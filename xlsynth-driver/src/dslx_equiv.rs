@@ -1,18 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::common::{parse_dslx_uf_spec, parse_uf_spec};
-use crate::ir_equiv::{emit_equiv_outcome_and_exit, outcome_from_error, outcome_from_report};
-use crate::proofs::obligations::{
-    LecObligation, LecProofOptions, LecSide, ObligationPayload, ProverObligation,
-};
-use crate::proofs::script::{
-    OblTree, OblTreeConfig, ScriptStep, execute_script, read_script_steps_from_json_path,
-    read_script_steps_from_jsonl_path,
-};
-use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
+use crate::common::parse_dslx_uf_spec;
+use crate::ir_equiv::emit_equiv_outcome_and_exit;
+use crate::proofs::script::TacticScript;
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path, proof_driver};
 use std::path::{Path, PathBuf};
-use xlsynth_prover::dslx_equiv::{DslxEquivRequest, DslxModule, run_dslx_equiv};
-use xlsynth_prover::dslx_specializer::specialize_dslx_module;
+use xlsynth_prover::dslx_equiv::{DslxEquivFile, DslxEquivFiles};
+use xlsynth_prover::dslx_tactics::obligations::LecProofOptions;
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 
@@ -24,15 +18,6 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     let assert_label_filter = matches.get_one::<String>("assert_label_filter").cloned();
     let lhs_file = matches.get_one::<String>("lhs_dslx_file").unwrap();
     let rhs_file = matches.get_one::<String>("rhs_dslx_file").unwrap();
-
-    let tactic_json_path = matches.get_one::<String>("tactic_json").cloned();
-    let tactic_jsonl_path = matches.get_one::<String>("tactic_jsonl").cloned();
-    if tactic_json_path.is_some() && tactic_jsonl_path.is_some() {
-        eprintln!("Error: --tactic_json and --tactic_jsonl cannot be used together");
-        std::process::exit(1);
-    }
-    let tactic_script_json = tactic_json_path.clone();
-    let tactic_script_jsonl = tactic_jsonl_path.clone();
 
     let mut lhs_top = matches
         .get_one::<String>("lhs_dslx_top")
@@ -56,12 +41,12 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         rhs_top = top;
     }
 
-    if lhs_top.is_none() || rhs_top.is_none() {
+    let (Some(lhs_top), Some(rhs_top)) = (lhs_top, rhs_top) else {
         eprintln!(
             "Error: a top function must be specified via --dslx_top or both --lhs_dslx_top/--rhs_dslx_top"
         );
         std::process::exit(1);
-    }
+    };
 
     let lhs_path = std::path::Path::new(lhs_file);
     let rhs_path = std::path::Path::new(rhs_file);
@@ -126,225 +111,45 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
         .map(|s| s == "true")
         .unwrap_or(true);
 
-    let lhs_module_name = lhs_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .expect("valid LHS module name");
-    let rhs_module_name = rhs_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .expect("valid RHS module name");
-
-    // Parse uninterpreted function mappings (lhs/rhs).
-    // Format: <func_name>:<uf_name>
-    // Semantics: Functions mapped to the same <uf_name> are assumed equivalent
-    // (treated as the same uninterpreted symbol) and assertions inside them are
-    // ignored.
-    if tactic_script_json.is_some() || tactic_script_jsonl.is_some() {
-        // Use tactic-based prover path.
-        // Build root obligation from DSLX files.
-        let lhs_top_str = lhs_top.unwrap();
-        let rhs_top_str = rhs_top.unwrap();
-        let lhs_pb = lhs_path.to_path_buf();
-        let rhs_pb = rhs_path.to_path_buf();
-        let mut lhs_side = LecSide::from_path(lhs_top_str, &lhs_pb);
-        let mut rhs_side = LecSide::from_path(rhs_top_str, &rhs_pb);
-        // UF mappings per side.
-        lhs_side.uf_map = parse_dslx_uf_spec(matches.get_many::<String>("lhs_uf"))
-            .into_iter()
-            .collect();
-        rhs_side.uf_map = parse_dslx_uf_spec(matches.get_many::<String>("rhs_uf"))
-            .into_iter()
-            .collect();
-        lhs_side.fixed_implicit_activation = lhs_fixed_implicit_activation;
-        rhs_side.fixed_implicit_activation = rhs_fixed_implicit_activation;
-        let root_ob = ProverObligation {
-            selector_segment: String::new(),
-            description: None,
-            payload: ObligationPayload::Lec(LecObligation {
-                lhs: lhs_side,
-                rhs: rhs_side,
-                options: LecProofOptions {
-                    assertion_semantics,
-                    assume_enum_in_bound,
-                    flatten_aggregates,
-                    drop_params,
-                    assert_label_filter,
-                    parallelism: strategy,
-                },
-            }),
-        };
-        let dslx_paths_vec: Vec<std::path::PathBuf> = dslx_path
-            .map(|s| {
-                s.split(';')
-                    .filter(|p| !p.is_empty())
-                    .map(|p| std::path::PathBuf::from(p))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cfg = OblTreeConfig {
-            dslx_stdlib_path: dslx_stdlib_path.map(|p| std::path::PathBuf::from(p)),
-            dslx_paths: dslx_paths_vec,
-            solver: solver_choice,
-            timeout_ms: None,
-        };
-        let mut tree = OblTree::new(root_ob, cfg);
-
-        // Read & parse tactic script from file (JSON array or JSONL).
-        let steps: Vec<ScriptStep> = if let Some(path) = tactic_script_json {
-            match read_script_steps_from_json_path(&path) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[{}] {}", SUBCOMMAND, e);
-                    std::process::exit(2);
-                }
-            }
-        } else if let Some(path) = tactic_script_jsonl {
-            match read_script_steps_from_jsonl_path(&path) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[{}] {}", SUBCOMMAND, e);
-                    std::process::exit(2);
-                }
-            }
-        } else {
-            unreachable!("tactic script presence already checked");
-        };
-
-        let start = std::time::Instant::now();
-        let report = match execute_script(&mut tree, &steps) {
-            Ok(r) => r,
-            Err(e) => {
-                let outcome =
-                    outcome_from_error(start.elapsed(), format!("execute_script error: {e}"));
-                if let Some(path) = output_json {
-                    std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
-                }
-                eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
-                std::process::exit(outcome.status.exit_code());
-            }
-        };
-        let dur = start.elapsed();
-        let status = report.proof_status();
-        let success = status.is_proved();
-        if let Some(path) = output_json {
-            let json = serde_json::json!({
-                "status": status,
-                "success": success,
-                "report": report,
-            });
-            std::fs::write(path, serde_json::to_string(&json).unwrap()).unwrap();
-        }
-        if success {
-            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-        } else {
-            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            eprintln!("[{}] failure", SUBCOMMAND);
-            for selector in &report.unresolved {
-                eprintln!(
-                    "[{}] unresolved obligation: {}",
-                    SUBCOMMAND,
-                    selector.join("/")
-                );
-            }
-        }
-        std::process::exit(status.exit_code());
-    } else {
-        // Original direct prover path (now via library API).
-        let lhs_uf_map = parse_uf_spec(lhs_module_name, matches.get_many::<String>("lhs_uf"));
-        let rhs_uf_map = parse_uf_spec(rhs_module_name, matches.get_many::<String>("rhs_uf"));
-        let use_unoptimized_ir = !lhs_uf_map.is_empty() || !rhs_uf_map.is_empty();
-        let lhs_contents = std::fs::read_to_string(lhs_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read DSLX file {}: {}", lhs_path.display(), e);
-            std::process::exit(1);
-        });
-        let rhs_contents = std::fs::read_to_string(rhs_path).unwrap_or_else(|e| {
-            eprintln!("Failed to read DSLX file {}: {}", rhs_path.display(), e);
-            std::process::exit(1);
-        });
-
-        let lhs_top_spec = lhs_top.unwrap();
-        let rhs_top_spec = rhs_top.unwrap();
-
-        let lhs_specialized = match specialize_dslx_module(
-            &lhs_contents,
-            lhs_path,
-            lhs_top_spec,
-            dslx_stdlib_path_ref,
-            &additional_search_paths,
-        ) {
-            Ok(output) => output,
-            Err(err) => {
-                eprintln!(
-                    "[{}] DSLX specialization failed\n  path: {}\n  error: {}",
-                    SUBCOMMAND,
-                    lhs_path.display(),
-                    err
-                );
-                std::process::exit(1);
-            }
-        };
-        let rhs_specialized = match specialize_dslx_module(
-            &rhs_contents,
-            rhs_path,
-            rhs_top_spec,
-            dslx_stdlib_path_ref,
-            &additional_search_paths,
-        ) {
-            Ok(output) => output,
-            Err(err) => {
-                eprintln!(
-                    "[{}] DSLX specialization failed\n  path: {}\n  error: {}",
-                    SUBCOMMAND,
-                    rhs_path.display(),
-                    err
-                );
-                std::process::exit(1);
-            }
-        };
-
-        let lhs_source_owned = lhs_specialized.source;
-        let rhs_source_owned = rhs_specialized.source;
-        let lhs_top_resolved = lhs_specialized.top_name;
-        let rhs_top_resolved = rhs_specialized.top_name;
-        let lhs_top = lhs_top_resolved.as_str();
-        let rhs_top = rhs_top_resolved.as_str();
-
-        let tool_path = config
-            .as_ref()
-            .and_then(|c| c.tool_path.as_deref())
-            .map(Path::new);
-
-        let lhs_module = DslxModule::new(lhs_source_owned.as_str(), lhs_top)
-            .with_path(Some(lhs_path))
-            .with_uf_map(&lhs_uf_map)
-            .with_fixed_implicit_activation(lhs_fixed_implicit_activation);
-        let rhs_module = DslxModule::new(rhs_source_owned.as_str(), rhs_top)
-            .with_path(Some(rhs_path))
-            .with_uf_map(&rhs_uf_map)
-            .with_fixed_implicit_activation(rhs_fixed_implicit_activation);
-
-        let request = DslxEquivRequest::new(lhs_module, rhs_module)
-            .with_drop_params(&drop_params)
-            .with_flatten_aggregates(flatten_aggregates)
-            .with_parallelism(strategy)
-            .with_assertion_semantics(assertion_semantics)
-            .with_assert_label_filter(assert_label_filter.as_deref())
-            .with_solver(solver_choice)
-            .with_assume_enum_in_bound(assume_enum_in_bound)
-            .with_optimize(!use_unoptimized_ir)
-            .with_tool_path(tool_path)
-            .with_dslx_stdlib_path(dslx_stdlib_path_ref)
-            .with_additional_search_paths(additional_search_paths)
-            .with_enable_warnings(enable_warnings)
-            .with_disable_warnings(disable_warnings);
-
-        let start = std::time::Instant::now();
-        let outcome = match run_dslx_equiv(&request) {
-            Ok(report) => outcome_from_report(report),
-            Err(err) => outcome_from_error(start.elapsed(), err),
-        };
-        emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
+    let request = DslxEquivFiles {
+        lhs: DslxEquivFile {
+            path: lhs_path,
+            top: lhs_top,
+            uf_map: parse_dslx_uf_spec(matches.get_many::<String>("lhs_uf")),
+            fixed_implicit_activation: lhs_fixed_implicit_activation,
+        },
+        rhs: DslxEquivFile {
+            path: rhs_path,
+            top: rhs_top,
+            uf_map: parse_dslx_uf_spec(matches.get_many::<String>("rhs_uf")),
+            fixed_implicit_activation: rhs_fixed_implicit_activation,
+        },
+        options: LecProofOptions {
+            assertion_semantics,
+            assume_enum_in_bound,
+            flatten_aggregates,
+            drop_params,
+            assert_label_filter,
+            parallelism: strategy,
+        },
+        solver: solver_choice,
+        dslx_stdlib_path: dslx_stdlib_path_ref,
+        additional_search_paths,
+    };
+    if let Some(script) = TacticScript::from_matches(matches) {
+        script.execute_and_exit(
+            request.into_tactic_tree(),
+            SUBCOMMAND,
+            "Solver proved equivalence",
+            output_json.map(String::as_str),
+            proof_driver(matches),
+        );
     }
+
+    let tool_path = config
+        .as_ref()
+        .and_then(|c| c.tool_path.as_deref())
+        .map(Path::new);
+    let outcome = request.prove(tool_path, enable_warnings, disable_warnings);
+    emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
 }

@@ -340,7 +340,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
 
     let outcome = dispatch_ir_equiv(&request, "ir-localized-eco");
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
     } else {
         println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);

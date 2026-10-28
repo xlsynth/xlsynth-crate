@@ -11,18 +11,8 @@ use crate::proof_plan::config::{
 use crate::prover::SolverChoice;
 use regex::escape;
 
-fn write_text(
-    dir: &tempfile::TempDir,
-    name: &str,
-    text: &str,
-) -> Result<std::path::PathBuf, String> {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).map_err(|e| format!("write {}: {}", name, e))?;
-    Ok(path)
-}
-
 /// Retains module identity while isolating sources with identical basenames.
-fn write_lec_source(
+fn write_obligation_source(
     dir: &tempfile::TempDir,
     subdir: &str,
     fallback_name: &str,
@@ -77,10 +67,18 @@ pub fn build_plan_from_obligations(
     for (i, (task_id, ob)) in obligations.iter().enumerate() {
         match &ob.payload {
             ObligationPayload::Lec(lec) => {
-                let lhs_path =
-                    write_lec_source(&tempdir, &format!("ob{i}_lhs"), "lhs.x", &lec.lhs.file)?;
-                let rhs_path =
-                    write_lec_source(&tempdir, &format!("ob{i}_rhs"), "rhs.x", &lec.rhs.file)?;
+                let lhs_path = write_obligation_source(
+                    &tempdir,
+                    &format!("ob{i}_lhs"),
+                    "lhs.x",
+                    &lec.lhs.file,
+                )?;
+                let rhs_path = write_obligation_source(
+                    &tempdir,
+                    &format!("ob{i}_rhs"),
+                    "rhs.x",
+                    &lec.rhs.file,
+                )?;
 
                 let lhs_uf: Vec<String> = lec
                     .lhs
@@ -127,8 +125,8 @@ pub fn build_plan_from_obligations(
                 });
             }
             ObligationPayload::QuickCheck(qc) => {
-                let qc_text = qc.file.text.clone();
-                let qc_path = write_text(&tempdir, &format!("ob{}_qc.x", i), &qc_text)?;
+                let qc_path =
+                    write_obligation_source(&tempdir, &format!("ob{i}_qc"), "qc.x", &qc.file)?;
 
                 let test_filter = if qc.tests.is_empty() {
                     None
@@ -160,9 +158,9 @@ pub fn build_plan_from_obligations(
                     dslx_stdlib_path: dslx_stdlib_path.map(|p| p.to_path_buf()),
                     test_filter,
                     solver: solver.clone(),
-                    assertion_semantics: None,
+                    assertion_semantics: Some(qc.assertion_semantics),
                     uf: if uf.is_empty() { None } else { Some(uf) },
-                    assert_label_filter: None,
+                    assert_label_filter: qc.assert_label_filter.clone(),
                     json: None,
                 };
 

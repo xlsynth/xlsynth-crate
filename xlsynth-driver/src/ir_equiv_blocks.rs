@@ -183,7 +183,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
         println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
         std::process::exit(0);

@@ -21,11 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use crate::proof_outcome::ProofResultHeader;
 
-use crate::proof_outcome::ProofStatus;
-
-use super::config::{GroupKind, ProverPlan, ProverTask, ToDriverCommand, resolve_driver_exe};
+use super::config::{GroupKind, ProofDriver, ProverPlan, ProverTask, resolve_driver_exe};
 use super::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome};
 
 use log::{debug, info, trace, warn};
@@ -34,14 +32,7 @@ use signal_hook::low_level as siglow;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
 
-use std::path::{Path, PathBuf};
-
-/// Required proof-result fields emitted by each driver subprocess.
-#[derive(Deserialize)]
-struct ProcessReport {
-    status: ProofStatus,
-    success: bool,
-}
+use std::path::Path;
 
 /// A validated result or an explanation of why it cannot establish a proof.
 struct ProcessResult {
@@ -149,7 +140,7 @@ pub struct Scheduler {
     // Run-scoped cancellation flag, toggled by CLI signal handlers or callers.
     cancel_flag: Arc<AtomicBool>,
     deadlines: BTreeMap<Instant, Vec<NodeId>>,
-    driver_executable: PathBuf,
+    driver: ProofDriver,
 }
 
 impl Scheduler {
@@ -168,7 +159,7 @@ impl Scheduler {
         plan: ProverPlan,
         max_procs: usize,
         cancel_flag: Arc<AtomicBool>,
-        driver: &Path,
+        driver: impl Into<ProofDriver>,
     ) -> Scheduler {
         log::info!("prover: new scheduler");
         let mut builder = PlanBuilder::default();
@@ -196,13 +187,13 @@ impl Scheduler {
             cmdlines: HashMap::new(),
             cancel_flag,
             deadlines: BTreeMap::new(),
-            driver_executable: driver.to_path_buf(),
+            driver: driver.into(),
         };
         // Precompute planned cmdlines for all tasks so short-circuited tasks
         // still report one.
         for n in &sched.nodes {
             if let NodeInner::Task(t) = &n.inner {
-                let cmd = t.task.to_command_with_driver(&sched.driver_executable);
+                let cmd = sched.driver.command_for(&t.task);
                 let program = cmd.get_program().to_string_lossy().into_owned();
                 let args = cmd
                     .get_args()
@@ -227,24 +218,24 @@ impl Scheduler {
     /// Behavior:
     /// - Schedules up to `max_procs` concurrent tasks.
     /// - Returns when the root plan resolves or no running tasks remain.
-    /// - On cancellation, cancels all tasks and returns `Ok(false)`.
+    /// - On cancellation, cancels unresolved tasks and reports their outcomes.
     /// - Maintains `running.len() <= max_procs` at all times.
-    pub fn run(&mut self) -> io::Result<bool> {
+    pub fn run(&mut self) -> io::Result<ProverReport> {
         loop {
             // Check for cancellation request.
             if self.cancel_flag.load(Ordering::Relaxed) {
                 warn!("prover: cancellation requested; cleaning up and exiting");
-                let _ = self.cleanup_tasks();
-                return Ok(false);
+                self.cleanup_tasks()?;
+                break;
             }
 
             // Check for timeouts.
             self.check_and_handle_timeouts()?;
 
             // If the root is already resolved, finish immediately.
-            if let Some(root_outcome) = self.node_outcome(self.root) {
+            if self.node_outcome(self.root).is_some() {
                 self.cleanup_tasks()?;
-                return Ok(root_outcome.is_success());
+                break;
             }
 
             // Fill available slots next.
@@ -253,9 +244,9 @@ impl Scheduler {
             }
 
             // Launch failures can resolve the plan without creating a child.
-            if let Some(root_outcome) = self.node_outcome(self.root) {
+            if self.node_outcome(self.root).is_some() {
                 self.cleanup_tasks()?;
-                return Ok(root_outcome.is_success());
+                break;
             }
 
             if self.running.is_empty() {
@@ -268,6 +259,9 @@ impl Scheduler {
             // completion at a time.
             self.wait_for_one_child_and_handle()?;
         }
+        Ok(ProverReport {
+            plan: self.build_report_node(self.root),
+        })
     }
 
     fn check_and_handle_timeouts(&mut self) -> io::Result<()> {
@@ -377,7 +371,7 @@ impl Scheduler {
             match &mut node.inner {
                 NodeInner::Task(t) => match t.state {
                     TaskState::NotStarted => {
-                        let mut cmd = t.task.to_command_with_driver(&self.driver_executable);
+                        let mut cmd = self.driver.command_for(&t.task);
                         // Create a temp path for JSON results and pass it to
                         // the child.
                         let json_tmp = tempfile::Builder::new().suffix(".json").tempfile()?;
@@ -615,7 +609,7 @@ impl Scheduler {
                 );
             }
         };
-        let report: ProcessReport = match serde_json::from_str(&data) {
+        let report: ProofResultHeader = match serde_json::from_str(&data) {
             Ok(report) => report,
             Err(error) => {
                 return ProcessResult::error(
@@ -624,12 +618,6 @@ impl Scheduler {
                 );
             }
         };
-        if report.success != report.status.is_proved() {
-            return ProcessResult::error(
-                IndefiniteReason::ProtocolError,
-                "proof result status contradicts success",
-            );
-        }
         if exit_code != report.status.exit_code() {
             return ProcessResult::error(
                 IndefiniteReason::ProcessFailure,
@@ -1164,7 +1152,7 @@ pub fn run_prover_plan(plan: ProverPlan, max_procs: usize) -> io::Result<ProverR
 pub fn run_prover_plan_with_driver(
     plan: ProverPlan,
     max_procs: usize,
-    driver: &Path,
+    driver: impl Into<ProofDriver>,
 ) -> io::Result<ProverReport> {
     // Create a run-scoped cancellation flag and wire OS signals to it.
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -1188,18 +1176,10 @@ pub fn run_prover_plan_with_driver(
         let _ = siglow::unregister(id);
     }
 
-    let result = match run_res {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = sched.cleanup_tasks();
-            return Err(e);
-        }
-    };
-    let plan_node = sched.build_report_node(sched.root);
-    Ok(ProverReport {
-        success: result,
-        plan: plan_node,
-    })
+    if run_res.is_err() {
+        let _ = sched.cleanup_tasks();
+    }
+    run_res
 }
 
 #[cfg(test)]
@@ -1208,6 +1188,7 @@ mod tests {
     use crate::proof_plan::config::IrEquivConfig;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
 
     /// Keeps the fake driver alive and reaps its processes even after a panic.
     struct TestScheduler {
@@ -1305,11 +1286,12 @@ printf 'task stderr\n' >&2
         assert!(scheduler.round_robin.is_empty());
         assert!(scheduler.outputs.is_empty());
         assert!(scheduler.json_files.is_empty());
-        assert!(!scheduler.run().unwrap());
-
-        let ProverReportNode::Task { stdout, stderr, .. } =
-            scheduler.build_report_node(scheduler.root)
-        else {
+        let report = scheduler.run().unwrap();
+        assert_eq!(
+            report.plan.proof_status(),
+            crate::proof_outcome::ProofStatus::ExecutionError
+        );
+        let ProverReportNode::Task { stdout, stderr, .. } = report.plan else {
             panic!("expected a task report");
         };
         assert_eq!(stdout.as_deref(), Some("task stdout\n"));
@@ -1363,11 +1345,11 @@ printf '%s\n' '{"status":"proved","success":true}' > "$output"
             }
         }
         assert_eq!(unsafe { libc::kill(winner_pid.unwrap(), libc::SIGCONT) }, 0);
-        assert!(scheduler.run().unwrap());
+        let report = scheduler.run().unwrap().plan;
+        assert!(report.proof_status().is_proved());
         assert!(scheduler.pid_to_node.is_empty());
         assert!(scheduler.outputs.is_empty());
 
-        let report = scheduler.build_report_node(scheduler.root);
         let ProverReportNode::Task {
             outcome,
             stdout,

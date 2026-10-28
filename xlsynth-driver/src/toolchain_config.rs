@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use serde::Deserialize;
+use xlsynth_prover::proof_plan::config::{ProofDriver, resolve_driver_exe};
 
 /// Rejects the removed key instead of letting Serde ignore it as unknown.
 fn reject_type_inference_v2<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
@@ -79,5 +80,13 @@ pub fn get_dslx_path(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> 
         Some(dslx_path.join(";"))
     } else {
         None
+    }
+}
+
+/// Selects the same toolchain TOML for proof workers as for the outer command.
+pub(crate) fn proof_driver(matches: &ArgMatches) -> ProofDriver {
+    ProofDriver {
+        executable: resolve_driver_exe(),
+        toolchain: matches.get_one::<String>("toolchain").map(Into::into),
     }
 }

@@ -555,6 +555,7 @@ fn main() {
         .arg(
             Arg::new("toolchain")
                 .long("toolchain")
+                .global(true)
                 .value_name("TOOLCHAIN")
                 .help("Path to a xlsynth-toolchain.toml file")
                 .action(ArgAction::Set),

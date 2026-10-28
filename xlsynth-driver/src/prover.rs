@@ -7,9 +7,10 @@ use std::io::Read;
 
 use crate::prover_config::ProverPlan;
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::ToolchainConfig;
+use crate::toolchain_config::{ToolchainConfig, proof_driver};
 use log::{info, warn};
-use xlsynth_prover::proof_outcome::ProofStatus;
+use serde::Serialize;
+use xlsynth_prover::proof_outcome::{ProofResultHeader, ProofStatus};
 
 // These compatibility exports are also consumed outside the CLI binary.
 #[allow(unused_imports)]
@@ -32,16 +33,27 @@ fn write_error_json(
     stage: &str,
 ) {
     if let Some(path) = output_json_path {
-        let obj = serde_json::json!({
-            "status": ProofStatus::ExecutionError,
-            "success": false,
-            "error": {
-                "message": message,
-                "exception": exception,
-                "stage": stage,
-            }
-        });
-        if let Err(write_err) = std::fs::write(path, obj.to_string()) {
+        #[derive(Serialize)]
+        struct PlanInputError<'a> {
+            #[serde(flatten)]
+            conclusion: ProofResultHeader,
+            error: ErrorDetails<'a>,
+        }
+        #[derive(Serialize)]
+        struct ErrorDetails<'a> {
+            message: &'a str,
+            exception: &'a str,
+            stage: &'a str,
+        }
+        let outcome = PlanInputError {
+            conclusion: ProofStatus::ExecutionError.into(),
+            error: ErrorDetails {
+                message,
+                exception,
+                stage,
+            },
+        };
+        if let Err(write_err) = std::fs::write(path, serde_json::to_vec(&outcome).unwrap()) {
             warn!(
                 "prover: failed writing output_json error to {}: {}",
                 path, write_err
@@ -132,7 +144,7 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
         }
     };
 
-    match run_prover_plan(plan, cores) {
+    match run_prover_plan_with_driver(plan, cores, proof_driver(matches)) {
         Ok(report) => {
             if let Some(path) = &output_json_path {
                 // Write full report including plan tree and captured outputs;
@@ -177,13 +189,13 @@ pub fn handle_prover(matches: &clap::ArgMatches, _config: &Option<ToolchainConfi
                 }
                 print_task_outputs(&report.plan);
             }
-            if report.success {
+            let status = report.plan.proof_status();
+            if status.is_proved() {
                 println!("Overall: success");
-                std::process::exit(0)
             } else {
                 println!("Overall: failure");
-                std::process::exit(1)
             }
+            std::process::exit(status.exit_code())
         }
         Err(e) => {
             let exc = e.to_string();

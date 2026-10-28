@@ -16,14 +16,10 @@
 //!   (models potential nondeterminism due to scheduling/ordering).
 //!
 //! The plan is executed via `run_prover_plan` with 1..=4 workers. Whenever the
-//! abstract eval is determinate (`Some(v)`), we require the scheduler's
-//! `report.success == v` for every worker count. If the abstract eval is
-//! indeterminate (`None`), either outcome is acceptable. This catches
-//! ordering/parallelism bugs and ensures the scheduler matches the intended
-//! semantics of these combinators.
-//!
-//! TODO: Currently, we don't have a timeout in our prover plan. This will be
-//! left as future work.
+//! abstract eval is determinate (`Some(v)`), all worker counts must give the
+//! same logical result. A timeout or execution error cannot satisfy an
+//! expected disproof. When the abstract eval is indeterminate (`None`), we
+//! still check that required tasks finished.
 
 use libfuzzer_sys::fuzz_target;
 
@@ -39,7 +35,8 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
     // Build a ProverPlan from normalized fuzz input (clamp already normalizes).
     let plan = xlsynth_driver_fuzz::build_plan_from_fuzz(root.clone());
 
-    // Compute expected outcome on the normalized tree; None means both possible.
+    // Compute expected outcome on the normalized tree; None means both
+    // possible.
     let expected = eval_fuzz(&root).outcome;
 
     // Helper: verify the tasks that must be kept running are not canceled.
@@ -75,15 +72,16 @@ fuzz_target!(|root: xlsynth_driver_fuzz::FuzzPlanNode| {
         }
     }
 
-    // Run the scheduler across 1..=4 cores. If expected is Some(v), all must match
-    // v.
+    // Run the scheduler across 1..=4 cores. If expected is Some(v), all must
+    // match v.
     for cores in 1..=4 {
         let report = match run_prover_plan(plan.clone(), cores) {
             Ok(r) => r,
             Err(_) => return,
         };
         if let Some(v) = expected {
-            assert_eq!(report.success, v);
+            let expected_status = TaskOutcome::Normal { success: v }.proof_status();
+            assert_eq!(report.plan.proof_status(), expected_status);
         }
 
         assert_keep_running_corridor(&plan, &report.plan);

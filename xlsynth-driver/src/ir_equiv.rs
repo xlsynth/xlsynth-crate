@@ -1,26 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::toolchain_config::ToolchainConfig;
-use serde::Serialize;
 use std::path::Path;
-use std::time::Duration;
-use xlsynth_prover::ir_equiv::run_ir_equiv as prover_run_ir_equiv;
+use std::time::Instant;
+use xlsynth_prover::ir_equiv::run_ir_equiv;
 pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
-use xlsynth_prover::proof_outcome::ProofStatus;
+use xlsynth_prover::proof_outcome::ProofSummary;
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::EquivParallelism;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivReport};
 
 const SUBCOMMAND: &str = "ir-equiv";
-
-/// CLI representation of an equivalence result and its diagnostic.
-#[derive(Debug, Serialize, Clone)]
-pub struct EquivOutcome {
-    pub time_micros: u128,
-    pub status: ProofStatus,
-    pub success: bool,
-    pub error_str: Option<String>,
-}
 
 /// Implements the "ir-equiv" subcommand.
 pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
@@ -78,14 +68,20 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
 
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let lhs_ir_text = std::fs::read_to_string(lhs).unwrap_or_else(|e| {
-        eprintln!("Failed to read lhs IR file: {}", e);
-        std::process::exit(1)
-    });
-    let rhs_ir_text = std::fs::read_to_string(rhs).unwrap_or_else(|e| {
-        eprintln!("Failed to read rhs IR file: {}", e);
-        std::process::exit(1)
-    });
+    let start = Instant::now();
+    let read_side = |side, path: &str| {
+        std::fs::read_to_string(path).unwrap_or_else(|err| {
+            let message = format!("Failed to read {side} IR file: {err}");
+            let outcome = ProofSummary::execution_error(start.elapsed(), message.clone());
+            if let Some(output_path) = output_json {
+                std::fs::write(output_path, serde_json::to_string(&outcome).unwrap()).unwrap();
+            }
+            eprintln!("{message}");
+            std::process::exit(outcome.conclusion.status.exit_code());
+        })
+    };
+    let lhs_ir_text = read_side("lhs", lhs);
+    let rhs_ir_text = read_side("rhs", rhs);
 
     let assert_label_filter = matches
         .get_one::<String>("assert_label_filter")
@@ -115,41 +111,17 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
 }
 
-pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> EquivOutcome {
+pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> ProofSummary {
     log::info!(
         "[{subcommand}] dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
         request.solver,
         request.tool_path
     );
-    let start = std::time::Instant::now();
-    match prover_run_ir_equiv(request) {
-        Ok(report) => outcome_from_report(report),
-        Err(err) => outcome_from_error(start.elapsed(), err),
-    }
-}
-
-pub fn outcome_from_report(report: EquivReport) -> EquivOutcome {
-    let status = ProofStatus::from(&report.result);
-    EquivOutcome {
-        time_micros: report.duration.as_micros(),
-        status,
-        success: status.is_proved(),
-        error_str: report.error_str(),
-    }
-}
-
-/// Reports a failed proof invocation without claiming a counterexample.
-pub fn outcome_from_error(duration: Duration, error: String) -> EquivOutcome {
-    EquivOutcome {
-        time_micros: duration.as_micros(),
-        status: ProofStatus::ExecutionError,
-        success: false,
-        error_str: Some(error),
-    }
+    ProofSummary::run(|| run_ir_equiv(request))
 }
 
 pub fn emit_equiv_outcome_and_exit(
-    outcome: &EquivOutcome,
+    outcome: &ProofSummary,
     subcommand: &str,
     output_json: Option<&String>,
 ) -> ! {
@@ -157,7 +129,7 @@ pub fn emit_equiv_outcome_and_exit(
         std::fs::write(path, serde_json::to_string(outcome).unwrap()).unwrap();
     }
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("[{}] Time taken: {:?}", subcommand, dur);
         println!("[{}] success: Solver proved equivalence", subcommand);
     } else {
@@ -168,47 +140,5 @@ pub fn emit_equiv_outcome_and_exit(
             eprintln!("[{}] failure", subcommand);
         }
     }
-    std::process::exit(outcome.status.exit_code());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use xlsynth_prover::prover::types::EquivResult;
-
-    #[test]
-    fn equivalence_json_preserves_non_counterexample_results() {
-        for (result, status, error) in [
-            (EquivResult::Proved, "proved", None),
-            (
-                EquivResult::Inconclusive("unknown".into()),
-                "inconclusive",
-                Some("unknown"),
-            ),
-            (
-                EquivResult::Error("solver failed".into()),
-                "execution-error",
-                Some("solver failed"),
-            ),
-            (
-                EquivResult::ToolchainDisproved("tool failed".into()),
-                "execution-error",
-                Some("tool failed"),
-            ),
-        ] {
-            let outcome = outcome_from_report(EquivReport {
-                duration: Duration::ZERO,
-                result,
-            });
-            assert_eq!(
-                serde_json::to_value(outcome).unwrap(),
-                serde_json::json!({
-                    "time_micros": 0,
-                    "status": status,
-                    "success": status == "proved",
-                    "error_str": error,
-                }),
-            );
-        }
-    }
+    std::process::exit(outcome.conclusion.status.exit_code());
 }

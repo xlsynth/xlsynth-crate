@@ -168,6 +168,33 @@ pub struct DslxFnProveAssertionsConfig {
     pub uf: Option<Vec<String>>,
 }
 
+/// Executable and optional toolchain TOML used by a proof worker.
+#[derive(Debug)]
+pub struct ProofDriver {
+    pub executable: PathBuf,
+    pub toolchain: Option<PathBuf>,
+}
+
+impl<P: AsRef<Path>> From<P> for ProofDriver {
+    fn from(executable: P) -> Self {
+        Self {
+            executable: executable.as_ref().to_owned(),
+            toolchain: None,
+        }
+    }
+}
+
+impl ProofDriver {
+    /// Applies the selected toolchain to every worker in the plan.
+    pub(super) fn command_for(&self, task: &ProverTask) -> Command {
+        let mut command = task.to_command_with_driver(&self.executable);
+        if let Some(path) = &self.toolchain {
+            command.arg("--toolchain").arg(path);
+        }
+        command
+    }
+}
+
 /// Constructs a driver invocation with either an explicit or conventionally
 /// located executable.
 pub trait ToDriverCommand {
@@ -336,6 +363,11 @@ impl ToDriverCommand for ProveQuickcheckConfig {
             add_flag(&mut cmd, "assertion-semantics", &sem.to_string());
         }
         if let Some(list) = &self.uf {
+            if !list.is_empty() {
+                // Keep helper calls in the worker IR so the requested
+                // abstraction survives.
+                add_bool(&mut cmd, "opt", Some(false));
+            }
             for entry in list {
                 add_flag(&mut cmd, "uf", entry);
             }

@@ -2,7 +2,10 @@
 
 //! Typed proof conclusions shared by solver results and subprocess reports.
 
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor, value::MapAccessDeserializer, value::StrDeserializer};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
+use std::time::{Duration, Instant};
 
 use crate::prover::types::{BoolPropertyResult, EquivResult};
 
@@ -25,6 +28,98 @@ impl ProofStatus {
     /// Returns the CLI exit code; JSON preserves the distinct failure kinds.
     pub fn exit_code(self) -> i32 {
         if self.is_proved() { 0 } else { 1 }
+    }
+}
+
+/// The common fields in every proof result exchanged with a subprocess.
+/// Only `status` is stored: `success` is derived on write and checked on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(into = "StatusFields")]
+pub struct ProofResultHeader {
+    pub status: ProofStatus,
+}
+
+/// Both fields are required in the wire protocol.
+#[derive(Serialize, Deserialize)]
+struct StatusFields {
+    #[serde(deserialize_with = "deserialize_status_name")]
+    status: ProofStatus,
+    success: bool,
+}
+
+impl From<ProofStatus> for ProofResultHeader {
+    fn from(status: ProofStatus) -> Self {
+        Self { status }
+    }
+}
+
+impl From<ProofResultHeader> for StatusFields {
+    fn from(header: ProofResultHeader) -> Self {
+        Self {
+            status: header.status,
+            success: header.status.is_proved(),
+        }
+    }
+}
+
+// Serde also accepts an externally tagged object for a unit enum. The worker
+// protocol specifies a string, so check its type before parsing the variant.
+fn deserialize_status_name<'de, D: Deserializer<'de>>(d: D) -> Result<ProofStatus, D::Error> {
+    let name = String::deserialize(d)?;
+    ProofStatus::deserialize(StrDeserializer::new(&name))
+}
+
+impl<'de> Deserialize<'de> for ProofResultHeader {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // A derived struct would accept a positional array as an alternative
+        // to a named object. Only an object constitutes a worker report.
+        struct ReportObject;
+        impl<'de> Visitor<'de> for ReportObject {
+            type Value = ProofResultHeader;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a proof result object with status and success fields")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let fields = StatusFields::deserialize(MapAccessDeserializer::new(map))?;
+                if fields.success != fields.status.is_proved() {
+                    return Err(de::Error::custom("proof result status contradicts success"));
+                }
+                Ok(fields.status.into())
+            }
+        }
+        d.deserialize_map(ReportObject)
+    }
+}
+
+/// A timed proof conclusion with an optional diagnostic, including setup
+/// errors.
+#[derive(Debug, Serialize, Clone)]
+pub struct ProofSummary {
+    pub time_micros: u128,
+    #[serde(flatten)]
+    pub conclusion: ProofResultHeader,
+    pub error_str: Option<String>,
+}
+
+impl ProofSummary {
+    /// Runs a proof invocation, including setup failures in the report.
+    pub fn run<T: Into<Self>>(prove: impl FnOnce() -> Result<T, String>) -> Self {
+        let start = Instant::now();
+        match prove() {
+            Ok(report) => report.into(),
+            Err(error) => Self::execution_error(start.elapsed(), error),
+        }
+    }
+
+    /// Reports an invocation failure without claiming a counterexample.
+    pub fn execution_error(duration: Duration, error: String) -> Self {
+        Self {
+            time_micros: duration.as_micros(),
+            conclusion: ProofStatus::ExecutionError.into(),
+            error_str: Some(error),
+        }
     }
 }
 

@@ -97,11 +97,12 @@ fn task_outcome(node: &ProverReportNode) -> Option<TaskOutcome> {
 }
 
 #[test_case(r#"{"status":"proved","success":true}"#, "exit 0", true; "proof")]
+#[test_case(r#"{"details":{"nested":[1,2]},"success":true,"status":"proved"}"#, "exit 0", true; "proof with diagnostics")]
 #[test_case(r#"{"status":"disproved","success":false}"#, "exit 1", false; "counterexample")]
 fn accepts_consistent_logical_results(json: &str, termination: &str, success: bool) {
     let backend = Backend::new(&[("result", Some(json), termination)]).unwrap();
     let report = run_prover_plan_with_driver(task("result", None), 1, &backend.path).unwrap();
-    assert_eq!(report.success, success);
+    assert_eq!(report.plan.proof_status().is_proved(), success);
     assert_eq!(
         task_outcome(&report.plan),
         Some(TaskOutcome::Normal { success })
@@ -121,6 +122,10 @@ fn accepts_consistent_logical_results(json: &str, termination: &str, success: bo
 #[test_case(Some(r#"{"status":"execution-error","success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "execution error contradicts success")]
 #[test_case(Some(r#"{"status":"unrecognized","success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "unknown status")]
 #[test_case(Some(r#"{"status":true,"success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "nonstring status")]
+#[test_case(Some(r#"["proved",true]"#), "exit 0", IndefiniteReason::ProtocolError; "positional result array")]
+#[test_case(Some(r#"{"status":{"proved":null},"success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "tagged status object")]
+#[test_case(Some(r#"{"status":"disproved","status":"proved","success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "duplicate status")]
+#[test_case(Some(r#"{"status":"proved","success":false,"success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "duplicate success")]
 #[test_case(Some(r#"{"success":true}"#), "exit 0", IndefiniteReason::ProtocolError; "absent status")]
 #[test_case(Some(r#"{"status":"proved"}"#), "exit 0", IndefiniteReason::ProtocolError; "absent success")]
 #[test_case(Some(r#"{"status":"proved","success":"true"}"#), "exit 0", IndefiniteReason::ProtocolError; "nonboolean success")]
@@ -134,7 +139,7 @@ fn nonlogical_process_results_remain_indefinite(
 ) {
     let backend = Backend::new(&[("result", json, termination)]).unwrap();
     let report = run_prover_plan_with_driver(task("result", None), 1, &backend.path).unwrap();
-    assert!(!report.success);
+    assert!(!report.plan.proof_status().is_proved());
     assert_eq!(
         task_outcome(&report.plan),
         Some(TaskOutcome::Indefinite { reason })
@@ -192,7 +197,7 @@ fn first_group_skips_nonlogical_results(keep_running: bool, status: &str, succes
     };
     // One core makes the error finish before the logical result without sleeps.
     let report = run_prover_plan_with_driver(plan, 1, &backend.path).unwrap();
-    assert_eq!(report.success, success);
+    assert_eq!(report.plan.proof_status().is_proved(), success);
     let ProverReportNode::Group { outcome, .. } = &report.plan else {
         panic!("expected a group report");
     };
@@ -229,7 +234,7 @@ fn group_without_logical_results_is_indefinite(kind: GroupKind, keep_running: bo
         keep_running_till_finish: keep_running,
     };
     let report = run_prover_plan_with_driver(plan, 1, &backend.path).unwrap();
-    assert!(!report.success);
+    assert!(!report.plan.proof_status().is_proved());
     let ProverReportNode::Group { outcome, .. } = report.plan else {
         panic!("expected a group report");
     };
@@ -241,7 +246,7 @@ fn timeout_preserves_captured_diagnostics() {
     // The shell writes diagnostics before waiting for the scheduler to kill it.
     let backend = Backend::new(&[("timeout", None, "while :; do :; done")]).unwrap();
     let report = run_prover_plan_with_driver(task("timeout", Some(500)), 1, &backend.path).unwrap();
-    assert!(!report.success);
+    assert!(!report.plan.proof_status().is_proved());
     assert_eq!(
         task_outcome(&report.plan),
         Some(TaskOutcome::Indefinite {
@@ -265,7 +270,7 @@ fn launch_failure_is_an_execution_error(exists: bool) {
         fs::set_permissions(&driver, fs::Permissions::from_mode(0o644)).unwrap();
     }
     let report = run_prover_plan_with_driver(task("result", None), 1, &driver).unwrap();
-    assert!(!report.success);
+    assert!(!report.plan.proof_status().is_proved());
     assert_eq!(
         task_outcome(&report.plan),
         Some(TaskOutcome::Indefinite {

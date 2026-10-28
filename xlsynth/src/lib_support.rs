@@ -793,8 +793,10 @@ pub(crate) fn xls_mangle_dslx_name(
     module_name: &str,
     function_name: &str,
 ) -> Result<String, XlsynthError> {
-    let module_name = CString::new(module_name).unwrap();
-    let function_name = CString::new(function_name).unwrap();
+    let module_name = CString::new(module_name)
+        .map_err(|_| XlsynthError("DSLX module name contains a NUL byte".to_string()))?;
+    let function_name = CString::new(function_name)
+        .map_err(|_| XlsynthError("DSLX function name contains a NUL byte".to_string()))?;
     let mut mangled_out: *mut std::os::raw::c_char = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_mangle_dslx_name, module_name.as_ptr(), function_name.as_ptr(); mangled_out)?;
     Ok(unsafe { c_str_to_rust(mangled_out) })

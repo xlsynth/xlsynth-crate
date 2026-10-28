@@ -3,6 +3,7 @@
 //! Library helpers for IR equivalence flows shared by multiple driver commands.
 
 use crate::ir_utils;
+use crate::proof_outcome::{ProofStatus, ProofSummary};
 use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
@@ -190,5 +191,57 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
             duration,
             result: other,
         }),
+    }
+}
+
+impl From<EquivReport> for ProofSummary {
+    fn from(report: EquivReport) -> Self {
+        Self {
+            time_micros: report.duration.as_micros(),
+            conclusion: ProofStatus::from(&report.result).into(),
+            error_str: report.error_str(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn equivalence_json_preserves_non_counterexample_results() {
+        for (result, status, error) in [
+            (EquivResult::Proved, "proved", None),
+            (
+                EquivResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                Some("unknown"),
+            ),
+            (
+                EquivResult::Error("solver failed".into()),
+                "execution-error",
+                Some("solver failed"),
+            ),
+            (
+                EquivResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = ProofSummary::from(EquivReport {
+                duration: Duration::ZERO,
+                result,
+            });
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "time_micros": 0,
+                    "status": status,
+                    "success": status == "proved",
+                    "error_str": error,
+                }),
+            );
+        }
     }
 }

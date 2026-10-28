@@ -6,16 +6,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use xlsynth::dslx::{self, MatchableModuleMember, TypecheckedModule};
 use xlsynth::{DslxCallingConvention, DslxConvertOptions};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 
+use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_paths};
+use crate::proof_outcome::{ProofStatus, ProofSummary};
 use crate::prover::property_fn::add_assertion_dependency_property;
 use crate::prover::prover_for_choice;
 use crate::prover::types::{
-    BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
+    BoolPropertyResult, FnInput, FnOutput, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
 };
 use crate::prover::{Prover, SolverChoice};
 
@@ -29,13 +32,133 @@ pub struct DslxAssertionsRequest<'a> {
     pub additional_search_paths: Vec<PathBuf>,
     pub assert_label_filter: Option<&'a str>,
     pub assume_enum_in_bound: bool,
-    pub uf_map: HashMap<String, String>,
+    pub uf_map: AssertionUfMappings,
+}
+
+/// Names of functions to abstract, either local DSLX names or resolved IR names
+/// (which may belong to an imported module).
+pub enum AssertionUfMappings {
+    LocalDslx(HashMap<String, String>),
+    Ir(HashMap<String, String>),
 }
 
 /// Result of a DSLX assertion proof.
 pub struct DslxAssertionsReport {
     pub duration: Duration,
     pub result: BoolPropertyResult,
+}
+
+const IMPLICIT_TOKEN_RUNTIME_PARAM_COUNT: usize = 2;
+
+/// A user-visible DSLX input in the counterexample.
+#[derive(Debug, Serialize)]
+pub struct AssertionInput {
+    pub name: String,
+    pub value: String,
+}
+
+/// The observed value and any violated assertion.
+#[derive(Debug, Serialize)]
+pub struct AssertionOutput {
+    pub value: String,
+    pub assertion_label: Option<String>,
+    pub assertion_message: Option<String>,
+}
+
+/// Inputs and output witnessing an assertion violation.
+#[derive(Debug, Serialize)]
+pub struct AssertionCounterexample {
+    pub inputs: Vec<AssertionInput>,
+    pub output: AssertionOutput,
+}
+
+/// An assertion proof and its counterexample with the synthetic ABI inputs
+/// removed.
+#[derive(Debug, Serialize)]
+pub struct AssertionsOutcome {
+    #[serde(flatten)]
+    pub summary: ProofSummary,
+    pub counterexample: Option<AssertionCounterexample>,
+}
+
+impl DslxAssertionsRequest<'_> {
+    /// Proves this request, also reporting failures before a solver result was
+    /// available.
+    pub fn prove(&self) -> AssertionsOutcome {
+        let start = Instant::now();
+        match run_dslx_assertions(self) {
+            Ok(report) => report.into(),
+            Err(error) => AssertionsOutcome::execution_error(start.elapsed(), error),
+        }
+    }
+}
+
+impl AssertionsOutcome {
+    /// Reports an invocation failure without counterexample evidence.
+    pub fn execution_error(duration: Duration, error: String) -> Self {
+        Self {
+            summary: ProofSummary::execution_error(duration, error),
+            counterexample: None,
+        }
+    }
+}
+
+/// Drops only the token and activation parameters inserted for the synthetic
+/// property.
+fn serialize_inputs(inputs: &[FnInput]) -> Vec<AssertionInput> {
+    inputs
+        .iter()
+        // The synthetic property function always uses the standard
+        // implicit-token ABI: param 0 is token, param 1 is activation.
+        .skip(IMPLICIT_TOKEN_RUNTIME_PARAM_COUNT)
+        .map(|input| AssertionInput {
+            name: input.name.clone(),
+            value: format!("{:?}", input.value),
+        })
+        .collect()
+}
+
+fn serialize_output(output: &FnOutput) -> AssertionOutput {
+    let (assertion_label, assertion_message) = output
+        .assertion_violation
+        .as_ref()
+        .map(|vio| (Some(vio.label.clone()), Some(vio.message.clone())))
+        .unwrap_or((None, None));
+    AssertionOutput {
+        value: format!("{:?}", output.value),
+        assertion_label,
+        assertion_message,
+    }
+}
+
+/// Keeps execution errors and inconclusive results separate from
+/// counterexamples.
+impl From<DslxAssertionsReport> for AssertionsOutcome {
+    fn from(report: DslxAssertionsReport) -> Self {
+        let DslxAssertionsReport { result, duration } = report;
+        let status = ProofStatus::from(&result);
+        let (counterexample, error_str) = match result {
+            BoolPropertyResult::Proved => (None, None),
+            BoolPropertyResult::Disproved { inputs, output } => (
+                Some(AssertionCounterexample {
+                    inputs: serialize_inputs(&inputs),
+                    output: serialize_output(&output),
+                }),
+                None,
+            ),
+            BoolPropertyResult::Inconclusive(msg)
+            | BoolPropertyResult::ToolchainDisproved(msg)
+            | BoolPropertyResult::Error(msg) => (None, Some(msg)),
+        };
+        AssertionsOutcome {
+            summary: ProofSummary {
+                conclusion: status.into(),
+                time_micros: duration.as_micros(),
+                error_str,
+            },
+            counterexample,
+        }
+    }
 }
 
 fn collect_enum_values(tcm: &TypecheckedModule, enum_def: &xlsynth::dslx::EnumDef) -> Vec<IrValue> {
@@ -156,6 +279,11 @@ pub fn add_assertions_property_function(
 pub fn run_dslx_assertions(
     request: &DslxAssertionsRequest<'_>,
 ) -> Result<DslxAssertionsReport, String> {
+    validate_dslx_paths(
+        std::iter::once(request.path)
+            .chain(request.dslx_stdlib_path)
+            .chain(request.additional_search_paths.iter().map(PathBuf::as_path)),
+    )?;
     let additional_search_path_refs: Vec<&Path> = request
         .additional_search_paths
         .iter()
@@ -208,7 +336,10 @@ pub fn run_dslx_assertions(
     let prover_fn = ProverFn::new(property_fn, Some(&package))
         .with_fixed_implicit_activation(true)
         .with_domains(top_domains)
-        .with_uf_map(request.uf_map.clone());
+        .with_uf_map(match &request.uf_map {
+            AssertionUfMappings::LocalDslx(names) => mangle_dslx_uf_map(module_name, names)?,
+            AssertionUfMappings::Ir(names) => names.clone(),
+        });
 
     let prover = prover_for_assertions(request.solver.unwrap_or(SolverChoice::Bitwuzla))?;
     let start = Instant::now();
@@ -226,7 +357,45 @@ pub fn run_dslx_assertions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prover::types::AssertionViolation;
     use xlsynth_pir::ir::NodePayload;
+
+    /// A resolved IR name can abstract assertions in an imported helper.
+    #[cfg(feature = "has-bitwuzla")]
+    #[test]
+    fn retains_imported_helper_ir_names_for_assertion_proofs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("entry.x");
+        let source = "import dep; pub fn main(x: u8) -> u8 { dep::helper(x) }";
+        std::fs::write(
+            dir.path().join("dep.x"),
+            r#"
+pub fn helper(x: u8) -> u8 { assert!(x != u8:0, "nonzero"); x }
+"#,
+        )
+        .unwrap();
+        for (mappings, expected) in [
+            (HashMap::new(), ProofStatus::Disproved),
+            (
+                HashMap::from([("__dep__helper".to_owned(), "F".to_owned())]),
+                ProofStatus::Proved,
+            ),
+        ] {
+            let request = DslxAssertionsRequest {
+                source,
+                path: &path,
+                top: "main",
+                solver: Some(SolverChoice::Bitwuzla),
+                dslx_stdlib_path: None,
+                additional_search_paths: vec![dir.path().to_owned()],
+                assert_label_filter: None,
+                assume_enum_in_bound: false,
+                uf_map: AssertionUfMappings::Ir(mappings),
+            };
+            let result = request.prove();
+            assert_eq!(result.summary.conclusion.status, expected, "{result:?}");
+        }
+    }
 
     #[test]
     fn property_function_depends_on_invoke_result() {
@@ -258,5 +427,86 @@ fn __itok__f(__token: token id=1, __activation: bits[1] id=2, x: bits[8] id=3) -
             }
             other => panic!("expected tuple index return, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn assertion_json_does_not_conflate_errors_with_counterexamples() {
+        for (result, status, error) in [
+            (BoolPropertyResult::Proved, "proved", None),
+            (
+                BoolPropertyResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                Some("unknown"),
+            ),
+            (
+                BoolPropertyResult::Error("solver failed".into()),
+                "execution-error",
+                Some("solver failed"),
+            ),
+            (
+                BoolPropertyResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = AssertionsOutcome::from(DslxAssertionsReport {
+                result,
+                duration: Duration::ZERO,
+            });
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "time_micros": 0,
+                    "status": status,
+                    "success": status == "proved",
+                    "counterexample": null,
+                    "error_str": error,
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn assertion_counterexample_exposes_user_inputs_including_double_underscore_names() {
+        let result = BoolPropertyResult::Disproved {
+            inputs: vec![
+                FnInput {
+                    name: "__token".into(),
+                    value: IrValue::make_token(),
+                },
+                FnInput {
+                    name: "__activated".into(),
+                    value: IrValue::bool(true),
+                },
+                FnInput {
+                    name: "__user".into(),
+                    value: IrValue::make_ubits(8, 7).unwrap(),
+                },
+            ],
+            output: FnOutput {
+                value: IrValue::bool(false),
+                assertion_violation: Some(AssertionViolation {
+                    label: "range".into(),
+                    message: "value out of range".into(),
+                }),
+            },
+        };
+        let outcome = AssertionsOutcome::from(DslxAssertionsReport {
+            result,
+            duration: Duration::from_micros(123),
+        });
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            serde_json::json!({
+                "time_micros": 123,
+                "status": "disproved",
+                "success": false,
+                "counterexample": {
+                    "inputs": [{ "name": "__user", "value": "bits[8]:7" }],
+                    "output": { "value": "bits[1]:0", "assertion_label": "range", "assertion_message": "value out of range" }
+                },
+                "error_str": null,
+            })
+        );
     }
 }

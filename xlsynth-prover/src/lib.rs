@@ -3,6 +3,7 @@
 pub mod array_alias_analysis;
 pub mod dslx_assertions;
 pub mod dslx_equiv;
+pub mod dslx_quickcheck;
 pub mod dslx_specializer;
 pub mod dslx_tactics;
 pub mod dslx_utils;

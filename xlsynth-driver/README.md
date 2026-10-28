@@ -3297,7 +3297,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--assume-enum-in-bound=<BOOL>`
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
-  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
+  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). The prover executes the script on the requested equivalence property.
   - `--tactic_jsonl <PATH>` Provide a tactic script as JSONL (one `ScriptStep` per line; `#` comments and blank lines allowed).
   - `--output_json <PATH>`
 
@@ -3588,16 +3588,16 @@ For successful proofs, `counterexample` is `null`.
 Proves that DSLX `#[quickcheck]` functions always return true.
 
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
-- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) switches to the tactic/script-driven workflow so you can edit QuickCheck obligations before solving.
+- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) selects the tactic workflow. A root `Solve` uses the same property selection, assertion semantics, label filter, and UF mappings as a direct proof.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain. The default is `bitwuzla`.
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
 - Output: `--output_json <PATH>` to write results as JSON.
-- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Each selected property is optimized with the XLS IR pipeline before solving. Use `--opt=false` to prove unoptimized IR. `--uf` requires explicit `--opt=false`: optimization would inline calls and erase UF abstraction boundaries. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
+- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Use `--opt=false` for unoptimized IR. Direct proofs using `--uf` require explicit `--opt=false` because optimization can inline the calls. Tactic and proof-plan workers select unoptimized IR automatically when given UF mappings. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
 - Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.
-- JSON: `--output_json` includes a `status` alongside `success`, both overall and for each property; the counterexample string format is unchanged. The file is written after all selected properties finish. See the [proof subprocess result protocol](#proof-subprocess-result-protocol).
+- JSON: `--output_json` includes a `status` alongside `success`, both overall and for each property. If preparation fails before proving starts, the file reports `execution-error` and includes the diagnostic. See the [proof subprocess result protocol](#proof-subprocess-result-protocol).
 
 UF semantics:
 
@@ -3619,6 +3619,7 @@ The command converts the DSLX module to unoptimized IR, injects Boolean guards f
 ### `prover`
 
 Runs a prover plan described by a JSON file with a process-based scheduler.
+Proof-plan and tactic workers inherit the parent command’s `--toolchain` file, including its tool directory and DSLX settings.
 
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.

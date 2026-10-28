@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::proof_outcome::ProofStatus;
+use crate::proof_outcome::{ProofResultHeader, ProofStatus};
 
 use super::config::GroupKind;
 
@@ -201,7 +201,6 @@ impl ProverReportNode {
 
 /// Overall plan outcome together with the complete report tree.
 pub struct ProverReport {
-    pub success: bool,
     pub plan: ProverReportNode,
 }
 
@@ -213,13 +212,12 @@ impl Serialize for ProverReport {
         #[derive(Serialize)]
         /// Wire report with the status derived from the resolved plan.
         struct Report<'a> {
-            status: ProofStatus,
-            success: bool,
+            #[serde(flatten)]
+            conclusion: ProofResultHeader,
             plan: &'a ProverReportNode,
         }
         Report {
-            status: self.plan.proof_status(),
-            success: self.success,
+            conclusion: self.plan.proof_status().into(),
             plan: &self.plan,
         }
         .serialize(serializer)

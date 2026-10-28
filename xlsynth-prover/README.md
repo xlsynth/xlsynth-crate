@@ -2,6 +2,21 @@
 
 Reusable equivalence checking, DSLX proof tactics, and proof-plan execution.
 
+For a file-based equivalence proof, build a `dslx_equiv::DslxEquivFiles`
+request. Call `prove` to check it directly or `into_tactic_tree` to decompose
+the same property. Supply DSLX function names for uninterpreted functions;
+the library specializes the requested tops and translates names for the solver.
+
+For QuickCheck, `dslx_quickcheck::DslxQuickCheckRequest::run` proves the
+selected properties and returns the suite conclusion and each property's
+result. Its callback can display progress. Use `tactic_tree` to select the
+same properties for a script. A root `Solve` carries the assertion semantics,
+label filter and uninterpreted function mappings through to the worker.
+
+For assertion proofs, `dslx_assertions::AssertionUfMappings::LocalDslx` accepts
+helper names in the entry module. Use `Ir` when you already have resolved IR
+names, for example to abstract a helper in an imported module.
+
 ## Tactic engine
 
 `dslx_tactics::script` owns the obligation tree, tactic application, solve
@@ -67,14 +82,17 @@ a direct proof restricted to valid root inputs succeeds.
 ## Process backend
 
 On Unix, `dslx_tactics::process::execute_script` runs the same engine using an
-explicit path to an `xlsynth-driver` executable. The lower-level
+explicit path to an `xlsynth-driver` executable. Its `ScriptExecution` contains
+the root report and an optional solver batch for displaying captured task
+diagnostics. Its serialized status comes from the root: a successful batch
+does not prove leaves the script did not select. The lower-level
 `run_obligations` adapter builds tasks, retains temporary DSLX sources until
 execution finishes, and returns captured output. Library entrypoints do not
 print task diagnostics.
 
 `proof_plan::config` provides serializable task and group configurations.
 `proof_plan::scheduler::run_prover_plan_with_driver` executes plans using a
-caller-supplied driver path and concurrency limit. `Scheduler::new_with_driver`
+caller-supplied driver path and concurrency limit. Pass a `proof_plan::config::ProofDriver` to select a toolchain TOML for all workers. `Scheduler::new_with_driver`
 also accepts a caller-owned cancellation flag. The convenience plan runner
 temporarily installs Unix signal handlers; use `Scheduler` directly when the
 embedding application owns signal handling.
@@ -90,7 +108,9 @@ and `success`, with the following values and normal process exit codes:
 | `inconclusive` | `false` | `1` |
 | `execution-error` | `false` | `1` |
 
-Additional diagnostic fields are allowed. Missing, malformed, or contradictory
+The result must be a JSON object with a string `status` and a Boolean
+`success`, each present exactly once. Additional diagnostic fields are allowed.
+Missing, malformed, or contradictory
 results are protocol errors; signals and unexpected exit codes are process
 failures, even if the child wrote successful JSON first. Neither establishes a
 proof or counterexample. Legacy JSON containing only `success` is intentionally

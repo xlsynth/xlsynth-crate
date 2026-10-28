@@ -224,7 +224,7 @@ mod tests {
         for cores in 1..=4 {
             let report = run_prover_plan(plan.clone(), cores).expect("run");
             assert!(
-                report.success,
+                report.plan.proof_status().is_proved(),
                 "single successful fake task should succeed for {cores} cores; report={:#?}",
                 report.plan
             );

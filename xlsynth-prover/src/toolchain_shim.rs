@@ -128,7 +128,7 @@ fn join_paths(paths: &[&Path]) -> Option<String> {
                 .iter()
                 .map(|p| p.to_string_lossy())
                 .collect::<Vec<_>>()
-                .join(";"),
+                .join(":"),
         )
     }
 }

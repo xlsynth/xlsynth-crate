@@ -1,8 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared helpers for working with DSLX entry points and parametric metadata.
 
-use xlsynth::XlsynthError;
+use std::collections::HashMap;
+use std::path::Path;
+
 use xlsynth::dslx::{Function, InterpValue, ParametricBinding, ParametricEnv};
+use xlsynth::{XlsynthError, mangle_dslx_name};
+
+/// Reject paths the DSLX C API cannot represent before passing them to libxls.
+pub(crate) fn validate_dslx_paths<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), String> {
+    for path in paths {
+        let text = path
+            .to_str()
+            .ok_or_else(|| format!("DSLX path is not UTF-8: {path:?}"))?;
+        if text.contains('\0') {
+            return Err(format!("DSLX path contains a NUL byte: {path:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Translates DSLX function names to the IR names the solver sees, retaining
+/// shared UF symbols.
+pub fn mangle_dslx_uf_map(
+    module_name: &str,
+    uf_map: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    uf_map
+        .iter()
+        .map(|(name, symbol)| {
+            Ok((
+                mangle_dslx_name(module_name, name).map_err(|e| e.to_string())?,
+                symbol.clone(),
+            ))
+        })
+        .collect()
+}
 
 /// Parsed description of a DSLX top reference, including optional positional
 /// param bindings.

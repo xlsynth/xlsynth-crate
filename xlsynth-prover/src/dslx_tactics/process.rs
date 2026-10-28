@@ -6,7 +6,8 @@ use std::path::Path;
 
 use super::obligations::ProverObligation;
 use super::plans::build_plan_from_obligations;
-use super::script::{OblTree, OblTreeConfig, ScriptReport, ScriptStep, execute_script_with_runner};
+use super::script::{OblTree, OblTreeConfig, ScriptExecution, ScriptStep, run_script};
+use crate::proof_plan::config::ProofDriver;
 use crate::proof_plan::report::ProverReport;
 use crate::proof_plan::scheduler::run_prover_plan_with_driver;
 
@@ -15,7 +16,7 @@ use crate::proof_plan::scheduler::run_prover_plan_with_driver;
 pub fn run_obligations(
     obligations: &[(String, ProverObligation)],
     config: &OblTreeConfig,
-    driver_exe: &Path,
+    driver: impl Into<ProofDriver>,
 ) -> Result<ProverReport, String> {
     let paths: Vec<&Path> = config.dslx_paths.iter().map(|p| p.as_path()).collect();
     let bundle = build_plan_from_obligations(
@@ -29,17 +30,17 @@ pub fn run_obligations(
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    run_prover_plan_with_driver(plan, cores, driver_exe).map_err(|e| e.to_string())
+    run_prover_plan_with_driver(plan, cores, driver).map_err(|e| e.to_string())
 }
 
-/// Executes a tactic script with the subprocess backend, without printing
-/// output.
+/// Executes a tactic script and returns its conclusion and captured task
+/// diagnostics.
 pub fn execute_script(
     tree: &mut OblTree,
     steps: &[ScriptStep],
-    driver_exe: &Path,
-) -> Result<ScriptReport, String> {
-    execute_script_with_runner(tree, steps, |obligations, config| {
-        run_obligations(obligations, config, driver_exe)
+    driver: impl Into<ProofDriver>,
+) -> Result<ScriptExecution, String> {
+    run_script(tree, steps, |obligations, config| {
+        run_obligations(obligations, config, driver)
     })
 }

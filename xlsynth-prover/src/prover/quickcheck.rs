@@ -9,6 +9,7 @@ use super::{
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     uf::infer_uf_signatures,
 };
+use crate::dslx_utils::validate_dslx_paths;
 use crate::solver::{BitVec, Response, Solver, SolverConfig};
 
 use regex::Regex;
@@ -229,6 +230,8 @@ pub enum QuickCheckErrorKind {
     Discovery,
     Conversion,
     InvalidProperty,
+    NoMatchingProperties,
+    OptimizingUninterpretedFunctions,
 }
 
 /// A recoverable setup error, separate from a property's proof outcome.
@@ -239,6 +242,13 @@ pub struct QuickCheckError {
 }
 
 impl QuickCheckError {
+    pub(crate) fn no_matching_properties() -> Self {
+        Self::new(
+            QuickCheckErrorKind::NoMatchingProperties,
+            "No matching quickcheck functions found",
+        )
+    }
+
     pub(crate) fn new(kind: QuickCheckErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
@@ -351,6 +361,12 @@ pub(crate) fn load_quickcheck_context(
     additional_search_paths: &[&Path],
     test_filter: Option<&str>,
 ) -> Result<QuickCheckContext, QuickCheckError> {
+    validate_dslx_paths(
+        std::iter::once(entry_file)
+            .chain(dslx_stdlib_path)
+            .chain(additional_search_paths.iter().copied()),
+    )
+    .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
     let test_regex = test_filter
         .map(|pattern| {
             Regex::new(pattern).map_err(|e| {
@@ -500,6 +516,22 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
     }
 }
 
+impl QuickCheckOptions {
+    /// Rejects inlining which would erase the requested uninterpreted calls.
+    pub(crate) fn validate_uf_optimization(
+        &self,
+        uf_map: &HashMap<String, String>,
+    ) -> Result<(), QuickCheckError> {
+        if self.optimize && !uf_map.is_empty() {
+            return Err(QuickCheckError::new(
+                QuickCheckErrorKind::OptimizingUninterpretedFunctions,
+                "XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Prepares shared DSLX/IR state without optimizing or proving any property.
 pub(crate) fn prepare_dslx_quickchecks<'a, S: SolverConfig>(
     solver_config: &'a S,
@@ -512,12 +544,7 @@ pub(crate) fn prepare_dslx_quickchecks<'a, S: SolverConfig>(
     uf_map: &HashMap<String, String>,
     options: QuickCheckOptions,
 ) -> Result<PreparedQuickCheckSuite<'a>, QuickCheckError> {
-    if options.optimize && !uf_map.is_empty() {
-        return Err(QuickCheckError::new(
-            QuickCheckErrorKind::Configuration,
-            "XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false",
-        ));
-    }
+    options.validate_uf_optimization(uf_map)?;
     let assert_label_regex = assert_label_filter
         .map(|pattern| {
             Regex::new(pattern).map_err(|e| {

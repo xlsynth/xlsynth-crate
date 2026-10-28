@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg(feature = "has-bitwuzla")]
-
 use std::process::Command;
 
 use serde_json::Value;
 
 /// All scheduler entry points must communicate conclusions independently of
 /// exit codes.
+#[cfg(feature = "has-bitwuzla")]
 #[test]
 fn scheduled_producers_report_proved_and_disproved_statuses() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,6 +109,7 @@ fn scheduled_producers_report_proved_and_disproved_statuses() {
 }
 
 /// A malformed request is an execution error, never a logical counterexample.
+#[cfg(feature = "has-bitwuzla")]
 #[test]
 fn ir_producer_reports_request_errors_with_typed_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -132,4 +132,54 @@ fn ir_producer_reports_request_errors_with_typed_status() {
     assert_eq!(report["status"], "execution-error");
     assert_eq!(report["success"], false);
     assert!(report["error_str"].is_string());
+}
+
+#[test]
+fn unreadable_ir_and_assertion_inputs_write_execution_error_reports() {
+    for (args, diagnostic, assertions) in [
+        (
+            &["ir-equiv", "missing", "missing", "--top=main"][..],
+            "Failed to read lhs IR file",
+            false,
+        ),
+        (
+            &[
+                "dslx-fn-prove-assertions",
+                "--dslx_input_file=missing",
+                "--dslx_top=main",
+            ][..],
+            "Failed to read DSLX file",
+            true,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = std::fs::read(dir.path().join("missing")).unwrap_err();
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(dir.path())
+            .args(args)
+            .arg("--output_json=result.json")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        let mut report: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap())
+                .unwrap();
+        assert!(
+            report
+                .as_object_mut()
+                .unwrap()
+                .remove("time_micros")
+                .unwrap()
+                .is_u64()
+        );
+        let mut expected = serde_json::json!({
+            "status": "execution-error",
+            "success": false,
+            "error_str": format!("{diagnostic}: {missing}"),
+        });
+        if assertions {
+            expected["counterexample"] = Value::Null;
+        }
+        assert_eq!(report, expected);
+    }
 }

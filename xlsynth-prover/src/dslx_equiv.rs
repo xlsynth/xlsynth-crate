@@ -2,9 +2,11 @@
 
 //! Library entry point for running equivalence checks between two DSLX modules.
 //!
-//! The driver crate parses CLI arguments and reads DSLX files; this module
-//! performs the remaining work: converting source text to IR, preparing UF
-//! metadata, selecting a solver, and dispatching the equivalence proof.
+//! [`DslxEquivFiles`] specializes file inputs or creates a tactic tree with the
+//! same assumptions. [`run_dslx_equiv`] accepts already specialized modules.
+
+mod files;
+pub use files::{DslxEquivFile, DslxEquivFiles};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -304,9 +306,25 @@ fn prepare_side(
         let module_path = module.path.ok_or_else(|| {
             "--tool_path requires DSLX modules to carry a filesystem path".to_string()
         })?;
+        // The prover works from a source snapshot, which may have a newly
+        // specialized top. The external converter reads files, so give
+        // it those exact bytes under the same basename to preserve the
+        // IR module name.
+        let source_dir =
+            tempfile::tempdir().map_err(|e| format!("create DSLX source directory: {e}"))?;
+        let source_path = source_dir
+            .path()
+            .join(module_path.file_name().ok_or_else(|| {
+                format!(
+                    "DSLX source path has no filename: {}",
+                    module_path.display()
+                )
+            })?);
+        std::fs::write(&source_path, module.source)
+            .map_err(|e| format!("write DSLX source: {e}"))?;
         let mut ir_text = toolchain_shim::run_ir_converter_main(
             options.tool_path.unwrap(),
-            module_path,
+            &source_path,
             Some(module.top),
             options.dslx_stdlib_path,
             &additional_path_refs,
