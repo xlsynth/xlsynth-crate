@@ -131,7 +131,7 @@ fn changed_rhs_rejects_the_same_proof() {
         check_equivalence_proof(&lean, &common::and3(), &rhs, &proof_fixture()).unwrap_err();
     assert!(
         matches!(
-            &error,
+            error.error.as_ref(),
             LeanError::ProcessFailed {
                 operation: "user proof compilation",
                 ..
@@ -158,7 +158,7 @@ fn empty_or_wrong_type_proof_body_is_rejected() {
         )
         .unwrap_err();
         assert!(
-            matches!(&error, LeanError::ProcessFailed { .. }),
+            matches!(error.error.as_ref(), LeanError::ProcessFailed { .. }),
             "{name}: unexpected error: {error:?}"
         );
     }

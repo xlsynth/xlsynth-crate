@@ -195,8 +195,11 @@ prepares and checks the target in a temporary directory.
 
 A successful `LeanProofOutput` means Lean accepted the named theorem at the
 generated target type. It returns `lean_version` and the captured `stdout` and
-`stderr` from successful compilation steps. The checker performs no axiom
-audit: Lean's normal acceptance of declarations using axioms or `sorry` applies.
+`stderr` from successful compilation steps. A `LeanProofFailure` retains the
+underlying `LeanError`, the Lean version if its query succeeded, and diagnostics
+from completed compilation steps and the failed process. The checker performs
+no axiom audit: Lean's normal acceptance of declarations using axioms or
+`sorry` applies.
 
 ## Lean semantics and conversion trust
 

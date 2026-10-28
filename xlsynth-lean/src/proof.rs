@@ -110,6 +110,50 @@ pub struct LeanProofOutput {
     pub stderr: String,
 }
 
+/// A failed proof invocation with its available version and process
+/// diagnostics.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct LeanProofFailure {
+    /// Underlying staging, process, or proof error.
+    #[source]
+    pub error: Box<LeanError>,
+    /// Version reported by Lean, if the version query succeeded.
+    pub lean_version: Option<String>,
+    /// Combined standard output from completed compilation steps and the failed
+    /// process.
+    pub stdout: String,
+    /// Combined standard error from completed compilation steps and the failed
+    /// process.
+    pub stderr: String,
+}
+
+impl LeanProofFailure {
+    /// Adds diagnostics from completed compilation steps to a failure.
+    fn with_output(error: LeanError, output: &LeanProofOutput) -> Self {
+        let mut failure = Self::from(error);
+        failure.lean_version = Some(output.lean_version.clone());
+        failure.stdout.insert_str(0, &output.stdout);
+        failure.stderr.insert_str(0, &output.stderr);
+        failure
+    }
+}
+
+impl From<LeanError> for LeanProofFailure {
+    fn from(error: LeanError) -> Self {
+        let (stdout, stderr) = match &error {
+            LeanError::ProcessFailed { stdout, stderr, .. } => (stdout.clone(), stderr.clone()),
+            _ => (String::new(), String::new()),
+        };
+        Self {
+            error: Box::new(error),
+            lean_version: None,
+            stdout,
+            stderr,
+        }
+    }
+}
+
 /// Prepares the exact Lean equivalence target for two combinational gate
 /// graphs.
 ///
@@ -145,7 +189,7 @@ pub fn run_equivalence_proof(
     target_root: &Path,
     proof_sources: &LeanProofSources,
     work_root: &Path,
-) -> Result<LeanProofOutput, LeanError> {
+) -> Result<LeanProofOutput, LeanProofFailure> {
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
@@ -176,14 +220,16 @@ pub fn run_equivalence_proof(
             relative,
             "generated target compilation",
             &mut result,
-        )?;
+        )
+        .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     }
     let ordered_proof_modules = order_proof_modules(
         &lean_executable,
         &work_root,
         &proof_modules,
         &generated_modules,
-    )?;
+    )
+    .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     for relative in ordered_proof_modules {
         compile_module(
             &lean_executable,
@@ -191,7 +237,8 @@ pub fn run_equivalence_proof(
             &relative,
             "user proof compilation",
             &mut result,
-        )?;
+        )
+        .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     }
     compile_module(
         &lean_executable,
@@ -199,7 +246,8 @@ pub fn run_equivalence_proof(
         Path::new("Check.lean"),
         "equivalence check",
         &mut result,
-    )?;
+    )
+    .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     Ok(result)
 }
 
@@ -209,7 +257,7 @@ pub fn check_equivalence_proof(
     lhs: &GateFn,
     rhs: &GateFn,
     proof_file: &Path,
-) -> Result<LeanProofOutput, LeanError> {
+) -> Result<LeanProofOutput, LeanProofFailure> {
     let target = prepare_equivalence_target(lhs, rhs)?;
     let temporary = tempfile::Builder::new()
         .prefix("xlsynth-lean-proof-")

@@ -22,8 +22,8 @@ pub use gate_fn::{
     WrittenLeanCircuit, export_gate_fn,
 };
 pub use proof::{
-    LeanEquivalenceTarget, LeanProofOutput, LeanProofSources, check_equivalence_proof,
-    prepare_equivalence_target, run_equivalence_proof,
+    LeanEquivalenceTarget, LeanProofFailure, LeanProofOutput, LeanProofSources,
+    check_equivalence_proof, prepare_equivalence_target, run_equivalence_proof,
 };
 pub use support::write_lean_support;
 

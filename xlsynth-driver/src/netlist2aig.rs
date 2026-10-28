@@ -197,12 +197,13 @@ pub fn handle_gv2aig(matches: &ArgMatches) {
 pub fn handle_gv2g8r(matches: &ArgMatches) -> Result<(), String> {
     let gate_fn = convert_gv(matches).map_err(|error| format!("{error:#}"))?;
     let design = SequentialGateFn::from_gate_fn(gate_fn);
-    write_stdout(&emit_g8r(&design)?);
+    let text = emit_g8r(&design)?;
     if let Some(path) = matches.get_one::<String>("bin_out") {
         let bytes = encode_g8r_binary(&design)?;
         std::fs::write(path, bytes)
             .map_err(|error| format!("writing native g8r binary '{path}': {error}"))?;
     }
+    write_stdout(&text);
     Ok(())
 }
 

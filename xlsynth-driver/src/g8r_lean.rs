@@ -126,14 +126,14 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
             stderr: output.stderr,
             error: None,
         },
-        Err(error) => CheckReport {
+        Err(failure) => CheckReport {
             status: "failed",
             audit_performed: false,
-            lean_version: None,
+            lean_version: failure.lean_version,
             elapsed_ms: started.elapsed().as_millis(),
-            stdout: String::new(),
-            stderr: String::new(),
-            error: Some(error.to_string()),
+            stdout: failure.stdout,
+            stderr: failure.stderr,
+            error: Some(failure.error.to_string()),
         },
     };
     if let Some(path) = matches.get_one::<String>("output-json") {

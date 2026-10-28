@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+#[cfg(unix)]
+use std::{os::fd::OwnedFd, os::unix::net::UnixStream, process::Stdio};
 
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
@@ -199,6 +201,42 @@ fn gv2g8r_emits_native_text_and_optional_binary() {
             );
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn gv2g8r_writes_binary_before_clean_broken_pipe_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let netlist = directory.path().join("and2.gv");
+    let liberty = directory.path().join("cells.textproto");
+    let binary_path = directory.path().join("and2.g8rbin");
+    std::fs::write(
+        &netlist,
+        "module top(input a, input b, output y); AND2 gate(.A(a), .B(b), .Y(y)); endmodule\n",
+    )
+    .unwrap();
+    std::fs::write(&liberty, CONE_TEST_LIBERTY).unwrap();
+
+    // Closing the peer before spawning makes the first stdout write fail with
+    // BrokenPipe without depending on process scheduling or pipe capacity.
+    let (peer, stdout) = UnixStream::pair().unwrap();
+    drop(peer);
+    let stdout: OwnedFd = stdout.into();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("gv2g8r")
+        .arg("--netlist")
+        .arg(&netlist)
+        .arg("--liberty_proto")
+        .arg(&liberty)
+        .arg("--bin-out")
+        .arg(&binary_path)
+        .stdout(Stdio::from(stdout))
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let graph = load_gate_fn_from_path(&binary_path).unwrap();
+    assert_eq!(graph.inputs.len(), 2);
+    assert_eq!(graph.outputs.len(), 1);
 }
 
 #[test]

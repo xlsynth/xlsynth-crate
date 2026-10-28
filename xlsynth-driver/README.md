@@ -3186,7 +3186,7 @@ Flags:
 - `--proof-source <PATH>` – Lean helper module under the proof root; every supplied module is imported by the generated wrapper. Repeat as needed.
 - `--lean <PATH>` – required explicit Lean executable.
 - `--work-dir <DIR>` – empty work directory; otherwise a temporary directory is used.
-- `--output-json <PATH>` – write status, version, timing, and diagnostics on success or proof failure.
+- `--output-json <PATH>` – write status, version, timing, and diagnostics on success or proof failure. The version is null if its query did not succeed.
 
 The driver generates `UserProof.lean` with imports for `Target` and every helper,
 then wraps the body in `theorem UserProof.equivalent : Target.Equivalent := (...)`.
