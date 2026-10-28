@@ -17,6 +17,10 @@ fn toolchain_setup_failures_write_proof_reports() {
     fs::write(path.join("type.toml"), "[toolchain]\ntool_path = true\n").unwrap();
     fs::create_dir(path.join("directory.toml")).unwrap();
     for (args, toolchain) in [
+        (
+            &["prover", "--plan_json_file=plan.json"][..],
+            Some("missing.toml"),
+        ),
         (&["ir-equiv", "lhs.ir", "rhs.ir"][..], Some("missing.toml")),
         (
             &["dslx-equiv", "lhs.x", "rhs.x", "--dslx_top=main"][..],
@@ -48,8 +52,18 @@ fn toolchain_setup_failures_write_proof_reports() {
             serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
         assert_eq!(report["status"], "execution-error", "{args:?}: {report}");
         assert_eq!(report["success"], false);
+        let diagnostic = if args[0] == "prover" {
+            assert_eq!(report["error"]["stage"], "toolchain");
+            assert_eq!(
+                report["error"]["message"],
+                "Failed to load toolchain configuration"
+            );
+            &report["error"]["exception"]
+        } else {
+            &report["error_str"]
+        };
         assert!(
-            report["error_str"]
+            diagnostic
                 .as_str()
                 .unwrap()
                 .contains(toolchain.unwrap_or("xlsynth-toolchain.toml"))

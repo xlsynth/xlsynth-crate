@@ -4100,21 +4100,28 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
 
     let start = std::time::Instant::now();
     let config = read_toolchain_config(matches.get_one::<String>("toolchain").map(String::as_str))
-        .unwrap_or_else(|error| {
-            if let Some((command, args)) = matches.subcommand()
-                && matches!(
+        .unwrap_or_else(|error| match matches.subcommand() {
+            Some(("prover", args)) => prover::fail_and_exit(
+                args.get_one::<String>("output_json").map(String::as_str),
+                "toolchain",
+                "Failed to load toolchain configuration",
+                &error,
+                &[],
+            ),
+            Some((command, args))
+                if matches!(
                     command,
                     "ir-equiv" | "dslx-equiv" | "prove-quickcheck" | "dslx-fn-prove-assertions"
-                )
+                ) =>
             {
                 proofs::report_setup_error(
                     start,
                     args.get_one::<String>("output_json").map(String::as_str),
                     command,
                     &error,
-                );
+                )
             }
-            report_cli_error_and_exit(&error, None, vec![]);
+            _ => report_cli_error_and_exit(&error, None, vec![]),
         });
 
     match matches.subcommand() {

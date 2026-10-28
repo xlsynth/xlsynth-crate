@@ -3620,6 +3620,7 @@ The command converts the DSLX module to unoptimized IR, injects Boolean guards f
 
 Runs a prover plan described by a JSON file with a process-based scheduler.
 Proof-plan and tactic workers inherit the parent command’s `--toolchain` file, including its tool directory and DSLX settings.
+If `prover` cannot load the toolchain, it exits with code `1` and writes an `execution-error` report to `--output_json` with `error.stage` set to `toolchain`.
 
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
