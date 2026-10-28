@@ -856,6 +856,10 @@ standard-cell pin connections, and unresolved combinational cycles.
 
 ### `aig-tech-map`: AIGER to library-cell netlist
 
+Technology mapping is evolving. Its options, defaults, optimization behavior and
+resulting netlists are not guaranteed to remain backward compatible. Pin the
+tool version and explicit settings when comparing results.
+
 Maps an input AIGER graph with `--strategy nand2|area|delay`. The default `nand2`
 strategy preserves the structural decomposition:
 
@@ -883,7 +887,8 @@ are mandatory cut boundaries, and opposite polarity demands share an inverter.
 Bounded cuts and local phase selection are heuristics, not globally optimal DAG
 covering. Constants and aliases are ideal wiring; physical tie cells and timing
 optimization are outside this covering policy. The subsequent fanout optimization
-requires timing tables; use `--fanout-opt=false` for raw area mapping without them.
+requires timing tables; disable fanout repair, timing sizing and area recovery
+for raw area mapping without them.
 Cells with unsupported function syntax or semantics are excluded from area
 mapping, and all excluded cells are listed in the optional JSON summary.
 
@@ -891,6 +896,40 @@ mapping, and all excluded cells are listed in the optional JSON summary.
 xlsynth-driver aig-tech-map my_design.aig --strategy area \
   --liberty_proto cells.proto --netlist_out my_design.mapped.gv \
   --json_out mapping.json
+```
+
+Area mapping enables critical-path cell sizing by default.
+Use `--timing-sizing=false` to disable the timing phase.
+The order is covering, optional fanout repair, timing sizing, then area recovery.
+This reuses `gv-resize`'s bounded greedy cell substitutions: rejected local trials
+restore their state; accepted decisions are not backtracked. Timing search
+improves worst or near-critical delay under the native STA model, within an area
+allowance. Recovery may spend subsequent timing improvements back to the fixed
+post-sizing checkpoint. It can resize a cell again, including undoing an upsize,
+without exceeding that checkpoint. These are model-based bounds, not physical
+timing guarantees; the AIG cover and netlist connectivity remain fixed.
+
+- `--timing-sizing[=true|false]`: default true for `area`, false otherwise;
+  enabling it is supported only for `area`. Delay-mode behavior is unchanged.
+- `--timing-sizing-max-area-growth <FRACTION>`: default 0.02, relative to the
+  netlist **after fanout repair**. This is independent of the fanout growth cap;
+  the allowances can compound across the two stages. Zero forbids sizing growth.
+- `--timing-sizing-rounds <COUNT>`: default 4; zero disables timing search.
+- `--timing-sizing-evaluation-budget <COUNT>`: propagation visits across all
+  timing rounds; default `max(50000, 4 * N)` for N post-fanout instances.
+  Zero permits no timing search work. Recovery has its own independent budget.
+
+Sizing tuning flags require sizing to be enabled. Area recovery defaults on
+when sizing is enabled; `--area-recovery=false` disables only recovery.
+With `--timing-sizing=false`, area recovery defaults off for area mapping but
+can still be enabled explicitly. For raw area mapping without timing data, use
+`--fanout-opt=false --timing-sizing=false --area-recovery=false`.
+
+```shell
+xlsynth-driver aig-tech-map design.aig --strategy area \
+  --timing-sizing-max-area-growth 0.02 --timing-sizing-evaluation-budget 50000 \
+  --area-recovery-evaluation-budget 100000 \
+  --liberty_proto cells.proto --netlist_out sized.gv --json_out mapping.json
 ```
 
 The experimental `delay` strategy reuses the same cuts and emission, retaining
@@ -908,17 +947,17 @@ area recovery using the native resizer. It substitutes cheaper equivalent cells
 without increasing the boundary delay reached before recovery, and allows no
 area growth. It does not repeat the timing-search phase or change the cover.
 Use `--area-recovery=false` for the original raw delay cover, or combine it with
-`--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
-by default for area mode and unsupported for nand2.
+`--fanout-opt=false` to disable both post-mapping stages. Area mode also enables recovery
+by default through timing sizing. Recovery is unsupported for nand2.
 
-- `--area-recovery[=true|false]`: default true for delay, false otherwise.
+- `--area-recovery[=true|false]`: default true for delay or timing sizing, false otherwise.
 - `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
 - `--area-recovery-evaluation-budget <COUNT>`: propagation visits across all
   recovery rounds; default `max(100000, 8 * N)` for N mapped instances after
   fanout optimization. Zero permits no search work. A budget stop retains
   completed, verified substitutions; it does not imply convergence.
 - `--wire-capacitance-constant-ff <VALUE>`,
-  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. Both post-mapping
+  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. All post-mapping
   stages share these affine lumped wire-capacitance terms, the input slew and
   output load. Output ports are not sink pins; output-only driven nets receive
   the constant term, dangling nets neither. Primary inputs remain ideal sources.
@@ -929,7 +968,11 @@ Recovery tuning flags require recovery to be enabled. The JSON summary keeps
 covering `stats` unchanged and adds `area_recovery` with final area/delay,
 accepted substitutions, resolved budgets and stopping reasons,
 `area_recovery_rounds`, and `post_mapping_timing` with the shared resolved
-model. Fanout results remain under `fanout_optimization`.
+model. With timing sizing enabled, `timing_sizing` instead contains the combined
+resize report (including recovery), alongside `timing_sizing_max_area_growth`
+and `timing_sizing_rounds`. In that report, `upsize` describes timing search in
+either size direction, and `downsize` describes recovery. Covering `stats` remain
+pre-optimization values. Fanout results remain under `fanout_optimization`.
 
 Key flags:
 
@@ -939,7 +982,8 @@ Key flags:
   functions and positive areas. Default area optimization also requires usable
   timing data and an output load (library default or `--module-output-load`).
   `delay` requires usable timing data even with `--fanout-opt=false`.
-  `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
+  `nand2` and raw area mapping with all post-mapping stages disabled do not
+  require timing.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` or `delay` is an error.
@@ -962,7 +1006,8 @@ post-mapping pass tries equivalent
 cell upsizing, buffering, and replication. Each accepted edit improves modeled
 worst delay and the delay/area score. The pass requires timing-enabled Liberty;
 timing uses pin capacitances plus optional affine wire capacitance. Use
-`--fanout-opt=false` for raw area mapping without timing requirements. Bare
+`--fanout-opt=false` to disable repair; timing sizing and recovery remain
+enabled by default for area mapping. Bare
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
 `nand2` and `delay` strategies leave it disabled. Enabling it requires
 `--strategy area` or `--strategy delay`.
