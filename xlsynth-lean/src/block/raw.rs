@@ -38,8 +38,6 @@ pub struct LeanBlockBundle {
 /// native XLS verification and typed PIR validation on the same input.
 /// Revalidate the package if you modify it before emission.
 ///
-/// Pass a verified block borrowed from `package`, whose file table supplies
-/// source locations in diagnostics and generated comments.
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
 /// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
