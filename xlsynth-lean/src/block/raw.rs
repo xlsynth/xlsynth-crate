@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct Lean emission from native-verified, typed XLS block IR.
+//! Direct Lean emission from verified, typed XLS block IR.
 //!
 //! The generated `XlsBlock.eval` evaluates every node from old registers and
 //! current inputs. Its result contains old-state outputs, simultaneous next
@@ -16,10 +16,12 @@ use xlsynth_pir::{
     ir_utils,
 };
 
-use crate::block::Block;
+use crate::block::BlockContext;
 
 /// Emit a self-contained Lean module for the arbiter/operator-control subset.
 ///
+/// Pass a verified block borrowed from `package`, whose file table supplies
+/// source locations in diagnostics and generated comments.
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
 /// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
@@ -32,8 +34,9 @@ use crate::block::Block;
 /// Unsupported nodes, types, or reset/instance shapes return a source error.
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
-pub fn emit(block: &Block) -> Result<String> {
-    emit_block(block).with_context(|| {
+pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
+    let block = BlockContext::new(package, block)?;
+    emit_block(&block).with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -45,7 +48,7 @@ pub fn emit(block: &Block) -> Result<String> {
 ///
 /// Every register must have exactly one write; outputs use the data operand of
 /// each output port, whose graph node itself has the empty tuple type.
-fn emit_block(block: &Block) -> Result<String> {
+fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
         "block instances are outside the supported Lean subset"
@@ -62,7 +65,7 @@ fn emit_block(block: &Block) -> Result<String> {
         );
     }
 
-    let graph = &block.graph;
+    let graph = block.graph;
     let writes = block
         .graph
         .registers
@@ -112,7 +115,7 @@ fn emit_block(block: &Block) -> Result<String> {
          -- Source assertions are results, never assumptions.\n\
          import Std\n\nnamespace XlsBlock\n\n",
         comment(&graph.name),
-        comment(&block.package_name)
+        comment(block.package_name)
     );
     source.push_str(&record_type(
         "State",
@@ -346,11 +349,11 @@ fn predicate(value: &str) -> String {
 /// Resolve only the operands used by this operation. Register writes and
 /// output ports return unit here; their effects are collected by `emit_block`.
 pub(crate) fn node_expression(
-    block: &Block,
+    block: &BlockContext<'_>,
     reference: NodeRef,
     operand: impl Fn(NodeRef) -> Result<String>,
 ) -> Result<String> {
-    let graph = &block.graph;
+    let graph = block.graph;
     let node = graph.get_node(reference);
     match &node.payload {
         NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
@@ -499,7 +502,7 @@ pub(crate) fn node_expression(
 /// The reference must be the selected write for this register, and every entry
 /// in `names` must denote an expression evaluated from old state.
 fn register_update(
-    block: &Block,
+    block: &BlockContext<'_>,
     register: &Register,
     reference: NodeRef,
     names: &[String],
@@ -557,7 +560,7 @@ pub(crate) fn identifier(source: &str) -> Result<String> {
 
 /// Describe a node and its available source locations for errors and Lean
 /// comments.
-pub(crate) fn node_context(block: &Block, reference: NodeRef) -> String {
+pub(crate) fn node_context(block: &BlockContext<'_>, reference: NodeRef) -> String {
     let node = block.graph.get_node(reference);
     let locations = node
         .pos
@@ -565,7 +568,7 @@ pub(crate) fn node_context(block: &Block, reference: NodeRef) -> String {
         .flatten()
         .map(|position| {
             position
-                .to_human_string(&block.file_table)
+                .to_human_string(block.file_table)
                 .unwrap_or_else(|| {
                     format!(
                         "file_number {}:{}:{}",
@@ -578,7 +581,7 @@ pub(crate) fn node_context(block: &Block, reference: NodeRef) -> String {
         .collect::<Vec<_>>();
     format!(
         "node {} [id={}, op={}, type={}]{}",
-        ir::node_textual_id(&block.graph, reference),
+        ir::node_textual_id(block.graph, reference),
         node.text_id,
         node.payload.get_operator(),
         node.ty,
