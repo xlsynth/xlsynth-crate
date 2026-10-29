@@ -686,6 +686,16 @@ Primarily tests:
   concatenations are tokenized correctly.
 - Top-level annotation tokenization with string-valued fields
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_mapped_netlist_proto_roundtrip.rs
+
+Generates small acyclic mapped GV designs with four input bits. It varies
+the connectivity, cell types, pin order, literal tieoffs, port
+declarations, implicit wires, and directive layout. After converting the GV
+to protobuf and back, Icarus Verilog elaborates both designs with the same
+cell models and compares every gate output for all 16 binary inputs using
+four-state equality. This catches lost modules, invalid emitted Verilog, and
+wiring changes. The target requires `iverilog` and `vvp`.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_netlist_resize.rs
 
 Uses the shared direct-G8R generator to construct combinational and sequential

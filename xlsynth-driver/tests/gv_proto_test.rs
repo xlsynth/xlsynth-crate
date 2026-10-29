@@ -33,9 +33,7 @@ fn round_trips_mapped_hierarchy_via_files_and_stdout() -> Result<()> {
     let restored = dir.path().join("restored.gv");
     std::fs::write(
         &gv,
-        r#"module leaf(input [3:0] a, output y);
-  INV gate0(.A(a[2]), .Y(y));
-endmodule
+        r#"`timescale 1ns/1ps module leaf(input [3:0] a, output y); INV gate0(.A(a[2]), .Y(y)); endmodule
 module top(input [1:0] a, output y);
   wire [3:0] bus;
   assign bus = {a, 2'H1};

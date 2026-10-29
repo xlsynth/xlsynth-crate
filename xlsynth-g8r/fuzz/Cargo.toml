@@ -36,6 +36,12 @@ members = ["."]
 warnings = "deny"
 
 [[bin]]
+name = "fuzz_mapped_netlist_proto_roundtrip"
+path = "fuzz_targets/fuzz_mapped_netlist_proto_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_netlist_resize"
 path = "fuzz_targets/fuzz_netlist_resize.rs"
 test = false

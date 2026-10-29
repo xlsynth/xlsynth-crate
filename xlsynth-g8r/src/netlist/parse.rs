@@ -909,12 +909,46 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
-    /// Consumes a supported timescale directive through the end of its line.
+    /// Reads one timescale argument token, skipping whitespace and comments.
+    fn pop_timescale_token(&mut self) -> Result<String, ScanError> {
+        let first = loop {
+            let start = self.pos;
+            let Some(b) = self.popb() else {
+                return Ok(String::new());
+            };
+            if b.is_ascii_whitespace() {
+                continue;
+            }
+            if b == b'/' && matches!(self.peekb(), Some(b'/' | b'*')) {
+                self.scan_comment_after_slash(start)?;
+                continue;
+            }
+            break b;
+        };
+        let mut token = String::from(char::from(first));
+        while let Some(b) = self.peekb() {
+            // The magnitude and unit may be adjacent, e.g. 100ps.
+            let continues = if first.is_ascii_digit() {
+                b.is_ascii_digit()
+            } else {
+                first.is_ascii_alphabetic()
+                    && (b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+            };
+            if !continues {
+                break;
+            }
+            self.popb();
+            token.push(char::from(b));
+        }
+        Ok(token)
+    }
+
+    /// Consumes the unit and precision, leaving subsequent HDL for the scanner.
     fn skip_directive(&mut self, start: Pos) -> Result<(), ScanError> {
         self.popb(); // backtick
         let mut word = String::new();
         while let Some(b) = self.peekb() {
-            if !(b.is_ascii_alphabetic() || b == b'_') {
+            if !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$')) {
                 break;
             }
             self.popb();
@@ -929,17 +963,25 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        while let Some(b) = self.popb() {
-            if b == b'\n' {
-                break;
+        const MAGNITUDES: &[&str] = &["1", "10", "100"];
+        const UNITS: &[&str] = &["s", "ms", "us", "ns", "ps", "fs"];
+        for allowed in [MAGNITUDES, UNITS, &["/"], MAGNITUDES, UNITS] {
+            let token = self.pop_timescale_token()?;
+            if !allowed.contains(&token.as_str()) {
+                return Err(self.error_with_context(
+                    "expected a timescale directive of the form 1ns/1ps",
+                    Span {
+                        start,
+                        limit: self.pos,
+                    },
+                ));
             }
         }
         Ok(())
     }
 
     /// Returns a token for a line comment and skips a block comment.
-    fn scan_comment(&mut self, start: Pos) -> Result<Option<Token>, ScanError> {
-        self.popb(); // first slash
+    fn scan_comment_after_slash(&mut self, start: Pos) -> Result<Option<Token>, ScanError> {
         match self.peekb() {
             Some(b'/') => {
                 self.popb();
@@ -993,7 +1035,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                 }
                 b'`' => self.skip_directive(start)?,
                 b'/' => {
-                    if let Some(comment) = self.scan_comment(start)? {
+                    self.popb();
+                    if let Some(comment) = self.scan_comment_after_slash(start)? {
                         return Ok(Some(comment));
                     }
                 }
@@ -3555,6 +3598,20 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn timescale_handles_comments_and_newlines_between_arguments() {
+        let src = r#"`timescale 100 /* unit */ ns // precision follows
+                      / 10 /* smaller unit */ ps module same_line(); endmodule
+                      module following(); endmodule"#;
+        let mut parser = Parser::new(TokenScanner::from_str_with_capacity(src, 1));
+        let modules = parser.parse_file().unwrap();
+        let names: Vec<_> = modules
+            .iter()
+            .map(|m| parser.interner.resolve(m.name))
+            .collect();
+        assert_eq!(names, [Some("same_line"), Some("following")]);
     }
 
     #[test]
