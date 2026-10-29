@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -14,6 +15,7 @@ use crate::dslx_tactics::obligations::{
 use crate::dslx_tactics::script::{OblTree, OblTreeConfig};
 use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_uf_map};
 use crate::proof_outcome::{ProofResultHeader, ProofStatus, aggregate_proof_statuses};
+use crate::proof_timing::ProofTiming;
 use crate::prover::quickcheck::{QuickCheckError, QuickCheckErrorKind, load_quickcheck_context};
 use crate::prover::types::{
     AssertionViolation, BoolPropertyResult, FnInput, QuickCheckAssertionSemantics,
@@ -83,6 +85,7 @@ impl QuickCheckRunResult {
 pub struct QuickCheckTestOutcome {
     pub name: String,
     pub time_micros: u128,
+    pub timing: ProofTiming,
     #[serde(flatten)]
     pub conclusion: ProofResultHeader,
     pub counterexample: Option<String>,
@@ -93,6 +96,7 @@ pub struct QuickCheckTestOutcome {
 /// order.
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckOutcome {
+    pub timing: ProofTiming,
     #[serde(flatten)]
     pub conclusion: ProofResultHeader,
     pub tests: Vec<QuickCheckTestOutcome>,
@@ -114,6 +118,7 @@ impl From<QuickCheckRunResult> for QuickCheckTestOutcome {
         Self {
             name: run.name,
             time_micros: run.duration.as_micros(),
+            timing: run.duration.into(),
             conclusion: status.into(),
             counterexample,
             error_str,
@@ -130,6 +135,7 @@ impl DslxQuickCheckRequest {
         tool_path: Option<&Path>,
         mut progress: impl FnMut(QuickCheckProgress<'_>),
     ) -> Result<QuickCheckOutcome, QuickCheckError> {
+        let start = Instant::now();
         options.validate_uf_optimization(&self.uf_map)?;
         let module_name = self
             .entry_file
@@ -176,6 +182,7 @@ impl DslxQuickCheckRequest {
         }
         let status = aggregate_proof_statuses(tests.iter().map(|test| test.conclusion.status));
         Ok(QuickCheckOutcome {
+            timing: ProofTiming::elapsed(start),
             conclusion: status.into(),
             tests,
         })
@@ -346,6 +353,7 @@ fn helper(x: u1) -> u1 { x }
                 serde_json::json!({
                     "name": "property",
                     "time_micros": 0,
+                    "timing": { "wall_micros": 0 },
                     "status": status,
                     "success": status == "proved",
                     "counterexample": counterexample,

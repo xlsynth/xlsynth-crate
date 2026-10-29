@@ -198,6 +198,7 @@ impl From<EquivReport> for ProofSummary {
     fn from(report: EquivReport) -> Self {
         Self {
             time_micros: report.duration.as_micros(),
+            timing: report.duration.into(),
             conclusion: ProofStatus::from(&report.result).into(),
             error_str: report.error_str(),
         }
@@ -237,6 +238,7 @@ mod tests {
                 serde_json::to_value(outcome).unwrap(),
                 serde_json::json!({
                     "time_micros": 0,
+                    "timing": { "wall_micros": 0 },
                     "status": status,
                     "success": status == "proved",
                     "error_str": error,

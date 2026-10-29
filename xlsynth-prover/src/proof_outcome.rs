@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::proof_timing::ProofTiming;
 use crate::prover::types::{BoolPropertyResult, EquivResult};
 
 /// A proof conclusion, distinct from whether the prover executed successfully.
@@ -98,6 +99,7 @@ impl<'de> Deserialize<'de> for ProofResultHeader {
 #[derive(Debug, Serialize, Clone)]
 pub struct ProofSummary {
     pub time_micros: u128,
+    pub timing: ProofTiming,
     #[serde(flatten)]
     pub conclusion: ProofResultHeader,
     pub error_str: Option<String>,
@@ -108,7 +110,11 @@ impl ProofSummary {
     pub fn run<T: Into<Self>>(prove: impl FnOnce() -> Result<T, String>) -> Self {
         let start = Instant::now();
         match prove() {
-            Ok(report) => report.into(),
+            Ok(report) => {
+                let mut report = report.into();
+                report.timing = ProofTiming::elapsed(start);
+                report
+            }
             Err(error) => Self::execution_error(start.elapsed(), error),
         }
     }
@@ -117,6 +123,7 @@ impl ProofSummary {
     pub fn execution_error(duration: Duration, error: String) -> Self {
         Self {
             time_micros: duration.as_micros(),
+            timing: duration.into(),
             conclusion: ProofStatus::ExecutionError.into(),
             error_str: Some(error),
         }

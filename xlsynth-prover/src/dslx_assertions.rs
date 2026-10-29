@@ -88,7 +88,11 @@ impl DslxAssertionsRequest<'_> {
     pub fn prove(&self) -> AssertionsOutcome {
         let start = Instant::now();
         match run_dslx_assertions(self) {
-            Ok(report) => report.into(),
+            Ok(report) => {
+                let mut outcome = AssertionsOutcome::from(report);
+                outcome.summary.timing = start.elapsed().into();
+                outcome
+            }
             Err(error) => AssertionsOutcome::execution_error(start.elapsed(), error),
         }
     }
@@ -155,6 +159,7 @@ impl From<DslxAssertionsReport> for AssertionsOutcome {
             summary: ProofSummary {
                 conclusion: status.into(),
                 time_micros: duration.as_micros(),
+                timing: duration.into(),
                 error_str,
             },
             counterexample,
@@ -472,6 +477,7 @@ fn __itok__f(__token: token id=1, __activation: bits[1] id=2, x: bits[8] id=3) -
                 serde_json::to_value(outcome).unwrap(),
                 serde_json::json!({
                     "time_micros": 0,
+                    "timing": { "wall_micros": 0 },
                     "status": status,
                     "success": status == "proved",
                     "counterexample": null,
@@ -514,6 +520,7 @@ fn __itok__f(__token: token id=1, __activation: bits[1] id=2, x: bits[8] id=3) -
             serde_json::to_value(outcome).unwrap(),
             serde_json::json!({
                 "time_micros": 123,
+                "timing": { "wall_micros": 123 },
                 "status": "disproved",
                 "success": false,
                 "counterexample": {

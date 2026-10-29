@@ -342,6 +342,8 @@ fn unreadable_ir_and_assertion_inputs_write_execution_error_reports() {
             "success": false,
             "error_str": format!("{diagnostic}: {missing}"),
         });
+        let timing = report.as_object_mut().unwrap().remove("timing").unwrap();
+        assert!(timing["wall_micros"].is_u64());
         if assertions {
             expected["counterexample"] = Value::Null;
         }
