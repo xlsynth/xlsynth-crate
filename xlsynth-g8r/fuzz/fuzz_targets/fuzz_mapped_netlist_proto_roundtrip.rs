@@ -21,6 +21,9 @@ fn mapped_gv(data: &[u8]) -> (String, usize) {
     if layout & 1 != 0 {
         gv.push_str("`timescale 1ns/1ps ");
     }
+    if layout & 4 != 0 {
+        gv.push_str("// mapped combinational circuit\n");
+    }
     if layout & 2 == 0 {
         writeln!(gv, "module dut(input [3:0] a, output [{}:0] y);", width - 1).unwrap();
     } else {
@@ -41,15 +44,25 @@ fn mapped_gv(data: &[u8]) -> (String, usize) {
         if gate[0] & 4 != 0 {
             writeln!(gv, "  wire n{i};").unwrap();
         }
-        if gate[0] & 8 == 0 {
-            writeln!(gv, "  {cell} u{i} (.A({a}), .B({b}), .Y(n{i}));").unwrap();
+        let separator = if gate[0] & 16 == 0 {
+            ", "
         } else {
-            writeln!(gv, "  {cell} u{i} (.Y(n{i}), .B({b}), .A({a}));").unwrap();
+            ", // pin\n    "
+        };
+        if gate[0] & 8 == 0 {
+            writeln!(gv, "  {cell} u{i} (.A({a}){separator}.B({b}), .Y(n{i}));").unwrap();
+        } else {
+            writeln!(gv, "  {cell} u{i} (.Y(n{i}){separator}.B({b}), .A({a}));").unwrap();
         }
         writeln!(gv, "  assign y[{}] = n{i};", i + 4).unwrap();
         sources.push(format!("n{i}"));
     }
     gv.push_str("endmodule\n");
+    match (layout >> 3) % 3 {
+        1 => gv = gv.replace('\n', "\r\n"),
+        2 => gv = gv.replace('\n', "\r"),
+        _ => {} // Keep LF line endings.
+    }
     (gv, width)
 }
 

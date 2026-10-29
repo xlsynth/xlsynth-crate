@@ -49,13 +49,14 @@ endmodule
 
 #[test]
 fn gv_reader_rejects_logic_assignments_in_mixed_input() {
-    let error = read_gv_from_str(MIXED_NETLIST)
-        .err()
-        .expect("mixed GV must fail");
-    assert_eq!(
-        error.to_string(),
-        include_str!("goldens/gv_logic_assignment.golden.txt").trim_end()
-    );
+    for newline in ["\n", "\r", "\r\n"] {
+        let source = MIXED_NETLIST.replace('\n', newline);
+        let error = read_gv_from_str(&source).err().expect("mixed GV must fail");
+        assert_eq!(
+            error.to_string(),
+            include_str!("goldens/gv_logic_assignment.golden.txt").trim_end()
+        );
+    }
 }
 
 #[test]

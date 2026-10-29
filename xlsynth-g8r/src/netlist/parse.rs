@@ -385,10 +385,46 @@ pub struct TokenScanner<R: Read + 'static> {
     reader: BufReader<R>,
     pub pos: Pos,
     lookahead: Option<Token>,
+    emit_line_comments: bool,
     reject_lossy_constructs: bool,
     read_error: Option<std::io::Error>,
     done: bool,
     line_lookup: Box<dyn Fn(u32) -> Option<String>>, // line number -> line text
+}
+
+/// Consumes a single source byte, treating CR, LF and CRLF as one newline.
+fn read_source_byte(reader: &mut impl BufRead) -> std::io::Result<Option<u8>> {
+    let Some(&b) = reader.fill_buf()?.first() else {
+        return Ok(None);
+    };
+    reader.consume(1);
+    if b == b'\r' {
+        if reader.fill_buf()?.first() == Some(&b'\n') {
+            reader.consume(1);
+        }
+        return Ok(Some(b'\n'));
+    }
+    Ok(Some(b))
+}
+
+/// Reads a diagnostic line with the same line numbering as token spans.
+pub(super) fn source_line(mut reader: impl BufRead, mut lineno: u32) -> Option<String> {
+    let mut text = Vec::new();
+    while let Some(b) = read_source_byte(&mut reader).ok()? {
+        if b == b'\n' {
+            if lineno == 1 {
+                return String::from_utf8(text).ok();
+            }
+            lineno = lineno.checked_sub(1)?;
+        } else if lineno == 1 {
+            text.push(b);
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        String::from_utf8(text).ok()
+    }
 }
 
 impl<R: Read + 'static> TokenScanner<R> {
@@ -422,6 +458,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 colno: 1,
             },
             lookahead: None,
+            emit_line_comments: true,
             reject_lossy_constructs: false,
             read_error: None,
             done: false,
@@ -432,32 +469,25 @@ impl<R: Read + 'static> TokenScanner<R> {
     /// Construct a TokenScanner for a file, using the file path for line
     /// lookup.
     pub fn from_file_with_path(reader: R, path: std::path::PathBuf) -> Self {
-        let path_clone = path.clone();
         Self::with_line_lookup(
             reader,
             Box::new(move |lineno| {
-                use std::io::{BufRead, BufReader};
-                let file = std::fs::File::open(&path_clone).ok()?;
-                let reader = BufReader::new(file);
-                reader
-                    .lines()
-                    .nth((lineno - 1) as usize)
-                    .and_then(Result::ok)
+                let file = std::fs::File::open(&path).ok()?;
+                source_line(BufReader::new(file), lineno)
             }),
         )
     }
 }
 
 impl<'a> TokenScanner<std::io::Cursor<&'a [u8]>> {
-    /// Construct a TokenScanner for a string (for tests), using a Vec<String>
-    /// for line lookup.
+    /// Constructs a token scanner with diagnostic lookup into the source text.
     pub fn from_str(input: &'a str) -> Self {
         Self::from_str_with_capacity(input, 8192)
     }
 
     fn from_str_with_capacity(input: &'a str, capacity: usize) -> Self {
-        let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
-        let lookup = move |lineno: u32| lines.get((lineno - 1) as usize).cloned();
+        let source = input.to_owned();
+        let lookup = move |lineno| source_line(source.as_bytes(), lineno);
         Self::with_line_lookup_and_capacity(
             std::io::Cursor::new(input.as_bytes()),
             Box::new(lookup),
@@ -473,7 +503,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             return None;
         }
         match self.reader.fill_buf() {
-            Ok(buf) => buf.first().copied(),
+            Ok(buf) => buf.first().map(|&b| if b == b'\r' { b'\n' } else { b }),
             Err(error) => {
                 self.read_error = Some(error);
                 self.done = true;
@@ -487,22 +517,19 @@ impl<R: Read + 'static> TokenScanner<R> {
         if self.done {
             return None;
         }
-        match self.reader.fill_buf() {
-            Ok(buf) => {
-                if let Some(&b) = buf.first() {
-                    if b == b'\n' {
-                        self.pos.lineno += 1;
-                        self.pos.colno = 1;
-                    } else {
-                        self.pos.colno += 1;
-                    }
-                    // Consume exactly one byte.
-                    self.reader.consume(1);
-                    Some(b)
+        match read_source_byte(&mut self.reader) {
+            Ok(Some(b)) => {
+                if b == b'\n' {
+                    self.pos.lineno += 1;
+                    self.pos.colno = 1;
                 } else {
-                    self.done = true;
-                    None
+                    self.pos.colno += 1;
                 }
+                Some(b)
+            }
+            Ok(None) => {
+                self.done = true;
+                None
             }
             Err(error) => {
                 self.read_error = Some(error);
@@ -659,6 +686,23 @@ impl<R: Read + 'static> TokenScanner<R> {
         })
     }
 
+    /// Skips whitespace and comments separating tokens inside an attribute.
+    fn skip_annotation_trivia(&mut self) -> Result<(), ScanError> {
+        loop {
+            match self.peekb() {
+                Some(b) if (b as char).is_whitespace() => {
+                    self.popb();
+                }
+                Some(b'/') => {
+                    let start = self.pos;
+                    self.popb();
+                    self.scan_comment_after_slash(start)?;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
     fn pop_annotation_after_open_paren(&mut self, start: Pos) -> Result<Token, ScanError> {
         if self.popb() != Some(b'*') {
             return Err(self.error_with_context(
@@ -669,15 +713,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Parse key
         let mut key = String::new();
         while let Some(b) = self.peekb() {
@@ -689,15 +725,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 break;
             }
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Expect '='
         if self.popb() != Some(b'=') {
             return Err(self.error_with_context(
@@ -708,15 +736,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Parse value (string, integer, or Verilog integer)
         let value: AnnotationValue = match self.peekb() {
             Some(b'"') => {
@@ -799,15 +819,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 ));
             }
         };
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Expect '*)'
         if self.popb() != Some(b'*') {
             return Err(self.error_with_context(
@@ -985,14 +997,16 @@ impl<R: Read + 'static> TokenScanner<R> {
         match self.peekb() {
             Some(b'/') => {
                 self.popb();
-                let mut comment = String::new();
+                let mut comment = self.emit_line_comments.then(String::new);
                 while let Some(b) = self.popb() {
                     if b == b'\n' {
                         break;
                     }
-                    comment.push(b as char);
+                    if let Some(comment) = &mut comment {
+                        comment.push(b as char);
+                    }
                 }
-                Ok(Some(Token {
+                Ok(comment.map(|comment| Token {
                     payload: TokenPayload::Comment(comment),
                     span: Span {
                         start,
@@ -1263,7 +1277,10 @@ pub(crate) struct Parser<R: Read + 'static> {
 
 impl<R: Read + 'static> Parser<R> {
     /// Construct a parser with explicit control over implicit-net handling.
-    pub fn new_with_options(scanner: TokenScanner<R>, allow_implicit_nets: bool) -> Self {
+    pub fn new_with_options(mut scanner: TokenScanner<R>, allow_implicit_nets: bool) -> Self {
+        // Both kinds of Verilog comment are whitespace at every grammar
+        // position.
+        scanner.emit_line_comments = false;
         Self {
             scanner,
             interner: StringInterner::new(),
@@ -3598,6 +3615,47 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn line_comments_are_whitespace_for_all_line_endings() {
+        let lines = [
+            "// header",
+            "module first(); endmodule // second module follows",
+            "module second(output y);",
+            "  (* source // attribute key",
+            "     = 1 *)",
+            "  BUF gate(.A({y // first bit",
+            "               , y}) // before the pin separator",
+            "           , // next pin",
+            "           .Y(y));",
+            "endmodule",
+        ];
+        for newline in ["\n", "\r", "\r\n"] {
+            let source = lines.join(newline);
+            let mut scanner = TokenScanner::with_line_lookup_and_capacity(
+                std::io::Cursor::new(source.as_bytes().to_vec()),
+                Box::new(move |n| source_line(source.as_bytes(), n)),
+                1,
+            );
+            // The standalone scanner still exposes comments with normalized
+            // spans.
+            let header = scanner.popt().unwrap().unwrap();
+            assert_eq!(header.payload, TokenPayload::Comment(" header".into()));
+            assert_eq!(header.span.to_human_string(), "1:1..2:1");
+            scanner.require_preserved_structure();
+            let mut parser = Parser::new(scanner);
+            let modules = parser.parse_file().unwrap();
+            let names: Vec<_> = modules
+                .iter()
+                .map(|m| parser.interner.resolve(m.name))
+                .collect();
+            assert_eq!(names, [Some("first"), Some("second")]);
+            let gate = &modules[1].instances[0];
+            assert_eq!((gate.inst_lineno, gate.inst_colno), (6, 7));
+            assert_eq!(gate.connections.len(), 2);
+            assert_eq!(parser.get_line(6).as_deref(), Some(lines[5]));
+        }
     }
 
     #[test]

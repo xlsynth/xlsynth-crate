@@ -13,13 +13,14 @@ use crate::liberty::Library;
 use crate::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
 use crate::netlist::form::{validate_gv_form, validate_ugv_form};
 use crate::netlist::parse::{
-    Net, NetlistModule, Parser as NetlistParser, PortId, ScanError, TokenScanner,
+    Net, NetlistModule, Parser as NetlistParser, PortId, ScanError, TokenScanner, source_line,
 };
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -159,10 +160,10 @@ pub fn read_ugv_from_str(source: &str) -> Result<ParsedNetlist> {
 }
 
 fn read_netlist_from_str(source: &str, format: NetlistFormat) -> Result<TimedParsedNetlist> {
-    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let bytes: Arc<[u8]> = source.as_bytes().into();
     let scanner = TokenScanner::with_line_lookup(
-        Cursor::new(source.as_bytes().to_vec()),
-        Box::new(move |lineno| lines.get((lineno - 1) as usize).cloned()),
+        Cursor::new(Arc::clone(&bytes)),
+        Box::new(move |lineno| source_line(bytes.as_ref(), lineno)),
     );
     read_netlist(scanner, "<string>", format)
 }
@@ -185,10 +186,10 @@ fn read_netlist_from_path(path: &Path, format: NetlistFormat) -> Result<TimedPar
             let br = BufReader::new(f);
             let gz = MultiGzDecoder::new(br);
             let rdr = BufReader::new(gz);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
+            source_line(rdr, lineno)
         } else {
             let rdr = BufReader::new(f);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
+            source_line(rdr, lineno)
         }
     };
 
