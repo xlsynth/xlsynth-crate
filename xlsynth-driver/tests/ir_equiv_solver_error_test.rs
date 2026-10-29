@@ -9,6 +9,7 @@ use std::process::Command;
 
 use serde_json::Value;
 use test_case::test_case;
+use xlsynth_prover::proof_phases::ProofPhases;
 
 /// The stage at which the second solver invocation fails.
 enum Failure {
@@ -45,6 +46,26 @@ done
     )?;
     fs::set_permissions(&solver, fs::Permissions::from_mode(0o755))?;
     Ok(solver)
+}
+
+/// Checks which stages of the fake SMT protocol the reported invocation
+/// reached.
+fn assert_query_phases(report: &Value, encoded: bool, check_count: u64, read_model: bool) {
+    let phases: ProofPhases = serde_json::from_value(report["timing"]["phases"].clone()).unwrap();
+    assert!(phases.prepare_work_micros.is_some(), "{report}");
+    assert_eq!(phases.smt_encode_work_micros.is_some(), encoded, "{report}");
+    assert_eq!(phases.solver_check_count, check_count, "{report}");
+    assert_eq!(
+        phases.solver_check_work_micros.is_some(),
+        check_count != 0,
+        "{report}"
+    );
+    assert_eq!(
+        phases.counterexample_read_work_micros.is_some(),
+        read_model,
+        "{report}"
+    );
+    assert_eq!(phases.external_tool_work_micros, None, "{report}");
 }
 
 #[test_case("single-threaded", Failure::MissingSolver; "missing_solver")]
@@ -86,6 +107,9 @@ top fn main(x: bits[2] id=1) -> bits[2] {
     let report = dir.path().join("result.json");
     let previous: Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
     assert_eq!(previous["status"], "proved");
+    // Both bits of the output, or both values of the split input, must prove.
+    let partitions = if strategy == "single-threaded" { 1 } else { 2 };
+    assert_query_phases(&previous, true, partitions, false);
 
     let expected = match failure {
         Failure::MissingSolver => {
@@ -119,6 +143,14 @@ top fn main(x: bits[2] id=1) -> bits[2] {
     let actual: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
     assert_eq!(actual["status"], "execution-error");
     assert_eq!(actual["success"], false);
+    match failure {
+        Failure::MissingSolver => assert_query_phases(&actual, false, 0, false),
+        Failure::DefineFun => assert_query_phases(&actual, true, 0, false),
+        Failure::CheckSat => assert_query_phases(&actual, true, partitions, false),
+        Failure::GetValueResponse(_) | Failure::ModelValue(_) => {
+            assert_query_phases(&actual, true, 1, true);
+        }
+    }
     let diagnostic = actual["error_str"].as_str().unwrap();
     match failure {
         Failure::MissingSolver | Failure::CheckSat => assert_eq!(diagnostic, expected),
@@ -162,6 +194,8 @@ fn quickcheck_reports_model_failure_for_the_property() {
     assert_eq!(test["status"], "execution-error");
     assert_eq!(test["success"], false);
     assert_eq!(test["counterexample"], Value::Null);
+    assert_query_phases(test, true, 1, true);
+    assert_query_phases(&report, true, 1, true);
     assert!(
         test["error_str"]
             .as_str()
@@ -234,4 +268,6 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
         serde_json::from_slice(&fs::read(dir.path().join("result.json")).unwrap()).unwrap();
     assert_eq!(report["status"], "disproved", "{report}");
     assert_eq!(report["success"], false);
+    // The failed or unknown check for x=0 and the SAT check for x=1 both count.
+    assert_query_phases(&report, true, 2, true);
 }

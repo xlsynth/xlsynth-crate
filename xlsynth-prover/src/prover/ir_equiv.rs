@@ -14,6 +14,7 @@ use super::{
     uf::infer_merged_uf_signatures,
 };
 use crate::proof_outcome::{ProofStatus, aggregate_proof_statuses};
+use crate::proof_phases::{Phase, PhaseCollector};
 use crate::solver::{BitVec, Response, Solver};
 use regex::Regex;
 use xlsynth_pir::ir;
@@ -180,7 +181,9 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     rhs: &SmtFn<'a, S::Term>,
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
+    phases: &PhaseCollector,
 ) -> io::Result<EquivResult> {
+    let encoding = phases.start(Phase::SmtEncode);
     // --------------------------------------------
     // Helper: build a 1-bit "failed" flag for each
     // side indicating whether **any** assertion is
@@ -246,8 +249,14 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     };
 
     solver.assert(&condition)?;
-    match solver.check()? {
+    drop(encoding);
+    let response = {
+        let _check = phases.start(Phase::SolverCheck);
+        solver.check()?
+    };
+    match response {
         Response::Sat => {
+            let _read = phases.start(Phase::CounterexampleRead);
             let (lhs_asserts, rhs_asserts) = match assertion_semantics {
                 AssertionSemantics::Ignore => (&[][..], &[][..]),
                 _ => (&lhs_asserts[..], &rhs_asserts[..]),
@@ -278,6 +287,26 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
     if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
         return EquivResult::Error(e);
     }
@@ -288,6 +317,7 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
         assertion_semantics,
         assert_label_include,
         None,
+        phases,
     )
 }
 
@@ -306,7 +336,9 @@ fn prove_equiv_partition<S: Solver>(
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
     constraint: Option<InputBitConstraint<'_>>,
+    phases: &PhaseCollector,
 ) -> EquivResult {
+    let setup = phases.start_prepare();
     let uf_signatures: HashMap<String, UfSignature> =
         if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
             HashMap::new()
@@ -338,7 +370,9 @@ fn prove_equiv_partition<S: Solver>(
             return EquivResult::Error(format!("Failed to create equivalence solver: {error}"));
         }
     };
+    drop(setup);
     let mut prove = || {
+        let encoding = phases.start(Phase::SmtEncode);
         let lhs_inputs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"))?;
         let rhs_inputs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"))?;
         assert_param_domains(&mut solver, &lhs_inputs)?;
@@ -354,12 +388,14 @@ fn prove_equiv_partition<S: Solver>(
             let equal = solver.eq(&bit_bv, &value);
             solver.assert(&equal)?;
         }
+        drop(encoding);
         check_aligned_fn_equiv_internal(
             &mut solver,
             &smt_lhs,
             &smt_rhs,
             assertion_semantics,
             assert_label_include,
+            phases,
         )
     };
     prove()
@@ -401,6 +437,26 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_output_bits_parallel_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_output_bits_parallel_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
     if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
         return EquivResult::Error(e);
     }
@@ -408,17 +464,19 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover
         // because there is no bit to split on.
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_phases::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            phases,
         );
     };
 
     prove_partitions(width, width.min(num_cpus::get()), |idx| {
+        let prepare = phases.start_prepare();
         let lf_ir = make_bit_fn(lhs.fn_ref, idx);
         let rf_ir = make_bit_fn(rhs.fn_ref, idx);
         let lf = ProverFn {
@@ -429,13 +487,15 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
             fn_ref: &rf_ir,
             ..rhs.clone()
         };
-        prove_ir_fn_equiv::<S>(
+        drop(prepare);
+        prove_ir_fn_equiv_with_phases::<S>(
             solver_config,
             &lf,
             &rf,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            phases,
         )
     })
 }
@@ -509,17 +569,42 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_split_input_bit_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        split_input_index,
+        split_input_bit_index,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_split_input_bit_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    split_input_index: usize,
+    split_input_bit_index: usize,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
     if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
         return EquivResult::Error(e);
     }
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_phases::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            phases,
         );
     }
 
@@ -548,6 +633,7 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
                 index: split_input_bit_index,
                 value: value as u64,
             }),
+            phases,
         )
     })
 }
@@ -614,10 +700,47 @@ pub mod test_utils {
     use xlsynth_pir::IrValue;
 
     use super::{align_compatible_inputs, ir_to_smt, prove_ir_fn_equiv};
+    use crate::proof_phases::PhaseCollector;
+    use crate::prover::Prover;
     use crate::prover::translate::{get_fn_inputs, ir_value_to_bv};
-    use crate::prover::types::{AssertionSemantics, EquivResult, FnInputs, ParamDomains, ProverFn};
+    use crate::prover::types::{
+        AssertionSemantics, EquivParallelism, EquivResult, FnInputs, ParamDomains, ProverFn,
+    };
     use crate::solver::{BitVec, Solver, test_utils::assert_solver_eq};
     use xlsynth_pir::{ir, ir_eval, ir_parser};
+
+    /// Every partition of this equivalence is required and returns UNSAT.
+    pub fn measured_partition_checks<S: Solver>(config: &S::Config) {
+        let ir = r#"package p
+top fn f(x: bits[3] id=1) -> bits[3] {
+  ret y: bits[3] = identity(x, id=2)
+}"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        let f = ProverFn::new(pkg.get_top_fn().unwrap(), Some(&pkg));
+        for (strategy, expected) in [
+            (EquivParallelism::SingleThreaded, 1),
+            (EquivParallelism::OutputBits, 3),
+            (EquivParallelism::InputBitSplit, 2),
+        ] {
+            let phases = PhaseCollector::default();
+            let result = config.prove_ir_equiv_with_phases(
+                &f,
+                &f,
+                strategy,
+                AssertionSemantics::Ignore,
+                None,
+                false,
+                &phases,
+            );
+            assert_eq!(result, EquivResult::Proved);
+            let measured = phases.snapshot();
+            assert_eq!(measured.solver_check_count, expected);
+            assert!(measured.smt_encode_work_micros.is_some());
+            assert!(measured.solver_check_work_micros.is_some());
+            assert_eq!(measured.counterexample_read_work_micros, None);
+            assert_eq!(measured.external_tool_work_micros, None);
+        }
+    }
 
     pub fn test_invoke_basic<S: Solver>(solver_config: &S::Config) {
         // Package with a callee that doubles its input and two wrappers:
@@ -2850,6 +2973,11 @@ macro_rules! test_with_solver {
         mod $mod_ident {
             use super::*;
             use crate::prover::ir_equiv::test_utils;
+
+            #[test]
+            fn measured_partition_checks() {
+                test_utils::measured_partition_checks::<$solver_type>($solver_config);
+            }
 
             #[test]
             fn test_align_zero_width_fn_inputs() {

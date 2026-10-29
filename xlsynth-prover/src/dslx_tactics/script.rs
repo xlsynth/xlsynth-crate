@@ -1207,8 +1207,12 @@ fn b(x: u8) -> u8 { !a(x) }
     #[test]
     fn standalone_report_keeps_valid_attempt_measurements() {
         let encoded = serde_json::json!({
+            "timing": { "wall_micros": 19, "phases": [7] },
             "attempts": [
-                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": ["root", "a"], "timing": {
+                    "queued_micros": 1,
+                    "worker_timing": { "wall_micros": 7, "phases": { "solver_check_count": -1 } }
+                }},
                 { "selector": 17 },
                 { "selector": ["root", "b"], "timing": {
                     "queued_micros": "unknown", "worker_wall_micros": 2,
@@ -1222,9 +1226,15 @@ fn b(x: u8) -> u8 { !a(x) }
         let report: ScriptReport = serde_json::from_value(encoded).unwrap();
         assert_eq!(report.proof_status(), ProofStatus::Proved);
         assert_eq!(
+            serde_json::to_value(report.timing).unwrap(),
+            serde_json::json!({"wall_micros":19})
+        );
+        assert_eq!(
             serde_json::to_value(report.attempts).unwrap(),
             serde_json::json!([
-                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": ["root", "a"], "timing": {
+                    "queued_micros": 1, "worker_timing": { "wall_micros": 7 }
+                }},
                 { "selector": ["root", "b"], "timing": { "worker_wall_micros": 2 } }
             ])
         );

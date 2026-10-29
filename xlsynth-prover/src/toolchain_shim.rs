@@ -4,9 +4,11 @@
 //! corresponding executable and returns its textual output or an error string.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::Instant;
 
 use crate::dslx_utils::join_dslx_search_paths;
+use crate::proof_phases::{Phase, PhaseCollector};
 use log::info;
 use tempfile::NamedTempFile;
 
@@ -84,6 +86,25 @@ pub fn run_prove_quickcheck_main(
     additional_search_paths: &[&Path],
     test_filter: &str,
 ) -> Result<String, String> {
+    run_prove_quickcheck_main_with_phases(
+        exe,
+        entry_file,
+        dslx_stdlib_path,
+        additional_search_paths,
+        test_filter,
+        &PhaseCollector::default(),
+    )
+}
+
+/// Measures the entire opaque checker process once spawn succeeds.
+pub(crate) fn run_prove_quickcheck_main_with_phases(
+    exe: &Path,
+    entry_file: &Path,
+    dslx_stdlib_path: Option<&Path>,
+    additional_search_paths: &[&Path],
+    test_filter: &str,
+    phases: &PhaseCollector,
+) -> Result<String, String> {
     if !exe.exists() {
         return Err(format!(
             "prove_quickcheck_main not found: {}",
@@ -98,7 +119,17 @@ pub fn run_prove_quickcheck_main(
     }
     add_dslx_search_paths(&mut cmd, additional_search_paths)?;
 
-    let output = run_command(&mut cmd, "prove_quickcheck_main")?;
+    info!("Running prove_quickcheck_main: {:?}", cmd);
+    let start = Instant::now();
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn prove_quickcheck_main: {e}"))?;
+    let output = child.wait_with_output();
+    phases.record(Phase::ExternalTool, start.elapsed());
+    let output = output.map_err(|e| format!("Failed to wait for prove_quickcheck_main: {e}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {

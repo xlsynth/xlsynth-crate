@@ -132,6 +132,25 @@ Parallel attempts can overlap, so their times do not add up to invocation wall t
 Missing timing is distinct from zero. Timing is diagnostic and never determines
 whether an obligation was proved.
 
+When available, `timing.phases` breaks down work measured inside the worker.
+Read the same fields under `worker_timing.phases` for a scheduled leaf:
+
+| Field | What is timed |
+| --- | --- |
+| `prepare_work_micros` | Preparation such as specializing a top, converting DSLX to IR, optimizing the selected property, and creating its solver instance |
+| `smt_encode_work_micros` | Encoding the IR and assertions into a solver query |
+| `solver_check_work_micros`, `solver_check_count` | Time spent in solver check calls and the number attempted, including calls that return unknown or an error |
+| `counterexample_read_work_micros` | Extracting a witness after a satisfiable check, including failed reads |
+| `external_tool_work_micros` | Wall time from launching an external XLS checker until observing its completion, including any polling delay; its internal solver phases are unknown |
+
+The durations are sums of measured intervals, not a partition of invocation
+wall time. Output-bit workers can check in parallel, so their summed work can
+exceed elapsed time. A missing or null duration means the phase was not
+observed; a measured interval shorter than a microsecond may report zero.
+For QuickCheck, each property's phases describe just that property. The suite
+totals include all properties plus `shared_prepare_micros` once; do not add
+the suite totals to the property timings.
+
 ## Process backend
 
 On Unix, `dslx_tactics::process::execute_script` runs the same engine using an

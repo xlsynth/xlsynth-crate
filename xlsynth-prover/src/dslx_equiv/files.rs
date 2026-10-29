@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use super::{DslxEquivRequest, DslxModule, DslxOptions, run_dslx_equiv};
+use super::{DslxEquivRequest, DslxModule, DslxOptions, run_dslx_equiv_with_phases};
 use crate::dslx_specializer::{SpecializedModule, specialize_dslx_module};
 use crate::dslx_tactics::obligations::{
     FileWithHistory, LecObligation, LecProofOptions, LecSide, ObligationPayload, ProverObligation,
@@ -145,7 +145,8 @@ impl DslxEquivFiles<'_> {
         enable_warnings: Option<&[String]>,
         disable_warnings: Option<&[String]>,
     ) -> ProofSummary {
-        ProofSummary::run(|| {
+        ProofSummary::run_with_phases(|phases| {
+            let prepare = phases.start_prepare();
             self.validate_request()?;
             let lhs = self
                 .lhs
@@ -175,7 +176,8 @@ impl DslxEquivFiles<'_> {
                     additional_search_paths: self.additional_search_paths,
                 },
             };
-            run_dslx_equiv(&request)
+            drop(prepare);
+            run_dslx_equiv_with_phases(&request, phases)
         })
     }
 }

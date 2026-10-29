@@ -15,6 +15,8 @@ use xlsynth_pir::ir_parser::Parser;
 
 use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_paths};
 use crate::proof_outcome::{ProofStatus, ProofSummary};
+use crate::proof_phases::PhaseCollector;
+use crate::proof_timing::ProofTiming;
 use crate::prover::property_fn::add_assertion_dependency_property;
 use crate::prover::prover_for_choice;
 use crate::prover::types::{
@@ -89,10 +91,13 @@ impl DslxAssertionsRequest<'_> {
     /// available.
     pub fn prove(&self) -> AssertionsOutcome {
         let start = Instant::now();
-        match run_dslx_assertions(self) {
-            Ok(report) => report.into(),
+        let phases = PhaseCollector::default();
+        let mut outcome = match run_dslx_assertions_with_phases(self, &phases) {
+            Ok(report) => AssertionsOutcome::from(report),
             Err(error) => AssertionsOutcome::execution_error(start.elapsed(), error),
-        }
+        };
+        outcome.summary.timing = ProofTiming::elapsed(start).with_phases(phases.snapshot());
+        outcome
     }
 }
 
@@ -287,7 +292,15 @@ pub fn add_assertions_property_function(
 pub fn run_dslx_assertions(
     request: &DslxAssertionsRequest<'_>,
 ) -> Result<DslxAssertionsReport, String> {
+    run_dslx_assertions_with_phases(request, &PhaseCollector::default())
+}
+
+fn run_dslx_assertions_with_phases(
+    request: &DslxAssertionsRequest<'_>,
+    phases: &PhaseCollector,
+) -> Result<DslxAssertionsReport, String> {
     let request_start = Instant::now();
+    let prepare = phases.start_prepare();
     validate_dslx_paths(
         std::iter::once(request.path)
             .chain(request.dslx_stdlib_path)
@@ -358,14 +371,16 @@ pub fn run_dslx_assertions(
 
     let prover = prover_for_assertions(request.solver.unwrap_or(SolverChoice::Bitwuzla))?;
     let start = Instant::now();
-    let result = prover.prove_ir_quickcheck(
+    drop(prepare);
+    let result = prover.prove_ir_quickcheck_with_phases(
         &prover_fn,
         QuickCheckAssertionSemantics::Never,
         request.assert_label_filter,
+        phases,
     );
     Ok(DslxAssertionsReport {
         duration: start.elapsed(),
-        timing: request_start.elapsed().into(),
+        timing: ProofTiming::elapsed(request_start).with_phases(phases.snapshot()),
         result,
     })
 }
