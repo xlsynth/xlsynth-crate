@@ -1711,6 +1711,62 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
+    /// Removes bare names that an instance terminal or assignment target
+    /// declares.
+    fn accept_implicit_declarations(&mut self, reference: &NetRef) {
+        match reference {
+            NetRef::Simple(index) => {
+                self.implicit_net_by_name.remove(&self.nets[index.0].name);
+            }
+            NetRef::Concat(parts) => {
+                for part in parts {
+                    self.accept_implicit_declarations(part);
+                }
+            }
+            _ => {
+                // A select requires an existing net. Literals and open pins
+                // name no net.
+            }
+        }
+    }
+
+    /// Checks implicit-net origins after all explicit declarations are known.
+    fn validate_implicit_nets(
+        &mut self,
+        assigns: &[NetlistAssign],
+        instances: &[NetlistInstance],
+    ) -> Result<(), ScanError> {
+        for instance in instances {
+            for (_, terminal) in &instance.connections {
+                self.accept_implicit_declarations(terminal);
+            }
+        }
+        for assign in assigns {
+            self.accept_implicit_declarations(&assign.lhs);
+            if assign.kind == NetlistAssignKind::Tran
+                && let AssignExpr::Leaf(rhs) = &assign.rhs
+            {
+                self.accept_implicit_declarations(rhs);
+            }
+        }
+        // Net table order is source order within the module, unlike HashSet
+        // iteration.
+        if let Some(&name) = self
+            .implicit_net_by_name
+            .iter()
+            .min_by_key(|name| self.net_index_by_name[*name].0)
+        {
+            return Err(ScanError {
+                message: format!(
+                    "net '{}' has no declaration or implicit declaration site in this module",
+                    self.interner.resolve(name).unwrap()
+                ),
+                span: self.net_width_span_by_name[&name],
+            });
+        }
+        Ok(())
+    }
+
     /// Parses: assign <lhs> = <rhs>;
     ///
     /// The supported RHS subset is limited to bitwise `~`, `&`, `|`, and `^`
@@ -2375,6 +2431,9 @@ impl<R: Read + 'static> Parser<R> {
                     });
                 }
             }
+        }
+        if self.scanner.reject_lossy_constructs && !self.implicit_net_by_name.is_empty() {
+            self.validate_implicit_nets(&assigns, &instances)?;
         }
         // Preserve top-level port order from the module header list, even when
         // non-ANSI input/output declarations are grouped by direction in the

@@ -166,3 +166,48 @@ endmodule
     );
     Ok(())
 }
+
+#[test]
+fn roundtrip_reader_requires_a_declaration_site_for_each_net() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("implicit.gv");
+    for body in [
+        "assign y = misspelled;",
+        "assign y = {misspelled, also_absent};",
+        "assign y = misspelled[0];",
+        "BUF inst(.A(misspelled[0]), .Y(y));",
+    ] {
+        // A declaration in a preceding module must not leak into this one.
+        let source = format!(
+            "module other(); wire misspelled; endmodule\nmodule top(output y); {body} endmodule"
+        );
+        std::fs::write(&path, &source)?;
+        let error = read_gv_for_roundtrip_from_path(&path)
+            .err()
+            .expect("missing declaration site");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: net 'misspelled' has no declaration or implicit declaration site in this module"
+        );
+        read_gv_from_str(&source)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn roundtrip_reader_accepts_implicit_declarations_and_forward_references() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("implicit.gv");
+    let source = r#"module top(input a, output [5:0] y);
+  BUF inst(.A({cell_input}), .Y(cell_output));
+  tran(tran_left, a);
+  tran(a, tran_right);
+  assign {alias_net} = a;
+  assign y = {cell_input, cell_output, tran_left, tran_right, alias_net, later_wire};
+  wire later_wire;
+endmodule
+"#;
+    std::fs::write(&path, source)?;
+    read_gv_for_roundtrip_from_path(&path)?;
+    Ok(())
+}
