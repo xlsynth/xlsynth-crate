@@ -35,6 +35,34 @@ pub(crate) const AIG_PROOF_SUPPORT: LeanSupport = LeanSupport(&[AIG, AAG, XLSYNT
 pub(crate) const IR_FUNCTION_SUPPORT: LeanSupport = LeanSupport(&[IR]);
 pub(crate) const EVALUATOR_SUPPORT: LeanSupport = LeanSupport(&[IR, AIG, AAG, EVAL_MAIN]);
 
+macro_rules! proof_module {
+    ($name:literal) => {
+        (
+            concat!("XlsynthLean/Proof/", $name, ".lean"),
+            include_bytes!(concat!("../lean/XlsynthLean/Proof/", $name, ".lean")),
+        )
+    };
+}
+
+/// Proof-only modules, compiled in dependency order.
+pub(crate) const AIG_PROOF_LIBRARY: LeanSupport = LeanSupport(&[
+    proof_module!("Claim"),
+    proof_module!("Miter"),
+    proof_module!("Decide"),
+    proof_module!("Outputs"),
+    proof_module!("Rebuild"),
+    proof_module!("Leaves"),
+    proof_module!("Rewrite"),
+    proof_module!("Domain"),
+    proof_module!("Substitute"),
+    proof_module!("Cut"),
+    proof_module!("Sparse"),
+    (
+        "XlsynthLean/Proof.lean",
+        include_bytes!("../lean/XlsynthLean/Proof.lean"),
+    ),
+]);
+
 impl LeanSupport {
     pub(crate) fn module_paths(&self) -> impl Iterator<Item = &'static str> {
         self.0.iter().map(|&(path, _)| path)
@@ -45,21 +73,24 @@ impl LeanSupport {
     }
 
     pub(crate) fn write_to(&self, root: &Path) -> Result<(), LeanError> {
-        write_support(root, self.0.iter().copied())
+        self.write_modules(root)?;
+        write_toolchain(root)
+    }
+
+    /// Writes only the modules so a prepared target keeps its toolchain pin.
+    pub(crate) fn write_modules(&self, root: &Path) -> Result<(), LeanError> {
+        for &(path, source) in self.0 {
+            write_file(root, Path::new(path), source)?;
+        }
+        Ok(())
     }
 }
 
 /// Writes all companion Lean sources and their toolchain pin.
 pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
-    let modules = AIG_PROOF_SUPPORT.0.iter().chain(IR_FUNCTION_SUPPORT.0);
-    write_support(root, modules.copied())
-}
-
-fn write_support(root: &Path, modules: impl Iterator<Item = Module>) -> Result<(), LeanError> {
-    for (path, source) in modules {
-        write_file(root, Path::new(path), source)?;
-    }
-    write_toolchain(root)
+    AIG_PROOF_SUPPORT.write_to(root)?;
+    IR_FUNCTION_SUPPORT.write_modules(root)?;
+    AIG_PROOF_LIBRARY.write_modules(root)
 }
 
 pub(crate) fn write_toolchain(root: &Path) -> Result<(), LeanError> {

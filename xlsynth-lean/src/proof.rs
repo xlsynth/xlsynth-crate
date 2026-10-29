@@ -9,7 +9,7 @@ use xlsynth_g8r::aig::GateFn;
 
 use crate::gate_fn::export_gate_fn_aag;
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{AIG_PROOF_SUPPORT, write_file};
+use crate::support::{AIG_PROOF_LIBRARY, AIG_PROOF_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
 const CHECK_SOURCE: &str = r#"-- SPDX-License-Identifier: Apache-2.0
@@ -36,6 +36,7 @@ impl LeanEquivalenceTarget {
     /// Writes the complete prepared target using a fixed portable layout.
     pub fn write_to(&self, root: &Path) -> Result<(), LeanError> {
         AIG_PROOF_SUPPORT.write_to(root)?;
+        AIG_PROOF_LIBRARY.write_modules(root)?;
         write_file(root, Path::new("Lhs.aag"), self.lhs_aag.as_bytes())?;
         write_file(root, Path::new("Rhs.aag"), self.rhs_aag.as_bytes())?;
         let target_source = target_source(self.input_count, self.output_count);
@@ -209,6 +210,7 @@ pub fn run_equivalence_proof(
 
     let generated_modules = AIG_PROOF_SUPPORT
         .module_paths()
+        .chain(AIG_PROOF_LIBRARY.module_paths())
         .map(PathBuf::from)
         .chain([PathBuf::from("Target.lean")])
         .collect::<Vec<_>>();
@@ -312,8 +314,8 @@ fn prepare_empty_work_directory(root: &Path) -> Result<(), LeanError> {
     Ok(())
 }
 
-/// Copies only the fixed artifacts emitted by
-/// `LeanEquivalenceTarget::write_to`.
+/// Stages the prepared circuits and their support files alongside the checker's
+/// proof library.
 fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), LeanError> {
     for relative in AIG_PROOF_SUPPORT
         .paths()
@@ -327,7 +329,9 @@ fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), Lean
         })?;
         write_file(work_root, Path::new(relative), &contents)?;
     }
-    Ok(())
+    // The checker supplies its tactics even for targets prepared before they
+    // existed.
+    AIG_PROOF_LIBRARY.write_modules(work_root)
 }
 
 /// Stages helpers and generates the proof module around the body.
@@ -351,6 +355,7 @@ fn stage_proof_sources(
     let mut imports = Vec::with_capacity(sources.modules.len());
     let reserved = AIG_PROOF_SUPPORT
         .paths()
+        .chain(AIG_PROOF_LIBRARY.module_paths())
         .chain(TARGET_ARTIFACTS.iter().copied())
         .chain(["UserProof.lean"])
         .map(PathBuf::from)
@@ -411,7 +416,9 @@ fn stage_proof_sources(
 
 /// Generates the imports and fixed theorem declaration around a Lean term.
 fn user_proof_source(body: &str, imports: &[LeanModuleName]) -> String {
-    let mut source = String::from("-- SPDX-License-Identifier: Apache-2.0\n\nimport Target\n");
+    let mut source = String::from(
+        "-- SPDX-License-Identifier: Apache-2.0\n\nimport Target\nimport XlsynthLean.Proof\n",
+    );
     for module in imports {
         source.push_str("import ");
         source.push_str(&module.lean_identifier());
