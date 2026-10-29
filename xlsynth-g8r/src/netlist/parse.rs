@@ -5,12 +5,14 @@
 //! For the structural `assign` subset used by `ugv2aig`, see
 //! `src/netlist/UGV.md`.
 
+use super::proto::MAX_CONCAT_DEPTH;
+use num_bigint::BigUint;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-use xlsynth_pir::IrBits;
+use xlsynth_pir::{IrBits, IrFormatPreference};
 
 pub type PortId = SymbolU32;
 pub type NetId = SymbolU32;
@@ -214,6 +216,8 @@ pub enum Keyword {
     Input,
     Output,
     Inout,
+    Assign,
+    Tran,
     Reg,
     Logic,
     Always,
@@ -235,8 +239,12 @@ pub enum PortDirection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationValue {
     I64(i64),
+    /// Verilog string contents, with source escape sequences preserved.
     String(String),
-    VerilogInt { width: Option<usize>, value: IrBits },
+    VerilogInt {
+        width: Option<usize>,
+        value: IrBits,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,23 +284,24 @@ fn is_simple_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
+/// Formats the decimal token spelling without narrowing the literal value.
+fn write_verilog_integer(
+    f: &mut fmt::Formatter<'_>,
+    width: Option<usize>,
+    value: &IrBits,
+) -> fmt::Result {
+    if let Some(width) = width {
+        write!(f, "{width}'d")?;
+    }
+    f.write_str(&value.to_string_fmt(IrFormatPreference::UnsignedDecimal, false))
+}
+
 impl fmt::Display for AnnotationValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AnnotationValue::I64(i) => write!(f, "{}", i),
-            AnnotationValue::String(s) => {
-                // Annotation strings cannot contain embedded '"' per scanner
-                // rules.
-                let s = s.replace('"', "");
-                write!(f, "\"{}\"", s)
-            }
-            AnnotationValue::VerilogInt { width, value } => {
-                let v = xlsynth_pir::IrValue::from_bits(value).to_u32().unwrap();
-                match width {
-                    Some(w) => write!(f, "{}'d{}", w, v),
-                    None => write!(f, "{}", v),
-                }
-            }
+            AnnotationValue::String(s) => write!(f, "\"{}\"", s),
+            AnnotationValue::VerilogInt { width, value } => write_verilog_integer(f, *width, value),
         }
     }
 }
@@ -329,13 +338,7 @@ impl fmt::Display for TokenPayload {
             TokenPayload::Annotation { key, value } => {
                 write!(f, "(* {} = {} *)", key, value)
             }
-            TokenPayload::VerilogInt { width, value } => {
-                let v = xlsynth_pir::IrValue::from_bits(value).to_u32().unwrap();
-                match width {
-                    Some(w) => write!(f, "{}'d{}", w, v),
-                    None => write!(f, "{}", v),
-                }
-            }
+            TokenPayload::VerilogInt { width, value } => write_verilog_integer(f, *width, value),
             TokenPayload::VerilogUnknownInt { width } => match width {
                 Some(w) => write!(f, "{}'hx", w),
                 None => write!(f, "'hx"),
@@ -381,11 +384,54 @@ pub struct TokenScanner<R: Read + 'static> {
     reader: BufReader<R>,
     pub pos: Pos,
     lookahead: Option<Token>,
+    emit_line_comments: bool,
+    reject_lossy_constructs: bool,
+    read_error: Option<std::io::Error>,
     done: bool,
     line_lookup: Box<dyn Fn(u32) -> Option<String>>, // line number -> line text
 }
 
+/// Consumes a single source byte, treating CR, LF and CRLF as one newline.
+fn read_source_byte(reader: &mut impl BufRead) -> std::io::Result<Option<u8>> {
+    let Some(&b) = reader.fill_buf()?.first() else {
+        return Ok(None);
+    };
+    reader.consume(1);
+    if b == b'\r' {
+        if reader.fill_buf()?.first() == Some(&b'\n') {
+            reader.consume(1);
+        }
+        return Ok(Some(b'\n'));
+    }
+    Ok(Some(b))
+}
+
+/// Reads a diagnostic line with the same line numbering as token spans.
+pub(super) fn source_line(mut reader: impl BufRead, mut lineno: u32) -> Option<String> {
+    let mut text = Vec::new();
+    while let Some(b) = read_source_byte(&mut reader).ok()? {
+        if b == b'\n' {
+            if lineno == 1 {
+                return String::from_utf8(text).ok();
+            }
+            lineno = lineno.checked_sub(1)?;
+        } else if lineno == 1 {
+            text.push(b);
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        String::from_utf8(text).ok()
+    }
+}
+
 impl<R: Read + 'static> TokenScanner<R> {
+    /// Reject constructs that analysis readers approximate in the parsed model.
+    pub(super) fn require_preserved_structure(&mut self) {
+        self.reject_lossy_constructs = true;
+    }
+
     /// Construct a TokenScanner with a custom line lookup callback.
     pub fn with_line_lookup(reader: R, line_lookup: Box<dyn Fn(u32) -> Option<String>>) -> Self {
         Self::with_buf_reader(BufReader::new(reader), line_lookup)
@@ -411,6 +457,9 @@ impl<R: Read + 'static> TokenScanner<R> {
                 colno: 1,
             },
             lookahead: None,
+            emit_line_comments: true,
+            reject_lossy_constructs: false,
+            read_error: None,
             done: false,
             line_lookup,
         }
@@ -419,32 +468,25 @@ impl<R: Read + 'static> TokenScanner<R> {
     /// Construct a TokenScanner for a file, using the file path for line
     /// lookup.
     pub fn from_file_with_path(reader: R, path: std::path::PathBuf) -> Self {
-        let path_clone = path.clone();
         Self::with_line_lookup(
             reader,
             Box::new(move |lineno| {
-                use std::io::{BufRead, BufReader};
-                let file = std::fs::File::open(&path_clone).ok()?;
-                let reader = BufReader::new(file);
-                reader
-                    .lines()
-                    .nth((lineno - 1) as usize)
-                    .and_then(Result::ok)
+                let file = std::fs::File::open(&path).ok()?;
+                source_line(BufReader::new(file), lineno)
             }),
         )
     }
 }
 
 impl<'a> TokenScanner<std::io::Cursor<&'a [u8]>> {
-    /// Construct a TokenScanner for a string (for tests), using a Vec<String>
-    /// for line lookup.
+    /// Constructs a token scanner with diagnostic lookup into the source text.
     pub fn from_str(input: &'a str) -> Self {
         Self::from_str_with_capacity(input, 8192)
     }
 
     fn from_str_with_capacity(input: &'a str, capacity: usize) -> Self {
-        let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
-        let lookup = move |lineno: u32| lines.get((lineno - 1) as usize).cloned();
+        let source = input.to_owned();
+        let lookup = move |lineno| source_line(source.as_bytes(), lineno);
         Self::with_line_lookup_and_capacity(
             std::io::Cursor::new(input.as_bytes()),
             Box::new(lookup),
@@ -460,8 +502,9 @@ impl<R: Read + 'static> TokenScanner<R> {
             return None;
         }
         match self.reader.fill_buf() {
-            Ok(buf) => buf.first().copied(),
-            Err(_) => {
+            Ok(buf) => buf.first().map(|&b| if b == b'\r' { b'\n' } else { b }),
+            Err(error) => {
+                self.read_error = Some(error);
                 self.done = true;
                 None
             }
@@ -473,24 +516,22 @@ impl<R: Read + 'static> TokenScanner<R> {
         if self.done {
             return None;
         }
-        match self.reader.fill_buf() {
-            Ok(buf) => {
-                if let Some(&b) = buf.first() {
-                    if b == b'\n' {
-                        self.pos.lineno += 1;
-                        self.pos.colno = 1;
-                    } else {
-                        self.pos.colno += 1;
-                    }
-                    // Consume exactly one byte.
-                    self.reader.consume(1);
-                    Some(b)
+        match read_source_byte(&mut self.reader) {
+            Ok(Some(b)) => {
+                if b == b'\n' {
+                    self.pos.lineno += 1;
+                    self.pos.colno = 1;
                 } else {
-                    self.done = true;
-                    None
+                    self.pos.colno += 1;
                 }
+                Some(b)
             }
-            Err(_) => {
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(error) => {
+                self.read_error = Some(error);
                 self.done = true;
                 None
             }
@@ -565,6 +606,102 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
+    /// Scans an unsigned sized literal, applying Verilog's padding and
+    /// truncation.
+    fn pop_sized_integer(&mut self, start: Pos, width_digits: &str) -> Result<Token, ScanError> {
+        self.popb(); // consume the apostrophe after the width
+        let radix = match self.popb().map(|b| b.to_ascii_lowercase()) {
+            Some(b'b') => 2,
+            Some(b'o') => 8,
+            Some(b'd') => 10,
+            Some(b'h') => 16,
+            _ => {
+                return Err(self.error_with_context(
+                    "unsupported literal base",
+                    Span {
+                        start,
+                        limit: self.pos,
+                    },
+                ));
+            }
+        };
+        let mut digits = String::new();
+        while let Some(b) = self.peekb() {
+            if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'?') {
+                break;
+            }
+            self.popb();
+            if b != b'_' {
+                digits.push(b as char);
+            }
+        }
+        let span = Span {
+            start,
+            limit: self.pos,
+        };
+        let width = width_digits
+            .parse::<usize>()
+            .map_err(|_| self.error_with_context("literal width exceeds usize", span))?;
+        if width == 0 {
+            return Err(self.error_with_context("literal width must be positive", span));
+        }
+        if digits.contains(['z', 'Z', '?']) {
+            return Err(self.error_with_context(
+                "high-impedance literal digits ('z', 'Z', or '?') are not supported",
+                span,
+            ));
+        }
+        if digits.contains(['x', 'X']) {
+            if self.reject_lossy_constructs && !digits.chars().all(|c| matches!(c, 'x' | 'X')) {
+                return Err(self.error_with_context(
+                    "mixed known and x literal digits cannot be preserved in a mapped netlist",
+                    span,
+                ));
+            }
+            return Ok(Token {
+                payload: TokenPayload::VerilogUnknownInt { width: Some(width) },
+                span,
+            });
+        }
+        let magnitude = BigUint::parse_bytes(digits.as_bytes(), radix)
+            .ok_or_else(|| self.error_with_context("invalid digits in sized literal", span))?;
+        let mut bytes = magnitude.to_bytes_le();
+        let byte_count = width.div_ceil(8);
+        bytes
+            .try_reserve_exact(byte_count.saturating_sub(bytes.len()))
+            .map_err(|_| self.error_with_context("literal width exceeds available memory", span))?;
+        bytes.resize(byte_count, 0);
+        if width % 8 != 0 {
+            *bytes.last_mut().unwrap() &= (1 << (width % 8)) - 1;
+        }
+        let value = IrBits::from_le_bytes(width, &bytes)
+            .map_err(|e| self.error_with_context(&e.to_string(), span))?;
+        Ok(Token {
+            payload: TokenPayload::VerilogInt {
+                width: Some(width),
+                value,
+            },
+            span,
+        })
+    }
+
+    /// Skips whitespace and comments separating tokens inside an attribute.
+    fn skip_annotation_trivia(&mut self) -> Result<(), ScanError> {
+        loop {
+            match self.peekb() {
+                Some(b) if (b as char).is_whitespace() => {
+                    self.popb();
+                }
+                Some(b'/') => {
+                    let start = self.pos;
+                    self.popb();
+                    self.scan_comment_after_slash(start)?;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
     fn pop_annotation_after_open_paren(&mut self, start: Pos) -> Result<Token, ScanError> {
         if self.popb() != Some(b'*') {
             return Err(self.error_with_context(
@@ -575,15 +712,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Parse key
         let mut key = String::new();
         while let Some(b) = self.peekb() {
@@ -595,15 +724,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 break;
             }
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Expect '='
         if self.popb() != Some(b'=') {
             return Err(self.error_with_context(
@@ -614,26 +735,28 @@ impl<R: Read + 'static> TokenScanner<R> {
                 },
             ));
         }
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Parse value (string, integer, or Verilog integer)
         let value: AnnotationValue = match self.peekb() {
             Some(b'"') => {
                 self.popb(); // consume opening quote
                 let mut s = String::new();
-                while let Some(b) = self.popb() {
-                    let c = b as char;
-                    if c == '"' {
+                let mut escaped = false;
+                loop {
+                    let b = self.popb().ok_or_else(|| {
+                        self.error_with_context(
+                            "unterminated annotation string",
+                            Span {
+                                start,
+                                limit: self.pos,
+                            },
+                        )
+                    })?;
+                    if !escaped && b == b'"' {
                         break;
                     }
-                    s.push(c);
+                    s.push(b as char);
+                    escaped = !escaped && b == b'\\';
                 }
                 AnnotationValue::String(s)
             }
@@ -648,88 +771,29 @@ impl<R: Read + 'static> TokenScanner<R> {
                         break;
                     }
                 }
-                let width = if !num.is_empty() {
-                    Some(num.parse::<usize>().unwrap())
-                } else {
-                    None
-                };
                 if self.peekb() == Some(b'\'') {
-                    self.popb(); // consume '
-                    // Now parse base and value as a string until whitespace or
-                    // '*' or ')'
-                    let mut base_and_value = String::new();
-                    while let Some(b2) = self.peekb() {
-                        let c2 = b2 as char;
-                        if c2.is_whitespace() || c2 == '*' || c2 == ')' {
-                            break;
+                    match self.pop_sized_integer(start, &num)?.payload {
+                        TokenPayload::VerilogInt { width, value } => {
+                            AnnotationValue::VerilogInt { width, value }
                         }
-                        self.popb();
-                        base_and_value.push(c2);
-                    }
-                    // Convert Verilog base to Rust-style
-                    let base_and_value = if let Some((_base, _rest)) = base_and_value
-                        .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
-                    {
-                        let (base_char, _value_str) = base_and_value.split_at(1);
-                        let prefix = match base_char {
-                            "b" => "0b",
-                            "h" => "0x",
-                            "o" => "0o",
-                            "d" => "",
-                            _ => "",
-                        };
-                        format!("{}{}", prefix, &base_and_value[1..])
-                    } else {
-                        base_and_value.clone()
-                    };
-                    let irbits_str = if let Some(width) = width {
-                        format!("bits[{}]:{}", width, base_and_value)
-                    } else {
-                        base_and_value.clone()
-                    };
-                    let value = xlsynth_pir::IrValue::parse_typed(&irbits_str)
-                        .unwrap()
-                        .to_bits()
-                        .unwrap();
-                    // Skip whitespace
-                    while let Some(b2) = self.peekb() {
-                        let c2 = b2 as char;
-                        if c2.is_whitespace() {
-                            self.popb();
-                        } else {
-                            break;
+                        _ => {
+                            return Err(ScanError {
+                                message: "expected a known integer annotation value".to_string(),
+                                span: Span {
+                                    start,
+                                    limit: self.pos,
+                                },
+                            });
                         }
                     }
-                    // Expect '*)'
-                    if self.popb() != Some(b'*') {
-                        return Err(self.error_with_context(
-                            "Expected '*' to close annotation",
-                            Span {
-                                start,
-                                limit: self.pos,
-                            },
-                        ));
-                    }
-                    if self.popb() != Some(b')') {
-                        return Err(self.error_with_context(
-                            "Expected ')' to close annotation",
-                            Span {
-                                start,
-                                limit: self.pos,
-                            },
-                        ));
-                    }
-                    let limit = self.pos;
-                    return Ok(Token {
-                        payload: TokenPayload::Annotation {
-                            key,
-                            value: AnnotationValue::VerilogInt { width, value },
-                        },
-                        span: Span { start, limit },
-                    });
                 } else {
-                    // Not a Verilog int, treat as plain integer
-                    AnnotationValue::I64(num.parse().unwrap())
+                    AnnotationValue::I64(num.parse().map_err(|_| ScanError {
+                        message: "annotation integer exceeds i64".to_string(),
+                        span: Span {
+                            start,
+                            limit: self.pos,
+                        },
+                    })?)
                 }
             }
             Some(b) if b == b'-' => {
@@ -764,15 +828,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 ));
             }
         };
-        // Skip whitespace
-        while let Some(b) = self.peekb() {
-            let c = b as char;
-            if c.is_whitespace() {
-                self.popb();
-            } else {
-                break;
-            }
-        }
+        self.skip_annotation_trivia()?;
         // Expect '*)'
         if self.popb() != Some(b'*') {
             return Err(self.error_with_context(
@@ -851,7 +907,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                         self.pos.colno += consumed as u32;
                         self.reader.consume(consumed);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        self.read_error = Some(error);
                         self.done = true;
                         break;
                     }
@@ -873,65 +930,152 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
-    pub fn next_token(&mut self) -> Result<Option<Token>, ScanError> {
-        // Always skip whitespace (except newlines) before any token logic
-        loop {
-            match self.peekb() {
-                Some(b) if b.is_ascii_whitespace() && b != b'\n' => {
-                    self.popb();
-                }
-                _ => break,
+    /// Reads one timescale argument token, skipping whitespace and comments.
+    fn pop_timescale_token(&mut self) -> Result<String, ScanError> {
+        let first = loop {
+            let start = self.pos;
+            let Some(b) = self.popb() else {
+                return Ok(String::new());
+            };
+            if b.is_ascii_whitespace() {
+                continue;
             }
-        }
-        let start = self.pos;
-        let b = match self.peekb() {
-            Some(b) => b,
-            None => return Ok(None),
+            if b == b'/' && matches!(self.peekb(), Some(b'/' | b'*')) {
+                self.scan_comment_after_slash(start)?;
+                continue;
+            }
+            break b;
         };
-        // Handle Verilog preprocessor-style directive lines we want to ignore.
-        // Currently, we skip lines that begin with `` `timescale`` anywhere in
-        // the file. This consumes through the end of the line and resumes
-        // scanning as if the directive were not present.
-        if b == b'`' {
-            let directive_start = start;
-            // consume backtick
-            self.popb();
-            // read directive word (letters/underscores)
-            let mut word = String::new();
-            while let Some(b2) = self.peekb() {
-                let c2 = b2 as char;
-                if c2.is_ascii_alphabetic() || c2 == '_' {
-                    self.popb();
-                    word.push(c2);
-                } else {
-                    break;
-                }
-            }
-            if word == "timescale" {
-                // consume until end-of-line (including the newline if present)
-                while let Some(b2) = self.popb() {
-                    if b2 == b'\n' {
-                        break;
-                    }
-                }
-                log::trace!("TokenScanner: skipped `timescale directive line");
-                // continue scanning next token
-                return match self.next_token()? {
-                    Some(tok) => Ok(Some(tok)),
-                    None => Ok(None),
-                };
+        let mut token = String::from(char::from(first));
+        while let Some(b) = self.peekb() {
+            // The magnitude and unit may be adjacent, e.g. 100ps.
+            let continues = if first.is_ascii_digit() {
+                b.is_ascii_digit()
             } else {
-                // Not a supported directive: report unexpected backtick at its
-                // position
+                first.is_ascii_alphabetic()
+                    && (b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+            };
+            if !continues {
+                break;
+            }
+            self.popb();
+            token.push(char::from(b));
+        }
+        Ok(token)
+    }
+
+    /// Consumes the unit and precision, leaving subsequent HDL for the scanner.
+    fn skip_directive(&mut self, start: Pos) -> Result<(), ScanError> {
+        self.popb(); // backtick
+        let mut word = String::new();
+        while let Some(b) = self.peekb() {
+            if !(b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$')) {
+                break;
+            }
+            self.popb();
+            word.push(b as char);
+        }
+        if word != "timescale" {
+            return Err(self.error_with_context(
+                "Unexpected character '`'",
+                Span {
+                    start,
+                    limit: start,
+                },
+            ));
+        }
+        const MAGNITUDES: &[&str] = &["1", "10", "100"];
+        const UNITS: &[&str] = &["s", "ms", "us", "ns", "ps", "fs"];
+        for allowed in [MAGNITUDES, UNITS, &["/"], MAGNITUDES, UNITS] {
+            let token = self.pop_timescale_token()?;
+            if !allowed.contains(&token.as_str()) {
                 return Err(self.error_with_context(
-                    "Unexpected character '`'",
+                    "expected a timescale directive of the form 1ns/1ps",
                     Span {
-                        start: directive_start,
-                        limit: directive_start,
+                        start,
+                        limit: self.pos,
                     },
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Returns a token for a line comment and skips a block comment.
+    fn scan_comment_after_slash(&mut self, start: Pos) -> Result<Option<Token>, ScanError> {
+        match self.peekb() {
+            Some(b'/') => {
+                self.popb();
+                let mut comment = self.emit_line_comments.then(String::new);
+                while let Some(b) = self.popb() {
+                    if b == b'\n' {
+                        break;
+                    }
+                    if let Some(comment) = &mut comment {
+                        comment.push(b as char);
+                    }
+                }
+                Ok(comment.map(|comment| Token {
+                    payload: TokenPayload::Comment(comment),
+                    span: Span {
+                        start,
+                        limit: self.pos,
+                    },
+                }))
+            }
+            Some(b'*') => {
+                self.popb();
+                let mut prev = None;
+                while let Some(b) = self.popb() {
+                    if prev == Some(b'*') && b == b'/' {
+                        return Ok(None);
+                    }
+                    prev = Some(b);
+                }
+                if self.reject_lossy_constructs {
+                    Err(self.error_with_context(
+                        "unterminated block comment",
+                        Span {
+                            start,
+                            limit: self.pos,
+                        },
+                    ))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Err(self.error_with_context(
+                "Unexpected '/'",
+                Span {
+                    start,
+                    limit: self.pos,
+                },
+            )),
+        }
+    }
+
+    /// Scans the next token, skipping whitespace, directives and block
+    /// comments.
+    pub fn next_token(&mut self) -> Result<Option<Token>, ScanError> {
+        let (start, b) = loop {
+            let Some(b) = self.peekb() else {
+                return Ok(None);
+            };
+            let start = self.pos;
+            match b {
+                b if b.is_ascii_whitespace() => {
+                    self.popb();
+                }
+                b'`' => self.skip_directive(start)?,
+                b'/' => {
+                    self.popb();
+                    if let Some(comment) = self.scan_comment_after_slash(start)? {
+                        return Ok(Some(comment));
+                    }
+                }
+                _ => break (start, b),
+            }
+        };
         // Handle annotation. Consume '(' before looking for '*' so annotation
         // recognition remains independent of internal BufReader chunk edges.
         if b == b'(' {
@@ -963,152 +1107,23 @@ impl<R: Read + 'static> TokenScanner<R> {
                     break;
                 }
             }
-            let width = if !num.is_empty() {
-                Some(num.parse::<usize>().unwrap())
-            } else {
-                None
-            };
             if self.peekb() == Some(b'\'') {
-                self.popb(); // consume '
-                // Now parse base and value as a string, but only consume
-                // characters that are valid inside a Verilog
-                // number literal (base char plus digits/hex
-                // digits, x/z/?, and underscores). This ensures we do
-                // not accidentally swallow structural punctuation like '}' that
-                // should be tokenized separately.
-                let mut base_and_value = String::new();
-                while let Some(b2) = self.peekb() {
-                    if b2.is_ascii_alphanumeric()
-                        || b2 == b'_'
-                        || b2 == b'x'
-                        || b2 == b'X'
-                        || b2 == b'z'
-                        || b2 == b'Z'
-                        || b2 == b'?'
-                    {
-                        self.popb();
-                        base_and_value.push(b2 as char);
-                    } else {
-                        break;
-                    }
-                }
-                let limit = self.pos;
-                if base_and_value
-                    .chars()
-                    .skip(1)
-                    .any(|ch| matches!(ch, 'z' | 'Z' | '?'))
-                {
-                    return Err(self.error_with_context(
-                        "high-impedance literal digits ('z', 'Z', or '?') are not supported",
-                        Span { start, limit },
-                    ));
-                }
-                let has_unknown_digit = base_and_value
-                    .chars()
-                    .skip(1)
-                    .any(|ch| matches!(ch, 'x' | 'X'));
-                // Convert Verilog base to Rust-style
-                let base_and_value = if let Some((_base, _rest)) = base_and_value
-                    .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
-                {
-                    let (base_char, _value_str) = base_and_value.split_at(1);
-                    let prefix = match base_char {
-                        "b" => "0b",
-                        "h" => "0x",
-                        "o" => "0o",
-                        "d" => "",
-                        _ => "",
-                    };
-                    format!("{}{}", prefix, &base_and_value[1..])
-                } else {
-                    base_and_value.clone()
-                };
-                let irbits_str = if let Some(width) = width {
-                    format!("bits[{}]:{}", width, base_and_value)
-                } else {
-                    base_and_value.clone()
-                };
-                if has_unknown_digit {
-                    return Ok(Some(Token {
-                        payload: TokenPayload::VerilogUnknownInt { width },
-                        span: Span { start, limit },
-                    }));
-                }
-                let value = xlsynth_pir::IrValue::parse_typed(&irbits_str)
-                    .unwrap()
-                    .to_bits()
-                    .unwrap();
-                return Ok(Some(Token {
-                    payload: TokenPayload::VerilogInt { width, value },
-                    span: Span { start, limit },
-                }));
-            } else {
-                // Parse as IrBits (decimal, width 32 per Verilog standard)
-                let irbits_str = format!("bits[32]:{}", num);
-                let value = match xlsynth_pir::IrValue::parse_typed(&irbits_str) {
-                    Ok(v) => v.to_bits().unwrap(),
-                    Err(e) => {
-                        let line = (self.line_lookup)(start.lineno)
-                            .unwrap_or_else(|| "<line unavailable>".to_string());
-                        let col = (start.colno as usize).saturating_sub(1);
-                        panic!(
-                            "Failed to parse integer literal '{}': {}\nLine {}: {}\n{}^",
-                            irbits_str,
-                            e,
-                            start.lineno,
-                            line,
-                            " ".repeat(col)
-                        );
-                    }
-                };
-                let limit = self.pos;
-                return Ok(Some(Token {
-                    payload: TokenPayload::VerilogInt { width: None, value },
-                    span: Span { start, limit },
-                }));
+                return self.pop_sized_integer(start, &num).map(Some);
             }
-        }
-        // Handle line comments
-        if b == b'/' {
-            self.popb();
-            match self.peekb() {
-                Some(b'/') => {
-                    self.popb();
-                    let mut comment = String::new();
-                    while let Some(b2) = self.popb() {
-                        if b2 == b'\n' {
-                            break;
-                        }
-                        comment.push(b2 as char);
-                    }
-                    let limit = self.pos;
-                    return Ok(Some(Token {
-                        payload: TokenPayload::Comment(comment),
-                        span: Span { start, limit },
-                    }));
-                }
-                Some(b'*') => {
-                    // Skip block comment
-                    self.popb(); // consume '*'
-                    let mut prev: Option<u8> = None;
-                    while let Some(b2) = self.popb() {
-                        if prev == Some(b'*') && b2 == b'/' {
-                            break;
-                        }
-                        prev = Some(b2);
-                    }
-                    // After skipping, try to get the next token
-                    return match self.next_token()? {
-                        Some(tok) => Ok(Some(tok)),
-                        None => Ok(None),
-                    };
-                }
-                _ => {
-                    // Not a comment, error
-                    let limit = self.pos;
-                    return Err(self.error_with_context("Unexpected '/'", Span { start, limit }));
-                }
-            }
+            let span = Span {
+                start,
+                limit: self.pos,
+            };
+            let value = num.parse::<u32>().map_err(|_| {
+                self.error_with_context("unsized decimal literal exceeds 32 bits", span)
+            })?;
+            return Ok(Some(Token {
+                payload: TokenPayload::VerilogInt {
+                    width: None,
+                    value: IrBits::u32(value),
+                },
+                span,
+            }));
         }
         // Handle punctuation
         let payload = match b {
@@ -1168,13 +1183,6 @@ impl<R: Read + 'static> TokenScanner<R> {
                 self.popb();
                 TokenPayload::Caret
             }
-            b'\n' => {
-                self.popb();
-                return match self.next_token()? {
-                    Some(tok) => Ok(Some(tok)),
-                    None => Ok(None),
-                };
-            } // skip newlines
             b'+' | b'-' | b'*' | b'/' | b'%' | b'?' | b'<' | b'>' | b'!' => {
                 return Err(self.error_with_context(
                     &format!(
@@ -1210,6 +1218,8 @@ impl Keyword {
             Self::Input => "input",
             Self::Output => "output",
             Self::Inout => "inout",
+            Self::Assign => "assign",
+            Self::Tran => "tran",
             Self::Reg => "reg",
             Self::Logic => "logic",
             Self::Always => "always",
@@ -1245,6 +1255,8 @@ impl Keyword {
             "input" => Some(Keyword::Input),
             "output" => Some(Keyword::Output),
             "inout" => Some(Keyword::Inout),
+            "assign" => Some(Keyword::Assign),
+            "tran" => Some(Keyword::Tran),
             "reg" => Some(Keyword::Reg),
             "logic" => Some(Keyword::Logic),
             "always" => Some(Keyword::Always),
@@ -1284,7 +1296,10 @@ pub(crate) struct Parser<R: Read + 'static> {
 
 impl<R: Read + 'static> Parser<R> {
     /// Construct a parser with explicit control over implicit-net handling.
-    pub fn new_with_options(scanner: TokenScanner<R>, allow_implicit_nets: bool) -> Self {
+    pub fn new_with_options(mut scanner: TokenScanner<R>, allow_implicit_nets: bool) -> Self {
+        // Both kinds of Verilog comment are whitespace at every grammar
+        // position.
+        scanner.emit_line_comments = false;
         Self {
             scanner,
             interner: StringInterner::new(),
@@ -1362,26 +1377,7 @@ impl<R: Read + 'static> Parser<R> {
                 if let Some(next) = self.scanner.peekt()? {
                     if matches!(next.payload, TokenPayload::OBrack) {
                         self.scanner.popt()?; // consume '['
-                        self.skip_trivia()?;
-                        let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                            message: "expected msb or index in net reference".to_string(),
-                            span: Span {
-                                start: self.scanner.pos,
-                                limit: self.scanner.pos,
-                            },
-                        })?;
-                        let msb = match msb_tok.payload {
-                            TokenPayload::VerilogInt { value, .. } => {
-                                xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                            }
-                            _ => {
-                                return Err(ScanError {
-                                    message: "expected integer for msb/index in net reference"
-                                        .to_string(),
-                                    span: msb_tok.span,
-                                });
-                            }
-                        };
+                        let msb = self.parse_u32_endpoint("msb/index in net reference")?;
                         self.skip_trivia()?;
                         let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
                             message: "expected ':' or ']' in net reference".to_string(),
@@ -1392,26 +1388,7 @@ impl<R: Read + 'static> Parser<R> {
                         })?;
                         return match next2.payload {
                             TokenPayload::Colon => {
-                                self.skip_trivia()?;
-                                let lsb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                    message: "expected lsb in net reference".to_string(),
-                                    span: Span {
-                                        start: self.scanner.pos,
-                                        limit: self.scanner.pos,
-                                    },
-                                })?;
-                                let lsb = match lsb_tok.payload {
-                                    TokenPayload::VerilogInt { value, .. } => {
-                                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                                    }
-                                    _ => {
-                                        return Err(ScanError {
-                                            message: "expected integer for lsb in net reference"
-                                                .to_string(),
-                                            span: lsb_tok.span,
-                                        });
-                                    }
-                                };
+                                let lsb = self.parse_u32_endpoint("lsb in net reference")?;
                                 self.skip_trivia()?;
                                 let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
                                     message: "expected ']' after part-select".to_string(),
@@ -1438,7 +1415,17 @@ impl<R: Read + 'static> Parser<R> {
                 }
                 Ok(NetRef::Simple(net_idx))
             }
-            TokenPayload::VerilogInt { value, width: _ } => Ok(NetRef::Literal(value)),
+            TokenPayload::VerilogInt { value, width } => {
+                // Unsized decimal literals are signed. A sized binary literal
+                // would zero-extend this value when used in a wider context.
+                if self.scanner.reject_lossy_constructs && width.is_none() && value.is_negative() {
+                    return Err(ScanError {
+                        message: "unsized decimal with its sign bit set cannot be preserved; specify an explicit literal width".to_string(),
+                        span: net_tok.span,
+                    });
+                }
+                Ok(NetRef::Literal(value))
+            }
             TokenPayload::VerilogUnknownInt { width } => {
                 Ok(NetRef::UnknownLiteral(width.unwrap_or(32)))
             }
@@ -1450,9 +1437,23 @@ impl<R: Read + 'static> Parser<R> {
     }
 
     fn parse_netref_expr(&mut self) -> Result<NetRef, ScanError> {
+        self.parse_nested_netref(0)
+    }
+
+    /// Rejects a reference too deep for the wire format before recursing.
+    fn parse_nested_netref(&mut self, depth: usize) -> Result<NetRef, ScanError> {
         self.skip_trivia()?;
+        let enforce_limit = self.scanner.reject_lossy_constructs;
         if let Some(tok) = self.scanner.peekt()? {
             if matches!(tok.payload, TokenPayload::OBrace) {
+                if enforce_limit && depth >= MAX_CONCAT_DEPTH {
+                    return Err(ScanError {
+                        message: format!(
+                            "mapped netlists support at most {MAX_CONCAT_DEPTH} nested concatenations"
+                        ),
+                        span: tok.span,
+                    });
+                }
                 // Parse concatenation: { expr (, expr)* }
                 self.scanner.popt()?; // consume '{'
                 let mut elems: Vec<NetRef> = Vec::new();
@@ -1467,7 +1468,7 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     // Parse one element (identifier with optional select,
                     // literal, or nested concat)
-                    let elem = self.parse_netref_expr()?;
+                    let elem = self.parse_nested_netref(depth + 1)?;
                     elems.push(elem);
                     // Optional comma
                     if let Some(next) = self.scanner.peekt()? {
@@ -1610,6 +1611,42 @@ impl<R: Read + 'static> Parser<R> {
     }
 
     fn parse_assign_expr(&mut self) -> Result<AssignExpr, ScanError> {
+        // A mapped assignment has a single wiring RHS. Strip grouping
+        // parentheses iteratively so even a deeply parenthesized reference
+        // does not enter the recursive Boolean expression parser.
+        if self.scanner.reject_lossy_constructs {
+            let mut parens = 0usize;
+            self.skip_trivia()?;
+            while self
+                .scanner
+                .peekt()?
+                .is_some_and(|t| matches!(t.payload, TokenPayload::OParen))
+            {
+                self.scanner.popt()?;
+                parens += 1;
+                self.skip_trivia()?;
+            }
+            let rhs = self.parse_netref_expr()?;
+            for _ in 0..parens {
+                let close = self.pop_non_trivia()?;
+                if !close
+                    .as_ref()
+                    .is_some_and(|t| matches!(t.payload, TokenPayload::CParen))
+                {
+                    return Err(ScanError {
+                        message: "expected ')' after wiring reference".to_string(),
+                        span: close.map_or(
+                            Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                            |t| t.span,
+                        ),
+                    });
+                }
+            }
+            return Ok(AssignExpr::Leaf(rhs));
+        }
         self.parse_assign_or()
     }
 
@@ -1639,7 +1676,10 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     (Some(_), None) => {
                         if implicit_scalar_placeholder {
-                            self.net_width_span_by_name.insert(name, err_span);
+                            // The explicit scalar declaration replaces the
+                            // synthetic [0:0] inferred at first use.
+                            existing.width = None;
+                            self.net_width_span_by_name.remove(&name);
                             clear_implicit_marker = true;
                         }
                     }
@@ -1693,6 +1733,62 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
+    /// Removes bare names that an instance terminal or assignment target
+    /// declares.
+    fn accept_implicit_declarations(&mut self, reference: &NetRef) {
+        match reference {
+            NetRef::Simple(index) => {
+                self.implicit_net_by_name.remove(&self.nets[index.0].name);
+            }
+            NetRef::Concat(parts) => {
+                for part in parts {
+                    self.accept_implicit_declarations(part);
+                }
+            }
+            _ => {
+                // A select requires an existing net. Literals and open pins
+                // name no net.
+            }
+        }
+    }
+
+    /// Checks implicit-net origins after all explicit declarations are known.
+    fn validate_implicit_nets(
+        &mut self,
+        assigns: &[NetlistAssign],
+        instances: &[NetlistInstance],
+    ) -> Result<(), ScanError> {
+        for instance in instances {
+            for (_, terminal) in &instance.connections {
+                self.accept_implicit_declarations(terminal);
+            }
+        }
+        for assign in assigns {
+            self.accept_implicit_declarations(&assign.lhs);
+            if assign.kind == NetlistAssignKind::Tran
+                && let AssignExpr::Leaf(rhs) = &assign.rhs
+            {
+                self.accept_implicit_declarations(rhs);
+            }
+        }
+        // Net table order is source order within the module, unlike HashSet
+        // iteration.
+        if let Some(&name) = self
+            .implicit_net_by_name
+            .iter()
+            .min_by_key(|name| self.net_index_by_name[*name].0)
+        {
+            return Err(ScanError {
+                message: format!(
+                    "net '{}' has no declaration or implicit declaration site in this module",
+                    self.interner.resolve(name).unwrap()
+                ),
+                span: self.net_width_span_by_name[&name],
+            });
+        }
+        Ok(())
+    }
+
     /// Parses: assign <lhs> = <rhs>;
     ///
     /// The supported RHS subset is limited to bitwise `~`, `&`, `|`, and `^`
@@ -1706,14 +1802,11 @@ impl<R: Read + 'static> Parser<R> {
                 limit: self.scanner.pos,
             },
         })?;
-        match t_assign.payload {
-            TokenPayload::Identifier(ref s) if s == "assign" => {}
-            _ => {
-                return Err(ScanError {
-                    message: "expected 'assign'".to_string(),
-                    span: t_assign.span,
-                });
-            }
+        if !matches!(t_assign.payload, TokenPayload::Keyword(Keyword::Assign)) {
+            return Err(ScanError {
+                message: "expected 'assign'".to_string(),
+                span: t_assign.span,
+            });
         }
 
         self.skip_trivia()?;
@@ -1783,7 +1876,7 @@ impl<R: Read + 'static> Parser<R> {
                 limit: self.scanner.pos,
             },
         })?;
-        if !matches!(t_tran.payload, TokenPayload::Identifier(ref s) if s == "tran") {
+        if !matches!(t_tran.payload, TokenPayload::Keyword(Keyword::Tran)) {
             return Err(ScanError {
                 message: "expected 'tran'".to_string(),
                 span: t_tran.span,
@@ -1791,8 +1884,15 @@ impl<R: Read + 'static> Parser<R> {
         }
 
         self.skip_trivia()?;
+        let reject_lossy_constructs = self.scanner.reject_lossy_constructs;
         if let Some(tok) = self.scanner.peekt()? {
             if matches!(tok.payload, TokenPayload::Identifier(_)) {
+                if reject_lossy_constructs {
+                    return Err(ScanError {
+                        message: "named tran instances and their ranges cannot be preserved in a mapped netlist".to_string(),
+                        span: tok.span,
+                    });
+                }
                 self.scanner.popt()?;
                 self.skip_trivia()?;
                 if let Some(range_tok) = self.scanner.peekt()? {
@@ -1916,10 +2016,10 @@ impl<R: Read + 'static> Parser<R> {
             },
         })
     }
-    /// Parses one integer endpoint of a packed port width.
-    fn parse_port_width_endpoint(&mut self, what: &str) -> Result<u32, ScanError> {
+    /// Parses an unsigned, representable range endpoint or bit index.
+    fn parse_u32_endpoint(&mut self, what: &str) -> Result<u32, ScanError> {
         let token = self.pop_non_trivia()?.ok_or_else(|| ScanError {
-            message: format!("expected {what} in port width"),
+            message: format!("expected {what}"),
             span: Span {
                 start: self.scanner.pos,
                 limit: self.scanner.pos,
@@ -1927,14 +2027,14 @@ impl<R: Read + 'static> Parser<R> {
         })?;
         let TokenPayload::VerilogInt { value, .. } = token.payload else {
             return Err(ScanError {
-                message: format!("expected integer for {what} in port width"),
+                message: format!("expected integer for {what}"),
                 span: token.span,
             });
         };
         xlsynth_pir::IrValue::from_bits(&value)
             .to_u32()
             .map_err(|_| ScanError {
-                message: format!("{what} in port width does not fit in u32"),
+                message: format!("{what} does not fit in u32"),
                 span: token.span,
             })
     }
@@ -1958,7 +2058,7 @@ impl<R: Read + 'static> Parser<R> {
             return Ok(None);
         }
         self.scanner.popt()?;
-        let msb = self.parse_port_width_endpoint("msb")?;
+        let msb = self.parse_u32_endpoint("msb in port width")?;
         let colon = self.pop_non_trivia()?.ok_or_else(|| ScanError {
             message: "expected ':' in port width".to_string(),
             span: Span {
@@ -1972,7 +2072,7 @@ impl<R: Read + 'static> Parser<R> {
                 span: colon.span,
             });
         }
-        let lsb = self.parse_port_width_endpoint("lsb")?;
+        let lsb = self.parse_u32_endpoint("lsb in port width")?;
         let close = self.pop_non_trivia()?.ok_or_else(|| ScanError {
             message: "expected ']' after port width".to_string(),
             span: Span {
@@ -2120,6 +2220,18 @@ impl<R: Read + 'static> Parser<R> {
                 None => break,
             }
         }
+        // A gzip reader can report a bad trailer after delivering the final
+        // endmodule. A transport error must never certify a partial netlist.
+        if let Some(error) = self.scanner.read_error.take() {
+            let pos = self.scanner.pos;
+            return Err(ScanError {
+                message: format!("reading netlist: {error}"),
+                span: Span {
+                    start: pos,
+                    limit: pos,
+                },
+            });
+        }
         log::trace!("parse_file: done; modules parsed: {}", modules.len());
         Ok(modules)
     }
@@ -2192,8 +2304,9 @@ impl<R: Read + 'static> Parser<R> {
         } else {
             // Parse a non-ANSI port list: identifier[, identifier ...].
             let mut port_names = Vec::new();
+            let mut expect_name = true;
             loop {
-                let t = self.scanner.popt()?.ok_or_else(|| ScanError {
+                let t = self.pop_non_trivia()?.ok_or_else(|| ScanError {
                     message: "expected token in port list".to_string(),
                     span: Span {
                         start: self.scanner.pos,
@@ -2201,18 +2314,25 @@ impl<R: Read + 'static> Parser<R> {
                     },
                 })?;
                 match t.payload {
-                    TokenPayload::Identifier(s) => {
-                        let sym = self.interner.get_or_intern(s);
-                        port_names.push(sym);
-                        // If next is ',', continue
-                        if let Some(next) = self.scanner.peekt()? {
-                            if matches!(next.payload, TokenPayload::Comma) {
-                                self.scanner.popt()?; // consume ','
-                                continue;
-                            }
-                        }
+                    TokenPayload::Identifier(s)
+                        if expect_name || !self.scanner.reject_lossy_constructs =>
+                    {
+                        port_names.push(self.interner.get_or_intern(s));
+                        expect_name = false;
                     }
-                    TokenPayload::CParen => break,
+                    TokenPayload::Comma if !expect_name => expect_name = true,
+                    TokenPayload::CParen => {
+                        if self.scanner.reject_lossy_constructs
+                            && expect_name
+                            && !port_names.is_empty()
+                        {
+                            return Err(ScanError {
+                                message: "empty non-ANSI port slots cannot be preserved in a mapped netlist".to_string(),
+                                span: t.span,
+                            });
+                        }
+                        break;
+                    }
                     _ => {
                         return Err(ScanError {
                             message: format!("unexpected token in port list: {:?}", t.payload),
@@ -2277,10 +2397,10 @@ impl<R: Read + 'static> Parser<R> {
                         self.scanner.popt()?; // consume 'endmodule'
                         break;
                     }
-                    TokenPayload::Identifier(s) if s == "assign" => {
+                    TokenPayload::Keyword(Keyword::Assign) => {
                         assigns.push(self.parse_assign()?);
                     }
-                    TokenPayload::Identifier(s) if s == "tran" => {
+                    TokenPayload::Keyword(Keyword::Tran) => {
                         assigns.push(self.parse_tran()?);
                     }
                     TokenPayload::Keyword(keyword) if keyword.is_unsupported_construct() => {
@@ -2334,12 +2454,15 @@ impl<R: Read + 'static> Parser<R> {
                 }
             }
         }
+        if self.scanner.reject_lossy_constructs && !self.implicit_net_by_name.is_empty() {
+            self.validate_implicit_nets(&assigns, &instances)?;
+        }
         // Preserve top-level port order from the module header list, even when
         // non-ANSI input/output declarations are grouped by direction in the
         // body. Ports not present in the header (if any) are left at
         // the end in their original declaration order.
         let mut header_port_index: HashMap<PortId, usize> = HashMap::new();
-        for (i, port_name) in port_names.into_iter().enumerate() {
+        for (i, &port_name) in port_names.iter().enumerate() {
             header_port_index.entry(port_name).or_insert(i);
         }
         ports.sort_by_key(|port| {
@@ -2348,6 +2471,16 @@ impl<R: Read + 'static> Parser<R> {
                 .copied()
                 .unwrap_or(usize::MAX)
         });
+        if self.scanner.reject_lossy_constructs
+            && !ansi_ports
+            && (header_port_index.len() != port_names.len()
+                || !ports.iter().map(|port| port.name).eq(port_names))
+        {
+            return Err(ScanError {
+                message: "each non-ANSI port slot must name a distinct port with exactly one matching body declaration".to_string(),
+                span: oparen_tok.span,
+            });
+        }
         Ok(NetlistModule {
             name,
             net_index_range: module_net_start..self.nets.len(),
@@ -2458,24 +2591,7 @@ impl<R: Read + 'static> Parser<R> {
         if let Some(next) = self.scanner.peekt()? {
             if matches!(next.payload, TokenPayload::OBrack) {
                 self.scanner.popt()?; // consume '['
-                let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected msb in width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                let msb = match msb_tok.payload {
-                    TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                    }
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer for msb".to_string(),
-                            span: msb_tok.span,
-                        });
-                    }
-                };
+                let msb = self.parse_u32_endpoint("msb in wire width")?;
                 let colon_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
                     message: "expected ':' in width".to_string(),
                     span: Span {
@@ -2489,24 +2605,7 @@ impl<R: Read + 'static> Parser<R> {
                         span: colon_tok.span,
                     });
                 }
-                let lsb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: "expected lsb in width".to_string(),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                let lsb = match lsb_tok.payload {
-                    TokenPayload::VerilogInt { value, .. } => {
-                        xlsynth_pir::IrValue::from_bits(&value).to_u32().unwrap()
-                    }
-                    _ => {
-                        return Err(ScanError {
-                            message: "expected integer for lsb".to_string(),
-                            span: lsb_tok.span,
-                        });
-                    }
-                };
+                let lsb = self.parse_u32_endpoint("lsb in wire width")?;
                 let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
                     message: "expected ']' after width".to_string(),
                     span: Span {
@@ -2856,6 +2955,22 @@ mod tests {
         let t = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t.payload, TokenPayload::Comment(ref s) if s == " hello world"));
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn roundtrip_reader_rejects_unterminated_block_comment_after_module() {
+        let source = "module first(); endmodule\n/* missing terminator\nmodule second(); endmodule";
+        let mut scanner = TokenScanner::from_str_with_capacity(source, 1);
+        scanner.require_preserved_structure();
+        let error = Parser::new(scanner).parse_file().unwrap_err();
+        assert_eq!(error.message, "unterminated block comment");
+        assert_eq!(
+            error.span.start,
+            Pos {
+                lineno: 2,
+                colno: 1
+            }
+        );
     }
 
     #[test]
@@ -3262,14 +3377,15 @@ endmodule
 
     #[test]
     fn test_token_scanner_annotation() {
-        let input = r#"(* src = "foo.sv" *)"#;
-        let mut scanner = TokenScanner::from_str(input);
+        let input = r#"(* src = "a\"b\\" *)"#;
+        let mut scanner = TokenScanner::from_str_with_capacity(input, 1);
         let t = scanner.popt().expect("no scan error").unwrap();
+        assert_eq!(t.payload.to_string(), input);
         match t.payload {
             TokenPayload::Annotation { ref key, ref value } => {
                 assert_eq!(key, "src");
                 match value {
-                    AnnotationValue::String(s) => assert_eq!(s, "foo.sv"),
+                    AnnotationValue::String(s) => assert_eq!(s, r#"a\"b\\"#),
                     _ => panic!("Expected string annotation value"),
                 }
             }
@@ -3531,11 +3647,127 @@ endmodule
     }
 
     #[test]
+    fn scanner_skips_long_runs_of_trivia_without_recursion() {
+        let mut source = "\n/* block */ /* another block */`timescale 1ns/1ps\n".repeat(10_000);
+        source.push_str("// kept\n;");
+        let mut scanner = TokenScanner::with_line_lookup(
+            std::io::Cursor::new(source.into_bytes()),
+            Box::new(|_| None),
+        );
+        let comment = scanner.popt().unwrap().unwrap();
+        assert_eq!(
+            comment.span.start,
+            Pos {
+                lineno: 20_001,
+                colno: 1
+            }
+        );
+        assert_eq!(comment.payload, TokenPayload::Comment(" kept".to_string()));
+        assert_eq!(scanner.popt().unwrap().unwrap().payload, TokenPayload::Semi);
+        assert!(scanner.popt().unwrap().is_none());
+    }
+
+    #[test]
+    fn scanner_displays_wide_integer_tokens_and_attributes() {
+        let mut scanner =
+            TokenScanner::from_str("65'h10000000000000000 (* init = 65'h10000000000000000 *)");
+        assert_eq!(
+            scanner.popt().unwrap().unwrap().payload.to_string(),
+            "65'd18446744073709551616"
+        );
+        assert_eq!(
+            scanner.popt().unwrap().unwrap().payload.to_string(),
+            "(* init = 65'd18446744073709551616 *)"
+        );
+    }
+
+    #[test]
+    fn range_endpoints_report_values_that_do_not_fit_u32() {
+        for (source, endpoint) in [
+            (
+                "module m(); wire [33'h100000000:0] w; endmodule",
+                "msb in wire width",
+            ),
+            (
+                "module m(); wire [0:33'h100000000] w; endmodule",
+                "lsb in wire width",
+            ),
+            (
+                "module m(input a, output y); assign y = a[33'h100000000]; endmodule",
+                "msb/index in net reference",
+            ),
+            (
+                "module m(input a, output y); assign y = a[0:33'h100000000]; endmodule",
+                "lsb in net reference",
+            ),
+        ] {
+            let mut parser = Parser::new(TokenScanner::from_str(source));
+            let error = parser.parse_file().unwrap_err();
+            assert_eq!(error.message, format!("{endpoint} does not fit in u32"));
+        }
+    }
+
+    #[test]
     fn test_skip_timescale_at_top() {
         let src = "`timescale 10ps/10ps\nmodule m(); endmodule\n";
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn line_comments_are_whitespace_for_all_line_endings() {
+        let lines = [
+            "// header",
+            "module first(); endmodule // second module follows",
+            "module second(output y);",
+            "  (* source // attribute key",
+            "     = 1 *)",
+            "  BUF gate(.A({y // first bit",
+            "               , y}) // before the pin separator",
+            "           , // next pin",
+            "           .Y(y));",
+            "endmodule",
+        ];
+        for newline in ["\n", "\r", "\r\n"] {
+            let source = lines.join(newline);
+            let mut scanner = TokenScanner::with_line_lookup_and_capacity(
+                std::io::Cursor::new(source.as_bytes().to_vec()),
+                Box::new(move |n| source_line(source.as_bytes(), n)),
+                1,
+            );
+            // The standalone scanner still exposes comments with normalized
+            // spans.
+            let header = scanner.popt().unwrap().unwrap();
+            assert_eq!(header.payload, TokenPayload::Comment(" header".into()));
+            assert_eq!(header.span.to_human_string(), "1:1..2:1");
+            scanner.require_preserved_structure();
+            let mut parser = Parser::new(scanner);
+            let modules = parser.parse_file().unwrap();
+            let names: Vec<_> = modules
+                .iter()
+                .map(|m| parser.interner.resolve(m.name))
+                .collect();
+            assert_eq!(names, [Some("first"), Some("second")]);
+            let gate = &modules[1].instances[0];
+            assert_eq!((gate.inst_lineno, gate.inst_colno), (6, 7));
+            assert_eq!(gate.connections.len(), 2);
+            assert_eq!(parser.get_line(6).as_deref(), Some(lines[5]));
+        }
+    }
+
+    #[test]
+    fn timescale_handles_comments_and_newlines_between_arguments() {
+        let src = r#"`timescale 100 /* unit */ ns // precision follows
+                      / 10 /* smaller unit */ ps module same_line(); endmodule
+                      module following(); endmodule"#;
+        let mut parser = Parser::new(TokenScanner::from_str_with_capacity(src, 1));
+        let modules = parser.parse_file().unwrap();
+        let names: Vec<_> = modules
+            .iter()
+            .map(|m| parser.interner.resolve(m.name))
+            .collect();
+        assert_eq!(names, [Some("same_line"), Some("following")]);
     }
 
     #[test]

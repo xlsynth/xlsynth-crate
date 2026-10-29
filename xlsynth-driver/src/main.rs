@@ -85,6 +85,7 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_eval;
 mod gv_instance_csv;
+mod gv_proto;
 mod gv_read_stats;
 mod gv_resize;
 mod gv_sta;
@@ -2170,6 +2171,7 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommands(gv_proto::commands())
         .subcommand(
             clap::Command::new("gv2block")
                 .about("Converts a gate-level netlist and Liberty proto to block IR")
@@ -4220,6 +4222,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv2block", subm)) => {
             gv2block::handle_gv2block(subm);
+        }
+        Some(("gv2pb", subm)) => {
+            if let Err(error) = gv_proto::handle_gv2pb(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("gv2pb"), vec![]);
+            }
+        }
+        Some(("pb2gv", subm)) => {
+            if let Err(error) = gv_proto::handle_pb2gv(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("pb2gv"), vec![]);
+            }
         }
         Some(("gv2ir", subm)) => {
             gv2ir::handle_gv2ir(subm);

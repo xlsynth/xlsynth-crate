@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::netlist::io::{read_gv_from_str, read_ugv_from_str};
+use anyhow::Result;
+use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
+use xlsynth_g8r::netlist::io::{
+    read_gv_for_roundtrip_from_path, read_gv_from_str, read_ugv_from_str,
+};
 
 const MIXED_NETLIST: &str = r#"module top(a, y);
   input a;
@@ -45,13 +49,14 @@ endmodule
 
 #[test]
 fn gv_reader_rejects_logic_assignments_in_mixed_input() {
-    let error = read_gv_from_str(MIXED_NETLIST)
-        .err()
-        .expect("mixed GV must fail");
-    assert_eq!(
-        error.to_string(),
-        include_str!("goldens/gv_logic_assignment.golden.txt").trim_end()
-    );
+    for newline in ["\n", "\r", "\r\n"] {
+        let source = MIXED_NETLIST.replace('\n', newline);
+        let error = read_gv_from_str(&source).err().expect("mixed GV must fail");
+        assert_eq!(
+            error.to_string(),
+            include_str!("goldens/gv_logic_assignment.golden.txt").trim_end()
+        );
+    }
 }
 
 #[test]
@@ -116,4 +121,93 @@ endmodule
         error.to_string(),
         include_str!("goldens/ugv_arithmetic.golden.txt").trim_end()
     );
+}
+
+#[test]
+fn roundtrip_reader_rejects_non_ansi_slots_that_would_be_lost() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ports.gv");
+    for (header, declarations) in [
+        ("a,", "input a;"),
+        ("a,a", "input a;"),
+        ("a,b", "input a;"),
+        ("a", "input a,b;"),
+        ("a,a", "input a; input a;"),
+    ] {
+        let source = format!("module top({header}); {declarations} endmodule");
+        std::fs::write(&path, &source)?;
+        assert!(read_gv_for_roundtrip_from_path(&path).is_err(), "{source}");
+        read_gv_from_str(&source)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn escaped_statement_keywords_roundtrip_as_cell_types() -> Result<()> {
+    let source = r#"module top();
+  \assign  u_assign ();
+  \tran  u_tran ();
+endmodule
+"#;
+    let parsed = read_gv_from_str(source)?;
+    let module = &parsed.modules[0];
+    assert_eq!(module.instances.len(), 2);
+    assert_eq!(
+        parsed.interner.resolve(module.instances[0].type_name),
+        Some("assign")
+    );
+    assert_eq!(
+        parsed.interner.resolve(module.instances[1].type_name),
+        Some("tran")
+    );
+    assert_eq!(
+        emit_module_as_netlist_text(module, &parsed.nets, &parsed.interner)?,
+        source
+    );
+    Ok(())
+}
+
+#[test]
+fn roundtrip_reader_requires_a_declaration_site_for_each_net() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("implicit.gv");
+    for body in [
+        "assign y = misspelled;",
+        "assign y = {misspelled, also_absent};",
+        "assign y = misspelled[0];",
+        "BUF inst(.A(misspelled[0]), .Y(y));",
+    ] {
+        // A declaration in a preceding module must not leak into this one.
+        let source = format!(
+            "module other(); wire misspelled; endmodule\nmodule top(output y); {body} endmodule"
+        );
+        std::fs::write(&path, &source)?;
+        let error = read_gv_for_roundtrip_from_path(&path)
+            .err()
+            .expect("missing declaration site");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: net 'misspelled' has no declaration or implicit declaration site in this module"
+        );
+        read_gv_from_str(&source)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn roundtrip_reader_accepts_implicit_declarations_and_forward_references() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("implicit.gv");
+    let source = r#"module top(input a, output [5:0] y);
+  BUF inst(.A({cell_input}), .Y(cell_output));
+  tran(tran_left, a);
+  tran(a, tran_right);
+  assign {alias_net} = a;
+  assign y = {cell_input, cell_output, tran_left, tran_right, alias_net, later_wire};
+  wire later_wire;
+endmodule
+"#;
+    std::fs::write(&path, source)?;
+    read_gv_for_roundtrip_from_path(&path)?;
+    Ok(())
 }

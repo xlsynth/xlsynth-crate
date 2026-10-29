@@ -65,8 +65,10 @@ fn sanitize_comment_ascii(s: &str) -> String {
 
 fn sanitize_annot_string_ascii(s: &str) -> String {
     s.chars()
-        .filter(|&c| c.is_ascii() && c != '"' && c != '\n' && c != '\r')
-        .collect()
+        .filter(|&c| c.is_ascii() && c != '\n' && c != '\r')
+        .collect::<String>()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 fn sanitize_key(s: &str) -> String {
     let mut out = String::new();

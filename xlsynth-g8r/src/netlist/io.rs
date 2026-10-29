@@ -13,13 +13,14 @@ use crate::liberty::Library;
 use crate::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
 use crate::netlist::form::{validate_gv_form, validate_ugv_form};
 use crate::netlist::parse::{
-    Net, NetlistModule, Parser as NetlistParser, PortId, ScanError, TokenScanner,
+    Net, NetlistModule, Parser as NetlistParser, PortId, ScanError, TokenScanner, source_line,
 };
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -103,20 +104,21 @@ pub fn select_module<'a>(
 #[derive(Clone, Copy)]
 enum NetlistFormat {
     Gv,
+    RoundTripGv,
     Ugv,
 }
 
 impl NetlistFormat {
     fn name(self) -> &'static str {
         match self {
-            Self::Gv => "GV",
+            Self::Gv | Self::RoundTripGv => "GV",
             Self::Ugv => "UGV",
         }
     }
 
     fn guidance(self) -> &'static str {
         match self {
-            Self::Gv => {
+            Self::Gv | Self::RoundTripGv => {
                 "GV supports cell instances and wiring assignments; procedural RTL and logic assignments are unsupported."
             }
             Self::Ugv => {
@@ -129,6 +131,12 @@ impl NetlistFormat {
 /// Reads GV containing cell instances and wiring-only assignments.
 pub fn read_gv_from_path(path: &Path) -> Result<ParsedNetlist> {
     read_netlist_from_path(path, NetlistFormat::Gv).map(|result| result.parsed)
+}
+
+/// Reads mapped GV for serialization, rejecting constructs whose structure or
+/// values would be lost when the parsed netlist is emitted again.
+pub fn read_gv_for_roundtrip_from_path(path: &Path) -> Result<ParsedNetlist> {
+    read_netlist_from_path(path, NetlistFormat::RoundTripGv).map(|result| result.parsed)
 }
 
 /// Reads combinational UGV containing Boolean assignments and no leaf cells.
@@ -152,10 +160,10 @@ pub fn read_ugv_from_str(source: &str) -> Result<ParsedNetlist> {
 }
 
 fn read_netlist_from_str(source: &str, format: NetlistFormat) -> Result<TimedParsedNetlist> {
-    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let bytes: Arc<[u8]> = source.as_bytes().into();
     let scanner = TokenScanner::with_line_lookup(
-        Cursor::new(source.as_bytes().to_vec()),
-        Box::new(move |lineno| lines.get((lineno - 1) as usize).cloned()),
+        Cursor::new(Arc::clone(&bytes)),
+        Box::new(move |lineno| source_line(bytes.as_ref(), lineno)),
     );
     read_netlist(scanner, "<string>", format)
 }
@@ -178,10 +186,10 @@ fn read_netlist_from_path(path: &Path, format: NetlistFormat) -> Result<TimedPar
             let br = BufReader::new(f);
             let gz = MultiGzDecoder::new(br);
             let rdr = BufReader::new(gz);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
+            source_line(rdr, lineno)
         } else {
             let rdr = BufReader::new(f);
-            rdr.lines().nth((lineno - 1) as usize).and_then(Result::ok)
+            source_line(rdr, lineno)
         }
     };
 
@@ -190,10 +198,13 @@ fn read_netlist_from_path(path: &Path, format: NetlistFormat) -> Result<TimedPar
 }
 
 fn read_netlist<R: Read + 'static>(
-    scanner: TokenScanner<R>,
+    mut scanner: TokenScanner<R>,
     source_name: &str,
     format: NetlistFormat,
 ) -> Result<TimedParsedNetlist> {
+    if matches!(format, NetlistFormat::RoundTripGv) {
+        scanner.require_preserved_structure();
+    }
     let mut parser = NetlistParser::new(scanner);
     let render_error = |error: ScanError, parser: &NetlistParser<R>| {
         anyhow!(
@@ -215,7 +226,9 @@ fn read_netlist<R: Read + 'static>(
         .map_err(|error| render_error(error, &parser))?;
     let parse_duration = parse_start.elapsed();
     match format {
-        NetlistFormat::Gv => validate_gv_form(&modules, &parser.nets, &parser.interner),
+        NetlistFormat::Gv | NetlistFormat::RoundTripGv => {
+            validate_gv_form(&modules, &parser.nets, &parser.interner)
+        }
         NetlistFormat::Ugv => validate_ugv_form(&modules, &parser.interner),
     }
     .map_err(|error| render_error(error, &parser))?;

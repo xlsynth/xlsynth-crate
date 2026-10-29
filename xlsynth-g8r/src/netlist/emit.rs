@@ -6,6 +6,7 @@ use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistModule, PortDirection,
 };
 use anyhow::{Result, anyhow};
+use std::collections::HashSet;
 use std::fmt::Write as FmtWrite;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
@@ -50,8 +51,8 @@ fn is_simple_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-/// Renders an identifier only if it can be represented in Verilog.
-fn render_identifier(name: &str) -> Result<String> {
+/// Checks whether an identifier can be represented in Verilog.
+pub(super) fn validate_identifier(name: &str) -> Result<()> {
     // Escaped identifiers contain one or more printable ASCII characters;
     // whitespace terminates the identifier and cannot be part of its name.
     if name.is_empty() || !name.bytes().all(|b| (b'!'..=b'~').contains(&b)) {
@@ -59,6 +60,11 @@ fn render_identifier(name: &str) -> Result<String> {
             "name cannot be represented as a Verilog identifier: {name:?}"
         ));
     }
+    Ok(())
+}
+
+fn render_identifier(name: &str) -> Result<String> {
+    validate_identifier(name)?;
     if is_simple_identifier(name) && !is_system_verilog_keyword(name) {
         Ok(name.to_string())
     } else {
@@ -141,6 +147,7 @@ fn render_assign_expr(
     }
 }
 
+/// Emits a module with its net declarations before assignments and instances.
 pub fn emit_module_as_netlist_text(
     module: &NetlistModule,
     nets: &[Net],
@@ -170,8 +177,10 @@ pub fn emit_module_as_netlist_text(
         .unwrap();
     }
 
+    let mut declared = HashSet::with_capacity(module.ports.len() + module.wires.len());
     for port in &module.ports {
         let port_name = render_identifier(&resolve_symbol(interner, port.name, "port name")?)?;
+        declared.insert(port.name);
         let dir = match port.direction {
             PortDirection::Input => "input",
             PortDirection::Output => "output",
@@ -196,7 +205,23 @@ pub fn emit_module_as_netlist_text(
             )
         })?;
         let wire_name = render_identifier(&resolve_symbol(interner, net.name, "wire name")?)?;
+        declared.insert(net.name);
         writeln!(&mut out, "  wire {}{};", width_suffix(net.width), wire_name).unwrap();
+    }
+
+    // An instance can introduce an implicit net that a later assign reads.
+    // We emit assigns first, so declare these nets before either statement.
+    let module_nets = nets
+        .get(module.net_index_range.clone())
+        .ok_or_else(|| anyhow!("invalid module net range {:?}", module.net_index_range))?;
+    for net in module_nets
+        .iter()
+        .filter(|net| !declared.contains(&net.name))
+    {
+        let name = render_identifier(&resolve_symbol(interner, net.name, "wire name")?)?;
+        // The parser represents an implicit scalar with a [0:0] placeholder.
+        let width = net.width.filter(|&range| range != (0, 0));
+        writeln!(&mut out, "  wire {}{};", width_suffix(width), name).unwrap();
     }
 
     for assign in &module.assigns {
