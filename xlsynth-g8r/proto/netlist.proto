@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+
+package xlsynth.netlist;
+
+// Structural mapped Verilog, independent of the Liberty library. All indices
+// are zero-based. Repeated fields preserve order, including modules and pins.
+message Netlist {
+  repeated CellInterface interfaces = 1;
+  repeated Module modules = 2;
+}
+
+// An instance references the combination of cell type and ordered named pins.
+// The same cell with omitted or reordered pins can use a different interface.
+message CellInterface {
+  string cell = 1;
+  repeated string pins = 2;
+}
+
+message Module {
+  string name = 1;
+  repeated Net nets = 2;       // Includes ports and implicit wires.
+  repeated Port ports = 3;     // Module header order.
+  repeated uint32 wires = 4;   // Explicit wire declarations, indices into nets.
+  repeated Assignment assigns = 5;
+  repeated Instance instances = 6;
+}
+
+message Range {
+  uint32 left = 1;
+  uint32 right = 2;
+}
+
+message Net {
+  string name = 1;
+  Range range = 2;  // Absent for scalar declarations, distinct from [0:0].
+}
+
+message Port {
+  enum Direction {
+    INPUT = 0;
+    OUTPUT = 1;
+    INOUT = 2;
+  }
+  uint32 net = 1;
+  Direction direction = 2;
+  Range range = 3;  // As declared on the port, independent of wire redeclarations.
+}
+
+message Instance {
+  string name = 1;
+  uint32 interface = 2; // Index in Netlist.interfaces.
+
+  // Populate exactly one list in interface pin order, or leave both empty for
+  // a pinless instance. For whole-net connections, nets stores packed indices
+  // into the enclosing module's net table. Use connections for all pins if
+  // any pin has a select, constant, concatenation or open connection.
+  repeated Ref connections = 3;
+  repeated uint32 nets = 4;
+}
+
+message Assignment {
+  Ref lhs = 1;
+  Ref rhs = 2;
+  bool tran = 3; // Bidirectional tran when set, otherwise continuous assign.
+}
+
+message Ref {
+  oneof kind {
+    uint32 net = 1; // Index in the enclosing module's nets.
+    Select select = 2;
+    Literal literal = 3;
+    uint64 unknown_width = 4; // All bits are x.
+    Concat concat = 5;
+    Open open = 6; // Empty named pin connection.
+  }
+}
+
+message Select {
+  uint32 net = 1;
+  uint32 left = 2;
+  optional uint32 right = 3; // Absent for a bit-select.
+}
+
+message Literal {
+  uint64 width = 1;
+  bytes little_endian = 2; // Exactly ceil(width/8) bytes, unused high bits zero.
+}
+
+message Concat {
+  repeated Ref parts = 1; // Most significant part first.
+}
+
+message Open {}

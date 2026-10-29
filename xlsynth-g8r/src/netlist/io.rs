@@ -103,20 +103,21 @@ pub fn select_module<'a>(
 #[derive(Clone, Copy)]
 enum NetlistFormat {
     Gv,
+    RoundTripGv,
     Ugv,
 }
 
 impl NetlistFormat {
     fn name(self) -> &'static str {
         match self {
-            Self::Gv => "GV",
+            Self::Gv | Self::RoundTripGv => "GV",
             Self::Ugv => "UGV",
         }
     }
 
     fn guidance(self) -> &'static str {
         match self {
-            Self::Gv => {
+            Self::Gv | Self::RoundTripGv => {
                 "GV supports cell instances and wiring assignments; procedural RTL and logic assignments are unsupported."
             }
             Self::Ugv => {
@@ -129,6 +130,12 @@ impl NetlistFormat {
 /// Reads GV containing cell instances and wiring-only assignments.
 pub fn read_gv_from_path(path: &Path) -> Result<ParsedNetlist> {
     read_netlist_from_path(path, NetlistFormat::Gv).map(|result| result.parsed)
+}
+
+/// Reads mapped GV for serialization, rejecting constructs whose structure or
+/// values would be lost when the parsed netlist is emitted again.
+pub fn read_gv_for_roundtrip_from_path(path: &Path) -> Result<ParsedNetlist> {
+    read_netlist_from_path(path, NetlistFormat::RoundTripGv).map(|result| result.parsed)
 }
 
 /// Reads combinational UGV containing Boolean assignments and no leaf cells.
@@ -190,10 +197,13 @@ fn read_netlist_from_path(path: &Path, format: NetlistFormat) -> Result<TimedPar
 }
 
 fn read_netlist<R: Read + 'static>(
-    scanner: TokenScanner<R>,
+    mut scanner: TokenScanner<R>,
     source_name: &str,
     format: NetlistFormat,
 ) -> Result<TimedParsedNetlist> {
+    if matches!(format, NetlistFormat::RoundTripGv) {
+        scanner.require_preserved_structure();
+    }
     let mut parser = NetlistParser::new(scanner);
     let render_error = |error: ScanError, parser: &NetlistParser<R>| {
         anyhow!(
@@ -215,7 +225,9 @@ fn read_netlist<R: Read + 'static>(
         .map_err(|error| render_error(error, &parser))?;
     let parse_duration = parse_start.elapsed();
     match format {
-        NetlistFormat::Gv => validate_gv_form(&modules, &parser.nets, &parser.interner),
+        NetlistFormat::Gv | NetlistFormat::RoundTripGv => {
+            validate_gv_form(&modules, &parser.nets, &parser.interner)
+        }
         NetlistFormat::Ugv => validate_ugv_form(&modules, &parser.interner),
     }
     .map_err(|error| render_error(error, &parser))?;

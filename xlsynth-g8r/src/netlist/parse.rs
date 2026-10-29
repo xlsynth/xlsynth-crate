@@ -381,11 +381,18 @@ pub struct TokenScanner<R: Read + 'static> {
     reader: BufReader<R>,
     pub pos: Pos,
     lookahead: Option<Token>,
+    reject_lossy_constructs: bool,
+    read_error: Option<std::io::Error>,
     done: bool,
     line_lookup: Box<dyn Fn(u32) -> Option<String>>, // line number -> line text
 }
 
 impl<R: Read + 'static> TokenScanner<R> {
+    /// Reject constructs that analysis readers approximate in the parsed model.
+    pub(super) fn require_preserved_structure(&mut self) {
+        self.reject_lossy_constructs = true;
+    }
+
     /// Construct a TokenScanner with a custom line lookup callback.
     pub fn with_line_lookup(reader: R, line_lookup: Box<dyn Fn(u32) -> Option<String>>) -> Self {
         Self::with_buf_reader(BufReader::new(reader), line_lookup)
@@ -411,6 +418,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                 colno: 1,
             },
             lookahead: None,
+            reject_lossy_constructs: false,
+            read_error: None,
             done: false,
             line_lookup,
         }
@@ -461,7 +470,8 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
         match self.reader.fill_buf() {
             Ok(buf) => buf.first().copied(),
-            Err(_) => {
+            Err(error) => {
+                self.read_error = Some(error);
                 self.done = true;
                 None
             }
@@ -490,7 +500,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                     None
                 }
             }
-            Err(_) => {
+            Err(error) => {
+                self.read_error = Some(error);
                 self.done = true;
                 None
             }
@@ -851,7 +862,8 @@ impl<R: Read + 'static> TokenScanner<R> {
                         self.pos.colno += consumed as u32;
                         self.reader.consume(consumed);
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        self.read_error = Some(error);
                         self.done = true;
                         break;
                     }
@@ -963,110 +975,82 @@ impl<R: Read + 'static> TokenScanner<R> {
                     break;
                 }
             }
-            let width = if !num.is_empty() {
-                Some(num.parse::<usize>().unwrap())
-            } else {
-                None
-            };
-            if self.peekb() == Some(b'\'') {
-                self.popb(); // consume '
-                // Now parse base and value as a string, but only consume
-                // characters that are valid inside a Verilog
-                // number literal (base char plus digits/hex
-                // digits, x/z/?, and underscores). This ensures we do
-                // not accidentally swallow structural punctuation like '}' that
-                // should be tokenized separately.
-                let mut base_and_value = String::new();
-                while let Some(b2) = self.peekb() {
-                    if b2.is_ascii_alphanumeric()
-                        || b2 == b'_'
-                        || b2 == b'x'
-                        || b2 == b'X'
-                        || b2 == b'z'
-                        || b2 == b'Z'
-                        || b2 == b'?'
-                    {
-                        self.popb();
-                        base_and_value.push(b2 as char);
-                    } else {
+            let (width, typed_literal) = if self.peekb() == Some(b'\'') {
+                self.popb();
+                let width = num.parse::<usize>().map_err(|_| ScanError {
+                    message: "literal width exceeds usize".to_string(),
+                    span: Span {
+                        start,
+                        limit: self.pos,
+                    },
+                })?;
+                let prefix = match self.popb().map(|b| b.to_ascii_lowercase()) {
+                    Some(b'b') => "0b",
+                    Some(b'o') => "0o",
+                    Some(b'd') => "",
+                    Some(b'h') => "0x",
+                    _ => {
+                        return Err(self.error_with_context(
+                            "unsupported literal base",
+                            Span {
+                                start,
+                                limit: self.pos,
+                            },
+                        ));
+                    }
+                };
+                let mut digits = String::new();
+                while let Some(b) = self.peekb() {
+                    if !(b.is_ascii_alphanumeric() || b == b'_' || b == b'?') {
                         break;
                     }
+                    self.popb();
+                    digits.push(b as char);
                 }
-                let limit = self.pos;
-                if base_and_value
-                    .chars()
-                    .skip(1)
-                    .any(|ch| matches!(ch, 'z' | 'Z' | '?'))
-                {
+                let span = Span {
+                    start,
+                    limit: self.pos,
+                };
+                if digits.contains(['z', 'Z', '?']) {
                     return Err(self.error_with_context(
                         "high-impedance literal digits ('z', 'Z', or '?') are not supported",
-                        Span { start, limit },
+                        span,
                     ));
                 }
-                let has_unknown_digit = base_and_value
-                    .chars()
-                    .skip(1)
-                    .any(|ch| matches!(ch, 'x' | 'X'));
-                // Convert Verilog base to Rust-style
-                let base_and_value = if let Some((_base, _rest)) = base_and_value
-                    .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
-                {
-                    let (base_char, _value_str) = base_and_value.split_at(1);
-                    let prefix = match base_char {
-                        "b" => "0b",
-                        "h" => "0x",
-                        "o" => "0o",
-                        "d" => "",
-                        _ => "",
-                    };
-                    format!("{}{}", prefix, &base_and_value[1..])
-                } else {
-                    base_and_value.clone()
-                };
-                let irbits_str = if let Some(width) = width {
-                    format!("bits[{}]:{}", width, base_and_value)
-                } else {
-                    base_and_value.clone()
-                };
-                if has_unknown_digit {
+                if digits.contains(['x', 'X']) {
+                    if self.reject_lossy_constructs
+                        && !digits.chars().all(|ch| matches!(ch, 'x' | 'X' | '_'))
+                    {
+                        return Err(self.error_with_context(
+                            "mixed known and x literal digits cannot be preserved in a mapped netlist", span,
+                        ));
+                    }
                     return Ok(Some(Token {
-                        payload: TokenPayload::VerilogUnknownInt { width },
-                        span: Span { start, limit },
+                        payload: TokenPayload::VerilogUnknownInt { width: Some(width) },
+                        span,
                     }));
                 }
-                let value = xlsynth_pir::IrValue::parse_typed(&irbits_str)
-                    .unwrap()
-                    .to_bits()
-                    .unwrap();
-                return Ok(Some(Token {
-                    payload: TokenPayload::VerilogInt { width, value },
-                    span: Span { start, limit },
-                }));
+                (Some(width), format!("bits[{width}]:{prefix}{digits}"))
             } else {
-                // Parse as IrBits (decimal, width 32 per Verilog standard)
-                let irbits_str = format!("bits[32]:{}", num);
-                let value = match xlsynth_pir::IrValue::parse_typed(&irbits_str) {
-                    Ok(v) => v.to_bits().unwrap(),
-                    Err(e) => {
-                        let line = (self.line_lookup)(start.lineno)
-                            .unwrap_or_else(|| "<line unavailable>".to_string());
-                        let col = (start.colno as usize).saturating_sub(1);
-                        panic!(
-                            "Failed to parse integer literal '{}': {}\nLine {}: {}\n{}^",
-                            irbits_str,
-                            e,
-                            start.lineno,
-                            line,
-                            " ".repeat(col)
-                        );
-                    }
-                };
-                let limit = self.pos;
-                return Ok(Some(Token {
-                    payload: TokenPayload::VerilogInt { width: None, value },
-                    span: Span { start, limit },
-                }));
-            }
+                // The parser represents unsized decimal literals at 32 bits.
+                (None, format!("bits[32]:{num}"))
+            };
+            let span = Span {
+                start,
+                limit: self.pos,
+            };
+            let value = xlsynth_pir::IrValue::parse_typed(&typed_literal)
+                .and_then(|value| value.to_bits())
+                .map_err(|e| {
+                    self.error_with_context(
+                        &format!("invalid literal '{typed_literal}': {e}"),
+                        span,
+                    )
+                })?;
+            return Ok(Some(Token {
+                payload: TokenPayload::VerilogInt { width, value },
+                span,
+            }));
         }
         // Handle line comments
         if b == b'/' {
@@ -1791,8 +1775,15 @@ impl<R: Read + 'static> Parser<R> {
         }
 
         self.skip_trivia()?;
+        let reject_lossy_constructs = self.scanner.reject_lossy_constructs;
         if let Some(tok) = self.scanner.peekt()? {
             if matches!(tok.payload, TokenPayload::Identifier(_)) {
+                if reject_lossy_constructs {
+                    return Err(ScanError {
+                        message: "named tran instances and their ranges cannot be preserved in a mapped netlist".to_string(),
+                        span: tok.span,
+                    });
+                }
                 self.scanner.popt()?;
                 self.skip_trivia()?;
                 if let Some(range_tok) = self.scanner.peekt()? {
@@ -2119,6 +2110,18 @@ impl<R: Read + 'static> Parser<R> {
                 }
                 None => break,
             }
+        }
+        // A gzip reader can report a bad trailer after delivering the final
+        // endmodule. A transport error must never certify a partial netlist.
+        if let Some(error) = self.scanner.read_error.take() {
+            let pos = self.scanner.pos;
+            return Err(ScanError {
+                message: format!("reading netlist: {error}"),
+                span: Span {
+                    start: pos,
+                    limit: pos,
+                },
+            });
         }
         log::trace!("parse_file: done; modules parsed: {}", modules.len());
         Ok(modules)

@@ -22,6 +22,7 @@ pub mod mapped;
 pub mod normalized;
 pub mod parse;
 pub mod power;
+pub mod proto;
 pub mod register_mapping;
 pub mod report;
 pub mod resize;

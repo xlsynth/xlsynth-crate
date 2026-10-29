@@ -355,6 +355,41 @@ xlsynth-driver lib-query ~/asap7.lib \
   --max-matches 10 --path-only
 ```
 
+### `gv2pb` — encode a mapped netlist
+
+Packs all modules from a gate-level Verilog file (`.gv`, `.v`, or either with
+`.gz`) into a binary netlist protobuf. Instances with the same cell type and
+ordered pins share one interface, and connections refer to nets by index.
+Cell and pin names come from the netlist, so no Liberty library is needed.
+The GV reader accepts named-pin instances and wiring such as aliases, selects,
+concatenations, literal tieoffs, and `tran` connections. Logic must be mapped
+to cells.
+
+```shell
+xlsynth-driver gv2pb design.gv.gz -o design.pb
+```
+
+- `-o, --output <PATH>` writes the binary protobuf to a file. The default is stdout.
+
+The protobuf captures the parsed netlist and omits comments and attributes.
+Unknown literals such as `4'bxxxx` retain their width and unfurl as `4'hx`.
+`gv2pb` rejects literals that mix known and unknown digits (such as
+`4'b10x1`), high-impedance digits (`z` and `?`), and named or arrayed
+`tran` instances. Concatenations can nest up to 48 levels in the binary
+format. See the [netlist schema](../xlsynth-g8r/proto/netlist.proto).
+
+### `pb2gv` — emit a mapped netlist as Verilog
+
+Renders every module in a binary netlist protobuf as canonical gate-level
+Verilog, in module order. Whitespace, declaration layout, and literal spelling
+can differ from the input used by `gv2pb`.
+
+```shell
+xlsynth-driver pb2gv design.pb > restored.gv
+```
+
+- `-o, --output <PATH>` writes the Verilog to a file. The default is stdout.
+
 ### `gv2ir`: gate-level netlist to IR
 
 ```shell

@@ -50,8 +50,8 @@ fn is_simple_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
-/// Renders an identifier only if it can be represented in Verilog.
-fn render_identifier(name: &str) -> Result<String> {
+/// Checks whether an identifier can be represented in Verilog.
+pub(super) fn validate_identifier(name: &str) -> Result<()> {
     // Escaped identifiers contain one or more printable ASCII characters;
     // whitespace terminates the identifier and cannot be part of its name.
     if name.is_empty() || !name.bytes().all(|b| (b'!'..=b'~').contains(&b)) {
@@ -59,6 +59,11 @@ fn render_identifier(name: &str) -> Result<String> {
             "name cannot be represented as a Verilog identifier: {name:?}"
         ));
     }
+    Ok(())
+}
+
+fn render_identifier(name: &str) -> Result<String> {
+    validate_identifier(name)?;
     if is_simple_identifier(name) && !is_system_verilog_keyword(name) {
         Ok(name.to_string())
     } else {
