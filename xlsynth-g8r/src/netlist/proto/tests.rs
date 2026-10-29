@@ -13,7 +13,7 @@ const MAPPED_GV: &str = r#"
 module leaf(bus, y, pad);
   output [72:0] y;
   inout pad;
-  input bus;
+  input [1:3] bus;
   wire [1:3] bus;
   wire [0:0] w;
   assign y[72:69] = {{bus[1:2], bus[3]}, 1'bx};

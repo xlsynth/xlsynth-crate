@@ -37,8 +37,8 @@ fn round_trips_mapped_hierarchy_via_files_and_stdout() -> Result<()> {
 module top(input [1:0] a, output y);
   wire [3:0] bus;
   assign bus = {a, 2'H1};
-  leaf inst(.a(bus), .y(from_leaf));
-  assign y = from_leaf;
+  (* note = "literal: \" *) // text" *) leaf inst(.a(bus), .y(from_leaf));
+  (* note = "trailing backslash: \\" *) assign y = from_leaf;
 endmodule
 "#,
     )?;

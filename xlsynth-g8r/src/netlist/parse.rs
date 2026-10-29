@@ -239,8 +239,12 @@ pub enum PortDirection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationValue {
     I64(i64),
+    /// Verilog string contents, with source escape sequences preserved.
     String(String),
-    VerilogInt { width: Option<usize>, value: IrBits },
+    VerilogInt {
+        width: Option<usize>,
+        value: IrBits,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,12 +300,7 @@ impl fmt::Display for AnnotationValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AnnotationValue::I64(i) => write!(f, "{}", i),
-            AnnotationValue::String(s) => {
-                // Annotation strings cannot contain embedded '"' per scanner
-                // rules.
-                let s = s.replace('"', "");
-                write!(f, "\"{}\"", s)
-            }
+            AnnotationValue::String(s) => write!(f, "\"{}\"", s),
             AnnotationValue::VerilogInt { width, value } => write_verilog_integer(f, *width, value),
         }
     }
@@ -742,12 +741,22 @@ impl<R: Read + 'static> TokenScanner<R> {
             Some(b'"') => {
                 self.popb(); // consume opening quote
                 let mut s = String::new();
-                while let Some(b) = self.popb() {
-                    let c = b as char;
-                    if c == '"' {
+                let mut escaped = false;
+                loop {
+                    let b = self.popb().ok_or_else(|| {
+                        self.error_with_context(
+                            "unterminated annotation string",
+                            Span {
+                                start,
+                                limit: self.pos,
+                            },
+                        )
+                    })?;
+                    if !escaped && b == b'"' {
                         break;
                     }
-                    s.push(c);
+                    s.push(b as char);
+                    escaped = !escaped && b == b'\\';
                 }
                 AnnotationValue::String(s)
             }
@@ -3368,14 +3377,15 @@ endmodule
 
     #[test]
     fn test_token_scanner_annotation() {
-        let input = r#"(* src = "foo.sv" *)"#;
-        let mut scanner = TokenScanner::from_str(input);
+        let input = r#"(* src = "a\"b\\" *)"#;
+        let mut scanner = TokenScanner::from_str_with_capacity(input, 1);
         let t = scanner.popt().expect("no scan error").unwrap();
+        assert_eq!(t.payload.to_string(), input);
         match t.payload {
             TokenPayload::Annotation { ref key, ref value } => {
                 assert_eq!(key, "src");
                 match value {
-                    AnnotationValue::String(s) => assert_eq!(s, "foo.sv"),
+                    AnnotationValue::String(s) => assert_eq!(s, r#"a\"b\\"#),
                     _ => panic!("Expected string annotation value"),
                 }
             }
