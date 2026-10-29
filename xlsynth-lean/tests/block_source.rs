@@ -4,6 +4,8 @@
 
 use std::{fs, path::Path};
 use xlsynth_lean::block::compile_stateful_function;
+use xlsynth_lean::block::{emit, select_block};
+use xlsynth_pir::ir_parser::Parser;
 
 #[test]
 fn private_declarations_do_not_enter_the_public_type_module() {
@@ -111,4 +113,15 @@ fn machine(__reg_count: Count) -> (Count, Count) {
     .unwrap();
     let bundle = compiled.emit_readable().unwrap();
     assert!(bundle.files.iter().any(|(_, text)| text.contains("Count")));
+    // Emitting from the retained package must match emitting from its saved IR.
+    let saved = Parser::new(compiled.block_ir())
+        .parse_and_validate_package()
+        .unwrap();
+    let raw = emit(&saved, select_block(&saved, None).unwrap()).unwrap();
+    let (_, generated) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "Generated.lean")
+        .unwrap();
+    assert_eq!(generated, &raw);
 }
