@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Collect the selected function's typechecked DSLX interface for Lean.
-use crate::block::{self, Block};
+use crate::block::{self, BlockContext};
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use xlsynth::{
@@ -451,7 +451,7 @@ pub(super) struct StatefulInterface {
 /// Pass the original module from the lowering that produced `block`. Register
 /// names and ordered output ports must follow the stateful function convention.
 pub(super) fn emit_stateful_readable(
-    block: &Block,
+    block: &BlockContext<'_>,
     module: &dslx::TypecheckedModule,
     top: &str,
 ) -> Result<block::LeanBlockBundle> {
@@ -467,7 +467,7 @@ pub(super) fn emit_stateful_readable(
     let FunctionSignature { params, returns } = catalogue
         .signature
         .context("selected stateful function not found")?;
-    let graph = &block.graph;
+    let graph = block.graph;
     let mut inputs = BTreeMap::from([("rst".to_owned(), SourceType::Bool)]);
     let mut registers = BTreeMap::new();
     let output_count = returns

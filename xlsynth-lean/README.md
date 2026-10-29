@@ -58,14 +58,14 @@ combinational API. Use the block IR API below for stateful models.
 ```rust
 use xlsynth_lean::block;
 
-let model = block::parse(&ir_text, None)?;
-let generated_lean = block::emit(&model)?;
+let selected = block::select_block(&package, None)?;
+let generated_lean = block::emit(&package, selected)?;
 ```
 
-`parse` verifies the package with native XLS and the typed Rust IR parser.
-An explicit block name selects that block; otherwise it selects the declared
-top or the sole block. `emit` returns a self-contained module in namespace
-`XlsBlock`. Neither operation invokes Lean.
+Pass a verified `xlsynth_pir::ir::Package` to `select_block`. Supply a block
+name to select it explicitly, or omit the name to select the declared top
+or the sole block. `emit` uses the package's source locations and the selected
+block to produce a self-contained Lean module in namespace `XlsBlock`.
 
 The generated `eval` takes arbitrary old registers and current inputs and
 returns outputs, next registers, and assertion results. Outputs read old

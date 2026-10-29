@@ -4,7 +4,8 @@
 
 use std::{fs, path::Path, process::Command};
 
-use xlsynth_lean::block::{LeanBlockBundle, compile_stateful_function, emit, parse};
+use xlsynth_lean::block::{LeanBlockBundle, compile_stateful_function, emit, select_block};
+use xlsynth_pir::ir_parser::Parser;
 
 // The same theorem uses the named output fields after a private binding
 // rename. Inputs and outputs deliberately have identical physical layouts.
@@ -206,7 +207,8 @@ top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
   other: () = output_port(en, name=other, id=6)
 }
 "#;
-    let source = emit(&parse(block, None).unwrap()).unwrap();
+    let package = Parser::new(block).parse_and_validate_package().unwrap();
+    let source = emit(&package, select_block(&package, None).unwrap()).unwrap();
     check_bundle(
         LeanBlockBundle {
             files: vec![("Generated.lean".into(), source)],
