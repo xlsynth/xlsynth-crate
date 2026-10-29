@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use xlsynth_lean::block;
+use xlsynth_pir::ir_parser::Parser;
 
 /// Shared swap-register fixture with reset, enable, and assertion behavior.
 const BLOCK: &str = include_str!("../../xlsynth-lean/tests/fixtures/block_step.ir");
@@ -62,9 +63,10 @@ fn raw_top_overrides_the_package_top_and_resolves_ambiguity() {
         let output = invoke(directory.path(), &["input.ir", "--top", "other"]);
         assert!(output.status.success(), "{:?}", output);
         assert!(output.stderr.is_empty());
+        let package = Parser::new(input).parse_and_validate_package().unwrap();
         assert_eq!(
             String::from_utf8(output.stdout).unwrap(),
-            block::emit(&block::parse(input, Some("other")).unwrap()).unwrap()
+            block::emit(&package, package.get_block("other").unwrap()).unwrap()
         );
     }
     let ambiguous = invoke(directory.path(), &["input.ir"]);
@@ -82,10 +84,17 @@ fn invalid_block_preserves_existing_output() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
     std::fs::write(directory.join("model.lean"), "keep").unwrap();
-    std::fs::write(directory.join("input.ir"), "not an IR package").unwrap();
+    // old_a has two bits, but a register's load enable must have one.
+    let invalid = BLOCK.replace("load_enable=en", "load_enable=old_a");
+    std::fs::write(directory.join("input.ir"), invalid).unwrap();
     let output = invoke(directory, &["input.ir", "--output", "model.lean"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("native XLS")
+    );
     assert_eq!(
         std::fs::read_to_string(directory.join("model.lean")).unwrap(),
         "keep"
