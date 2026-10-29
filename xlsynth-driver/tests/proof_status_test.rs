@@ -273,6 +273,39 @@ fn invalid_proof_arguments_write_the_requested_report() {
     }
 }
 
+/// Discovery runs before the tactic script clock starts, even when it fails.
+#[test]
+fn tactic_preparation_error_wall_time_includes_quickcheck_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("module.x"),
+        "fn identity(x: u8) -> u8 { x }",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("script.json"), "[]").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(dir.path())
+        .args([
+            "prove-quickcheck",
+            "--dslx_input_file=module.x",
+            "--tactic_json=script.json",
+            "--output_json=result.json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("result.json")).unwrap()).unwrap();
+    assert_eq!(report["status"], "execution-error");
+    assert_eq!(
+        report["error_str"],
+        "No matching quickcheck functions found"
+    );
+    let wall = report["timing"]["wall_micros"].as_u64().unwrap();
+    let script_time = report["time_micros"].as_u64().unwrap();
+    assert!(wall > script_time, "{report}");
+}
+
 /// A malformed IR package reaches the same worker protocol as setup errors.
 #[cfg(feature = "has-bitwuzla")]
 #[test]

@@ -126,6 +126,8 @@ Tactic output associates measured attempts with their selectors in
 `ScriptReport` stores the invocation's wall time in `timing.wall_micros`.
 The worker JSON exposes that same measurement in both the standalone report
 (`report.timing`) and the shared worker envelope (`timing`).
+If the command fails before it can return a script report, its error
+report's `timing.wall_micros` includes preparation of the obligation tree.
 Parallel attempts can overlap, so their times do not add up to invocation wall time.
 Missing timing is distinct from zero. Timing is diagnostic and never determines
 whether an obligation was proved.

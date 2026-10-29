@@ -62,16 +62,23 @@ impl<'a> TacticScript<'a> {
     /// task diagnostics.
     pub(crate) fn execute_and_exit(
         self,
+        command_start: Instant,
         tree: Result<OblTree, String>,
         subcommand: &str,
         success_message: &str,
         output_json: Option<&str>,
         driver: ProofDriver,
     ) -> ! {
-        let start = Instant::now();
+        let script_start = Instant::now();
         let fail = |error: String| -> ! {
             if let Some(path) = output_json {
-                let outcome = ProofSummary::execution_error(start.elapsed(), error.clone());
+                let failed_at = Instant::now();
+                // The legacy duration starts after preparing the obligation
+                // tree.
+                let outcome = ProofSummary {
+                    timing: (failed_at - command_start).into(),
+                    ..ProofSummary::execution_error(failed_at - script_start, error.clone())
+                };
                 std::fs::write(path, serde_json::to_vec(&outcome).unwrap()).unwrap();
             }
             eprintln!("[{subcommand}] {error}");
@@ -81,7 +88,7 @@ impl<'a> TacticScript<'a> {
         let steps = self.read().unwrap_or_else(|error| fail(error));
         let execution = execute_script(&mut tree, &steps, driver)
             .unwrap_or_else(|error| fail(format!("execute_script error: {error}")));
-        let duration = start.elapsed();
+        let duration = script_start.elapsed();
         if let Some(batch) = &execution.task_report {
             write_task_diagnostics(&batch.plan, &mut io::stdout().lock()).unwrap_or_else(|error| {
                 fail(format!("failed to write proof diagnostics: {error}"))
