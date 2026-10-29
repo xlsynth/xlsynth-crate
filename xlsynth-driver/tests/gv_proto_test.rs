@@ -65,6 +65,7 @@ fn rejects_unrepresentable_gv_before_replacing_output() -> Result<()> {
         "assign y = 4294967295;",
         "tran bridge(y[0], a[0]);",
         "tran bridges[3:0](y, a);",
+        "endmodule /* unclosed block comment\nmodule truncated();",
     ] {
         std::fs::write(
             &gv,

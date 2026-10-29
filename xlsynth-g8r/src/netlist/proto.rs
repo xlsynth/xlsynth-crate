@@ -36,8 +36,8 @@ struct Declarations {
     packed_range: bool,
 }
 
-/// Checks declarations in the namespaces used by the emitted Verilog.
-fn validate_declarations(design: &pb::Netlist) -> Result<()> {
+/// Checks declaration namespaces and removes synthetic implicit-net ranges.
+fn normalize_declarations(design: &mut pb::Netlist) -> Result<()> {
     for interface in &design.interfaces {
         let mut pins = HashSet::with_capacity(interface.pins.len());
         for pin in &interface.pins {
@@ -49,21 +49,21 @@ fn validate_declarations(design: &pb::Netlist) -> Result<()> {
         }
     }
     let mut modules = HashSet::with_capacity(design.modules.len());
-    for module in &design.modules {
+    for module in &mut design.modules {
+        normalize_module_declarations(module)
+            .with_context(|| format!("declarations in module {:?}", module.name))?;
         ensure!(
             modules.insert(&module.name),
             "duplicate module {:?}",
             module.name
         );
-        validate_module_declarations(module)
-            .with_context(|| format!("declarations in module {:?}", module.name))?;
     }
     Ok(())
 }
 
 /// Ports may redeclare their nets once as wires. Instances share the net
 /// namespace.
-fn validate_module_declarations(module: &pb::Module) -> Result<()> {
+fn normalize_module_declarations(module: &mut pb::Module) -> Result<()> {
     let mut names = HashSet::with_capacity(module.nets.len() + module.instances.len());
     for net in &module.nets {
         ensure!(names.insert(&net.name), "duplicate net {:?}", net.name);
@@ -105,15 +105,17 @@ fn validate_module_declarations(module: &pb::Module) -> Result<()> {
         );
         decl.wire = true;
     }
-    for (net, declared) in module.nets.iter().zip(declared) {
-        // The GV reader uses [0:0] for implicit scalar wires.
-        ensure!(
-            declared.wire
-                || declared.packed_range
-                || matches!(net.range, None | Some(pb::Range { left: 0, right: 0 })),
-            "packed net {:?} has no range declaration",
-            net.name
-        );
+    for (net, declared) in module.nets.iter_mut().zip(declared) {
+        if !declared.wire && !declared.packed_range {
+            // The GV reader uses [0:0] for inferred scalars. Only an
+            // explicit declaration can give such a net a packed range.
+            ensure!(
+                matches!(net.range, None | Some(pb::Range { left: 0, right: 0 })),
+                "packed net {:?} has no range declaration",
+                net.name
+            );
+            net.range = None;
+        }
     }
     Ok(())
 }

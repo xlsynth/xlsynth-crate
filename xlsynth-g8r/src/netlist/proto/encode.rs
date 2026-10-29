@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{MAX_CONCAT_DEPTH, pb, validate_declarations, validate_identifier, validate_lvalue};
+use super::{MAX_CONCAT_DEPTH, normalize_declarations, pb, validate_identifier, validate_lvalue};
 use crate::netlist::io::{ParsedNetlist, resolve_symbol};
 use crate::netlist::parse::{
     AssignExpr, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, NetlistModule, PortDirection,
@@ -213,10 +213,10 @@ pub fn encode_netlist(parsed: &ParsedNetlist) -> Result<Vec<u8>> {
         .iter()
         .map(|module| encode_module(parsed, module, &mut interfaces))
         .collect::<Result<_>>()?;
-    let design = pb::Netlist {
+    let mut design = pb::Netlist {
         interfaces: interfaces.records,
         modules,
     };
-    validate_declarations(&design)?;
+    normalize_declarations(&mut design)?;
     Ok(design.encode_to_vec())
 }

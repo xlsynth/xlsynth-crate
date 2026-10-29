@@ -75,6 +75,43 @@ fn round_trips_structural_gv_and_shares_ordered_interfaces() -> Result<()> {
 }
 
 #[test]
+fn packed_ranges_require_an_explicit_declaration() -> Result<()> {
+    let source = r#"module top();
+  AND2 u (.A(a), .B(b), .Y(y));
+  wire a;
+  wire [0:0] y;
+endmodule
+"#;
+    let bytes = encode_netlist(&read_gv_from_str(source)?)?;
+    let wire = pb::Netlist::decode(bytes.as_slice())?;
+    let declarations: Vec<_> = wire.modules[0]
+        .nets
+        .iter()
+        .map(|net| {
+            (
+                net.name.as_str(),
+                net.range.as_ref().map(|r| (r.left, r.right)),
+            )
+        })
+        .collect();
+    assert_eq!(
+        declarations,
+        [("a", None), ("b", None), ("y", Some((0, 0)))]
+    );
+    assert_eq!(
+        emit(&decode_netlist(&bytes)?)?,
+        r#"module top();
+  wire a;
+  wire [0:0] y;
+  wire b;
+  AND2 u (.A(a), .B(b), .Y(y));
+endmodule
+"#
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_malformed_references_in_assignments() -> Result<()> {
     let parsed = read_gv_from_str("module top(output y); assign y = 1'b0; endmodule")?;
     let mut wire = pb::Netlist::decode(encode_netlist(&parsed)?.as_slice())?;

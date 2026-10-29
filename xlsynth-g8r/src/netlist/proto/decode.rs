@@ -8,7 +8,7 @@ use string_interner::{StringInterner, backend::StringBackend, symbol::SymbolU32}
 use xlsynth_pir::IrBits;
 
 use super::pb::r#ref::Kind;
-use super::{pb, validate_declarations, validate_identifier, validate_lvalue};
+use super::{normalize_declarations, pb, validate_identifier, validate_lvalue};
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssign, NetlistAssignKind, NetlistInstance,
@@ -31,8 +31,8 @@ struct CellInterface {
 
 /// Decodes a binary mapped netlist into the same model used by GV readers.
 pub fn decode_netlist(bytes: &[u8]) -> Result<ParsedNetlist> {
-    let message = pb::Netlist::decode(bytes).context("decoding netlist protobuf")?;
-    validate_declarations(&message)?;
+    let mut message = pb::Netlist::decode(bytes).context("decoding netlist protobuf")?;
+    normalize_declarations(&mut message)?;
     let mut interner = Interner::new();
     let mut interfaces = Vec::with_capacity(message.interfaces.len());
     for interface in message.interfaces {

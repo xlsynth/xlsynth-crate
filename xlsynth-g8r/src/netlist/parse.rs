@@ -1019,11 +1019,21 @@ impl<R: Read + 'static> TokenScanner<R> {
                 let mut prev = None;
                 while let Some(b) = self.popb() {
                     if prev == Some(b'*') && b == b'/' {
-                        break;
+                        return Ok(None);
                     }
                     prev = Some(b);
                 }
-                Ok(None)
+                if self.reject_lossy_constructs {
+                    Err(self.error_with_context(
+                        "unterminated block comment",
+                        Span {
+                            start,
+                            limit: self.pos,
+                        },
+                    ))
+                } else {
+                    Ok(None)
+                }
             }
             _ => Err(self.error_with_context(
                 "Unexpected '/'",
@@ -1657,7 +1667,10 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     (Some(_), None) => {
                         if implicit_scalar_placeholder {
-                            self.net_width_span_by_name.insert(name, err_span);
+                            // The explicit scalar declaration replaces the
+                            // synthetic [0:0] inferred at first use.
+                            existing.width = None;
+                            self.net_width_span_by_name.remove(&name);
                             clear_implicit_marker = true;
                         }
                     }
@@ -2933,6 +2946,22 @@ mod tests {
         let t = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t.payload, TokenPayload::Comment(ref s) if s == " hello world"));
         assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn roundtrip_reader_rejects_unterminated_block_comment_after_module() {
+        let source = "module first(); endmodule\n/* missing terminator\nmodule second(); endmodule";
+        let mut scanner = TokenScanner::from_str_with_capacity(source, 1);
+        scanner.require_preserved_structure();
+        let error = Parser::new(scanner).parse_file().unwrap_err();
+        assert_eq!(error.message, "unterminated block comment");
+        assert_eq!(
+            error.span.start,
+            Pos {
+                lineno: 2,
+                colno: 1
+            }
+        );
     }
 
     #[test]
