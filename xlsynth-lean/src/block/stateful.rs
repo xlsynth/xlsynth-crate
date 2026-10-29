@@ -6,22 +6,27 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use xlsynth::{IrPackage, dslx, dslx_path_to_module_name, mangle_dslx_name};
-use xlsynth_pir::{ir_parser::Parser, stateful_fn_to_block::stateful_fn_to_block};
+use xlsynth_pir::{ir, ir_parser::Parser, stateful_fn_to_block::stateful_fn_to_block};
 
-use super::{LeanBlockBundle, emit_stateful_readable, parse};
+use super::{BlockContext, LeanBlockBundle, emit_stateful_readable, select_block};
 
 /// Lower a named IR function using its register suffix and outer return tuple.
 /// Native verification covers the entire resulting package, including calls.
 pub fn stateful_ir_to_block(ir: &str, top: &str) -> Result<String> {
+    verified_stateful_block(ir, top).map(|(_, text)| text)
+}
+
+fn verified_stateful_block(ir: &str, top: &str) -> Result<(ir::Package, String)> {
     let package = Parser::new(ir).parse_and_validate_package()?;
     let converted = stateful_fn_to_block(package, top).map_err(anyhow::Error::msg)?;
     let text = converted.to_string();
     IrPackage::parse_ir(&text, None)?.verify()?;
-    Ok(text)
+    Ok((converted, text))
 }
 
 /// A block and the exact typechecked DSLX module from which it was lowered.
 pub struct CompiledStatefulFunction {
+    package: ir::Package,
     block_ir: String,
     module: dslx::TypecheckedModule,
     source_top: String,
@@ -35,7 +40,7 @@ impl CompiledStatefulFunction {
 
     /// Emit both models, preserving the source types of the public interface.
     pub fn emit_readable(&self) -> Result<LeanBlockBundle> {
-        let block = parse(&self.block_ir, None)?;
+        let block = BlockContext::new(&self.package, select_block(&self.package, None)?)?;
         emit_stateful_readable(&block, &self.module, &self.source_top)
     }
 }
@@ -60,9 +65,10 @@ pub fn compile_stateful_function(
         .convert_to_ir_text()
         .with_context(|| format!("lowering stateful function {source_top}"))?;
     let top = mangle_dslx_name(module_name, source_top)?;
-    let block_ir = stateful_ir_to_block(&ir, &top)
+    let (package, block_ir) = verified_stateful_block(&ir, &top)
         .with_context(|| format!("lowering stateful function {source_top}"))?;
     Ok(CompiledStatefulFunction {
+        package,
         block_ir,
         module,
         source_top: source_top.to_owned(),

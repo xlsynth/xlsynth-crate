@@ -22,7 +22,7 @@ use xlsynth_pir::{
 };
 
 use crate::block::{
-    Block,
+    BlockContext,
     raw::{
         self as lean, LeanBlockBundle, identifier, lean_type, record_value, tuple_element,
         tuple_value,
@@ -36,7 +36,7 @@ use crate::block::{
 /// contexts memoize propagation through shared nodes; they are local to one
 /// emission and cannot outlive the validated inputs.
 struct Presentation<'a> {
-    block: &'a Block,
+    block: &'a BlockContext<'a>,
     declarations: &'a [TypeDecl],
     interface: &'a StatefulInterface,
     node_types: Vec<Option<SourceType>>,
@@ -49,11 +49,11 @@ struct Presentation<'a> {
 /// Emit five dependent modules after the raw emitter checks supported
 /// operations.
 pub(super) fn emit(
-    block: &Block,
+    block: &BlockContext<'_>,
     declarations: &[TypeDecl],
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
-    let raw = lean::emit(block)?;
+    let raw = lean::emit_with_context(block)?;
     let presentation = Presentation::new(block, declarations, interface)?;
     Ok(LeanBlockBundle {
         files: vec![
@@ -79,7 +79,7 @@ impl<'a> Presentation<'a> {
     /// One-bit nodes use `Bool`; nominal types come from register reads,
     /// projections, and write destinations rather than matching widths alone.
     fn new(
-        block: &'a Block,
+        block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
         interface: &'a StatefulInterface,
     ) -> Result<Self> {
@@ -88,7 +88,7 @@ impl<'a> Presentation<'a> {
             .nodes
             .iter()
             .enumerate()
-            .map(|(index, _)| ir::node_textual_id(&block.graph, NodeRef { index }))
+            .map(|(index, _)| ir::node_textual_id(block.graph, NodeRef { index }))
             .collect();
         let mut used: BTreeSet<String> = [
             "q",
@@ -115,7 +115,7 @@ impl<'a> Presentation<'a> {
             .iter()
             .enumerate()
             .map(|(index, node)| {
-                let source = ir::node_textual_id(&block.graph, NodeRef { index });
+                let source = ir::node_textual_id(block.graph, NodeRef { index });
                 let name = if node.name.is_none() || used.contains(&source) {
                     let mut fallback = format!("xls_node_{index}");
                     while reserved.contains(&fallback) || used.contains(&fallback) {
@@ -192,7 +192,7 @@ impl<'a> Presentation<'a> {
         Ok(result)
     }
 
-    fn block(&self) -> &Block {
+    fn block(&self) -> &BlockContext<'a> {
         self.block
     }
 
@@ -933,7 +933,7 @@ def eval (q : State) (x : Input) : Evaluation :=
             })
             .map(|(reference, activate)| {
                 Ok((
-                    identifier(&ir::node_textual_id(&block.graph, reference))?,
+                    identifier(&ir::node_textual_id(block.graph, reference))?,
                     self.typed_operand(activate, Some(&SourceType::Bool), 0)?,
                 ))
             })
