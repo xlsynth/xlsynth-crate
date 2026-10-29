@@ -73,14 +73,15 @@ input node do not affect evaluation. Invalid graphs return `LeanError` values.
 ## Export XLS block IR
 
 ```rust
-let block = xlsynth_lean::block::parse(ir_text, None)?;
-let lean_source = xlsynth_lean::block::emit(&block)?;
+let block = xlsynth_lean::block::select_block(&package, None)?;
+let lean_source = xlsynth_lean::block::emit(&package, block)?;
 ```
 
-`parse` verifies the package with native XLS and the typed Rust parser. Pass a
-block name instead of `None` to override the package top; without a top, the
-package must contain exactly one block. `emit` returns a self-contained Lean
-module and does not run Lean.
+`emit` takes a verified `xlsynth_pir::ir::Package` and a block borrowed from
+it. If you already have the block, pass it directly. Otherwise, `select_block`
+accepts a block name, or selects the package top when given `None`. A package
+without a top must contain exactly one block for automatic selection.
+`emit` returns a self-contained Lean module and does not run Lean.
 
 The generated clock step preserves old-state outputs, simultaneous register
 writes, reset precedence and source assertions. Unsupported operations and
