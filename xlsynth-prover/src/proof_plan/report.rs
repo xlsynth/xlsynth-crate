@@ -2,10 +2,11 @@
 
 //! Typed outcomes and captured diagnostics from proof-plan execution.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 
 use crate::proof_outcome::{ProofResultHeader, ProofStatus};
-use crate::proof_timing::ProofTiming;
+use crate::proof_timing::{ProofTiming, read_timing_object};
 
 use super::config::GroupKind;
 
@@ -142,18 +143,42 @@ impl serde::Serialize for TaskOutcome {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskTiming {
     /// Time from scheduler start until dispatch or cancellation in the queue.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_micros",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub queued_micros: Option<u64>,
     /// Time from successful launch until the scheduler observes termination.
     /// Includes polling and, for a running canceled task, teardown until reap.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "optional_micros",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub worker_wall_micros: Option<u64>,
     /// Present when a validated worker result supplied its own measurements.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "ProofTiming::deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub worker_timing: Option<ProofTiming>,
 }
 
+/// A malformed duration does not discard the other measurements on a task.
+fn optional_micros<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    let raw = Box::<RawValue>::deserialize(d)?;
+    Ok(serde_json::from_str(raw.get()).ok())
+}
+
 impl TaskTiming {
+    /// Retains the attempt's selector even when its timing record is unusable.
+    pub(crate) fn deserialize_or_empty<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = Box::<RawValue>::deserialize(d)?;
+        Ok(read_timing_object(&raw).unwrap_or_default())
+    }
+
     /// Whether neither the scheduler nor the worker supplied a measurement.
     pub fn is_empty(&self) -> bool {
         self.queued_micros.is_none()

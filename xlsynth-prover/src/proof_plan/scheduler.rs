@@ -54,12 +54,7 @@ struct WorkerMeasurement<'a> {
 /// verdict.
 fn read_worker_timing(data: &str) -> Option<ProofTiming> {
     let worker: WorkerMeasurement = serde_json::from_str(data).ok()?;
-    let raw = worker.timing.get();
-    // Serde also accepts positional arrays for structs; require named timings.
-    if !raw.starts_with('{') {
-        return None;
-    }
-    serde_json::from_str(raw).ok()
+    ProofTiming::from_json(worker.timing)
 }
 
 impl ProcessResult {

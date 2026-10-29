@@ -12,9 +12,10 @@ use crate::proof_outcome::{ProofResultHeader, ProofStatus};
 use crate::proof_plan::report::{
     IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome, TaskTiming,
 };
-use crate::proof_timing::ProofTiming;
+use crate::proof_timing::{ProofTiming, read_timing_object};
 use crate::prover::SolverChoice;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
 
 /// A path from the root to an obligation in the decomposition tree.
 pub type Selector = Vec<String>;
@@ -377,20 +378,40 @@ pub struct RollbackEntry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptTiming {
     pub selector: Selector,
-    #[serde(default, skip_serializing_if = "TaskTiming::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "TaskTiming::deserialize_or_empty",
+        skip_serializing_if = "TaskTiming::is_empty"
+    )]
     pub timing: TaskTiming,
 }
 
+/// Reads valid attempts in order, ignoring malformed entries or a non-list.
+fn deserialize_attempts<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<AttemptTiming>, D::Error> {
+    let raw = Box::<RawValue>::deserialize(d)?;
+    let attempts: Vec<&RawValue> = serde_json::from_str(raw.get()).unwrap_or_default();
+    Ok(attempts
+        .into_iter()
+        .filter_map(read_timing_object)
+        .collect())
+}
+
 /// Attempt outcomes and unresolved obligations after all tactic rollbacks.
+/// Malformed values of optional telemetry fields do not invalidate the proof
+/// conclusion. Duplicate report fields remain ambiguous and are rejected.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScriptReport {
     /// Wall time of this invocation, from applying steps through resolving the
     /// final tree. ScriptExecution also exposes this measurement at the top
     /// level so schedulers can read it like any other worker's timing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "ProofTiming::deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timing: Option<ProofTiming>,
     /// Reported tasks in selected tree order, including discarded children.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_attempts")]
     pub attempts: Vec<AttemptTiming>,
     pub solved: Vec<Selector>,
     pub indefinite: Vec<TaskLogEntry>,
@@ -1132,6 +1153,51 @@ fn b(x: u8) -> u8 { !a(x) }
         let report: ScriptReport = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(report.timing, Some(Duration::from_micros(53).into()));
         assert_eq!(serde_json::to_value(report).unwrap(), encoded);
+    }
+
+    #[test]
+    fn standalone_report_reads_conclusion_with_malformed_telemetry() {
+        let mut encoded = serde_json::json!({
+            "timing": { "wall_micros": -1 },
+            "attempts": "unavailable",
+            "solved": [], "failed": [], "indefinite": [],
+            "rolled_back": [], "unresolved": [["root"]],
+            "root_disproved": true, "has_execution_error": false
+        });
+        let report: ScriptReport = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(report.proof_status(), ProofStatus::Disproved);
+        assert_eq!(report.unresolved, vec![root_selector()]);
+        assert!(report.timing.is_none());
+        assert!(report.attempts.is_empty());
+
+        encoded["root_disproved"] = serde_json::json!("true");
+        assert!(serde_json::from_value::<ScriptReport>(encoded).is_err());
+    }
+
+    #[test]
+    fn standalone_report_keeps_valid_attempt_measurements() {
+        let encoded = serde_json::json!({
+            "attempts": [
+                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": 17 },
+                { "selector": ["root", "b"], "timing": {
+                    "queued_micros": "unknown", "worker_wall_micros": 2,
+                    "worker_timing": { "wall_micros": -1 }
+                }}
+            ],
+            "solved": [["root"]], "failed": [], "indefinite": [],
+            "rolled_back": [], "unresolved": [],
+            "root_disproved": false, "has_execution_error": false
+        });
+        let report: ScriptReport = serde_json::from_value(encoded).unwrap();
+        assert_eq!(report.proof_status(), ProofStatus::Proved);
+        assert_eq!(
+            serde_json::to_value(report.attempts).unwrap(),
+            serde_json::json!([
+                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": ["root", "b"], "timing": { "worker_wall_micros": 2 } }
+            ])
+        );
     }
 
     #[test]
