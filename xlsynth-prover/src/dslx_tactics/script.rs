@@ -12,10 +12,9 @@ use crate::proof_outcome::{ProofResultHeader, ProofStatus};
 use crate::proof_plan::report::{
     IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome, TaskTiming,
 };
-use crate::proof_timing::{ProofTiming, read_timing_object};
+use crate::proof_timing::{ProofTiming, TimingObject, optional_measurement};
 use crate::prover::SolverChoice;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::value::RawValue;
 
 /// A path from the root to an obligation in the decomposition tree.
 pub type Selector = Vec<String>;
@@ -388,11 +387,10 @@ pub struct AttemptTiming {
 
 /// Reads valid attempts in order, ignoring malformed entries or a non-list.
 fn deserialize_attempts<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<AttemptTiming>, D::Error> {
-    let raw = Box::<RawValue>::deserialize(d)?;
-    let attempts: Vec<&RawValue> = serde_json::from_str(raw.get()).unwrap_or_default();
+    let attempts: Vec<TimingObject<AttemptTiming>> = optional_measurement(d)?.unwrap_or_default();
     Ok(attempts
         .into_iter()
-        .filter_map(read_timing_object)
+        .filter_map(TimingObject::into_option)
         .collect())
 }
 
@@ -1153,6 +1151,38 @@ fn b(x: u8) -> u8 { !a(x) }
         let report: ScriptReport = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(report.timing, Some(Duration::from_micros(53).into()));
         assert_eq!(serde_json::to_value(report).unwrap(), encoded);
+    }
+
+    #[test]
+    fn standalone_report_timing_survives_buffered_deserialization() {
+        /// A consumer's result envelope with one variant per report kind.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SavedResult {
+            Tactic(ScriptReport),
+        }
+
+        /// A consumer that places the tactic fields alongside its own fields.
+        #[derive(Deserialize)]
+        struct SavedRun {
+            #[serde(flatten)]
+            report: ScriptReport,
+        }
+
+        let encoded = r#"{
+            "timing":{"wall_micros":8},
+            "attempts":[{"selector":["root"],"timing":{"queued_micros":1,
+                "worker_wall_micros":3,"worker_timing":{"wall_micros":2}}}],
+            "solved":[["root"]],"failed":[],"indefinite":[],"rolled_back":[],
+            "unresolved":[],"root_disproved":false,"has_execution_error":false
+        }"#;
+        let SavedResult::Tactic(untagged) = serde_json::from_str(encoded).unwrap();
+        let flattened: SavedRun = serde_json::from_str(encoded).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(encoded).unwrap();
+        for report in [untagged, flattened.report] {
+            assert_eq!(report.proof_status(), ProofStatus::Proved);
+            assert_eq!(serde_json::to_value(report).unwrap(), expected);
+        }
     }
 
     #[test]

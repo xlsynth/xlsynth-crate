@@ -3,10 +3,9 @@
 //! Typed outcomes and captured diagnostics from proof-plan execution.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::value::RawValue;
 
 use crate::proof_outcome::{ProofResultHeader, ProofStatus};
-use crate::proof_timing::{ProofTiming, read_timing_object};
+use crate::proof_timing::{ProofTiming, TimingObject, optional_measurement};
 
 use super::config::GroupKind;
 
@@ -145,7 +144,7 @@ pub struct TaskTiming {
     /// Time from scheduler start until dispatch or cancellation in the queue.
     #[serde(
         default,
-        deserialize_with = "optional_micros",
+        deserialize_with = "optional_measurement",
         skip_serializing_if = "Option::is_none"
     )]
     pub queued_micros: Option<u64>,
@@ -153,7 +152,7 @@ pub struct TaskTiming {
     /// Includes polling and, for a running canceled task, teardown until reap.
     #[serde(
         default,
-        deserialize_with = "optional_micros",
+        deserialize_with = "optional_measurement",
         skip_serializing_if = "Option::is_none"
     )]
     pub worker_wall_micros: Option<u64>,
@@ -166,17 +165,12 @@ pub struct TaskTiming {
     pub worker_timing: Option<ProofTiming>,
 }
 
-/// A malformed duration does not discard the other measurements on a task.
-fn optional_micros<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
-    let raw = Box::<RawValue>::deserialize(d)?;
-    Ok(serde_json::from_str(raw.get()).ok())
-}
-
 impl TaskTiming {
     /// Retains the attempt's selector even when its timing record is unusable.
     pub(crate) fn deserialize_or_empty<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = Box::<RawValue>::deserialize(d)?;
-        Ok(read_timing_object(&raw).unwrap_or_default())
+        Ok(TimingObject::<Self>::deserialize(d)?
+            .into_option()
+            .unwrap_or_default())
     }
 
     /// Whether neither the scheduler nor the worker supplied a measurement.
