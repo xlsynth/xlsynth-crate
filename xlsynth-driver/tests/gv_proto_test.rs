@@ -39,7 +39,8 @@ endmodule
 module top(input [1:0] a, output y);
   wire [3:0] bus;
   assign bus = {a, 2'H1};
-  leaf inst(.a(bus), .y(y));
+  leaf inst(.a(bus), .y(from_leaf));
+  assign y = from_leaf;
 endmodule
 "#,
     )?;
@@ -49,6 +50,8 @@ endmodule
     assert!(convert("pb2gv", &pb, Some(&restored))?.is_empty());
     let text = std::fs::read_to_string(&restored)?;
     compare_golden_text(&text, "tests/gv_proto.golden.v");
+    assert_eq!(text.as_bytes(), convert("pb2gv", &pb, None)?);
+    convert("gv2pb", &restored, Some(&pb))?;
     assert_eq!(text.as_bytes(), convert("pb2gv", &pb, None)?);
     Ok(())
 }
@@ -61,6 +64,7 @@ fn rejects_unrepresentable_gv_before_replacing_output() -> Result<()> {
     std::fs::write(&pb, b"previous output")?;
     for statement in [
         "assign y = 4'b10x1;",
+        "assign y = 4294967295;",
         "tran bridge(y[0], a[0]);",
         "tran bridges[3:0](y, a);",
     ] {
@@ -81,6 +85,43 @@ fn rejects_unrepresentable_gv_before_replacing_output() -> Result<()> {
         assert!(result.stdout.is_empty());
         assert_eq!(std::fs::read(&pb)?, b"previous output");
     }
+    Ok(())
+}
+
+#[test]
+fn round_trips_octal_digits_at_the_declared_width() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let gv = dir.path().join("octal.gv");
+    let pb = dir.path().join("octal.pb");
+    std::fs::write(
+        &gv,
+        "module top(output [7:0] y); (* value = 8'o70 *) assign y = 8'O4_70; endmodule",
+    )?;
+    convert("gv2pb", &gv, Some(&pb))?;
+    let text = String::from_utf8(convert("pb2gv", &pb, None)?)?;
+    assert_eq!(
+        text,
+        "module top(y);\n  output [7:0] y;\n  assign y = 8'b00111000;\nendmodule\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_deep_concatenations_with_a_diagnostic() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let gv = dir.path().join("deep.gv");
+    let source = format!(
+        "module top(output y); assign y = {}1'b1{}; endmodule",
+        "{".repeat(8192),
+        "}".repeat(8192)
+    );
+    std::fs::write(&gv, source)?;
+    let result = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("gv2pb")
+        .arg(&gv)
+        .output()?;
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8(result.stderr)?.contains("48 nested concatenations"));
     Ok(())
 }
 

@@ -7,21 +7,21 @@ package xlsynth.netlist;
 // are zero-based. Repeated fields preserve order, including modules and pins.
 message Netlist {
   repeated CellInterface interfaces = 1;
-  repeated Module modules = 2;
+  repeated Module modules = 2; // Unique module names.
 }
 
 // An instance references the combination of cell type and ordered named pins.
 // The same cell with omitted or reordered pins can use a different interface.
 message CellInterface {
   string cell = 1;
-  repeated string pins = 2;
+  repeated string pins = 2; // Each named pin can appear only once.
 }
 
 message Module {
   string name = 1;
   repeated Net nets = 2;       // Includes ports and implicit wires.
-  repeated Port ports = 3;     // Module header order.
-  repeated uint32 wires = 4;   // Explicit wire declarations, indices into nets.
+  repeated Port ports = 3;     // Distinct ports in module header order.
+  repeated uint32 wires = 4;   // Distinct indices into nets, may also be ports.
   repeated Assignment assigns = 5;
   repeated Instance instances = 6;
 }
@@ -60,8 +60,8 @@ message Instance {
 }
 
 message Assignment {
-  Ref lhs = 1;
-  Ref rhs = 2;
+  Ref lhs = 1; // Net lvalue.
+  Ref rhs = 2; // Net lvalue for tran, otherwise any non-open wiring expression.
   bool tran = 3; // Bidirectional tran when set, otherwise continuous assign.
 }
 
@@ -70,7 +70,7 @@ message Ref {
     uint32 net = 1; // Index in the enclosing module's nets.
     Select select = 2;
     Literal literal = 3;
-    uint64 unknown_width = 4; // All bits are x.
+    uint64 unknown_width = 4; // Positive width, all bits are x.
     Concat concat = 5;
     Open open = 6; // Empty named pin connection.
   }
@@ -83,12 +83,12 @@ message Select {
 }
 
 message Literal {
-  uint64 width = 1;
+  uint64 width = 1; // Positive width.
   bytes little_endian = 2; // Exactly ceil(width/8) bytes, unused high bits zero.
 }
 
 message Concat {
-  repeated Ref parts = 1; // Most significant part first.
+  repeated Ref parts = 1; // One or more parts, most significant first.
 }
 
 message Open {}

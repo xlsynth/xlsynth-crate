@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{pb, validate_declarations, validate_identifier, validate_lvalue};
+use super::{MAX_CONCAT_DEPTH, pb, validate_declarations, validate_identifier, validate_lvalue};
 use crate::netlist::io::{ParsedNetlist, resolve_symbol};
 use crate::netlist::parse::{
     AssignExpr, NetIndex, NetRef, NetlistAssignKind, NetlistInstance, NetlistModule, PortDirection,
@@ -8,8 +8,8 @@ use crate::netlist::parse::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use prost::Message;
+use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Assigns each distinct (cell type, ordered pin list) its index at first use.
@@ -62,11 +62,6 @@ fn encode_range(width: Option<(u32, u32)>) -> Option<pb::Range> {
     width.map(|(left, right)| pb::Range { left, right })
 }
 
-// Prost allows 100 nested messages below the Netlist. Module, Assignment (or
-// Instance), Ref, and a leaf payload such as Literal consume four. Each
-// enclosing concatenation adds a Concat and a Ref for its selected part.
-const MAX_CONCAT_DEPTH: usize = (100 - 4) / 2;
-
 /// Encodes a reference, counting enclosing concatenations to ensure
 /// decodability.
 fn encode_ref(reference: &NetRef, range: &Range<usize>, concat_depth: usize) -> Result<pb::Ref> {
@@ -86,11 +81,16 @@ fn encode_ref(reference: &NetRef, range: &Range<usize>, concat_depth: usize) -> 
             left: *left,
             right: Some(*right),
         }),
-        NetRef::Literal(bits) => pb::r#ref::Kind::Literal(pb::Literal {
-            width: u64::try_from(bits.get_bit_count())?,
-            little_endian: bits.to_bytes(),
-        }),
+        NetRef::Literal(bits) => {
+            ensure!(bits.get_bit_count() > 0, "zero-width Verilog literal");
+            pb::r#ref::Kind::Literal(pb::Literal {
+                width: u64::try_from(bits.get_bit_count())?,
+                little_endian: bits.to_bytes(),
+            })
+        }
+        NetRef::UnknownLiteral(0) => bail!("zero-width Verilog literal"),
         NetRef::UnknownLiteral(width) => pb::r#ref::Kind::UnknownWidth(u64::try_from(*width)?),
+        NetRef::Concat(parts) if parts.is_empty() => bail!("empty Verilog concatenation"),
         NetRef::Concat(parts) => pb::r#ref::Kind::Concat(pb::Concat {
             parts: parts
                 .iter()
@@ -123,10 +123,7 @@ fn encode_module(
     for (index, net) in local_nets.iter().enumerate() {
         let index = u32::try_from(index).context("module net index exceeds u32")?;
         let name = encode_name(parsed, net.name, "net name")?;
-        ensure!(
-            net_by_name.insert(net.name, index).is_none(),
-            "duplicate net {name:?} in module"
-        );
+        net_by_name.insert(net.name, index);
         result.nets.push(pb::Net {
             name,
             range: encode_range(net.width),
@@ -153,30 +150,26 @@ fn encode_module(
         .map(|wire| local_net(*wire, range))
         .collect::<Result<_>>()?;
 
-    validate_declarations(&result)?;
-
     for assign in &module.assigns {
         let AssignExpr::Leaf(rhs) = &assign.rhs else {
             bail!("mapped netlists permit only wiring references in assignments")
         };
-        if assign.kind == NetlistAssignKind::Continuous {
-            validate_lvalue(&assign.lhs)?;
+        let lhs_ref = encode_ref(&assign.lhs, range, 0)?;
+        let rhs_ref = encode_ref(rhs, range, 0)?;
+        validate_lvalue(&assign.lhs)?;
+        if assign.kind == NetlistAssignKind::Tran {
+            validate_lvalue(rhs)?;
         }
         result.assigns.push(pb::Assignment {
-            lhs: Some(encode_ref(&assign.lhs, range, 0)?),
-            rhs: Some(encode_ref(rhs, range, 0)?),
+            lhs: Some(lhs_ref),
+            rhs: Some(rhs_ref),
             tran: assign.kind == NetlistAssignKind::Tran,
         });
     }
-    let mut instance_names = HashSet::with_capacity(module.instances.len());
     for instance in &module.instances {
-        let encoded = encode_instance(parsed, instance, interfaces, range)?;
-        ensure!(
-            instance_names.insert(instance.instance_name),
-            "duplicate instance {:?} in module",
-            encoded.name
-        );
-        result.instances.push(encoded);
+        result
+            .instances
+            .push(encode_instance(parsed, instance, interfaces, range)?);
     }
     Ok(result)
 }
@@ -220,9 +213,10 @@ pub fn encode_netlist(parsed: &ParsedNetlist) -> Result<Vec<u8>> {
         .iter()
         .map(|module| encode_module(parsed, module, &mut interfaces))
         .collect::<Result<_>>()?;
-    Ok(pb::Netlist {
+    let design = pb::Netlist {
         interfaces: interfaces.records,
         modules,
-    }
-    .encode_to_vec())
+    };
+    validate_declarations(&design)?;
+    Ok(design.encode_to_vec())
 }

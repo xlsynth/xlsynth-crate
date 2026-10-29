@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::ops::Range;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -33,6 +32,7 @@ struct CellInterface {
 /// Decodes a binary mapped netlist into the same model used by GV readers.
 pub fn decode_netlist(bytes: &[u8]) -> Result<ParsedNetlist> {
     let message = pb::Netlist::decode(bytes).context("decoding netlist protobuf")?;
+    validate_declarations(&message)?;
     let mut interner = Interner::new();
     let mut interfaces = Vec::with_capacity(message.interfaces.len());
     for interface in message.interfaces {
@@ -72,20 +72,16 @@ fn decode_module(
     nets: &mut Vec<Net>,
     interner: &mut Interner,
 ) -> Result<NetlistModule> {
-    validate_declarations(module)?;
     let name = intern(interner, &module.name)?;
     let start = nets.len();
-    let mut net_names = HashSet::with_capacity(module.nets.len());
     for net in &module.nets {
         let name = intern(interner, &net.name)?;
-        ensure!(net_names.insert(name), "duplicate net name {:?}", net.name);
         nets.push(Net {
             name,
             width: net.range.as_ref().map(|r| (r.left, r.right)),
         });
     }
 
-    drop(net_names);
     let net_index_range = start..nets.len();
     let mut ports = Vec::with_capacity(module.ports.len());
     for port in &module.ports {
@@ -120,8 +116,10 @@ fn decode_module(
             .as_ref()
             .context("assignment is missing its RHS")?;
         let lhs = decode_ref(lhs, &net_index_range)?;
-        if !assign.tran {
-            validate_lvalue(&lhs)?;
+        let rhs = decode_ref(rhs, &net_index_range)?;
+        validate_lvalue(&lhs)?;
+        if assign.tran {
+            validate_lvalue(&rhs)?;
         }
         assigns.push(NetlistAssign {
             kind: if assign.tran {
@@ -130,7 +128,7 @@ fn decode_module(
                 NetlistAssignKind::Continuous
             },
             lhs,
-            rhs: AssignExpr::Leaf(decode_ref(rhs, &net_index_range)?),
+            rhs: AssignExpr::Leaf(rhs),
             span: Span {
                 start: SYNTHETIC_POS,
                 limit: SYNTHETIC_POS,
@@ -139,14 +137,8 @@ fn decode_module(
     }
 
     let mut instances = Vec::with_capacity(module.instances.len());
-    let mut instance_names = HashSet::with_capacity(module.instances.len());
     for instance in &module.instances {
         let instance_name = intern(interner, &instance.name)?;
-        ensure!(
-            instance_names.insert(instance_name),
-            "duplicate instance name {:?}",
-            instance.name
-        );
         let interface = interfaces
             .get(instance.interface as usize)
             .with_context(|| {
@@ -234,12 +226,15 @@ fn decode_ref(reference: &pb::Ref, range: &Range<usize>) -> Result<NetRef> {
             }
         }
         Kind::Literal(literal) => {
+            ensure!(literal.width > 0, "zero-width Verilog literal");
             let width = usize::try_from(literal.width).context("literal width exceeds usize")?;
             NetRef::Literal(IrBits::from_le_bytes(width, &literal.little_endian)?)
         }
+        Kind::UnknownWidth(0) => bail!("zero-width Verilog literal"),
         Kind::UnknownWidth(width) => NetRef::UnknownLiteral(
             usize::try_from(*width).context("unknown literal width exceeds usize")?,
         ),
+        Kind::Concat(concat) if concat.parts.is_empty() => bail!("empty Verilog concatenation"),
         Kind::Concat(concat) => NetRef::Concat(
             concat
                 .parts

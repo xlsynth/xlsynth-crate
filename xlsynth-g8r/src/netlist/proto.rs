@@ -5,6 +5,8 @@
 //! Decoding reconstructs connectivity without a Liberty library. Source
 //! locations, comments and attributes are outside the structural model.
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, ensure};
 
 use super::emit::validate_identifier;
@@ -21,32 +23,94 @@ pub mod pb {
 pub use decode::decode_netlist;
 pub use encode::encode_netlist;
 
-/// Checks that emitted port and wire declarations account for every packed net.
-fn validate_declarations(module: &pb::Module) -> Result<()> {
-    let mut declared = vec![false; module.nets.len()];
+// Prost allows 100 nested messages below the Netlist. Module, Assignment (or
+// Instance), Ref, and a leaf payload such as Literal consume four. Each
+// enclosing concatenation adds a Concat and a Ref for its selected part.
+pub(super) const MAX_CONCAT_DEPTH: usize = (100 - 4) / 2;
+
+/// Records which declarations supply a net's direction, type and packed range.
+#[derive(Clone, Copy, Default)]
+struct Declarations {
+    port: bool,
+    wire: bool,
+    packed_range: bool,
+}
+
+/// Checks declarations in the namespaces used by the emitted Verilog.
+fn validate_declarations(design: &pb::Netlist) -> Result<()> {
+    for interface in &design.interfaces {
+        let mut pins = HashSet::with_capacity(interface.pins.len());
+        for pin in &interface.pins {
+            ensure!(
+                pins.insert(pin),
+                "duplicate pin {pin:?} on cell {:?}",
+                interface.cell
+            );
+        }
+    }
+    let mut modules = HashSet::with_capacity(design.modules.len());
+    for module in &design.modules {
+        ensure!(
+            modules.insert(&module.name),
+            "duplicate module {:?}",
+            module.name
+        );
+        validate_module_declarations(module)
+            .with_context(|| format!("declarations in module {:?}", module.name))?;
+    }
+    Ok(())
+}
+
+/// Ports may redeclare their nets once as wires. Instances share the net
+/// namespace.
+fn validate_module_declarations(module: &pb::Module) -> Result<()> {
+    let mut names = HashSet::with_capacity(module.nets.len() + module.instances.len());
+    for net in &module.nets {
+        ensure!(names.insert(&net.name), "duplicate net {:?}", net.name);
+    }
+    for instance in &module.instances {
+        ensure!(
+            names.insert(&instance.name),
+            "duplicate name {:?} for instance",
+            instance.name
+        );
+    }
+
+    let mut declared = vec![Declarations::default(); module.nets.len()];
     for port in &module.ports {
         let net = module
             .nets
             .get(port.net as usize)
             .context("port net index out of range")?;
+        let decl = &mut declared[port.net as usize];
+        ensure!(!decl.port, "duplicate port {:?}", net.name);
+        decl.port = true;
         if let Some(range) = &port.range {
             ensure!(
                 net.range.as_ref() == Some(range),
                 "port range disagrees with net {}",
                 net.name
             );
-            declared[port.net as usize] = true;
+            decl.packed_range = true;
         }
     }
     for &wire in &module.wires {
-        *declared
+        let decl = declared
             .get_mut(wire as usize)
-            .context("wire net index out of range")? = true;
+            .context("wire net index out of range")?;
+        ensure!(
+            !decl.wire,
+            "duplicate wire {:?}",
+            module.nets[wire as usize].name
+        );
+        decl.wire = true;
     }
     for (net, declared) in module.nets.iter().zip(declared) {
         // The GV reader uses [0:0] for implicit scalar wires.
         ensure!(
-            declared || matches!(net.range, None | Some(pb::Range { left: 0, right: 0 })),
+            declared.wire
+                || declared.packed_range
+                || matches!(net.range, None | Some(pb::Range { left: 0, right: 0 })),
             "packed net {:?} has no range declaration",
             net.name
         );
@@ -54,16 +118,12 @@ fn validate_declarations(module: &pb::Module) -> Result<()> {
     Ok(())
 }
 
-/// A continuous assignment must have a net lvalue, including within a
-/// concatenation.
+/// An assignment target or bidirectional terminal must be a net lvalue.
 fn validate_lvalue(reference: &NetRef) -> Result<()> {
     match reference {
         NetRef::Simple(_) | NetRef::BitSelect(..) | NetRef::PartSelect(..) => Ok(()),
-        NetRef::Concat(parts) => {
-            ensure!(!parts.is_empty(), "empty assignment lvalue");
-            parts.iter().try_for_each(validate_lvalue)
-        }
-        _ => anyhow::bail!("assignment target must be a net, select or concatenation of nets"),
+        NetRef::Concat(parts) => parts.iter().try_for_each(validate_lvalue),
+        _ => anyhow::bail!("expected a net lvalue (net, select or concatenation of nets)"),
     }
 }
 

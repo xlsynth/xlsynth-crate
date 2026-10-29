@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::netlist::io::{read_gv_from_str, read_ugv_from_str};
+use anyhow::Result;
+use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
+use xlsynth_g8r::netlist::io::{
+    read_gv_for_roundtrip_from_path, read_gv_from_str, read_ugv_from_str,
+};
 
 const MIXED_NETLIST: &str = r#"module top(a, y);
   input a;
@@ -116,4 +120,48 @@ endmodule
         error.to_string(),
         include_str!("goldens/ugv_arithmetic.golden.txt").trim_end()
     );
+}
+
+#[test]
+fn roundtrip_reader_rejects_non_ansi_slots_that_would_be_lost() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ports.gv");
+    for (header, declarations) in [
+        ("a,", "input a;"),
+        ("a,a", "input a;"),
+        ("a,b", "input a;"),
+        ("a", "input a,b;"),
+        ("a,a", "input a; input a;"),
+    ] {
+        let source = format!("module top({header}); {declarations} endmodule");
+        std::fs::write(&path, &source)?;
+        assert!(read_gv_for_roundtrip_from_path(&path).is_err(), "{source}");
+        read_gv_from_str(&source)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn escaped_statement_keywords_roundtrip_as_cell_types() -> Result<()> {
+    let source = r#"module top();
+  \assign  u_assign ();
+  \tran  u_tran ();
+endmodule
+"#;
+    let parsed = read_gv_from_str(source)?;
+    let module = &parsed.modules[0];
+    assert_eq!(module.instances.len(), 2);
+    assert_eq!(
+        parsed.interner.resolve(module.instances[0].type_name),
+        Some("assign")
+    );
+    assert_eq!(
+        parsed.interner.resolve(module.instances[1].type_name),
+        Some("tran")
+    );
+    assert_eq!(
+        emit_module_as_netlist_text(module, &parsed.nets, &parsed.interner)?,
+        source
+    );
+    Ok(())
 }

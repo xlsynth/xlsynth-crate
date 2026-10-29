@@ -4,8 +4,10 @@ use super::pb::r#ref::Kind;
 use super::{decode_netlist, encode_netlist, pb};
 use crate::netlist::emit::emit_module_as_netlist_text;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
+use crate::netlist::parse::{AssignExpr, NetRef};
 use anyhow::Result;
 use prost::Message;
+use xlsynth_pir::IrBits;
 
 const MAPPED_GV: &str = r#"
 module leaf(bus, y, pad);
@@ -127,6 +129,21 @@ fn rejects_invalid_declarations_and_interfaces() -> Result<()> {
         }),
         ("bad wire index", |m| m.modules[0].wires.push(1)),
         ("bad port index", |m| m.modules[0].ports[0].net = 1),
+        ("duplicate module name", |m| {
+            m.modules.push(m.modules[0].clone())
+        }),
+        ("duplicate port", |m| {
+            let ports = &mut m.modules[0].ports;
+            ports.push(ports[0].clone());
+        }),
+        ("duplicate wire", |m| m.modules[0].wires = vec![0, 0]),
+        ("net and instance share a name", |m| {
+            m.modules[0].instances[0].name = "a".into()
+        }),
+        ("duplicate pin", |m| {
+            m.interfaces[0].pins.push("A".into());
+            m.modules[0].instances[0].nets = vec![0, 0];
+        }),
         ("bad interface index", |m| {
             m.modules[0].instances[0].interface = 1
         }),
@@ -157,6 +174,57 @@ fn rejects_invalid_declarations_and_interfaces() -> Result<()> {
         );
     }
     assert!(decode_netlist(&[0xff]).is_err());
+    Ok(())
+}
+
+#[test]
+fn rejects_empty_values_inside_pin_expressions() -> Result<()> {
+    let mut parsed = read_gv_from_str("module top(); INV u(.A(1'b1)); endmodule")?;
+    let mut wire = pb::Netlist::decode(encode_netlist(&parsed)?.as_slice())?;
+    for (reference, kind) in [
+        (
+            NetRef::Literal(IrBits::zero(0)),
+            Kind::Literal(pb::Literal::default()),
+        ),
+        (NetRef::UnknownLiteral(0), Kind::UnknownWidth(0)),
+        (
+            NetRef::Concat(Vec::new()),
+            Kind::Concat(pb::Concat::default()),
+        ),
+    ] {
+        // Even when nested inside a valid nonempty concat, these cannot emit
+        // GV.
+        parsed.modules[0].instances[0].connections[0].1 = NetRef::Concat(vec![reference]);
+        assert!(encode_netlist(&parsed).is_err());
+        wire.modules[0].instances[0].connections[0].kind = Some(Kind::Concat(pb::Concat {
+            parts: vec![pb::Ref { kind: Some(kind) }],
+        }));
+        assert!(decode_netlist(&wire.encode_to_vec()).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn tran_requires_two_net_lvalues() -> Result<()> {
+    for invalid_lhs in [true, false] {
+        let mut parsed = read_gv_from_str("module top(inout a, inout b); tran(a, b); endmodule")?;
+        let mut wire = pb::Netlist::decode(encode_netlist(&parsed)?.as_slice())?;
+        let assign = &mut parsed.modules[0].assigns[0];
+        let message = &mut wire.modules[0].assigns[0];
+        if invalid_lhs {
+            assign.lhs = NetRef::UnknownLiteral(1);
+            message.lhs = Some(pb::Ref {
+                kind: Some(Kind::UnknownWidth(1)),
+            });
+        } else {
+            assign.rhs = AssignExpr::Leaf(NetRef::UnknownLiteral(1));
+            message.rhs = Some(pb::Ref {
+                kind: Some(Kind::UnknownWidth(1)),
+            });
+        }
+        assert!(encode_netlist(&parsed).is_err());
+        assert!(decode_netlist(&wire.encode_to_vec()).is_err());
+    }
     Ok(())
 }
 

@@ -7,6 +7,8 @@ module top(a, y);
   input [1:0] a;
   output y;
   wire [3:0] bus;
+  wire from_leaf;
   assign bus = {a, 2'b01};
-  leaf inst (.a(bus), .y(y));
+  assign y = from_leaf;
+  leaf inst (.a(bus), .y(from_leaf));
 endmodule
