@@ -3705,6 +3705,9 @@ If `prover` cannot load the toolchain, it exits with code `1` and writes an `exe
 
 #### Proof subprocess result protocol
 
+For timing fields in direct, tactic, and scheduled JSON reports, see
+[Reading proof timings](../xlsynth-prover/README.md#reading-proof-timings).
+
 The driver and its proof workers must be built from the same revision; see the
 [proof engine's revision compatibility policy](../xlsynth-prover/README.md#revision-compatibility).
 

@@ -117,6 +117,7 @@ fn write_task_diagnostics(node: &ProverReportNode, writer: &mut impl Write) -> i
             outcome: Some(outcome),
             stdout,
             stderr,
+            ..
         } => {
             match outcome {
                 TaskOutcome::Normal { success: false } => {
@@ -170,6 +171,7 @@ mod tests {
     #[test]
     fn tactic_diagnostics_preserve_errors_and_omit_canceled_tasks() {
         let mut tasks = vec![ProverReportNode::Task {
+            timing: Default::default(),
             task_id: Some("counterexample".into()),
             cmdline: Some("driver prove-counterexample".into()),
             outcome: Some(TaskOutcome::Normal { success: false }),
@@ -187,6 +189,7 @@ mod tests {
             IndefiniteReason::Cleanup,
         ] {
             tasks.push(ProverReportNode::Task {
+                timing: Default::default(),
                 task_id: Some(format!("{reason:?}")),
                 cmdline: Some("driver prove-property".into()),
                 outcome: Some(TaskOutcome::Indefinite { reason }),
@@ -196,6 +199,7 @@ mod tests {
         }
         for outcome in [None, Some(TaskOutcome::Normal { success: true })] {
             tasks.push(ProverReportNode::Task {
+                timing: Default::default(),
                 task_id: Some("quiet".into()),
                 cmdline: None,
                 outcome,

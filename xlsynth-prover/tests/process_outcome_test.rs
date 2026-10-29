@@ -247,7 +247,9 @@ fn group_without_logical_results_is_indefinite(kind: GroupKind, keep_running: bo
 fn timeout_preserves_captured_diagnostics() {
     // The shell writes diagnostics before waiting for the scheduler to kill it.
     let backend = Backend::new(&[("timeout", None, "while :; do :; done")]).unwrap();
-    let report = run_prover_plan_with_driver(task("timeout", Some(500)), 1, &backend.path).unwrap();
+    let timeout_ms = 500;
+    let report =
+        run_prover_plan_with_driver(task("timeout", Some(timeout_ms)), 1, &backend.path).unwrap();
     assert!(!report.plan.proof_status().is_proved());
     assert_eq!(
         task_outcome(&report.plan),
@@ -255,11 +257,21 @@ fn timeout_preserves_captured_diagnostics() {
             reason: IndefiniteReason::Timeout,
         })
     );
-    let ProverReportNode::Task { stdout, stderr, .. } = report.plan else {
+    let ProverReportNode::Task {
+        stdout,
+        stderr,
+        timing,
+        ..
+    } = report.plan
+    else {
         panic!("expected a task report");
     };
     assert_eq!(stdout.as_deref(), Some("timeout stdout\n"));
     assert_eq!(stderr.as_deref(), Some("timeout stderr\n"));
+    let worker_wall = timing.worker_wall_micros.unwrap();
+    assert!(worker_wall >= timeout_ms * 1000);
+    assert!(timing.queued_micros.unwrap() + worker_wall <= report.wall_micros.unwrap());
+    assert!(timing.worker_timing.is_none());
 }
 
 #[test_case(false; "missing driver")]
@@ -279,10 +291,13 @@ fn launch_failure_is_an_execution_error(exists: bool) {
             reason: IndefiniteReason::ExecutionError,
         })
     );
-    let ProverReportNode::Task { stderr, .. } = report.plan else {
+    let ProverReportNode::Task { stderr, timing, .. } = report.plan else {
         panic!("expected a task report");
     };
     assert!(!stderr.expect("launch error diagnostic").is_empty());
+    assert!(timing.queued_micros.unwrap() <= report.wall_micros.unwrap());
+    assert!(timing.worker_wall_micros.is_none());
+    assert!(timing.worker_timing.is_none());
 }
 
 #[test_case(Some("{broken json"), "exit 0", Some(IndefiniteReason::ProtocolError); "malformed output")]
@@ -413,7 +428,9 @@ fn process_outcomes_only_roll_back_actual_child_disproofs(
             assert_eq!(targets.len(), 1);
             assert_eq!(targets[0].0, "root/skeleton");
             Ok(ProverReport {
+                wall_micros: None,
                 plan: ProverReportNode::Task {
+                    timing: Default::default(),
                     task_id: Some(targets[0].0.clone()),
                     cmdline: None,
                     outcome: Some(ProofStatus::Proved.into()),

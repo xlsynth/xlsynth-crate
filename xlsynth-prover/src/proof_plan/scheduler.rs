@@ -22,9 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::proof_outcome::ProofResultHeader;
+use crate::proof_timing::{ProofTiming, micros};
 
 use super::config::{GroupKind, ProofDriver, ProverPlan, ProverTask, resolve_driver_exe};
-use super::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome};
+use super::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome, TaskTiming};
 
 use log::{debug, info, trace, warn};
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
@@ -38,6 +39,27 @@ use std::path::Path;
 struct ProcessResult {
     outcome: TaskOutcome,
     diagnostic: Option<String>,
+    worker_timing: Option<ProofTiming>,
+}
+
+/// The timing extension of a worker response, decoded independently of its
+/// verdict.
+#[derive(serde::Deserialize)]
+struct WorkerMeasurement<'a> {
+    #[serde(borrow)]
+    timing: &'a serde_json::value::RawValue,
+}
+
+/// Ignores absent or malformed telemetry while preserving the validated
+/// verdict.
+fn read_worker_timing(data: &str) -> Option<ProofTiming> {
+    let worker: WorkerMeasurement = serde_json::from_str(data).ok()?;
+    let raw = worker.timing.get();
+    // Serde also accepts positional arrays for structs; require named timings.
+    if !raw.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(raw).ok()
 }
 
 impl ProcessResult {
@@ -46,6 +68,7 @@ impl ProcessResult {
         Self {
             outcome: TaskOutcome::indefinite(reason),
             diagnostic: Some(message.into()),
+            worker_timing: None,
         }
     }
 }
@@ -65,6 +88,7 @@ struct TaskNode {
     timeout_ms: Option<u64>,
     task_id: Option<String>,
     state: TaskState,
+    timing: TaskTiming,
     // Captured outputs after task completion; None until completed.
     completed_stdout: Option<String>,
     completed_stderr: Option<String>,
@@ -87,6 +111,14 @@ struct GroupNode {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 /// Stable index into the scheduler's node arena.
 struct NodeId(usize);
+
+/// A launched worker stays tracked through reap, even after logical
+/// cancellation.
+#[derive(Debug)]
+struct TrackedChild {
+    task_id: NodeId,
+    launched_at: Instant,
+}
 
 #[derive(Debug)]
 /// Task-specific or group-specific data stored at a plan node.
@@ -126,7 +158,7 @@ pub struct Scheduler {
     // Running task ids set for fast membership.
     running: HashSet<NodeId>,
     // pid -> task node mapping for efficient waitpid handling.
-    pid_to_node: HashMap<i32, NodeId>,
+    pid_to_node: HashMap<i32, TrackedChild>,
     // Queue to iterate scheduling in a fair-ish manner.
     round_robin: VecDeque<NodeId>,
     // Concurrency limit.
@@ -141,6 +173,8 @@ pub struct Scheduler {
     cancel_flag: Arc<AtomicBool>,
     deadlines: BTreeMap<Instant, Vec<NodeId>>,
     driver: ProofDriver,
+    run_started_at: Option<Instant>,
+    wall_micros: Option<u64>,
 }
 
 impl Scheduler {
@@ -188,6 +222,8 @@ impl Scheduler {
             cancel_flag,
             deadlines: BTreeMap::new(),
             driver: driver.into(),
+            run_started_at: None,
+            wall_micros: None,
         };
         // Precompute planned cmdlines for all tasks so short-circuited tasks
         // still report one.
@@ -225,6 +261,7 @@ impl Scheduler {
     /// - On cancellation, cancels unresolved tasks and reports their outcomes.
     /// - Maintains `running.len() <= max_procs` at all times.
     pub fn run(&mut self) -> io::Result<ProverReport> {
+        self.run_started_at.get_or_insert_with(Instant::now);
         loop {
             // Check for cancellation request.
             if self.cancel_flag.load(Ordering::Relaxed) {
@@ -265,6 +302,7 @@ impl Scheduler {
         }
         Ok(ProverReport {
             plan: self.build_report_node(self.root),
+            wall_micros: self.wall_micros,
         })
     }
 
@@ -365,9 +403,10 @@ impl Scheduler {
     /// Postconditions:
     /// - Child process spawned; becomes its own process group leader.
     /// - Task state becomes `Running { pid }`.
-    /// - `running` contains `task_id`; `pid_to_node[pid] == task_id`.
+    /// - `running` contains `task_id`; `pid_to_node[pid]` records its launch.
     /// - A temp JSON file is created and tracked in `json_files`.
     fn spawn_task(&mut self, task_id: NodeId) -> io::Result<()> {
+        self.record_dequeue(task_id, Instant::now());
         let node = &mut self.nodes[task_id.0];
         // Build command and tempfiles; only insert into maps after successful
         // spawn.
@@ -431,6 +470,7 @@ impl Scheduler {
             };
 
         let child = cmd.spawn()?;
+        let launched_at = Instant::now();
         let pid_i32 = child.id() as i32;
 
         // Now that spawn succeeded, store tempfiles and cmdline.
@@ -452,8 +492,34 @@ impl Scheduler {
             );
         }
         self.running.insert(task_id);
-        self.pid_to_node.insert(pid_i32, task_id);
+        self.pid_to_node.insert(
+            pid_i32,
+            TrackedChild {
+                task_id,
+                launched_at,
+            },
+        );
         Ok(())
+    }
+
+    /// Ends queue residence before command setup or when a queued task is
+    /// canceled.
+    fn record_dequeue(&mut self, tid: NodeId, now: Instant) {
+        let start = *self.run_started_at.get_or_insert(now);
+        let NodeInner::Task(task) = &mut self.nodes[tid.0].inner else {
+            unreachable!("only tasks enter the scheduling queue");
+        };
+        task.timing.queued_micros = Some(micros(now.duration_since(start)));
+    }
+
+    /// Closes a worker interval when waitpid reports its exit or ECHILD.
+    fn observe_reap(&mut self, pid: i32, now: Instant) -> Option<NodeId> {
+        let child = self.pid_to_node.remove(&pid)?;
+        let NodeInner::Task(task) = &mut self.nodes[child.task_id.0].inner else {
+            unreachable!("only tasks launch workers");
+        };
+        task.timing.worker_wall_micros = Some(micros(now.duration_since(child.launched_at)));
+        Some(child.task_id)
     }
 
     /// Ensures none of `tids` remain in `round_robin` nor `task_ids`.
@@ -521,7 +587,7 @@ impl Scheduler {
                         continue;
                     }
                     if raw == libc::ECHILD {
-                        if let Some(tid) = self.pid_to_node.remove(&pid) {
+                        if let Some(tid) = self.observe_reap(pid, Instant::now()) {
                             if self.is_task_indefinite(tid) {
                                 self.capture_task_output(tid, None);
                                 self.remove_task_bookkeeping(tid);
@@ -540,7 +606,7 @@ impl Scheduler {
             }
 
             // rc > 0: child state available; complete bookkeeping for this pid.
-            if let Some(tid) = self.pid_to_node.remove(&pid) {
+            if let Some(tid) = self.observe_reap(pid, Instant::now()) {
                 // If the task was already indefinite, do not convert it to
                 // normal or bubble up.
                 let was_indefinite = self.is_task_indefinite(tid);
@@ -631,9 +697,12 @@ impl Scheduler {
                 ),
             );
         }
+        // Timing is optional telemetry. Parse it separately after validating
+        // the proof so older or malformed timing cannot change the outcome.
         ProcessResult {
             outcome: report.status.into(),
             diagnostic: None,
+            worker_timing: read_worker_timing(&data),
         }
     }
 
@@ -665,6 +734,10 @@ impl Scheduler {
 
     /// Completes an attempt and propagates only its validated logical outcome.
     fn finish_task(&mut self, tid: NodeId, result: ProcessResult) -> io::Result<()> {
+        let NodeInner::Task(task) = &mut self.nodes[tid.0].inner else {
+            unreachable!("only tasks return worker results");
+        };
+        task.timing.worker_timing = result.worker_timing;
         self.set_outcome(tid, result.outcome);
         self.capture_task_output(tid, result.diagnostic);
         self.remove_task_bookkeeping(tid);
@@ -917,6 +990,7 @@ impl Scheduler {
                 self.set_outcome(id, TaskOutcome::indefinite(indefinite_reason));
                 match prior_state {
                     TaskState::NotStarted => {
+                        self.record_dequeue(id, Instant::now());
                         debug!("prover: canceled (not-started) task");
                     }
                     TaskState::Running { pid } => {
@@ -991,6 +1065,7 @@ impl Scheduler {
                     outcome,
                     stdout,
                     stderr,
+                    timing: t.timing.clone(),
                 }
             }
             NodeInner::Group(g) => {
@@ -1016,6 +1091,7 @@ impl Scheduler {
     /// - Reaps all remaining children until none remain (blocking).
     /// After return, no child processes should remain.
     pub fn cleanup_tasks(&mut self) -> io::Result<()> {
+        let start = *self.run_started_at.get_or_insert_with(Instant::now);
         // Prevent any further scheduling if this instance somehow continues.
         self.cancel_flag.store(true, Ordering::Relaxed);
         info!("prover: cleanup starting (best-effort) ");
@@ -1041,7 +1117,7 @@ impl Scheduler {
                         }
                         if raw == libc::ECHILD {
                             // Already reaped elsewhere; drop bookkeeping.
-                            if let Some(tid) = self.pid_to_node.remove(&pid) {
+                            if let Some(tid) = self.observe_reap(pid, Instant::now()) {
                                 self.capture_task_output(tid, None);
                             }
                             reaped_any = true;
@@ -1050,9 +1126,9 @@ impl Scheduler {
                     }
                     warn!("prover: waitpid during cleanup failed: {}", err);
                     // Drop from bookkeeping to avoid getting stuck.
-                    if let Some(tid) = self.pid_to_node.remove(&pid) {
+                    if let Some(child) = self.pid_to_node.remove(&pid) {
                         self.capture_task_output(
-                            tid,
+                            child.task_id,
                             Some(format!("waitpid during cleanup failed: {err}")),
                         );
                     }
@@ -1061,7 +1137,7 @@ impl Scheduler {
                 }
 
                 // rc > 0
-                if let Some(tid) = self.pid_to_node.remove(&pid) {
+                if let Some(tid) = self.observe_reap(pid, Instant::now()) {
                     self.capture_task_output(tid, None);
                 }
                 trace!("prover: reaped child pid={} during cleanup", pid);
@@ -1079,6 +1155,8 @@ impl Scheduler {
             }
         }
 
+        self.wall_micros
+            .get_or_insert_with(|| micros(start.elapsed()));
         warn!("prover: cleanup complete");
         Ok(())
     }
@@ -1112,6 +1190,7 @@ impl PlanBuilder {
                     timeout_ms,
                     task_id,
                     state: TaskState::NotStarted,
+                    timing: TaskTiming::default(),
                     completed_stdout: None,
                     completed_stderr: None,
                 }),
@@ -1193,6 +1272,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use test_case::test_case;
 
     /// Keeps the fake driver alive and reaps its processes even after a panic.
     struct TestScheduler {
@@ -1256,6 +1336,88 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_worker_intervals_start_after_dispatch_and_close_once() {
+        let plan = ProverPlan::Group {
+            kind: GroupKind::All,
+            tasks: vec![task("a"), task("b")],
+            keep_running_till_finish: false,
+        };
+        let mut scheduler = Scheduler::new_with_driver(
+            plan,
+            2,
+            Arc::new(AtomicBool::new(false)),
+            Path::new("unused"),
+        );
+        let start = Instant::now();
+        scheduler.run_started_at = Some(start);
+        let at = |micros| start + Duration::from_micros(micros);
+        let a = scheduler.task_ids[0];
+        let b = scheduler.task_ids[1];
+        // Both workers are alive from t=15 through t=29. Their queue and
+        // worker intervals exclude command setup between dispatch and launch.
+        scheduler.record_dequeue(a, at(0));
+        scheduler.pid_to_node.insert(
+            1,
+            TrackedChild {
+                task_id: a,
+                launched_at: at(5),
+            },
+        );
+        scheduler.record_dequeue(b, at(11));
+        scheduler.pid_to_node.insert(
+            2,
+            TrackedChild {
+                task_id: b,
+                launched_at: at(15),
+            },
+        );
+        assert_eq!(scheduler.observe_reap(2, at(29)), Some(b));
+        assert_eq!(scheduler.observe_reap(1, at(34)), Some(a));
+        assert_eq!(scheduler.observe_reap(2, at(40)), None);
+        for (id, queue, worker) in [(a, 0, 29), (b, 11, 14)] {
+            let ProverReportNode::Task { timing, .. } = scheduler.build_report_node(id) else {
+                panic!("expected a task");
+            };
+            assert_eq!(
+                timing,
+                TaskTiming {
+                    queued_micros: Some(queue),
+                    worker_wall_micros: Some(worker),
+                    worker_timing: None,
+                },
+            );
+        }
+    }
+
+    #[test_case(r#"{"wall_micros":7}"#, 0, Some(7); "valid worker timing")]
+    #[test_case(r#"{"wall_micros":7}"#, 1, None; "inconsistent exit")]
+    #[test_case(r#"{"wall_micros":-1}"#, 0, None; "negative duration")]
+    #[test_case(r#"[7]"#, 0, None; "positional timing")]
+    fn only_validated_results_supply_worker_timing(timing: &str, exit: i32, expected: Option<u64>) {
+        let mut scheduler = Scheduler::new_with_driver(
+            task("result"),
+            1,
+            Arc::new(AtomicBool::new(false)),
+            Path::new("unused"),
+        );
+        let result_file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            result_file.path(),
+            format!(r#"{{"status":"proved","success":true,"timing":{timing}}}"#),
+        )
+        .unwrap();
+        scheduler.json_files.insert(scheduler.root, result_file);
+        let result = scheduler.read_task_result(scheduler.root, exit << 8);
+        let expected_outcome = if exit == 0 {
+            TaskOutcome::success()
+        } else {
+            TaskOutcome::indefinite(IndefiniteReason::ProcessFailure)
+        };
+        assert_eq!(result.outcome, expected_outcome);
+        assert_eq!(result.worker_timing.map(|t| t.wall_micros), expected);
+    }
+
+    #[test]
     fn externally_reaped_task_completes_as_process_failure() {
         let mut fixture = TestScheduler::new(
             r#"#!/bin/sh
@@ -1295,9 +1457,18 @@ printf 'task stderr\n' >&2
             report.plan.proof_status(),
             crate::proof_outcome::ProofStatus::ExecutionError
         );
-        let ProverReportNode::Task { stdout, stderr, .. } = report.plan else {
+        let ProverReportNode::Task {
+            stdout,
+            stderr,
+            timing,
+            ..
+        } = report.plan
+        else {
             panic!("expected a task report");
         };
+        assert!(timing.queued_micros.is_some());
+        assert!(timing.worker_wall_micros.is_some());
+        assert!(timing.worker_timing.is_none());
         assert_eq!(stdout.as_deref(), Some("task stdout\n"));
         assert_eq!(
             stderr.as_deref(),
@@ -1319,11 +1490,11 @@ output="$1"
 printf '%s stdout\n' "$mode"
 printf '%s stderr\n' "$mode" >&2
 kill -STOP "$$"
-printf '%s\n' '{"status":"proved","success":true}' > "$output"
+printf '%s\n' '{"status":"proved","success":true,"timing":{"wall_micros":7}}' > "$output"
 "#,
             ProverPlan::Group {
                 kind: GroupKind::First,
-                tasks: vec![task("winner"), task("canceled")],
+                tasks: vec![task("winner"), task("canceled"), task("queued")],
                 keep_running_till_finish: false,
             },
         )
@@ -1332,7 +1503,7 @@ printf '%s\n' '{"status":"proved","success":true}' > "$output"
         scheduler.fill_slots().unwrap();
         let children = scheduler.get_group_node(scheduler.root).children.clone();
         let mut winner_pid = None;
-        for child in &children {
+        for child in &children[..2] {
             let NodeInner::Task(TaskNode {
                 state: TaskState::Running { pid },
                 ..
@@ -1349,7 +1520,13 @@ printf '%s\n' '{"status":"proved","success":true}' > "$output"
             }
         }
         assert_eq!(unsafe { libc::kill(winner_pid.unwrap(), libc::SIGCONT) }, 0);
-        let report = scheduler.run().unwrap().plan;
+        let report = scheduler.run().unwrap();
+        assert!(report.wall_micros.is_some());
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::to_value(scheduler.run().unwrap()).unwrap(),
+        );
+        let report = report.plan;
         assert!(report.proof_status().is_proved());
         assert!(scheduler.pid_to_node.is_empty());
         assert!(scheduler.outputs.is_empty());
@@ -1358,6 +1535,7 @@ printf '%s\n' '{"status":"proved","success":true}' > "$output"
             outcome,
             stdout,
             stderr,
+            timing,
             ..
         } = report.find_task_node("canceled").unwrap()
         else {
@@ -1371,6 +1549,25 @@ printf '%s\n' '{"status":"proved","success":true}' > "$output"
         );
         assert_eq!(stdout.as_deref(), Some("canceled stdout\n"));
         assert_eq!(stderr.as_deref(), Some("canceled stderr\n"));
+        assert!(timing.queued_micros.is_some());
+        assert!(timing.worker_wall_micros.is_some());
+        assert!(timing.worker_timing.is_none());
+
+        let ProverReportNode::Task { timing, .. } = report.find_task_node("queued").unwrap() else {
+            panic!("expected the queued sibling");
+        };
+        assert!(timing.queued_micros.is_some());
+        assert!(timing.worker_wall_micros.is_none());
+        assert!(timing.worker_timing.is_none());
+
+        let ProverReportNode::Task { timing, .. } = report.find_task_node("winner").unwrap() else {
+            panic!("expected the winner");
+        };
+        assert!(timing.worker_wall_micros.is_some());
+        assert_eq!(
+            timing.worker_timing.as_ref().map(|t| t.wall_micros),
+            Some(7)
+        );
     }
 
     #[test]
@@ -1403,6 +1600,7 @@ kill -STOP "$$"
             outcome,
             stdout,
             stderr,
+            timing,
             ..
         } = scheduler.build_report_node(scheduler.root)
         else {
@@ -1416,5 +1614,7 @@ kill -STOP "$$"
         );
         assert_eq!(stdout.as_deref(), Some("task stdout\n"));
         assert_eq!(stderr.as_deref(), Some("task stderr\n"));
+        assert!(timing.worker_wall_micros.is_some());
+        assert!(timing.worker_timing.is_none());
     }
 }

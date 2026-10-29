@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::proof_outcome::{ProofResultHeader, ProofStatus};
+use crate::proof_timing::ProofTiming;
 
 use super::config::GroupKind;
 
@@ -137,6 +138,30 @@ impl serde::Serialize for TaskOutcome {
     }
 }
 
+/// Parent-observed scheduling intervals and any timing the worker reported.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskTiming {
+    /// Time from scheduler start until dispatch or cancellation in the queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_micros: Option<u64>,
+    /// Time from successful launch until the scheduler observes termination.
+    /// Includes polling and, for a running canceled task, teardown until reap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_wall_micros: Option<u64>,
+    /// Present when a validated worker result supplied its own measurements.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_timing: Option<ProofTiming>,
+}
+
+impl TaskTiming {
+    /// Whether neither the scheduler nor the worker supplied a measurement.
+    pub fn is_empty(&self) -> bool {
+        self.queued_micros.is_none()
+            && self.worker_wall_micros.is_none()
+            && self.worker_timing.is_none()
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 /// A proof-plan node with its outcome and captured task output.
@@ -147,6 +172,8 @@ pub enum ProverReportNode {
         outcome: Option<TaskOutcome>,
         stdout: Option<String>,
         stderr: Option<String>,
+        #[serde(skip_serializing_if = "TaskTiming::is_empty")]
+        timing: TaskTiming,
     },
     Group {
         kind: GroupKind,
@@ -204,6 +231,8 @@ impl ProverReportNode {
 /// Overall plan outcome together with the complete report tree.
 pub struct ProverReport {
     pub plan: ProverReportNode,
+    /// Wall time from scheduler start through child cleanup.
+    pub wall_micros: Option<u64>,
 }
 
 impl Serialize for ProverReport {
@@ -217,10 +246,13 @@ impl Serialize for ProverReport {
             #[serde(flatten)]
             conclusion: ProofResultHeader,
             plan: &'a ProverReportNode,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            wall_micros: Option<u64>,
         }
         Report {
             conclusion: self.plan.proof_status().into(),
             plan: &self.plan,
+            wall_micros: self.wall_micros,
         }
         .serialize(serializer)
     }
@@ -233,6 +265,7 @@ mod tests {
     #[test]
     fn group_setup_error_is_preserved_when_children_have_no_outcome() {
         let report = ProverReport {
+            wall_micros: None,
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
                 outcome: Some(ProofStatus::ExecutionError.into()),
@@ -242,6 +275,7 @@ mod tests {
                     outcome: None,
                     stdout: None,
                     stderr: None,
+                    timing: TaskTiming::default(),
                 }],
             },
         };

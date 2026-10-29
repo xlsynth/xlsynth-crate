@@ -21,7 +21,9 @@ impl ProofTiming {
 
 impl From<Duration> for ProofTiming {
     fn from(duration: Duration) -> Self {
-        Self { wall_micros: micros(duration) }
+        Self {
+            wall_micros: micros(duration),
+        }
     }
 }
 

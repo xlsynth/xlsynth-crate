@@ -396,6 +396,9 @@ pub enum EquivResult {
 #[derive(Debug, Clone)]
 pub struct EquivReport {
     pub duration: Duration,
+    /// Wall time for this request, including preparation before backend
+    /// dispatch.
+    pub timing: crate::proof_timing::ProofTiming,
     pub result: EquivResult,
 }
 

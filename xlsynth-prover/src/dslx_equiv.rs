@@ -277,6 +277,7 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         EquivResult::Error(msg) => Err(msg),
         other => Ok(EquivReport {
             duration,
+            timing: duration.into(),
             result: other,
         }),
     }
