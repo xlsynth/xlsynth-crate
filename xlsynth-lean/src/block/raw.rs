@@ -18,10 +18,14 @@ use xlsynth_pir::{
 
 use crate::block::BlockContext;
 
-/// Emit a self-contained Lean module for the arbiter/operator-control subset.
+/// Emit a self-contained Lean model of a verified XLS block.
+/// Return an error if the block uses an unsupported operation.
 ///
 /// Pass a verified block borrowed from `package`, whose file table supplies
-/// source locations in diagnostics and generated comments.
+/// source locations in diagnostics and generated comments. For saved IR, run
+/// native XLS verification and typed PIR validation on the same input.
+/// Revalidate the package if you modify it before emission.
+///
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
 /// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
