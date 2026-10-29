@@ -21,12 +21,42 @@ const LEAN_SUPPORT_FILES: &[(&str, &str)] = &[
     ("lean-toolchain", include_str!("../lean/lean-toolchain")),
 ];
 
-/// Returns support module paths in dependency order.
-pub(crate) fn lean_support_module_paths() -> impl Iterator<Item = &'static str> {
-    lean_support_paths().filter(|relative_path| relative_path.ends_with(".lean"))
+macro_rules! proof_module {
+    ($name:literal) => {
+        (
+            concat!("XlsynthLean/Proof/", $name, ".lean"),
+            include_str!(concat!("../lean/XlsynthLean/Proof/", $name, ".lean")),
+        )
+    };
 }
 
-/// Returns every embedded support artifact path.
+/// Proof-only modules, compiled in dependency order.
+const PROOF_SUPPORT_FILES: &[(&str, &str)] = &[
+    proof_module!("Claim"),
+    proof_module!("Miter"),
+    proof_module!("Decide"),
+    proof_module!("Outputs"),
+    proof_module!("Rebuild"),
+    proof_module!("Leaves"),
+    proof_module!("Rewrite"),
+    proof_module!("Domain"),
+    proof_module!("Substitute"),
+    proof_module!("Cut"),
+    proof_module!("Sparse"),
+    (
+        "XlsynthLean/Proof.lean",
+        include_str!("../lean/XlsynthLean/Proof.lean"),
+    ),
+];
+
+/// Returns support module paths in dependency order.
+pub(crate) fn lean_support_module_paths() -> impl Iterator<Item = &'static str> {
+    lean_support_paths()
+        .filter(|relative_path| relative_path.ends_with(".lean"))
+        .chain(PROOF_SUPPORT_FILES.iter().map(|(path, _)| *path))
+}
+
+/// Returns the support artifacts shared with the circuit evaluator.
 pub(crate) fn lean_support_paths() -> impl Iterator<Item = &'static str> {
     LEAN_SUPPORT_FILES
         .iter()
@@ -36,7 +66,22 @@ pub(crate) fn lean_support_paths() -> impl Iterator<Item = &'static str> {
 /// Writes the companion Lean support files into `root` using portable relative
 /// paths.
 pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
-    for (relative_path, contents) in LEAN_SUPPORT_FILES {
+    write_evaluation_support(root)?;
+    write_proof_support(root)
+}
+
+/// Writes the modules and toolchain pin needed by the circuit evaluator.
+pub(crate) fn write_evaluation_support(root: &Path) -> Result<(), LeanError> {
+    write_support_files(root, LEAN_SUPPORT_FILES)
+}
+
+/// Stages the tactics shipped with the proof checker.
+pub(crate) fn write_proof_support(root: &Path) -> Result<(), LeanError> {
+    write_support_files(root, PROOF_SUPPORT_FILES)
+}
+
+fn write_support_files(root: &Path, files: &[(&str, &str)]) -> Result<(), LeanError> {
+    for (relative_path, contents) in files {
         write_file(root, Path::new(relative_path), contents.as_bytes())?;
     }
     Ok(())

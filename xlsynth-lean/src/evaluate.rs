@@ -10,7 +10,7 @@ use xlsynth_g8r::aig::GateFn;
 use xlsynth_ir_value::IrBits;
 
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{write_file, write_lean_support};
+use crate::support::{write_evaluation_support, write_file};
 use crate::{LeanCircuitBundle, LeanError, LeanExportOptions, export_gate_fn};
 
 /// Reusable evaluator that compiles the companion Lean support modules once.
@@ -50,7 +50,7 @@ impl LeanEvaluator {
             .prefix("xlsynth-lean-support-")
             .tempdir()
             .map_err(LeanError::TemporaryDirectory)?;
-        write_lean_support(support_root.path())?;
+        write_evaluation_support(support_root.path())?;
         let version_output = run_lean_process(
             &lean_executable,
             support_root.path(),
