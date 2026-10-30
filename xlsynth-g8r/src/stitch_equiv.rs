@@ -24,8 +24,15 @@ use crate::prove_gate_fn_equiv_sat::{
 };
 
 mod correspondence;
+mod stage_functions;
 mod stage_graph;
 mod stage_script;
+mod vectors;
+
+pub(crate) use vectors::check_stitch_vectors;
+pub use vectors::{
+    StitchInputRow, StitchVectorCounts, StitchVectorMismatch, StitchVectorResult, StitchVectors,
+};
 
 #[cfg(feature = "has-bitwuzla")]
 mod behavioral;
@@ -69,18 +76,33 @@ impl StitchObservation<'_> {
     ) -> Option<bool> {
         let (_, edges) = frames.split_last()?;
         let start = edges.len().saturating_sub(latency);
-        if let Some(reset) = self.reset
-            && edges[start..]
-                .iter()
-                .any(|frame| frame[reset].is_zero() == self.reset_active_low)
-        {
-            // Synchronous reset clears every valid register at this edge.
+        let source = (edges.len() >= latency).then(|| &frames[start]);
+        self.valid_for_source(
+            source,
+            self.reset.is_some()
+                && edges[start..]
+                    .iter()
+                    .any(|frame| self.reset_asserted(frame)),
+        )
+    }
+
+    /// Tests the reset level that will be sampled at this frame's edge.
+    fn reset_asserted(&self, frame: &BTreeMap<String, IrBits>) -> bool {
+        self.reset
+            .is_some_and(|reset| frame[reset].is_zero() == self.reset_active_low)
+    }
+
+    /// Qualifies the originating data row once its input edge is known, or a
+    /// reset flushed it.
+    fn valid_for_source(
+        &self,
+        source: Option<&BTreeMap<String, IrBits>>,
+        reset_since_source: bool,
+    ) -> Option<bool> {
+        if reset_since_source {
             return Some(false);
         }
-        (edges.len() >= latency).then(|| {
-            self.input_valid
-                .is_none_or(|valid| !frames[start][valid].is_zero())
-        })
+        source.map(|frame| self.input_valid.is_none_or(|valid| !frame[valid].is_zero()))
     }
 
     /// Tests the named outputs that are observable at the end of this trace.

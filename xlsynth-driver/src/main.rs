@@ -141,6 +141,7 @@ mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
 mod sequential_eval_io;
+mod stitch_check_vectors;
 mod stitch_equiv;
 mod toolchain_config;
 mod tools;
@@ -772,6 +773,7 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommand(stitch_check_vectors::command())
         .subcommand(stitch_equiv::command())
         .subcommand(
             clap::Command::new("g8r-stitch-pipeline")
@@ -4047,6 +4049,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-stitch-g8r-pipeline", subm)) => {
             dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
+        }
+        Some(("stitch-check-vectors", subm)) => {
+            if let Err(error) = stitch_check_vectors::handle(subm) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("stitch-check-vectors"),
+                    vec![],
+                );
+            }
         }
         Some(("stitch-equiv", subm)) => {
             if let Err(error) = stitch_equiv::handle(subm) {

@@ -4009,7 +4009,7 @@ Notes
 
 ### Shared DSLX stitch specification
 
-`dslx-stitch-pipeline`, `dslx-stitch-g8r-pipeline`, and `stitch-equiv` accept
+`dslx-stitch-pipeline`, `dslx-stitch-g8r-pipeline`, `stitch-equiv`, and `stitch-check-vectors` accept
 the same TOML file via `--spec <PATH>`. The example manifest below selects
 `muladd_cycle0` and `muladd_cycle1`. The first stage multiplies `x` by `y` and carries `z` alongside the product. The second adds `z`. Both operations use `u8` arithmetic. [Two-cycle multiply-add source and manifest](examples/stitch-equiv)
 
@@ -4022,7 +4022,7 @@ flop_outputs = true
 
 - Supply either `dslx_top` for implicit stage discovery or `stages = ["align", "finish"]` for an explicit order. `output_module_name` defaults to `dslx_top` and is required with `stages`.
 - Implicit stage indices start at zero, are contiguous, and have no leading zeros. Each selected stage needs a concrete data-only IR entry point. A private stage that lowers only to an implicit-token function is rejected by name.
-- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. All three commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
+- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. These commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
 - `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The multiply-add example above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
 - A stage with one aggregate parameter receives the entire preceding result. Multiple parameters consume slices of the packed result from least-significant bits upward in parameter declaration order. The proof uses the same wiring as the generators.
 - `clock_name` defaults to `"clk"`. Optional `input_valid_signal`, `output_valid_signal`, `reset`, and `reset_active_low` configure the generated valid pipeline. Both `output_valid_signal` and `reset` require `input_valid_signal`. Reset is synchronous and active high by default. Setting `reset_active_low = true` requires a named `reset`.
@@ -4149,6 +4149,53 @@ An interrupted stage solve triggers fallback in `auto` mode. In `stages` mode
 an interrupted or failed obligation exits nonzero and identifies the stage and
 any selected split leaf. An inconclusive whole-pipeline check or an unsupported
 input also exits nonzero with a diagnostic.
+
+### `stitch-check-vectors` runs concrete inputs through DSLX and mapped gates
+
+Interprets the behavioral XLS stage functions and simulates the selected mapped
+module continuously, starting its registers at zero. Each input row occupies
+one clock cycle. For latency `L`, data from row `t` is compared at cycle
+`t + L` when its valid transaction survives the intervening synchronous reset
+edges. If the wrapper exposes output valid, every defined valid indication is
+compared, including bubbles and reset flushes. The checker appends `L` drain
+cycles with zero data, input valid low and reset inactive. An empty stream or
+a stream with no observable comparisons produces an error.
+
+Supply one of two input sources. `--input-irvals` reads one named record per
+line with every external input except the clock, including configured control
+ports. Use packed bit values with the port widths declared by the stitch
+interface. Entry order within a row is arbitrary. `--random-samples` generates
+a reproducible stream, including bubbles and occasional resets. Its last row
+has valid asserted and reset inactive so at least one transaction retires.
+
+- `--spec PATH` — Required stitch TOML specification.
+- `--netlist PATH` — Required mapped gate-level Verilog.
+- `--liberty-proto PATH` — Required Liberty proto for the mapped cells.
+- `--module-name NAME` — Mapped top module. Defaults to the stitch wrapper name.
+- `--input-irvals PATH` — Named input rows, one per cycle.
+- `--random-samples COUNT` — Generate a positive number of input rows.
+- `--seed SEED` — Random generator seed. Defaults to 0 in random mode.
+
+```text
+{x: bits[8]:42, vin: bits[1]:1, rst_n: bits[1]:1}
+{x: bits[8]:17, vin: bits[1]:0, rst_n: bits[1]:1}
+```
+
+```sh
+xlsynth-driver stitch-check-vectors --spec pipe.toml --netlist pipe.gv \
+  --liberty-proto cells.pb --random-samples 256 --seed 42
+xlsynth-driver stitch-check-vectors --spec pipe.toml --netlist pipe.gv \
+  --liberty-proto cells.pb --input-irvals inputs.irvals
+```
+
+Stages and their helpers must have deterministic output bits. The checker
+rejects `smulp` and `umulp` because XLS specifies only the sum of the partial
+products, while concrete implementations can return different component bits.
+
+A successful run reports how many rows and outputs it checked. A disagreement
+reports the first failing cycle, the output's expected and actual values, and
+the input rows at the originating and observation cycles. Cycle and row indices
+start at zero. Use `stitch-equiv` for a proof covering all permitted traces.
 
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 

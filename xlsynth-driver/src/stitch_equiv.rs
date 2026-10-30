@@ -13,19 +13,41 @@ use xlsynth_g8r::stitch_equiv::{
     StitchProofSolver,
 };
 
+/// Identifies the same behavioral spec, mapped top and cell library for both
+/// stitch checks.
+pub(crate) fn design_args() -> [Arg; 4] {
+    [
+        Arg::new("spec")
+            .long("spec")
+            .required(true)
+            .value_name("PATH")
+            .value_parser(value_parser!(PathBuf))
+            .help("TOML stitch specification"),
+        Arg::new("netlist")
+            .long("netlist")
+            .required(true)
+            .value_name("PATH")
+            .value_parser(value_parser!(PathBuf))
+            .help("Mapped gate-level Verilog netlist"),
+        Arg::new("liberty-proto")
+            .long("liberty-proto")
+            .required(true)
+            .value_name("PATH")
+            .value_parser(value_parser!(PathBuf))
+            .help("Liberty proto describing the mapped cells"),
+        Arg::new("module-name")
+            .long("module-name")
+            .value_name("NAME")
+            .help("Mapped top module (defaults to the stitch specification's wrapper name)"),
+    ]
+}
+
 /// Defines the clocked equivalence check between a stitch spec and mapped
 /// gates.
 pub fn command() -> Command {
     Command::new("stitch-equiv")
         .about("Proves output equivalence of a DSLX stitch pipeline and mapped gates under the spec's valid and reset protocol")
-        .arg(Arg::new("spec").long("spec").required(true).value_name("PATH")
-            .value_parser(value_parser!(PathBuf)).help("TOML stitch specification"))
-        .arg(Arg::new("netlist").long("netlist").required(true).value_name("PATH")
-            .value_parser(value_parser!(PathBuf)).help("Mapped gate-level Verilog netlist"))
-        .arg(Arg::new("liberty-proto").long("liberty-proto").required(true).value_name("PATH")
-            .value_parser(value_parser!(PathBuf)).help("Liberty proto describing the mapped cells"))
-        .arg(Arg::new("module-name").long("module-name").value_name("NAME")
-            .help("Mapped top module (defaults to the stitch specification's wrapper name)"))
+        .args(design_args())
         .arg(Arg::new("solver").long("solver").value_name("SOLVER")
             .value_parser(["bitwuzla", "cadical"])
             .default_value(match StitchProofSolver::default() {

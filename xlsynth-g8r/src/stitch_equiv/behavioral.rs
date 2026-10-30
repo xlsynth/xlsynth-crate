@@ -9,19 +9,14 @@ use std::ops::Range;
 use xlsynth::ir_package::IrPackage;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{self, Binop, NodePayload, Unop};
-use xlsynth_pir::ir_eval::eval_fn_in_package_value;
-use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::ir_utils::external_function_references;
-use xlsynth_pir::ir_value_utils::{
-    flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
-};
-use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_prover::prover::translate::ir_to_smt_data;
 use xlsynth_prover::prover::types::{FnInputs, IrTypedBitVec, ProverFn};
 use xlsynth_prover::solver::{BitVec, Solver};
 
-use crate::aig::sequential_pipeline::{StitchedGatePipeline, stitch_gate_fns_with_layout};
-use crate::aig::{AigBitVector, GateBuilder, GateBuilderOptions, SequentialPipelineOptions};
+use super::stage_functions;
+use super::stage_functions::named_inputs;
+use crate::aig::SequentialPipelineOptions;
+use crate::aig::sequential_pipeline::StitchedGatePipeline;
 
 /// Data Q words in parameter order followed by the optional valid Q.
 struct RegisterLayer {
@@ -76,71 +71,6 @@ pub(crate) struct BehavioralPipeline {
     output_layer: Option<RegisterLayer>,
     boundary: SequentialPipelineOptions,
     register_count: usize,
-}
-
-// The native translator uses recursive calls on the stage proof worker stack.
-const MAX_CALL_DEPTH: usize = 64;
-
-/// Returns the longest callee chain, counting this function. A pending cache
-/// entry denotes a function on the current path.
-fn call_height<'a>(
-    functions: &BTreeMap<&'a str, &'a ir::Fn>,
-    function: &'a ir::Fn,
-    remaining: usize,
-    heights: &mut HashMap<&'a str, Option<usize>>,
-) -> Result<usize, String> {
-    let cached = heights.get(function.name.as_str()).copied();
-    if remaining == 0 || cached.flatten().is_some_and(|height| height > remaining) {
-        return Err(format!(
-            "Bitwuzla stitch proofs support at most {MAX_CALL_DEPTH} nested XLS functions including the stage. Inline helpers to shorten the call chain"
-        ));
-    }
-    if let Some(height) = cached {
-        return height.ok_or_else(|| format!("recursive IR call to function '{}'", function.name));
-    }
-    heights.insert(&function.name, None);
-    let mut height = 1;
-    for node in &function.nodes {
-        if let NodePayload::Invoke { to_apply, .. }
-        | NodePayload::CountedFor { body: to_apply, .. } = &node.payload
-        {
-            let callee = functions.get(to_apply.as_str()).ok_or_else(|| {
-                format!(
-                    "missing IR callee '{to_apply}' in function '{}'",
-                    function.name
-                )
-            })?;
-            height = height.max(1 + call_height(functions, callee, remaining - 1, heights)?);
-        }
-    }
-    heights.insert(&function.name, Some(height));
-    Ok(height)
-}
-
-/// Bounds recursive package verification and translation before accessing any
-/// unverified operands. Check stage roots first to report the DSLX stage name.
-fn check_call_depths(package: &ir::Package, names: &[(String, String)]) -> Result<(), String> {
-    let functions: BTreeMap<_, _> = package
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            ir::PackageMember::Function(f) => Some((f.name.as_str(), f)),
-            ir::PackageMember::Block(_) => None,
-        })
-        .collect();
-    let mut heights = HashMap::new();
-    for (stage, name) in names {
-        let root = functions
-            .get(name.as_str())
-            .ok_or_else(|| format!("stage '{stage}': no IR function '{name}'"))?;
-        call_height(&functions, root, MAX_CALL_DEPTH, &mut heights)
-            .map_err(|e| format!("stage '{stage}': {e}"))?;
-    }
-    // The package verifier also visits any functions outside the stage roots.
-    for function in functions.values() {
-        call_height(&functions, function, MAX_CALL_DEPTH, &mut heights)?;
-    }
-    Ok(())
 }
 
 /// Rejects operations without a value encoding in the function SMT translator.
@@ -232,38 +162,7 @@ impl BehavioralPipeline {
         names: &[(String, String)],
         boundary: &SequentialPipelineOptions,
     ) -> Result<Self, String> {
-        let mut members = Vec::new();
-        let mut visited = HashSet::new();
-        for (stage, root) in names {
-            let mut pending = vec![root.clone()];
-            while let Some(name) = pending.pop() {
-                if !visited.insert(name.clone()) {
-                    continue;
-                }
-                let declaration = source
-                    .get_function(&name)
-                    .and_then(|f| f.to_ir_string())
-                    .map_err(|e| {
-                        format!("stage '{stage}': could not read XLS function '{name}': {e}")
-                    })?;
-                // Read the behavioral body even for FFI helpers. Extension
-                // metadata describes an implementation that may disagree
-                // with the XLS function being specified.
-                let function = Parser::new(&declaration)
-                    .parse_function_declaration()
-                    .map_err(|e| {
-                        format!("stage '{stage}': could not read XLS function '{name}': {e}")
-                    })?;
-                pending.extend(external_function_references(&function));
-                members.push(ir::PackageMember::Function(function));
-            }
-        }
-        let package = ir::Package {
-            name: "behavioral_stages".into(),
-            members,
-            file_table: ir::FileTable::new(),
-            top: None,
-        };
+        let package = stage_functions::load_stage_package(source, names)?;
         Self::new(package, names, boundary)
     }
 
@@ -273,11 +172,7 @@ impl BehavioralPipeline {
         names: &[(String, String)],
         boundary: &SequentialPipelineOptions,
     ) -> Result<Self, String> {
-        if names.is_empty() {
-            return Err("behavioral pipeline needs at least one stage".into());
-        }
-        check_call_depths(&package, names)?;
-        verify_package(&package).map_err(|e| format!("invalid behavioral stage IR: {e}"))?;
+        stage_functions::validate_stage_package(&package, names)?;
         let mut stages = Vec::with_capacity(names.len());
         let mut register_count = 0;
         let has_valid = boundary.input_valid_signal.is_some();
@@ -339,20 +234,18 @@ impl BehavioralPipeline {
     /// Builds the ABI and state layout from IR signatures alone. Data outputs
     /// are placeholders and must never be used to evaluate or prove behavior.
     pub(crate) fn interface_layout(&self) -> Result<StitchedGatePipeline, String> {
-        let mut interfaces = Vec::with_capacity(self.stages.len());
-        for stage in &self.stages {
-            let func = self.function(stage)?;
-            let mut builder = GateBuilder::new(stage.name.clone(), GateBuilderOptions::no_opt());
-            for param in func.param_nodes() {
-                builder.add_input(param.param_name().into(), param.ty.bit_count());
-            }
-            builder.add_output(
-                "output_value".into(),
-                AigBitVector::zeros(func.ret_ty.bit_count()),
-            );
-            interfaces.push(builder.build());
-        }
-        stitch_gate_fns_with_layout(&interfaces, &self.boundary)
+        stage_functions::interface_layout(&self.resolve_functions()?, &self.boundary)
+    }
+
+    /// Resolves the proof stages for interface construction and interpreter
+    /// replay.
+    fn resolve_functions(&self) -> Result<Vec<stage_functions::StageFunction<'_>>, String> {
+        stage_functions::resolve_functions(
+            &self.package,
+            self.stages
+                .iter()
+                .map(|stage| (stage.name.as_str(), stage.ir_name.as_str())),
+        )
     }
 
     /// Returns the ordered D and visible output width of a stage obligation.
@@ -445,7 +338,7 @@ impl BehavioralPipeline {
             ));
         }
         let external = if index == 0 {
-            named_inputs(stage, func, inputs, BitVec::get_width)?
+            named_inputs(&stage.name, func, inputs, BitVec::get_width)?
         } else {
             Vec::new()
         };
@@ -529,7 +422,7 @@ impl BehavioralPipeline {
                     })
                     .collect()
             } else {
-                named_inputs(stage, func, inputs, BitVec::get_width)?
+                named_inputs(&stage.name, func, inputs, BitVec::get_width)?
             };
             previous = Some(self.translate(solver, stage, func, &args)?);
         }
@@ -542,81 +435,8 @@ impl BehavioralPipeline {
         &self,
         inputs: &BTreeMap<String, IrBits>,
     ) -> Result<IrBits, String> {
-        let mut previous: Option<Vec<bool>> = None;
-        for stage in &self.stages {
-            let func = self.function(stage)?;
-            let flat = if let Some(bits) = previous.take() {
-                bits
-            } else {
-                let words = named_inputs(stage, func, inputs, IrBits::get_bit_count)?;
-                let mut bits = Vec::new();
-                for word in words {
-                    for i in 0..word.get_bit_count() {
-                        bits.push(word.get_bit(i).map_err(|e| e.to_string())?);
-                    }
-                }
-                bits
-            };
-            let mut offset = 0;
-            let args = func
-                .param_nodes()
-                .map(|p| {
-                    let end = offset + p.ty.bit_count();
-                    let bits = flat.get(offset..end).ok_or_else(|| {
-                        format!(
-                            "stage '{}': missing packed input bits for '{}'",
-                            stage.name,
-                            p.param_name()
-                        )
-                    })?;
-                    offset = end;
-                    ir_value_from_lsb0_bits_with_layout(&p.ty, bits).map_err(|e| {
-                        format!(
-                            "stage '{}', parameter '{}': {e}",
-                            stage.name,
-                            p.param_name()
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            let result = eval_fn_in_package_value(&self.package, func, &args);
-            let mut bits = Vec::with_capacity(func.ret_ty.bit_count());
-            flatten_ir_value_to_lsb0_bits_for_type(&result, &func.ret_ty, &mut bits)
-                .map_err(|e| format!("stage '{}': {e}", stage.name))?;
-            previous = Some(bits);
-        }
-        previous
-            .map(|bits| IrBits::from_lsb_is_0(&bits))
-            .ok_or_else(|| "behavioral pipeline needs at least one stage".into())
+        stage_functions::compose_concrete(&self.package, &self.resolve_functions()?, inputs)
     }
-}
-
-/// Binds external ports by name, checking widths before either evaluator runs.
-fn named_inputs<T: Clone>(
-    stage: &Stage,
-    func: &ir::Fn,
-    inputs: &BTreeMap<String, T>,
-    width: impl Fn(&T) -> usize,
-) -> Result<Vec<T>, String> {
-    // A frame may also carry wrapper valid and reset inputs. Only the stage's
-    // declared data parameters participate in the DSLX call.
-    func.param_nodes()
-        .map(|p| {
-            let name = p.param_name();
-            let value = inputs.get(name).ok_or_else(|| {
-                format!("stage '{}': missing external input '{name}'", stage.name)
-            })?;
-            if width(value) != p.ty.bit_count() {
-                return Err(format!(
-                    "stage '{}': external input '{name}' expects {} bits, got {}",
-                    stage.name,
-                    p.ty.bit_count(),
-                    width(value)
-                ));
-            }
-            Ok(value.clone())
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -626,6 +446,7 @@ mod tests {
 
     use super::*;
     use crate::aig::ClockPort;
+    use xlsynth_pir::ir_parser::Parser;
     use xlsynth_prover::solver::{
         Response,
         bitwuzla::{Bitwuzla, BitwuzlaOptions},
