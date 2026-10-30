@@ -900,7 +900,9 @@ fn referenced_function_postorder(
         let function = resolve_function(package, top, function_name)?;
         for node in &function.nodes {
             let callee = match &node.payload {
-                NodePayload::Invoke { to_apply, .. } => Some(to_apply),
+                NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
+                    Some(to_apply)
+                }
                 NodePayload::CountedFor { body, .. } => Some(body),
                 _ => None,
             };
@@ -1603,7 +1605,7 @@ struct ScratchPlan {
     in_place_array_updates: HashSet<NodeRef>,
     gate_zero_offset: Option<usize>,
     gate_zero_byte_count: usize,
-    invoke_sites: HashMap<NodeRef, InvokeScratchPlan>,
+    call_sites: HashMap<NodeRef, CallScratchPlan>,
     counted_for_sites: HashMap<NodeRef, CountedForScratchPlan>,
     trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     runtime_scalar_offsets: HashMap<NodeRef, usize>,
@@ -1612,8 +1614,9 @@ struct ScratchPlan {
     alignment: usize,
 }
 
+/// Scratch for the argument pointers and result storage of an invoke or map.
 #[derive(Debug)]
-struct InvokeScratchPlan {
+struct CallScratchPlan {
     pointer_array_offset: Option<usize>,
     scalar_operand_offsets: Vec<Option<usize>>,
     output_offset: Option<usize>,
@@ -1665,7 +1668,7 @@ impl ScratchPlan {
             assign_materialized_scratch_offsets(function, order)?;
         let (gate_zero_offset, gate_zero_byte_count) =
             reserve_gate_zero_storage(function, order, &mut byte_count, &mut alignment)?;
-        let mut invoke_sites = HashMap::new();
+        let mut call_sites = HashMap::new();
         let mut counted_for_sites = HashMap::new();
         let mut trace_sites = HashMap::new();
         let mut runtime_scalar_offsets = HashMap::new();
@@ -1733,8 +1736,10 @@ impl ScratchPlan {
             }
         }
         for node_ref in order {
-            let NodePayload::Invoke { operands, .. } = &function.get_node(*node_ref).payload else {
-                continue;
+            let operands = match &function.get_node(*node_ref).payload {
+                NodePayload::Invoke { operands, .. } => operands.as_slice(),
+                NodePayload::Map { array, .. } => std::slice::from_ref(array),
+                _ => continue,
             };
             let mut scalar_operand_offsets = Vec::with_capacity(operands.len());
             for operand in operands {
@@ -1761,7 +1766,7 @@ impl ScratchPlan {
                     .checked_mul(std::mem::size_of::<*const u8>())
                     .ok_or_else(|| {
                         CompilerError::UnsupportedType(
-                            "invoke pointer array scratch size overflow".into(),
+                            "call argument pointer storage size overflow".into(),
                         )
                     })?;
                 Some(reserve_scratch_region(
@@ -1769,7 +1774,7 @@ impl ScratchPlan {
                     &mut alignment,
                     pointer_array_byte_count,
                     std::mem::align_of::<*const u8>(),
-                    "invoke pointer array scratch size overflow",
+                    "call argument pointer storage size overflow",
                 )?)
             };
             let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
@@ -1781,12 +1786,12 @@ impl ScratchPlan {
                     &mut alignment,
                     result_layout.byte_count(),
                     result_layout.alignment(),
-                    "invoke output scratch size overflow",
+                    "call result storage size overflow",
                 )?)
             };
-            invoke_sites.insert(
+            call_sites.insert(
                 *node_ref,
-                InvokeScratchPlan {
+                CallScratchPlan {
                     pointer_array_offset,
                     scalar_operand_offsets,
                     output_offset,
@@ -1893,7 +1898,7 @@ impl ScratchPlan {
             in_place_array_updates,
             gate_zero_offset,
             gate_zero_byte_count,
-            invoke_sites,
+            call_sites,
             counted_for_sites,
             trace_sites,
             runtime_scalar_offsets,
@@ -1917,7 +1922,7 @@ impl ScratchPlan {
         if let Some(offset) = &mut self.gate_zero_offset {
             rebase(offset)?;
         }
-        for plan in self.invoke_sites.values_mut() {
+        for plan in self.call_sites.values_mut() {
             if let Some(offset) = &mut plan.pointer_array_offset {
                 rebase(offset)?;
             }
@@ -3023,12 +3028,11 @@ fn lower_function(
                 );
                 ComputedValue::ZeroSized
             }
-            NodePayload::Invoke { to_apply, operands } => lower_invoke(
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => lower_call(
                 builder,
                 function,
                 *node_ref,
                 to_apply,
-                operands,
                 &values,
                 &layout,
                 scratch_pointer,
@@ -4024,13 +4028,13 @@ fn lower_function(
     Ok(())
 }
 
+/// Calls a compiled callee once per invocation or per array element.
 #[allow(clippy::too_many_arguments)]
-fn lower_invoke(
+fn lower_call(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
     node_ref: NodeRef,
     to_apply: &str,
-    operands: &[NodeRef],
     values: &[Option<ComputedValue>],
     result_layout: &NativeValueLayout,
     scratch_pointer: Value,
@@ -4039,9 +4043,9 @@ fn lower_invoke(
     function_targets: &HashMap<String, FuncRef>,
     pointer_type: ClifType,
 ) -> Result<ComputedValue, CompilerError> {
-    let plan = scratch_plan.invoke_sites.get(&node_ref).ok_or_else(|| {
+    let plan = scratch_plan.call_sites.get(&node_ref).ok_or_else(|| {
         CompilerError::InvalidFunction(format!(
-            "invoke node {} has no scratch assignment",
+            "call node {} has no scratch assignment",
             function.get_node(node_ref).text_id
         ))
     })?;
@@ -4049,23 +4053,6 @@ fn lower_invoke(
         .pointer_array_offset
         .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
         .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
-    for (index, operand) in operands.iter().enumerate() {
-        let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
-        let pointer = invoke_operand_pointer(
-            builder,
-            computed_value_for(values, *operand)?,
-            &layout,
-            plan.scalar_operand_offsets[index],
-            scratch_pointer,
-            pointer_type,
-        )?;
-        builder.ins().store(
-            MemFlags::new(),
-            pointer,
-            inputs_pointer,
-            (index * std::mem::size_of::<*const u8>()) as i32,
-        );
-    }
     let output_pointer = plan
         .output_offset
         .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
@@ -4073,14 +4060,107 @@ fn lower_invoke(
     let target = function_targets.get(to_apply).copied().ok_or_else(|| {
         CompilerError::InvalidFunction(format!("missing lowered function target '{to_apply}'"))
     })?;
-    emit_checked_compiled_function_call(
-        builder,
-        target,
-        inputs_pointer,
-        output_pointer,
-        scratch_pointer,
-        execution_context,
-    );
+    match &function.get_node(node_ref).payload {
+        NodePayload::Invoke { operands, .. } => {
+            for (index, operand) in operands.iter().enumerate() {
+                let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+                let pointer = invoke_operand_pointer(
+                    builder,
+                    computed_value_for(values, *operand)?,
+                    &layout,
+                    plan.scalar_operand_offsets[index],
+                    scratch_pointer,
+                    pointer_type,
+                )?;
+                builder.ins().store(
+                    MemFlags::new(),
+                    pointer,
+                    inputs_pointer,
+                    (index * std::mem::size_of::<*const u8>()) as i32,
+                );
+            }
+            emit_checked_compiled_function_call(
+                builder,
+                target,
+                inputs_pointer,
+                output_pointer,
+                scratch_pointer,
+                execution_context,
+            );
+        }
+        NodePayload::Map { array, .. } => {
+            let input_layout = NativeValueLayout::from_type(&function.get_node(*array).ty)?;
+            let (
+                NativeValueLayout::Array {
+                    element,
+                    element_count,
+                },
+                NativeValueLayout::Array {
+                    element: result_element,
+                    ..
+                },
+            ) = (&input_layout, result_layout)
+            else {
+                return Err(CompilerError::InvalidFunction(
+                    "map requires array input and output".into(),
+                ));
+            };
+            let array_pointer = invoke_operand_pointer(
+                builder,
+                computed_value_for(values, *array)?,
+                &input_layout,
+                None,
+                scratch_pointer,
+                pointer_type,
+            )?;
+            // Keep a single native call site regardless of array length. The
+            // callee still runs for every zero-sized element to preserve
+            // events.
+            let header = builder.create_block();
+            let body = builder.create_block();
+            let done = builder.create_block();
+            let index = builder.append_block_param(header, pointer_type);
+            let zero = builder.ins().iconst(pointer_type, 0);
+            builder.ins().jump(header, &[zero.into()]);
+            builder.switch_to_block(header);
+            let in_bounds =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThan, index, *element_count as i64);
+            builder.ins().brif(in_bounds, body, &[], done, &[]);
+            builder.switch_to_block(body);
+            builder.seal_block(body);
+            let input_element = array_element_pointer_from_address_index(
+                builder,
+                array_pointer,
+                index,
+                element.byte_count(),
+            );
+            let output_element = array_element_pointer_from_address_index(
+                builder,
+                output_pointer,
+                index,
+                result_element.byte_count(),
+            );
+            builder
+                .ins()
+                .store(MemFlags::new(), input_element, inputs_pointer, 0);
+            emit_checked_compiled_function_call(
+                builder,
+                target,
+                inputs_pointer,
+                output_element,
+                scratch_pointer,
+                execution_context,
+            );
+            let next = builder.ins().iadd_imm(index, 1);
+            builder.ins().jump(header, &[next.into()]);
+            builder.seal_block(header);
+            builder.switch_to_block(done);
+            builder.seal_block(done);
+        }
+        _ => unreachable!("expected invoke or map in call lowering"),
+    }
     Ok(load_value_from_storage(
         builder,
         output_pointer,

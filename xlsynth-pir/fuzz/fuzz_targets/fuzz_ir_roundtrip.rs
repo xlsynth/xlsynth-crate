@@ -18,6 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let options = RandomFnOptions {
         allow_arbitrary_width_multiply: true,
         allow_gate: true,
+        allow_map: true,
         allow_events: true,
         array_assumption_mode: ArrayAssumptionMode::Unrestricted,
         ..RandomFnOptions::default()

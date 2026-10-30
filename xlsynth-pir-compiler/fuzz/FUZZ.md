@@ -8,10 +8,10 @@ Run:
 cargo fuzz run fuzz_pir_function_compiler_eval_equiv
 ```
 
-This target uses `xlsynth_pir::ir_random` to construct typed scalar PIR
-packages directly from the fuzzer byte stream, with widths limited to the
-current native-value execution boundary. Generated packages may include
-`counted_for` loop bodies. It evaluates the same generated arguments through
+This target generates PIR packages with scalar operations on bits up to 64
+bits wide. It also generates one-dimensional arrays so it can map unary
+functions over those scalars. Generated packages may call helpers with
+`invoke` and `counted_for`. It evaluates the same generated arguments through
 `xlsynth_pir::ir_eval` and through `xlsynth-pir-compiler`, then requires
 identical returned values. Each compiled graph is exercised with
 32 reproducible argument sets rather than decoding arguments directly from the
@@ -47,7 +47,8 @@ indexing, aggregate equality/inequality, aggregate-valued gate or selection
 results, and default-only `sel` nodes. It also exercises tuple-valued
 extension results such as `ext_normalize_left` and XLS partial-product
 multiply tuples, along with `after_all`, `cover`, `assert`, and `trace`.
-Generated packages may include aggregate-valued `counted_for` carries.
+Generated packages may map unary functions over aggregate elements and use
+aggregate-valued `counted_for` carries.
 Generated array operations also exercise `assumed_in_bounds=true` and compare
 reported out-of-bounds assumption violations.
 Observable event results are compared as unordered multisets because independent
@@ -79,7 +80,7 @@ graphs as well as genuinely large values. It also generates token-based
 runtime results. It also generates `assumed_in_bounds=true` array operations
 and compares reported out-of-bounds violations. The target enables every
 operation provided by the random PIR function generator, including
-`counted_for`.
+`map` over arrays of wide values and `counted_for`.
 Each compiled graph is exercised with 32 reproducible argument sets from the
 [shared mixed-vector sampler](../../FUZZ.md#shared-concrete-input-sampling).
 

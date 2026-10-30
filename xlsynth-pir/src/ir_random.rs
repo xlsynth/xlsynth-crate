@@ -352,7 +352,8 @@ pub struct RandomFnOptions {
     /// Maximum total number of generated functions, including the top, when
     /// constructing a package.
     pub max_functions: usize,
-    /// Maximum number of invoke nodes emitted in any one generated function.
+    /// Maximum combined number of `invoke` and `map` nodes per generated
+    /// function.
     pub max_invokes_per_function: usize,
     /// Allows fixed-array maps of generated unary functions, sharing the invoke
     /// budget.
@@ -905,6 +906,8 @@ pub fn generate_fn<S: EntropySource>(
 /// Each function body is generated node by node. An ordinary node request
 /// occasionally emits an `invoke` or `counted_for` to a completed function or
 /// recursively creates a new callee with an independently generated signature.
+/// With `allow_map`, a map can call a fresh unary leaf function whose input
+/// and output have the array element type.
 /// Functions under construction are never eligible callees, so the resulting
 /// call graph is acyclic by construction.
 pub fn generate_package<S: EntropySource>(
