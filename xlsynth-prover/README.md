@@ -105,6 +105,33 @@ values, so assuming valid inputs for a helper could falsely prove its callers
 equivalent. This stronger requirement means a decomposition can fail even when
 a direct proof restricted to valid root inputs succeeds.
 
+## Reading proof timings
+
+Direct equivalence and assertion reports carry `timing.wall_micros`: elapsed
+wall time in the library proof request. QuickCheck reports record it for the
+whole suite (including shared preparation) and for each named property. Existing
+`time_micros` fields retain their previous command-specific scopes.
+
+In a plan, `wall_micros` measures the scheduler run including cleanup. Each
+task's `timing.queued_micros` measures time from the start of scheduling until
+dispatch or cancellation. `worker_wall_micros` measures from successful launch
+until the parent observes the exit, including polling delay. A task that never
+launched has no worker wall time. A worker whose report and exit agree may also
+provide `worker_timing`, measured inside the proof routine. The difference
+between the two wall times can include startup, report I/O, teardown, and
+polling; it does not isolate scheduler delay.
+
+Tactic output associates measured attempts with their selectors in
+`report.attempts`, including work later discarded by rollback. The library's
+`ScriptReport` stores the invocation's wall time in `timing.wall_micros`.
+The worker JSON exposes that same measurement in both the standalone report
+(`report.timing`) and the shared worker envelope (`timing`).
+If the command fails before it can return a script report, its error
+report's `timing.wall_micros` includes preparation of the obligation tree.
+Parallel attempts can overlap, so their times do not add up to invocation wall time.
+Missing timing is distinct from zero. Timing is diagnostic and never determines
+whether an obligation was proved.
+
 ## Process backend
 
 On Unix, `dslx_tactics::process::execute_script` runs the same engine using an

@@ -150,6 +150,7 @@ impl<'a> IrEquivRequest<'a> {
 
 /// Dispatches an IR equivalence comparison using the requested solver.
 pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String> {
+    let request_start = Instant::now();
     let choice = request.solver.unwrap_or(SolverChoice::Bitwuzla);
     let prover = prover_for_choice_with_limits(choice, request.tool_path, request.solver_limits);
     let (lhs_pkg, lhs_fn_dropped) = ir_utils::parse_package_and_drop_params(
@@ -189,6 +190,7 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
         EquivResult::Error(msg) => Err(msg),
         other => Ok(EquivReport {
             duration,
+            timing: request_start.elapsed().into(),
             result: other,
         }),
     }
@@ -198,6 +200,7 @@ impl From<EquivReport> for ProofSummary {
     fn from(report: EquivReport) -> Self {
         Self {
             time_micros: report.duration.as_micros(),
+            timing: report.timing.clone(),
             conclusion: ProofStatus::from(&report.result).into(),
             error_str: report.error_str(),
         }
@@ -231,12 +234,14 @@ mod tests {
         ] {
             let outcome = ProofSummary::from(EquivReport {
                 duration: Duration::ZERO,
+                timing: Duration::from_micros(11).into(),
                 result,
             });
             assert_eq!(
                 serde_json::to_value(outcome).unwrap(),
                 serde_json::json!({
                     "time_micros": 0,
+                    "timing": { "wall_micros": 11 },
                     "status": status,
                     "success": status == "proved",
                     "error_str": error,

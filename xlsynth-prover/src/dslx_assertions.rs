@@ -46,6 +46,8 @@ pub enum AssertionUfMappings {
 /// Result of a DSLX assertion proof.
 pub struct DslxAssertionsReport {
     pub duration: Duration,
+    /// Wall time for this request, including typechecking and IR preparation.
+    pub timing: crate::proof_timing::ProofTiming,
     pub result: BoolPropertyResult,
 }
 
@@ -136,7 +138,11 @@ fn serialize_output(output: &FnOutput) -> AssertionOutput {
 /// counterexamples.
 impl From<DslxAssertionsReport> for AssertionsOutcome {
     fn from(report: DslxAssertionsReport) -> Self {
-        let DslxAssertionsReport { result, duration } = report;
+        let DslxAssertionsReport {
+            result,
+            duration,
+            timing,
+        } = report;
         let status = ProofStatus::from(&result);
         let (counterexample, error_str) = match result {
             BoolPropertyResult::Proved => (None, None),
@@ -155,6 +161,7 @@ impl From<DslxAssertionsReport> for AssertionsOutcome {
             summary: ProofSummary {
                 conclusion: status.into(),
                 time_micros: duration.as_micros(),
+                timing,
                 error_str,
             },
             counterexample,
@@ -280,6 +287,7 @@ pub fn add_assertions_property_function(
 pub fn run_dslx_assertions(
     request: &DslxAssertionsRequest<'_>,
 ) -> Result<DslxAssertionsReport, String> {
+    let request_start = Instant::now();
     validate_dslx_paths(
         std::iter::once(request.path)
             .chain(request.dslx_stdlib_path)
@@ -357,6 +365,7 @@ pub fn run_dslx_assertions(
     );
     Ok(DslxAssertionsReport {
         duration: start.elapsed(),
+        timing: request_start.elapsed().into(),
         result,
     })
 }
@@ -467,11 +476,13 @@ fn __itok__f(__token: token id=1, __activation: bits[1] id=2, x: bits[8] id=3) -
             let outcome = AssertionsOutcome::from(DslxAssertionsReport {
                 result,
                 duration: Duration::ZERO,
+                timing: Duration::from_micros(11).into(),
             });
             assert_eq!(
                 serde_json::to_value(outcome).unwrap(),
                 serde_json::json!({
                     "time_micros": 0,
+                    "timing": { "wall_micros": 11 },
                     "status": status,
                     "success": status == "proved",
                     "counterexample": null,
@@ -509,11 +520,13 @@ fn __itok__f(__token: token id=1, __activation: bits[1] id=2, x: bits[8] id=3) -
         let outcome = AssertionsOutcome::from(DslxAssertionsReport {
             result,
             duration: Duration::from_micros(123),
+            timing: Duration::from_micros(456).into(),
         });
         assert_eq!(
             serde_json::to_value(outcome).unwrap(),
             serde_json::json!({
                 "time_micros": 123,
+                "timing": { "wall_micros": 456 },
                 "status": "disproved",
                 "success": false,
                 "counterexample": {

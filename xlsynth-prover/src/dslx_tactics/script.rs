@@ -4,13 +4,17 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::dslx_tactics::obligations::ProverObligation;
 use crate::dslx_tactics::tactics::{IsTactic, Tactic};
 use crate::proof_outcome::{ProofResultHeader, ProofStatus};
-use crate::proof_plan::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome};
+use crate::proof_plan::report::{
+    IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome, TaskTiming,
+};
+use crate::proof_timing::{ProofTiming, TimingObject, optional_measurement};
 use crate::prover::SolverChoice;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A path from the root to an obligation in the decomposition tree.
 pub type Selector = Vec<String>;
@@ -216,6 +220,7 @@ struct ReportedTask<'a> {
     status: Option<TaskSimple>,
     stdout: Option<&'a str>,
     stderr: Option<&'a str>,
+    timing: &'a TaskTiming,
 }
 
 /// Correlates results by selected task ID, rejecting ambiguous or foreign IDs.
@@ -236,6 +241,7 @@ fn collect_outcomes<'a>(
                 outcome,
                 stdout,
                 stderr,
+                timing,
                 ..
             } => {
                 let id = task_id
@@ -253,6 +259,7 @@ fn collect_outcomes<'a>(
                     status,
                     stdout: stdout.as_deref(),
                     stderr: stderr.as_deref(),
+                    timing,
                 };
                 if out.insert(id, task).is_some() {
                     return Err(format!("proof runner returned duplicate task ID: {id}"));
@@ -287,6 +294,12 @@ fn update_from_outcome(
     task: Option<&ReportedTask<'_>>,
     report: &mut ScriptReport,
 ) {
+    if let Some(task) = task {
+        report.attempts.push(AttemptTiming {
+            selector: sel.clone(),
+            timing: task.timing.clone(),
+        });
+    }
     let status = task.and_then(|task| task.status);
     if let Some(node) = OblTree::find_mut(&mut tree.root, &sel) {
         node.solve = false;
@@ -337,7 +350,7 @@ fn update_from_outcome(
             }
         }
         None => {
-            // Missing outcomes leave the node pending without attempt history.
+            // A missing outcome leaves the node pending without a conclusion.
         }
     }
 }
@@ -360,9 +373,44 @@ pub struct RollbackEntry {
     pub reason_selector: Selector,
 }
 
+/// The timing a runner reported for one selected obligation in this invocation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptTiming {
+    pub selector: Selector,
+    #[serde(
+        default,
+        deserialize_with = "TaskTiming::deserialize_or_empty",
+        skip_serializing_if = "TaskTiming::is_empty"
+    )]
+    pub timing: TaskTiming,
+}
+
+/// Reads valid attempts in order, ignoring malformed entries or a non-list.
+fn deserialize_attempts<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<AttemptTiming>, D::Error> {
+    let attempts: Vec<TimingObject<AttemptTiming>> = optional_measurement(d)?.unwrap_or_default();
+    Ok(attempts
+        .into_iter()
+        .filter_map(TimingObject::into_option)
+        .collect())
+}
+
 /// Attempt outcomes and unresolved obligations after all tactic rollbacks.
+/// Malformed values of optional telemetry fields do not invalidate the proof
+/// conclusion. Duplicate report fields remain ambiguous and are rejected.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScriptReport {
+    /// Wall time of this invocation, from applying steps through resolving the
+    /// final tree. ScriptExecution also exposes this measurement at the top
+    /// level so schedulers can read it like any other worker's timing.
+    #[serde(
+        default,
+        deserialize_with = "ProofTiming::deserialize_optional",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timing: Option<ProofTiming>,
+    /// Reported tasks in selected tree order, including discarded children.
+    #[serde(default, deserialize_with = "deserialize_attempts")]
+    pub attempts: Vec<AttemptTiming>,
     pub solved: Vec<Selector>,
     pub indefinite: Vec<TaskLogEntry>,
     pub failed: Vec<TaskLogEntry>,
@@ -396,10 +444,13 @@ impl Serialize for ScriptExecution {
         struct TacticOutcome<'a> {
             #[serde(flatten)]
             conclusion: ProofResultHeader,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            timing: Option<&'a ProofTiming>,
             report: &'a ScriptReport,
         }
         TacticOutcome {
             conclusion: self.report.proof_status().into(),
+            timing: self.report.timing.as_ref(),
             report: &self.report,
         }
         .serialize(serializer)
@@ -495,6 +546,7 @@ pub(super) fn run_script(
     steps: &[ScriptStep],
     runner: impl FnOnce(&[(String, ProverObligation)], &OblTreeConfig) -> Result<ProverReport, String>,
 ) -> Result<ScriptExecution, String> {
+    let start = Instant::now();
     // 1) Apply all tactics except Solve; mark Solve flags only.
     for step in steps {
         match &step.command {
@@ -551,6 +603,7 @@ pub(super) fn run_script(
     collect_unresolved(&tree.root, &mut completion);
     completion.root_disproved =
         matches!(tree.root.kind, NodeKind::Leaf(_)) && tree.root.status == NodeStatus::Failed;
+    completion.timing = Some(ProofTiming::elapsed(start));
     Ok(ScriptExecution {
         report: completion,
         task_report,
@@ -571,6 +624,7 @@ mod tests {
     use crate::proof_plan::config::GroupKind;
     use crate::proof_plan::report::IndefiniteReason;
     use std::path::Path;
+    use std::time::Duration;
     use test_case::test_case;
 
     /// Runs selected equivalence obligations directly through the library API.
@@ -626,6 +680,7 @@ mod tests {
             let status = ProofStatus::from(&proof.result);
             statuses.push(status);
             tasks.push(ProverReportNode::Task {
+                timing: Default::default(),
                 task_id: Some(id.clone()),
                 cmdline: None,
                 outcome: Some(status.into()),
@@ -635,6 +690,7 @@ mod tests {
         }
         let status = aggregate_proof_statuses(statuses);
         Ok(ProverReport {
+            wall_micros: None,
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
                 outcome: Some(status.into()),
@@ -654,12 +710,14 @@ mod tests {
         _config: &OblTreeConfig,
     ) -> Result<ProverReport, String> {
         Ok(ProverReport {
+            wall_micros: None,
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
                 outcome: Some(TaskOutcome::Normal { success: true }),
                 tasks: obligations
                     .iter()
                     .map(|(id, _)| ProverReportNode::Task {
+                        timing: Default::default(),
                         task_id: Some(id.clone()),
                         cmdline: None,
                         outcome: Some(TaskOutcome::Normal { success: true }),
@@ -944,9 +1002,10 @@ fn b(x: u8) -> u8 { !a(x) }
         );
     }
 
-    #[test_case(ProofStatus::Proved; "discarded_sibling_proved")]
-    #[test_case(ProofStatus::ExecutionError; "discarded_sibling_execution_error")]
-    fn rollback_classifies_the_restored_root(sibling_status: ProofStatus) {
+    #[test_case(TaskOutcome::Normal { success: true }; "discarded_sibling_proved")]
+    #[test_case(TaskOutcome::Indefinite { reason: IndefiniteReason::ExecutionError }; "discarded_sibling_execution_error")]
+    #[test_case(TaskOutcome::Indefinite { reason: IndefiniteReason::GroupCriteriaAlreadyMet }; "discarded_sibling_canceled")]
+    fn rollback_classifies_the_restored_root(sibling_outcome: TaskOutcome) {
         let mut tree = OblTree::new(base_obligation(), base_config());
         execute_script(
             &mut tree,
@@ -961,19 +1020,35 @@ fn b(x: u8) -> u8 { !a(x) }
             }],
         )
         .unwrap();
+        let pair_timing = TaskTiming {
+            queued_micros: Some(3),
+            worker_wall_micros: Some(29),
+            worker_timing: Some(Duration::from_micros(17).into()),
+        };
+        let sibling_timing = TaskTiming {
+            queued_micros: Some(12),
+            ..Default::default()
+        };
         let report = ProverReport {
+            wall_micros: None,
             plan: ProverReportNode::Group {
                 kind: GroupKind::All,
                 outcome: Some(TaskOutcome::Normal { success: false }),
+                // Return the sibling first, as a concurrent runner may do.
                 tasks: [
-                    ("root/pair_1", ProofStatus::Disproved),
-                    ("root/skeleton", sibling_status),
+                    ("root/skeleton", sibling_outcome, sibling_timing.clone()),
+                    (
+                        "root/pair_1",
+                        ProofStatus::Disproved.into(),
+                        pair_timing.clone(),
+                    ),
                 ]
                 .into_iter()
-                .map(|(path, status)| ProverReportNode::Task {
+                .map(|(path, outcome, timing)| ProverReportNode::Task {
+                    timing,
                     task_id: Some(path.to_string()),
                     cmdline: None,
-                    outcome: Some(status.into()),
+                    outcome: Some(outcome),
                     stdout: None,
                     stderr: None,
                 })
@@ -995,14 +1070,24 @@ fn b(x: u8) -> u8 { !a(x) }
             |_, _| Ok(report),
         )
         .unwrap();
-        if sibling_status == ProofStatus::Proved {
-            assert_eq!(attempted.solved, vec![sel(&["root", "skeleton"])]);
-        } else {
+        assert_eq!(
+            attempted.attempts,
+            [
+                AttemptTiming {
+                    selector: sel(&["root", "pair_1"]),
+                    timing: pair_timing
+                },
+                AttemptTiming {
+                    selector: sel(&["root", "skeleton"]),
+                    timing: sibling_timing
+                },
+            ]
+        );
+        if let TaskOutcome::Indefinite { reason } = sibling_outcome {
             assert_eq!(attempted.indefinite.len(), 1);
-            assert_eq!(
-                attempted.indefinite[0].reason,
-                Some(IndefiniteReason::ExecutionError)
-            );
+            assert_eq!(attempted.indefinite[0].reason, Some(reason));
+        } else {
+            assert_eq!(attempted.solved, vec![sel(&["root", "skeleton"])]);
         }
         assert_eq!(attempted.proof_status(), ProofStatus::Inconclusive);
         assert_eq!(attempted.rolled_back.len(), 1);
@@ -1011,6 +1096,7 @@ fn b(x: u8) -> u8 { !a(x) }
         // A later report has no failed attempts, but the restored root still
         // needs proof, regardless of the discarded sibling's result.
         let completion = execute_script(&mut tree, &[]).unwrap();
+        assert!(completion.attempts.is_empty());
         assert!(completion.failed.is_empty());
         assert!(!completion.is_complete());
         assert_eq!(completion.proof_status(), ProofStatus::Inconclusive);
@@ -1044,13 +1130,113 @@ fn b(x: u8) -> u8 { !a(x) }
         encoded["unresolved"] = serde_json::json!([]);
         let complete = serde_json::from_value::<ScriptReport>(encoded).unwrap();
         assert!(complete.is_complete());
+        assert!(complete.timing.is_none());
+    }
+
+    #[test]
+    fn standalone_report_roundtrip_preserves_timing() {
+        let encoded = serde_json::json!({
+            "timing": { "wall_micros": 53 },
+            "attempts": [{
+                "selector": ["root"],
+                "timing": {
+                    "queued_micros": 3, "worker_wall_micros": 29,
+                    "worker_timing": { "wall_micros": 17 }
+                }
+            }],
+            "solved": [["root"]], "failed": [], "indefinite": [],
+            "rolled_back": [], "unresolved": [],
+            "root_disproved": false, "has_execution_error": false
+        });
+        let report: ScriptReport = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(report.timing, Some(Duration::from_micros(53).into()));
+        assert_eq!(serde_json::to_value(report).unwrap(), encoded);
+    }
+
+    #[test]
+    fn standalone_report_timing_survives_buffered_deserialization() {
+        /// A consumer's result envelope with one variant per report kind.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum SavedResult {
+            Tactic(ScriptReport),
+        }
+
+        /// A consumer that places the tactic fields alongside its own fields.
+        #[derive(Deserialize)]
+        struct SavedRun {
+            #[serde(flatten)]
+            report: ScriptReport,
+        }
+
+        let encoded = r#"{
+            "timing":{"wall_micros":8},
+            "attempts":[{"selector":["root"],"timing":{"queued_micros":1,
+                "worker_wall_micros":3,"worker_timing":{"wall_micros":2}}}],
+            "solved":[["root"]],"failed":[],"indefinite":[],"rolled_back":[],
+            "unresolved":[],"root_disproved":false,"has_execution_error":false
+        }"#;
+        let SavedResult::Tactic(untagged) = serde_json::from_str(encoded).unwrap();
+        let flattened: SavedRun = serde_json::from_str(encoded).unwrap();
+        let expected: serde_json::Value = serde_json::from_str(encoded).unwrap();
+        for report in [untagged, flattened.report] {
+            assert_eq!(report.proof_status(), ProofStatus::Proved);
+            assert_eq!(serde_json::to_value(report).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn standalone_report_reads_conclusion_with_malformed_telemetry() {
+        let mut encoded = serde_json::json!({
+            "timing": { "wall_micros": -1 },
+            "attempts": "unavailable",
+            "solved": [], "failed": [], "indefinite": [],
+            "rolled_back": [], "unresolved": [["root"]],
+            "root_disproved": true, "has_execution_error": false
+        });
+        let report: ScriptReport = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(report.proof_status(), ProofStatus::Disproved);
+        assert_eq!(report.unresolved, vec![root_selector()]);
+        assert!(report.timing.is_none());
+        assert!(report.attempts.is_empty());
+
+        encoded["root_disproved"] = serde_json::json!("true");
+        assert!(serde_json::from_value::<ScriptReport>(encoded).is_err());
+    }
+
+    #[test]
+    fn standalone_report_keeps_valid_attempt_measurements() {
+        let encoded = serde_json::json!({
+            "attempts": [
+                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": 17 },
+                { "selector": ["root", "b"], "timing": {
+                    "queued_micros": "unknown", "worker_wall_micros": 2,
+                    "worker_timing": { "wall_micros": -1 }
+                }}
+            ],
+            "solved": [["root"]], "failed": [], "indefinite": [],
+            "rolled_back": [], "unresolved": [],
+            "root_disproved": false, "has_execution_error": false
+        });
+        let report: ScriptReport = serde_json::from_value(encoded).unwrap();
+        assert_eq!(report.proof_status(), ProofStatus::Proved);
+        assert_eq!(
+            serde_json::to_value(report.attempts).unwrap(),
+            serde_json::json!([
+                { "selector": ["root", "a"], "timing": { "queued_micros": 1 } },
+                { "selector": ["root", "b"], "timing": { "worker_wall_micros": 2 } }
+            ])
+        );
     }
 
     #[test]
     fn missing_task_outcome_keeps_leaf_unresolved() {
         let mut tree = OblTree::new(base_obligation(), base_config());
         let report = ProverReport {
+            wall_micros: None,
             plan: ProverReportNode::Task {
+                timing: Default::default(),
                 task_id: Some("root".to_string()),
                 cmdline: None,
                 outcome: None,
@@ -1081,9 +1267,12 @@ fn b(x: u8) -> u8 { !a(x) }
             panic!("an empty selection must not invoke the proof runner")
         })
         .unwrap();
+        let timing = completion.timing.as_ref().unwrap();
         assert_eq!(
-            serde_json::to_value(completion).unwrap(),
+            serde_json::to_value(&completion).unwrap(),
             serde_json::json!({
+                "timing": timing,
+                "attempts": [],
                 "solved": [],
                 "failed": [],
                 "indefinite": [],
@@ -1107,6 +1296,7 @@ fn b(x: u8) -> u8 { !a(x) }
             }],
             |_, _| {
                 Ok(ProverReport {
+                    wall_micros: None,
                     plan: ProverReportNode::Group {
                         kind: GroupKind::All,
                         outcome: Some(TaskOutcome::Normal { success: true }),
@@ -1118,6 +1308,7 @@ fn b(x: u8) -> u8 { !a(x) }
                                     kind: GroupKind::All,
                                     outcome: Some(TaskOutcome::Normal { success: true }),
                                     tasks: vec![ProverReportNode::Task {
+                                        timing: Default::default(),
                                         task_id: id.map(str::to_owned),
                                         cmdline: None,
                                         // Reserve IDs even without an outcome.
@@ -1157,10 +1348,12 @@ fn b(x: u8) -> u8 { !a(x) }
             }],
             |_, _| {
                 Ok(ProverReport {
+                    wall_micros: None,
                     plan: ProverReportNode::Group {
                         kind: GroupKind::All,
                         outcome: Some(ProofStatus::ExecutionError.into()),
                         tasks: vec![ProverReportNode::Task {
+                            timing: Default::default(),
                             task_id: Some("root".into()),
                             outcome: None,
                             cmdline: None,
@@ -1200,12 +1393,14 @@ fn b(x: u8) -> u8 { !a(x) }
         }];
         let first = execute_script_with_runner(&mut tree, &solve, |_, _| {
             Ok(ProverReport {
+                wall_micros: None,
                 plan: ProverReportNode::Group {
                     kind: GroupKind::All,
                     outcome,
                     tasks: outcome
                         .into_iter()
                         .map(|outcome| ProverReportNode::Task {
+                            timing: Default::default(),
                             task_id: Some("root".to_string()),
                             cmdline: None,
                             outcome: Some(outcome),
@@ -1232,6 +1427,7 @@ fn b(x: u8) -> u8 { !a(x) }
         assert!(unchanged.solved.is_empty());
         assert!(unchanged.failed.is_empty());
         assert!(unchanged.indefinite.is_empty());
+        assert!(unchanged.attempts.is_empty());
 
         let mut reran = false;
         let retried = execute_script_with_runner(&mut tree, &solve, |obligations, config| {
@@ -1282,6 +1478,7 @@ fn b(x: u8) -> u8 { !a(x) }
                 assert_eq!(obligations.len(), 1);
                 assert_eq!(obligations[0].0, "root");
                 Ok(ProverReport {
+                    wall_micros: None,
                     plan: ProverReportNode::Group {
                         kind: GroupKind::All,
                         outcome: Some(TaskOutcome::Normal { success: true }),
@@ -1296,11 +1493,15 @@ fn b(x: u8) -> u8 { !a(x) }
             execution.task_report.as_ref().unwrap().plan.proof_status(),
             ProofStatus::Proved
         );
+        let timing = execution.report.timing.as_ref().unwrap();
         assert_eq!(
             serde_json::to_value(&execution).unwrap(),
             serde_json::json!({
                 "status": "inconclusive", "success": false,
+                "timing": { "wall_micros": timing.wall_micros },
                 "report": {
+                    "timing": { "wall_micros": timing.wall_micros },
+                    "attempts": [],
                     "unresolved": [["root"]], "root_disproved": false, "has_execution_error": false,
                     "solved": [], "indefinite": [], "failed": [], "rolled_back": []
                 }
@@ -1320,7 +1521,9 @@ fn b(x: u8) -> u8 { !a(x) }
             }],
             |_, _| {
                 Ok(ProverReport {
+                    wall_micros: None,
                     plan: ProverReportNode::Task {
+                        timing: Default::default(),
                         task_id: Some("root".to_string()),
                         cmdline: None,
                         outcome: Some(if indefinite {
@@ -1346,9 +1549,12 @@ fn b(x: u8) -> u8 { !a(x) }
         if indefinite {
             log[0]["reason"] = serde_json::json!("Timeout");
         }
+        let timing = completion.timing.as_ref().unwrap();
         assert_eq!(
-            serde_json::to_value(completion).unwrap(),
+            serde_json::to_value(&completion).unwrap(),
             serde_json::json!({
+                "timing": timing,
+                "attempts": [{"selector": ["root"]}],
                 "solved": [],
                 "failed": if indefinite { serde_json::json!([]) } else { log.clone() },
                 "indefinite": if indefinite { log } else { serde_json::json!([]) },

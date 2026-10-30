@@ -156,6 +156,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
     };
     if let Some(script) = TacticScript::from_matches(matches) {
         script.execute_and_exit(
+            start,
             request.tactic_tree().map_err(|e| e.to_string()),
             SUBCOMMAND,
             "QuickCheck obligations proved",

@@ -134,6 +134,7 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     };
     if let Some(script) = TacticScript::from_matches(matches) {
         script.execute_and_exit(
+            start,
             request.into_tactic_tree(),
             SUBCOMMAND,
             "Solver proved equivalence",

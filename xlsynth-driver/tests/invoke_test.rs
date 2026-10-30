@@ -8795,14 +8795,18 @@ fn main(x: u8) -> u8 { x }
         &without_tactic_timing(&stderr, subcommand),
         &format!("tests/tactic_empty_{subcommand}.golden.txt"),
     );
-    let report: serde_json::Value =
+    let mut report: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(report_path).unwrap()).unwrap();
+    let timing = report.as_object_mut().unwrap().remove("timing").unwrap();
+    assert!(timing["wall_micros"].is_u64());
     assert_eq!(
         report,
         serde_json::json!({
             "status": "inconclusive",
             "success": false,
             "report": {
+                "timing": timing,
+                "attempts": [],
                 "solved": [],
                 "failed": [],
                 "indefinite": [],
@@ -9154,7 +9158,7 @@ fn main(x: u8) -> u8 { helper(x) }
             "tests/tactic_focus_partial.golden.txt",
         );
     }
-    let report: serde_json::Value =
+    let mut report: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(report_path).unwrap()).unwrap();
     let solved = if solve_pair {
         vec![vec!["root", "pair_1"], vec!["root", "skeleton"]]
@@ -9166,12 +9170,30 @@ fn main(x: u8) -> u8 { helper(x) }
     } else {
         vec![vec!["root", "pair_1"]]
     };
+    let timing = report.as_object_mut().unwrap().remove("timing").unwrap();
+    let wall = timing["wall_micros"].as_u64().unwrap();
+    let attempts = report["report"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attempts")
+        .unwrap();
+    let attempts = attempts.as_array().unwrap();
+    assert_eq!(attempts.len(), solved.len());
+    for (attempt, selector) in attempts.iter().zip(&solved) {
+        assert_eq!(attempt["selector"], serde_json::json!(selector));
+        let timing = &attempt["timing"];
+        let queued = timing["queued_micros"].as_u64().unwrap();
+        let worker_wall = timing["worker_wall_micros"].as_u64().unwrap();
+        assert!(queued + worker_wall <= wall);
+        assert!(timing["worker_timing"]["wall_micros"].is_u64());
+    }
     assert_eq!(
         report,
         serde_json::json!({
             "status": if solve_pair { "proved" } else { "inconclusive" },
             "success": solve_pair,
             "report": {
+                "timing": timing,
                 "solved": solved,
                 "failed": [],
                 "indefinite": [],

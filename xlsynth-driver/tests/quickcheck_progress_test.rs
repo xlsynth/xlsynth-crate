@@ -113,6 +113,7 @@ fn quickcheck_progress_and_counterexample_goldens() {
             serde_json::from_str(&std::fs::read_to_string(dir.path().join("result.json")).unwrap())
                 .unwrap();
         assert_eq!(report["success"], false);
+        let suite_wall = report["timing"]["wall_micros"].as_u64().unwrap();
         let tests = report["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 3);
         for (test, (name, success)) in tests.iter().zip([
@@ -123,6 +124,8 @@ fn quickcheck_progress_and_counterexample_goldens() {
             assert_eq!(test["name"], name);
             assert_eq!(test["success"], success);
             assert!(test["time_micros"].is_u64());
+            assert_eq!(test["time_micros"], test["timing"]["wall_micros"]);
+            assert!(test["timing"]["wall_micros"].as_u64().unwrap() <= suite_wall);
             if success {
                 assert!(test["counterexample"].is_null());
             }
