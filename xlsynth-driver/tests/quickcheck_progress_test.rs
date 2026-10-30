@@ -28,6 +28,11 @@ fn quickcheck_uf_requires_explicit_opt_false() {
                 .unwrap();
         assert_eq!(result["status"], "execution-error");
         assert_eq!(result["success"], false);
+        let phases = &result["timing"]["phases"];
+        assert!(phases["prepare_work_micros"].is_u64());
+        assert_eq!(phases["solver_check_count"], 0);
+        assert!(phases["smt_encode_work_micros"].is_null());
+        assert!(phases["solver_check_work_micros"].is_null());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
             include_str!("testdata/quickcheck/uf_opt_error.golden.txt")
@@ -114,6 +119,8 @@ fn quickcheck_progress_and_counterexample_goldens() {
                 .unwrap();
         assert_eq!(report["success"], false);
         let suite_wall = report["timing"]["wall_micros"].as_u64().unwrap();
+        let shared_prepare = report["shared_prepare_micros"].as_u64().unwrap();
+        let suite_phases = &report["timing"]["phases"];
         let tests = report["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 3);
         for (test, (name, success)) in tests.iter().zip([
@@ -126,10 +133,36 @@ fn quickcheck_progress_and_counterexample_goldens() {
             assert!(test["time_micros"].is_u64());
             assert_eq!(test["time_micros"], test["timing"]["wall_micros"]);
             assert!(test["timing"]["wall_micros"].as_u64().unwrap() <= suite_wall);
+            let phases = &test["timing"]["phases"];
+            assert_eq!(phases["solver_check_count"], 1);
+            assert_eq!(phases["counterexample_read_work_micros"].is_u64(), !success);
+            assert!(phases["external_tool_work_micros"].is_null());
             if success {
                 assert!(test["counterexample"].is_null());
             }
         }
+        assert_eq!(suite_phases["solver_check_count"], 3);
+        for field in [
+            "prepare_work_micros",
+            "smt_encode_work_micros",
+            "solver_check_work_micros",
+        ] {
+            let property_work: u64 = tests
+                .iter()
+                .map(|test| test["timing"]["phases"][field].as_u64().unwrap())
+                .sum();
+            let shared_work = if field == "prepare_work_micros" {
+                shared_prepare
+            } else {
+                0
+            };
+            assert_eq!(suite_phases[field], property_work + shared_work, "{field}");
+        }
+        assert_eq!(
+            suite_phases["counterexample_read_work_micros"],
+            tests[1]["timing"]["phases"]["counterexample_read_work_micros"],
+        );
+        assert!(suite_phases["external_tool_work_micros"].is_null());
         assert_eq!(
             tests[1]["counterexample"],
             "inputs: [FnInput { name: \"a\", value: bits[1]:0 }, FnInput { name: \"b\", value: bits[2]:0 }], output: FnOutput { value: bits[1]:0, assertion_violation: None }"
@@ -281,6 +314,22 @@ fn h(x: u8) -> u8 { x + u8:2 }
             let report: Value =
                 serde_json::from_slice(&std::fs::read(result_path).unwrap()).unwrap();
             assert_eq!(report["status"], expected, "{command:?}: {report}");
+            let timing = if scripted {
+                let attempts = report["report"]["attempts"].as_array().unwrap();
+                assert_eq!(attempts.len(), 1);
+                assert_eq!(attempts[0]["selector"], serde_json::json!(["root"]));
+                &attempts[0]["timing"]["worker_timing"]
+            } else {
+                &report["timing"]
+            };
+            let phases = &timing["phases"];
+            assert_eq!(phases["solver_check_count"], 1, "{command:?}: {report}");
+            assert!(phases["smt_encode_work_micros"].is_u64());
+            assert!(phases["solver_check_work_micros"].is_u64());
+            assert_eq!(
+                phases["counterexample_read_work_micros"].is_u64(),
+                expected == "disproved"
+            );
             assert_eq!(
                 output.status.success(),
                 expected == "proved",

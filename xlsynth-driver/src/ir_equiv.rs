@@ -4,7 +4,6 @@ use crate::proofs::report_setup_error;
 use crate::toolchain_config::ToolchainConfig;
 use std::path::Path;
 use std::time::Instant;
-use xlsynth_prover::ir_equiv::run_ir_equiv;
 pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
 use xlsynth_prover::proof_outcome::ProofSummary;
 use xlsynth_prover::prover::SolverChoice;
@@ -111,7 +110,7 @@ pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> Proo
         request.solver,
         request.tool_path
     );
-    ProofSummary::run(|| run_ir_equiv(request))
+    request.prove()
 }
 
 pub fn emit_equiv_outcome_and_exit(

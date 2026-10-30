@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::proof_phases::PhaseCollector;
 use crate::proof_timing::ProofTiming;
 use crate::prover::types::{BoolPropertyResult, EquivResult};
 
@@ -106,13 +107,23 @@ pub struct ProofSummary {
 }
 
 impl ProofSummary {
+    /// Retains measured phases even when setup or the solver returns an error.
+    pub(crate) fn run_with_phases<T: Into<Self>>(
+        prove: impl FnOnce(&PhaseCollector) -> Result<T, String>,
+    ) -> Self {
+        let phases = PhaseCollector::default();
+        let mut report = Self::run(|| prove(&phases));
+        report.timing = report.timing.with_phases(phases.snapshot());
+        report
+    }
+
     /// Runs a proof invocation, including setup failures in the report.
     pub fn run<T: Into<Self>>(prove: impl FnOnce() -> Result<T, String>) -> Self {
         let start = Instant::now();
         match prove() {
             Ok(report) => {
                 let mut report = report.into();
-                report.timing = ProofTiming::elapsed(start);
+                report.timing.wall_micros = ProofTiming::elapsed(start).wall_micros;
                 report
             }
             Err(error) => Self::execution_error(start.elapsed(), error),

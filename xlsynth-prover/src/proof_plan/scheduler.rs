@@ -28,6 +28,7 @@ use super::config::{GroupKind, ProofDriver, ProverPlan, ProverTask, resolve_driv
 use super::report::{IndefiniteReason, ProverReport, ProverReportNode, TaskOutcome, TaskTiming};
 
 use log::{debug, info, trace, warn};
+use serde_json::value::RawValue;
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use signal_hook::low_level as siglow;
 use std::os::unix::process::CommandExt;
@@ -47,7 +48,7 @@ struct ProcessResult {
 #[derive(serde::Deserialize)]
 struct WorkerMeasurement<'a> {
     #[serde(borrow)]
-    timing: &'a serde_json::value::RawValue,
+    timing: &'a RawValue,
 }
 
 /// Ignores absent or malformed telemetry while preserving the validated
@@ -1410,6 +1411,35 @@ mod tests {
         };
         assert_eq!(result.outcome, expected_outcome);
         assert_eq!(result.worker_timing.map(|t| t.wall_micros), expected);
+    }
+
+    #[test_case(r#""phases":{"solver_check_count":2}"#, Some(2); "named phase fields")]
+    #[test_case(r#""phases":[0]"#, None; "positional phase fields")]
+    #[test_case(r#""phases":0.5"#, None; "fractional phases")]
+    #[test_case(r#""phases":{"solver_check_count":-1}"#, None; "invalid phase field")]
+    #[test_case(r#""phases":{},"phases":{}"#, None; "duplicate phase extension")]
+    fn worker_wall_time_survives_malformed_optional_phases(extension: &str, checks: Option<u64>) {
+        let data = format!(r#"{{"timing":{{"wall_micros":5,{extension}}}}}"#);
+        let timing = read_worker_timing(&data).unwrap();
+        assert_eq!(timing.wall_micros, 5);
+        assert_eq!(timing.phases.map(|p| p.solver_check_count), checks);
+    }
+
+    #[test_case(r#""wall_micros":17"#, Some(17); "valid wall")]
+    #[test_case(r#""wall_micros":17,"wall_micros":18"#, None; "duplicate wall")]
+    #[test_case(r#""wall_micros":-1"#, None; "invalid wall")]
+    fn deeply_nested_worker_phases_do_not_hide_wall_fields(wall: &str, expected: Option<u64>) {
+        // A worker extension can exceed the typed JSON decoder's recursion
+        // limit.
+        let phases = format!("{}0{}", "[".repeat(140), "]".repeat(140));
+        let data = format!(r#"{{"timing":{{"phases":{phases},{wall}}}}}"#);
+        assert_eq!(
+            read_worker_timing(&data),
+            expected.map(|wall_micros| ProofTiming {
+                wall_micros,
+                phases: None
+            })
+        );
     }
 
     #[test]

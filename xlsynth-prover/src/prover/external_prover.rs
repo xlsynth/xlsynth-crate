@@ -13,7 +13,8 @@ use super::types::{
     QuickCheckAssertionSemantics, QuickCheckOptions,
 };
 use crate::dslx_utils::join_dslx_search_paths;
-use crate::toolchain_shim::run_prove_quickcheck_main;
+use crate::proof_phases::{Phase, PhaseCollector};
+use crate::toolchain_shim::run_prove_quickcheck_main_with_phases;
 use regex::escape;
 use xlsynth_pir::ir::emit_fn;
 use xlsynth_pir::ir_inline::package_with_reachable_callees;
@@ -70,36 +71,7 @@ impl Prover for ExternalProver {
         rhs_pkg_text: &str,
         top: Option<&str>,
     ) -> EquivResult {
-        match self {
-            ExternalProver::ToolExe(path) => {
-                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                    path,
-                )
-                .into()
-            }
-            ExternalProver::ToolDir(path) => {
-                prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_dir(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                    path,
-                )
-                .into()
-            }
-            ExternalProver::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
-                Ok(dir) => ExternalProver::ToolDir(PathBuf::from(dir)).prove_ir_pkg_text_equiv(
-                    lhs_pkg_text,
-                    rhs_pkg_text,
-                    top,
-                ),
-                Err(_) => EquivResult::Error(
-                    "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
-                ),
-            },
-        }
+        self.prove_text_with_phases(lhs_pkg_text, rhs_pkg_text, top, &PhaseCollector::default())
     }
 
     fn prove_ir_equiv<'a>(
@@ -110,6 +82,27 @@ impl Prover for ExternalProver {
         assertion_semantics: AssertionSemantics,
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
+    ) -> EquivResult {
+        self.prove_ir_equiv_with_phases(
+            lhs,
+            rhs,
+            strategy,
+            assertion_semantics,
+            assert_label_filter,
+            allow_flatten,
+            &PhaseCollector::default(),
+        )
+    }
+
+    fn prove_ir_equiv_with_phases<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+        phases: &PhaseCollector,
     ) -> EquivResult {
         if !lhs.uf_map.is_empty() || !rhs.uf_map.is_empty() {
             return EquivResult::Error("External provers do not support UFs".to_string());
@@ -141,11 +134,12 @@ impl Prover for ExternalProver {
                         "External provers do not support flattening".to_string(),
                     );
                 }
-                match (toolchain_input(lhs), toolchain_input(rhs)) {
+                let inputs = phases.prepare(|| (toolchain_input(lhs), toolchain_input(rhs)));
+                match inputs {
                     (Ok(lhs_pkg), Ok(rhs_pkg)) => {
                         // Each package marks its own entry, even when the names
                         // differ.
-                        self.prove_ir_pkg_text_equiv(&lhs_pkg, &rhs_pkg, None)
+                        self.prove_text_with_phases(&lhs_pkg, &rhs_pkg, None, phases)
                     }
                     (Err(e), _) | (_, Err(e)) => EquivResult::Error(e),
                 }
@@ -234,6 +228,50 @@ impl Prover for ExternalProver {
     }
 }
 
+impl ExternalProver {
+    /// Records only a launched checker, after all IR preparation has succeeded.
+    fn prove_text_with_phases(
+        &self,
+        lhs: &str,
+        rhs: &str,
+        top: Option<&str>,
+        phases: &PhaseCollector,
+    ) -> EquivResult {
+        let exe = match self {
+            Self::ToolExe(path) => path.clone(),
+            Self::ToolDir(dir) => {
+                let exe = dir.join("check_ir_equivalence_main");
+                if !exe.exists() {
+                    return EquivResult::Error(format!(
+                        "check_ir_equivalence_main not found in {}",
+                        dir.display()
+                    ));
+                }
+                exe
+            }
+            Self::Toolchain => match std::env::var("XLSYNTH_TOOLS") {
+                Ok(dir) => {
+                    return Self::ToolDir(dir.into()).prove_text_with_phases(lhs, rhs, top, phases);
+                }
+                Err(_) => {
+                    return EquivResult::Error(
+                        "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".into(),
+                    );
+                }
+            },
+        };
+        prove_equiv_via_toolchain::prove_ir_pkg_equiv_with_tool_exe_timed(
+            lhs,
+            rhs,
+            top,
+            exe,
+            None,
+            |duration| phases.record(Phase::ExternalTool, duration),
+        )
+        .into()
+    }
+}
+
 struct ExternalQuickChecks {
     exe: PathBuf,
     entry_file: PathBuf,
@@ -243,17 +281,24 @@ struct ExternalQuickChecks {
 }
 
 impl PreparedQuickCheckBackend for ExternalQuickChecks {
-    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult {
+    fn prove(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckProofResult {
+        let prepare = phases.start_prepare();
         let result = match std::fs::read_to_string(&self.entry_file) {
             Ok(source) if source == self.source => {
                 let filter = format!("^{}$", escape(&property.name));
                 let paths: Vec<_> = self.search_paths.iter().map(PathBuf::as_path).collect();
-                match run_prove_quickcheck_main(
+                drop(prepare);
+                match run_prove_quickcheck_main_with_phases(
                     &self.exe,
                     &self.entry_file,
                     self.stdlib.as_deref(),
                     &paths,
                     &filter,
+                    phases,
                 ) {
                     Ok(_) => BoolPropertyResult::Proved,
                     // The tool's textual failure does not distinguish a
@@ -400,7 +445,12 @@ fn f(x: bits[1] id=1) -> bits[1] {
             name_span: None,
             requires_implicit_token: false,
         };
-        let result = backend.prove(&property).result;
+        let phases = PhaseCollector::default();
+        let result = backend.prove(&property, &phases).result;
+        let measured = phases.snapshot();
+        assert!(measured.prepare_work_micros.is_some());
+        assert!(measured.external_tool_work_micros.is_some());
+        assert_eq!(measured.solver_check_work_micros, None);
         if expect_success {
             assert_eq!(result, BoolPropertyResult::Proved);
         } else {
@@ -434,7 +484,11 @@ fn f(x: bits[1] id=1) -> bits[1] {
             name_span: None,
             requires_implicit_token: false,
         };
-        let result = backend.prove(&property).result;
+        let phases = PhaseCollector::default();
+        let result = backend.prove(&property, &phases).result;
+        let measured = phases.snapshot();
+        assert!(measured.prepare_work_micros.is_some());
+        assert_eq!(measured.external_tool_work_micros, None);
         assert!(matches!(result, BoolPropertyResult::Error(_)), "{result:?}");
     }
 

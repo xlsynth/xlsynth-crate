@@ -10,6 +10,7 @@ use super::{
     uf::infer_uf_signatures,
 };
 use crate::dslx_utils::validate_dslx_paths;
+use crate::proof_phases::{Phase, PhaseCollector};
 use crate::solver::{BitVec, Response, Solver, SolverConfig};
 
 use regex::Regex;
@@ -63,6 +64,26 @@ where
     S: Solver,
     S::Term: 'a,
 {
+    prove_ir_quickcheck_with_phases::<S>(
+        solver_config,
+        prover_fn,
+        assertion_semantics,
+        assert_label_include,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_quickcheck_with_phases<'a, S>(
+    solver_config: &S::Config,
+    prover_fn: &ProverFn<'a>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    phases: &PhaseCollector,
+) -> BoolPropertyResult
+where
+    S: Solver,
+    S::Term: 'a,
+{
     // Ensure the function indeed returns a single-bit value.
     assert_eq!(
         prover_fn.fn_ref.ret_ty.bit_count(),
@@ -70,6 +91,7 @@ where
         "Function must return a single-bit value"
     );
 
+    let setup = phases.start_prepare();
     let mut solver = match S::new(solver_config) {
         Ok(solver) => solver,
         Err(error) => {
@@ -94,12 +116,14 @@ where
             }
         }
     };
+    drop(setup);
     check_quickcheck_query(
         &mut solver,
         prover_fn,
         assertion_semantics,
         assert_label_include,
         &uf_signatures,
+        phases,
     )
     .unwrap_or_else(|error| BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}")))
 }
@@ -111,7 +135,9 @@ fn check_quickcheck_query<S: Solver>(
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_include: Option<&Regex>,
     uf_signatures: &HashMap<String, UfSignature>,
+    phases: &PhaseCollector,
 ) -> io::Result<BoolPropertyResult> {
+    let encoding = phases.start(Phase::SmtEncode);
     let fn_inputs = get_fn_inputs(solver, prover_fn.clone(), None)?;
     assert_param_domains(solver, &fn_inputs)?;
     let uf_registry = UfRegistry::from_uf_signatures(solver, uf_signatures)?;
@@ -159,9 +185,15 @@ fn check_quickcheck_query<S: Solver>(
 
     // Ask solver for a model that satisfies the *negation* of the property.
     solver.assert(&condition)?;
-    match solver.check()? {
+    drop(encoding);
+    let response = {
+        let _check = phases.start(Phase::SolverCheck);
+        solver.check()?
+    };
+    match response {
         Response::Unsat => Ok(BoolPropertyResult::Proved),
         Response::Sat => {
+            let _read = phases.start(Phase::CounterexampleRead);
             let witness = smt_fn.read_counterexample(solver, &filtered_assertions)?;
             Ok(BoolPropertyResult::Disproved {
                 inputs: witness.inputs,
@@ -195,10 +227,21 @@ pub enum QuickCheckErrorKind {
 }
 
 /// A recoverable setup error, separate from a property's proof outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Equality compares the kind and message, independently of when they were
+/// observed.
+#[derive(Debug, Clone, Eq)]
 pub struct QuickCheckError {
     pub kind: QuickCheckErrorKind,
     pub message: String,
+    /// Measurements available when the containing request observed this
+    /// failure.
+    pub timing: Option<crate::proof_timing::ProofTiming>,
+}
+
+impl PartialEq for QuickCheckError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.message == other.message
+    }
 }
 
 impl QuickCheckError {
@@ -213,6 +256,7 @@ impl QuickCheckError {
         Self {
             kind,
             message: message.into(),
+            timing: None,
         }
     }
 }
@@ -248,7 +292,11 @@ pub(crate) struct QuickCheckProofResult {
 }
 
 pub(crate) trait PreparedQuickCheckBackend {
-    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult;
+    fn prove(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckProofResult;
 }
 
 /// A parsed suite whose properties are proved only when requested.
@@ -285,18 +333,32 @@ impl<'a> PreparedQuickCheckSuite<'a> {
     /// Optimizes (if enabled) and proves exactly one property, timing that
     /// work.
     pub fn prove(&self, id: usize) -> Result<QuickCheckRunResult, QuickCheckError> {
+        self.prove_with_phases(id, &PhaseCollector::default())
+    }
+
+    /// Proves one property, recording the preparation and backend phases it
+    /// reaches.
+    pub fn prove_with_phases(
+        &self,
+        id: usize,
+        phases: &PhaseCollector,
+    ) -> Result<QuickCheckRunResult, QuickCheckError> {
         let property = self.properties().get(id).ok_or_else(|| {
             QuickCheckError::new(
                 QuickCheckErrorKind::InvalidProperty,
                 format!("No QuickCheck property with id {id}"),
             )
         })?;
-        Ok(self.prove_property(property))
+        Ok(self.prove_property(property, phases))
     }
 
-    fn prove_property(&self, property: &QuickCheckProperty) -> QuickCheckRunResult {
+    fn prove_property(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckRunResult {
         let start = std::time::Instant::now();
-        let proof = self.backend.prove(property);
+        let proof = self.backend.prove(property, phases);
         QuickCheckRunResult {
             name: property.name.clone(),
             implicit_token: proof.implicit_token,
@@ -309,7 +371,7 @@ impl<'a> PreparedQuickCheckSuite<'a> {
     pub fn prove_all(&self) -> Vec<QuickCheckRunResult> {
         self.properties()
             .iter()
-            .map(|property| self.prove_property(property))
+            .map(|property| self.prove_property(property, &PhaseCollector::default()))
             .collect()
     }
 }
@@ -411,9 +473,14 @@ struct InProcessQuickChecks<'a, S> {
 }
 
 impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> {
-    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult {
+    fn prove(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckProofResult {
         let mut implicit_token = false;
         let result = (|| -> Result<BoolPropertyResult, String> {
+            let preparation = phases.start(Phase::Prepare);
             let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
                 &self.module_name,
                 &property.name,
@@ -455,7 +522,8 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
             let prover_fn = ProverFn::new(fn_ref, Some(proof_pkg))
                 .with_fixed_implicit_activation(fixed_implicit_activation)
                 .with_uf_map(self.uf_map.clone());
-            Ok(prove_ir_quickcheck::<S::Solver>(
+            drop(preparation);
+            Ok(prove_ir_quickcheck_with_phases::<S::Solver>(
                 self.solver_config,
                 &prover_fn,
                 self.assertion_semantics,
@@ -466,6 +534,7 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
                 } else {
                     self.assert_label_regex.as_ref()
                 },
+                phases,
             ))
         })()
         .unwrap_or_else(BoolPropertyResult::Error);

@@ -15,6 +15,7 @@ use crate::dslx_tactics::obligations::{
 use crate::dslx_tactics::script::{OblTree, OblTreeConfig};
 use crate::dslx_utils::{mangle_dslx_uf_map, validate_dslx_uf_map};
 use crate::proof_outcome::{ProofResultHeader, ProofStatus, aggregate_proof_statuses};
+use crate::proof_phases::{PhaseCollector, ProofPhases};
 use crate::proof_timing::ProofTiming;
 use crate::prover::quickcheck::{QuickCheckError, QuickCheckErrorKind, load_quickcheck_context};
 use crate::prover::types::{
@@ -97,6 +98,8 @@ pub struct QuickCheckTestOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct QuickCheckOutcome {
     pub timing: ProofTiming,
+    /// Discovery and IR preparation shared by all properties in this suite.
+    pub shared_prepare_micros: u64,
     #[serde(flatten)]
     pub conclusion: ProofResultHeader,
     pub tests: Vec<QuickCheckTestOutcome>,
@@ -133,9 +136,42 @@ impl DslxQuickCheckRequest {
         &self,
         options: QuickCheckOptions,
         tool_path: Option<&Path>,
-        mut progress: impl FnMut(QuickCheckProgress<'_>),
+        progress: impl FnMut(QuickCheckProgress<'_>),
     ) -> Result<QuickCheckOutcome, QuickCheckError> {
         let start = Instant::now();
+        let shared = PhaseCollector::default();
+        let mut properties = ProofPhases::default();
+        let result = self.run_properties(options, tool_path, progress, &shared, &mut properties);
+        let mut total = shared.snapshot();
+        let shared_prepare_micros = total.prepare_work_micros.unwrap_or(0);
+        total.merge(properties);
+        let timing = ProofTiming::elapsed(start).with_phases(total);
+        match result {
+            Ok(tests) => Ok(QuickCheckOutcome {
+                conclusion: aggregate_proof_statuses(tests.iter().map(|t| t.conclusion.status))
+                    .into(),
+                timing,
+                shared_prepare_micros,
+                tests,
+            }),
+            Err(mut error) => {
+                error.timing = Some(timing);
+                Err(error)
+            }
+        }
+    }
+
+    /// Charges conversion once to the suite and measures each property's own
+    /// work.
+    fn run_properties(
+        &self,
+        options: QuickCheckOptions,
+        tool_path: Option<&Path>,
+        mut progress: impl FnMut(QuickCheckProgress<'_>),
+        shared: &PhaseCollector,
+        property_work: &mut ProofPhases,
+    ) -> Result<Vec<QuickCheckTestOutcome>, QuickCheckError> {
+        let prepare = shared.start_prepare();
         options.validate_uf_optimization(&self.uf_map)?;
         let module_name = self
             .entry_file
@@ -167,10 +203,15 @@ impl DslxQuickCheckRequest {
         if suite.properties().is_empty() {
             return Err(QuickCheckError::no_matching_properties());
         }
+        drop(prepare);
         let mut tests = Vec::with_capacity(suite.properties().len());
         for property in suite.properties() {
             progress(QuickCheckProgress::Started(&property.name));
-            let run = suite.prove(property.id)?;
+            let phases = PhaseCollector::default();
+            let result = suite.prove_with_phases(property.id, &phases);
+            let measured = phases.snapshot();
+            property_work.merge(measured);
+            let run = result?;
             progress(QuickCheckProgress::Finished {
                 location: property
                     .name_span
@@ -178,14 +219,11 @@ impl DslxQuickCheckRequest {
                     .map(|span| (suite.source(), span)),
                 run: &run,
             });
-            tests.push(QuickCheckTestOutcome::from(run));
+            let mut test = QuickCheckTestOutcome::from(run);
+            test.timing = test.timing.with_phases(measured);
+            tests.push(test);
         }
-        let status = aggregate_proof_statuses(tests.iter().map(|test| test.conclusion.status));
-        Ok(QuickCheckOutcome {
-            timing: ProofTiming::elapsed(start),
-            conclusion: status.into(),
-            tests,
-        })
+        Ok(tests)
     }
 
     /// Captures the discovered source snapshot and the same property
@@ -270,10 +308,10 @@ fn helper(x: u1) -> u1 { x }
             .unwrap_err();
         assert_eq!(error.kind, QuickCheckErrorKind::Configuration);
         assert_eq!(events, 0);
-        assert_eq!(
-            request.tactic_tree().unwrap_err().kind,
-            QuickCheckErrorKind::Configuration
-        );
+        let tactic_error = request.tactic_tree().unwrap_err();
+        assert!(error.timing.is_some());
+        assert!(tactic_error.timing.is_none());
+        assert_eq!(error, tactic_error);
     }
 
     #[test]

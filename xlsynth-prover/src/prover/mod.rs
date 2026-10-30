@@ -26,6 +26,7 @@ use self::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult,
 };
+use crate::proof_phases::PhaseCollector;
 use crate::solver::SolverConfig;
 use std::str::FromStr;
 
@@ -143,6 +144,27 @@ pub trait Prover {
         allow_flatten: bool,
     ) -> EquivResult;
 
+    /// Proves the request and records the phases observable by this backend.
+    fn prove_ir_equiv_with_phases<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+        _phases: &PhaseCollector,
+    ) -> EquivResult {
+        self.prove_ir_equiv(
+            lhs,
+            rhs,
+            strategy,
+            assertion_semantics,
+            assert_label_filter,
+            allow_flatten,
+        )
+    }
+
     fn prove_ir_fn_quickcheck<'a>(self: &Self, ir_fn: &ProverFn<'a>) -> BoolPropertyResult {
         self.prove_ir_quickcheck(ir_fn, QuickCheckAssertionSemantics::Never, None)
     }
@@ -153,6 +175,17 @@ pub trait Prover {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult;
+
+    /// Proves the request and records the phases observable by this backend.
+    fn prove_ir_quickcheck_with_phases<'a>(
+        self: &Self,
+        prover_fn: &ProverFn<'a>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        _phases: &PhaseCollector,
+    ) -> BoolPropertyResult {
+        self.prove_ir_quickcheck(prover_fn, assertion_semantics, assert_label_filter)
+    }
 
     /// Collects all selected proof results with default-on XLS optimization.
     /// Use `prepare_dslx_quickchecks` for caller-controlled per-property
@@ -364,6 +397,27 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult {
+        self.prove_ir_equiv_with_phases(
+            lhs,
+            rhs,
+            strategy,
+            assertion_semantics,
+            assert_label_filter,
+            allow_flatten,
+            &PhaseCollector::default(),
+        )
+    }
+
+    fn prove_ir_equiv_with_phases<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+        phases: &PhaseCollector,
+    ) -> EquivResult {
         if strategy != EquivParallelism::SingleThreaded
             && (!lhs.uf_map.is_empty() || !rhs.uf_map.is_empty())
         {
@@ -382,22 +436,26 @@ impl<S: SolverConfig> Prover for S {
             Err(error) => return EquivResult::Error(error),
         };
         match strategy {
-            EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
-                self,
-                lhs,
-                rhs,
-                assertion_semantics,
-                assert_label_regex.as_ref(),
-                allow_flatten,
-            ),
-            EquivParallelism::OutputBits => {
-                ir_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+            EquivParallelism::SingleThreaded => {
+                ir_equiv::prove_ir_fn_equiv_with_phases::<S::Solver>(
                     self,
                     lhs,
                     rhs,
                     assertion_semantics,
                     assert_label_regex.as_ref(),
                     allow_flatten,
+                    phases,
+                )
+            }
+            EquivParallelism::OutputBits => {
+                ir_equiv::prove_ir_fn_equiv_output_bits_parallel_with_phases::<S::Solver>(
+                    self,
+                    lhs,
+                    rhs,
+                    assertion_semantics,
+                    assert_label_regex.as_ref(),
+                    allow_flatten,
+                    phases,
                 )
             }
             EquivParallelism::InputBitSplit => {
@@ -412,16 +470,17 @@ impl<S: SolverConfig> Prover for S {
                 else {
                     // No bit can partition the inputs; the unsplit proof still
                     // checks both signatures.
-                    return ir_equiv::prove_ir_fn_equiv::<S::Solver>(
+                    return ir_equiv::prove_ir_fn_equiv_with_phases::<S::Solver>(
                         self,
                         lhs,
                         rhs,
                         assertion_semantics,
                         assert_label_regex.as_ref(),
                         allow_flatten,
+                        phases,
                     );
                 };
-                ir_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+                ir_equiv::prove_ir_fn_equiv_split_input_bit_with_phases::<S::Solver>(
                     self,
                     lhs,
                     rhs,
@@ -430,6 +489,7 @@ impl<S: SolverConfig> Prover for S {
                     assertion_semantics,
                     assert_label_regex.as_ref(),
                     allow_flatten,
+                    phases,
                 )
             }
         }
@@ -441,15 +501,31 @@ impl<S: SolverConfig> Prover for S {
         assertion_semantics: QuickCheckAssertionSemantics,
         assert_label_filter: Option<&str>,
     ) -> BoolPropertyResult {
+        self.prove_ir_quickcheck_with_phases(
+            ir_fn,
+            assertion_semantics,
+            assert_label_filter,
+            &PhaseCollector::default(),
+        )
+    }
+
+    fn prove_ir_quickcheck_with_phases<'a>(
+        self: &Self,
+        ir_fn: &ProverFn<'a>,
+        assertion_semantics: QuickCheckAssertionSemantics,
+        assert_label_filter: Option<&str>,
+        phases: &PhaseCollector,
+    ) -> BoolPropertyResult {
         let assert_label_regex = match build_assert_label_regex(assert_label_filter) {
             Ok(regex) => regex,
             Err(error) => return BoolPropertyResult::Error(error),
         };
-        quickcheck::prove_ir_quickcheck::<S::Solver>(
+        quickcheck::prove_ir_quickcheck_with_phases::<S::Solver>(
             self,
             ir_fn,
             assertion_semantics,
             assert_label_regex.as_ref(),
+            phases,
         )
     }
 

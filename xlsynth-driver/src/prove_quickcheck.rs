@@ -195,7 +195,10 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         Ok(outcome) => outcome,
         Err(error) => {
             if let Some(path) = output_json {
-                let report = ProofSummary::execution_error(start.elapsed(), error.to_string());
+                let mut report = ProofSummary::execution_error(start.elapsed(), error.to_string());
+                if let Some(timing) = &error.timing {
+                    report.timing = timing.clone();
+                }
                 std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
             }
             match error.kind {

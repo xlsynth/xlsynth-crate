@@ -55,6 +55,27 @@ pub fn prove_ir_pkg_equiv_with_tool_exe_and_timeout<P: AsRef<std::path::Path>>(
     tool_exe: P,
     timeout: Duration,
 ) -> ToolchainEquivResult {
+    prove_ir_pkg_equiv_with_tool_exe_timed(
+        lhs_pkg_text,
+        rhs_pkg_text,
+        top,
+        tool_exe,
+        Some(timeout),
+        |_| {},
+    )
+}
+
+/// Reports process wall time after a successfully spawned checker finishes or
+/// is stopped. An absent timeout uses the configured watchdog duration.
+pub fn prove_ir_pkg_equiv_with_tool_exe_timed<P: AsRef<std::path::Path>>(
+    lhs_pkg_text: &str,
+    rhs_pkg_text: &str,
+    top: Option<&str>,
+    tool_exe: P,
+    timeout: Option<Duration>,
+    observe: impl FnOnce(Duration),
+) -> ToolchainEquivResult {
+    let timeout = timeout.unwrap_or_else(configured_toolchain_equiv_timeout);
     let exe = tool_exe.as_ref();
     if !exe.exists() {
         return ToolchainEquivResult::Error(format!("tool not found: {}", exe.display()));
@@ -79,33 +100,39 @@ pub fn prove_ir_pkg_equiv_with_tool_exe_and_timeout<P: AsRef<std::path::Path>>(
     let mut stderr_file = tempfile::tempfile().unwrap();
     cmd.stdout(Stdio::from(stdout_file.try_clone().unwrap()));
     cmd.stderr(Stdio::from(stderr_file.try_clone().unwrap()));
+    let process_start = Instant::now();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return ToolchainEquivResult::Error(format!("spawn failed: {}", e)),
     };
     let start = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = read_spooled_output(&mut stdout_file);
-                let stderr = read_spooled_output(&mut stderr_file);
-                return classify_tool_output(status, &stdout, &stderr);
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return ToolchainEquivResult::TimedOutOrInterrupted(format!(
+                break Err(ToolchainEquivResult::TimedOutOrInterrupted(format!(
                     "tool timed out after {} ms",
                     timeout.as_millis()
-                ));
+                )));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return ToolchainEquivResult::Error(format!("wait failed: {}", e));
+                break Err(ToolchainEquivResult::Error(format!("wait failed: {}", e)));
             }
         }
+    };
+    observe(process_start.elapsed());
+    match status {
+        Ok(status) => classify_tool_output(
+            status,
+            &read_spooled_output(&mut stdout_file),
+            &read_spooled_output(&mut stderr_file),
+        ),
+        Err(error) => error,
     }
 }
 
@@ -230,13 +257,17 @@ while :; do :; done
         permissions.set_mode(0o755);
         std::fs::set_permissions(&exe, permissions).unwrap();
 
-        let result = prove_ir_pkg_equiv_with_tool_exe_and_timeout(
+        let timeout = Duration::from_millis(100);
+        let mut process_wall = None;
+        let result = prove_ir_pkg_equiv_with_tool_exe_timed(
             "package lhs\n",
             "package rhs\n",
             None,
             exe,
-            Duration::from_millis(100),
+            Some(timeout),
+            |wall| process_wall = Some(wall),
         );
+        assert!(process_wall.is_some_and(|wall| wall >= timeout));
         match result {
             ToolchainEquivResult::TimedOutOrInterrupted(message) => {
                 assert_eq!(message, "tool timed out after 100 ms");

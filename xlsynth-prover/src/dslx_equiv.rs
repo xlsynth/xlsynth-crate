@@ -18,6 +18,8 @@ use xlsynth::{DslxConvertOptions, IrPackage, mangle_dslx_name, optimize_ir};
 use xlsynth_pir::IrValue;
 
 use crate::ir_utils;
+use crate::proof_phases::PhaseCollector;
+use crate::proof_timing::ProofTiming;
 use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
@@ -230,7 +232,15 @@ impl<'a> DslxEquivRequest<'a> {
 
 /// Proves equivalence between two DSLX modules described by `request`.
 pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, String> {
+    run_dslx_equiv_with_phases(request, &PhaseCollector::default())
+}
+
+fn run_dslx_equiv_with_phases(
+    request: &DslxEquivRequest<'_>,
+    phases: &PhaseCollector,
+) -> Result<EquivReport, String> {
     let start = Instant::now();
+    let prepare = phases.start_prepare();
 
     let lhs_ir = prepare_side(request, &request.lhs)?;
     let rhs_ir = prepare_side(request, &request.rhs)?;
@@ -263,13 +273,15 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         .with_domains(rhs_ir.param_domains.clone())
         .with_uf_map(request.rhs.uf_map.clone().into_owned());
 
-    let result = prover.prove_ir_equiv(
+    drop(prepare);
+    let result = prover.prove_ir_equiv_with_phases(
         &lhs_side,
         &rhs_side,
         request.parallelism,
         request.assertion_semantics,
         assert_label_filter,
         request.flatten_aggregates,
+        phases,
     );
 
     let duration = start.elapsed();
@@ -277,7 +289,7 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         EquivResult::Error(msg) => Err(msg),
         other => Ok(EquivReport {
             duration,
-            timing: duration.into(),
+            timing: ProofTiming::from(duration).with_phases(phases.snapshot()),
             result: other,
         }),
     }
