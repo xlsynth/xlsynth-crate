@@ -180,7 +180,7 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
     std::fs::write(&aig, make_two_input_and_aig())?;
     std::fs::write(&liberty, make_timing_enabled_inv_nand2_liberty_textproto())?;
 
-    let map = |destination: &Path| {
+    let map = || {
         let mut cmd = Command::new(driver);
         cmd.arg("aig-tech-map")
             .arg(&aig)
@@ -188,17 +188,15 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
             .arg("--liberty_proto")
             .arg(&liberty)
             .args(["--module_name", "mapped_top"])
-            .arg("--netlist_out")
-            .arg(destination)
             .env_remove("RUST_LOG");
         cmd
     };
-    let gv = map(Path::new("-")).output()?;
-    let binary = map(Path::new("-"))
-        .args(["--netlist-format", "pb"])
-        .output()?;
-    let file = map(&pb)
-        .args(["--netlist-format", "pb", "--json_out"])
+    let gv = map().output()?;
+    let binary = map().args(["-o", "-", "--netlist-format", "pb"]).output()?;
+    let file = map()
+        .arg("--output")
+        .arg(&pb)
+        .arg("--json_out")
         .arg(&report)
         .output()?;
     for result in [&gv, &binary, &file] {
@@ -221,6 +219,27 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
         String::from_utf8_lossy(&restored.stderr)
     );
     assert_eq!(gv.stdout, restored.stdout);
+
+    // Format selection is shared across strategies, so exercise the remaining
+    // destination and override cases once with the default mapper.
+    if strategy_args.is_empty() {
+        for (filename, flags, expected) in [
+            ("mapped.PrOtO", &[][..], &binary.stdout),
+            ("verilog.pb", &["--netlist-format", "gv"][..], &gv.stdout),
+            ("mapped.netlist", &[][..], &gv.stdout),
+            ("mapped", &[][..], &gv.stdout),
+        ] {
+            let path = dir.path().join(filename);
+            let result = map().arg("-o").arg(&path).args(flags).output()?;
+            assert!(
+                result.status.success(),
+                "{filename}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(result.stdout.is_empty(), "{filename}");
+            assert_eq!(&std::fs::read(path)?, expected, "{filename}");
+        }
+    }
     Ok(())
 }
 
@@ -1078,7 +1097,7 @@ fn cli_rejects_aliased_outputs_without_clobbering() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+        "aig-tech-map error: --json_out and --output must name different files\n"
     );
     assert_eq!(
         std::fs::read_to_string(&output_path).unwrap(),
@@ -1112,7 +1131,7 @@ fn cli_rejects_json_aliasing_redirected_stdout() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+        "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
     );
     assert_eq!(
         std::fs::read_to_string(&output_path).unwrap(),
@@ -1148,7 +1167,7 @@ fn cli_rejects_json_aliasing_stdout_pipe() {
         assert!(output.stdout.is_empty());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
     }
 }
@@ -1180,7 +1199,7 @@ fn cli_rejects_stdout_device_alias_with_redirected_file() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
         assert_eq!(
             std::fs::read_to_string(&output_path).unwrap(),
@@ -1284,7 +1303,7 @@ fn cli_rejects_stdout_device_alias_with_socket() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
         peer.set_nonblocking(true).unwrap();
         let mut byte = [0];
@@ -1417,7 +1436,7 @@ fn cli_handles_case_dependent_output_aliases() {
             assert!(!output.status.success());
             assert_eq!(
                 String::from_utf8(output.stderr).unwrap(),
-                "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+                "aig-tech-map error: --json_out and --output must name different files\n"
             );
             if exists {
                 assert_eq!(
@@ -1538,7 +1557,7 @@ fn cli_rejects_symlinked_output_aliases() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+            "aig-tech-map error: --json_out and --output must name different files\n"
         );
         if exists {
             assert_eq!(
@@ -1576,7 +1595,7 @@ fn cli_rejects_hard_linked_output_aliases() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+        "aig-tech-map error: --json_out and --output must name different files\n"
     );
     assert_eq!(
         std::fs::read_to_string(output_path).unwrap(),

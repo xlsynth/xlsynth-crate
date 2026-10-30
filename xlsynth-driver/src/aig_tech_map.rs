@@ -2,13 +2,11 @@
 
 use anyhow::{Context, Result, ensure};
 use clap::{ArgMatches, parser::ValueSource};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-#[cfg(windows)]
-use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::FileTypeExt;
+use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
@@ -24,179 +22,11 @@ use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
 };
 
-use crate::mapped_netlist_output::{Format, write_stdout};
-
-/// Resolves existing output targets or their parents before either file is
-/// written.
-fn resolved_output_path(path: &Path) -> Result<PathBuf> {
-    match path.canonicalize() {
-        Ok(resolved) => Ok(resolved),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            // A dangling file symlink still identifies its eventual write
-            // target.
-            if path
-                .symlink_metadata()
-                .is_ok_and(|m| m.file_type().is_symlink())
-            {
-                let target = std::fs::read_link(path)?;
-                return resolved_output_path(&parent.join(target));
-            }
-            let name = path.file_name().context("output path has no file name")?;
-            Ok(parent.canonicalize()?.join(name))
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Detects equal destinations, including symlinks, hard links, and
-/// not-yet-created files.
-fn output_paths_alias(lhs: &Path, rhs: &Path) -> Result<bool> {
-    if resolved_output_path(lhs)? == resolved_output_path(rhs)? {
-        return Ok(true);
-    }
-    let Some(lhs_metadata) = metadata_if_exists(lhs)? else {
-        return Ok(false);
-    };
-    let Some(rhs_metadata) = metadata_if_exists(rhs)? else {
-        return Ok(false);
-    };
-    #[cfg(unix)]
-    {
-        Ok(same_unix_file(&lhs_metadata, &rhs_metadata))
-    }
-    #[cfg(not(unix))]
-    {
-        // Opening special files to compare their identities can block or have
-        // side effects. Regular files are also checked using their output
-        // handles before either is written.
-        if !lhs_metadata.is_file() || !rhs_metadata.is_file() {
-            return Ok(false);
-        }
-        match (identity_handle(lhs), identity_handle(rhs)) {
-            (Ok(lhs_handle), Ok(rhs_handle)) => Ok(lhs_handle == rhs_handle),
-            // Identity checking is best effort here; both outputs are checked
-            // again after opening them for writing when both are regular.
-            _ => Ok(false),
-        }
-    }
-}
-
-/// Reads metadata without treating a missing output as an error.
-fn metadata_if_exists(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
-    match std::fs::metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Identifies existing stream-like outputs, excluding invalid directories.
-fn is_special_output(path: &Path) -> std::io::Result<bool> {
-    Ok(metadata_if_exists(path)?.is_some_and(|metadata| !metadata.is_file() && !metadata.is_dir()))
-}
-
-/// Compares Unix file identities without opening either file's data.
 #[cfg(unix)]
-fn same_unix_file(lhs: &std::fs::Metadata, rhs: &std::fs::Metadata) -> bool {
-    (lhs.dev(), lhs.ino()) == (rhs.dev(), rhs.ino())
-}
-
-/// Opens a file for identity queries without requesting read or write access.
-#[cfg(windows)]
-fn identity_handle(path: &Path) -> std::io::Result<same_file::Handle> {
-    let file = OpenOptions::new().access_mode(0).open(path)?;
-    same_file::Handle::from_file(file)
-}
-
-/// Opens a file for identity queries on other supported platforms.
-#[cfg(not(any(unix, windows)))]
-fn identity_handle(path: &Path) -> std::io::Result<same_file::Handle> {
-    same_file::Handle::from_path(path)
-}
-
-/// Checks that a placeholder still names the file that was created.
-fn path_matches_handle(path: &Path, handle: &same_file::Handle) -> bool {
-    #[cfg(unix)]
-    {
-        match (std::fs::metadata(path), handle.as_file().metadata()) {
-            (Ok(path_metadata), Ok(handle_metadata)) => {
-                same_unix_file(&path_metadata, &handle_metadata)
-            }
-            _ => false,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-            && identity_handle(path).is_ok_and(|path_handle| path_handle == *handle)
-    }
-}
-
-/// An output opened without truncation, with cleanup for a new placeholder.
-struct PendingOutput {
-    handle: Option<same_file::Handle>,
-    created_path: Option<PathBuf>,
-}
-
-impl PendingOutput {
-    /// Opens a destination without destroying existing contents.
-    fn open(path: &Path) -> Result<Self> {
-        // Resolving dangling symlinks lets us record the actual newly created
-        // target for cleanup without deleting the symlink itself.
-        let resolved = resolved_output_path(path)?;
-        let (file, created) = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&resolved)
-        {
-            Ok(file) => (file, true),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                (OpenOptions::new().write(true).open(&resolved)?, false)
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let handle = match same_file::Handle::from_file(file) {
-            Ok(handle) => handle,
-            Err(error) => {
-                if created {
-                    let _ = std::fs::remove_file(&resolved);
-                }
-                return Err(error.into());
-            }
-        };
-        Ok(Self {
-            handle: Some(handle),
-            created_path: created.then_some(resolved),
-        })
-    }
-
-    /// Keeps the destination and truncates it immediately before writing.
-    fn prepare_write(&mut self) -> Result<&mut File> {
-        self.created_path = None;
-        let file = self.handle.as_mut().unwrap().as_file_mut();
-        if file.metadata()?.is_file() {
-            file.set_len(0)?;
-        }
-        Ok(file)
-    }
-}
-
-impl Drop for PendingOutput {
-    fn drop(&mut self) {
-        if let Some(path) = self.created_path.take() {
-            let handle = self.handle.take().unwrap();
-            let still_same_file = path_matches_handle(&path, &handle);
-            drop(handle);
-            if still_same_file {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-}
+use crate::mapped_netlist_output::metadata_if_exists;
+use crate::mapped_netlist_output::{
+    Format, PendingOutput, is_special_output, output_paths_alias, path_aliases_stream, write_stdout,
+};
 
 /// Both file outputs, opened and checked for filesystem-level aliasing.
 struct OutputFiles {
@@ -211,43 +41,17 @@ fn open_distinct_outputs(netlist_path: &Path, json_path: &Path) -> Result<Output
     let json = PendingOutput::open(json_path)
         .with_context(|| format!("failed to open JSON summary '{}'", json_path.display()))?;
     ensure!(
-        netlist.handle != json.handle,
-        "--json_out and --netlist_out must name different files"
+        netlist.handle() != json.handle(),
+        "--json_out and --output must name different files"
     );
     Ok(OutputFiles { netlist, json })
-}
-
-/// Detects an existing path that aliases a standard output stream.
-fn path_aliases_stream(
-    path: &Path,
-    stream: &same_file::Handle,
-    #[cfg_attr(not(unix), allow(unused_variables))] stream_paths: &[&str],
-) -> Result<bool> {
-    let Some(metadata) = metadata_if_exists(path)? else {
-        return Ok(false);
-    };
-    #[cfg(unix)]
-    let aliases = {
-        // On some Unix systems, stat of a /dev/fd entry reports the identity
-        // of its descriptor vnode rather than the identity returned by fstat
-        // on the descriptor itself. Compare both forms without opening a
-        // potentially blocking FIFO or another special output.
-        same_unix_file(&metadata, &stream.as_file().metadata()?)
-            || stream_paths.iter().any(|stream_path| {
-                std::fs::metadata(stream_path)
-                    .is_ok_and(|stream_metadata| same_unix_file(&metadata, &stream_metadata))
-            })
-    };
-    #[cfg(not(unix))]
-    let aliases = metadata.is_file() && identity_handle(path).is_ok_and(|handle| handle == *stream);
-    Ok(aliases)
 }
 
 /// Detects an existing JSON destination that aliases the netlist's stdout.
 fn ensure_distinct_from_stdout(path: &Path, stdout: &same_file::Handle) -> Result<()> {
     ensure!(
         !path_aliases_stream(path, stdout, &["/dev/stdout", "/dev/fd/1"])?,
-        "--json_out must not refer to stdout when --netlist_out is '-'"
+        "--json_out must not refer to stdout when the netlist is written to stdout"
     );
     Ok(())
 }
@@ -294,7 +98,7 @@ fn remove_runtime(value: &mut serde_json::Value) {
 fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
-    let netlist_out = matches.get_one::<String>("netlist_out").unwrap();
+    let netlist_out = matches.get_one::<String>("output").unwrap();
     let json_out = matches.get_one::<String>("json_out");
     let module_name = matches.get_one::<String>("module_name");
     let strategy = matches.get_one::<String>("strategy").unwrap().as_str();
@@ -359,7 +163,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         ensure!(
             netlist_out == "-"
                 || !output_paths_alias(Path::new(json_path), Path::new(netlist_out))?,
-            "--json_out and --netlist_out must name different files"
+            "--json_out and --output must name different files"
         );
         let stderr = same_file::Handle::stderr()?;
         ensure_distinct_from_stderr(Path::new(json_path), &stderr)?;
@@ -541,7 +345,8 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let net_count = mapped.nets.len();
     report["cell_count"] = cell_count.into();
     report["net_count"] = net_count.into();
-    let netlist_bytes = Format::from_matches(matches).encode(&mapped.into())?;
+    let format = Format::from_matches(matches, Path::new(netlist_out));
+    let netlist_bytes = format.encode(&mapped.into())?;
     if let (Some(json_path), Some(stderr)) = (json_out, stderr.as_ref()) {
         ensure_distinct_from_stderr(Path::new(json_path), stderr)?;
     }
@@ -553,7 +358,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             if metadata_if_exists(json_path)?.is_some_and(|metadata| metadata.file_type().is_fifo())
             {
                 // A named path such as /dev/stdout can keep the original
-                // stdout pipe open just as --netlist_out - does.
+                // stdout pipe open just as --output - does.
                 if let Ok(stdout) = same_file::Handle::stdout() {
                     if path_aliases_stream(netlist_path, &stdout, &["/dev/stdout", "/dev/fd/1"])? {
                         ensure_json_fifo_safe_for_stdout(json_path, &stdout)?;
@@ -566,7 +371,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             // Concurrent replacement of paths cannot be made atomic here.
             ensure!(
                 !output_paths_alias(netlist_path, json_path)?,
-                "--json_out and --netlist_out must name different files"
+                "--json_out and --output must name different files"
             );
             std::fs::write(netlist_path, netlist_bytes)
                 .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
@@ -579,7 +384,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         } else {
             let mut outputs = open_distinct_outputs(netlist_path, json_path)?;
             ensure!(
-                outputs.json.handle.as_ref() != stderr.as_ref(),
+                Some(outputs.json.handle()) != stderr.as_ref(),
                 "--json_out must not refer to stderr"
             );
             outputs
@@ -614,11 +419,11 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                     format!("failed to open JSON summary '{}'", json_path.display())
                 })?;
                 ensure!(
-                    json.handle.as_ref() != Some(&stdout),
-                    "--json_out must not refer to stdout when --netlist_out is '-'"
+                    json.handle() != &stdout,
+                    "--json_out must not refer to stdout when the netlist is written to stdout"
                 );
                 ensure!(
-                    json.handle.as_ref() != stderr.as_ref(),
+                    Some(json.handle()) != stderr.as_ref(),
                     "--json_out must not refer to stderr"
                 );
                 write_stdout(&netlist_bytes)?;

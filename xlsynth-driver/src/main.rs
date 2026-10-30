@@ -2413,13 +2413,7 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
-                .arg(
-                    Arg::new("netlist_out")
-                        .long("netlist_out")
-                        .help("Path to write the mapped netlist (use '-' for stdout)")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
+                .arg(mapped_netlist_output::output_arg().visible_alias("netlist_out"))
                 .arg(mapped_netlist_output::format_arg())
                 .arg(
                     Arg::new("module_name")

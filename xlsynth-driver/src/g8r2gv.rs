@@ -1,22 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::Context;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use xlsynth_g8r::liberty::io_defaults::{default_output_load_ff, resolve_reference_buffer};
 use xlsynth_g8r::liberty::load::load_library_from_path;
 use xlsynth_g8r::netlist::abc::{
-    AbcIoConstraints, AbcMappingContext, AbcMappingOptions, AbcToolchain,
+    AbcIoConstraints, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics, AbcToolchain,
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 
-use crate::mapped_netlist_output::{Format, format_arg, write_stdout};
+use crate::mapped_netlist_output::{
+    Format, PendingOutput, format_arg, is_special_output, output_arg, output_paths_alias,
+    path_aliases_stream, write_stdout,
+};
 
 /// Defines the thin CLI surface for direct ABC/native sequential mapping.
 pub fn command() -> Command {
     Command::new("g8r2gv")
-        .about("Maps a .g8r or .g8rbin design to a gate-level netlist on stdout using ABC and native register mapping, without Yosys")
+        .about("Maps a .g8r or .g8rbin design to a gate-level netlist using ABC and native register mapping, without Yosys")
+        .arg(output_arg())
         .arg(format_arg())
         .arg(Arg::new("g8r_input_file").required(true).index(1).help("Input .g8r or .g8rbin design"))
         .arg(Arg::new("liberty").long("liberty").value_name("PATH").required(true).action(ArgAction::Append)
@@ -51,6 +57,73 @@ pub fn command() -> Command {
             .help("Write raw ABC mapping stdout on success; may contain nondeterministic timing and progress output"))
         .arg(Arg::new("abc-stderr-out").long("abc-stderr-out").value_name("PATH")
             .help("Write raw ABC mapping stderr on success; may contain nondeterministic tool output"))
+}
+
+/// Checks sidecar destinations and writes them in the existing order before the
+/// netlist.
+fn write_outputs(
+    matches: &ArgMatches,
+    output_path: &Path,
+    bytes: &[u8],
+    diagnostics: &AbcRunDiagnostics,
+) -> anyhow::Result<()> {
+    let to_stdout = output_path.as_os_str() == "-";
+    // Reserve regular files before checking aliases so even a new destination
+    // has a filesystem identity. Stream opens can block until their readers
+    // finish consuming the sidecars, so defer them until after the sidecars.
+    let netlist_file = if to_stdout || is_special_output(output_path)? {
+        None
+    } else {
+        Some(
+            PendingOutput::open(output_path)
+                .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?,
+        )
+    };
+    for flag in ["diagnostics-out", "abc-stdout-out", "abc-stderr-out"] {
+        let Some(path) = matches.get_one::<String>(flag).map(Path::new) else {
+            continue;
+        };
+        let aliases = if to_stdout {
+            path_aliases_stream(
+                path,
+                &same_file::Handle::stdout()?,
+                &["/dev/stdout", "/dev/fd/1"],
+            )
+        } else {
+            output_paths_alias(output_path, path)
+        }
+        .with_context(|| {
+            format!(
+                "checking --{flag} '{}' against the netlist output",
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            !aliases,
+            "--{flag} and --output must name different destinations"
+        );
+    }
+    if let Some(path) = matches.get_one::<String>("diagnostics-out") {
+        let json = serde_json::to_string_pretty(diagnostics)?;
+        std::fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("writing ABC diagnostics '{path}'"))?;
+    }
+    for (flag, log) in [
+        ("abc-stdout-out", &diagnostics.stdout),
+        ("abc-stderr-out", &diagnostics.stderr),
+    ] {
+        if let Some(path) = matches.get_one::<String>(flag) {
+            std::fs::write(path, log).with_context(|| format!("writing --{flag} '{path}'"))?;
+        }
+    }
+    if to_stdout {
+        return write_stdout(bytes);
+    }
+    match netlist_file {
+        Some(mut file) => file.prepare_write()?.write_all(bytes),
+        None => std::fs::write(output_path, bytes),
+    }
+    .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
 }
 
 /// Loads inputs, resolves independent IO overrides, and emits the mapped
@@ -94,7 +167,8 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         .collect::<Vec<_>>();
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
-    let format = Format::from_matches(matches);
+    let output_path = Path::new(matches.get_one::<String>("output").unwrap());
+    let format = Format::from_matches(matches, output_path);
     let mapped = match format {
         Format::Gv => context.map_sequential(&design, &options),
         Format::Pb => context.map_sequential_structural(&design, &options),
@@ -103,18 +177,5 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     let output = format
         .encode(&mapped.netlist)
         .map_err(|e| format!("{e:#}"))?;
-    if let Some(path) = matches.get_one::<String>("diagnostics-out") {
-        let json = serde_json::to_string_pretty(&mapped.diagnostics).map_err(|e| e.to_string())?;
-        std::fs::write(path, format!("{json}\n"))
-            .map_err(|e| format!("writing ABC diagnostics '{path}': {e}"))?;
-    }
-    for (flag, log) in [
-        ("abc-stdout-out", &mapped.diagnostics.stdout),
-        ("abc-stderr-out", &mapped.diagnostics.stderr),
-    ] {
-        if let Some(path) = matches.get_one::<String>(flag) {
-            std::fs::write(path, log).map_err(|e| format!("writing --{flag} '{path}': {e}"))?;
-        }
-    }
-    write_stdout(&output).map_err(|e| format!("{e:#}"))
+    write_outputs(matches, output_path, &output, &mapped.diagnostics).map_err(|e| format!("{e:#}"))
 }

@@ -163,29 +163,33 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     let diagnostics = dir.path().join("diagnostics.json");
     let abc_stdout = dir.path().join("abc.stdout");
     let abc_stderr = dir.path().join("abc.stderr");
-    let mut cmd = command(dir.path(), &input);
-    cmd.args([
-        "--add-clk-port",
-        "clk",
-        "--flop-inputs",
-        "--flop-outputs",
-        "--module-name",
-        "mapped_top",
-        "--register-cell",
-        "DFFN",
-        "--output-load-ff",
-        "7",
-    ])
-    .arg("--abc-script")
-    .arg(&script)
-    .arg("--diagnostics-out")
-    .arg(&diagnostics)
-    .arg("--abc-stdout-out")
-    .arg(&abc_stdout)
-    .arg("--abc-stderr-out")
-    .arg(&abc_stderr)
-    .env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.01s\n")
-    .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 100\n");
+    let map = || {
+        let mut cmd = command(dir.path(), &input);
+        cmd.args([
+            "--add-clk-port",
+            "clk",
+            "--flop-inputs",
+            "--flop-outputs",
+            "--module-name",
+            "mapped_top",
+            "--register-cell",
+            "DFFN",
+            "--output-load-ff",
+            "7",
+        ])
+        .arg("--abc-script")
+        .arg(&script)
+        .arg("--diagnostics-out")
+        .arg(&diagnostics)
+        .arg("--abc-stdout-out")
+        .arg(&abc_stdout)
+        .arg("--abc-stderr-out")
+        .arg(&abc_stderr);
+        cmd
+    };
+    let mut cmd = map();
+    cmd.env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.01s\n")
+        .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 100\n");
     let result = cmd.output().unwrap();
     assert!(
         result.status.success(),
@@ -248,7 +252,31 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     assert!(binary.stderr.is_empty());
     assert_eq!(first_diagnostics, std::fs::read(&diagnostics).unwrap());
     let pb = dir.path().join("mapped.pb");
-    std::fs::write(&pb, binary.stdout).unwrap();
+    for (flag, filename, format_args, expected) in [
+        ("-o", "mapped.pb", &[][..], &binary.stdout),
+        ("--output", "mapped.proto", &[][..], &binary.stdout),
+        (
+            "--output",
+            "verilog.pb",
+            &["--netlist-format", "gv"][..],
+            &result.stdout,
+        ),
+    ] {
+        let path = dir.path().join(filename);
+        let named = map()
+            .arg(flag)
+            .arg(&path)
+            .args(format_args)
+            .output()
+            .unwrap();
+        assert!(
+            named.status.success(),
+            "{filename}: {}",
+            String::from_utf8_lossy(&named.stderr)
+        );
+        assert!(named.stdout.is_empty(), "{filename}");
+        assert_eq!(&std::fs::read(path).unwrap(), expected, "{filename}");
+    }
     let restored = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("pb2gv")
         .arg(&pb)
@@ -425,4 +453,51 @@ fn defaults_resolve_independently_and_invalid_options_fail_cleanly() {
             .status
             .success()
     );
+
+    let output = dir.path().join("mapped.pb");
+    let alias = dir.path().join("alias");
+    let new_output = dir.path().join("new.pb");
+    std::fs::write(&output, b"original contents").unwrap();
+    std::fs::hard_link(&output, &alias).unwrap();
+    for (destination, flag, sidecar) in [
+        (&output, "--diagnostics-out", &output),
+        (&output, "--abc-stdout-out", &alias),
+        (&output, "--abc-stderr-out", &alias),
+        (&new_output, "--diagnostics-out", &new_output),
+    ] {
+        let rejected = command(dir.path(), &input)
+            .arg("--output")
+            .arg(destination)
+            .arg(flag)
+            .arg(sidecar)
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(1), "{flag}");
+        assert!(rejected.stdout.is_empty(), "{flag}");
+        assert_eq!(
+            String::from_utf8(rejected.stderr).unwrap(),
+            format!(
+                "xlsynth-driver: g8r2gv: {flag} and --output must name different destinations\n"
+            )
+        );
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"original contents",
+            "{flag}"
+        );
+    }
+    assert!(!new_output.try_exists().unwrap());
+
+    let diagnostics = dir.path().join("diagnostics.json");
+    std::fs::write(&diagnostics, b"original diagnostics").unwrap();
+    let rejected = command(dir.path(), &input)
+        .arg("--output")
+        .arg(dir.path())
+        .arg("--diagnostics-out")
+        .arg(&diagnostics)
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    assert_eq!(std::fs::read(diagnostics).unwrap(), b"original diagnostics");
 }
