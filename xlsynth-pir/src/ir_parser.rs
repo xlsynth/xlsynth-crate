@@ -3789,6 +3789,27 @@ impl Parser {
         self.parse_fn_with_outer(Vec::new())
     }
 
+    /// Parses a complete XLS function declaration, preserving attributes,
+    /// invokes and the function body as printed by libxls.
+    pub fn parse_function_declaration(&mut self) -> Result<ir::Fn, ParseError> {
+        let mut attrs = Vec::new();
+        self.drop_whitespace_and_comments();
+        while self.peek_is("#[") {
+            attrs.push(self.parse_raw_attribute("#[")?);
+            self.drop_whitespace_and_comments();
+        }
+        // The top marker belongs to the enclosing package.
+        self.try_drop_keyword("top");
+        let f = self.parse_fn_with_outer(attrs)?;
+        if !self.at_eof() {
+            return Err(ParseError::new(format!(
+                "unexpected text after function '{}'",
+                f.name
+            )));
+        }
+        Ok(f)
+    }
+
     /// Parses a block, retaining ports as ordinary graph nodes.
     pub fn parse_block(&mut self) -> Result<Block, ParseError> {
         self.parse_block_with_outer(Vec::new())

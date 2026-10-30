@@ -115,11 +115,19 @@ pub(super) enum StageSolveOutcome {
     Inconclusive { location: String },
 }
 
-/// A single selected range in the shared graph's stage mismatch vectors.
+/// Result of checking one selected range of a stage's output bits.
+pub(super) enum LeafResult {
+    Proved,
+    Counterexample,
+    Inconclusive,
+}
+
+/// A selected range of stage bits and its script location.
 struct LeafTask<'a> {
+    index: usize,
     stage: &'a str,
     selector: &'a Selector,
-    bits: &'a [AigOperand],
+    bits: Range<usize>,
 }
 
 impl LeafTask<'_> {
@@ -155,8 +163,7 @@ fn solve_leaf(
     solver.sat_solve_assuming(&[])
 }
 
-/// Validates all stage plans before sharing one worker budget across their
-/// leaves.
+/// Checks stage leaves against the gatified reference using CaDiCaL.
 pub(super) fn run_stage_proofs(
     miters: &StageMiters,
     stage_names: &[String],
@@ -164,39 +171,61 @@ pub(super) fn run_stage_proofs(
     jobs: usize,
     options: GateFormalOptions,
 ) -> Result<StageSolveOutcome, String> {
+    let widths = miters.mismatches.iter().map(Vec::len).collect::<Vec<_>>();
+    run_stage_leaves(
+        stage_names,
+        &widths,
+        scripts,
+        jobs,
+        |stage, range| match solve_leaf(&miters.graph, &miters.mismatches[stage][range], options) {
+            Ok(SatSolveResult::Unsat) => Ok(LeafResult::Proved),
+            Ok(SatSolveResult::Sat) => Ok(LeafResult::Counterexample),
+            Err(ValidationError::CadicalSolveInterrupted) => Ok(LeafResult::Inconclusive),
+            Err(err) => Err(err.to_string()),
+        },
+    )
+}
+
+/// Validates all stage plans, then shares one worker budget across the leaves.
+pub(super) fn run_stage_leaves(
+    stage_names: &[String],
+    widths: &[usize],
+    scripts: &BTreeMap<String, StageProofScript>,
+    jobs: usize,
+    solve_leaf: impl Fn(usize, Range<usize>) -> Result<LeafResult, String> + Sync,
+) -> Result<StageSolveOutcome, String> {
     if jobs == 0 {
         return Err("stage proof worker count must be positive".into());
     }
-    if stage_names.is_empty() || stage_names.len() != miters.mismatches.len() {
+    if stage_names.is_empty() || stage_names.len() != widths.len() {
         return Err("stage names must match the nonempty list of stage obligations".into());
     }
     let default = StageProofScript::default();
     let mut tasks = Vec::new();
     let mut leaf_counts = Vec::new();
-    for (stage, bits) in stage_names.iter().zip(&miters.mismatches) {
+    for (index, (stage, &width)) in stage_names.iter().zip(widths).enumerate() {
         let script = scripts.get(stage).unwrap_or(&default);
         let ranges = script
-            .ranges(bits.len())
+            .ranges(width)
             .map_err(|err| format!("stage '{stage}': {err}"))?;
         leaf_counts.push(ranges.len());
         for (selector, range) in script.leaves.iter().zip(ranges) {
             tasks.push(LeafTask {
+                index,
                 stage,
                 selector,
-                bits: &bits[range],
+                bits: range,
             });
         }
     }
-    let solve = |task: &LeafTask| match solve_leaf(&miters.graph, task.bits, options) {
-        Ok(SatSolveResult::Unsat) => None,
-        Ok(SatSolveResult::Sat) => Some(Ok(StageSolveOutcome::Counterexample {
+    let solve = |task: &LeafTask| match solve_leaf(task.index, task.bits.clone()) {
+        Ok(LeafResult::Proved) => None,
+        Ok(LeafResult::Counterexample) => Some(Ok(StageSolveOutcome::Counterexample {
             location: task.location(),
         })),
-        Err(ValidationError::CadicalSolveInterrupted) => {
-            Some(Ok(StageSolveOutcome::Inconclusive {
-                location: task.location(),
-            }))
-        }
+        Ok(LeafResult::Inconclusive) => Some(Ok(StageSolveOutcome::Inconclusive {
+            location: task.location(),
+        })),
         Err(err) => Some(Err(format!("stage {}: {err}", task.location()))),
     };
     let workers = jobs.min(tasks.len());

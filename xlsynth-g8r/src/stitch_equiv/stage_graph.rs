@@ -59,15 +59,15 @@ fn check_bit_cover(
     Ok(())
 }
 
-/// Compares all next-state bits under the proposed Q relation and compares the
-/// visible outputs under the same relation. Inputs and current state are free.
-pub(super) fn build_stage_miters(
-    reference: &SequentialGateFn,
+/// Validates the named interface, stage layout and complete Q bijection for
+/// either staged proof encoding.
+pub(super) fn validate_stage_relation<'a>(
+    reference: &'a SequentialGateFn,
     mapped: &SequentialGateFn,
     pairs: &[RegisterBitPair],
     register_stages: &[usize],
     stage_count: usize,
-) -> Result<StageMiters, String> {
+) -> Result<super::Interface<'a>, String> {
     reference.validate_legalized()?;
     mapped.validate_legalized()?;
     if stage_count == 0 {
@@ -107,7 +107,19 @@ pub(super) fn build_stage_miters(
         "mapped",
         pairs.iter().map(|p| (p.mapped_register, p.mapped_bit)),
     )?;
+    Ok(expected)
+}
 
+/// Compares all next-state bits under the proposed Q relation and compares the
+/// visible outputs under the same relation. Inputs and current state are free.
+pub(super) fn build_stage_miters(
+    reference: &SequentialGateFn,
+    mapped: &SequentialGateFn,
+    pairs: &[RegisterBitPair],
+    register_stages: &[usize],
+    stage_count: usize,
+) -> Result<StageMiters, String> {
+    let expected = validate_stage_relation(reference, mapped, pairs, register_stages, stage_count)?;
     let mut builder = GateBuilder::new("stitch_stage_miters".into(), GateBuilderOptions::opt());
     let external: BTreeMap<_, _> = expected
         .inputs

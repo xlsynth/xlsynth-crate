@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! SAT equivalence of a free-running stitched pipeline and a mapped netlist.
+//! Formal equivalence of a free-running stitched pipeline and a mapped netlist.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use xlsynth_pir::IrBits;
 
@@ -26,6 +27,16 @@ mod correspondence;
 mod stage_graph;
 mod stage_script;
 
+#[cfg(feature = "has-bitwuzla")]
+mod behavioral;
+#[cfg(feature = "has-bitwuzla")]
+mod bitwuzla;
+#[cfg(feature = "has-bitwuzla")]
+mod mapped_smt;
+
+#[cfg(feature = "has-bitwuzla")]
+pub(crate) use behavioral::BehavioralPipeline;
+
 pub use stage_script::StageProofScript;
 
 /// Selects when to use the direct register correspondence proof.
@@ -40,12 +51,44 @@ pub enum StitchProofMode {
     WholePipeline,
 }
 
+/// Selects the reference semantics and solver for every proof and fallback.
+#[derive(Clone, Copy, Debug)]
+pub enum StitchProofSolver {
+    /// Compare behavioral XLS IR against Boolean mapped-cell formulas.
+    Bitwuzla { timeout: Option<Duration> },
+    /// Compare the gatified reference against the mapped cells.
+    Cadical(GateFormalOptions),
+}
+
+impl Default for StitchProofSolver {
+    fn default() -> Self {
+        if cfg!(feature = "has-bitwuzla") {
+            Self::Bitwuzla { timeout: None }
+        } else {
+            Self::Cadical(GateFormalOptions::default())
+        }
+    }
+}
+
+/// A prepared reference for the selected proof backend.
+#[derive(Clone, Copy)]
+pub(crate) enum ProofReference<'a> {
+    Gates(&'a GateFormalOptions),
+    #[cfg(feature = "has-bitwuzla")]
+    Behavioral {
+        stages: &'a BehavioralPipeline,
+        timeout: Option<Duration>,
+        /// Simulates candidate pairs. The proof uses the behavioral functions.
+        lower_for_pairing: &'a dyn Fn() -> Result<StitchedGatePipeline, String>,
+    },
+}
+
 /// Stage scripts override the default single Solve for the named DSLX stages.
 pub struct StitchProofOptions {
     pub mode: StitchProofMode,
     pub jobs: NonZeroUsize,
     pub stage_scripts: BTreeMap<String, StageProofScript>,
-    pub formal: GateFormalOptions,
+    pub solver: StitchProofSolver,
 }
 
 impl Default for StitchProofOptions {
@@ -54,7 +97,7 @@ impl Default for StitchProofOptions {
             mode: StitchProofMode::Auto,
             jobs: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
             stage_scripts: BTreeMap::new(),
-            formal: GateFormalOptions::default(),
+            solver: StitchProofSolver::default(),
         }
     }
 }
@@ -367,6 +410,7 @@ fn prove_stages(
     latency: usize,
     stage_names: &[String],
     options: &StitchProofOptions,
+    model: ProofReference<'_>,
 ) -> Result<StageAttempt, String> {
     let reference = &pipeline.design;
     // Auto can go straight to the post-fill check on unequal state widths.
@@ -380,7 +424,22 @@ fn prove_stages(
             )));
         }
     }
-    let pairs = match correspondence::direct_register_pairs(reference, implementation, latency) {
+    let proposal = match model {
+        _ if reference.registers.is_empty() && implementation.registers.is_empty() => {
+            // A combinational design has an empty state relation.
+            Ok(Vec::new())
+        }
+        ProofReference::Gates(_) => {
+            correspondence::direct_register_pairs(reference, implementation, latency)
+        }
+        #[cfg(feature = "has-bitwuzla")]
+        ProofReference::Behavioral {
+            lower_for_pairing, ..
+        } => lower_for_pairing().and_then(|candidate| {
+            correspondence::direct_register_pairs(&candidate.design, implementation, latency)
+        }),
+    };
+    let pairs = match proposal {
         Ok(pairs) => pairs,
         Err(reason) if options.stage_scripts.is_empty() => {
             return Ok(StageAttempt::Unresolved(format!(
@@ -393,20 +452,67 @@ fn prove_stages(
             ));
         }
     };
-    let miters = stage_graph::build_stage_miters(
-        reference,
-        implementation,
-        &pairs,
-        &pipeline.register_stages,
-        stage_names.len(),
-    )?;
-    let outcome = stage_script::run_stage_proofs(
-        &miters,
-        stage_names,
-        &options.stage_scripts,
-        options.jobs.get(),
-        options.formal,
-    )?;
+    let (outcome, solver_name) = match model {
+        ProofReference::Gates(formal) => {
+            let miters = stage_graph::build_stage_miters(
+                reference,
+                implementation,
+                &pairs,
+                &pipeline.register_stages,
+                stage_names.len(),
+            )?;
+            (
+                stage_script::run_stage_proofs(
+                    &miters,
+                    stage_names,
+                    &options.stage_scripts,
+                    options.jobs.get(),
+                    *formal,
+                )?,
+                "CaDiCaL",
+            )
+        }
+        #[cfg(feature = "has-bitwuzla")]
+        ProofReference::Behavioral {
+            stages: behavior,
+            timeout,
+            ..
+        } => {
+            let mapped = mapped_smt::MappedStages::new(
+                reference,
+                implementation,
+                &pairs,
+                &pipeline.register_stages,
+                stage_names.len(),
+            )?;
+            let widths = (0..stage_names.len())
+                .map(|i| behavior.stage_width(i))
+                .collect::<Result<Vec<_>, _>>()?;
+            for (i, &width) in widths.iter().enumerate() {
+                if width != mapped.width(i) {
+                    return Err(format!(
+                        "stage '{}' has {width} behavioral bits but {} mapped bits",
+                        stage_names[i],
+                        mapped.width(i)
+                    ));
+                }
+            }
+            (
+                stage_script::run_stage_leaves(
+                    stage_names,
+                    &widths,
+                    &options.stage_scripts,
+                    options.jobs.get(),
+                    |stage, bits| {
+                        bitwuzla::prove_stage_leaf(
+                            behavior, &mapped, reference, stage, bits, timeout,
+                        )
+                    },
+                )?,
+                "Bitwuzla",
+            )
+        }
+    };
     Ok(match outcome {
         stage_script::StageSolveOutcome::Proved { leaf_counts } => StageAttempt::Proved(
             stage_names
@@ -423,7 +529,7 @@ fn prove_stages(
         ),
         stage_script::StageSolveOutcome::Inconclusive { location } => {
             StageAttempt::Unresolved(format!(
-                "stage proof inconclusive for {location}: CaDiCaL interrupted by a timeout or resource limit"
+                "stage proof inconclusive for {location}: {solver_name} interrupted by a timeout or resource limit"
             ))
         }
     })
@@ -437,6 +543,7 @@ pub(crate) fn prove_with_stage_options(
     latency: usize,
     stage_names: &[String],
     options: &StitchProofOptions,
+    model: ProofReference<'_>,
 ) -> Result<StitchProofReport, String> {
     let reference = &pipeline.design;
     let implementation = &mapped.sequential_gate_fn;
@@ -457,7 +564,14 @@ pub(crate) fn prove_with_stage_options(
             None
         }
         StitchProofMode::Auto | StitchProofMode::Stages => {
-            match prove_stages(pipeline, implementation, latency, stage_names, options)? {
+            match prove_stages(
+                pipeline,
+                implementation,
+                latency,
+                stage_names,
+                options,
+                model,
+            )? {
                 StageAttempt::Proved(stages) => {
                     return Ok(StitchProofReport {
                         result: StitchEquivResult::Proved,
@@ -473,13 +587,17 @@ pub(crate) fn prove_with_stage_options(
             }
         }
     };
-    let result = prove_post_fill(
-        reference,
-        implementation,
-        &expected,
-        latency,
-        options.formal,
-    )
+    let result = match model {
+        ProofReference::Gates(formal) => {
+            prove_post_fill(reference, implementation, &expected, latency, *formal)
+        }
+        #[cfg(feature = "has-bitwuzla")]
+        ProofReference::Behavioral {
+            stages: behavior,
+            timeout,
+            ..
+        } => bitwuzla::prove_post_fill(behavior, reference, implementation, latency, timeout),
+    }
     .map_err(|error| match &fallback_reason {
         Some(reason) => format!("{reason}; whole-pipeline proof: {error}"),
         None => error,
@@ -605,6 +723,8 @@ mod tests {
         project_sequential_module,
     };
     use crate::netlist::io::read_gv_from_str;
+    #[cfg(feature = "has-bitwuzla")]
+    use xlsynth_pir::ir_parser::Parser;
 
     fn prove_stitched_pipeline_equiv(
         reference: &SequentialGateFn,
@@ -694,6 +814,86 @@ mod tests {
         assert_ne!(trace.inputs_by_frame[0]["x"], trace.inputs_by_frame[1]["x"]);
     }
 
+    #[cfg(feature = "has-bitwuzla")]
+    #[test]
+    fn behavioral_proofs_detect_a_shared_error_in_the_gate_lowering() {
+        // Both the candidate graph and the mapped cells capture x. The XLS
+        // stage specifies !x. Pair discovery can succeed despite the bug.
+        let stages = ["invert".to_owned()];
+        let package = Parser::new(
+            r#"package wrong_lowering
+top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
+  ret complement: bits[4] = not(x, id=3)
+}"#,
+        )
+        .parse_package()
+        .unwrap();
+        let behavior = BehavioralPipeline::new(
+            package,
+            &[(stages[0].clone(), stages[0].clone())],
+            false,
+            true,
+        )
+        .unwrap();
+        let lower = || {
+            delayed_x(1).map(|design| StitchedGatePipeline {
+                design,
+                register_stages: vec![0],
+            })
+        };
+        let pipeline = lower().unwrap();
+        let implementation = mapped(delayed_x(1).unwrap());
+        let formal = GateFormalOptions::default();
+        let mut options = StitchProofOptions {
+            mode: StitchProofMode::Stages,
+            solver: StitchProofSolver::Cadical(formal),
+            ..StitchProofOptions::default()
+        };
+        let gate_report = prove_with_stage_options(
+            &pipeline,
+            &implementation,
+            1,
+            &stages,
+            &options,
+            ProofReference::Gates(&formal),
+        )
+        .unwrap();
+        assert_eq!(gate_report.result, StitchEquivResult::Proved);
+
+        options.solver = StitchProofSolver::Bitwuzla { timeout: None };
+        let model = ProofReference::Behavioral {
+            stages: &behavior,
+            timeout: None,
+            lower_for_pairing: &lower,
+        };
+        assert_eq!(
+            prove_with_stage_options(&pipeline, &implementation, 1, &stages, &options, model)
+                .unwrap_err(),
+            "the proposed correspondence fails the one-step obligation for 'invert'. Use whole-pipeline mode to check the external outputs after fill"
+        );
+        for mode in [StitchProofMode::Auto, StitchProofMode::WholePipeline] {
+            options.mode = mode;
+            let model = if mode == StitchProofMode::WholePipeline {
+                ProofReference::Behavioral {
+                    stages: &behavior,
+                    timeout: None,
+                    lower_for_pairing: &|| panic!("whole-pipeline proof attempted gatification"),
+                }
+            } else {
+                model
+            };
+            let report =
+                prove_with_stage_options(&pipeline, &implementation, 1, &stages, &options, model)
+                    .unwrap();
+            let StitchEquivResult::Disproved(trace) = report.result else {
+                panic!("behavioral comparison must disprove the faulty lowering")
+            };
+            let x = &trace.inputs_by_frame[0]["x"];
+            assert_eq!(&trace.mapped_outputs["out"], x);
+            assert_eq!(trace.reference_outputs["out"], x.not());
+        }
+    }
+
     #[test]
     fn interrupted_solve_reports_inconclusive() {
         let reference = delayed_x(1).unwrap();
@@ -733,24 +933,39 @@ mod tests {
             ]"#,
         )
         .unwrap();
+        let formal = GateFormalOptions::default().with_cadical_timeout(Duration::ZERO);
         let mut options = StitchProofOptions {
             mode: StitchProofMode::Stages,
             jobs: NonZeroUsize::MIN,
             stage_scripts: BTreeMap::from([(stage_names[0].clone(), split)]),
-            formal: GateFormalOptions::default().with_cadical_timeout(Duration::ZERO),
+            solver: StitchProofSolver::Cadical(formal),
         };
         let stage_error = "stage proof inconclusive for 'capture' at root/high: CaDiCaL interrupted by a timeout or resource limit";
         assert_eq!(
-            prove_with_stage_options(&pipeline, &implementation, 1, &stage_names, &options)
-                .unwrap_err(),
+            prove_with_stage_options(
+                &pipeline,
+                &implementation,
+                1,
+                &stage_names,
+                &options,
+                ProofReference::Gates(&formal)
+            )
+            .unwrap_err(),
             format!(
                 "{stage_error}. Use whole-pipeline mode to check the external outputs after fill"
             )
         );
         options.mode = StitchProofMode::Auto;
         assert_eq!(
-            prove_with_stage_options(&pipeline, &implementation, 1, &stage_names, &options)
-                .unwrap_err(),
+            prove_with_stage_options(
+                &pipeline,
+                &implementation,
+                1,
+                &stage_names,
+                &options,
+                ProofReference::Gates(&formal)
+            )
+            .unwrap_err(),
             format!(
                 "{stage_error}; whole-pipeline proof: stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit"
             )

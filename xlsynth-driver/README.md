@@ -4038,19 +4038,32 @@ generate RTL, lower to g8r, or check a netlist.
 ### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
 
 Proves bit-exact output equivalence after pipeline fill for a free-running
-pipeline. The checker gatifies the selected DSLX stages, imports the mapped
-module with the supplied Liberty cell functions and flip-flop semantics, and
-by default runs one CaDiCaL proof per stage concurrently. Simulation proposes a
-one-to-one pairing of register bits, allowing renamed, reordered, and inverted
-flops. SAT checks every paired next-state bit for arbitrary current state and
-inputs. The last stage also checks all external outputs. Together these checks
-prove output equality on every cycle after the reference pipeline fills.
+pipeline. Bitwuzla compares the behavioral XLS IR of the selected DSLX stages
+against the mapped cells' Liberty functions and flip-flop semantics. CaDiCaL
+compares a gatified reference against the same mapped cells. Builds with
+in-process Bitwuzla use it by default. Other builds default to CaDiCaL.
+Bitwuzla supports call chains of up to 64 XLS functions, counting the stage
+itself and each nested `invoke` or `counted_for` body. Inline helpers to
+shorten a deeper chain.
+
+The behavioral translator reports the stage, helper and operation when it
+cannot encode a partial-product operation or a zero-width slice, reduction,
+select or array access. The diagnostic identifies the unsupported operand or
+result shape. For a gate-level comparison, use `--solver cadical` if g8r can
+lower the stage.
+
+The checker normally runs one proof per stage concurrently. Simulation proposes
+a one-to-one pairing of register bits, allowing renamed, reordered, and inverted
+flops. The solver checks every paired next-state bit for arbitrary current state
+and inputs. The last stage also checks all external outputs. Together these
+checks prove output equality on every cycle after the reference pipeline fills.
 
 If synthesis changes the state encoding, removes flops, or the proposed pairing
-fails a stage proof, the default mode checks the whole pipeline. This proof
-starts the two sides with independent arbitrary register contents, drives the
-same inputs at every frame, and compares the outputs after the specified
-number of rising edges.
+fails a stage proof, the default mode checks the whole pipeline. Bitwuzla
+composes the behavioral stages on the first frame's inputs. It advances the
+mapped cells from arbitrary power-up state with fresh inputs on every frame
+and compares the output after the specified number of rising edges. CaDiCaL
+unrolls both gate graphs from independent arbitrary power-up states.
 
 Inputs and outputs must agree in name and packed bit width, with bit zero as
 the LSB. The native g8r result `output_value` and the stitched RTL result
@@ -4091,15 +4104,16 @@ a matching proto as described under `g8r2gv`. A netlist from synthesis of
 - `--netlist <PATH>` supplies the mapped gate-level Verilog file.
 - `--liberty-proto <PATH>` supplies the matching Liberty proto.
 - `--module-name <NAME>` overrides the mapped module name. The default is the spec's wrapper name.
+- `--solver <bitwuzla|cadical>` selects the backend for stage proofs and whole-pipeline checks. `bitwuzla` requires a driver built with `with-bitwuzla-system` or `with-bitwuzla-built`.
 - `--proof-mode <MODE>` defaults to `auto`, which tries stage proofs and falls back to the whole-pipeline check if needed. `stages` requires a complete, proved correspondence and reports the unmatched bit or failing stage. `whole-pipeline` runs the post-fill check directly.
 - `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
 - `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
-- `--show-proof-plan` prints the proved leaf count per stage or the whole-pipeline fallback reason to stderr.
-- `--timeout-seconds <N>` limits each CaDiCaL solve to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
+- `--show-proof-plan` prints the solver and reference used, along with the proved leaf count per stage or the whole-pipeline fallback reason, to stderr.
+- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
 
 For example, to split the multiply stage's obligations, save the following as
 `product-proof.json`. Stage scripts use the `xlsynth-prover` selector and
-`Apply`/`Solve` command format. The gate-level tactic `SplitOutputs` divides a
+`Apply`/`Solve` command format. The tactic `SplitOutputs` divides a
 stage's ordered mismatch bits in half. The bits follow reference register
 order, least-significant bit first, followed on the last stage by the external
 output bits. Each child can be split again if it has at least two bits. Every

@@ -7,8 +7,10 @@ use std::time::Duration;
 use crate::dslx_stitch_pipeline::resolve_stitch_spec;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
 use xlsynth_g8r::stitch_equiv::{
     StageProofScript, StitchEquivResult, StitchProofMethod, StitchProofMode, StitchProofOptions,
+    StitchProofSolver,
 };
 
 /// Defines the clocked equivalence check between a stitch spec and mapped
@@ -24,6 +26,13 @@ pub fn command() -> Command {
             .value_parser(value_parser!(PathBuf)).help("Liberty proto describing the mapped cells"))
         .arg(Arg::new("module-name").long("module-name").value_name("NAME")
             .help("Mapped top module (defaults to the stitch specification's wrapper name)"))
+        .arg(Arg::new("solver").long("solver").value_name("SOLVER")
+            .value_parser(["bitwuzla", "cadical"])
+            .default_value(match StitchProofSolver::default() {
+                StitchProofSolver::Bitwuzla { .. } => "bitwuzla",
+                StitchProofSolver::Cadical(_) => "cadical",
+            })
+            .help("Compare behavioral XLS IR (Bitwuzla) or a gatified reference (CaDiCaL) against the mapped cells"))
         .arg(Arg::new("proof-mode").long("proof-mode").value_name("MODE")
             .value_parser(["auto", "stages", "whole-pipeline"]).default_value("auto")
             .help("Try stage proofs with post-fill fallback, require stage proofs, or prove the whole pipeline directly"))
@@ -32,16 +41,28 @@ pub fn command() -> Command {
         .arg(Arg::new("stage-script").long("stage-script").value_name("STAGE=PATH").action(ArgAction::Append)
             .help("JSON tactic script for one DSLX stage (repeat for other stages)"))
         .arg(Arg::new("show-proof-plan").long("show-proof-plan").action(ArgAction::SetTrue)
-            .help("Report the proof method and discharged leaf counts or fallback reason on stderr"))
+            .help("Report the proof method, discharged leaf counts or fallback reason, and solver on stderr"))
         .arg(Arg::new("timeout-seconds").long("timeout-seconds").value_name("SECONDS")
-            .value_parser(value_parser!(u64).range(1..)).help("Timeout per CaDiCaL solve (default unlimited)"))
+            .value_parser(value_parser!(u64).range(1..)).help("Timeout per solver check (default unlimited)"))
 }
 
 /// Loads the reference and reports the proof result or a replayable
 /// counterexample.
 pub fn handle(matches: &ArgMatches) -> Result<()> {
     let reference = resolve_stitch_spec(matches.get_one::<PathBuf>("spec").unwrap())?;
+    let timeout = matches
+        .get_one::<u64>("timeout-seconds")
+        .copied()
+        .map(Duration::from_secs);
     let mut options = StitchProofOptions {
+        solver: match matches.get_one::<String>("solver").unwrap().as_str() {
+            "bitwuzla" => StitchProofSolver::Bitwuzla { timeout },
+            "cadical" => StitchProofSolver::Cadical(GateFormalOptions {
+                cadical_timeout: timeout,
+                ..GateFormalOptions::default()
+            }),
+            _ => unreachable!("clap validates the stitch solver"),
+        },
         mode: match matches.get_one::<String>("proof-mode").map(String::as_str) {
             Some("stages") => StitchProofMode::Stages,
             Some("whole-pipeline") => StitchProofMode::WholePipeline,
@@ -71,11 +92,6 @@ pub fn handle(matches: &ArgMatches) -> Result<()> {
             .with_context(context)?;
         options.stage_scripts.insert(name.to_owned(), script);
     }
-    if let Some(seconds) = matches.get_one::<u64>("timeout-seconds") {
-        options.formal = options
-            .formal
-            .with_cadical_timeout(Duration::from_secs(*seconds));
-    }
     let module = matches.get_one::<String>("module-name").map(String::as_str);
     let report = reference.prove_equivalent_to_gv_with_options(
         matches.get_one::<PathBuf>("netlist").unwrap(),
@@ -101,6 +117,14 @@ pub fn handle(matches: &ArgMatches) -> Result<()> {
             StitchProofMethod::WholePipeline {
                 fallback_reason: None,
             } => eprintln!("whole-pipeline proof"),
+        }
+        match options.solver {
+            StitchProofSolver::Bitwuzla { .. } => {
+                eprintln!("solver bitwuzla: behavioral XLS IR vs. mapped cells")
+            }
+            StitchProofSolver::Cadical(_) => {
+                eprintln!("solver cadical: gatified reference vs. mapped cells")
+            }
         }
     }
     match report.result {

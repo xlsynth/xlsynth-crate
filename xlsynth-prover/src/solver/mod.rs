@@ -83,7 +83,7 @@ pub trait Solver: Sized {
         let mut s = String::with_capacity(2 + width);
         s.push_str("#b");
         for bit in (0..width).rev() {
-            let b = ((value >> bit) & 1) != 0;
+            let b = bit < u128::BITS as usize && ((value >> bit) & 1) != 0;
             s.push(if b { '1' } else { '0' });
         }
         self.from_raw_str(width, &s)
@@ -647,7 +647,7 @@ pub trait Solver: Sized {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BitVec<Term> {
     BitVec { width: usize, rep: Term },
     ZeroWidth,

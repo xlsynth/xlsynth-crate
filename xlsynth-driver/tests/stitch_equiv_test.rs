@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 use xlsynth_g8r::aig_serdes::g8r::parse_g8r;
 use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::CADICAL_CONFIG_ENV;
 use xlsynth_pir::IrBits;
 
 const SPEC: &str = r#"
@@ -24,7 +25,12 @@ cells: {
   pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
   sequential: { state_var: "IQ" next_state: "D" clock_expr: "CLK" kind: SEQUENTIAL_KIND_FF }
 }
-interned_strings: ["D", "CLK", "Q", "IQ"]
+cells: {
+  name: "INV"
+  pins: { name_string_id: 5 direction: INPUT }
+  pins: { name_string_id: 6 direction: OUTPUT function_string_id: 7 }
+}
+interned_strings: ["D", "CLK", "Q", "IQ", "A", "Y", "!A"]
 "#;
 
 const NETLIST: &str = r#"
@@ -44,7 +50,7 @@ fn driver(directory: &Path, args: &[&str]) -> std::io::Result<Output> {
         .output()
 }
 
-/// Writes a two-stage spec with only the inter-stage register layer.
+/// Writes a stitch spec with unregistered external inputs and outputs.
 fn stage_fixture(directory: &Path, dslx: &str, gv: &str) -> std::io::Result<()> {
     fs::write(directory.join("pipe.x"), dslx)?;
     fs::write(directory.join("pipe.gv"), gv)?;
@@ -79,6 +85,378 @@ const SPLIT: &str = r#"[
   {"selector":["root","low"],"command":"Solve"},
   {"selector":["root","high"],"command":"Solve"}
 ]"#;
+
+const BITWUZLA_PLAN: &str = "solver bitwuzla: behavioral XLS IR vs. mapped cells\n";
+const CADICAL_PLAN: &str = "solver cadical: gatified reference vs. mapped cells\n";
+const DEFAULT_SOLVER_PLAN: &str = if cfg!(feature = "has-bitwuzla") {
+    BITWUZLA_PLAN
+} else {
+    CADICAL_PLAN
+};
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn behavioral_stitch_bounds_helper_depth_before_parallel_translation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("split.json"), SPLIT).unwrap();
+    for depth in [64, 65, 256] {
+        let mut source = "fn h0(x: u2) -> u2 { x }\n".to_owned();
+        let last = depth - 2;
+        for i in 1..=last {
+            source.push_str(&format!("fn h{i}(x: u2) -> u2 {{ h{}(x) }}\n", i - 1));
+        }
+        // Visit h31 first. Its cached height still contributes to the full
+        // path through h{last}, even when all of h31's callees are known.
+        source.push_str(&format!(
+            "fn pipe_cycle0(x: bool) -> u2 {{ h{last}(h31(x as u2)) }}"
+        ));
+        stage_fixture(
+            dir.path(),
+            &source,
+            "module pipe(input x, output [1:0] out); assign out = {1'b0, x}; endmodule",
+        )
+        .unwrap();
+        let proof = stage_command(
+            dir.path(),
+            &[
+                "--solver",
+                "bitwuzla",
+                "--proof-mode",
+                "stages",
+                "--jobs",
+                "2",
+                "--stage-script",
+                "pipe_cycle0=split.json",
+            ],
+        )
+        .output()
+        .unwrap();
+        if depth == 64 {
+            assert_eq!(
+                proof.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&proof.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(proof.stderr).unwrap(),
+                format!("stage pipe_cycle0: 2 proved leaves\n{BITWUZLA_PLAN}")
+            );
+            // The maximum supported depth must also replay a concrete
+            // mismatch on the main thread, including the full helper chain.
+            fs::write(
+                dir.path().join("pipe.gv"),
+                "module pipe(input x, output [1:0] out); assign out = 2'b00; endmodule",
+            )
+            .unwrap();
+            let replay = stage_command(
+                dir.path(),
+                &["--solver", "bitwuzla", "--proof-mode", "whole-pipeline"],
+            )
+            .output()
+            .unwrap();
+            assert_eq!(replay.status.code(), Some(1));
+            assert!(replay.stdout.is_empty());
+            assert_eq!(
+                String::from_utf8(replay.stderr).unwrap(),
+                format!(
+                    r#"whole-pipeline proof
+{BITWUZLA_PLAN}xlsynth-driver: stitch-equiv: post-fill output mismatch
+Reference initial state {{}}
+Mapped initial state {{}}
+Frame 0 inputs {{"x": bits[1]:1}}
+Reference outputs {{"out": bits[2]:1}}
+Mapped outputs {{"out": bits[2]:0}}
+"#
+                )
+            );
+        } else {
+            assert_eq!(proof.status.code(), Some(1));
+            assert_eq!(
+                String::from_utf8(proof.stderr).unwrap(),
+                "xlsynth-driver: stitch-equiv: stage 'pipe_cycle0': Bitwuzla stitch proofs support at most 64 nested XLS functions including the stage. Inline helpers to shorten the call chain\n"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn behavioral_stitch_zero_extends_wide_loop_indices_for_proof_and_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    // The three iterations set both low bits. Repeating either nonzero
+    // index in the upper 128 bits would also set bit two of the result.
+    stage_fixture(
+        dir.path(),
+        r#"fn pipe_cycle0() -> u3 {
+    for (i, carry): (uN[256], u3) in uN[256]:0..uN[256]:3 {
+        let high = or_reduce(i[128+:uN[128]]);
+        carry | (high ++ i[0+:u2])
+    }(u3:0)
+}"#,
+        "module pipe(output [2:0] out); assign out = 3'b011; endmodule",
+    )
+    .unwrap();
+    let options = ["--solver", "bitwuzla", "--proof-mode", "whole-pipeline"];
+    let proved = stage_command(dir.path(), &options).output().unwrap();
+    assert_eq!(
+        proved.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&proved.stderr)
+    );
+    assert_eq!(
+        proved.stdout,
+        b"Proved pipe equivalent to pipe after 0 rising clock edges.\n"
+    );
+
+    fs::write(
+        dir.path().join("pipe.gv"),
+        "module pipe(output [2:0] out); assign out = 3'b111; endmodule",
+    )
+    .unwrap();
+    let disproved = stage_command(dir.path(), &options).output().unwrap();
+    assert_eq!(disproved.status.code(), Some(1));
+    assert!(disproved.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(disproved.stderr).unwrap(),
+        format!(
+            r#"whole-pipeline proof
+{BITWUZLA_PLAN}xlsynth-driver: stitch-equiv: post-fill output mismatch
+Reference initial state {{}}
+Mapped initial state {{}}
+Frame 0 inputs {{}}
+Reference outputs {{"out": bits[3]:3}}
+Mapped outputs {{"out": bits[3]:7}}
+"#
+        )
+    );
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn behavioral_stitch_proves_and_replays_shared_calls_through_distinct_wrappers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = String::from("fn f0(a: bool, b: bool) -> bool { a & !b }\n");
+    for level in 1..=24 {
+        let prev = level - 1;
+        // Both wrappers invoke the same child on the same operands. Their
+        // different results make the callee part of the cache key observable.
+        source.push_str(&format!(
+            r#"fn left{level}(a: bool, b: bool) -> bool {{ f{prev}(a, b) }}
+fn right{level}(a: bool, b: bool) -> bool {{ !f{prev}(a, b) }}
+fn f{level}(a: bool, b: bool) -> bool {{ left{level}(a, b) | !right{level}(a, b) }}
+"#
+        ));
+    }
+    // The two argument orders give x and !x respectively at every level.
+    source.push_str("fn pipe_cycle0(x: bool) -> u2 { f24(x, !x) ++ f24(!x, x) }\n");
+    let mapped = r#"module pipe(input x, output [1:0] out);
+  INV inv (.A(x), .Y(out[0]));
+  assign out[1] = x;
+endmodule"#;
+    stage_fixture(dir.path(), &source, mapped).unwrap();
+    let options = ["--solver", "bitwuzla", "--proof-mode", "whole-pipeline"];
+    let proved = stage_command(dir.path(), &options).output().unwrap();
+    assert_eq!(
+        proved.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&proved.stderr)
+    );
+    assert_eq!(
+        proved.stdout,
+        b"Proved pipe equivalent to pipe after 0 rising clock edges.\n"
+    );
+
+    // Tying the inverter's input high gives a unique witness at x=0.
+    fs::write(
+        dir.path().join("pipe.gv"),
+        mapped.replace(".A(x)", ".A(1'b1)"),
+    )
+    .unwrap();
+    let disproved = stage_command(dir.path(), &options).output().unwrap();
+    assert_eq!(disproved.status.code(), Some(1));
+    assert!(disproved.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(disproved.stderr).unwrap(),
+        format!(
+            r#"whole-pipeline proof
+{BITWUZLA_PLAN}xlsynth-driver: stitch-equiv: post-fill output mismatch
+Reference initial state {{}}
+Mapped initial state {{}}
+Frame 0 inputs {{"x": bits[1]:0}}
+Reference outputs {{"out": bits[2]:1}}
+Mapped outputs {{"out": bits[2]:0}}
+"#
+        )
+    );
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn behavioral_stitch_reads_stage_callees_in_a_source_with_an_unrelated_proc() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_fixture(
+        dir.path(),
+        r#"fn invert(x: bool) -> bool { !x }
+fn transform(x: bool) -> bool { map([x], invert)[u32:0] }
+fn pipe_cycle0(x: bool) -> bool { transform(x) }
+
+proc Counter {
+    output: chan<u8> out;
+    config(output: chan<u8> out) { (output,) }
+    init { u8:0 }
+    next(state: u8) {
+        let tok = send(join(), output, state);
+        state + u8:1
+    }
+}
+"#,
+        "module pipe(input x, output out); INV inv (.A(x), .Y(out)); endmodule",
+    )
+    .unwrap();
+    let result = stage_command(
+        dir.path(),
+        &["--solver", "bitwuzla", "--proof-mode", "whole-pipeline"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        result.stdout,
+        b"Proved pipe equivalent to pipe after 0 rising clock edges.\n"
+    );
+    assert_eq!(
+        String::from_utf8(result.stderr).unwrap(),
+        format!("whole-pipeline proof\n{BITWUZLA_PLAN}")
+    );
+}
+
+#[cfg(feature = "has-bitwuzla")]
+#[test]
+fn behavioral_stitch_checks_xls_function_body_with_contradictory_ffi_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_fixture(
+        dir.path(),
+        r#"#[extern_verilog("assign {return} = {x}; /* xlsynth_pir_ext=ext_mask_low;out_width=1;count_width=1 */")]
+fn spec(x: bool) -> bool { !x }
+fn pipe_cycle0(x: bool) -> bool { spec(x) }
+"#,
+        "module pipe(input x, output out); assign out = x; endmodule",
+    ).unwrap();
+    for (mode, diagnostic) in [
+        (
+            "stages",
+            "xlsynth-driver: stitch-equiv: the proposed correspondence fails the one-step obligation for 'pipe_cycle0'. Use whole-pipeline mode to check the external outputs after fill",
+        ),
+        (
+            "whole-pipeline",
+            "xlsynth-driver: stitch-equiv: post-fill output mismatch",
+        ),
+    ] {
+        let result = driver(
+            dir.path(),
+            &[
+                "stitch-equiv",
+                "--spec",
+                "pipe.toml",
+                "--netlist",
+                "pipe.gv",
+                "--liberty-proto",
+                "cells.textproto",
+                "--solver",
+                "bitwuzla",
+                "--proof-mode",
+                mode,
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap().lines().next(),
+            Some(diagnostic)
+        );
+    }
+}
+
+#[test]
+fn stitch_equiv_selects_the_solver_for_stages_and_whole_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    // The physical flop captures !x. Invert its Q to recover the DSLX stage
+    // value.
+    stage_fixture(
+        dir.path(),
+        "fn pipe_cycle0(x: bool) -> bool { x }\nfn pipe_cycle1(y: bool) -> bool { y }",
+        r#"module pipe(input x, input clk, output out);
+  wire nx, nq;
+  INV invert_d (.A(x), .Y(nx));
+  DFF r (.D(nx), .CLK(clk), .Q(nq));
+  INV invert_q (.A(nq), .Y(out));
+endmodule"#,
+    )
+    .unwrap();
+    for (mode, method, error_context) in [
+        (
+            "stages",
+            "stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n",
+            "stage 'pipe_cycle0': ",
+        ),
+        ("whole-pipeline", "whole-pipeline proof\n", ""),
+    ] {
+        let mut cadical = stage_command(dir.path(), &["--solver", "cadical", "--proof-mode", mode]);
+        let proved = cadical.output().unwrap();
+        assert_eq!(
+            proved.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&proved.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(proved.stderr).unwrap(),
+            format!("{method}{CADICAL_PLAN}")
+        );
+
+        // An invalid CaDiCaL configuration distinguishes the actual backend
+        // from a command that only changes the reported solver name.
+        let rejected = cadical.env(CADICAL_CONFIG_ENV, "invalid").output().unwrap();
+        assert_eq!(rejected.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8(rejected.stderr).unwrap(),
+            format!(
+                "xlsynth-driver: stitch-equiv: {error_context}CadicalConfigError(\"invalid: invalid config\")\n"
+            )
+        );
+        let bitwuzla = stage_command(dir.path(), &["--solver", "bitwuzla", "--proof-mode", mode])
+            .env(CADICAL_CONFIG_ENV, "invalid")
+            .output()
+            .unwrap();
+        if cfg!(feature = "has-bitwuzla") {
+            assert_eq!(
+                bitwuzla.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&bitwuzla.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(bitwuzla.stderr).unwrap(),
+                format!("{method}{BITWUZLA_PLAN}")
+            );
+        } else {
+            assert_eq!(bitwuzla.status.code(), Some(1));
+            assert_eq!(
+                String::from_utf8(bitwuzla.stderr).unwrap(),
+                "xlsynth-driver: stitch-equiv: Bitwuzla behavioral stitch proofs require a build with with-bitwuzla-system or with-bitwuzla-built. Use --solver cadical for a gate-level proof\n"
+            );
+        }
+    }
+}
 
 #[test]
 fn stitch_equiv_defaults_to_stages_and_accepts_one_scripted_override() {
@@ -121,7 +499,10 @@ endmodule"#;
             result.stdout,
             b"Proved pipe equivalent to pipe after 1 rising clock edge.\n"
         );
-        assert_eq!(String::from_utf8(result.stderr).unwrap(), expected);
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            format!("{expected}{DEFAULT_SOLVER_PLAN}")
+        );
     }
     fs::write(dir.path().join("unresolved.json"),
         r#"[{"selector":["root"],"command":{"Apply":"SplitOutputs"}},{"selector":["root","low"],"command":"Solve"}]"#
@@ -208,8 +589,10 @@ fn stitch_equiv_runs_stages_serially_when_workers_cannot_start() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_eq!(
-        result.stderr,
-        b"stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n"
+        String::from_utf8(result.stderr).unwrap(),
+        format!(
+            "stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n{DEFAULT_SOLVER_PLAN}"
+        )
     );
 }
 
@@ -246,7 +629,7 @@ endmodule"#;
     );
     assert_eq!(
         String::from_utf8(auto.stderr).unwrap(),
-        format!("whole-pipeline fallback: {reason}\n")
+        format!("whole-pipeline fallback: {reason}\n{DEFAULT_SOLVER_PLAN}")
     );
 
     fs::write(
@@ -260,9 +643,10 @@ endmodule"#;
     let stderr = String::from_utf8(corrupt.stderr).unwrap();
     // The solver may choose either direction of the transition in its witness.
     assert_eq!(
-        stderr.lines().take(2).collect::<Vec<_>>(),
+        stderr.lines().take(3).collect::<Vec<_>>(),
         [
             format!("whole-pipeline fallback: {reason}"),
+            DEFAULT_SOLVER_PLAN.trim_end().into(),
             "xlsynth-driver: stitch-equiv: post-fill output mismatch".into()
         ]
     );
@@ -277,8 +661,10 @@ endmodule"#;
     let merged = stage_command(dir.path(), &[]).output().unwrap();
     assert_eq!(merged.status.code(), Some(0));
     assert_eq!(
-        merged.stderr,
-        b"whole-pipeline fallback: no direct register correspondence: register bit counts differ (reference 2, mapped 1)\n"
+        String::from_utf8(merged.stderr).unwrap(),
+        format!(
+            "whole-pipeline fallback: no direct register correspondence: register bit counts differ (reference 2, mapped 1)\n{DEFAULT_SOLVER_PLAN}"
+        )
     );
 }
 
@@ -590,6 +976,8 @@ fn stitch_equiv_reports_unsupported_stage_operation() {
         temp.path(),
         &[
             "stitch-equiv",
+            "--solver",
+            "cadical",
             "--spec",
             "pipe.toml",
             "--netlist",
