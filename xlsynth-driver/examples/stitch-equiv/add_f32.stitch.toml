@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+dslx_input_file = "add_f32.x"
+dslx_top = "add_f32"
+flop_inputs = false
+flop_outputs = true

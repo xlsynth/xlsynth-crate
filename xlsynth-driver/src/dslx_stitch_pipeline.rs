@@ -4,18 +4,13 @@ use crate::common::get_dslx_paths;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
+use std::path::Path;
+use xlsynth::XlsynthError;
+use xlsynth_g8r::dslx_stitch_pipeline::{StitchPipelineSpec, StitchRtlOptions};
 use xlsynth_g8r::verilog_version::VerilogVersion;
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
 pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
-    let paths = get_dslx_paths(matches, config);
-    let path_refs = paths.search_path_views();
-
-    let input = matches.get_one::<String>("dslx_input_file").unwrap();
-    let dslx_top = matches.get_one::<String>("dslx_top");
-    let dslx = std::fs::read_to_string(input).unwrap_or_else(|e| {
-        report_cli_error_and_exit("could not read DSLX input", Some(&e.to_string()), vec![]);
-    });
     let use_system_verilog = matches
         .get_one::<String>("use_system_verilog")
         .map(|s| s == "true")
@@ -26,6 +21,64 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         VerilogVersion::Verilog
     };
 
+    // Determine whether to add invariant assertions based on toolchain config
+    // (default false).
+    let add_invariant_assertions = config
+        .as_ref()
+        .and_then(|c| c.codegen.as_ref())
+        .and_then(|cg| cg.add_invariant_assertions)
+        .unwrap_or(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
+
+    // Determine whether to emit array-index bounds checking (default true).
+    let array_index_bounds_checking = matches
+        .get_one::<String>("array_index_bounds_checking")
+        .map(|s| s == "true")
+        .or_else(|| {
+            config
+                .as_ref()
+                .and_then(|c| c.codegen.as_ref())
+                .and_then(|cg| cg.array_index_bounds_checking)
+        })
+        .unwrap_or(crate::flag_defaults::CODEGEN_ARRAY_INDEX_BOUNDS_CHECKING);
+
+    let rtl_options = StitchRtlOptions {
+        verilog_version,
+        validate_no_constant_flops: *matches
+            .get_one::<bool>("validate_no_constant_flops")
+            .expect("flag has a default"),
+        add_invariant_assertions,
+        array_index_bounds_checking,
+        gate_format: matches
+            .get_one::<String>("gate_format")
+            .map(String::as_str)
+            .or_else(|| config.as_ref()?.codegen.as_ref()?.gate_format.as_deref()),
+    };
+    let result = match matches.get_one::<String>("spec") {
+        Some(path) => StitchPipelineSpec::load(Path::new(path))
+            .and_then(|spec| spec.resolve())
+            .and_then(|resolved| resolved.emit_rtl(&rtl_options)),
+        None => stitch_from_flags(matches, config, rtl_options),
+    };
+    match result {
+        Ok(sv) => println!("{}", sv),
+        Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),
+    }
+}
+
+/// Emits RTL using the original CLI's stage selection and wrapper semantics.
+fn stitch_from_flags(
+    matches: &ArgMatches,
+    config: &Option<ToolchainConfig>,
+    rtl: StitchRtlOptions<'_>,
+) -> Result<String, XlsynthError> {
+    let paths = get_dslx_paths(matches, config);
+    let path_refs = paths.search_path_views();
+
+    let input = matches.get_one::<String>("dslx_input_file").unwrap();
+    let dslx_top = matches.get_one::<String>("dslx_top");
+    let dslx = std::fs::read_to_string(input).unwrap_or_else(|e| {
+        report_cli_error_and_exit("could not read DSLX input", Some(&e.to_string()), vec![]);
+    });
     let stage_list: Option<Vec<String>> = matches
         .get_one::<String>("stages")
         .map(|csv| csv.split(',').map(|s| s.trim().to_string()).collect());
@@ -65,26 +118,6 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .map(|s| s == "true")
         .unwrap_or(false);
 
-    // Determine whether to add invariant assertions based on toolchain config
-    // (default false).
-    let add_invariant_assertions = config
-        .as_ref()
-        .and_then(|c| c.codegen.as_ref())
-        .and_then(|cg| cg.add_invariant_assertions)
-        .unwrap_or(crate::flag_defaults::CODEGEN_ADD_INVARIANT_ASSERTIONS);
-
-    // Determine whether to emit array-index bounds checking (default true).
-    let array_index_bounds_checking = matches
-        .get_one::<String>("array_index_bounds_checking")
-        .map(|s| s == "true")
-        .or_else(|| {
-            config
-                .as_ref()
-                .and_then(|c| c.codegen.as_ref())
-                .and_then(|cg| cg.array_index_bounds_checking)
-        })
-        .unwrap_or(crate::flag_defaults::CODEGEN_ARRAY_INDEX_BOUNDS_CHECKING);
-
     let flop_inputs = matches
         .get_one::<String>("flop_inputs")
         .map(|s| s == "true")
@@ -106,25 +139,20 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .expect("validated combinations above");
 
     let options = xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineOptions {
-        verilog_version,
+        verilog_version: rtl.verilog_version,
         explicit_stages: stage_list,
         stdlib_path: paths.stdlib_path.as_deref(),
         search_paths: path_refs.clone(),
         flop_inputs,
         flop_outputs,
-        validate_no_constant_flops: *matches
-            .get_one::<bool>("validate_no_constant_flops")
-            .expect("flag has a default"),
+        validate_no_constant_flops: rtl.validate_no_constant_flops,
         input_valid_signal: input_valid_signal_opt,
         output_valid_signal: output_valid_signal_opt,
         reset_signal: reset_opt,
         reset_active_low,
-        add_invariant_assertions,
-        array_index_bounds_checking,
-        gate_format: matches
-            .get_one::<String>("gate_format")
-            .map(String::as_str)
-            .or_else(|| config.as_ref()?.codegen.as_ref()?.gate_format.as_deref()),
+        add_invariant_assertions: rtl.add_invariant_assertions,
+        array_index_bounds_checking: rtl.array_index_bounds_checking,
+        gate_format: rtl.gate_format,
         output_module_name: wrapper_name,
     };
 
@@ -132,14 +160,10 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
     // stages are provided explicitly, this value is unused by discovery but
     // we pass the wrapper name.
     let top_for_library = stage_discovery_prefix_opt.unwrap_or(wrapper_name);
-    let result = xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
+    xlsynth_g8r::dslx_stitch_pipeline::stitch_pipeline(
         &dslx,
         std::path::Path::new(input),
         top_for_library,
         &options,
-    );
-    match result {
-        Ok(sv) => println!("{}", sv),
-        Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),
-    }
+    )
 }

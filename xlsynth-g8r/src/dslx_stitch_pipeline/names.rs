@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 
 use xlsynth::XlsynthError;
 
-use super::StitchPipelineOptions;
 use super::build_pipeline::{
     flop_reg_name, slice_wire_name, stage_instance_name, stage_output_wire_name, valid_reg_name,
 };
+use crate::aig::SequentialPipelineOptions;
 
 const NAME_VALIDATION_PREFIX: &str = "name validation failed";
 
@@ -339,7 +339,7 @@ pub(crate) fn collect_stage_name_infos(
 pub(crate) fn validate_stitch_pipeline_names(
     stages: &[StageNameInfo],
     signatures: &[StageSignature],
-    opts: &StitchPipelineOptions,
+    opts: &SequentialPipelineOptions,
 ) -> Result<(), XlsynthError> {
     if stages.is_empty() {
         return name_error("no pipeline stages found during name validation");
@@ -352,13 +352,13 @@ pub(crate) fn validate_stitch_pipeline_names(
         ));
     }
 
-    validate_simple_verilog_identifier(opts.output_module_name, NameRole::WrapperModule)?;
+    validate_simple_verilog_identifier(&opts.name, NameRole::WrapperModule)?;
 
     let mut module_namespace = BTreeMap::new();
     record_emitted_name(
         &mut module_namespace,
-        opts.output_module_name,
-        format!("wrapper module `{}`", opts.output_module_name),
+        &opts.name,
+        format!("wrapper module `{}`", opts.name),
     )?;
 
     for stage in stages {
@@ -376,12 +376,12 @@ pub(crate) fn validate_stitch_pipeline_names(
     }
 
     validate_simple_verilog_identifier(
-        "clk",
+        &opts.clock.name,
         NameRole::ControlPort {
             role: "clock control",
         },
     )?;
-    if let Some(reset_signal) = opts.reset_signal {
+    if let Some(reset_signal) = opts.reset_signal.as_deref() {
         validate_simple_verilog_identifier(
             reset_signal,
             NameRole::ControlPort {
@@ -389,7 +389,7 @@ pub(crate) fn validate_stitch_pipeline_names(
             },
         )?;
     }
-    if let Some(input_valid_signal) = opts.input_valid_signal {
+    if let Some(input_valid_signal) = opts.input_valid_signal.as_deref() {
         validate_simple_verilog_identifier(
             input_valid_signal,
             NameRole::ControlPort {
@@ -397,7 +397,7 @@ pub(crate) fn validate_stitch_pipeline_names(
             },
         )?;
     }
-    if let Some(output_valid_signal) = opts.output_valid_signal {
+    if let Some(output_valid_signal) = opts.output_valid_signal.as_deref() {
         validate_simple_verilog_identifier(
             output_valid_signal,
             NameRole::ControlPort {
@@ -413,22 +413,26 @@ pub(crate) fn validate_stitch_pipeline_names(
     validate_simple_verilog_identifier(final_output_name, NameRole::WrapperOutputPort)?;
 
     let mut reserved = BTreeMap::new();
-    insert_reserved(&mut reserved, "clk", "reserved wrapper/control port `clk`");
-    if let Some(reset_signal) = opts.reset_signal {
+    insert_reserved(
+        &mut reserved,
+        &opts.clock.name,
+        format!("reserved wrapper/control port `{}`", opts.clock.name),
+    );
+    if let Some(reset_signal) = opts.reset_signal.as_deref() {
         insert_reserved(
             &mut reserved,
             reset_signal,
             format!("reserved wrapper/control port `{reset_signal}`"),
         );
     }
-    if let Some(input_valid_signal) = opts.input_valid_signal {
+    if let Some(input_valid_signal) = opts.input_valid_signal.as_deref() {
         insert_reserved(
             &mut reserved,
             input_valid_signal,
             format!("reserved wrapper/control port `{input_valid_signal}`"),
         );
     }
-    if let Some(output_valid_signal) = opts.output_valid_signal {
+    if let Some(output_valid_signal) = opts.output_valid_signal.as_deref() {
         insert_reserved(
             &mut reserved,
             output_valid_signal,
@@ -464,24 +468,24 @@ pub(crate) fn validate_stitch_pipeline_names(
     let mut wrapper_namespace = BTreeMap::new();
     record_emitted_name(
         &mut wrapper_namespace,
-        "clk",
-        "wrapper/control port `clk` (clock)".to_string(),
+        &opts.clock.name,
+        format!("wrapper/control port `{}` (clock)", opts.clock.name),
     )?;
-    if let Some(reset_signal) = opts.reset_signal {
+    if let Some(reset_signal) = opts.reset_signal.as_deref() {
         record_emitted_name(
             &mut wrapper_namespace,
             reset_signal,
             format!("wrapper/control port `{reset_signal}` (reset)"),
         )?;
     }
-    if let Some(input_valid_signal) = opts.input_valid_signal {
+    if let Some(input_valid_signal) = opts.input_valid_signal.as_deref() {
         record_emitted_name(
             &mut wrapper_namespace,
             input_valid_signal,
             format!("wrapper/control port `{input_valid_signal}` (input valid)"),
         )?;
     }
-    if let Some(output_valid_signal) = opts.output_valid_signal {
+    if let Some(output_valid_signal) = opts.output_valid_signal.as_deref() {
         record_emitted_name(
             &mut wrapper_namespace,
             output_valid_signal,
@@ -510,7 +514,7 @@ pub(crate) fn validate_stitch_pipeline_names(
 fn validate_generated_wrapper_names(
     stages: &[StageNameInfo],
     final_output_name: &str,
-    opts: &StitchPipelineOptions,
+    opts: &SequentialPipelineOptions,
     wrapper_namespace: &mut BTreeMap<String, String>,
 ) -> Result<(), XlsynthError> {
     let mut next_pipe_stage_number = 0;

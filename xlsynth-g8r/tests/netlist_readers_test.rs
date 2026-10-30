@@ -3,7 +3,8 @@
 use anyhow::Result;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{
-    read_gv_for_roundtrip_from_path, read_gv_from_str, read_ugv_from_str,
+    read_gv_for_proof_from_path, read_gv_for_roundtrip_from_path, read_gv_from_str,
+    read_ugv_from_str,
 };
 
 const MIXED_NETLIST: &str = r#"module top(a, y);
@@ -191,6 +192,80 @@ fn roundtrip_reader_requires_a_declaration_site_for_each_net() -> Result<()> {
         );
         read_gv_from_str(&source)?;
     }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_rejects_part_selects_opposite_to_the_declaration() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("select.gv");
+    for (statement, select, declaration) in [
+        ("assign y = x[0:1];", "x[0:1]", "[1:0]"),
+        ("assign y[0:1] = x;", "y[0:1]", "[1:0]"),
+        ("assign y = {{w[1:0]}};", "w[1:0]", "[0:1]"),
+        ("tran(w[1:0], x);", "w[1:0]", "[0:1]"),
+        ("tran(w[0], x[0:1]);", "x[0:1]", "[1:0]"),
+        ("BUF inst(.A({x[0:1]}), .Y(y));", "x[0:1]", "[1:0]"),
+    ] {
+        let source = format!(
+            "module top(x, y); {statement} input [1:0] x; output [1:0] y; wire [0:1] w; endmodule"
+        );
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("a reversed part-select must not become a bit reversal");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!(
+                "GV reader: part-select '{select}' does not follow its declared packed range {declaration}"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_accepts_ascending_and_singleton_part_selects() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ascending.gv");
+    std::fs::write(
+        &path,
+        r#"module top(input [1:0] x, output [1:0] y);
+  assign w[0:1] = x[1:0];
+  assign y = {w[0:0], w[1:1]};
+  wire [0:1] w;
+endmodule"#,
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_requires_scalar_tran_terminals_before_elaboration() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tran.gv");
+    for (lhs, rhs, terminal) in [("out", "x", "out"), ("out[0]", "x", "x")] {
+        std::fs::write(
+            &path,
+            format!("module top(input [1:0] x, output [1:0] out); tran({lhs}, {rhs}); endmodule"),
+        )?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("vector tran terminal");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!(
+                "GV reader: plain tran terminal '{terminal}' has width 2. Use one tran primitive per bit"
+            )
+        );
+        // The round-trip codec can preserve the original terminal structure.
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    std::fs::write(
+        &path,
+        "module top(input [1:0] x, output [1:0] out); tran(out[0], x[0]); tran(out[1], x[1]); endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
     Ok(())
 }
 

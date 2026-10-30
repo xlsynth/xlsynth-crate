@@ -22,8 +22,8 @@ use crate::netlist::gatefn_from_netlist::{
     project_labeled_sequential_netlist_aig_with_boundaries,
 };
 use crate::netlist::hierarchy::elaborate_hierarchy;
-use crate::netlist::io::{load_liberty_from_path, read_gv_from_path, select_module};
-use crate::netlist::parse::PortDirection;
+use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, read_gv_from_path, select_module};
+use crate::netlist::parse::{NetlistModule, PortDirection};
 use crate::netlist::power::{
     GvDynamicPowerOptions, GvDynamicPowerReport, GvSequentialDynamicPowerOptions,
     GvSequentialDynamicPowerReport,
@@ -271,13 +271,24 @@ pub fn load_labeled_sequential_netlist_aig_with_liberty(
 ) -> Result<LabeledSequentialNetlistAig> {
     let parsed = read_gv_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
-    let elaborated = elaborate_hierarchy(&parsed, module)?;
+    project_sequential_module(&parsed, module, liberty, options.clock_port_name.as_deref())
+}
+
+/// Elaborates a mapped module and preserves its clock edge and register
+/// boundaries.
+pub(crate) fn project_sequential_module(
+    parsed: &ParsedNetlist,
+    module: &NetlistModule,
+    liberty: &Library,
+    clock_hint: Option<&str>,
+) -> Result<LabeledSequentialNetlistAig> {
+    let elaborated = elaborate_hierarchy(parsed, module)?;
     project_labeled_sequential_netlist_aig_with_boundaries(
         &elaborated.module,
         &elaborated.nets,
         &elaborated.interner,
         liberty,
-        options.clock_port_name.as_deref(),
+        clock_hint,
         &elaborated.module_boundaries,
     )
     .map_err(|error| anyhow!(error))

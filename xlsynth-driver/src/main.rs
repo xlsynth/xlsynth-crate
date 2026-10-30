@@ -141,6 +141,7 @@ mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
 mod sequential_eval_io;
+mod stitch_equiv;
 mod toolchain_config;
 mod tools;
 
@@ -225,6 +226,7 @@ trait AppExt {
     fn add_delay_model_arg(self) -> Self;
     fn add_pipeline_args(self) -> Self;
     fn add_dslx_input_args(self, include_top: bool) -> Self;
+    fn add_stitch_input_args(self, output_name_flag: &'static str) -> Self;
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
@@ -279,6 +281,82 @@ impl AppExt for clap::Command {
                     .action(ArgAction::Set),
             );
         command.add_bool_arg("warnings_as_errors", "Treat warnings as errors")
+    }
+
+    /// Accepts either a complete stitch specification or the legacy source and
+    /// boundary flags.
+    fn add_stitch_input_args(self, output_name_flag: &'static str) -> Self {
+        self.add_dslx_input_args(false)
+            .mut_arg("dslx_input_file", |arg| {
+                arg.required(false).required_unless_present("spec")
+            })
+            .arg(
+                Arg::new("spec")
+                    .long("spec")
+                    .value_name("PATH")
+                    .help("TOML stitch specification with paths relative to the specification file")
+                    .conflicts_with_all([
+                        "dslx_input_file",
+                        "dslx_top",
+                        "stages",
+                        output_name_flag,
+                        "dslx_path",
+                        "dslx_stdlib_path",
+                        "input_valid_signal",
+                        "output_valid_signal",
+                        "reset",
+                        "reset_active_low",
+                        "flop_inputs",
+                        "flop_outputs",
+                    ]),
+            )
+            .arg(
+                Arg::new("dslx_top")
+                    .long("dslx_top")
+                    .value_name("DSLX_TOP")
+                    .help("Pipeline prefix for implicit <top>_cycleN discovery")
+                    .conflicts_with("stages")
+                    .required_unless_present_any(["stages", "spec"]),
+            )
+            .arg(
+                Arg::new("stages")
+                    .long("stages")
+                    .value_name("CSV")
+                    .help("Comma-separated explicit stage names in pipeline order"),
+            )
+            .arg(
+                Arg::new(output_name_flag)
+                    .long(output_name_flag)
+                    .value_name("NAME")
+                    .help("Pipeline name; required with --stages, defaults to --dslx_top"),
+            )
+            .arg(
+                Arg::new("input_valid_signal")
+                    .long("input_valid_signal")
+                    .value_name("NAME")
+                    .help("Load enable signal for pipeline registers"),
+            )
+            .arg(
+                Arg::new("output_valid_signal")
+                    .long("output_valid_signal")
+                    .value_name("NAME")
+                    .help("Output port holding the pipelined valid signal"),
+            )
+            .arg(
+                Arg::new("reset")
+                    .long("reset")
+                    .value_name("NAME")
+                    .help("Synchronous reset signal for valid pipeline registers"),
+            )
+            .add_bool_arg("reset_active_low", "Reset is active low")
+            .add_bool_arg(
+                "flop_inputs",
+                "Whether to insert input pipeline flops (default true)",
+            )
+            .add_bool_arg(
+                "flop_outputs",
+                "Whether to insert output pipeline flops (default true)",
+            )
     }
 
     fn add_pipeline_args(self) -> Self {
@@ -649,67 +727,16 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
                 .about("Stitches DSLX pipeline stages")
-                .add_dslx_input_args(false)
+                .add_stitch_input_args("output_module_name")
                 .arg(
                     Arg::new("gate_format")
                         .long("gate_format")
                         .value_name("TEMPLATE")
                         .help("Verilog template for gate! operations; overrides toolchain.codegen.gate_format"),
                 )
-                .arg(
-                    Arg::new("dslx_top")
-                        .long("dslx_top")
-                        .value_name("DSLX_TOP")
-                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
-                        .conflicts_with("stages")
-                        .required_unless_present("stages"),
-                )
                 .add_bool_arg(
                     "use_system_verilog",
                     "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
-                )
-                .arg(
-                    Arg::new("input_valid_signal")
-                        .long("input_valid_signal")
-                        .value_name("INPUT_VALID_SIGNAL")
-                        .help("Load enable signal for pipeline registers"),
-                )
-                .arg(
-                    Arg::new("output_valid_signal")
-                        .long("output_valid_signal")
-                        .value_name("OUTPUT_VALID_SIGNAL")
-                        .help("Output port holding pipelined valid signal"),
-                )
-                .arg(
-                    Arg::new("reset")
-                        .long("reset")
-                        .value_name("RESET")
-                        .help("Reset signal name"),
-                )
-                .add_bool_arg(
-                    "reset_active_low",
-                    "Reset is active low",
-                )
-                .arg(
-                    Arg::new("stages")
-                        .long("stages")
-                        .value_name("CSV")
-                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("output_module_name")
-                        .long("output_module_name")
-                        .value_name("NAME")
-                        .help("Wrapper module name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
-                )
-                .add_bool_arg(
-                    "flop_inputs",
-                    "Whether to insert input pipeline flops (default true)",
-                )
-                .add_bool_arg(
-                    "flop_outputs",
-                    "Whether to insert output pipeline flops (default true)",
                 )
                 .arg(
                     Arg::new("validate_no_constant_flops")
@@ -730,62 +757,12 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-g8r-pipeline")
                 .about("Stitches DSLX pipeline stages into a native sequential .g8r design")
-                .add_dslx_input_args(false)
+                .add_stitch_input_args("output_design_name")
                 .arg(
-                    Arg::new("dslx_top")
-                        .long("dslx_top")
-                        .value_name("DSLX_TOP")
-                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
-                        .conflicts_with("stages")
-                        .required_unless_present("stages"),
-                )
-                .arg(
-                    Arg::new("stages")
-                        .long("stages")
-                        .value_name("CSV")
-                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("output_design_name")
-                        .long("output_design_name")
-                        .value_name("NAME")
-                        .help("Sequential g8r design name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
-                )
-                .arg(
-                    Arg::new("clock_name")
-                        .long("clock_name")
-                        .value_name("NAME")
+                    Arg::new("clock_name").long("clock_name").value_name("NAME")
                         .help("Clock port name for inserted registers (default clk)")
-                        .action(ArgAction::Set),
+                        .conflicts_with("spec"),
                 )
-                .add_bool_arg(
-                    "flop_inputs",
-                    "Whether to insert input pipeline flops (default true)",
-                )
-                .add_bool_arg(
-                    "flop_outputs",
-                    "Whether to insert output pipeline flops (default true)",
-                )
-                .arg(
-                    Arg::new("input_valid_signal")
-                        .long("input_valid_signal")
-                        .value_name("INPUT_VALID_SIGNAL")
-                        .help("Load enable signal for pipeline registers"),
-                )
-                .arg(
-                    Arg::new("output_valid_signal")
-                        .long("output_valid_signal")
-                        .value_name("OUTPUT_VALID_SIGNAL")
-                        .help("Output port holding pipelined valid signal"),
-                )
-                .arg(
-                    Arg::new("reset")
-                        .long("reset")
-                        .value_name("RESET")
-                        .help("Synchronous reset signal for valid pipeline registers"),
-                )
-                .add_bool_arg("reset_active_low", "Reset is active low")
                 .add_g8r_lowering_flags()
                 .arg(
                     Arg::new("bin_out")
@@ -795,6 +772,7 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommand(stitch_equiv::command())
         .subcommand(
             clap::Command::new("g8r-stitch-pipeline")
                 .about("Stitches combinational .g8r stages into a native sequential .g8r design")
@@ -4069,6 +4047,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-stitch-g8r-pipeline", subm)) => {
             dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
+        }
+        Some(("stitch-equiv", subm)) => {
+            if let Err(error) = stitch_equiv::handle(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("stitch-equiv"), vec![]);
+            }
         }
         Some(("g8r-stitch-pipeline", subm)) => {
             if let Err(e) = g8r_stitch_pipeline::handle_g8r_stitch_pipeline(subm) {

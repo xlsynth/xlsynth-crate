@@ -4,9 +4,10 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use xlsynth::dslx::{self, MatchableModuleMember};
+use xlsynth::dslx::MatchableModuleMember;
 use xlsynth::{
-    DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
+    DslxCallingConvention, mangle_dslx_name, mangle_dslx_name_with_calling_convention, optimize_ir,
+    schedule_and_codegen,
 };
 use xlsynth_vast::{ModulePortDirection, VastFile, VastFileType};
 
@@ -22,8 +23,12 @@ use build_pipeline::{
 pub mod g8r_pipeline;
 pub mod validate_constant_flops;
 
+mod equiv;
 mod names;
-use names::{collect_stage_name_infos, validate_stitch_pipeline_names};
+mod spec;
+pub use spec::{ResolvedStitchPipeline, StitchPipelineSpec};
+
+use crate::aig::{ClockPort, SequentialPipelineOptions};
 
 use crate::verilog_version::VerilogVersion;
 
@@ -48,6 +53,45 @@ pub struct StitchPipelineOptions<'a> {
     /// Optional Verilog template for each stage's gate! operations.
     pub gate_format: Option<&'a str>,
     pub output_module_name: &'a str,
+}
+
+/// RTL emission settings for an already resolved pipeline.
+#[derive(Clone, Debug)]
+pub struct StitchRtlOptions<'a> {
+    pub verilog_version: VerilogVersion,
+    pub validate_no_constant_flops: bool,
+    pub add_invariant_assertions: bool,
+    pub array_index_bounds_checking: bool,
+    pub gate_format: Option<&'a str>,
+}
+
+impl Default for StitchRtlOptions<'_> {
+    fn default() -> Self {
+        Self {
+            verilog_version: VerilogVersion::SystemVerilog,
+            validate_no_constant_flops: false,
+            add_invariant_assertions: false,
+            array_index_bounds_checking: true,
+            gate_format: None,
+        }
+    }
+}
+
+impl StitchPipelineOptions<'_> {
+    fn boundary_options(&self) -> SequentialPipelineOptions {
+        SequentialPipelineOptions {
+            name: self.output_module_name.to_string(),
+            clock: ClockPort {
+                name: "clk".to_string(),
+            },
+            flop_inputs: self.flop_inputs,
+            flop_outputs: self.flop_outputs,
+            input_valid_signal: self.input_valid_signal.map(str::to_string),
+            output_valid_signal: self.output_valid_signal.map(str::to_string),
+            reset_signal: self.reset_signal.map(str::to_string),
+            reset_active_low: self.reset_active_low,
+        }
+    }
 }
 
 fn build_ports_from_ir(
@@ -94,41 +138,34 @@ fn build_ports_from_ir(
     Ok((ports, ret_width))
 }
 
-/// Collect user-specified or auto-discovered stage names and their mangled IR
-/// names.
-fn discover_stage_names(
+/// Resolves every selected DSLX stage to an IR function with a data interface.
+fn resolve_stage_ir_names(
     ir: &xlsynth::ir_package::IrPackage,
-    path: &std::path::Path,
-    top: &str,
-    explicit: Option<&[String]>,
+    module_name: &str,
+    names: Vec<String>,
 ) -> Result<Vec<(String, String)>, xlsynth::XlsynthError> {
-    let mut stages = Vec::new();
-    if let Some(names) = explicit {
-        for name in names {
-            let mangled = mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), name)?;
-            if ir.get_function(&mangled).is_err() {
+    if names.is_empty() {
+        return Err(xlsynth::XlsynthError("stages must be nonempty".into()));
+    }
+    let mut stages = Vec::with_capacity(names.len());
+    for name in names {
+        let mangled = mangle_dslx_name(module_name, &name)?;
+        if ir.get_function(&mangled).is_err() {
+            let token_name = mangle_dslx_name_with_calling_convention(
+                module_name,
+                &name,
+                DslxCallingConvention::ImplicitToken,
+            )?;
+            if ir.get_function(&token_name).is_ok() {
                 return Err(xlsynth::XlsynthError(format!(
-                    "stage {name} (mangled {mangled}) not found in IR"
+                    "stage '{name}' uses the implicit-token calling convention and has no data-only IR entry point. Declare the stage pub to emit a wrapper for its packed data ports"
                 )));
             }
-            stages.push((name.clone(), mangled));
+            return Err(xlsynth::XlsynthError(format!(
+                "selected stage '{name}' was not found as a DSLX function in module '{module_name}' (expected IR function '{mangled}')"
+            )));
         }
-    } else {
-        for i in 0.. {
-            let fn_name = format!("{top}_cycle{i}");
-            let mangled =
-                match mangle_dslx_name(path.file_stem().unwrap().to_str().unwrap(), &fn_name) {
-                    Ok(v) => v,
-                    Err(_) => break,
-                };
-            if ir.get_function(&mangled).is_err() {
-                break;
-            }
-            stages.push((fn_name, mangled));
-        }
-    }
-    if stages.is_empty() {
-        return Err(xlsynth::XlsynthError("no pipeline stages found".into()));
+        stages.push((name, mangled));
     }
     Ok(stages)
 }
@@ -254,51 +291,46 @@ use_system_verilog: {sv}"#,
     })
 }
 
-fn is_implicit_stage_name(name: &str) -> bool {
-    if let Some(idx) = name.rfind("_cycle") {
-        let digits = &name[idx + 6..];
-        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
-    } else {
-        false
-    }
-}
-
-/// Scans the typechecked DSLX module for functions named like `<top>_cycle<N>`
-/// and enforces that indices start at 0 and are contiguous.
-fn check_implicit_stage_numbering(
+/// Selects every numbered DSLX stage, requiring contiguous canonical indices.
+fn implicit_stage_names(
     tc_module: &xlsynth::dslx::TypecheckedModule,
     top: &str,
-) -> Result<(), xlsynth::XlsynthError> {
+) -> Result<Vec<String>, xlsynth::XlsynthError> {
     let module = tc_module.get_module();
-    let mut indices: HashSet<usize> = HashSet::new();
+    let mut indices = Vec::new();
     let prefix = format!("{top}_cycle");
     for i in 0..module.get_member_count() {
         let member = module.get_member(i);
         if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
             let name = func.get_identifier();
-            if name.starts_with(&prefix) {
-                let digits = &name[prefix.len()..];
-                if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-                    if let Ok(idx) = digits.parse::<usize>() {
-                        indices.insert(idx);
-                    }
+            if let Some(digits) = name.strip_prefix(&prefix)
+                && !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                let idx = digits.parse::<usize>().map_err(|_| {
+                    xlsynth::XlsynthError(format!(
+                        "stage '{name}' has an index too large for implicit stage selection"
+                    ))
+                })?;
+                if digits.len() > 1 && digits.starts_with('0') {
+                    return Err(xlsynth::XlsynthError(format!(
+                        "stage '{name}' has a leading zero in its index; implicit stage selection expects '{prefix}{idx}'"
+                    )));
                 }
+                indices.push(idx);
             }
         }
     }
 
     if indices.is_empty() {
-        return Ok(());
+        return Err(xlsynth::XlsynthError(format!(
+            "no DSLX stage functions found for dslx_top '{top}'; expected '{prefix}0'"
+        )));
     }
 
-    let mut sorted: Vec<usize> = indices.iter().copied().collect();
-    sorted.sort_unstable();
-    let max = *sorted.last().unwrap();
-    let expected_len = max + 1;
-    let starts_at_zero = sorted.first().copied().unwrap() == 0;
-    let contiguous = indices.len() == expected_len && starts_at_zero;
-    if !contiguous {
-        let found = sorted
+    indices.sort_unstable();
+    if indices.iter().copied().ne(0..indices.len()) {
+        let found = indices
             .iter()
             .map(|v| v.to_string())
             .collect::<Vec<_>>()
@@ -308,62 +340,32 @@ fn check_implicit_stage_numbering(
         )));
     }
 
-    Ok(())
+    Ok(indices.iter().map(|idx| format!("{prefix}{idx}")).collect())
 }
 
-/// Ensures the stage functions selected for stitching are non-parametric. When
-/// `explicit_stages` is provided we check those names directly. Otherwise the
-/// scan includes functions named like `<top>_cycle<N>`. This second branch is
-/// prone to false positives (parametric functions named like `<top>_cycle<N>`,
-/// but not the ones being stitched).
+/// Ensures the stage functions selected for stitching are non-parametric.
 fn check_for_parametric_stages(
     tc_module: &xlsynth::dslx::TypecheckedModule,
-    top: &str,
-    explicit_stages: Option<&[String]>,
+    stages: &[String],
 ) -> Result<(), xlsynth::XlsynthError> {
     let module = tc_module.get_module();
-    let mut offending = HashSet::new();
-    match explicit_stages {
-        Some(stages) => {
-            let stages_set: HashSet<&str> = stages.iter().map(|s| s.as_str()).collect();
-            if stages_set.is_empty() {
-                return Ok(());
-            }
-            for i in 0..module.get_member_count() {
-                let member = module.get_member(i);
-                if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
-                    let name = func.get_identifier();
-                    if stages_set.contains(name.as_str()) && func.is_parametric() {
-                        offending.insert(name);
-                    }
-                }
-            }
-        }
-        None => {
-            // Note: even this is more prone to false positives than necessary;
-            // we should check for {top}_cycle0, {top}_cycle1, etc.
-            let prefix = format!("{top}_cycle");
-            for i in 0..module.get_member_count() {
-                let member = module.get_member(i);
-                if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
-                    let name = func.get_identifier();
-                    if name.starts_with(&prefix)
-                        && is_implicit_stage_name(&name)
-                        && func.is_parametric()
-                    {
-                        offending.insert(name);
-                    }
-                }
+    let stage_set: HashSet<&str> = stages.iter().map(String::as_str).collect();
+    let mut offending = Vec::new();
+    for i in 0..module.get_member_count() {
+        let member = module.get_member(i);
+        if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
+            let name = func.get_identifier();
+            if stage_set.contains(name.as_str()) && func.is_parametric() {
+                offending.push(name);
             }
         }
     }
 
     if !offending.is_empty() {
-        let mut names: Vec<String> = offending.into_iter().collect();
-        names.sort();
+        offending.sort();
         return Err(xlsynth::XlsynthError(format!(
             "parametric stage function(s) detected that cannot be stitched: {}. Provide a concrete (non-parametric) wrapper or specialization before running the stitch tool.",
-            names.join(", ")
+            offending.join(", ")
         )));
     }
     Ok(())
@@ -387,148 +389,131 @@ pub fn stitch_pipeline<'a>(
             "output_valid_signal requires input_valid_signal in dslx-stitch-pipeline".to_string(),
         ));
     }
-    if opts.validate_no_constant_flops && !opts.array_index_bounds_checking {
-        return Err(xlsynth::XlsynthError(
-            "constant-flop validation requires array_index_bounds_checking=true".to_string(),
-        ));
-    }
-
-    // Extract option fields for backwards-compat ease.
-    let verilog_version = opts.verilog_version;
-    let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
-    let stdlib_path = opts.stdlib_path;
-    let search_paths = opts.search_paths.as_slice();
-    let flop_inputs = opts.flop_inputs;
-    let flop_outputs = opts.flop_outputs;
-    let input_valid_signal = opts.input_valid_signal;
-    let output_valid_signal = opts.output_valid_signal;
-    let reset_signal = opts.reset_signal;
-    let reset_active_low = opts.reset_active_low;
-    let add_invariant_assertions = opts.add_invariant_assertions;
-    let array_index_bounds_checking = opts.array_index_bounds_checking;
-
-    // Parse/typecheck once for pre-codegen validations.
-    let module_name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| xlsynth::XlsynthError("invalid path".into()))?;
-    let mut import_data = dslx::ImportData::new(stdlib_path, search_paths);
-    let typechecked_module =
-        dslx::parse_and_typecheck(dslx, path.to_str().unwrap(), module_name, &mut import_data)?;
-
-    check_for_parametric_stages(&typechecked_module, top, explicit_stages)?;
-    // If relying on implicit stage discovery, ensure any discovered
-    // `<top>_cycleN` functions start at 0 and are contiguous.
-    if explicit_stages.is_none() {
-        check_implicit_stage_numbering(&typechecked_module, top)?;
-    }
-    let convert_opts = DslxConvertOptions {
-        dslx_stdlib_path: stdlib_path,
-        additional_search_paths: search_paths.to_vec(),
-        enable_warnings: None,
-        disable_warnings: None,
-        force_implicit_token_calling_convention: false,
-    };
-    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
-    let ir = conv.ir;
-
-    let cfg = PipelineCfg {
-        ir: &ir,
-        verilog_version,
-        add_invariant_assertions,
-        array_index_bounds_checking,
+    let resolved = spec::resolve_stages(
+        dslx,
+        path,
+        top,
+        opts.explicit_stages.as_deref(),
+        opts.stdlib_path,
+        &opts.search_paths,
+        opts.boundary_options(),
+    )?;
+    resolved.validate_wrapper_names()?;
+    resolved.emit_rtl(&StitchRtlOptions {
+        verilog_version: opts.verilog_version,
+        validate_no_constant_flops: opts.validate_no_constant_flops,
+        add_invariant_assertions: opts.add_invariant_assertions,
+        array_index_bounds_checking: opts.array_index_bounds_checking,
         gate_format: opts.gate_format,
-    };
+    })
+}
 
-    let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
-    verify_stage_signatures(&ir, &stages)?;
-    verify_stage_port_widths(&ir, &stages)?;
-    let (stage_name_infos, stage_signatures) = collect_stage_name_infos(&ir, &stages)?;
-    validate_stitch_pipeline_names(&stage_name_infos, &stage_signatures, opts)?;
-
-    if opts.validate_no_constant_flops {
-        let constant_flops =
-            validate_constant_flops::find_constant_flops(&ir, &stages, flop_outputs).map_err(
-                |error| xlsynth::XlsynthError(format!("constant-flop validation failed: {error}")),
-            )?;
-        if !constant_flops.is_empty() {
-            let details = constant_flops
-                .iter()
-                .map(|flop| {
-                    format!(
-                        "  stage '{}' (index {}), output bit {} is always {}",
-                        flop.stage_name,
-                        flop.stage_index,
-                        flop.output_bit_index,
-                        u8::from(flop.value)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Err(xlsynth::XlsynthError(format!(
-                "constant-flop validation failed:\n{details}"
-            )));
+impl ResolvedStitchPipeline {
+    /// Emits combinational stage modules and the clocked wrapper for the
+    /// resolved specification.
+    pub fn emit_rtl(&self, opts: &StitchRtlOptions<'_>) -> Result<String, xlsynth::XlsynthError> {
+        if opts.validate_no_constant_flops && !opts.array_index_bounds_checking {
+            return Err(xlsynth::XlsynthError(
+                "constant-flop validation requires array_index_bounds_checking=true".to_string(),
+            ));
         }
+        let cfg = PipelineCfg {
+            ir: &self.ir,
+            verilog_version: opts.verilog_version,
+            add_invariant_assertions: opts.add_invariant_assertions,
+            array_index_bounds_checking: opts.array_index_bounds_checking,
+            gate_format: opts.gate_format,
+        };
+        let stages = &self.stages;
+        if opts.validate_no_constant_flops {
+            let constant_flops = validate_constant_flops::find_constant_flops(
+                &self.ir,
+                stages,
+                self.boundary.flop_outputs,
+            )
+            .map_err(|error| {
+                xlsynth::XlsynthError(format!("constant-flop validation failed: {error}"))
+            })?;
+            if !constant_flops.is_empty() {
+                let details = constant_flops
+                    .iter()
+                    .map(|flop| {
+                        format!(
+                            "  stage '{}' (index {}), output bit {} is always {}",
+                            flop.stage_name,
+                            flop.stage_index,
+                            flop.output_bit_index,
+                            u8::from(flop.value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(xlsynth::XlsynthError(format!(
+                    "constant-flop validation failed:\n{details}"
+                )));
+            }
+        }
+
+        // For each stage run codegen immediately so we can parse its port list.
+        let mut stage_infos = Vec::with_capacity(stages.len());
+        for (stage_unmangled, stage_mangled) in stages {
+            stage_infos.push(make_stage_info_comb(
+                &cfg,
+                stage_unmangled,
+                stage_mangled,
+                false,
+            )?);
+        }
+
+        // The wrapper needs only stage interface metadata, not a second VAST
+        // file.
+        let stage_modules = stage_infos
+            .iter()
+            .zip(stages)
+            .map(|(stage_info, (module_name, _))| StageModuleInterface {
+                name: module_name.clone(),
+                ports: stage_info
+                    .ports
+                    .iter()
+                    .map(|port| StagePortInterface {
+                        name: port.name.clone(),
+                        direction: if port.is_input {
+                            ModulePortDirection::Input
+                        } else {
+                            ModulePortDirection::Output
+                        },
+                        width: i64::from(port.width),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        // Generate wrapper using shared implementation.
+        let mut wrapper_file = VastFile::new(match opts.verilog_version {
+            VerilogVersion::SystemVerilog => VastFileType::SystemVerilog,
+            VerilogVersion::Verilog => VastFileType::Verilog,
+        });
+        let pipeline_cfg = BuildPipelineConfig {
+            top_module_name: self.boundary.name.clone(),
+            clk_port_name: self.boundary.clock.name.clone(),
+            stage_modules,
+            flop_inputs: self.boundary.flop_inputs,
+            flop_outputs: self.boundary.flop_outputs,
+            input_valid_signal: self.boundary.input_valid_signal.as_deref(),
+            output_valid_signal: self.boundary.output_valid_signal.as_deref(),
+            reset_signal: self.boundary.reset_signal.as_deref(),
+            reset_active_low: self.boundary.reset_active_low,
+        };
+        let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
+
+        let mut text = stage_infos
+            .iter()
+            .map(|s| s.sv_text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        text.push_str(&wrapper_sv);
+        Ok(text)
     }
-
-    // For each stage run codegen immediately so we can parse its port list.
-    let mut stage_infos = Vec::with_capacity(stages.len());
-    for (stage_unmangled, stage_mangled) in &stages {
-        stage_infos.push(make_stage_info_comb(
-            &cfg,
-            stage_unmangled,
-            stage_mangled,
-            false,
-        )?);
-    }
-
-    // The wrapper needs only stage interface metadata, not a second VAST file.
-    let stage_modules = stage_infos
-        .iter()
-        .zip(&stages)
-        .map(|(stage_info, (module_name, _))| StageModuleInterface {
-            name: module_name.clone(),
-            ports: stage_info
-                .ports
-                .iter()
-                .map(|port| StagePortInterface {
-                    name: port.name.clone(),
-                    direction: if port.is_input {
-                        ModulePortDirection::Input
-                    } else {
-                        ModulePortDirection::Output
-                    },
-                    width: i64::from(port.width),
-                })
-                .collect(),
-        })
-        .collect();
-
-    // Generate wrapper using shared implementation.
-    let mut wrapper_file = VastFile::new(match verilog_version {
-        VerilogVersion::SystemVerilog => VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => VastFileType::Verilog,
-    });
-    let pipeline_cfg = BuildPipelineConfig {
-        top_module_name: opts.output_module_name.to_string(),
-        clk_port_name: "clk".to_string(),
-        stage_modules,
-        flop_inputs,
-        flop_outputs,
-        input_valid_signal,
-        output_valid_signal,
-        reset_signal,
-        reset_active_low,
-    };
-    let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
-
-    let mut text = stage_infos
-        .iter()
-        .map(|s| s.sv_text.clone())
-        .collect::<Vec<_>>()
-        .join("\n");
-    text.push_str(&wrapper_sv);
-    Ok(text)
 }
 
 #[cfg(test)]
@@ -966,9 +951,10 @@ fn foo_cycle1() -> u32 { u32:1 }"#;
             },
         ];
         let opts = default_test_options("foo");
-        let err = names::validate_stitch_pipeline_names(&stages, &signatures, &opts)
-            .unwrap_err()
-            .0;
+        let err =
+            names::validate_stitch_pipeline_names(&stages, &signatures, &opts.boundary_options())
+                .unwrap_err()
+                .0;
         assert!(
             err.contains("stage parameter `foo_cycle0.out`")
                 && err.contains("reserved wrapper/output port `out`"),

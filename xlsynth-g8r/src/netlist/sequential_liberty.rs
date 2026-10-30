@@ -43,6 +43,12 @@ pub(crate) fn get_sequential_ff_clock_spec(
         ));
     }
     if seq.kind != SequentialKind::Ff as i32 {
+        if seq.kind == SequentialKind::Latch as i32 {
+            return Err(format!(
+                "cell '{}' is a level-sensitive latch. Sequential netlist projection requires edge-triggered FFs",
+                cell.name
+            ));
+        }
         return Err(format!(
             "cell '{}' uses unsupported sequential kind {:?}",
             cell.name, seq.kind
@@ -52,7 +58,8 @@ pub(crate) fn get_sequential_ff_clock_spec(
     let clock_from_seq = if seq.clock_expr.is_empty() {
         None
     } else {
-        let (pin_name, is_negated) = parse_simple_clock_expr(&seq.clock_expr)?;
+        let (pin_name, is_negated) = parse_simple_clock_expr(&seq.clock_expr)
+            .map_err(|error| format!("cell '{}': {error}", cell.name))?;
         Some(SequentialClockSpec {
             pin_name,
             is_negated,
@@ -109,11 +116,19 @@ pub(crate) fn get_gv_eval_sequential_cell_spec(
         .sequential
         .first()
         .expect("clock resolution found one sequential entry");
-    if !seq.clear_expr.is_empty() || !seq.preset_expr.is_empty() {
+    if seq.clock_expr.is_empty() {
         return Err(format!(
-            "sequential gv-eval does not support asynchronous reset cell '{}'",
-            cell.name
+            "cell '{}' identifies clock pin '{}' but its Liberty FF entry has no clock_expr. Specify the active clock edge to project this FF",
+            cell.name, clock.pin_name
         ));
+    }
+    for (control, expression) in [("clear", &seq.clear_expr), ("preset", &seq.preset_expr)] {
+        if !expression.is_empty() {
+            return Err(format!(
+                "cell '{}' uses asynchronous {control} '{expression}'. Sequential netlist projection requires synchronous FF behavior",
+                cell.name
+            ));
+        }
     }
     if seq.state_var.is_empty() {
         return Err(format!(
