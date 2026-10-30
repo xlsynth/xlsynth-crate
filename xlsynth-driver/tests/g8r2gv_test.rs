@@ -4,6 +4,7 @@
 
 use std::ffi::OsStr;
 use std::fmt::Write;
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -298,6 +299,14 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     let pb = dir.path().join("mapped.pb");
     for (flag, filename, format_args, expected) in [
         ("-o", OsStr::new("mapped.pb"), &[][..], &binary.stdout),
+        (
+            "--output",
+            OsStr::new("mapped.proto"),
+            &[][..],
+            &binary.stdout,
+        ),
+        // The default macOS filesystem only accepts UTF-8 filenames.
+        #[cfg(target_os = "linux")]
         (
             "--output",
             OsStr::from_bytes(b"mapped-\xff.proto"),

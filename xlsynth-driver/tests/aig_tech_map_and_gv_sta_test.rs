@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -228,7 +228,8 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
     if strategy_args.is_empty() {
         for (filename, flags, expected) in [
             (OsStr::new("mapped.PrOtO"), &[][..], &binary.stdout),
-            #[cfg(unix)]
+            // The default macOS filesystem only accepts UTF-8 filenames.
+            #[cfg(target_os = "linux")]
             (
                 OsStr::from_bytes(b"mapped-\xff.pb"),
                 &[][..],
