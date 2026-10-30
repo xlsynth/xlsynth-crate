@@ -2,9 +2,11 @@
 
 mod common;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use xlsynth_g8r::aig::{AigBitVector, GateFn};
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_lean::{
     InterfaceDirection, LeanError, LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof,
@@ -55,6 +57,116 @@ fn prepared_target_uses_aag_files_and_the_fixed_root_contract() {
     );
     assert!(target_root.join("Rhs.aag").is_file());
     assert!(!target_root.join("Generated").exists());
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn aig_decide_proves_ordered_outputs_and_replays_an_inequivalent_input() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aig_decide");
+    let sources = LeanProofSources {
+        body: root.join("Body.lean"),
+        modules: vec![root.join("EdgeCases.lean")],
+        root,
+    };
+    let mut lhs = common::and3();
+    let mut rhs = right_associated_and3();
+    for graph in [&mut lhs, &mut rhs] {
+        let and = *graph.outputs[0].bit_vector.get_lsb(0);
+        graph.outputs[0].bit_vector = AigBitVector::from_lsb_is_index_0(&[and.negate(), and]);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    prepare_equivalence_target(&lhs, &rhs)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+    run_equivalence_proof(&lean, &target, &sources, &directory.path().join("work")).unwrap();
+
+    // Only 111 distinguishes output bit 1 from a stuck-at-zero RHS.
+    let low_bit = *rhs.outputs[0].bit_vector.get_lsb(0);
+    let zero = AigOperand {
+        node: AigRef { id: 0 },
+        negated: false,
+    };
+    rhs.outputs[0].bit_vector = AigBitVector::from_lsb_is_index_0(&[low_bit, zero]);
+    let error = check_equivalence_proof(&lean, &lhs, &rhs, &sources.body).unwrap_err();
+    assert!(
+        error.stdout.contains(
+            "aig_decide found a counterexample:\ninput atoms set to true: [0, 1, 2] (all others false)\noutput bit 1: lhs=true, rhs=false"
+        ),
+        "unexpected proof failure: {error}"
+    );
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn decomposed_proof_closes_the_generated_multi_output_target() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/decomposition");
+    let sources = LeanProofSources {
+        body: root.join("Body.lean"),
+        modules: [
+            "Partitioned",
+            "RewriteExamples",
+            "DomainExamples",
+            "CutExamples",
+            "SparseExamples",
+        ]
+        .map(|name| root.join(format!("{name}.lean")))
+        .to_vec(),
+        root,
+    };
+    let mut lhs = common::and3();
+    let mut rhs = right_associated_and3();
+    for graph in [&mut lhs, &mut rhs] {
+        let result = *graph.outputs[0].bit_vector.get_lsb(0);
+        let bypass = *graph.inputs[0].bit_vector.get_lsb(0);
+        graph.outputs[0].bit_vector =
+            AigBitVector::from_lsb_is_index_0(&[result, result.negate(), bypass]);
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target");
+    prepare_equivalence_target(&lhs, &rhs)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+    run_equivalence_proof(&lean, &target, &sources, &directory.path().join("work")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn aig_decide_rejects_an_invalid_unsat_certificate() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let directory = tempfile::tempdir().unwrap();
+    let solver = directory.path().join("false-unsat");
+    // Syntactically valid LRAT claiming the empty clause follows from clause 1
+    // alone.
+    std::fs::write(
+        &solver,
+        "#!/bin/sh\nprintf '1000 0 1 0\\n' > \"$2\"\nprintf 's UNSATISFIABLE\\n'\nexit 20\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&solver, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let body = directory.path().join("Body.lean");
+    let solver_literal = serde_json::to_string(solver.to_str().unwrap()).unwrap();
+    std::fs::write(
+        &body,
+        format!("by\n  apply XlsynthLean.Proof.equivalent_of_rootValid\n  set_option sat.solver {solver_literal} in aig_decide\n"),
+    )
+    .unwrap();
+    let lhs = common::and3();
+    let mut rhs = right_associated_and3();
+    rhs.outputs[0].bit_vector =
+        AigBitVector::from_bit(rhs.outputs[0].bit_vector.get_lsb(0).negate());
+    let error = check_equivalence_proof(&lean, &lhs, &rhs, &body).unwrap_err();
+    assert!(
+        error
+            .stdout
+            .contains("LRAT certificate failed verification"),
+        "unexpected proof failure: {error}"
+    );
 }
 
 #[test]

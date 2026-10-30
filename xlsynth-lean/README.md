@@ -153,32 +153,44 @@ def Circuit.Equivalent (lhs rhs : Circuit inputCount outputCount) : Prop :=
   ∀ inputs, lhs.denote inputs = rhs.denote inputs
 ```
 
-The proof file contains a complete Lean term for `Target.Equivalent`, including
-`by` when using tactics. For example, the small three-input AND test uses:
+The proof file contains a complete Lean term for `Target.Equivalent`. To check
+both AIGs with SAT, use this proof body:
 
 ```lean
 by
-  unfold Target.Equivalent XlsynthLean.Aig.Circuit.Equivalent
-  native_decide
+  apply XlsynthLean.Proof.equivalent_of_rootValid
+  aig_decide
 ```
 
-The runner generates `UserProof.lean` with `import Target`, imports for every
-supplied helper module, and the declaration
+`equivalent_of_rootValid` reduces the goal to a guarded equality between the
+ordered outputs of the two circuits, sharing input bits by position. Its root
+guard is true. `aig_decide` builds an AIG entrypoint that is true when the
+guard holds and any output differs. It runs CaDiCaL on Lean's `AIG.toCNF`
+encoding and uses `Reflect.verifyCert_correct` to connect the checked LRAT to
+the goal. Certificate checking uses Lean's native evaluator and its compiler
+and runtime trust. The certificate is generated during the run. A satisfying
+assignment is replayed on the original claim, and the error reports the true
+input atoms (zero-based input bit indices for a root claim) and a differing
+output bit.
+The tactic takes a closed `XlsynthLean.Proof.Claim.Valid` goal and uses Lean
+4.34.1's default SAT timeout of 10 seconds per invocation. Give a larger
+leaf its own solver budget with `aig_decide (timeout := 120)` (seconds).
+
+The runner generates `UserProof.lean`. It imports `Target`, `XlsynthLean.Proof`,
+and every supplied helper module. It then emits the declaration
 `theorem UserProof.equivalent : Target.Equivalent := (...)`. The body is placed
 verbatim inside those parentheses, preserving its whitespace and literals. A
 direct term such as `Helpers.Proof.equivalent` is also accepted. The body is a
 term fragment rather than a standalone Lean module, so it does not contain
 top-level imports or a theorem declaration.
 
-This example's `native_decide` uses Lean's native execution trust and contributes
-a generated axiom to the proof.
-
 The prepared directory contains the companion support sources, `Lhs.aag`,
 `Rhs.aag`, `Target.lean`, and `Check.lean`. It can be retained
 as a build artifact or inspected while developing the proof.
 
 The runner requires an empty work directory. It copies the fixed prepared
-artifacts and generates `UserProof.lean` at the work root. Helper modules keep
+target artifacts, stages the checker's proof library, and generates
+`UserProof.lean` at the work root. Helper modules keep
 their paths relative to `LeanProofSources.root`; every supplied file
 must be under that root. The generated wrapper imports helpers in the supplied
 order, and Lean's `--src-deps` mode determines their compilation order. The
@@ -200,6 +212,59 @@ underlying `LeanError`, the Lean version if its query succeeded, and diagnostics
 from completed compilation steps and the failed process. The checker performs
 no axiom audit: Lean's normal acceptance of declarations using axioms or
 `sorry` applies.
+
+### Decompose a proof
+
+A proof body or helper module can import `XlsynthLean.Proof` and open that
+namespace. Each rule constructs child claims from its parent. Applying the rule's
+soundness theorem makes Lean require the child proofs before it accepts the parent.
+
+| Operation | What the author supplies | What must be proved |
+| --- | --- | --- |
+| `Claim.valid_of_cover` | Ordered lists of output positions | Each group is valid and every output occurs in a group. Overlap and permutation are allowed. |
+| `Rewrite.run` and `round.valid_of_rewrite` | Signed node pairs, optionally with interior references to retain | The pairs agree in the original graph under its guard, and the rewritten claim is valid. Forward redirects are allowed. Cycles and duplicate sources are errors. |
+| `Claim.valid_of_bool_split`, `valid_of_ref_cover`, `valid_of_table_cover` | A Boolean selector, case predicates, or tables of selector words | Each restricted claim is valid. For custom predicates or tables the parent guard must imply their union. The coverage goal can itself be solved by `aig_decide`. |
+| `Claim.cofactor` and `valid_of_cofactors` | A family of partial assignments | The assignments cover the parent guard and every specialized claim is valid. Unfixed inputs remain symbolic. |
+| `Claim.valid_of_substitution` | A previously proved child and bindings for its inputs | The parent guard implies the instantiated guard, and the instantiated left and right outputs respectively match the parent's. |
+| `Claim.cut` and `cut.valid` | Signed endpoint pairs and an optional Boolean contract | Three claims must hold. The endpoints agree upstream, actual upstream values satisfy the contract, and the downstream outputs agree for every fresh cut value satisfying it. The default contract is true. |
+
+For example, the proof of a horizontal cut can use a different method for each
+obligation:
+
+```lean
+  apply cut.valid
+  · aig_decide
+  · exact cut.range.valid_of_identical (by native_decide)
+  · exact cut.downstream.valid_of_identical (by native_decide)
+```
+
+This particular proof works when the contract is true and both rebuilt outputs
+have identical signed references. For a small leaf with `n` input bits,
+`Claim.valid_of_exhaustive` checks the atom bound and evaluates the guarded
+mismatch for all `BitVec n` inputs. If the two live inputs have labels 100 and
+50000, `claim.sparseLeaf [100, 50000]` gives them dense labels. Its `valid`
+theorem checks that all live inputs are covered and enumerates just four rows.
+See [SparseExamples.lean](tests/fixtures/decomposition/SparseExamples.lean).
+
+For numeric output positions, `outputBits? width positions` rejects an index
+outside the interface. Use `rootLeftRef` and `rootRightRef` to select a reference from either imported
+graph. An AAG literal `2 * node + invert` can also be resolved on its own graph
+with `Rebuild.refs?`. Rebuilding preserves sharing, folds constants, identities, complements and
+absorption (`x ∧ (x ∨ y) = x`), and returns
+images for retained references. When a rewrite makes the two sets of signed
+output references identical, `Rewrite.valid_of_identical` closes the parent
+from the pair proof and one Boolean check of the rebuild. Pin a reference if a later round needs it after
+its original cone becomes unreachable. Under a cut, a contract may depend on both
+cut values and original inputs that bypass the cut. Build that predicate on the
+original graph, extending it with `Claim.onExtension` if it needs new gates.
+The same predicate is rebuilt with fresh inputs for the downstream obligation.
+
+[Partitioned.lean](tests/fixtures/decomposition/Partitioned.lean) proves the
+generated three-output target using overlapping output groups, a cut, a rewrite
+and a domain split. [CutExamples.lean](tests/fixtures/decomposition/CutExamples.lean)
+shows a reachable-value contract that rules out a spurious counterexample.
+[DomainExamples.lean](tests/fixtures/decomposition/DomainExamples.lean) reuses a
+child theorem under two signed input bindings.
 
 ## Lean semantics and conversion trust
 
