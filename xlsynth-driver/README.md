@@ -4012,11 +4012,11 @@ Notes
 
 `dslx-stitch-pipeline`, `dslx-stitch-g8r-pipeline`, and `stitch-equiv` accept
 the same TOML file via `--spec <PATH>`. The example manifest below selects
-`add_f32_cycle0` and `add_f32_cycle1`. [Two-cycle f32 adder source and manifest](examples/stitch-equiv)
+`muladd_cycle0` and `muladd_cycle1`. The first stage multiplies `x` by `y` and carries `z` alongside the product. The second adds `z`. Both operations use `u8` arithmetic. [Two-cycle multiply-add source and manifest](examples/stitch-equiv)
 
 ```toml
-dslx_input_file = "add_f32.x"
-dslx_top = "add_f32"
+dslx_input_file = "muladd.x"
+dslx_top = "muladd"
 flop_inputs = false
 flop_outputs = true
 ```
@@ -4024,7 +4024,7 @@ flop_outputs = true
 - Supply either `dslx_top` for implicit stage discovery or `stages = ["align", "finish"]` for an explicit order. `output_module_name` defaults to `dslx_top` and is required with `stages`.
 - Implicit stage indices start at zero, are contiguous, and have no leading zeros. Each selected stage needs a concrete data-only IR entry point. A private stage that lowers only to an implicit-token function is rejected by name.
 - `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. All three commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
-- `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The two-stage adder above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
+- `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The multiply-add example above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
 - A stage with one aggregate parameter receives the entire preceding result. Multiple parameters consume slices of the packed result from least-significant bits upward in parameter declaration order. The proof uses the same wiring as the generators.
 - `clock_name` defaults to `"clk"`. Optional `input_valid_signal`, `output_valid_signal`, `reset`, and `reset_active_low` configure the generated valid pipeline. Both `output_valid_signal` and `reset` require `input_valid_signal`. Reset is synchronous and active high by default. Setting `reset_active_low = true` requires a named `reset`.
 - The names `out` and `output_value` are reserved for the generated data output.
@@ -4066,17 +4066,17 @@ Run these commands from the example directory with a matching cell library and
 Liberty proto.
 
 ```shell
-xlsynth-driver dslx-stitch-g8r-pipeline --spec add_f32.stitch.toml \
-  --bin-out add_f32.g8rbin > add_f32.g8r
-xlsynth-driver g8r2gv add_f32.g8rbin --liberty cells.lib \
-  --liberty-proto cells.proto > add_f32.gv
-xlsynth-driver stitch-equiv --spec add_f32.stitch.toml \
-  --netlist add_f32.gv --liberty-proto cells.proto
+xlsynth-driver dslx-stitch-g8r-pipeline --spec muladd.stitch.toml \
+  --bin-out muladd.g8rbin > muladd.g8r
+xlsynth-driver g8r2gv muladd.g8rbin --liberty cells.lib \
+  --liberty-proto cells.proto > muladd.gv
+xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
+  --netlist muladd.gv --liberty-proto cells.proto
 ```
 
 For split libraries such as ASAP7, repeat the mapper's `--liberty` flag and use
 a matching proto as described under `g8r2gv`. A netlist from synthesis of
-`dslx-stitch-pipeline --spec add_f32.stitch.toml` can be checked the same way.
+`dslx-stitch-pipeline --spec muladd.stitch.toml` can be checked the same way.
 
 - `--spec <PATH>` selects the DSLX stitch spec.
 - `--netlist <PATH>` supplies the mapped gate-level Verilog file.
