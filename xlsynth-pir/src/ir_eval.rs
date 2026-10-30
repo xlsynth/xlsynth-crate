@@ -16,7 +16,7 @@ use crate::math::ceil_log2;
 use crate::{IrBits, IrValue};
 use num_bigint::{BigInt, BigUint, Sign};
 use smallvec::SmallVec;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 struct DenseEvalEnv {
     values: Vec<Option<IrValue>>,
@@ -1966,7 +1966,7 @@ pub fn eval_fn_in_package_value(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue])
         args,
         None,
         EvalOrderPolicy::Checked,
-        Some(&mut HashMap::new()),
+        Some(&mut CallValues::default()),
     ) {
         FnEvalResult::Success(result) => result.value,
         FnEvalResult::Failure(result) => result.value,
@@ -2000,21 +2000,43 @@ pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> 
     )
 }
 
-/// A memoized invoke result and whether the current iteration used it.
-struct CachedCall {
-    value: IrValue,
-    used: bool,
+/// Each callee can retain this many loop argument sets, even when each
+/// iteration passes a distinct version of a large array carry.
+const MAX_LOOP_CALLS_PER_CALLEE: usize = 8;
+
+/// Shares invokes across the entire value-only evaluation. Ordinary calls
+/// retain their results, and sibling and nested loops share per-callee LRUs.
+#[derive(Default)]
+struct CallValues<'ir> {
+    ordinary: HashMap<&'ir str, HashMap<Vec<IrValue>, IrValue>>,
+    in_loops: HashMap<&'ir str, VecDeque<(Vec<IrValue>, IrValue)>>,
+    loop_depth: usize,
 }
 
-/// Invoke results shared within a value-only evaluation.
-type CallValues<'ir> = HashMap<&'ir str, HashMap<Vec<IrValue>, CachedCall>>;
+impl<'ir> CallValues<'ir> {
+    /// Reuses a matching invoke and promotes it to the caller's cache.
+    fn get(&mut self, callee: &'ir str, args: &[IrValue]) -> Option<IrValue> {
+        if let Some(value) = self.ordinary.get(callee).and_then(|calls| calls.get(args)) {
+            return Some(value.clone());
+        }
+        let recent = self.in_loops.get_mut(callee)?;
+        let index = recent.iter().position(|(key, _)| key == args)?;
+        let (key, value) = recent.remove(index)?;
+        self.insert(callee, key, value.clone());
+        Some(value)
+    }
 
-/// Keeps the last iteration's calls available for reuse in the next one.
-fn begin_call_iteration(calls: &mut CallValues<'_>) {
-    calls.retain(|_, results| {
-        results.retain(|_, call| std::mem::take(&mut call.used));
-        !results.is_empty()
-    });
+    fn insert(&mut self, callee: &'ir str, args: Vec<IrValue>, value: IrValue) {
+        if self.loop_depth == 0 {
+            self.ordinary.entry(callee).or_default().insert(args, value);
+        } else {
+            let recent = self.in_loops.entry(callee).or_default();
+            if recent.len() == MAX_LOOP_CALLS_PER_CALLEE {
+                recent.pop_back();
+            }
+            recent.push_front((args, value));
+        }
+    }
 }
 
 fn eval_fn_impl<'a, 'ir>(
@@ -2188,13 +2210,11 @@ fn eval_fn_impl<'a, 'ir>(
                     })
                     .collect();
 
-                if let Some(call) = call_values
+                if let Some(value) = call_values
                     .as_deref_mut()
-                    .and_then(|calls| calls.get_mut(callee.name.as_str()))
-                    .and_then(|results| results.get_mut(&callee_args))
+                    .and_then(|calls| calls.get(&callee.name, &callee_args))
                 {
-                    call.used = true;
-                    call.value.clone()
+                    value
                 } else {
                     let value = absorb_nested_eval_result(
                         eval_fn_impl(
@@ -2212,13 +2232,7 @@ fn eval_fn_impl<'a, 'ir>(
                         &mut cover_index_by_text_id,
                     );
                     if let Some(calls) = call_values.as_deref_mut() {
-                        calls.entry(&callee.name).or_default().insert(
-                            callee_args,
-                            CachedCall {
-                                value: value.clone(),
-                                used: true,
-                            },
-                        );
+                        calls.insert(&callee.name, callee_args, value.clone());
                     }
                     value
                 }
@@ -2250,7 +2264,9 @@ fn eval_fn_impl<'a, 'ir>(
                     .get(init)
                     .expect("counted_for init must be evaluated")
                     .clone();
-                let mut iteration_calls = call_values.as_ref().map(|_| CallValues::new());
+                if let Some(calls) = call_values.as_deref_mut() {
+                    calls.loop_depth += 1;
+                }
                 for iteration in 0..*trip_count {
                     let induction_value = iteration
                         .checked_mul(*stride)
@@ -2264,9 +2280,6 @@ fn eval_fn_impl<'a, 'ir>(
                     );
                     body_args.push(carry);
                     body_args.extend(invariant_values.iter().cloned());
-                    if let Some(calls) = &mut iteration_calls {
-                        begin_call_iteration(calls);
-                    }
                     carry = absorb_nested_eval_result(
                         eval_fn_impl(
                             Some(pkg),
@@ -2274,7 +2287,7 @@ fn eval_fn_impl<'a, 'ir>(
                             &body_args,
                             observer,
                             order_policy,
-                            iteration_calls.as_mut(),
+                            call_values.as_deref_mut(),
                         ),
                         &mut assertion_failures,
                         &mut assumption_failures,
@@ -2282,6 +2295,9 @@ fn eval_fn_impl<'a, 'ir>(
                         &mut cover_counts,
                         &mut cover_index_by_text_id,
                     );
+                }
+                if let Some(calls) = call_values.as_deref_mut() {
+                    calls.loop_depth -= 1;
                 }
                 carry
             }
@@ -4522,44 +4538,44 @@ fn f(init: bits[8] id=10, invariant: bits[8] id=11) -> bits[8] {
     }
 
     #[test]
-    fn counted_for_shares_invokes_without_retaining_array_carries() {
+    fn counted_for_bounds_cached_invokes_with_evolving_array_carries() {
         let ir_text = r#"package test
 
-fn flip(carry: bits[1][4] id=1, i: bits[2] id=2) -> bits[1] {
+fn flip(carry: bits[1][64] id=1, i: bits[6] id=2) -> bits[1] {
   old: bits[1] = array_index(carry, indices=[i], id=3)
   ret flipped: bits[1] = not(old, id=4)
 }
 
-fn body(i: bits[2] id=5, carry: bits[1][4] id=6) -> bits[1][4] {
+fn body(i: bits[6] id=5, carry: bits[1][64] id=6) -> bits[1][64] {
   a: bits[1] = invoke(carry, i, to_apply=flip, id=7)
   b: bits[1] = invoke(carry, i, to_apply=flip, id=8)
   v: bits[1] = and(a, b, id=9)
-  ret next: bits[1][4] = array_update(carry, v, indices=[i], id=10)
+  ret next: bits[1][64] = array_update(carry, v, indices=[i], id=10)
 }
 
-fn f() -> bits[1][4] {
-  init: bits[1][4] = literal(value=[0, 0, 0, 0], id=11)
-  ret loop: bits[1][4] = counted_for(init, trip_count=4, stride=1, body=body, id=12)
+fn f(init: bits[1][64] id=11) -> bits[1][64] {
+  ret loop: bits[1][64] = counted_for(init, trip_count=64, stride=1, body=body, id=12)
 }
 "#;
         let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
-        let mut calls = CallValues::new();
+        let zeros = vec![IrValue::make_ubits(1, 0).unwrap(); 64];
+        let mut calls = CallValues::default();
         let mut observer = RecordingBoolObserver::new();
         let FnEvalResult::Success(result) = eval_fn_impl(
             Some(&pkg),
             pkg.get_fn("f").unwrap(),
-            &[],
+            &[IrValue::make_array(&zeros).unwrap()],
             Some(&mut observer),
             EvalOrderPolicy::Checked,
             Some(&mut calls),
         ) else {
             panic!("counted_for should evaluate successfully");
         };
-        assert_eq!(
-            result.value,
-            IrValue::parse_typed("[bits[1]:1, bits[1]:1, bits[1]:1, bits[1]:1]").unwrap()
-        );
-        assert!(calls.is_empty());
+        let ones = vec![IrValue::make_ubits(1, 1).unwrap(); 64];
+        assert_eq!(result.value, IrValue::make_array(&ones).unwrap());
+        assert!(calls.ordinary.is_empty());
+        assert_eq!(calls.in_loops.len(), 1);
+        assert_eq!(calls.in_loops["flip"].len(), MAX_LOOP_CALLS_PER_CALLEE);
         // Both invokes in an iteration share the computation at node 4.
         assert_eq!(
             observer
@@ -4567,36 +4583,38 @@ fn f() -> bits[1][4] {
                 .iter()
                 .filter(|(id, _)| *id == 4)
                 .count(),
-            4
+            64
         );
     }
 
     #[test]
-    fn counted_for_reuses_invariant_invokes_and_expires_unused_arguments() {
+    fn counted_for_reuses_invariant_invokes_under_cache_pressure() {
         let ir_text = r#"package test
 
 fn toggle(i: bits[2] id=1, carry: bits[1] id=2) -> bits[1] {
   ret toggled: bits[1] = not(carry, id=3)
 }
 
-fn expensive(x: bits[1] id=4) -> bits[1] {
-  ret inner: bits[1] = counted_for(x, trip_count=3, stride=1, body=toggle, id=5)
+fn expensive(x: bits[8] id=4) -> bits[1] {
+  zero: bits[8] = literal(value=0, id=5)
+  start: bits[1] = eq(x, zero, id=6)
+  ret inner: bits[1] = counted_for(start, trip_count=3, stride=1, body=toggle, id=7)
 }
 
-fn body(i: bits[2] id=6, carry: bits[1] id=7, x: bits[1] id=8) -> bits[1] {
-  invariant: bits[1] = invoke(x, to_apply=expensive, id=9)
-  low: bits[1] = bit_slice(i, start=0, width=1, id=10)
-  alternating: bits[1] = invoke(low, to_apply=expensive, id=11)
-  ret next: bits[1] = xor(carry, invariant, alternating, id=12)
+fn body(i: bits[8] id=8, carry: bits[1] id=9, x: bits[8] id=10) -> bits[1] {
+  invariant: bits[1] = invoke(x, to_apply=expensive, id=11)
+  changing: bits[1] = invoke(i, to_apply=expensive, id=12)
+  ret next: bits[1] = xor(carry, invariant, changing, id=13)
 }
 
-fn f(x: bits[1] id=13) -> bits[1] {
-  ret outer: bits[1] = counted_for(x, trip_count=4, stride=1, body=body, invariant_args=[x], id=14)
+fn f(x: bits[8] id=14) -> bits[1] {
+  init: bits[1] = literal(value=0, id=15)
+  ret outer: bits[1] = counted_for(init, trip_count=32, stride=1, body=body, invariant_args=[x], id=16)
 }
 "#;
         let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
         let f = pkg.get_fn("f").unwrap();
-        let args = [IrValue::make_ubits(1, 0).unwrap()];
+        let args = [IrValue::make_ubits(8, 255).unwrap()];
         let mut observer = RecordingBoolObserver::new();
         let FnEvalResult::Success(result) = eval_fn_impl(
             Some(&pkg),
@@ -4604,20 +4622,20 @@ fn f(x: bits[1] id=13) -> bits[1] {
             &args,
             Some(&mut observer),
             EvalOrderPolicy::Checked,
-            Some(&mut CallValues::new()),
+            Some(&mut CallValues::default()),
         ) else {
             panic!("counted_for should evaluate successfully");
         };
-        assert_eq!(result.value, args[0]);
-        // expensive(0) is used on every iteration. expensive(1) is used
-        // only on iterations 1 and 3 and must have expired between them.
-        let inner_results: Vec<_> = observer
-            .bool_events
-            .iter()
-            .filter(|(id, _)| *id == 5)
-            .map(|(_, value)| *value)
-            .collect();
-        assert_eq!(inner_results, [true, false, false]);
+        assert!(result.value.to_bool().unwrap());
+        // The inner loop runs once for x and once for each induction value.
+        assert_eq!(
+            observer
+                .bool_events
+                .iter()
+                .filter(|(id, _)| *id == 7)
+                .count(),
+            33
+        );
 
         let mut observer = RecordingBoolObserver::new();
         eval_fn_in_package_with_observer(&pkg, f, &args, Some(&mut observer));
@@ -4625,9 +4643,50 @@ fn f(x: bits[1] id=13) -> bits[1] {
             observer
                 .bool_events
                 .iter()
-                .filter(|(id, _)| *id == 5)
+                .filter(|(id, _)| *id == 7)
                 .count(),
-            8
+            64
+        );
+    }
+
+    #[test]
+    fn sibling_counted_for_loops_share_their_nested_invoke() {
+        let ir_text = r#"package test
+
+fn helper(x: bits[1] id=1) -> bits[1] {
+  ret flipped: bits[1] = not(x, id=2)
+}
+
+fn body(i: bits[1] id=3, carry: bits[1] id=4) -> bits[1] {
+  ret next: bits[1] = invoke(carry, to_apply=helper, id=5)
+}
+
+fn f(x: bits[1] id=6) -> bits[1] {
+  first: bits[1] = counted_for(x, trip_count=1, stride=1, body=body, id=7)
+  second: bits[1] = counted_for(x, trip_count=1, stride=1, body=body, id=8)
+  ret both: bits[1] = and(first, second, id=9)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let mut observer = RecordingBoolObserver::new();
+        let FnEvalResult::Success(result) = eval_fn_impl(
+            Some(&pkg),
+            pkg.get_fn("f").unwrap(),
+            &[IrValue::make_ubits(1, 0).unwrap()],
+            Some(&mut observer),
+            EvalOrderPolicy::Checked,
+            Some(&mut CallValues::default()),
+        ) else {
+            panic!("sibling loops should evaluate successfully");
+        };
+        assert!(result.value.to_bool().unwrap());
+        assert_eq!(
+            observer
+                .bool_events
+                .iter()
+                .filter(|(id, _)| *id == 2)
+                .count(),
+            1
         );
     }
 
