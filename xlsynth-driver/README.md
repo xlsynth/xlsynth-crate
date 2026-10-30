@@ -4037,8 +4037,8 @@ generate RTL, lower to g8r, or check a netlist.
 
 ### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
 
-Proves bit-exact output equivalence after pipeline fill for a free-running
-pipeline. Bitwuzla compares the behavioral XLS IR of the selected DSLX stages
+Proves bit-exact output equivalence under the stitch specification. Bitwuzla
+compares the behavioral XLS IR of the selected DSLX stages
 against the mapped cells' Liberty functions and flip-flop semantics. CaDiCaL
 compares a gatified reference against the same mapped cells. Builds with
 in-process Bitwuzla use it by default. Other builds default to CaDiCaL.
@@ -4052,25 +4052,36 @@ select or array access. The diagnostic identifies the unsupported operand or
 result shape. For a gate-level comparison, use `--solver cadical` if g8r can
 lower the stage.
 
+For a free-running pipeline, the checker compares data on every cycle after
+fill. With `input_valid_signal`, it compares data only for valid transactions.
+A transaction appears at the output one pipeline latency after its valid
+input, provided every intervening rising edge sampled reset inactive. An
+asserted synchronous reset flushes all in-flight transactions. When
+`output_valid_signal` is present, the checker compares that port on every
+cycle whose validity is known, including bubbles and the first observation
+after a reset edge. Before fill, validity can be unknown because registers
+start with arbitrary contents. A pipeline with zero register layers uses
+the current input valid. Without an output-valid port, the same transaction
+timing determines which data to compare.
+
 The checker normally runs one proof per stage concurrently. Simulation proposes
 a one-to-one pairing of register bits, allowing renamed, reordered, and inverted
 flops. The solver checks every paired next-state bit for arbitrary current state
-and inputs. The last stage also checks all external outputs. Together these
-checks prove output equality on every cycle after the reference pipeline fills.
+and inputs. The last stage also checks the external outputs. This can establish
+equivalence even when the mapped data and valid flops have different names.
 
 If synthesis changes the state encoding, removes flops, or the proposed pairing
 fails a stage proof, the default mode checks the whole pipeline. Bitwuzla
 composes the behavioral stages on the first frame's inputs. It advances the
 mapped cells from arbitrary power-up state with fresh inputs on every frame
-and compares the output after the specified number of rising edges. CaDiCaL
+and checks the defined outputs. CaDiCaL
 unrolls both gate graphs from independent arbitrary power-up states.
 
 Inputs and outputs must agree in name and packed bit width, with bit zero as
 the LSB. The native g8r result `output_value` and the stitched RTL result
 `out` identify the same data port. Internal register names, counts, and
-encodings can differ. Valid-enabled pipelines and reset protocols require a
-different observation contract and are rejected. Mapped FFs must share the
-spec's rising-edge clock. The importer rejects latches, derived clocks, and
+encodings can differ. Mapped FFs must share the spec's rising-edge clock.
+The importer rejects latches, derived clocks, and
 asynchronous clear/preset cells.
 
 Supply a valid structural Verilog netlist (`.gv`) with cell instances and wiring assignments.
@@ -4105,7 +4116,7 @@ a matching proto as described under `g8r2gv`. A netlist from synthesis of
 - `--liberty-proto <PATH>` supplies the matching Liberty proto.
 - `--module-name <NAME>` overrides the mapped module name. The default is the spec's wrapper name.
 - `--solver <bitwuzla|cadical>` selects the backend for stage proofs and whole-pipeline checks. `bitwuzla` requires a driver built with `with-bitwuzla-system` or `with-bitwuzla-built`.
-- `--proof-mode <MODE>` defaults to `auto`, which tries stage proofs and falls back to the whole-pipeline check if needed. `stages` requires a complete, proved correspondence and reports the unmatched bit or failing stage. `whole-pipeline` runs the post-fill check directly.
+- `--proof-mode <MODE>` defaults to `auto`, which tries stage proofs and falls back to the whole-pipeline check if needed. `stages` requires a complete, proved correspondence and reports the unmatched bit or failing stage. `whole-pipeline` checks the external observations directly, including for an implementation that captures different data during bubbles.
 - `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
 - `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
 - `--show-proof-plan` prints the solver and reference used, along with the proved leaf count per stage or the whole-pipeline fallback reason, to stderr.

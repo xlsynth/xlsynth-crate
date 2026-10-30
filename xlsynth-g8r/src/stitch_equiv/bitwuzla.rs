@@ -15,7 +15,7 @@ use crate::aig::SequentialGateFn;
 use super::behavioral::BehavioralPipeline;
 use super::mapped_smt::{MappedStages, unroll_mapped};
 use super::stage_script::LeafResult;
-use super::{StitchCounterexample, StitchEquivResult, replay};
+use super::{StitchCounterexample, StitchEquivResult, StitchObservation, replay_trace};
 
 const INCONCLUSIVE: &str =
     "stitch equivalence inconclusive: Bitwuzla interrupted by a timeout or resource limit";
@@ -141,12 +141,14 @@ fn model_bits(solver: &mut Bitwuzla, word: &BitVec<BitwuzlaTerm>) -> Result<IrBi
         .map_err(|e| e.to_string())
 }
 
-/// Compares the composed frame-zero IR result with the post-fill mapped output.
+/// Compares the composed IR payload when qualified, plus every defined output
+/// valid bit, starting from arbitrary mapped power-up state.
 pub(super) fn prove_post_fill(
     behavior: &BehavioralPipeline,
     reference: &SequentialGateFn,
     mapped: &SequentialGateFn,
     latency: usize,
+    controls: StitchObservation<'_>,
     timeout: Option<Duration>,
 ) -> Result<StitchEquivResult, String> {
     let frame_count = latency.checked_add(1).ok_or("pipeline latency overflow")?;
@@ -158,20 +160,68 @@ pub(super) fn prove_post_fill(
         .collect::<Result<Vec<_>, _>>()?;
     let q = arbitrary_state(&mut solver, mapped)?;
     let expected = behavior.compose_smt(&mut solver, &frames[0])?;
-    let actual = unroll_mapped(&mut solver, mapped, &frames, &q)?;
-    // Free-running stitch specs have one packed data output and no controls.
-    let actual_data = actual
-        .get("out")
-        .filter(|_| actual.len() == 1)
-        .ok_or("behavioral stitch equivalence requires a single mapped data output 'out'")?;
-    match check_mismatch(&mut solver, &expected, actual_data)? {
+    let actual = unroll_mapped(
+        &mut solver,
+        mapped,
+        &frames,
+        &q,
+        controls.reset.and(controls.output_valid),
+    )?;
+    let actual_data = &actual.final_outputs["out"];
+    if expected.get_width() != actual_data.get_width() {
+        return Err("behavioral and mapped payload widths differ".into());
+    }
+    // Any sampled reset defines every valid register, even before the launch
+    // transaction could reach the output. The observation frame has no edge.
+    let mut flushed = solver.numerical(1, 0);
+    let mut early_mismatches = Vec::new();
+    if let Some(reset) = controls.reset {
+        for (edge, frame) in frames[..latency].iter().enumerate() {
+            let active = if controls.reset_active_low {
+                solver.not(&frame[reset])
+            } else {
+                frame[reset].clone()
+            };
+            flushed = solver.or(&flushed, &active);
+            if let Some(mapped_valid) = actual.prefill_valid.get(edge) {
+                // The observation just after this edge is still before fill.
+                early_mismatches.push(solver.and(&flushed, mapped_valid));
+            }
+        }
+    }
+    let mut valid = solver.not(&flushed);
+    if let Some(input_valid) = controls.input_valid {
+        valid = solver.and(&valid, &frames[0][input_valid]);
+    }
+    let data_differs = solver.ne(&expected, actual_data);
+    let mut mismatch = solver.and(&valid, &data_differs);
+    if let Some(port) = controls.output_valid {
+        let valid_differs = solver.ne(&valid, &actual.final_outputs[port]);
+        mismatch = solver.or(&mismatch, &valid_differs);
+    }
+    for early in &early_mismatches {
+        mismatch = solver.or(&mismatch, early);
+    }
+    match solver
+        .assert(&mismatch)
+        .and_then(|()| solver.check())
+        .map_err(|e| e.to_string())?
+    {
         Response::Unsat => return Ok(StitchEquivResult::Proved),
         Response::Unknown => return Err(INCONCLUSIVE.into()),
         Response::Sat => {
-            // Replay the full witness before reporting a data mismatch.
+            // Decode and independently replay the first mismatching
+            // observation.
         }
     }
-    let inputs_by_frame = frames
+    let mut cycle = latency;
+    for (index, early) in early_mismatches.iter().enumerate() {
+        if !model_bits(&mut solver, early)?.is_zero() {
+            cycle = index + 1;
+            break;
+        }
+    }
+    let inputs_by_frame = frames[..=cycle]
         .iter()
         .map(|frame| {
             frame
@@ -186,8 +236,8 @@ pub(super) fn prove_post_fill(
         .zip(&q)
         .map(|(reg, term)| Ok((reg.name.clone(), model_bits(&mut solver, term)?)))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
-    // All logical power-up data has been flushed. Zero is a concrete initial
-    // state consistent with the behavioral counterexample.
+    // An observed transaction depends only on its launch data. A sampled
+    // reset likewise makes validity independent of the initial logical state.
     let reference_initial_state = reference
         .registers
         .iter()
@@ -196,19 +246,42 @@ pub(super) fn prove_post_fill(
             (reg.name.clone(), IrBits::zero(width))
         })
         .collect();
-    let reference_outputs = BTreeMap::from([(
-        "out".to_owned(),
-        behavior.compose_concrete(&inputs_by_frame[0])?,
-    )]);
-    let mapped_outputs = replay(mapped, &mapped_initial_state, &inputs_by_frame)?;
-    if reference_outputs == mapped_outputs
-        || reference_outputs["out"] != model_bits(&mut solver, &expected)?
-        || mapped_outputs["out"] != model_bits(&mut solver, actual_data)?
-    {
-        return Err(
-            "Bitwuzla counterexample did not replay in the behavioral IR and mapped simulators"
-                .into(),
-        );
+    let qualified = controls
+        .valid_at(latency, &inputs_by_frame)
+        .ok_or("Bitwuzla counterexample selected an undefined observation")?;
+    let mut reference_outputs = BTreeMap::new();
+    let mut mapped_outputs = replay_trace(mapped, &mapped_initial_state, &inputs_by_frame)?
+        .pop()
+        .ok_or("missing mapped observation frame")?;
+    if let Some(port) = controls.output_valid {
+        reference_outputs.insert(port.to_owned(), IrBits::from_lsb_is_0(&[qualified]));
+        let mapped_valid = if cycle < latency {
+            &actual.prefill_valid[cycle - 1]
+        } else {
+            &actual.final_outputs[port]
+        };
+        if mapped_outputs[port] != model_bits(&mut solver, mapped_valid)? {
+            return Err(
+                "Bitwuzla valid counterexample did not replay in the mapped simulator".into(),
+            );
+        }
+    }
+    if qualified {
+        let data = behavior.compose_concrete(&inputs_by_frame[0])?;
+        if data != model_bits(&mut solver, &expected)?
+            || mapped_outputs["out"] != model_bits(&mut solver, actual_data)?
+        {
+            return Err(
+                "Bitwuzla counterexample did not replay in the behavioral IR and mapped simulators"
+                    .into(),
+            );
+        }
+        reference_outputs.insert("out".to_owned(), data);
+    } else {
+        mapped_outputs.remove("out");
+    }
+    if reference_outputs == mapped_outputs {
+        return Err("Bitwuzla counterexample did not reproduce an observable mismatch".into());
     }
     Ok(StitchEquivResult::Disproved(StitchCounterexample {
         reference_initial_state,

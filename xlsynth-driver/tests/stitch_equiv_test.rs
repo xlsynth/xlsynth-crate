@@ -30,7 +30,19 @@ cells: {
   pins: { name_string_id: 5 direction: INPUT }
   pins: { name_string_id: 6 direction: OUTPUT function_string_id: 7 }
 }
-interned_strings: ["D", "CLK", "Q", "IQ", "A", "Y", "!A"]
+cells: {
+  name: "AND2"
+  pins: { name_string_id: 5 direction: INPUT }
+  pins: { name_string_id: 8 direction: INPUT }
+  pins: { name_string_id: 6 direction: OUTPUT function_string_id: 9 }
+}
+cells: {
+  name: "OR2"
+  pins: { name_string_id: 5 direction: INPUT }
+  pins: { name_string_id: 8 direction: INPUT }
+  pins: { name_string_id: 6 direction: OUTPUT function_string_id: 10 }
+}
+interned_strings: ["D", "CLK", "Q", "IQ", "A", "Y", "!A", "B", "A & B", "A | B"]
 "#;
 
 const NETLIST: &str = r#"
@@ -88,6 +100,11 @@ const SPLIT: &str = r#"[
 
 const BITWUZLA_PLAN: &str = "solver bitwuzla: behavioral XLS IR vs. mapped cells\n";
 const CADICAL_PLAN: &str = "solver cadical: gatified reference vs. mapped cells\n";
+const STITCH_SOLVERS: &[(&str, &str)] = &[
+    ("cadical", CADICAL_PLAN),
+    #[cfg(feature = "has-bitwuzla")]
+    ("bitwuzla", BITWUZLA_PLAN),
+];
 const DEFAULT_SOLVER_PLAN: &str = if cfg!(feature = "has-bitwuzla") {
     BITWUZLA_PLAN
 } else {
@@ -852,46 +869,192 @@ endmodule"#,
     }
 }
 
-/// A valid-enabled design needs a different observation contract even when
-/// the mapped implementation uses the same control names.
-#[test]
-fn stitch_equiv_reports_configured_valid_and_reset_ports() {
-    let temp = tempfile::tempdir().unwrap();
+/// Two-stage identity pipeline with synchronous active-low reset and a mapped
+/// datapath that continues to capture data during bubbles.
+fn valid_reset_fixture(directory: &Path) -> std::io::Result<&'static str> {
+    let source = r#"fn pipe_cycle0(x: bool) -> bool { x }
+fn pipe_cycle1(y: bool) -> bool { y }"#;
+    let gv = r#"module pipe(input x, input clk, input vin, input rst_n, output vout, output out);
+  wire data0, valid0, d0, d1;
+  DFF data_ff0 (.D(x), .CLK(clk), .Q(data0));
+  DFF data_ff1 (.D(data0), .CLK(clk), .Q(out));
+  AND2 flush0 (.A(vin), .B(rst_n), .Y(d0));
+  DFF valid_ff0 (.D(d0), .CLK(clk), .Q(valid0));
+  AND2 flush1 (.A(valid0), .B(rst_n), .Y(d1));
+  DFF valid_ff1 (.D(d1), .CLK(clk), .Q(vout));
+endmodule"#;
+    stage_fixture(directory, source, gv)?;
     fs::write(
-        temp.path().join("pipe.x"),
-        "fn pipe_cycle0(x: bool) -> bool { x }",
-    )
-    .unwrap();
-    fs::write(
-        temp.path().join("pipe.toml"),
+        directory.join("pipe.toml"),
         format!(
-            "{SPEC}\n{}",
-            r#"input_valid_signal = "vin"
+            r#"{SPEC}
+input_valid_signal = "vin"
 output_valid_signal = "vout"
 reset = "rst_n"
 reset_active_low = true"#
         ),
+    )?;
+    Ok(gv)
+}
+
+#[test]
+fn stitch_equiv_checks_valid_data_and_synchronous_reset() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv = valid_reset_fixture(temp.path()).unwrap();
+    let mapped = temp.path().join("pipe.gv");
+    for &(solver, _) in STITCH_SOLVERS {
+        fs::write(&mapped, gv).unwrap();
+        let mut command = stage_command(temp.path(), &["--solver", solver]);
+        let proved = command.output().unwrap();
+        assert!(
+            proved.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proved.stderr)
+        );
+        assert_eq!(
+            proved.stdout,
+            b"Proved pipe equivalent to pipe under the stitch valid protocol (2 rising clock edges of latency).\n"
+        );
+
+        // The extra flops are zero after two edges, so their initial bits
+        // cannot disturb a post-fill observation. They can still raise vout
+        // immediately after a reset edge, when it must be known low.
+        let stale_valid = gv.replace(".Q(vout)", ".Q(clean_valid)").replace(
+            "  DFF valid_ff1",
+            r#"  wire clean_valid, stale0, stale1;
+  DFF extra0 (.D(1'b0), .CLK(clk), .Q(stale0));
+  DFF extra1 (.D(stale0), .CLK(clk), .Q(stale1));
+  OR2 leak (.A(clean_valid), .B(stale1), .Y(vout));
+  DFF valid_ff1"#,
+        );
+        command.args(["--proof-mode", "whole-pipeline"]);
+        for (defect, broken) in [
+            ("payload bypass", gv.replace(".D(data0)", ".D(x)")),
+            ("early valid", gv.replace(".D(d1)", ".D(d0)")),
+            (
+                "reset leaks an in-flight transaction",
+                gv.replace(".D(d1)", ".D(valid0)"),
+            ),
+            ("pre-fill stale valid", stale_valid),
+        ] {
+            fs::write(&mapped, broken).unwrap();
+            let result = command.output().unwrap();
+            let stderr = String::from_utf8(result.stderr).unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "{solver}, {defect}: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .any(|line| line
+                        == "xlsynth-driver: stitch-equiv: valid-qualified output mismatch"),
+                "{solver}, {defect}: {stderr}"
+            );
+        }
+    }
+}
+
+/// A clockless, valid-enabled pipeline compares data on the current valid
+/// input. Synchronous reset has no edge on which to act.
+#[test]
+fn stitch_equiv_qualifies_data_without_an_output_valid_port() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv = r#"module pipe(input x, input vin, input rst, output out);
+  AND2 mask (.A(x), .B(vin), .Y(out));
+endmodule"#;
+    stage_fixture(temp.path(), "fn pipe_cycle0(x: bool) -> bool { x }", gv).unwrap();
+    let spec = SPEC.replace("flop_outputs = true", "flop_outputs = false");
+    fs::write(
+        temp.path().join("pipe.toml"),
+        format!(
+            r#"{spec}
+input_valid_signal = "vin"
+reset = "rst""#
+        ),
     )
     .unwrap();
-    let result = driver(
-        temp.path(),
-        &[
-            "stitch-equiv",
-            "--spec",
-            "pipe.toml",
-            "--netlist",
-            "unused.gv",
-            "--liberty-proto",
-            "unused.proto",
-        ],
-    )
-    .unwrap();
-    assert_eq!(result.status.code(), Some(1));
-    assert_eq!(
-        String::from_utf8(result.stderr).unwrap(),
-        r#"xlsynth-driver: stitch-equiv: unsupported stitch controls for 'pipe': input_valid_signal = "vin", output_valid_signal = "vout", reset = "rst_n". stitch-equiv checks free-running pipelines and compares data on every cycle after fill. Valid-qualified observations and reset sequences are not yet supported
-"#
-    );
+    let mapped = temp.path().join("pipe.gv");
+    for &(solver, _) in STITCH_SOLVERS {
+        fs::write(&mapped, gv).unwrap();
+        let mut command = stage_command(
+            temp.path(),
+            &["--solver", solver, "--proof-mode", "whole-pipeline"],
+        );
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        // This incorrectly masks a valid payload during an asserted reset.
+        let gated_on_reset = gv
+            .replace(
+                "  AND2 mask",
+                "  wire running;\n  INV inv (.A(rst), .Y(running));\n  AND2 mask",
+            )
+            .replace(".B(vin)", ".B(running)");
+        fs::write(&mapped, gated_on_reset).unwrap();
+        let result = command.output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(
+            stderr.lines().any(|line| line == "xlsynth-driver: stitch-equiv: valid-qualified output mismatch"),
+            "{stderr}"
+        );
+    }
+}
+
+/// Both stage solvers discharge the valid-register reset and the data
+/// register's hold-on-bubble obligation.
+#[test]
+fn stitch_equiv_proves_valid_and_reset_in_stages_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv = r#"module pipe(input clk, input x, input vin, input rst, output out, output vout);
+  wire sample, bubble, held, d, running, next_valid;
+  AND2 capture (.A(x), .B(vin), .Y(sample));
+  INV invert_valid (.A(vin), .Y(bubble));
+  AND2 hold (.A(out), .B(bubble), .Y(held));
+  OR2 mux (.A(sample), .B(held), .Y(d));
+  DFF data_ff (.D(d), .CLK(clk), .Q(out));
+  INV invert_reset (.A(rst), .Y(running));
+  AND2 flush (.A(vin), .B(running), .Y(next_valid));
+  DFF valid_ff (.D(next_valid), .CLK(clk), .Q(vout));
+endmodule"#;
+    stage_fixture(temp.path(), "fn pipe_cycle0(x: bool) -> bool { x }", gv).unwrap();
+    let input_flop = SPEC
+        .replace("flop_inputs = false", "flop_inputs = true")
+        .replace("flop_outputs = true", "flop_outputs = false");
+    // For an identity stage the same two physical flops can implement either
+    // wrapper boundary. The stage proof has different D roots in each case.
+    for boundary in [SPEC, &input_flop] {
+        fs::write(
+            temp.path().join("pipe.toml"),
+            format!(
+                r#"{boundary}
+input_valid_signal = "vin"
+output_valid_signal = "vout"
+reset = "rst""#
+            ),
+        )
+        .unwrap();
+        for &(solver, plan) in STITCH_SOLVERS {
+            let result =
+                stage_command(temp.path(), &["--solver", solver, "--proof-mode", "stages"])
+                    .output()
+                    .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(result.stderr).unwrap(),
+                format!("stage pipe_cycle0: 1 proved leaf\n{plan}")
+            );
+        }
+    }
 }
 
 /// Every source stage must resolve before proving the latency of the selected
@@ -1298,4 +1461,37 @@ endmodule"#,
     let extra_edge = driver(temp.path(), &args).unwrap();
     assert_eq!(extra_edge.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&extra_edge.stderr).contains("post-fill output mismatch"));
+
+    // With input valid, a nullary stage still has a one-bit input register
+    // layer. The constant payload requires no flops.
+    fs::write(&source, nullary_stage).unwrap();
+    fs::write(
+        temp.path().join("pipe.toml"),
+        r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+flop_inputs = true
+flop_outputs = false
+input_valid_signal = "vin"
+output_valid_signal = "vout""#,
+    )
+    .unwrap();
+    fs::write(
+        &mapped,
+        r#"module pipe(input clk, input vin, output out, output vout);
+  DFF valid_ff (.D(vin), .CLK(clk), .Q(vout));
+  assign out = 1'b1;
+endmodule"#,
+    )
+    .unwrap();
+    for &(solver, _) in STITCH_SOLVERS {
+        let result = stage_command(temp.path(), &["--solver", solver, "--proof-mode", "stages"])
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"Proved pipe equivalent to pipe under the stitch valid protocol (1 rising clock edge of latency).\n");
+    }
 }
