@@ -1828,9 +1828,9 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
         .replace("area: 2.0", "area: 1.0");
     std::fs::write(&lib, format!("{text}\ncells: {{{recovery_cell}")).unwrap();
     for repair in [false, true] {
-        let run_map = |name: &str, extra: &[&str]| {
-            let netlist = dir.path().join(format!("{name}.gv"));
-            let report = dir.path().join(format!("{name}.json"));
+        let run_map = |filename: &str, extra: &[&str]| {
+            let netlist = dir.path().join(filename);
+            let report = netlist.with_extension("json");
             let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
                 .arg("aig-tech-map")
                 .arg(&aig)
@@ -1859,9 +1859,9 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
                 serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
             (netlist, json)
         };
-        let (raw, raw_report) = run_map("raw", &["--area-recovery=false"]);
+        let (raw, raw_report) = run_map("raw.gv", &["--area-recovery=false"]);
         assert!(raw_report.get("area_recovery").is_none());
-        let (zero, zero_report) = run_map("zero", &["--area-recovery-evaluation-budget", "0"]);
+        let (zero, zero_report) = run_map("zero.gv", &["--area-recovery-evaluation-budget", "0"]);
         assert_eq!(std::fs::read(&raw).unwrap(), std::fs::read(zero).unwrap());
         assert_eq!(
             zero_report["area_recovery"]["work_limits"]["recovery_evaluations"],
@@ -1871,7 +1871,7 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
             zero_report["area_recovery"]["downsize"]["propagated_instances"],
             0
         );
-        let (_, rounds_report) = run_map("rounds", &["--area-recovery-rounds", "0"]);
+        let (_, rounds_report) = run_map("rounds.gv", &["--area-recovery-rounds", "0"]);
         assert_eq!(
             rounds_report["area_recovery"]["downsize"]["stop_reason"],
             "disabled"
@@ -1885,13 +1885,13 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
         ];
         let (before, _) = if repair {
             run_map(
-                "before",
+                "before.gv",
                 &["--area-recovery=false", wire[0], wire[1], wire[2], wire[3]],
             )
         } else {
             (raw, raw_report)
         };
-        let (after, report) = run_map("after", &wire);
+        let (after, report) = run_map("after.gv", &wire);
         let explicit = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
             .arg("gv-resize")
             .arg("--netlist")
@@ -1916,7 +1916,8 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
             "{}",
             String::from_utf8_lossy(&explicit.stderr)
         );
-        assert_eq!(std::fs::read(after).unwrap(), explicit.stdout);
+        let optimized_gv = std::fs::read(after).unwrap();
+        assert_eq!(optimized_gv, explicit.stdout);
         assert_eq!(
             report["post_mapping_timing"]["wire_load"]["constant_capacitance"],
             0.5
@@ -1944,8 +1945,19 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
                 report["area_recovery"]["initial_area"]
             );
         }
-        let (_, repeated) = run_map("repeat", &wire);
+        let (pb, repeated) = run_map("repeat.pb", &wire);
         assert_eq!(report, repeated);
+        let decoded = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("pb2gv")
+            .arg(pb)
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(decoded.stdout, optimized_gv);
     }
 }
 

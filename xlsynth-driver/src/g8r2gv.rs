@@ -18,7 +18,7 @@ use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 use crate::mapped_netlist_output::same_unix_file;
 use crate::mapped_netlist_output::{
     Format, PendingOutput, ensure_pb_handle_distinct_from_stderr, format_arg, metadata_if_exists,
-    output_arg, output_paths_alias, path_aliases_stream, write_stdout,
+    output_arg, output_paths_alias, path_aliases_stream, reset_regular_output, write_stdout,
 };
 
 /// Defines the thin CLI surface for direct ABC/native sequential mapping.
@@ -174,7 +174,7 @@ fn write_sidecar(
         "--{flag} and --output must name different destinations"
     );
     if metadata.is_file() {
-        file.set_len(0)?;
+        reset_regular_output(&mut file)?;
     }
     Ok(file.write_all(bytes)?)
 }

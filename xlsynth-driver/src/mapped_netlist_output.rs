@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::{Arg, ArgMatches, ValueEnum};
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
@@ -232,6 +232,13 @@ pub(super) struct PendingOutput {
     created_path: Option<PathBuf>,
 }
 
+/// Starts a replacement at byte zero even when the path duplicates an open
+/// descriptor with a nonzero cursor (such as /dev/fd/N on macOS).
+pub(super) fn reset_regular_output(file: &mut File) -> io::Result<()> {
+    file.rewind()?;
+    file.set_len(0)
+}
+
 impl PendingOutput {
     /// Opens a destination without destroying existing contents.
     pub(super) fn open(path: &Path) -> Result<Self> {
@@ -275,11 +282,11 @@ impl PendingOutput {
 
     /// Keeps the destination and truncates it immediately before writing.
     pub(super) fn prepare_write(&mut self) -> Result<&mut File> {
-        self.created_path = None;
         let file = self.handle.as_mut().unwrap().as_file_mut();
         if file.metadata()?.is_file() {
-            file.set_len(0)?;
+            reset_regular_output(file)?;
         }
+        self.created_path = None;
         Ok(file)
     }
 }
@@ -329,12 +336,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::output_paths_alias;
     use std::fs;
-    #[cfg(target_os = "linux")]
-    use std::io::Write;
+    use std::io::{Seek, SeekFrom, Write};
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
+
+    #[test]
+    fn replacing_a_regular_output_rewinds_its_open_descriptor() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("mapped.pb");
+        fs::write(&path, b"old contents")?;
+        let mut output = PendingOutput::open(&path)?;
+        output.handle().as_file().seek(SeekFrom::End(0))?;
+        output.prepare_write()?.write_all(b"netlist")?;
+        assert_eq!(fs::read(path)?, b"netlist");
+        Ok(())
+    }
 
     #[test]
     fn missing_outputs_that_require_a_directory_are_rejected() -> anyhow::Result<()> {
