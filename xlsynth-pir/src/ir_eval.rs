@@ -164,6 +164,7 @@ fn append_operand_values<'a>(
                 push(operand);
             }
         }
+        Map { array, .. } => push(array),
         Invoke { operands, .. } => {
             for operand in operands {
                 push(operand);
@@ -1174,6 +1175,7 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::RegisterWrite { .. }
         | ir::NodePayload::AfterAll(_)
         | ir::NodePayload::Invoke { .. }
+        | ir::NodePayload::Map { .. }
         | ir::NodePayload::Cover { .. }
         | ir::NodePayload::CountedFor { .. } => None,
         _ => Some(eval_pure(n, operand_values)),
@@ -2137,6 +2139,37 @@ fn eval_fn_impl<'a, 'ir>(
             P::AfterAll(_deps) => {
                 // Tokens have no payload; produce a fresh token value.
                 IrValue::make_token()
+            }
+            P::Map { array, to_apply } => {
+                let pkg = pkg.expect("map requires package context");
+                let callee = pkg.get_fn(to_apply).expect("verified map callee");
+                let elements = env
+                    .get(array)
+                    .expect("map array evaluated")
+                    .as_elements()
+                    .expect("verified array");
+                let values = elements
+                    .iter()
+                    .map(|element| {
+                        absorb_nested_eval_result(
+                            eval_fn_impl(
+                                Some(pkg),
+                                callee,
+                                std::slice::from_ref(element),
+                                observer,
+                                order_policy,
+                                call_values.as_deref_mut(),
+                            ),
+                            &mut assertion_failures,
+                            &mut assumption_failures,
+                            &mut trace_messages,
+                            &mut cover_counts,
+                            &mut cover_index_by_text_id,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                IrValue::make_array_typed(callee.ret_ty.clone(), &values)
+                    .expect("verified map result")
             }
             P::Invoke { to_apply, operands } => {
                 let pkg = pkg.expect("Invoke requires package context for callee resolution");

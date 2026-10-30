@@ -35,7 +35,7 @@ impl Default for IrInlineOptions {
 /// Runs the `ir-inline` transform over IR text and returns the rewritten IR.
 ///
 /// The result is validated and reduced to the members reachable from the
-/// selected top function via `invoke` / `counted_for`.
+/// selected top function via `invoke`, `map`, or `counted_for`.
 pub fn run_ir_inline_over_ir_text(
     ir_text: &str,
     top: Option<&str>,
@@ -108,7 +108,7 @@ fn run_ir_inline_over_ir_text_via_toolchain(
     if !residual_invokes.is_empty() {
         let targets = residual_invokes.into_iter().collect::<Vec<_>>().join(", ");
         return Err(format!(
-            "ir_inline: toolchain backend did not eliminate invoke nodes from top '{top_name}': {targets}"
+            "ir_inline: toolchain backend did not eliminate invoke/map nodes from top '{top_name}': {targets}"
         ));
     }
 
@@ -134,6 +134,7 @@ fn build_opt_pass_pipeline(options: IrInlineOptions) -> String {
     if options.unroll {
         passes.push("loop_unroll");
     }
+    passes.push("map_inlining");
     passes.push("inlining");
     passes.push("dce");
     passes.join(" ")
@@ -190,7 +191,9 @@ fn run_opt_main_with_passes(
 fn residual_invoke_targets(f: &crate::ir::Fn) -> BTreeSet<String> {
     let mut targets = BTreeSet::new();
     for node in &f.nodes {
-        if let NodePayload::Invoke { to_apply, .. } = &node.payload {
+        if let NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } =
+            &node.payload
+        {
             targets.insert(to_apply.clone());
         }
     }
@@ -211,7 +214,7 @@ fn direct_callee_names(f: &crate::ir::Fn) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for node in &f.nodes {
         match &node.payload {
-            NodePayload::Invoke { to_apply, .. } => {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
                 names.insert(to_apply.clone());
             }
             NodePayload::CountedFor { body, .. } => {
@@ -291,11 +294,11 @@ mod tests {
     fn build_opt_pass_pipeline_matches_unroll_flag() {
         assert_eq!(
             build_opt_pass_pipeline(IrInlineOptions { unroll: true }),
-            "loop_unroll inlining dce"
+            "loop_unroll map_inlining inlining dce"
         );
         assert_eq!(
             build_opt_pass_pipeline(IrInlineOptions { unroll: false }),
-            "inlining dce"
+            "map_inlining inlining dce"
         );
     }
 

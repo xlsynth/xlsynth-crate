@@ -92,7 +92,8 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                     check(*r, format_args!("node {} payload list", i))?;
                 }
             }
-            NodePayload::TupleIndex { tuple, .. }
+            NodePayload::Map { array: tuple, .. }
+            | NodePayload::TupleIndex { tuple, .. }
             | NodePayload::Unop(_, tuple)
             | NodePayload::Decode { arg: tuple, .. }
             | NodePayload::Encode { arg: tuple }
@@ -404,6 +405,12 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
     let ty = |node_ref: ir::NodeRef| -> &Type { &f.get_node(node_ref).ty };
 
     match &node.payload {
+        NodePayload::Array(elements) if elements.is_empty() => match &node.ty {
+            Type::Array(a) if a.element_count == 0 => Ok(()),
+            ty => Err(format!(
+                "empty array constructor requires a zero-length array type, got {ty}"
+            )),
+        },
         NodePayload::Nil
         | NodePayload::Tuple(_)
         | NodePayload::Array(_)
@@ -415,6 +422,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         | NodePayload::RegisterRead { .. }
         | NodePayload::RegisterWrite { .. }
         | NodePayload::Invoke { .. }
+        | NodePayload::Map { .. }
         | NodePayload::CountedFor { .. } => Ok(()),
         NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.

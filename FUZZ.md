@@ -138,7 +138,7 @@ reset feedback graphs remain outside the reset-based fuzz oracle.
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including
-helper functions, `invoke`, `counted_for`, `gate`, arbitrary-width multiply,
+helper functions, `invoke`, `map`, `counted_for`, `gate`, arbitrary-width multiply,
 product-pair, token, and event forms (`after_all`, `assert`, `trace`, and
 `cover`), parses and re-emits it through libxls, then reparses with the Rust
 parser and checks IR-level structural equivalence across the PIR roundtrip.
@@ -444,7 +444,7 @@ Primarily tests:
 
 Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated acyclic PIR package, using the shared mixed-vector sampler plus a bounded autocov corpus of interesting typed inputs.
 
-- Generates an upstream-standard random PIR package, including helper functions, `invoke`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
+- Generates an upstream-standard random PIR package, including helper functions, `invoke`, `map`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
 - Draws 32 shared mixed input vectors, seeded from the generated IR, then runs autocov to add semantically interesting tuples. Nullary functions are evaluated on their single empty argument vector without autocov.
 - Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 

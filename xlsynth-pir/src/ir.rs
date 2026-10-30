@@ -419,6 +419,11 @@ pub enum NodePayload {
         to_apply: String,
         operands: Vec<NodeRef>,
     },
+    /// Applies a unary function to each element of a fixed-length array.
+    Map {
+        array: NodeRef,
+        to_apply: String,
+    },
     PrioritySel {
         selector: NodeRef,
         cases: Vec<NodeRef>,
@@ -513,6 +518,7 @@ impl NodePayload {
             NodePayload::AfterAll(_) => "after_all",
             NodePayload::Nary(op, _) => nary_op_to_operator(*op),
             NodePayload::Invoke { .. } => "invoke",
+            NodePayload::Map { .. } => "map",
             NodePayload::PrioritySel { .. } => "priority_sel",
             NodePayload::OneHotSel { .. } => "one_hot_sel",
             NodePayload::OneHot { .. } => "one_hot",
@@ -837,6 +843,9 @@ impl NodePayload {
                 let mut parts = format_operands(operands);
                 parts.push(format!("to_apply={}", to_apply));
                 parts
+            }
+            NodePayload::Map { array, to_apply } => {
+                vec![format_operand(*array), format!("to_apply={to_apply}")]
             }
             NodePayload::PrioritySel {
                 selector,

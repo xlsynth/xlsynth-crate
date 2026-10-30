@@ -215,6 +215,7 @@ fn hash_payload_attributes(
             update_hash_str(hasher, ir::nary_op_to_operator(*op));
             update_hash_u64(hasher, nodes.len() as u64);
         }
+        NodePayload::Map { to_apply, .. } => update_hash_str(hasher, to_apply),
         NodePayload::Invoke { to_apply, operands } => {
             update_hash_str(hasher, to_apply);
             update_hash_u64(hasher, operands.len() as u64);
@@ -349,6 +350,7 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         NodePayload::OneHot { lsb_prio, .. } => attrs.push(format!("lsb_prio={lsb_prio}")),
         NodePayload::Decode { width, .. } => attrs.push(format!("width={width}")),
         NodePayload::Nary(_, nodes) => attrs.push(format!("len={}", nodes.len())),
+        NodePayload::Map { to_apply, .. } => attrs.push(format!("to_apply={to_apply}")),
         NodePayload::Invoke { to_apply, operands } => {
             attrs.push(format!("to_apply={to_apply}"));
             attrs.push(format!("len={}", operands.len()));

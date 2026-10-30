@@ -1482,6 +1482,54 @@ fn random_package_generation_is_bounded_acyclic_and_reaches_configured_maximum()
 }
 
 #[test]
+fn package_map_generation_is_opt_in_and_respects_the_call_budget() {
+    for allow_map in [false, true] {
+        let options = RandomFnOptions {
+            allow_map,
+            max_nodes: 24,
+            max_functions: 4,
+            max_invokes_per_function: 1,
+            enabled_operations: OperationSet::new([
+                RandomOperation::Literal,
+                RandomOperation::Array,
+                RandomOperation::Map,
+                RandomOperation::Invoke,
+            ]),
+            ..RandomFnOptions::default()
+        };
+        let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x6d61_7000));
+        let mut saw_map = false;
+        for _ in 0..32 {
+            let generated =
+                generate_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(12)).unwrap();
+            verify_package(&generated.package).unwrap();
+            assert!(generated.package.members.len() <= options.max_functions);
+            for member in &generated.package.members {
+                let PackageMember::Function(f) = member else {
+                    unreachable!("function generator produced a block")
+                };
+                saw_map |= f
+                    .nodes
+                    .iter()
+                    .any(|n| matches!(n.payload, NodePayload::Map { .. }));
+                let calls = f
+                    .nodes
+                    .iter()
+                    .filter(|n| {
+                        matches!(
+                            n.payload,
+                            NodePayload::Map { .. } | NodePayload::Invoke { .. }
+                        )
+                    })
+                    .count();
+                assert!(calls <= options.max_invokes_per_function);
+            }
+        }
+        assert_eq!(saw_map, allow_map);
+    }
+}
+
+#[test]
 fn random_package_counted_for_generation_is_bounded_and_covers_forms() {
     let options = RandomFnOptions {
         max_params: 5,

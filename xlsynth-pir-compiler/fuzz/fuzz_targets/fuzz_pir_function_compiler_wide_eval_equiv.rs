@@ -30,6 +30,7 @@ fn options() -> RandomFnOptions {
         allow_arrays: true,
         allow_tuples: true,
         allow_gate: true,
+        allow_map: true,
         allow_extension_ops: true,
         allow_zero_width_bits: true,
         allow_arbitrary_width_multiply: true,

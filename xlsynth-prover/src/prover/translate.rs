@@ -123,6 +123,63 @@ pub(crate) fn assert_param_domains<S: Solver>(
     Ok(())
 }
 
+/// Applies the same subroutine or uninterpreted function for an invoke or a map
+/// element.
+fn translate_call<'ir, S: Solver>(
+    solver: &mut S,
+    caller: &FnInputs<'ir, S::Term>,
+    name: &str,
+    args: Vec<BitVec<S::Term>>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+    inline_call: impl FnOnce(&mut S, &FnInputs<'ir, S::Term>) -> BitVec<S::Term>,
+) -> IrTypedBitVec<'ir, S::Term> {
+    let callee = caller.get_fn(name);
+    assert_eq!(args.len(), callee.params.len(), "call arity mismatch");
+    if let Some(symbol) = uf_map.get(name.strip_prefix("__itok").unwrap_or(name)) {
+        let uf = uf_registry
+            .ufs
+            .get(symbol)
+            .expect("declared uninterpreted function");
+        let has_itok = name.starts_with("__itok")
+            || (callee.params.len() >= 2
+                && matches!(callee.get_param(0).ty, ir::Type::Token)
+                && matches!(callee.get_param(1).ty, ir::Type::Bits(1)))
+            || matches!(&callee.ret_ty, ir::Type::Tuple(fields) if fields.len() >= 2 && matches!(*fields[0], ir::Type::Token));
+        let visible_args = if has_itok {
+            log::warn!("calling UF {symbol} for {name}, ignoring side effects");
+            &args[2..]
+        } else {
+            &args
+        };
+        return IrTypedBitVec {
+            ir_type: &callee.ret_ty,
+            bitvec: solver.apply_uf(uf, &visible_args.iter().collect::<Vec<_>>()),
+        };
+    }
+    let callee_inputs = FnInputs {
+        prover_fn: ProverFn::new(callee, caller.prover_fn.pkg_ref)
+            .with_fixed_implicit_activation(false),
+        inputs: callee
+            .param_nodes()
+            .zip(args)
+            .map(|(param, bitvec)| {
+                (
+                    param.param_name().to_string(),
+                    IrTypedBitVec {
+                        ir_type: &param.ty,
+                        bitvec,
+                    },
+                )
+            })
+            .collect(),
+    };
+    IrTypedBitVec {
+        ir_type: &callee.ret_ty,
+        bitvec: inline_call(solver, &callee_inputs),
+    }
+}
+
 fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
     solver: &mut S,
     inputs: &'inputs FnInputs<'ir, S::Term>,
@@ -958,108 +1015,48 @@ fn translate_nodes<'ir, S: Solver>(
                 }
             }
             NodePayload::Invoke { to_apply, operands } => {
-                let callee = inputs.get_fn(to_apply);
-
-                // Build callee inputs by mapping current env operands to callee
-                // params.
-                assert_eq!(
-                    callee.params.len(),
-                    operands.len(),
-                    "Invoke operand count does not match callee params"
-                );
-
-                let mut callee_input_map: HashMap<String, IrTypedBitVec<'ir, S::Term>> =
-                    HashMap::new();
-                for (param, arg_ref) in callee.param_nodes().zip(operands.iter()) {
-                    let arg_bv = env.get(arg_ref).unwrap_or_else(|| {
-                        panic!("Invoke arg BV missing for {}", param.param_name())
-                    });
-                    callee_input_map.insert(
-                        param.param_name().to_string(),
-                        IrTypedBitVec {
-                            ir_type: &param.ty,
-                            bitvec: arg_bv.bitvec.clone(),
-                        },
-                    );
-                }
-
-                // Kind of hacky as this is just determining whether it is
-                // implicit token calling convention based on
-                // the name of the function. But this seems to
-                // be the only way to determine it from the IR.
-                let has_itok_in_name = callee.name.starts_with("__itok");
-                let has_itok_calling_convention_in_param = callee.params.len() >= 2
-                    && matches!(callee.get_param(0).ty, ir::Type::Token)
-                    && matches!(callee.get_param(1).ty, ir::Type::Bits(1));
-                let has_itok_calling_convention_in_ret = match &callee.ret_ty {
-                    ir::Type::Tuple(types) => {
-                        types.len() >= 2 && matches!(*types[0], ir::Type::Token)
-                    }
-                    _ => false,
+                let args = operands.iter().map(|r| env[r].bitvec.clone()).collect();
+                translate_call(
+                    solver,
+                    inputs,
+                    to_apply,
+                    args,
+                    uf_map,
+                    uf_registry,
+                    |s, call| inline_call(s, call, &mut assertions),
+                )
+            }
+            NodePayload::Map { array, to_apply } => {
+                let arg = &env[array];
+                let ir::Type::Array(array_ty) = arg.ir_type else {
+                    unreachable!("verified map operand must be an array")
                 };
-                let has_itok = has_itok_in_name
-                    || has_itok_calling_convention_in_param
-                    || has_itok_calling_convention_in_ret;
-                if has_itok_in_name && !has_itok {
-                    log::warn!(
-                        "Warning: function {} has __itok in name but does not conform to implicit token calling convention",
-                        callee.name
-                    );
-                }
-                let no_itok_name = callee.name.strip_prefix("__itok").unwrap_or(&callee.name);
-                // If this callee is configured to be treated as an
-                // uninterpreted function, apply the UF instead
-                // of inlining the body.
-                if let Some(uf_sym) = uf_map.get(no_itok_name) {
-                    let uf = uf_registry
-                        .ufs
-                        .get(uf_sym)
-                        .unwrap_or_else(|| panic!("UF symbol '{}' not declared", uf_sym));
-
-                    if has_itok {
-                        log::warn!(
-                            "Warning: calling uf {} for {}, any side effects are ignored.",
-                            uf_sym,
-                            callee.name
-                        );
-                        assert!(
-                            callee.params.len() >= 2,
-                            "Implicit token calling convention requires at least 2 params"
-                        );
-                        let args: Vec<&BitVec<S::Term>> = callee
-                            .param_nodes()
-                            .skip(2)
-                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
-                            .collect();
-                        let app = solver.apply_uf(uf, &args);
-                        // It is okay to use this result as token has zero width
-                        IrTypedBitVec {
-                            ir_type: &node.ty,
-                            bitvec: app,
-                        }
+                let width = array_ty.element_type.bit_count();
+                let mut bitvec = BitVec::ZeroWidth;
+                for i in 0..array_ty.element_count {
+                    let element = if width == 0 {
+                        BitVec::ZeroWidth
                     } else {
-                        // Build argument vector in callee param order.
-                        let args: Vec<&BitVec<S::Term>> = callee
-                            .param_nodes()
-                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
-                            .collect();
-                        let app = solver.apply_uf(uf, &args);
-                        IrTypedBitVec {
-                            ir_type: &node.ty,
-                            bitvec: app,
-                        }
-                    }
-                } else {
-                    // Otherwise inline the callee recursively.
-                    let callee_inputs = FnInputs {
-                        prover_fn: ProverFn::new(callee, inputs.prover_fn.pkg_ref)
-                            .with_fixed_implicit_activation(false),
-                        inputs: callee_input_map,
+                        let low = i32::try_from(i * width).expect("SMT bit index fits i32");
+                        let high =
+                            i32::try_from((i + 1) * width - 1).expect("SMT bit index fits i32");
+                        solver.extract(&arg.bitvec, high, low)
                     };
-                    IrTypedBitVec {
-                        ir_type: &node.ty,
-                        bitvec: inline_call(solver, &callee_inputs, &mut assertions),
-                    }
+                    let result = translate_call(
+                        solver,
+                        inputs,
+                        to_apply,
+                        vec![element],
+                        uf_map,
+                        uf_registry,
+                        |s, call| inline_call(s, call, &mut assertions),
+                    );
+                    // Array element zero occupies the low bits.
+                    bitvec = solver.concat(&result.bitvec, &bitvec);
+                }
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec,
                 }
             }
             NodePayload::OneHot { arg, lsb_prio } => {

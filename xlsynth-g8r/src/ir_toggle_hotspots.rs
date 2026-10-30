@@ -131,10 +131,12 @@ pub fn analyze_toggle_hotspots(
     if function.nodes.iter().any(|node| {
         matches!(
             node.payload,
-            NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
+            NodePayload::Invoke { .. } | NodePayload::Map { .. } | NodePayload::CountedFor { .. }
         )
     }) {
-        return Err("inline invokes and counted_for loops before analyzing toggles".to_string());
+        return Err(
+            "inline calls, maps and counted_for loops before analyzing toggles".to_string(),
+        );
     }
     let expected = ir::Type::Tuple(
         function

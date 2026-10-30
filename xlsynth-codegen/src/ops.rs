@@ -263,8 +263,8 @@ impl BlockEmitter<'_, '_> {
                 let expression = self.file.make_shll(&one, &argument.expr);
                 Some(Value::expression(expression, argument.depth + 1))
             }
-            NodePayload::Invoke { .. } => {
-                unreachable!("invoke nodes are rejected before emission")
+            NodePayload::Invoke { .. } | NodePayload::Map { .. } => {
+                unreachable!("function calls are rejected before emission")
             }
             NodePayload::CountedFor { .. } => {
                 unreachable!("counted_for nodes are rejected before emission")

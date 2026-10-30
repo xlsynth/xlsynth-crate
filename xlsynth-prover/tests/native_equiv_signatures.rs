@@ -192,3 +192,28 @@ top fn main(x: bits[1]) -> bits[1] {{
         "{result:?}"
     );
 }
+
+#[test]
+fn map_matches_element_by_element_calls_with_different_input_and_output_widths() {
+    let header = r#"package p
+fn widen(x: bits[4] id=1) -> bits[8] {
+  ret wide: bits[8] = sign_ext(x, new_bit_count=8, id=2)
+}
+top fn main(a: bits[4][2] id=3) -> bits[8][2] {"#;
+    let mapped = format!("{header} ret m: bits[8][2] = map(a, to_apply=widen, id=4) }}");
+    let expanded = format!(
+        r#"{header}
+  zero: bits[1] = literal(value=0, id=4)
+  one: bits[1] = literal(value=1, id=5)
+  x: bits[4] = array_index(a, indices=[zero], id=6)
+  y: bits[4] = array_index(a, indices=[one], id=7)
+  wx: bits[8] = invoke(x, to_apply=widen, id=8)
+  wy: bits[8] = invoke(y, to_apply=widen, id=9)
+  ret result: bits[8][2] = array(wx, wy, id=10)
+}}"#
+    );
+    assert_eq!(
+        xlsynth_prover::prover::prove_ir_pkg_text_equiv(&mapped, &expanded, Some("main")),
+        EquivResult::Proved
+    );
+}
