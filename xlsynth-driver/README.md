@@ -1505,7 +1505,8 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
   The extensions `.pb` and `.proto` select binary netlist protobuf, ignoring
   case. Other paths and stdout default to gate-level Verilog. For protobuf on a
   pipe or with shell redirection, use `--netlist-format pb`. The protobuf
-  includes physical flip-flops and their connections.
+  includes physical flip-flops and their connections. Keep stderr separate from
+  the protobuf destination.
 - `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
   including the executable/version, raw Liberty paths, resolved constraints, and
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.

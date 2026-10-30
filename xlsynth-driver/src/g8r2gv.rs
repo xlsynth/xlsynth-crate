@@ -17,8 +17,8 @@ use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
 use crate::mapped_netlist_output::{
-    Format, PendingOutput, format_arg, metadata_if_exists, output_arg, output_paths_alias,
-    path_aliases_stream, write_stdout,
+    Format, PendingOutput, ensure_pb_handle_distinct_from_stderr, format_arg, metadata_if_exists,
+    output_arg, output_paths_alias, path_aliases_stream, write_stdout,
 };
 
 /// Defines the thin CLI surface for direct ABC/native sequential mapping.
@@ -73,7 +73,7 @@ enum NetlistOutput {
 
 impl NetlistOutput {
     /// Reserves regular files and records the identity of a deferred stream.
-    fn open(path: &Path) -> anyhow::Result<Self> {
+    fn open(path: &Path, pb_stderr: Option<&same_file::Handle>) -> anyhow::Result<Self> {
         if path.as_os_str() == "-" {
             return Ok(Self::Stdout);
         }
@@ -85,11 +85,18 @@ impl NetlistOutput {
             // its descriptor vnode hides the redirected regular file.
             #[cfg(unix)]
             if std::fs::metadata("/dev/fd/1").is_ok_and(|fd| same_unix_file(&metadata, &fd)) {
+                if let Some(stderr) = pb_stderr {
+                    ensure_pb_handle_distinct_from_stderr(&same_file::Handle::stdout()?, stderr)?;
+                }
                 return Ok(Self::Stdout);
             }
             return Ok(Self::Stream(metadata));
         }
-        Ok(Self::File(PendingOutput::open(path)?))
+        let pending = PendingOutput::open(path)?;
+        if let Some(stderr) = pb_stderr {
+            ensure_pb_handle_distinct_from_stderr(pending.handle(), stderr)?;
+        }
+        Ok(Self::File(pending))
     }
 
     /// Compares the opened sidecar to the netlist before the sidecar is
@@ -112,7 +119,12 @@ impl NetlistOutput {
     }
 
     /// Writes the netlist after the sidecars have been closed.
-    fn write(self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    fn write(
+        self,
+        path: &Path,
+        bytes: &[u8],
+        pb_stderr: Option<&same_file::Handle>,
+    ) -> anyhow::Result<()> {
         match self {
             Self::Stdout => write_stdout(bytes),
             Self::File(mut pending) => Ok(pending.prepare_write()?.write_all(bytes)?),
@@ -129,6 +141,14 @@ impl NetlistOutput {
                 #[cfg(not(unix))]
                 let unchanged = expected.file_type() == actual.file_type();
                 anyhow::ensure!(unchanged, "netlist stream '{}' changed", path.display());
+                // Windows identity handles are available only for regular
+                // files.
+                if let Some(stderr) = pb_stderr
+                    && (cfg!(unix) || actual.is_file())
+                {
+                    let netlist = same_file::Handle::from_file(file.try_clone()?)?;
+                    ensure_pb_handle_distinct_from_stderr(&netlist, stderr)?;
+                }
                 Ok(file.write_all(bytes)?)
             }
         }
@@ -163,10 +183,11 @@ fn write_sidecar(
 fn write_outputs(
     matches: &ArgMatches,
     output_path: &Path,
+    pb_stderr: Option<&same_file::Handle>,
     bytes: &[u8],
     diagnostics: &AbcRunDiagnostics,
 ) -> anyhow::Result<()> {
-    let netlist = NetlistOutput::open(output_path)
+    let netlist = NetlistOutput::open(output_path, pb_stderr)
         .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
     for flag in ["diagnostics-out", "abc-stdout-out", "abc-stderr-out"] {
         let Some(path) = matches.get_one::<String>(flag).map(Path::new) else {
@@ -212,13 +233,18 @@ fn write_outputs(
         }
     }
     netlist
-        .write(output_path, bytes)
+        .write(output_path, bytes, pb_stderr)
         .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
 }
 
 /// Loads inputs, resolves independent IO overrides, and emits the mapped
 /// netlist.
 pub fn handle(matches: &ArgMatches) -> Result<(), String> {
+    let output_path = Path::new(matches.get_one::<String>("output").unwrap());
+    let format = Format::from_matches(matches, output_path);
+    let pb_stderr = format
+        .check_output_stderr(output_path)
+        .map_err(|e| format!("{e:#}"))?;
     let design = crate::g8r_cli::load_netlist_design(matches)?;
     let library_path = matches.get_one::<String>("liberty-proto").unwrap();
     let library = load_library_from_path(Path::new(library_path)).map_err(|e| e.to_string())?;
@@ -257,8 +283,6 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         .collect::<Vec<_>>();
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
-    let output_path = Path::new(matches.get_one::<String>("output").unwrap());
-    let format = Format::from_matches(matches, output_path);
     let mapped = match format {
         Format::Gv => context.map_sequential(&design, &options),
         Format::Pb => context.map_sequential_structural(&design, &options),
@@ -267,7 +291,14 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     let output = format
         .encode(&mapped.netlist)
         .map_err(|e| format!("{e:#}"))?;
-    write_outputs(matches, output_path, &output, &mapped.diagnostics).map_err(|e| format!("{e:#}"))
+    write_outputs(
+        matches,
+        output_path,
+        pb_stderr.as_ref(),
+        &output,
+        &mapped.diagnostics,
+    )
+    .map_err(|e| format!("{e:#}"))
 }
 
 #[cfg(test)]
@@ -283,7 +314,7 @@ mod tests {
         let original_log = dir.path().join("original.stdout");
         fs::write(&output, b"existing netlist")?;
         fs::write(&log, b"existing log")?;
-        let netlist = NetlistOutput::open(&output)?;
+        let netlist = NetlistOutput::open(&output, None)?;
         assert!(!output_paths_alias(&output, &log)?);
 
         // A diagnostics FIFO can delay the raw-log write after preflight.

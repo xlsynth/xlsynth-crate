@@ -8,6 +8,8 @@ use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use xlsynth_g8r::netlist::emit::emit_netlist_as_text;
 use xlsynth_g8r::netlist::io::ParsedNetlist;
@@ -19,6 +21,8 @@ pub enum Format {
     Gv,
     Pb,
 }
+
+const PB_STDERR_ALIAS: &str = "protobuf netlist output must not refer to stderr";
 
 pub fn output_arg() -> Arg {
     Arg::new("output")
@@ -52,6 +56,27 @@ impl Format {
         }
     }
 
+    /// Rejects a protobuf destination shared with stderr before mapping and
+    /// returns stderr for checking the actual opened output before writing.
+    pub(super) fn check_output_stderr(self, output: &Path) -> Result<Option<same_file::Handle>> {
+        if matches!(self, Self::Gv) {
+            return Ok(None);
+        }
+        // An unavailable stderr cannot receive diagnostics.
+        let Ok(stderr) = same_file::Handle::stderr() else {
+            return Ok(None);
+        };
+        if output.as_os_str() == "-" {
+            ensure_pb_handle_distinct_from_stderr(&same_file::Handle::stdout()?, &stderr)?;
+        } else {
+            anyhow::ensure!(
+                !path_aliases_stream(output, &stderr, &["/dev/stderr", "/dev/fd/2"])?,
+                PB_STDERR_ALIAS
+            );
+        }
+        Ok(Some(stderr))
+    }
+
     /// Serializes the mapper's final netlist directly in the selected format.
     pub fn encode(self, netlist: &ParsedNetlist) -> Result<Vec<u8>> {
         match self {
@@ -61,6 +86,22 @@ impl Format {
             Self::Pb => encode_netlist(netlist).context("failed to encode mapped netlist protobuf"),
         }
     }
+}
+
+/// Checks the opened destination so path replacement cannot mix diagnostics
+/// into a successful protobuf output.
+pub(super) fn ensure_pb_handle_distinct_from_stderr(
+    netlist: &same_file::Handle,
+    stderr: &same_file::Handle,
+) -> Result<()> {
+    anyhow::ensure!(netlist != stderr, PB_STDERR_ALIAS);
+    // Windows standard streams can share a handle without having a file ID.
+    #[cfg(windows)]
+    anyhow::ensure!(
+        netlist.as_raw_handle() != stderr.as_raw_handle(),
+        PB_STDERR_ALIAS
+    );
+    Ok(())
 }
 
 /// Flushes the entire netlist before continuing to sidecar output or exiting.

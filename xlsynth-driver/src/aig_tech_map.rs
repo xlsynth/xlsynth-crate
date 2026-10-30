@@ -6,8 +6,6 @@ use std::fs::File;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -27,7 +25,8 @@ use xlsynth_g8r::techmap::nand2::{
 #[cfg(unix)]
 use crate::mapped_netlist_output::metadata_if_exists;
 use crate::mapped_netlist_output::{
-    Format, PendingOutput, is_special_output, output_paths_alias, path_aliases_stream, write_stdout,
+    Format, PendingOutput, ensure_pb_handle_distinct_from_stderr, is_special_output,
+    output_paths_alias, path_aliases_stream, write_stdout,
 };
 
 /// Both file outputs, opened and checked for filesystem-level aliasing.
@@ -63,24 +62,6 @@ fn ensure_distinct_from_stderr(path: &Path, stderr: &same_file::Handle) -> Resul
     ensure!(
         !path_aliases_stream(path, stderr, &["/dev/stderr", "/dev/fd/2"])?,
         "--json_out must not refer to stderr"
-    );
-    Ok(())
-}
-
-const PB_STDERR_ALIAS: &str = "protobuf netlist output must not refer to stderr";
-
-/// Checks the opened netlist itself so path replacement cannot mix diagnostics
-/// into a successful protobuf output.
-fn ensure_pb_handle_distinct_from_stderr(
-    netlist: &same_file::Handle,
-    stderr: &same_file::Handle,
-) -> Result<()> {
-    ensure!(netlist != stderr, PB_STDERR_ALIAS);
-    // Windows standard streams can share a handle without having a file ID.
-    #[cfg(windows)]
-    ensure!(
-        netlist.as_raw_handle() != stderr.as_raw_handle(),
-        PB_STDERR_ALIAS
     );
     Ok(())
 }
@@ -199,30 +180,16 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let format = Format::from_matches(matches, netlist_path);
     let stderr = if let Some(json_path) = json_out {
         ensure!(
-            netlist_out == "-"
-                || !output_paths_alias(Path::new(json_path), Path::new(netlist_out))?,
+            netlist_out == "-" || !output_paths_alias(Path::new(json_path), netlist_path)?,
             "--json_out and --output must name different files"
         );
         let stderr = same_file::Handle::stderr()?;
         ensure_distinct_from_stderr(Path::new(json_path), &stderr)?;
         Some(stderr)
-    } else if matches!(format, Format::Pb) {
-        // An unavailable stderr cannot receive the mapping summary.
-        same_file::Handle::stderr().ok()
     } else {
         None
     };
-    let pb_stderr = stderr.as_ref().filter(|_| matches!(format, Format::Pb));
-    if let Some(stderr) = pb_stderr {
-        if netlist_out == "-" {
-            ensure_pb_handle_distinct_from_stderr(&same_file::Handle::stdout()?, stderr)?;
-        } else {
-            ensure!(
-                !path_aliases_stream(netlist_path, stderr, &["/dev/stderr", "/dev/fd/2"])?,
-                PB_STDERR_ALIAS
-            );
-        }
-    }
+    let pb_stderr = format.check_output_stderr(netlist_path)?;
     let gate_fn =
         load_aiger_auto_from_path(Path::new(aig_input_file), GateBuilderOptions::no_opt())
             .map_err(anyhow::Error::msg)
@@ -423,7 +390,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 !output_paths_alias(netlist_path, json_path)?,
                 "--json_out and --output must name different files"
             );
-            write_netlist_path(netlist_path, &netlist_bytes, pb_stderr)
+            write_netlist_path(netlist_path, &netlist_bytes, pb_stderr.as_ref())
                 .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
             let file = File::create(json_path).with_context(|| {
                 format!("failed to create JSON summary '{}'", json_path.display())
@@ -437,7 +404,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 Some(outputs.json.handle()) != stderr.as_ref(),
                 "--json_out must not refer to stderr"
             );
-            if let Some(stderr) = pb_stderr {
+            if let Some(stderr) = &pb_stderr {
                 ensure_pb_handle_distinct_from_stderr(outputs.netlist.handle(), stderr)?;
             }
             outputs
@@ -488,7 +455,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             write_stdout(&netlist_bytes)?;
         }
     } else {
-        write_netlist_path(netlist_path, &netlist_bytes, pb_stderr)
+        write_netlist_path(netlist_path, &netlist_bytes, pb_stderr.as_ref())
             .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
     }
     eprintln!(

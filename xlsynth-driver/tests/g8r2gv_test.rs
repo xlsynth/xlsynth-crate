@@ -145,6 +145,48 @@ fn shared_signatures_accept_both_serializations_and_preserve_ports() {
 }
 
 #[test]
+fn protobuf_output_shared_with_stderr_fails_before_mapping() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    // The destination check must run before the driver tries to load this
+    // input.
+    let input = dir.path().join("missing.g8r");
+    let pb = dir.path().join("mapped.pb");
+    let diagnostics = dir.path().join("diagnostics.json");
+    let mut expected_stderr = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("--version")
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "info")
+        .output()?
+        .stderr;
+    expected_stderr.extend_from_slice(
+        b"xlsynth-driver: g8r2gv: protobuf netlist output must not refer to stderr\n",
+    );
+    for named_output in [false, true] {
+        let stderr = std::fs::File::create(&pb)?;
+        let mut cmd = command(dir.path(), &input);
+        if named_output {
+            cmd.arg("--output").arg(&pb);
+        } else {
+            // Reproduce shell redirection to the same open file: >mapped.pb
+            // 2>&1.
+            cmd.args(["--netlist-format", "pb"])
+                .stdout(stderr.try_clone()?);
+        }
+        let rejected = cmd
+            .arg("--diagnostics-out")
+            .arg(&diagnostics)
+            .env("RUST_LOG", "info")
+            .stderr(stderr)
+            .output()?;
+        assert_eq!(rejected.status.code(), Some(1));
+        assert!(rejected.stdout.is_empty());
+        assert_eq!(std::fs::read(&pb)?, expected_stderr);
+        assert!(!diagnostics.try_exists()?);
+    }
+    Ok(())
+}
+
+#[test]
 fn boundary_registers_script_constraints_and_diagnostics() {
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let a = builder.add_input("a".into(), 2);
