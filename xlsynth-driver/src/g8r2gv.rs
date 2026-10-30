@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -13,8 +14,10 @@ use xlsynth_g8r::netlist::abc::{
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 
+#[cfg(unix)]
+use crate::mapped_netlist_output::same_unix_file;
 use crate::mapped_netlist_output::{
-    Format, PendingOutput, format_arg, is_special_output, output_arg, output_paths_alias,
+    Format, PendingOutput, format_arg, metadata_if_exists, output_arg, output_paths_alias,
     path_aliases_stream, write_stdout,
 };
 
@@ -59,31 +62,117 @@ pub fn command() -> Command {
             .help("Write raw ABC mapping stderr on success; may contain nondeterministic tool output"))
 }
 
-/// Checks sidecar destinations and writes them in the existing order before the
-/// netlist.
+/// Pins the netlist destination while the sidecars are being written. Opening
+/// a named stream waits until its turn so its reader can consume the sidecars
+/// first.
+enum NetlistOutput {
+    Stdout,
+    File(PendingOutput),
+    Stream(Metadata),
+}
+
+impl NetlistOutput {
+    /// Reserves regular files and records the identity of a deferred stream.
+    fn open(path: &Path) -> anyhow::Result<Self> {
+        if path.as_os_str() == "-" {
+            return Ok(Self::Stdout);
+        }
+        if let Some(metadata) = metadata_if_exists(path)?
+            && !metadata.is_file()
+            && !metadata.is_dir()
+        {
+            // Use the inherited descriptor for /dev/stdout even when stat of
+            // its descriptor vnode hides the redirected regular file.
+            #[cfg(unix)]
+            if std::fs::metadata("/dev/fd/1").is_ok_and(|fd| same_unix_file(&metadata, &fd)) {
+                return Ok(Self::Stdout);
+            }
+            return Ok(Self::Stream(metadata));
+        }
+        Ok(Self::File(PendingOutput::open(path)?))
+    }
+
+    /// Compares the opened sidecar to the netlist before the sidecar is
+    /// truncated.
+    fn aliases_file(&self, file: &File, metadata: &Metadata) -> anyhow::Result<bool> {
+        #[cfg(not(unix))]
+        if !metadata.is_file() {
+            // Windows supports identity handles for regular files.
+            return Ok(false);
+        }
+        let sidecar = same_file::Handle::from_file(file.try_clone()?)?;
+        Ok(match self {
+            Self::Stdout => sidecar == same_file::Handle::stdout()?,
+            Self::File(pending) => &sidecar == pending.handle(),
+            #[cfg(unix)]
+            Self::Stream(expected) => same_unix_file(expected, metadata),
+            #[cfg(not(unix))]
+            Self::Stream(_) => false, // A regular sidecar cannot be the deferred stream.
+        })
+    }
+
+    /// Writes the netlist after the sidecars have been closed.
+    fn write(self, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+        match self {
+            Self::Stdout => write_stdout(bytes),
+            Self::File(mut pending) => Ok(pending.prepare_write()?.write_all(bytes)?),
+            Self::Stream(expected) => {
+                let mut file = OpenOptions::new().write(true).open(path)?;
+                let actual = file.metadata()?;
+                #[cfg(unix)]
+                // A descriptor vnode can have a different stat identity from
+                // the pipe or terminal returned by fstat on the opened file.
+                let unchanged = same_unix_file(&expected, &actual)
+                    || (!actual.is_file()
+                        && !actual.is_dir()
+                        && same_unix_file(&expected, &std::fs::metadata(path)?));
+                #[cfg(not(unix))]
+                let unchanged = expected.file_type() == actual.file_type();
+                anyhow::ensure!(unchanged, "netlist stream '{}' changed", path.display());
+                Ok(file.write_all(bytes)?)
+            }
+        }
+    }
+}
+
+/// Opens without truncating so a concurrent path replacement cannot make a
+/// sidecar overwrite the netlist between preflight and writing.
+fn write_sidecar(
+    path: &Path,
+    bytes: &[u8],
+    flag: &str,
+    netlist: &NetlistOutput,
+) -> anyhow::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        !netlist.aliases_file(&file, &metadata)?,
+        "--{flag} and --output must name different destinations"
+    );
+    if metadata.is_file() {
+        file.set_len(0)?;
+    }
+    Ok(file.write_all(bytes)?)
+}
+
+/// Checks sidecar destinations and writes them in order before the netlist.
 fn write_outputs(
     matches: &ArgMatches,
     output_path: &Path,
     bytes: &[u8],
     diagnostics: &AbcRunDiagnostics,
 ) -> anyhow::Result<()> {
-    let to_stdout = output_path.as_os_str() == "-";
-    // Reserve regular files before checking aliases so even a new destination
-    // has a filesystem identity. Stream opens can block until their readers
-    // finish consuming the sidecars, so defer them until after the sidecars.
-    let netlist_file = if to_stdout || is_special_output(output_path)? {
-        None
-    } else {
-        Some(
-            PendingOutput::open(output_path)
-                .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?,
-        )
-    };
+    let netlist = NetlistOutput::open(output_path)
+        .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
     for flag in ["diagnostics-out", "abc-stdout-out", "abc-stderr-out"] {
         let Some(path) = matches.get_one::<String>(flag).map(Path::new) else {
             continue;
         };
-        let aliases = if to_stdout {
+        let aliases = if matches!(netlist, NetlistOutput::Stdout) {
             path_aliases_stream(
                 path,
                 &same_file::Handle::stdout()?,
@@ -105,25 +194,26 @@ fn write_outputs(
     }
     if let Some(path) = matches.get_one::<String>("diagnostics-out") {
         let json = serde_json::to_string_pretty(diagnostics)?;
-        std::fs::write(path, format!("{json}\n"))
-            .with_context(|| format!("writing ABC diagnostics '{path}'"))?;
+        write_sidecar(
+            Path::new(path),
+            format!("{json}\n").as_bytes(),
+            "diagnostics-out",
+            &netlist,
+        )
+        .with_context(|| format!("writing ABC diagnostics '{path}'"))?;
     }
     for (flag, log) in [
         ("abc-stdout-out", &diagnostics.stdout),
         ("abc-stderr-out", &diagnostics.stderr),
     ] {
         if let Some(path) = matches.get_one::<String>(flag) {
-            std::fs::write(path, log).with_context(|| format!("writing --{flag} '{path}'"))?;
+            write_sidecar(Path::new(path), log.as_bytes(), flag, &netlist)
+                .with_context(|| format!("writing --{flag} '{path}'"))?;
         }
     }
-    if to_stdout {
-        return write_stdout(bytes);
-    }
-    match netlist_file {
-        Some(mut file) => file.prepare_write()?.write_all(bytes),
-        None => std::fs::write(output_path, bytes),
-    }
-    .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
+    netlist
+        .write(output_path, bytes)
+        .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
 }
 
 /// Loads inputs, resolves independent IO overrides, and emits the mapped
@@ -178,4 +268,34 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         .encode(&mapped.netlist)
         .map_err(|e| format!("{e:#}"))?;
     write_outputs(matches, output_path, &output, &mapped.diagnostics).map_err(|e| format!("{e:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NetlistOutput, output_paths_alias, write_sidecar};
+    use std::fs;
+
+    #[test]
+    fn raw_log_replaced_after_preflight_cannot_overwrite_netlist() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let output = dir.path().join("mapped.pb");
+        let log = dir.path().join("abc.stdout");
+        let original_log = dir.path().join("original.stdout");
+        fs::write(&output, b"existing netlist")?;
+        fs::write(&log, b"existing log")?;
+        let netlist = NetlistOutput::open(&output)?;
+        assert!(!output_paths_alias(&output, &log)?);
+
+        // A diagnostics FIFO can delay the raw-log write after preflight.
+        fs::rename(&log, &original_log)?;
+        fs::hard_link(&output, &log)?;
+        let error = write_sidecar(&log, b"new log", "abc-stdout-out", &netlist).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--abc-stdout-out and --output must name different destinations"
+        );
+        assert_eq!(fs::read(output)?, b"existing netlist");
+        assert_eq!(fs::read(original_log)?, b"existing log");
+        Ok(())
+    }
 }

@@ -1510,8 +1510,8 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.
 - `--abc-stdout-out <PATH>`, `--abc-stderr-out <PATH>` – optionally save ABC's
   raw stdout/stderr after successful mapping. Unlike the metadata, these logs
-  can contain nondeterministic timings and memory usage. They are never mixed
-  into the emitted netlist.
+  can contain nondeterministic timings and memory usage. The diagnostics and raw
+  logs must use destinations separate from the netlist, including redirected stdout.
 
 ABC uses global driver/load constraints, including at register Q/D boundaries;
 these are not per-register clock-to-Q/setup constraints or actual D-pin loads.

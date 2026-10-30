@@ -101,34 +101,28 @@ fn resolved_output_path(path: &Path) -> Result<PathBuf> {
 /// Detects equal destinations, including symlinks, hard links, and
 /// not-yet-created files.
 pub(super) fn output_paths_alias(lhs: &Path, rhs: &Path) -> Result<bool> {
-    if resolved_output_path(lhs)? == resolved_output_path(rhs)? {
-        return Ok(true);
-    }
-    let Some(lhs_metadata) = metadata_if_exists(lhs)? else {
-        return Ok(false);
-    };
-    let Some(rhs_metadata) = metadata_if_exists(rhs)? else {
-        return Ok(false);
-    };
-    #[cfg(unix)]
-    {
-        Ok(same_unix_file(&lhs_metadata, &rhs_metadata))
-    }
-    #[cfg(not(unix))]
-    {
-        // Opening special files to compare their identities can block or have
-        // side effects. Regular files are also checked using their output
-        // handles before either is written.
-        if !lhs_metadata.is_file() || !rhs_metadata.is_file() {
-            return Ok(false);
-        }
-        match (identity_handle(lhs), identity_handle(rhs)) {
-            (Ok(lhs_handle), Ok(rhs_handle)) => Ok(lhs_handle == rhs_handle),
-            // Identity checking is best effort here; both outputs are checked
-            // again after opening them for writing when both are regular.
-            _ => Ok(false),
+    let lhs_metadata = metadata_if_exists(lhs)?;
+    let rhs_metadata = metadata_if_exists(rhs)?;
+    if let (Some(lhs_meta), Some(rhs_meta)) = (&lhs_metadata, &rhs_metadata) {
+        // Distinct open files can have the same /proc/self/fd link text after
+        // unlinking. Prefer the identity of the files those paths actually
+        // open.
+        #[cfg(unix)]
+        return Ok(same_unix_file(lhs_meta, rhs_meta));
+        #[cfg(not(unix))]
+        if lhs_meta.is_file() && rhs_meta.is_file() {
+            if let (Ok(lhs_handle), Ok(rhs_handle)) = (identity_handle(lhs), identity_handle(rhs)) {
+                return Ok(lhs_handle == rhs_handle);
+            }
         }
     }
+    if lhs_metadata.is_some() != rhs_metadata.is_some() {
+        // Check the missing destination's parent before either output is
+        // written.
+        resolved_output_path(if lhs_metadata.is_none() { lhs } else { rhs })?;
+        return Ok(false);
+    }
+    Ok(resolved_output_path(lhs)? == resolved_output_path(rhs)?)
 }
 
 /// Reads metadata without treating a missing output as an error.
@@ -147,7 +141,7 @@ pub(super) fn is_special_output(path: &Path) -> std::io::Result<bool> {
 
 /// Compares Unix file identities without opening either file's data.
 #[cfg(unix)]
-fn same_unix_file(lhs: &std::fs::Metadata, rhs: &std::fs::Metadata) -> bool {
+pub(super) fn same_unix_file(lhs: &std::fs::Metadata, rhs: &std::fs::Metadata) -> bool {
     (lhs.dev(), lhs.ino()) == (rhs.dev(), rhs.ino())
 }
 
@@ -191,9 +185,14 @@ pub(super) struct PendingOutput {
 impl PendingOutput {
     /// Opens a destination without destroying existing contents.
     pub(super) fn open(path: &Path) -> Result<Self> {
-        // Resolving dangling symlinks lets us record the actual newly created
-        // target for cleanup without deleting the symlink itself.
-        let resolved = resolved_output_path(path)?;
+        // Open existing paths as given, including descriptor paths for unlinked
+        // files. Resolve a missing target for cleanup without deleting its
+        // symlink.
+        let resolved = if metadata_if_exists(path)?.is_some() {
+            path.to_owned()
+        } else {
+            resolved_output_path(path)?
+        };
         let (file, created) = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -272,4 +271,34 @@ pub(super) fn path_aliases_stream(
     #[cfg(not(unix))]
     let aliases = metadata.is_file() && identity_handle(path).is_ok_and(|handle| handle == *stream);
     Ok(aliases)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::{PendingOutput, output_paths_alias};
+    use std::fs;
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
+
+    #[test]
+    fn descriptor_paths_retain_the_identity_of_unlinked_files() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("output");
+        let first = fs::File::create(&path)?;
+        fs::remove_file(&path)?;
+        let second = fs::File::create(&path)?;
+        fs::remove_file(&path)?;
+        let first_path = PathBuf::from(format!("/proc/self/fd/{}", first.as_raw_fd()));
+        let second_path = PathBuf::from(format!("/proc/self/fd/{}", second.as_raw_fd()));
+        assert_eq!(fs::read_link(&first_path)?, fs::read_link(&second_path)?);
+        assert!(!output_paths_alias(&first_path, &second_path)?);
+
+        let mut output = PendingOutput::open(&first_path)?;
+        output.prepare_write()?.write_all(b"netlist")?;
+        assert_eq!(fs::read(&first_path)?, b"netlist");
+        assert!(fs::read(&second_path)?.is_empty());
+        assert!(fs::read_dir(dir.path())?.next().is_none());
+        Ok(())
+    }
 }
