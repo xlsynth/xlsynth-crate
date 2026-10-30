@@ -6,7 +6,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use xlsynth::{IrPackage, dslx, dslx_path_to_module_name, mangle_dslx_name};
-use xlsynth_pir::{ir, ir_parser::Parser, stateful_fn_to_block::stateful_fn_to_block};
+use xlsynth_pir::{
+    dce::remove_dead_nodes,
+    ir,
+    ir_parser::Parser,
+    ir_utils::{get_topological, remap_payload_with},
+    stateful_fn_to_block::stateful_fn_to_block,
+};
 
 use super::{BlockContext, LeanBlockBundle, emit_stateful_readable, select_block};
 
@@ -17,11 +23,35 @@ pub fn stateful_ir_to_block(ir: &str, top: &str) -> Result<String> {
 }
 
 fn verified_stateful_block(ir: &str, top: &str) -> Result<(ir::Package, String)> {
-    let package = Parser::new(ir).parse_and_validate_package()?;
+    let mut package = Parser::new(ir).parse_and_validate_package()?;
+    for member in &mut package.members {
+        if let ir::PackageMember::Function(function) = member {
+            clean_model_function(function);
+        }
+    }
     let converted = stateful_fn_to_block(package, top).map_err(anyhow::Error::msg)?;
     let text = converted.to_string();
     IrPackage::parse_ir(&text, None)?.verify()?;
     Ok((converted, text))
+}
+
+/// The model pipeline only forwards identity nodes and removes dead nodes.
+/// Keep live operations and function calls intact for readers of the model.
+fn clean_model_function(function: &mut ir::Fn) {
+    let mut forwarded: Vec<_> = (0..function.nodes.len())
+        .map(|index| ir::NodeRef { index })
+        .collect();
+    for reference in get_topological(function) {
+        let node = &mut function.nodes[reference.index];
+        if let ir::NodePayload::Unop(ir::Unop::Identity, operand) = node.payload {
+            forwarded[reference.index] = forwarded[operand.index];
+        } else {
+            node.payload =
+                remap_payload_with(&node.payload, |(_, operand)| forwarded[operand.index]);
+        }
+    }
+    function.ret_node_ref = function.ret_node_ref.map(|node| forwarded[node.index]);
+    *function = remove_dead_nodes(function);
 }
 
 /// A block and the exact typechecked DSLX module from which it was lowered.
