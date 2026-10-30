@@ -4,6 +4,10 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use xlsynth_g8r::aig_serdes::g8r::parse_g8r;
+use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
+use xlsynth_pir::IrBits;
+
 const SPEC: &str = r#"
 dslx_input_file = "pipe.x"
 dslx_top = "pipe"
@@ -38,6 +42,44 @@ fn driver(directory: &Path, args: &[&str]) -> std::io::Result<Output> {
         .current_dir(directory)
         .args(args)
         .output()
+}
+
+/// Checks the product and addend at the register separating the example's two
+/// operations.
+#[test]
+fn stitch_muladd_registers_the_product_before_adding() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stitch-equiv");
+    let generated = driver(
+        &example,
+        &["dslx-stitch-g8r-pipeline", "--spec", "muladd.stitch.toml"],
+    )
+    .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let design = parse_g8r(std::str::from_utf8(&generated.stdout).unwrap()).unwrap();
+    let mut state = SequentialState::all_zeros(&design);
+    // Each row gives this edge's operands, its registered {product, z}, and
+    // the registered sum from the preceding row. Both operations wrap to u8.
+    for (operands, partials, sum) in [
+        ([7, 9, 5], 0x3f05, 0),
+        ([255, 2, 3], 0xfe03, 68),
+        ([0, 0, 0], 0, 1),
+    ] {
+        let inputs = operands.map(|v| IrBits::make_ubits(8, v).unwrap());
+        let edge = simulate(&design, &[inputs.to_vec()], state).unwrap();
+        assert_eq!(
+            edge.final_state().values(),
+            [
+                IrBits::make_ubits(16, partials).unwrap(),
+                IrBits::make_ubits(8, sum).unwrap()
+            ],
+            "register values after applying {operands:?}"
+        );
+        state = edge.final_state().clone();
+    }
 }
 
 /// Both emitters consume the same relative-path spec and preserve their
