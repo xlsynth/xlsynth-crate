@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Arg, ArgMatches, Command, value_parser};
-use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
+use xlsynth_g8r::netlist::emit::emit_netlist_as_text;
 use xlsynth_g8r::netlist::io::read_gv_for_roundtrip_from_path;
 use xlsynth_g8r::netlist::proto::{decode_netlist, encode_netlist};
 
@@ -50,11 +49,7 @@ fn write_output(matches: &ArgMatches, bytes: &[u8]) -> Result<()> {
     if let Some(path) = matches.get_one::<PathBuf>("output") {
         std::fs::write(path, bytes).with_context(|| format!("writing '{}'", path.display()))
     } else {
-        let mut stdout = io::stdout().lock();
-        stdout
-            .write_all(bytes)
-            .and_then(|()| stdout.flush())
-            .context("writing stdout")
+        crate::mapped_netlist_output::write_stdout(bytes)
     }
 }
 
@@ -69,13 +64,5 @@ pub fn handle_pb2gv(matches: &ArgMatches) -> Result<()> {
     let bytes = std::fs::read(input).with_context(|| format!("reading '{}'", input.display()))?;
     let parsed =
         decode_netlist(&bytes).with_context(|| format!("decoding '{}'", input.display()))?;
-    let mut text = String::new();
-    for module in &parsed.modules {
-        text.push_str(&emit_module_as_netlist_text(
-            module,
-            &parsed.nets,
-            &parsed.interner,
-        )?);
-    }
-    write_output(matches, text.as_bytes())
+    write_output(matches, emit_netlist_as_text(&parsed)?.as_bytes())
 }

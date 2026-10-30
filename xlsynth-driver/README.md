@@ -945,7 +945,7 @@ mapping, and all excluded cells are listed in the optional JSON summary.
 
 ```shell
 xlsynth-driver aig-tech-map my_design.aig --strategy area \
-  --liberty_proto cells.proto --netlist_out my_design.mapped.gv \
+  --liberty_proto cells.proto --netlist-format pb --netlist_out my_design.mapped.pb \
   --json_out mapping.json
 ```
 
@@ -997,6 +997,10 @@ Key flags:
   `delay` requires usable timing data even with `--fanout-opt=false`.
   `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
+- `--netlist-format <gv|pb>` selects gate-level Verilog (`gv`, the default for
+  any filename) or binary netlist protobuf (`pb`). The mapper encodes the final
+  mapped cells and wiring directly, including edits from fanout optimization
+  and area recovery. Use `pb2gv` to render the protobuf as Verilog.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` or `delay` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
@@ -1008,7 +1012,8 @@ Key flags:
   sharing statistics, the AND duplication audit, and excluded library cells.
   With `delay`, it includes mapping statistics, the timing model and reference
   slew/load.
-  Netlist text stays on stdout when `--netlist_out -` is used; diagnostics go to stderr.
+  With `--netlist_out -`, stdout carries the selected netlist format and stderr
+  carries diagnostics.
   The JSON destination must differ from the netlist output and stderr, including
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
@@ -1446,9 +1451,9 @@ xlsynth-driver gv-stats --netlist resized.gv \
   --liberty_proto /path/to/cells.timing.proto
 ```
 
-### `g8r2gv`: G8R to mapped gate-level Verilog
+### `g8r2gv`: G8R to mapped gate-level netlist
 
-Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
+Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level netlist
 on **stdout**, using standalone ABC for combinational logic and native physical
 flip-flop mapping. Supports combinational and sequential designs, including
 explicit synchronous reset/enable controls (legalized before mapping). No Yosys
@@ -1491,6 +1496,9 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 - `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a
   stored clock or `--add-clk-port`.
 - `--module-name <NAME>` – override the emitted module name.
+- `--netlist-format <gv|pb>` selects gate-level Verilog (`gv`, default) or
+  binary netlist protobuf (`pb`) on stdout. The protobuf encodes the assembled
+  netlist, including physical flip-flops and their connections.
 - `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
   including the executable/version, raw Liberty paths, resolved constraints, and
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.
@@ -1502,7 +1510,7 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 ABC uses global driver/load constraints, including at register Q/D boundaries;
 these are not per-register clock-to-Q/setup constraints or actual D-pin loads.
 Use `gv-stats` with a matching timing-enabled proto for final registered timing.
-Zero-width ports remain in the native design but are omitted from Verilog.
+The mapper omits zero-width ports from the flat netlist in both output formats.
 
 ```bash
 xlsynth-driver ir2g8r pipeline.ir --top main > pipeline.g8r
@@ -1510,7 +1518,8 @@ xlsynth-driver g8r2gv pipeline.g8r \
   --liberty /path/to/buffers.lib --liberty /path/to/logic.lib \
   --liberty /path/to/registers.lib \
   --liberty-proto /path/to/cells.proto \
-  --diagnostics-out mapping.json > mapped.gv
+  --netlist-format pb --diagnostics-out mapping.json > mapped.pb
+xlsynth-driver pb2gv mapped.pb -o mapped.gv
 xlsynth-driver gv-stats --netlist mapped.gv \
   --liberty_proto /path/to/cells.timing.proto \
   --primary_input_transition 0.01 --module_output_load 4

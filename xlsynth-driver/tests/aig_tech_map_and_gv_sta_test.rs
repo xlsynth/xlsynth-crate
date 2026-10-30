@@ -14,6 +14,7 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
+use test_case::test_case;
 use xlsynth_g8r::aig::AigBitVector;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
@@ -162,6 +163,65 @@ fn aig_tech_map_then_gv_sta_smoke() {
         .parse()
         .expect("worst_output_arrival should parse as f64");
     assert!(value > 0.0, "expected positive arrival, got {}", value);
+}
+
+#[test_case(&[]; "default_nand2")]
+#[test_case(&["--strategy", "area"]; "area_with_fanout_optimization")]
+#[test_case(&["--strategy", "delay", "--primary-input-transition", "0.01", "--module-output-load", "0.01"]; "delay_with_area_recovery")]
+fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
+    strategy_args: &[&str],
+) -> anyhow::Result<()> {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let dir = tempfile::tempdir()?;
+    let aig = dir.path().join("input.aag");
+    let liberty = dir.path().join("cells.textproto");
+    let pb = dir.path().join("mapped.pb");
+    let report = dir.path().join("mapping.json");
+    std::fs::write(&aig, make_two_input_and_aig())?;
+    std::fs::write(&liberty, make_timing_enabled_inv_nand2_liberty_textproto())?;
+
+    let map = |destination: &Path| {
+        let mut cmd = Command::new(driver);
+        cmd.arg("aig-tech-map")
+            .arg(&aig)
+            .args(strategy_args)
+            .arg("--liberty_proto")
+            .arg(&liberty)
+            .args(["--module_name", "mapped_top"])
+            .arg("--netlist_out")
+            .arg(destination)
+            .env_remove("RUST_LOG");
+        cmd
+    };
+    let gv = map(Path::new("-")).output()?;
+    let binary = map(Path::new("-"))
+        .args(["--netlist-format", "pb"])
+        .output()?;
+    let file = map(&pb)
+        .args(["--netlist-format", "pb", "--json_out"])
+        .arg(&report)
+        .output()?;
+    for result in [&gv, &binary, &file] {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert!(file.stdout.is_empty());
+    assert_eq!(gv.stderr, binary.stderr);
+    assert_eq!(std::fs::read(&pb)?, binary.stdout);
+    let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(report)?)?;
+    assert_eq!(summary["module"], "mapped_top");
+
+    let restored = Command::new(driver).arg("pb2gv").arg(&pb).output()?;
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(gv.stdout, restored.stdout);
+    Ok(())
 }
 
 #[test]

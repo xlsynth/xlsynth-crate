@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
-use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::fanout_opt::{FanoutOptimizationOptions, optimize_fanout};
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
 use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
@@ -24,6 +23,8 @@ use xlsynth_g8r::techmap::delay::{
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
 };
+
+use crate::mapped_netlist_output::{Format, write_stdout};
 
 /// Resolves existing output targets or their parents before either file is
 /// written.
@@ -536,10 +537,11 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     }
     report["strategy"] = strategy.into();
     report["module"] = mapped.interner.resolve(mapped.module.name).unwrap().into();
-    report["cell_count"] = mapped.module.instances.len().into();
-    report["net_count"] = mapped.nets.len().into();
-    let netlist_text = emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner)
-        .context("failed to emit mapped netlist text")?;
+    let cell_count = mapped.module.instances.len();
+    let net_count = mapped.nets.len();
+    report["cell_count"] = cell_count.into();
+    report["net_count"] = net_count.into();
+    let netlist_bytes = Format::from_matches(matches).encode(&mapped.into())?;
     if let (Some(json_path), Some(stderr)) = (json_out, stderr.as_ref()) {
         ensure_distinct_from_stderr(Path::new(json_path), stderr)?;
     }
@@ -566,7 +568,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 !output_paths_alias(netlist_path, json_path)?,
                 "--json_out and --netlist_out must name different files"
             );
-            std::fs::write(netlist_path, netlist_text)
+            std::fs::write(netlist_path, netlist_bytes)
                 .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
             let file = File::create(json_path).with_context(|| {
                 format!("failed to create JSON summary '{}'", json_path.display())
@@ -583,7 +585,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             outputs
                 .netlist
                 .prepare_write()?
-                .write_all(netlist_text.as_bytes())
+                .write_all(&netlist_bytes)
                 .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
             serde_json::to_writer_pretty(outputs.json.prepare_write()?, &report).with_context(
                 || format!("failed writing JSON summary to '{}'", json_path.display()),
@@ -600,7 +602,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 // deadlock with a blocking FIFO open here.
                 #[cfg(unix)]
                 ensure_json_fifo_safe_for_stdout(json_path, &stdout)?;
-                print!("{netlist_text}");
+                write_stdout(&netlist_bytes)?;
                 let file = File::create(json_path).with_context(|| {
                     format!("failed to create JSON summary '{}'", json_path.display())
                 })?;
@@ -619,24 +621,20 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                     json.handle.as_ref() != stderr.as_ref(),
                     "--json_out must not refer to stderr"
                 );
-                print!("{netlist_text}");
+                write_stdout(&netlist_bytes)?;
                 serde_json::to_writer_pretty(json.prepare_write()?, &report).with_context(
                     || format!("failed writing JSON summary to '{}'", json_path.display()),
                 )?;
             }
         } else {
-            print!("{netlist_text}");
+            write_stdout(&netlist_bytes)?;
         }
     } else {
-        std::fs::write(netlist_out, netlist_text)
+        std::fs::write(netlist_out, netlist_bytes)
             .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
     }
     eprintln!(
-        "aig-tech-map: mapped '{}' to {} instances / {} nets {}",
-        aig_input_file,
-        mapped.module.instances.len(),
-        mapped.nets.len(),
-        summary
+        "aig-tech-map: mapped '{aig_input_file}' to {cell_count} instances / {net_count} nets {summary}"
     );
     Ok(())
 }

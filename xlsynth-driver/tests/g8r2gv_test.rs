@@ -237,6 +237,29 @@ fn boundary_registers_script_constraints_and_diagnostics() {
         &(serde_json::to_string_pretty(&json).unwrap() + "\n"),
         "tests/g8r2gv_diagnostics.golden.txt",
     );
+
+    std::fs::remove_file(&diagnostics).unwrap();
+    let binary = cmd.args(["--netlist-format", "pb"]).output().unwrap();
+    assert!(
+        binary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&binary.stderr)
+    );
+    assert!(binary.stderr.is_empty());
+    assert_eq!(first_diagnostics, std::fs::read(&diagnostics).unwrap());
+    let pb = dir.path().join("mapped.pb");
+    std::fs::write(&pb, binary.stdout).unwrap();
+    let restored = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("pb2gv")
+        .arg(&pb)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(result.stdout, restored.stdout);
 }
 
 #[test]

@@ -23,7 +23,7 @@ xlsynth-pir = { path = "../xlsynth-pir", version = "0.77.0" }
 xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.77.0" }
 xlsynth-autocov = { path = "../xlsynth-autocov", version = "0.77.0" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.77.0" }
-clap = "4.5.21"
+clap = { version = "4.5.21", features = ["derive"] }
 tempfile = "3.20"
 toml.workspace = true
 env_logger = "0.11"

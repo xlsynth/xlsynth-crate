@@ -11,10 +11,13 @@ use xlsynth_g8r::netlist::abc::{
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 
+use crate::mapped_netlist_output::{Format, format_arg, write_stdout};
+
 /// Defines the thin CLI surface for direct ABC/native sequential mapping.
 pub fn command() -> Command {
     Command::new("g8r2gv")
-        .about("Maps a .g8r or .g8rbin design to a complete gate-level Verilog netlist on stdout using ABC and native register mapping, without Yosys")
+        .about("Maps a .g8r or .g8rbin design to a gate-level netlist on stdout using ABC and native register mapping, without Yosys")
+        .arg(format_arg())
         .arg(Arg::new("g8r_input_file").required(true).index(1).help("Input .g8r or .g8rbin design"))
         .arg(Arg::new("liberty").long("liberty").value_name("PATH").required(true).action(ArgAction::Append)
             .help("Raw uncompressed Liberty file for ABC; repeat in loading order. The first one or two files must provide the usable combinational library"))
@@ -91,10 +94,15 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         .collect::<Vec<_>>();
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
-    let mapped = context
-        .map_sequential(&design, &options)
-        .map_err(|e| e.to_string())?;
-    let verilog = mapped.emit_verilog()?;
+    let format = Format::from_matches(matches);
+    let mapped = match format {
+        Format::Gv => context.map_sequential(&design, &options),
+        Format::Pb => context.map_sequential_structural(&design, &options),
+    }
+    .map_err(|e| e.to_string())?;
+    let output = format
+        .encode(&mapped.netlist)
+        .map_err(|e| format!("{e:#}"))?;
     if let Some(path) = matches.get_one::<String>("diagnostics-out") {
         let json = serde_json::to_string_pretty(&mapped.diagnostics).map_err(|e| e.to_string())?;
         std::fs::write(path, format!("{json}\n"))
@@ -108,6 +116,5 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
             std::fs::write(path, log).map_err(|e| format!("writing --{flag} '{path}': {e}"))?;
         }
     }
-    print!("{verilog}");
-    Ok(())
+    write_stdout(&output).map_err(|e| format!("{e:#}"))
 }
