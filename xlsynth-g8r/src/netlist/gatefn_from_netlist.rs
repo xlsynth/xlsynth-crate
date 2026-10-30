@@ -372,13 +372,11 @@ fn check_undriven_bits(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<(), String> {
-    for bit_idx in used_as_input {
-        if !driven.contains(bit_idx) {
-            return Err(format!(
-                "net bit '{}' is used as an input but is never driven by any instance, continuous assign, or module input",
-                normalized.render_bit(*bit_idx, nets, interner)
-            ));
-        }
+    if let Some(bit_idx) = used_as_input.difference(driven).min() {
+        return Err(format!(
+            "net bit '{}' is used as an input but is never driven by any instance, continuous assign, or module input",
+            normalized.render_bit(*bit_idx, nets, interner)
+        ));
     }
     Ok(())
 }

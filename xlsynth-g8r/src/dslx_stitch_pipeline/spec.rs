@@ -11,8 +11,7 @@ use xlsynth::{DslxConvertOptions, XlsynthError, convert_dslx_to_ir, dslx};
 
 use super::names::{collect_stage_name_infos, validate_stitch_pipeline_names};
 use super::{
-    check_for_parametric_stages, implicit_stage_names, resolve_stage_ir_names,
-    verify_stage_port_widths, verify_stage_signatures,
+    resolve_stage_ir_names, select_stage_names, verify_stage_port_widths, verify_stage_signatures,
 };
 use crate::aig::{ClockPort, SequentialPipelineOptions};
 
@@ -233,11 +232,7 @@ pub(super) fn resolve_stages(
     }
     let mut imports = dslx::ImportData::new(stdlib_path, search_paths);
     let module = dslx::parse_and_typecheck(text, path_str, module_name, &mut imports)?;
-    let names = match explicit_stages {
-        Some(names) => names.to_vec(),
-        None => implicit_stage_names(&module, top)?,
-    };
-    check_for_parametric_stages(&module, &names)?;
+    let names = select_stage_names(&module, top, explicit_stages)?;
     let convert = DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
         additional_search_paths: search_paths.to_vec(),
@@ -364,6 +359,39 @@ flop_input = false
                 .unwrap_err()
                 .0
                 .contains("unknown field `flop_input`")
+        );
+    }
+
+    #[test]
+    fn explicit_stages_must_name_concrete_source_functions() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pipe.x"),
+            r#"fn helper<N: u32>(x: uN[N]) -> uN[N] { x }
+fn first(x: u4) -> u4 { helper(x) }"#,
+        )
+        .unwrap();
+        let path = dir.path().join("pipe.toml");
+        fs::write(
+            &path,
+            r#"dslx_input_file = "pipe.x"
+stages = ["first"]
+output_module_name = "pipe""#,
+        )
+        .unwrap();
+        let mut spec = StitchPipelineSpec::load(&path).unwrap();
+        let pipeline = spec.resolve().unwrap();
+        // XLS emitted this IR function to implement first's call to helper.
+        assert!(pipeline.ir.get_function("__pipe__helper__4").is_ok());
+        spec.stages = Some(vec!["helper__4".into()]);
+        assert_eq!(
+            spec.resolve().err().unwrap().0,
+            r#"selected stage "helper__4" is not a declared DSLX function in module 'pipe'"#
+        );
+        spec.stages = Some(vec!["helper".into()]);
+        assert_eq!(
+            spec.resolve().err().unwrap().0,
+            "parametric stage function(s) detected that cannot be stitched: helper. Provide a concrete (non-parametric) DSLX wrapper before running the stitch tool."
         );
     }
 

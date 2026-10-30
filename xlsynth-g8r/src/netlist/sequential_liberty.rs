@@ -3,7 +3,7 @@
 //! Shared Liberty interpretation for synchronous netlist projection.
 
 use crate::liberty::cell_formula::{Term, parse_formula};
-use crate::liberty_model::{Cell, Library, SequentialKind};
+use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
 
 /// One supported Liberty FF clock, including its active-edge polarity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +53,30 @@ pub(crate) fn get_sequential_ff_clock_spec(
             "cell '{}' uses unsupported sequential kind {:?}",
             cell.name, seq.kind
         ));
+    }
+
+    // Next-state formulas bind the physical inputs, Q and !Q by name.
+    // An output pin may expose a state variable of the same name.
+    let complement = seq
+        .complementary_state_var
+        .as_deref()
+        .filter(|name| !name.is_empty());
+    if complement == Some(seq.state_var.as_str()) {
+        return Err(format!(
+            "cell '{}' FF state_var and complementary_state_var both name '{}'. Q and its complement require distinct names",
+            cell.name, seq.state_var
+        ));
+    }
+    for pin in &cell.pins {
+        let name = library.resolve_string(&pin.name);
+        if pin.direction == PinDirection::Input as i32
+            && (name == seq.state_var || Some(name) == complement)
+        {
+            return Err(format!(
+                "cell '{}' uses '{name}' as both an FF state variable and a physical input pin",
+                cell.name
+            ));
+        }
     }
 
     let clock_from_seq = if seq.clock_expr.is_empty() {

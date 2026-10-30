@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Simple utility to stitch together pipeline stages defined in DSLX.
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use xlsynth::dslx::MatchableModuleMember;
+use xlsynth::dslx::{Function, MatchableModuleMember};
 use xlsynth::{
     DslxCallingConvention, mangle_dslx_name, mangle_dslx_name_with_calling_convention, optimize_ir,
     schedule_and_codegen,
@@ -144,9 +144,6 @@ fn resolve_stage_ir_names(
     module_name: &str,
     names: Vec<String>,
 ) -> Result<Vec<(String, String)>, xlsynth::XlsynthError> {
-    if names.is_empty() {
-        return Err(xlsynth::XlsynthError("stages must be nonempty".into()));
-    }
     let mut stages = Vec::with_capacity(names.len());
     for name in names {
         let mangled = mangle_dslx_name(module_name, &name)?;
@@ -162,7 +159,7 @@ fn resolve_stage_ir_names(
                 )));
             }
             return Err(xlsynth::XlsynthError(format!(
-                "selected stage '{name}' was not found as a DSLX function in module '{module_name}' (expected IR function '{mangled}')"
+                "DSLX stage '{name}' in module '{module_name}' has no IR function '{mangled}'"
             )));
         }
         stages.push((name, mangled));
@@ -293,32 +290,27 @@ use_system_verilog: {sv}"#,
 
 /// Selects every numbered DSLX stage, requiring contiguous canonical indices.
 fn implicit_stage_names(
-    tc_module: &xlsynth::dslx::TypecheckedModule,
+    functions: &BTreeMap<String, Function>,
     top: &str,
 ) -> Result<Vec<String>, xlsynth::XlsynthError> {
-    let module = tc_module.get_module();
     let mut indices = Vec::new();
     let prefix = format!("{top}_cycle");
-    for i in 0..module.get_member_count() {
-        let member = module.get_member(i);
-        if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
-            let name = func.get_identifier();
-            if let Some(digits) = name.strip_prefix(&prefix)
-                && !digits.is_empty()
-                && digits.bytes().all(|b| b.is_ascii_digit())
-            {
-                let idx = digits.parse::<usize>().map_err(|_| {
-                    xlsynth::XlsynthError(format!(
-                        "stage '{name}' has an index too large for implicit stage selection"
-                    ))
-                })?;
-                if digits.len() > 1 && digits.starts_with('0') {
-                    return Err(xlsynth::XlsynthError(format!(
-                        "stage '{name}' has a leading zero in its index; implicit stage selection expects '{prefix}{idx}'"
-                    )));
-                }
-                indices.push(idx);
+    for name in functions.keys() {
+        if let Some(digits) = name.strip_prefix(&prefix)
+            && !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+        {
+            let idx = digits.parse::<usize>().map_err(|_| {
+                xlsynth::XlsynthError(format!(
+                    "stage '{name}' has an index too large for implicit stage selection"
+                ))
+            })?;
+            if digits.len() > 1 && digits.starts_with('0') {
+                return Err(xlsynth::XlsynthError(format!(
+                    "stage '{name}' has a leading zero in its index; implicit stage selection expects '{prefix}{idx}'"
+                )));
             }
+            indices.push(idx);
         }
     }
 
@@ -343,32 +335,47 @@ fn implicit_stage_names(
     Ok(indices.iter().map(|idx| format!("{prefix}{idx}")).collect())
 }
 
-/// Ensures the stage functions selected for stitching are non-parametric.
-fn check_for_parametric_stages(
+/// Selects concrete functions declared in the source module before IR
+/// conversion can introduce generated names for helpers and specializations.
+fn select_stage_names(
     tc_module: &xlsynth::dslx::TypecheckedModule,
-    stages: &[String],
-) -> Result<(), xlsynth::XlsynthError> {
+    top: &str,
+    explicit_stages: Option<&[String]>,
+) -> Result<Vec<String>, xlsynth::XlsynthError> {
     let module = tc_module.get_module();
-    let stage_set: HashSet<&str> = stages.iter().map(String::as_str).collect();
-    let mut offending = Vec::new();
+    let mut functions = BTreeMap::new();
     for i in 0..module.get_member_count() {
         let member = module.get_member(i);
         if let Some(MatchableModuleMember::Function(func)) = member.to_matchable() {
-            let name = func.get_identifier();
-            if stage_set.contains(name.as_str()) && func.is_parametric() {
-                offending.push(name);
-            }
+            functions.insert(func.get_identifier(), func);
+        }
+    }
+    let stages = match explicit_stages {
+        Some([]) => return Err(xlsynth::XlsynthError("stages must be nonempty".into())),
+        Some(names) => names.to_vec(),
+        None => implicit_stage_names(&functions, top)?,
+    };
+    let mut offending = Vec::new();
+    for name in &stages {
+        let func = functions.get(name).ok_or_else(|| {
+            xlsynth::XlsynthError(format!(
+                "selected stage {name:?} is not a declared DSLX function in module '{}'",
+                module.get_name()
+            ))
+        })?;
+        if func.is_parametric() {
+            offending.push(name.as_str());
         }
     }
 
     if !offending.is_empty() {
         offending.sort();
         return Err(xlsynth::XlsynthError(format!(
-            "parametric stage function(s) detected that cannot be stitched: {}. Provide a concrete (non-parametric) wrapper or specialization before running the stitch tool.",
+            "parametric stage function(s) detected that cannot be stitched: {}. Provide a concrete (non-parametric) DSLX wrapper before running the stitch tool.",
             offending.join(", ")
         )));
     }
-    Ok(())
+    Ok(stages)
 }
 
 /// Generates SystemVerilog for pipeline stages `top_cycle0`, `top_cycle1`, ...

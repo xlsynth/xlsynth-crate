@@ -280,6 +280,66 @@ fn pipe_cycle1(x: u1) -> u1 { x }
     assert!(String::from_utf8_lossy(&wrong_latency.stderr).contains("post-fill output mismatch"));
 }
 
+/// The stage boundary gives the first parameter the low bit and the second
+/// parameter the next two bits of the registered tuple.
+#[test]
+fn stitch_equiv_checks_unequal_width_stage_parameter_slices() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join("pipe.x"),
+        r#"fn pipe_cycle0(x: u3) -> (u1, u2) { (x[2+:u1], x[0+:u2]) }
+fn pipe_cycle1(a: u1, b: u2) -> u3 { a ++ b }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("pipe.toml"),
+        SPEC.replace("flop_outputs = true", "flop_outputs = false"),
+    )
+    .unwrap();
+    fs::write(temp.path().join("cells.textproto"), LIBERTY).unwrap();
+    let mapped = temp.path().join("pipe.gv");
+    // The first stage packs {x[2], x[1:0]}, so its registered result is q.
+    // The second stage concatenates its two parameter slices in order.
+    let gv = r#"module pipe(input clk, input [2:0] x, output [2:0] out);
+  wire [2:0] q;
+  DFF r0 (.CLK(clk), .D(x[0]), .Q(q[0]));
+  DFF r1 (.CLK(clk), .D(x[1]), .Q(q[1]));
+  DFF r2 (.CLK(clk), .D(x[2]), .Q(q[2]));
+  assign out = {q[0], q[2:1]};
+endmodule"#;
+    let args = [
+        "stitch-equiv",
+        "--spec",
+        "pipe.toml",
+        "--netlist",
+        "pipe.gv",
+        "--liberty-proto",
+        "cells.textproto",
+    ];
+    fs::write(&mapped, gv).unwrap();
+    let result = driver(temp.path(), &args).unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        result.stdout,
+        b"Proved pipe equivalent to pipe after 1 rising clock edge.\n"
+    );
+
+    fs::write(&mapped, gv.replace("{q[0], q[2:1]}", "{q[2], q[1:0]}")).unwrap();
+    let reversed = driver(temp.path(), &args).unwrap();
+    assert_eq!(reversed.status.code(), Some(1));
+    assert!(reversed.stdout.is_empty());
+    // The solver can choose any input whose rotated value differs from x.
+    assert_eq!(
+        String::from_utf8(reversed.stderr).unwrap().lines().next(),
+        Some("xlsynth-driver: stitch-equiv: post-fill output mismatch")
+    );
+}
+
 /// Native clockless mapping and an RTL wrapper's unused clock have the same
 /// zero-edge contract.
 #[test]

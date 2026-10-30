@@ -210,15 +210,55 @@ interned_strings: ["D", "CLK", "Q", "IQ", "A", "Y"]
             "module pipe(input x, input tick, output out); DFF ff (.CLK(tick), .D(x), .Q(out)); endmodule",
         )
         .unwrap();
-        let pin_only = fs::read_to_string(&liberty)
-            .unwrap()
-            .replace(r#"clock_expr: "CLK""#, "");
-        fs::write(&liberty, pin_only).unwrap();
+        let ff = fs::read_to_string(&liberty).unwrap();
+        for (bad_ff, expected) in [
+            (
+                ff.replace(r#"clock_expr: "CLK""#, ""),
+                "instance 'ff': cell 'DFF' identifies clock pin 'CLK' but its Liberty FF entry has no clock_expr. Specify the active clock edge to project this FF",
+            ),
+            (
+                ff.replace(
+                    r#"state_var: "IQ""#,
+                    r#"state_var: "IQ" complementary_state_var: "IQ""#,
+                ),
+                "instance 'ff': cell 'DFF' FF state_var and complementary_state_var both name 'IQ'. Q and its complement require distinct names",
+            ),
+            (
+                ff.replace(r#"state_var: "IQ""#, r#"state_var: "D""#)
+                    .replace("function_string_id: 4", "function_string_id: 1"),
+                "instance 'ff': cell 'DFF' uses 'D' as both an FF state variable and a physical input pin",
+            ),
+            (
+                ff.replace(
+                    r#"state_var: "IQ""#,
+                    r#"state_var: "IQ" complementary_state_var: "D""#,
+                ),
+                "instance 'ff': cell 'DFF' uses 'D' as both an FF state variable and a physical input pin",
+            ),
+            (
+                ff.replace(
+                    r#"state_var: "IQ""#,
+                    r#"state_var: "IQ" complementary_state_var: "CLK""#,
+                ),
+                "instance 'ff': cell 'DFF' uses 'CLK' as both an FF state variable and a physical input pin",
+            ),
+        ] {
+            fs::write(&liberty, bad_ff).unwrap();
+            let error = pipe
+                .prove_equivalent_to_gv(&netlist, &liberty, None, GateFormalOptions::default())
+                .unwrap_err();
+            assert_eq!(error.to_string(), expected);
+        }
+        // With no output function, an output named for Q directly exposes
+        // that state bit. It contributes no binding to the next-state formula.
+        let implicit_q = ff
+            .replace(r#"state_var: "IQ""#, r#"state_var: "Q""#)
+            .replace("function_string_id: 4", "");
+        fs::write(&liberty, implicit_q).unwrap();
         assert_eq!(
             pipe.prove_equivalent_to_gv(&netlist, &liberty, None, GateFormalOptions::default())
-                .unwrap_err()
-                .to_string(),
-            "instance 'ff': cell 'DFF' identifies clock pin 'CLK' but its Liberty FF entry has no clock_expr. Specify the active clock edge to project this FF"
+                .unwrap(),
+            crate::stitch_equiv::StitchEquivResult::Proved,
         );
     }
     #[test]
