@@ -1948,11 +1948,27 @@ pub fn eval_fn_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(None, f, args, observer, EvalOrderPolicy::Checked)
+    eval_fn_impl(None, f, args, observer, EvalOrderPolicy::Checked, None)
 }
 
 pub fn eval_fn_in_package(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
-    eval_fn_impl(Some(pkg), f, args, None, EvalOrderPolicy::Checked)
+    eval_fn_impl(Some(pkg), f, args, None, EvalOrderPolicy::Checked, None)
+}
+
+/// Evaluates only the return value, sharing calls with identical arguments.
+/// Use `eval_fn_in_package` when individual runtime events are observable.
+pub fn eval_fn_in_package_value(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue]) -> IrValue {
+    match eval_fn_impl(
+        Some(pkg),
+        f,
+        args,
+        None,
+        EvalOrderPolicy::Checked,
+        Some(&mut HashMap::new()),
+    ) {
+        FnEvalResult::Success(result) => result.value,
+        FnEvalResult::Failure(result) => result.value,
+    }
 }
 
 pub fn eval_fn_in_package_with_observer(
@@ -1962,7 +1978,7 @@ pub fn eval_fn_in_package_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(Some(pkg), f, args, observer, EvalOrderPolicy::Checked)
+    eval_fn_impl(Some(pkg), f, args, observer, EvalOrderPolicy::Checked, None)
 }
 
 /// Evaluates a function whose node vector is already in dependency-before-user
@@ -1978,16 +1994,32 @@ pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> 
         args,
         None,
         EvalOrderPolicy::AssumeNodeIndexTopological,
+        None,
     )
 }
 
-fn eval_fn_impl<'a>(
-    pkg: Option<&ir::Package>,
-    f: &ir::Fn,
+/// Function results for one value-only evaluation, keyed by ordered XLS values.
+type CallValues<'ir> = HashMap<&'ir str, HashMap<Vec<IrValue>, IrValue>>;
+
+fn eval_fn_impl<'a, 'ir>(
+    pkg: Option<&'ir ir::Package>,
+    f: &'ir ir::Fn,
     args: &[IrValue],
     observer: Option<*mut (dyn EvalObserver + 'a)>,
     order_policy: EvalOrderPolicy,
+    mut call_values: Option<&mut CallValues<'ir>>,
 ) -> FnEvalResult {
+    if let Some(value) = call_values
+        .as_ref()
+        .and_then(|calls| calls.get(f.name.as_str()))
+        .and_then(|results| results.get(args))
+    {
+        return FnEvalResult::Success(FnEvalSuccess {
+            value: value.clone(),
+            trace_messages: Vec::new(),
+            cover_counts: Vec::new(),
+        });
+    }
     debug_assert!(
         f.check_pir_layout_invariants().is_ok(),
         "PIR layout invariants violated for function '{}'",
@@ -2026,6 +2058,10 @@ fn eval_fn_impl<'a>(
                 let arg_index = *param_index_by_node.get(&nr).expect("param not found");
                 args[arg_index].clone()
             }
+            // These operations contribute only their zero-sized result when
+            // evaluating data. Runtime events belong to the eventful APIs.
+            P::Assert { .. } | P::Trace { .. } if call_values.is_some() => IrValue::make_token(),
+            P::Cover { .. } if call_values.is_some() => IrValue::make_tuple(&[]),
             P::Assert {
                 token,
                 activate,
@@ -2117,7 +2153,14 @@ fn eval_fn_impl<'a>(
                     .collect();
 
                 absorb_nested_eval_result(
-                    eval_fn_impl(Some(pkg), callee, &callee_args, observer, order_policy),
+                    eval_fn_impl(
+                        Some(pkg),
+                        callee,
+                        &callee_args,
+                        observer,
+                        order_policy,
+                        call_values.as_deref_mut(),
+                    ),
                     &mut assertion_failures,
                     &mut assumption_failures,
                     &mut trace_messages,
@@ -2166,7 +2209,14 @@ fn eval_fn_impl<'a>(
                     body_args.push(carry);
                     body_args.extend(invariant_values.iter().cloned());
                     carry = absorb_nested_eval_result(
-                        eval_fn_impl(Some(pkg), body_fn, &body_args, observer, order_policy),
+                        eval_fn_impl(
+                            Some(pkg),
+                            body_fn,
+                            &body_args,
+                            observer,
+                            order_policy,
+                            call_values.as_deref_mut(),
+                        ),
                         &mut assertion_failures,
                         &mut assumption_failures,
                         &mut trace_messages,
@@ -2317,7 +2367,7 @@ fn eval_fn_impl<'a>(
                         value = &elements[count - 1];
                     }
                 }
-                if clamped_any && *assumed_in_bounds {
+                if clamped_any && *assumed_in_bounds && call_values.is_none() {
                     if let Some(observer) = observer {
                         unsafe {
                             (&mut *observer).on_failure_event(FailureEvent {
@@ -2404,7 +2454,7 @@ fn eval_fn_impl<'a>(
                 match set_at_path(arr, &idxs, val) {
                     Some(updated) => updated,
                     None => {
-                        if *assumed_in_bounds {
+                        if *assumed_in_bounds && call_values.is_none() {
                             if let Some(observer) = observer {
                                 unsafe {
                                     (&mut *observer).on_failure_event(FailureEvent {
@@ -2498,6 +2548,12 @@ fn eval_fn_impl<'a>(
         .expect("return value must have been computed")
         .clone();
 
+    if let Some(calls) = call_values {
+        calls
+            .entry(&f.name)
+            .or_default()
+            .insert(args.to_vec(), ret_value.clone());
+    }
     if assertion_failures.is_empty() && assumption_failures.is_empty() {
         FnEvalResult::Success(FnEvalSuccess {
             value: ret_value,
@@ -4180,6 +4236,7 @@ fn f(a: bits[8][2] id=10, i: bits[2] id=11) -> bits[8] {
             panic!("out-of-bounds assumptions should fail");
         };
         assert_eq!(failure.value, IrValue::make_ubits(8, 11).unwrap());
+        assert_eq!(eval_fn_in_package_value(&pkg, f, &args), failure.value);
         assert_eq!(
             failure.assumption_failures,
             vec![
@@ -4481,6 +4538,7 @@ fn f() -> bits[1] {
             panic!("counted_for should report body assertion failure");
         };
         assert_eq!(failure.value, IrValue::make_ubits(1, 0).unwrap());
+        assert_eq!(eval_fn_in_package_value(&pkg, f, &[]), failure.value);
         assert_eq!(
             failure.assertion_failures,
             vec![AssertionFailure {

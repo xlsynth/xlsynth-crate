@@ -127,19 +127,28 @@ impl OblTree {
     // executor.
 }
 
-/// A decomposition or proof action addressed to a single obligation.
+/// A DSLX decomposition or proof action addressed to a single obligation.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     Apply(Tactic),
     Solve,
 }
 
-/// One serialized action in a tactic script.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScriptStep {
-    pub selector: Selector,
-    pub command: Command,
+/// Script syntax shared by proof domains with their own command sets.
+pub mod syntax {
+    use super::Selector;
+    use serde::{Deserialize, Serialize};
+
+    /// One serialized command and the obligation it addresses.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ScriptStep<C> {
+        pub selector: Selector,
+        pub command: C,
+    }
 }
+
+/// One serialized action in a DSLX tactic script.
+pub type ScriptStep = syntax::ScriptStep<Command>;
 
 /// Replaces a leaf with a tactic's children while retaining its original proof.
 fn apply_tactic(
@@ -612,6 +621,7 @@ pub(super) fn run_script(
 
 #[cfg(test)]
 mod tests {
+    use super::Command::Solve;
     use super::*;
     use crate::dslx_equiv::{DslxEquivRequest, DslxModule, run_dslx_equiv};
     use crate::dslx_tactics::obligations::{
@@ -626,6 +636,21 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
     use test_case::test_case;
+
+    #[test]
+    fn dslx_commands_and_steps_infer_without_type_annotations() {
+        let command = Command::Solve;
+        assert_eq!(serde_json::to_string(&command).unwrap(), r#""Solve""#);
+        let step = ScriptStep {
+            selector: root_selector(),
+            command: serde_json::from_str(r#""Solve""#).unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_string(&step).unwrap(),
+            r#"{"selector":["root"],"command":"Solve"}"#
+        );
+        assert!(matches!(step.command, Solve));
+    }
 
     /// Runs selected equivalence obligations directly through the library API.
     fn run_test_obligations(

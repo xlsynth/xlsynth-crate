@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io;
 
 use xlsynth_pir::IrValue;
@@ -127,6 +128,35 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
     inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
+) -> (
+    HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
+    Vec<Assertion<'ir, S::Term>>,
+) {
+    translate_nodes(
+        solver,
+        inputs,
+        uf_map,
+        uf_registry,
+        &mut |s, args, assertions| {
+            let callee = ir_to_smt(s, args, uf_map, uf_registry);
+            assertions.extend(callee.assertions);
+            callee.output.bitvec
+        },
+    )
+}
+
+/// Translates the nodes of one function using the caller's policy for nested
+/// calls. A counted_for body contributes only its value to the accumulator.
+fn translate_nodes<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+    inline_call: &mut dyn FnMut(
+        &mut S,
+        &FnInputs<'ir, S::Term>,
+        &mut Vec<Assertion<'ir, S::Term>>,
+    ) -> BitVec<S::Term>,
 ) -> (
     HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
     Vec<Assertion<'ir, S::Term>>,
@@ -277,10 +307,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         prover_fn: callee_prover_fn.clone(),
                         inputs: callee_input_map,
                     };
-                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
                     acc = IrTypedBitVec {
                         ir_type: &node.ty,
-                        bitvec: callee_smt.output.bitvec,
+                        bitvec: inline_call(solver, &callee_inputs, &mut Vec::new()),
                     };
                 }
 
@@ -704,17 +733,13 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     let max_selectable = get_num_indexable_elements::<S>(index_bv, children.len());
                     let index_width = index_bv.bitvec.get_width();
 
-                    let mut result = children[max_selectable - 1].bitvec.clone();
+                    let mut result = children[max_selectable - 1].clone();
                     for i in (0..max_selectable - 1).rev() {
                         let idx_val = solver.numerical(index_width, i as u64);
                         let cond = solver.eq(&index_bv.bitvec, &idx_val);
-                        result = solver.ite(&cond, &children[i].bitvec, &result);
+                        result.bitvec = solver.ite(&cond, &children[i].bitvec, &result.bitvec);
                     }
-
-                    IrTypedBitVec {
-                        ir_type: elem_ty,
-                        bitvec: result,
-                    }
+                    result
                 }
 
                 // Gather the index bit-vectors in evaluation order.
@@ -981,15 +1006,11 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         callee.name
                     );
                 }
-                let no_itok_name = if has_itok {
-                    callee.name[6..].to_string()
-                } else {
-                    callee.name.clone()
-                };
+                let no_itok_name = callee.name.strip_prefix("__itok").unwrap_or(&callee.name);
                 // If this callee is configured to be treated as an
                 // uninterpreted function, apply the UF instead
                 // of inlining the body.
-                if let Some(uf_sym) = uf_map.get(&no_itok_name) {
+                if let Some(uf_sym) = uf_map.get(no_itok_name) {
                     let uf = uf_registry
                         .ufs
                         .get(uf_sym)
@@ -1035,12 +1056,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                             .with_fixed_implicit_activation(false),
                         inputs: callee_input_map,
                     };
-                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
-                    assertions.extend(callee_smt.assertions.iter().cloned());
-                    let callee_output_bv = callee_smt.output.bitvec;
                     IrTypedBitVec {
                         ir_type: &node.ty,
-                        bitvec: callee_output_bv,
+                        bitvec: inline_call(solver, &callee_inputs, &mut assertions),
                     }
                 }
             }
@@ -1191,6 +1209,56 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
         env.insert(nr, exp);
     }
     (env, assertions)
+}
+
+/// Translates the returned data of a verified function using its actual
+/// callees. Calls with identical solver terms share an output within this
+/// evaluation. Assertion events are neither returned nor imposed as input
+/// constraints.
+pub fn ir_to_smt_data<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+) -> BitVec<S::Term>
+where
+    S::Term: Eq + Hash,
+{
+    translate_data_call(solver, inputs, &mut HashMap::new())
+}
+
+/// This cache belongs to one package and one solver. Parameter order, widths
+/// and term identity distinguish calls to the same function.
+type DataCallCache<'ir, T> = HashMap<(&'ir str, Vec<BitVec<T>>), BitVec<T>>;
+
+/// Reuses the data term even if another path in the call graph computed it.
+fn translate_data_call<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    calls: &mut DataCallCache<'ir, S::Term>,
+) -> BitVec<S::Term>
+where
+    S::Term: Eq + Hash,
+{
+    let function = inputs.prover_fn.fn_ref;
+    let arguments = inputs
+        .params()
+        .map(|p| inputs.inputs[p.param_name()].bitvec.clone())
+        .collect();
+    let key = (function.name.as_str(), arguments);
+    if let Some(output) = calls.get(&key) {
+        return output.clone();
+    }
+    let (mut env, _) = translate_nodes(
+        solver,
+        inputs,
+        &HashMap::new(),
+        &UfRegistry {
+            ufs: HashMap::new(),
+        },
+        &mut |s, args, _| translate_data_call(s, args, calls),
+    );
+    let output = env.remove(&function.ret_node_ref.unwrap()).unwrap().bitvec;
+    calls.insert(key, output.clone());
+    output
 }
 
 pub fn ir_to_smt<'ir, 'inputs, S: Solver>(

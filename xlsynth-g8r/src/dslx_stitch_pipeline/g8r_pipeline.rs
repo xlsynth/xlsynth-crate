@@ -8,9 +8,8 @@ use xlsynth::optimize_ir;
 
 use super::ResolvedStitchPipeline;
 use super::spec::{StitchImportPaths, resolve_stages};
-use crate::aig::{
-    ClockPort, SequentialGateFn, SequentialPipelineOptions, stitch_gate_fns_into_pipeline,
-};
+use crate::aig::sequential_pipeline::{StitchedGatePipeline, stitch_gate_fns_with_layout};
+use crate::aig::{ClockPort, SequentialGateFn, SequentialPipelineOptions};
 use crate::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts};
 
 /// Options for turning DSLX stage functions into one sequential g8r design.
@@ -70,6 +69,14 @@ impl ResolvedStitchPipeline {
         &self,
         lowering_options: &CanonicalG8rOptions,
     ) -> Result<SequentialGateFn, xlsynth::XlsynthError> {
+        Ok(self.lower_to_g8r_with_layout(lowering_options)?.design)
+    }
+
+    /// Lowers the stages once and retains the register boundaries for proof.
+    pub(super) fn lower_to_g8r_with_layout(
+        &self,
+        lowering_options: &CanonicalG8rOptions,
+    ) -> Result<StitchedGatePipeline, xlsynth::XlsynthError> {
         let mut stage_gate_fns = Vec::with_capacity(self.stages.len());
         for (stage_name, stage_mangled) in &self.stages {
             let optimized_ir = optimize_ir(&self.ir, stage_mangled)?;
@@ -86,7 +93,6 @@ impl ResolvedStitchPipeline {
             stage_gate_fns.push(lowering.gate_fn);
         }
 
-        stitch_gate_fns_into_pipeline(&stage_gate_fns, &self.boundary)
-            .map_err(xlsynth::XlsynthError)
+        stitch_gate_fns_with_layout(&stage_gate_fns, &self.boundary).map_err(xlsynth::XlsynthError)
     }
 }

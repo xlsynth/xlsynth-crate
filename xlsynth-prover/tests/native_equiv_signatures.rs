@@ -3,14 +3,45 @@
 #![cfg(feature = "has-bitwuzla")]
 
 use test_case::test_case;
+use xlsynth_pir::ir_parser::Parser;
 use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
-use xlsynth_prover::prover::types::{EquivParallelism, EquivResult};
+use xlsynth_prover::prover::translate::{get_fn_inputs, ir_to_smt_data};
+use xlsynth_prover::prover::types::{EquivParallelism, EquivResult, ProverFn};
+use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::{Response, Solver};
 
 const STRATEGIES: [EquivParallelism; 3] = [
     EquivParallelism::SingleThreaded,
     EquivParallelism::OutputBits,
     EquivParallelism::InputBitSplit,
 ];
+
+#[test]
+fn indexing_a_multi_index_result_selects_the_expected_bit() {
+    let ir = r#"package p
+top fn main(a: bits[1][2][2][2], i: bits[1], j: bits[1], k: bits[1]) -> bits[1] {
+  row: bits[1][2] = array_index(a, indices=[i, j], id=5)
+  ret out: bits[1] = array_index(row, indices=[k], id=6)
+}"#;
+    let package = Parser::new(ir).parse_package().unwrap();
+    let mut solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
+    let function = ProverFn::new(package.get_top_fn().unwrap(), Some(&package));
+    let inputs = get_fn_inputs(&mut solver, function, None).unwrap();
+    let output = ir_to_smt_data(&mut solver, &inputs);
+
+    // Element zero is at the LSB in each dimension, so the offset into
+    // the packed eight-bit input is 4*i + 2*j + k.
+    let offset = solver.concat_many(
+        ["i", "j", "k"]
+            .map(|name| &inputs.inputs[name].bitvec)
+            .to_vec(),
+    );
+    let shifted = solver.xls_shrl(&inputs.inputs["a"].bitvec, &offset);
+    let expected = solver.slice(&shifted, 0, 1);
+    let mismatch = solver.ne(&output, &expected);
+    solver.assert(&mismatch).unwrap();
+    assert_eq!(solver.check().unwrap(), Response::Unsat);
+}
 
 #[test_case("identity", true; "identical_callees")]
 #[test_case("not", false; "different_callees_with_the_same_name")]

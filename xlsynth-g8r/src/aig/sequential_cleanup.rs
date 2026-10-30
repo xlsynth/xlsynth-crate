@@ -96,7 +96,7 @@ pub fn cleanup_sequential_gate_fn(
     // state is removed (or there are no registers at all).
     current.transition = dce_safe(&current.transition);
     let mut stats = SequentialCleanupStats {
-        initial_register_bits: register_bit_count(design),
+        initial_register_bits: design.register_bit_count(),
         initial_and_nodes: count_and_nodes(&design.transition),
         ..SequentialCleanupStats::default()
     };
@@ -142,22 +142,13 @@ pub fn cleanup_sequential_gate_fn(
         current.transition = dce_safe(&current.transition);
     }
 
-    stats.final_register_bits = register_bit_count(&current);
+    stats.final_register_bits = current.register_bit_count();
     stats.final_and_nodes = count_and_nodes(&current.transition);
     current.validate_legalized()?;
     Ok(SequentialCleanupResult {
         design: current,
         stats,
     })
-}
-
-/// Counts physical state bits rather than packed register declarations.
-fn register_bit_count(design: &SequentialGateFn) -> usize {
-    design
-        .registers
-        .iter()
-        .map(|register| design.transition.inputs[register.q.index()].get_bit_count())
-        .sum()
 }
 
 /// Counts actual AND nodes without counting AIG inputs or constants.
@@ -171,7 +162,7 @@ fn count_and_nodes(graph: &GateFn) -> usize {
 
 /// Flattens packed register bindings while retaining their original bit order.
 fn collect_state_bits(design: &SequentialGateFn) -> StateLayout {
-    let mut result = Vec::with_capacity(register_bit_count(design));
+    let mut result = Vec::with_capacity(design.register_bit_count());
     let mut bits_by_register = Vec::with_capacity(design.registers.len());
     for register in &design.registers {
         let q = &design.transition.inputs[register.q.index()];

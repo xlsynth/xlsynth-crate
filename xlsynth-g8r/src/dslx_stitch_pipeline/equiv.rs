@@ -2,14 +2,19 @@
 
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 
 use super::ResolvedStitchPipeline;
 use crate::netlist::gv_eval::project_sequential_module;
 use crate::netlist::io::{load_liberty_from_path, read_gv_for_proof_from_path, select_module};
 use crate::process_ir_path::CanonicalG8rOptions;
 use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
-use crate::stitch_equiv::{StitchEquivResult, prove_stitched_pipeline_equiv};
+#[cfg(feature = "has-bitwuzla")]
+use crate::stitch_equiv::BehavioralPipeline;
+use crate::stitch_equiv::{
+    ProofReference, StitchEquivResult, StitchProofOptions, StitchProofReport, StitchProofSolver,
+    prove_with_stage_options,
+};
 
 impl ResolvedStitchPipeline {
     /// Checks the free-running pipeline's outputs against a Liberty-backed
@@ -21,6 +26,24 @@ impl ResolvedStitchPipeline {
         module_name: Option<&str>,
         options: GateFormalOptions,
     ) -> Result<StitchEquivResult> {
+        let options = StitchProofOptions {
+            solver: StitchProofSolver::Cadical(options),
+            ..StitchProofOptions::default()
+        };
+        Ok(self
+            .prove_equivalent_to_gv_with_options(netlist_path, liberty_path, module_name, &options)?
+            .result)
+    }
+
+    /// Checks the mapped circuit using the selected stage scripts and worker
+    /// budget, and reports how the external equivalence result was obtained.
+    pub fn prove_equivalent_to_gv_with_options(
+        &self,
+        netlist_path: &Path,
+        liberty_path: &Path,
+        module_name: Option<&str>,
+        options: &StitchProofOptions,
+    ) -> Result<StitchProofReport> {
         let controls = [
             (
                 "input_valid_signal",
@@ -70,22 +93,74 @@ impl ResolvedStitchPipeline {
         // Give gate! its DSLX value semantics. Keep optional mapping rewrites
         // out of the reference so a native implementation using them is
         // checked against a separately lowered graph.
-        let reference = self.lower_to_g8r(&CanonicalG8rOptions {
-            unsafe_gatify_gate_operation: true,
-            enable_formal_array_alias_analysis: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            fraig: false,
-            reassociation: false,
-            cut_db_rewrite: false,
-            compute_graph_logical_effort: false,
-            ..CanonicalG8rOptions::default()
-        })?;
-        prove_stitched_pipeline_equiv(&reference, &mapped, self.latency(), options)
-            .map_err(|error| anyhow!(error))
+        let lower_gates = || {
+            self.lower_to_g8r_with_layout(&CanonicalG8rOptions {
+                unsafe_gatify_gate_operation: true,
+                enable_formal_array_alias_analysis: false,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
+                fraig: false,
+                reassociation: false,
+                cut_db_rewrite: false,
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            })
+        };
+        let stage_names = self
+            .stages
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let check = |layout, model| {
+            prove_with_stage_options(
+                layout,
+                &mapped,
+                self.latency(),
+                &stage_names,
+                options,
+                model,
+            )
+            .map_err(anyhow::Error::msg)
+        };
+        match &options.solver {
+            StitchProofSolver::Cadical(formal) => {
+                let reference = lower_gates()?;
+                check(&reference, ProofReference::Gates(formal))
+            }
+            #[cfg(feature = "has-bitwuzla")]
+            StitchProofSolver::Bitwuzla { timeout } => {
+                let stages = BehavioralPipeline::from_xls(
+                    &self.ir,
+                    &self.stages,
+                    self.boundary.flop_inputs,
+                    self.boundary.flop_outputs,
+                )
+                .map_err(anyhow::Error::msg)?;
+                let layout = stages
+                    .interface_layout(&self.boundary)
+                    .map_err(anyhow::Error::msg)?;
+                let lower_for_pairing = || {
+                    lower_gates().map_err(|e| {
+                        format!("could not gatify reference for register pairing: {e}")
+                    })
+                };
+                check(
+                    &layout,
+                    ProofReference::Behavioral {
+                        stages: &stages,
+                        timeout: *timeout,
+                        lower_for_pairing: &lower_for_pairing,
+                    },
+                )
+            }
+            #[cfg(not(feature = "has-bitwuzla"))]
+            StitchProofSolver::Bitwuzla { .. } => bail!(
+                "Bitwuzla behavioral stitch proofs require a build with with-bitwuzla-system or with-bitwuzla-built. Use --solver cadical for a gate-level proof"
+            ),
+        }
     }
 }
 
