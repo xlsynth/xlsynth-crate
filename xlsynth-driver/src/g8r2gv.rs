@@ -2,7 +2,7 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -240,7 +240,7 @@ fn write_outputs(
 /// Loads inputs, resolves independent IO overrides, and emits the mapped
 /// netlist.
 pub fn handle(matches: &ArgMatches) -> Result<(), String> {
-    let output_path = Path::new(matches.get_one::<String>("output").unwrap());
+    let output_path = matches.get_one::<PathBuf>("output").unwrap();
     let format = Format::from_matches(matches, output_path);
     let pb_stderr = format
         .check_output_stderr(output_path)

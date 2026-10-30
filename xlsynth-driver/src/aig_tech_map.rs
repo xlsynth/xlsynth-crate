@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
@@ -115,7 +115,8 @@ fn remove_runtime(value: &mut serde_json::Value) {
 fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
-    let netlist_out = matches.get_one::<String>("output").unwrap();
+    let netlist_path = matches.get_one::<PathBuf>("output").unwrap();
+    let to_stdout = netlist_path.as_os_str() == "-";
     let json_out = matches.get_one::<String>("json_out");
     let module_name = matches.get_one::<String>("module_name");
     let strategy = matches.get_one::<String>("strategy").unwrap().as_str();
@@ -176,11 +177,10 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
             || matches.value_source("cell_policy") != Some(ValueSource::CommandLine),
         "--cell_policy applies only to --strategy nand2"
     );
-    let netlist_path = Path::new(netlist_out);
     let format = Format::from_matches(matches, netlist_path);
     let stderr = if let Some(json_path) = json_out {
         ensure!(
-            netlist_out == "-" || !output_paths_alias(Path::new(json_path), netlist_path)?,
+            to_stdout || !output_paths_alias(Path::new(json_path), netlist_path)?,
             "--json_out and --output must name different files"
         );
         let stderr = same_file::Handle::stderr()?;
@@ -368,7 +368,13 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     if let (Some(json_path), Some(stderr)) = (json_out, stderr.as_ref()) {
         ensure_distinct_from_stderr(Path::new(json_path), stderr)?;
     }
-    if let Some(json_path) = json_out.filter(|_| netlist_out != "-") {
+    let netlist_write_context = || {
+        format!(
+            "failed to write netlist output '{}'",
+            netlist_path.display()
+        )
+    };
+    if let Some(json_path) = json_out.filter(|_| !to_stdout) {
         let json_path = Path::new(json_path);
         if is_special_output(netlist_path)? || is_special_output(json_path)? {
             #[cfg(unix)]
@@ -391,7 +397,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 "--json_out and --output must name different files"
             );
             write_netlist_path(netlist_path, &netlist_bytes, pb_stderr.as_ref())
-                .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+                .with_context(netlist_write_context)?;
             let file = File::create(json_path).with_context(|| {
                 format!("failed to create JSON summary '{}'", json_path.display())
             })?;
@@ -411,12 +417,12 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 .netlist
                 .prepare_write()?
                 .write_all(&netlist_bytes)
-                .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+                .with_context(netlist_write_context)?;
             serde_json::to_writer_pretty(outputs.json.prepare_write()?, &report).with_context(
                 || format!("failed writing JSON summary to '{}'", json_path.display()),
             )?;
         }
-    } else if netlist_out == "-" {
+    } else if to_stdout {
         if let Some(json_path) = json_out {
             let json_path = Path::new(json_path);
             let stdout = same_file::Handle::stdout()?;
@@ -456,7 +462,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         }
     } else {
         write_netlist_path(netlist_path, &netlist_bytes, pb_stderr.as_ref())
-            .with_context(|| format!("failed to write netlist output '{netlist_out}'"))?;
+            .with_context(netlist_write_context)?;
     }
     eprintln!(
         "aig-tech-map: mapped '{aig_input_file}' to {cell_count} instances / {net_count} nets {summary}"

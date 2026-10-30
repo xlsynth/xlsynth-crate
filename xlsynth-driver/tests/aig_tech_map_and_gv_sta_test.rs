@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -224,20 +227,30 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
     // destination and override cases once with the default mapper.
     if strategy_args.is_empty() {
         for (filename, flags, expected) in [
-            ("mapped.PrOtO", &[][..], &binary.stdout),
-            ("verilog.pb", &["--netlist-format", "gv"][..], &gv.stdout),
-            ("mapped.netlist", &[][..], &gv.stdout),
-            ("mapped", &[][..], &gv.stdout),
+            (OsStr::new("mapped.PrOtO"), &[][..], &binary.stdout),
+            #[cfg(unix)]
+            (
+                OsStr::from_bytes(b"mapped-\xff.pb"),
+                &[][..],
+                &binary.stdout,
+            ),
+            (
+                OsStr::new("verilog.pb"),
+                &["--netlist-format", "gv"][..],
+                &gv.stdout,
+            ),
+            (OsStr::new("mapped.netlist"), &[][..], &gv.stdout),
+            (OsStr::new("mapped"), &[][..], &gv.stdout),
         ] {
             let path = dir.path().join(filename);
             let result = map().arg("-o").arg(&path).args(flags).output()?;
             assert!(
                 result.status.success(),
-                "{filename}: {}",
+                "{filename:?}: {}",
                 String::from_utf8_lossy(&result.stderr)
             );
-            assert!(result.stdout.is_empty(), "{filename}");
-            assert_eq!(&std::fs::read(path)?, expected, "{filename}");
+            assert!(result.stdout.is_empty(), "{filename:?}");
+            assert_eq!(&std::fs::read(path)?, expected, "{filename:?}");
         }
     }
     Ok(())

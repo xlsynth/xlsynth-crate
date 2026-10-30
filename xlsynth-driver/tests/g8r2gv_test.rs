@@ -2,7 +2,9 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::fmt::Write;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -295,11 +297,16 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     assert_eq!(first_diagnostics, std::fs::read(&diagnostics).unwrap());
     let pb = dir.path().join("mapped.pb");
     for (flag, filename, format_args, expected) in [
-        ("-o", "mapped.pb", &[][..], &binary.stdout),
-        ("--output", "mapped.proto", &[][..], &binary.stdout),
+        ("-o", OsStr::new("mapped.pb"), &[][..], &binary.stdout),
         (
             "--output",
-            "verilog.pb",
+            OsStr::from_bytes(b"mapped-\xff.proto"),
+            &[][..],
+            &binary.stdout,
+        ),
+        (
+            "--output",
+            OsStr::new("verilog.pb"),
             &["--netlist-format", "gv"][..],
             &result.stdout,
         ),
@@ -313,11 +320,11 @@ fn boundary_registers_script_constraints_and_diagnostics() {
             .unwrap();
         assert!(
             named.status.success(),
-            "{filename}: {}",
+            "{filename:?}: {}",
             String::from_utf8_lossy(&named.stderr)
         );
-        assert!(named.stdout.is_empty(), "{filename}");
-        assert_eq!(&std::fs::read(path).unwrap(), expected, "{filename}");
+        assert!(named.stdout.is_empty(), "{filename:?}");
+        assert_eq!(&std::fs::read(path).unwrap(), expected, "{filename:?}");
     }
     let restored = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .arg("pb2gv")

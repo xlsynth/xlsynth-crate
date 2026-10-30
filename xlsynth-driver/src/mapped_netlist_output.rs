@@ -29,6 +29,7 @@ pub fn output_arg() -> Arg {
         .long("output")
         .short('o')
         .value_name("PATH")
+        .value_parser(clap::value_parser!(PathBuf))
         .default_value("-")
         .help("Mapped netlist output path ('-' for stdout). Defaults to protobuf for .pb or .proto and Verilog otherwise")
 }
