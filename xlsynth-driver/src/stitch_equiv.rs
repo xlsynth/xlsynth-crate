@@ -17,7 +17,7 @@ use xlsynth_g8r::stitch_equiv::{
 /// gates.
 pub fn command() -> Command {
     Command::new("stitch-equiv")
-        .about("Proves post-fill output equivalence of a free-running DSLX stitch pipeline and mapped gates")
+        .about("Proves output equivalence of a DSLX stitch pipeline and mapped gates under the spec's valid and reset protocol")
         .arg(Arg::new("spec").long("spec").required(true).value_name("PATH")
             .value_parser(value_parser!(PathBuf)).help("TOML stitch specification"))
         .arg(Arg::new("netlist").long("netlist").required(true).value_name("PATH")
@@ -35,7 +35,7 @@ pub fn command() -> Command {
             .help("Compare behavioral XLS IR (Bitwuzla) or a gatified reference (CaDiCaL) against the mapped cells"))
         .arg(Arg::new("proof-mode").long("proof-mode").value_name("MODE")
             .value_parser(["auto", "stages", "whole-pipeline"]).default_value("auto")
-            .help("Try stage proofs with post-fill fallback, require stage proofs, or prove the whole pipeline directly"))
+            .help("Try stage proofs with whole-pipeline fallback, require stage proofs, or check the whole pipeline directly"))
         .arg(Arg::new("jobs").long("jobs").value_name("N").value_parser(value_parser!(NonZeroUsize))
             .help("Maximum concurrent stage proof leaves (default available CPUs)"))
         .arg(Arg::new("stage-script").long("stage-script").value_name("STAGE=PATH").action(ArgAction::Append)
@@ -127,14 +127,20 @@ pub fn handle(matches: &ArgMatches) -> Result<()> {
             }
         }
     }
+    let name = reference.name();
+    let mapped = module.unwrap_or(name);
+    let latency = reference.latency();
+    let edges = if latency == 1 { "edge" } else { "edges" };
     match report.result {
-        StitchEquivResult::Proved => println!(
-            "Proved {} equivalent to {} after {} rising clock edge{}.",
-            reference.name(),
-            module.unwrap_or(reference.name()),
-            reference.latency(),
-            if reference.latency() == 1 { "" } else { "s" },
+        StitchEquivResult::Proved if reference.has_valid_signal() => println!(
+            "Proved {name} equivalent to {mapped} under the stitch valid protocol ({latency} rising clock {edges} of latency)."
         ),
+        StitchEquivResult::Proved => {
+            println!("Proved {name} equivalent to {mapped} after {latency} rising clock {edges}.")
+        }
+        StitchEquivResult::Disproved(trace) if reference.has_valid_signal() => {
+            bail!("valid-qualified output mismatch\n{trace}")
+        }
         StitchEquivResult::Disproved(trace) => bail!("post-fill output mismatch\n{trace}"),
     }
     Ok(())

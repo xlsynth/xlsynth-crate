@@ -219,14 +219,21 @@ fn evaluate_cone<S: Solver>(
     Ok(values)
 }
 
-/// Advances independent arbitrary physical state, observing all named outputs
-/// on the final input frame. Every earlier edge samples all effective Ds.
+/// Physical outputs after fill and the optional valid bit on cycles 1..latency.
+pub(super) struct MappedObservations<T> {
+    pub(super) final_outputs: BTreeMap<String, BitVec<T>>,
+    pub(super) prefill_valid: Vec<BitVec<T>>,
+}
+
+/// Advances arbitrary physical state once per edge. A reset can make output
+/// validity observable before fill, so retain those bits when requested.
 pub(super) fn unroll_mapped<S: Solver>(
     solver: &mut S,
     mapped: &SequentialGateFn,
     frames: &[BTreeMap<String, BitVec<S::Term>>],
     initial_q: &[BitVec<S::Term>],
-) -> Result<BTreeMap<String, BitVec<S::Term>>, String> {
+    prefill_valid_name: Option<&str>,
+) -> Result<MappedObservations<S::Term>, String> {
     let (observation, advances) = frames
         .split_last()
         .ok_or("unrolling needs an observation frame")?;
@@ -253,10 +260,33 @@ pub(super) fn unroll_mapped<S: Solver>(
         .iter()
         .map(|r| &graph.outputs[r.d.index()].bit_vector)
         .collect();
-    let capture_order = cone_order(graph, captures.iter().flat_map(|d| d.iter_lsb_to_msb()));
+    let valid = prefill_valid_name
+        .map(|name| {
+            let port = mapped
+                .outputs
+                .iter()
+                .map(|id| &graph.outputs[id.index()])
+                .find(|o| o.name == name && o.bit_vector.get_bit_count() == 1)
+                .ok_or_else(|| format!("missing scalar mapped valid output '{name}'"))?;
+            Ok::<_, String>(port.bit_vector.get_lsb(0))
+        })
+        .transpose()?;
+    let capture_order = cone_order(
+        graph,
+        captures
+            .iter()
+            .flat_map(|d| d.iter_lsb_to_msb())
+            .chain(valid),
+    );
     let mut q = initial_q.to_vec();
-    for frame in advances {
+    let mut prefill_valid = Vec::new();
+    for (cycle, frame) in advances.iter().enumerate() {
         let values = evaluate_cone(solver, graph, &capture_order, &bindings, frame, &q)?;
+        if cycle > 0
+            && let Some(valid) = valid
+        {
+            prefill_valid.push(operand_term(solver, *valid, &values));
+        }
         q = captures
             .iter()
             .map(|d| pack_bits(solver, d.iter_lsb_to_msb(), &values))
@@ -272,7 +302,7 @@ pub(super) fn unroll_mapped<S: Solver>(
         outputs.iter().flat_map(|o| o.bit_vector.iter_lsb_to_msb()),
     );
     let values = evaluate_cone(solver, graph, &observe_order, &bindings, observation, &q)?;
-    Ok(outputs
+    let final_outputs = outputs
         .into_iter()
         .map(|o| {
             (
@@ -280,5 +310,9 @@ pub(super) fn unroll_mapped<S: Solver>(
                 pack_bits(solver, o.bit_vector.iter_lsb_to_msb(), &values),
             )
         })
-        .collect())
+        .collect();
+    Ok(MappedObservations {
+        final_outputs,
+        prefill_valid,
+    })
 }

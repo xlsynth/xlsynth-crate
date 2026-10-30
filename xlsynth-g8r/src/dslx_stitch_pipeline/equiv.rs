@@ -5,20 +5,20 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use super::ResolvedStitchPipeline;
-use crate::netlist::gv_eval::project_sequential_module;
+use crate::netlist::gv_eval::{LabeledSequentialNetlistAig, project_sequential_module};
 use crate::netlist::io::{load_liberty_from_path, read_gv_for_proof_from_path, select_module};
 use crate::process_ir_path::CanonicalG8rOptions;
 use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
 #[cfg(feature = "has-bitwuzla")]
 use crate::stitch_equiv::BehavioralPipeline;
 use crate::stitch_equiv::{
-    ProofReference, StitchEquivResult, StitchProofOptions, StitchProofReport, StitchProofSolver,
-    prove_with_stage_options,
+    ProofReference, StitchEquivResult, StitchObservation, StitchProofOptions, StitchProofReport,
+    StitchProofSolver, prove_with_stage_options,
 };
 
 impl ResolvedStitchPipeline {
-    /// Checks the free-running pipeline's outputs against a Liberty-backed
-    /// netlist after fill.
+    /// Checks the pipeline's defined valid and data outputs against a
+    /// Liberty-backed netlist.
     pub fn prove_equivalent_to_gv(
         &self,
         netlist_path: &Path,
@@ -35,37 +35,14 @@ impl ResolvedStitchPipeline {
             .result)
     }
 
-    /// Checks the mapped circuit using the selected stage scripts and worker
-    /// budget, and reports how the external equivalence result was obtained.
-    pub fn prove_equivalent_to_gv_with_options(
+    /// Loads the mapped transition graph with the stitch clock and exact GV
+    /// ABI.
+    pub(super) fn load_mapped_for_check(
         &self,
         netlist_path: &Path,
         liberty_path: &Path,
         module_name: Option<&str>,
-        options: &StitchProofOptions,
-    ) -> Result<StitchProofReport> {
-        let controls = [
-            (
-                "input_valid_signal",
-                self.boundary.input_valid_signal.as_deref(),
-            ),
-            (
-                "output_valid_signal",
-                self.boundary.output_valid_signal.as_deref(),
-            ),
-            ("reset", self.boundary.reset_signal.as_deref()),
-        ];
-        let configured = controls
-            .iter()
-            .filter_map(|(field, value)| value.map(|name| format!("{field} = {name:?}")))
-            .collect::<Vec<_>>();
-        if !configured.is_empty() {
-            bail!(
-                "unsupported stitch controls for '{}': {}. stitch-equiv checks free-running pipelines and compares data on every cycle after fill. Valid-qualified observations and reset sequences are not yet supported",
-                self.name(),
-                configured.join(", ")
-            );
-        }
+    ) -> Result<LabeledSequentialNetlistAig> {
         // A proof must preserve the source ABI and literal values. The strict
         // GV reader rejects lossy constructs such as unsized signed literals
         // that would become zero-extended in the transition graph.
@@ -90,6 +67,19 @@ impl ResolvedStitchPipeline {
                 actual.port_name
             );
         }
+        Ok(mapped)
+    }
+
+    /// Checks the mapped circuit using the selected stage scripts and worker
+    /// budget, and reports how the external equivalence result was obtained.
+    pub fn prove_equivalent_to_gv_with_options(
+        &self,
+        netlist_path: &Path,
+        liberty_path: &Path,
+        module_name: Option<&str>,
+        options: &StitchProofOptions,
+    ) -> Result<StitchProofReport> {
+        let mapped = self.load_mapped_for_check(netlist_path, liberty_path, module_name)?;
         // Give gate! its DSLX value semantics. Keep optional mapping rewrites
         // out of the reference so a native implementation using them is
         // checked against a separately lowered graph.
@@ -119,6 +109,7 @@ impl ResolvedStitchPipeline {
                 layout,
                 &mapped,
                 self.latency(),
+                StitchObservation::from(&self.boundary),
                 &stage_names,
                 options,
                 model,
@@ -132,16 +123,9 @@ impl ResolvedStitchPipeline {
             }
             #[cfg(feature = "has-bitwuzla")]
             StitchProofSolver::Bitwuzla { timeout } => {
-                let stages = BehavioralPipeline::from_xls(
-                    &self.ir,
-                    &self.stages,
-                    self.boundary.flop_inputs,
-                    self.boundary.flop_outputs,
-                )
-                .map_err(anyhow::Error::msg)?;
-                let layout = stages
-                    .interface_layout(&self.boundary)
+                let stages = BehavioralPipeline::from_xls(&self.ir, &self.stages, &self.boundary)
                     .map_err(anyhow::Error::msg)?;
+                let layout = stages.interface_layout().map_err(anyhow::Error::msg)?;
                 let lower_for_pairing = || {
                     lower_gates().map_err(|e| {
                         format!("could not gatify reference for register pairing: {e}")

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use rand::{RngCore, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+use super::StitchObservation;
 use crate::aig::SequentialGateFn;
 use crate::aig_sim::gate_simd::{Vec256, eval_node_values_in_order_into};
 
@@ -34,7 +35,11 @@ struct BitSample {
 /// Samples 256 independent input histories together, retaining only register
 /// values after fill. Both designs draw identical input bits in port-name
 /// order.
-fn sample_registers(design: &SequentialGateFn, latency: usize) -> Result<Vec<BitSample>, String> {
+fn sample_registers(
+    design: &SequentialGateFn,
+    latency: usize,
+    controls: StitchObservation<'_>,
+) -> Result<Vec<BitSample>, String> {
     let mut offsets = Vec::with_capacity(design.transition.inputs.len());
     let mut inputs = Vec::new();
     for port in &design.transition.inputs {
@@ -60,7 +65,15 @@ fn sample_registers(design: &SequentialGateFn, latency: usize) -> Result<Vec<Bit
     if samples.is_empty() {
         return Ok(samples);
     }
-    let warmup = latency.saturating_sub(1);
+    // Launch one transaction in every lane and keep reset inactive until it
+    // reaches the last layer. This aligns held data even for complementary
+    // physical encodings that both started at zero. Random valid bits after
+    // that launch distinguish the valid flops throughout the pipeline.
+    let warmup = if controls.input_valid.is_some() {
+        latency
+    } else {
+        latency.saturating_sub(1)
+    };
     let frames = warmup
         .checked_add(SAMPLE_FRAMES)
         .ok_or("pipeline latency overflow")?;
@@ -70,7 +83,16 @@ fn sample_registers(design: &SequentialGateFn, latency: usize) -> Result<Vec<Bit
     for frame in 0..frames {
         for id in &external {
             let start = offsets[id.index()];
-            let width = design.transition.inputs[id.index()].get_bit_count();
+            let port = &design.transition.inputs[id.index()];
+            let width = port.get_bit_count();
+            if frame == 0 && latency > 0 && controls.input_valid == Some(port.name.as_str()) {
+                inputs[start] = Vec256::splat(true);
+                continue;
+            }
+            if frame < warmup && controls.reset == Some(port.name.as_str()) {
+                inputs[start] = Vec256::splat(controls.reset_active_low);
+                continue;
+            }
             for value in &mut inputs[start..start + width] {
                 // Sparse and dense stimuli exercise rare conditions missed by
                 // uniform data, for example exponent extremes in FP arithmetic.
@@ -109,9 +131,10 @@ pub(super) fn direct_register_pairs(
     reference: &SequentialGateFn,
     mapped: &SequentialGateFn,
     latency: usize,
+    controls: StitchObservation<'_>,
 ) -> Result<Vec<RegisterBitPair>, String> {
-    let logical = sample_registers(reference, latency)?;
-    let physical = sample_registers(mapped, latency)?;
+    let logical = sample_registers(reference, latency, controls)?;
+    let physical = sample_registers(mapped, latency, controls)?;
     let physical_by_name: BTreeMap<_, _> = physical
         .iter()
         .enumerate()
@@ -178,7 +201,8 @@ pub(super) fn direct_register_pairs(
 mod tests {
     use super::*;
     use crate::aig::{
-        AigBitVector, ClockPort, GateBuilder, GateBuilderOptions, add_output_registers,
+        AigBitVector, ClockPort, GateBuilder, GateBuilderOptions, SequentialPipelineOptions,
+        add_output_registers, stitch_gate_fns_into_pipeline,
     };
 
     /// Two logical outputs share x[0]. The physical variant splits a bus into
@@ -213,7 +237,8 @@ mod tests {
     fn pairs_renamed_permuted_bits_with_polarity_and_reserves_named_aliases() {
         let reference = register_fixture(false).unwrap();
         let mapped = register_fixture(true).unwrap();
-        let pairs = direct_register_pairs(&reference, &mapped, 1).unwrap();
+        let pairs =
+            direct_register_pairs(&reference, &mapped, 1, StitchObservation::default()).unwrap();
         let tuples: Vec<_> = pairs
             .iter()
             .map(|p| {
@@ -257,12 +282,58 @@ mod tests {
         for (index, register) in mapped.registers.iter_mut().enumerate() {
             register.name = format!("ff_{index}");
         }
-        let pairs = direct_register_pairs(&reference, &mapped, LAYERS).unwrap();
+        let pairs =
+            direct_register_pairs(&reference, &mapped, LAYERS, StitchObservation::default())
+                .unwrap();
         assert_eq!(pairs.len(), LAYERS);
         for (index, pair) in pairs.iter().enumerate() {
             assert_eq!(pair.reference_register, index);
             assert_eq!(pair.mapped_register, LAYERS - index - 1);
             assert!(pair.inverted);
+        }
+    }
+
+    #[test]
+    fn pairs_renamed_and_reordered_deep_valid_and_inverted_data_flops() {
+        const LAYERS: usize = 12;
+        let boundary = SequentialPipelineOptions {
+            name: "pipe".into(),
+            clock: ClockPort { name: "clk".into() },
+            flop_inputs: false,
+            flop_outputs: true,
+            input_valid_signal: Some("vin".into()),
+            output_valid_signal: Some("vout".into()),
+            reset_signal: Some("rst_n".into()),
+            reset_active_low: true,
+        };
+        // Inverting all stages complements every other data flop while
+        // preserving the observable result. Each data flop holds on bubbles.
+        let build = |invert: bool| {
+            let mut b = GateBuilder::new("stage".into(), GateBuilderOptions::opt());
+            let x = *b.add_input("x".into(), 1).get_lsb(0);
+            b.add_output("out".into(), if invert { x.negate() } else { x }.into());
+            let stage = b.build();
+            stitch_gate_fns_into_pipeline(&vec![stage; LAYERS], &boundary)
+        };
+        let reference = build(false).unwrap();
+        let mut mapped = build(true).unwrap();
+        mapped.registers.reverse();
+        for (index, register) in mapped.registers.iter_mut().enumerate() {
+            register.name = format!("ff_{index}");
+        }
+        let pairs = direct_register_pairs(
+            &reference,
+            &mapped,
+            LAYERS,
+            StitchObservation::from(&boundary),
+        )
+        .unwrap();
+        assert_eq!(pairs.len(), 2 * LAYERS);
+        for (index, pair) in pairs.iter().enumerate() {
+            assert_eq!(pair.reference_register, index);
+            assert_eq!(pair.mapped_register, 2 * LAYERS - 1 - index);
+            // Each layer has a data flop followed by a valid flop.
+            assert_eq!(pair.inverted, index % 4 == 0);
         }
     }
 
@@ -274,13 +345,19 @@ mod tests {
         b.add_input("y".into(), 1);
         b.add_output("out".into(), x);
         let empty = SequentialGateFn::from_gate_fn(b.build());
-        assert!(direct_register_pairs(&empty, &empty, 0).unwrap().is_empty());
+        assert!(
+            direct_register_pairs(&empty, &empty, 0, StitchObservation::default())
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            direct_register_pairs(&registered, &empty, 1).unwrap_err(),
+            direct_register_pairs(&registered, &empty, 1, StitchObservation::default())
+                .unwrap_err(),
             "no direct mapped partner for reference boundary register 'p0_bus[0]' (5 reference bits, 0 mapped bits)"
         );
         assert_eq!(
-            direct_register_pairs(&empty, &registered, 1).unwrap_err(),
+            direct_register_pairs(&empty, &registered, 1, StitchObservation::default())
+                .unwrap_err(),
             "no direct reference boundary partner for mapped register 'p0_bus[0]' (0 reference bits, 5 mapped bits)"
         );
     }

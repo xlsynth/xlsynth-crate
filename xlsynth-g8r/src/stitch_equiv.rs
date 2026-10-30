@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Formal equivalence of a free-running stitched pipeline and a mapped netlist.
+//! Formal equivalence of a stitched pipeline and a mapped netlist.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,7 +12,7 @@ use xlsynth_pir::IrBits;
 use crate::aig::import::import_gate_fn;
 use crate::aig::sequential_pipeline::StitchedGatePipeline;
 use crate::aig::topo::extract_cone;
-use crate::aig::{AigBitVector, SequentialGateFn};
+use crate::aig::{AigBitVector, SequentialGateFn, SequentialPipelineOptions};
 use crate::aig_sim::sequential::{SequentialState, simulate};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
 use crate::netlist::gv_eval::{
@@ -39,15 +39,75 @@ pub(crate) use behavioral::BehavioralPipeline;
 
 pub use stage_script::StageProofScript;
 
+/// The controls that define which outputs are observable in a stitch window.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct StitchObservation<'a> {
+    pub(crate) input_valid: Option<&'a str>,
+    pub(crate) output_valid: Option<&'a str>,
+    pub(crate) reset: Option<&'a str>,
+    pub(crate) reset_active_low: bool,
+}
+
+impl<'a> From<&'a SequentialPipelineOptions> for StitchObservation<'a> {
+    fn from(boundary: &'a SequentialPipelineOptions) -> Self {
+        Self {
+            input_valid: boundary.input_valid_signal.as_deref(),
+            output_valid: boundary.output_valid_signal.as_deref(),
+            reset: boundary.reset_signal.as_deref(),
+            reset_active_low: boundary.reset_active_low,
+        }
+    }
+}
+
+impl StitchObservation<'_> {
+    /// Returns the specified output validity, or None while power-up state
+    /// can still determine it. The last frame supplies the observation inputs.
+    pub(crate) fn valid_at(
+        &self,
+        latency: usize,
+        frames: &[BTreeMap<String, IrBits>],
+    ) -> Option<bool> {
+        let (_, edges) = frames.split_last()?;
+        let start = edges.len().saturating_sub(latency);
+        if let Some(reset) = self.reset
+            && edges[start..]
+                .iter()
+                .any(|frame| frame[reset].is_zero() == self.reset_active_low)
+        {
+            // Synchronous reset clears every valid register at this edge.
+            return Some(false);
+        }
+        (edges.len() >= latency).then(|| {
+            self.input_valid
+                .is_none_or(|valid| !frames[start][valid].is_zero())
+        })
+    }
+
+    /// Tests the named outputs that are observable at the end of this trace.
+    pub(crate) fn mismatch(
+        &self,
+        latency: usize,
+        frames: &[BTreeMap<String, IrBits>],
+        reference: &BTreeMap<String, IrBits>,
+        mapped: &BTreeMap<String, IrBits>,
+    ) -> bool {
+        self.valid_at(latency, frames).is_some_and(|data_valid| {
+            reference.iter().any(|(name, value)| {
+                (data_valid || Some(name.as_str()) == self.output_valid) && *value != mapped[name]
+            })
+        })
+    }
+}
+
 /// Selects when to use the direct register correspondence proof.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum StitchProofMode {
-    /// Try stage obligations first, then check the post-fill window if needed.
+    /// Try stage obligations first, then check the external outputs if needed.
     #[default]
     Auto,
     /// Require a complete, proved correspondence between the two state vectors.
     Stages,
-    /// Compare only the post-fill external outputs.
+    /// Compare defined valid indications and qualified data directly.
     WholePipeline,
 }
 
@@ -123,7 +183,7 @@ pub struct StitchProofReport {
     pub method: StitchProofMethod,
 }
 
-/// Conclusion of checking every externally visible output after pipeline fill.
+/// Conclusion of checking every defined valid indication and qualified output.
 #[derive(Debug, PartialEq, Eq)]
 pub enum StitchEquivResult {
     Proved,
@@ -264,38 +324,39 @@ fn check_mapped_abi(
     Ok(())
 }
 
-/// Unrolls one transition graph, sampling its outputs in the last input frame.
+/// Unrolls one transition graph, sampling its outputs before each edge.
 fn unroll(
     design: &SequentialGateFn,
     frames: &[BTreeMap<&str, AigBitVector>],
     initial_state: &[AigBitVector],
     builder: &mut GateBuilder,
-) -> Result<BTreeMap<String, AigBitVector>, String> {
+) -> Result<Vec<BTreeMap<String, AigBitVector>>, String> {
     let mut bindings = vec![AigBitVector::zeros(0); design.transition.inputs.len()];
+    let mut outputs = Vec::with_capacity(frames.len());
     for (register, value) in design.registers.iter().zip(initial_state) {
         bindings[register.q.index()] = value.clone();
     }
-    for (index, frame) in frames.iter().enumerate() {
+    for frame in frames {
         for id in &design.inputs {
             let name = &design.transition.inputs[id.index()].name;
             bindings[id.index()] = frame[name.as_str()].clone();
         }
         let values = import_gate_fn(&design.transition, &bindings, builder)?;
-        if index + 1 == frames.len() {
-            return Ok(design
+        outputs.push(
+            design
                 .outputs
                 .iter()
                 .map(|id| {
                     let name = output_name(&design.transition.outputs[id.index()].name);
                     (name.to_string(), values[id.index()].clone())
                 })
-                .collect());
-        }
+                .collect(),
+        );
         for register in &design.registers {
             bindings[register.q.index()] = values[register.d.index()].clone();
         }
     }
-    Err("unrolling needs at least an observation frame".into())
+    Ok(outputs)
 }
 
 /// Allocates independent symbolic power-up bits even for equally named flops.
@@ -317,12 +378,13 @@ fn initial_state(
         .collect()
 }
 
-/// Replays a SAT model through the original transition graph as a cross-check.
-fn replay(
+/// Replays the named input frames, sampling all external outputs before each
+/// edge.
+fn replay_trace(
     design: &SequentialGateFn,
     state: &BTreeMap<String, IrBits>,
     frames: &[BTreeMap<String, IrBits>],
-) -> Result<BTreeMap<String, IrBits>, String> {
+) -> Result<Vec<BTreeMap<String, IrBits>>, String> {
     let initial = SequentialState::from_register_values(
         design,
         design
@@ -342,20 +404,21 @@ fn replay(
         })
         .collect::<Vec<_>>();
     let trace = simulate(design, &inputs, initial)?;
-    Ok(design
-        .outputs
+    Ok(trace
+        .external_outputs()
         .iter()
-        .zip(
-            trace
-                .external_outputs()
-                .last()
-                .ok_or("missing observation frame")?,
-        )
-        .map(|(id, value)| {
-            (
-                output_name(&design.transition.outputs[id.index()].name).to_owned(),
-                value.clone(),
-            )
+        .map(|values| {
+            design
+                .outputs
+                .iter()
+                .zip(values)
+                .map(|(id, value)| {
+                    (
+                        output_name(&design.transition.outputs[id.index()].name).to_owned(),
+                        value.clone(),
+                    )
+                })
+                .collect()
         })
         .collect())
 }
@@ -402,12 +465,13 @@ enum StageAttempt {
 
 /// Proves the Q relation inductive by checking every D bit and external output.
 /// The bijection gives every mapped power-up state a corresponding reference
-/// state, which the free-running reference flushes within its specified
-/// latency.
+/// state. At a defined observation the reference valid and qualified data
+/// are independent of that initial state.
 fn prove_stages(
     pipeline: &StitchedGatePipeline,
     implementation: &SequentialGateFn,
     latency: usize,
+    observation: StitchObservation<'_>,
     stage_names: &[String],
     options: &StitchProofOptions,
     model: ProofReference<'_>,
@@ -430,13 +494,18 @@ fn prove_stages(
             Ok(Vec::new())
         }
         ProofReference::Gates(_) => {
-            correspondence::direct_register_pairs(reference, implementation, latency)
+            correspondence::direct_register_pairs(reference, implementation, latency, observation)
         }
         #[cfg(feature = "has-bitwuzla")]
         ProofReference::Behavioral {
             lower_for_pairing, ..
         } => lower_for_pairing().and_then(|candidate| {
-            correspondence::direct_register_pairs(&candidate.design, implementation, latency)
+            correspondence::direct_register_pairs(
+                &candidate.design,
+                implementation,
+                latency,
+                observation,
+            )
         }),
     };
     let pairs = match proposal {
@@ -535,12 +604,13 @@ fn prove_stages(
     })
 }
 
-/// Selects the proof strategy and, when needed, checks the external post-fill
-/// property independently of the proposed register relation.
+/// Selects the proof strategy and, when needed, checks the defined external
+/// observations independently of the proposed register relation.
 pub(crate) fn prove_with_stage_options(
     pipeline: &StitchedGatePipeline,
     mapped: &LabeledSequentialNetlistAig,
     latency: usize,
+    observation: StitchObservation<'_>,
     stage_names: &[String],
     options: &StitchProofOptions,
     model: ProofReference<'_>,
@@ -568,6 +638,7 @@ pub(crate) fn prove_with_stage_options(
                 pipeline,
                 implementation,
                 latency,
+                observation,
                 stage_names,
                 options,
                 model,
@@ -588,15 +659,27 @@ pub(crate) fn prove_with_stage_options(
         }
     };
     let result = match model {
-        ProofReference::Gates(formal) => {
-            prove_post_fill(reference, implementation, &expected, latency, *formal)
-        }
+        ProofReference::Gates(formal) => prove_post_fill(
+            reference,
+            implementation,
+            &expected,
+            latency,
+            observation,
+            *formal,
+        ),
         #[cfg(feature = "has-bitwuzla")]
         ProofReference::Behavioral {
             stages: behavior,
             timeout,
             ..
-        } => bitwuzla::prove_post_fill(behavior, reference, implementation, latency, timeout),
+        } => bitwuzla::prove_post_fill(
+            behavior,
+            reference,
+            implementation,
+            latency,
+            observation,
+            timeout,
+        ),
     }
     .map_err(|error| match &fallback_reason {
         Some(reason) => format!("{reason}; whole-pipeline proof: {error}"),
@@ -608,13 +691,14 @@ pub(crate) fn prove_with_stage_options(
     })
 }
 
-/// Proves output equality after fill, starting with independent arbitrary
-/// register contents on each side. A disproof is replayed in both designs.
+/// Checks post-fill outputs and pre-fill validity after a sampled reset.
+/// An arbitrary state at the start of the window covers every reset edge.
 fn prove_post_fill(
     reference: &SequentialGateFn,
     implementation: &SequentialGateFn,
     expected: &Interface,
     latency: usize,
+    observation: StitchObservation<'_>,
     options: GateFormalOptions,
 ) -> Result<StitchEquivResult, String> {
     let frame_count = latency.checked_add(1).ok_or("pipeline latency overflow")?;
@@ -639,9 +723,38 @@ fn prove_post_fill(
     let ref_outputs = unroll(reference, &frames, &ref_state, &mut builder)?;
     let mapped_outputs = unroll(implementation, &frames, &mapped_state, &mut builder)?;
     let mut mismatch = builder.get_false();
-    for (name, ref_value) in ref_outputs {
-        let differs = builder.add_ne_vec(&ref_value, &mapped_outputs[&name], ReductionKind::Tree);
-        mismatch = builder.add_or_binary(mismatch, differs);
+    let mut flushed = builder.get_false();
+    let accepted = observation
+        .input_valid
+        .map_or(builder.get_true(), |valid| *frames[0][valid].get_lsb(0));
+    for (i, (expected, actual)) in ref_outputs.iter().zip(&mapped_outputs).enumerate() {
+        if i == latency {
+            let data_valid = builder.add_and_binary(accepted, flushed.negate());
+            for (name, value) in expected {
+                let mut differs = builder.add_ne_vec(value, &actual[name], ReductionKind::Tree);
+                if Some(name.as_str()) != observation.output_valid {
+                    differs = builder.add_and_binary(data_valid, differs);
+                }
+                mismatch = builder.add_or_binary(mismatch, differs);
+            }
+        } else {
+            if let (Some(valid), Some(_)) = (observation.output_valid, observation.reset) {
+                // Before fill, a sampled reset makes the valid output defined.
+                let differs =
+                    builder.add_ne_vec(&expected[valid], &actual[valid], ReductionKind::Tree);
+                let observable = builder.add_and_binary(flushed, differs);
+                mismatch = builder.add_or_binary(mismatch, observable);
+            }
+            if let Some(reset) = observation.reset {
+                let bit = *frames[i][reset].get_lsb(0);
+                let active = if observation.reset_active_low {
+                    bit.negate()
+                } else {
+                    bit
+                };
+                flushed = builder.add_or_binary(flushed, active);
+            }
+        }
     }
     builder.add_output("mismatch".to_string(), mismatch.into());
     let graph = builder.build();
@@ -688,7 +801,7 @@ fn prove_post_fill(
     };
     let reference_initial_state = decode_state(reference, &ref_state);
     let mapped_initial_state = decode_state(implementation, &mapped_state);
-    let inputs_by_frame = frames
+    let mut inputs_by_frame = frames
         .iter()
         .map(|frame| {
             frame
@@ -697,10 +810,20 @@ fn prove_post_fill(
                 .collect()
         })
         .collect::<Vec<_>>();
-    let reference_outputs = replay(reference, &reference_initial_state, &inputs_by_frame)?;
-    let mapped_outputs = replay(implementation, &mapped_initial_state, &inputs_by_frame)?;
-    if reference_outputs == mapped_outputs {
-        return Err("SAT counterexample did not replay in the sequential simulator".into());
+    let reference_trace = replay_trace(reference, &reference_initial_state, &inputs_by_frame)?;
+    let mapped_trace = replay_trace(implementation, &mapped_initial_state, &inputs_by_frame)?;
+    let (index, (mut reference_outputs, mut mapped_outputs)) = reference_trace
+        .into_iter()
+        .zip(mapped_trace)
+        .enumerate()
+        .find(|(i, (reference, mapped))| {
+            observation.mismatch(latency, &inputs_by_frame[..=*i], reference, mapped)
+        })
+        .ok_or("SAT counterexample did not replay in the sequential simulator")?;
+    inputs_by_frame.truncate(index + 1);
+    if observation.valid_at(latency, &inputs_by_frame) == Some(false) {
+        reference_outputs.retain(|name, _| Some(name.as_str()) == observation.output_valid);
+        mapped_outputs.retain(|name, _| Some(name.as_str()) == observation.output_valid);
     }
     Ok(StitchEquivResult::Disproved(StitchCounterexample {
         reference_initial_state,
@@ -738,6 +861,7 @@ mod tests {
             &mapped.sequential_gate_fn,
             &interface,
             latency,
+            StitchObservation::default(),
             options,
         )
     }
@@ -768,6 +892,43 @@ mod tests {
             module_ports: Vec::new(),
             module_boundaries: Vec::new(),
             instances: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_reset_flushes_exactly_the_transactions_crossing_its_edge() {
+        let observation = StitchObservation {
+            input_valid: Some("vin"),
+            reset: Some("rst_n"),
+            reset_active_low: true,
+            output_valid: None,
+        };
+        let frames = [
+            (false, false), // reset edge, flushing unknown power-up validity
+            (true, true),   // launch transaction
+            (false, true),  // bubble
+            (true, false),  // observe transaction, then reset on this edge
+            (true, true),   // launch post-reset transaction
+            (false, true),
+            (false, true), // observe post-reset transaction
+        ]
+        .map(|(vin, rst_n)| {
+            BTreeMap::from([
+                ("vin".to_owned(), IrBits::bool(vin)),
+                ("rst_n".to_owned(), IrBits::bool(rst_n)),
+            ])
+        });
+        let expected = [
+            None,
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(true),
+        ];
+        for (i, valid) in expected.iter().enumerate() {
+            assert_eq!(observation.valid_at(2, &frames[..=i]), *valid);
         }
     }
 
@@ -831,8 +992,16 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
         let behavior = BehavioralPipeline::new(
             package,
             &[(stages[0].clone(), stages[0].clone())],
-            false,
-            true,
+            &SequentialPipelineOptions {
+                name: "invert".into(),
+                clock: ClockPort { name: "clk".into() },
+                flop_inputs: false,
+                flop_outputs: true,
+                input_valid_signal: None,
+                output_valid_signal: None,
+                reset_signal: None,
+                reset_active_low: false,
+            },
         )
         .unwrap();
         let lower = || {
@@ -853,6 +1022,7 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
             &pipeline,
             &implementation,
             1,
+            StitchObservation::default(),
             &stages,
             &options,
             ProofReference::Gates(&formal),
@@ -867,8 +1037,16 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
             lower_for_pairing: &lower,
         };
         assert_eq!(
-            prove_with_stage_options(&pipeline, &implementation, 1, &stages, &options, model)
-                .unwrap_err(),
+            prove_with_stage_options(
+                &pipeline,
+                &implementation,
+                1,
+                StitchObservation::default(),
+                &stages,
+                &options,
+                model
+            )
+            .unwrap_err(),
             "the proposed correspondence fails the one-step obligation for 'invert'. Use whole-pipeline mode to check the external outputs after fill"
         );
         for mode in [StitchProofMode::Auto, StitchProofMode::WholePipeline] {
@@ -882,9 +1060,16 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
             } else {
                 model
             };
-            let report =
-                prove_with_stage_options(&pipeline, &implementation, 1, &stages, &options, model)
-                    .unwrap();
+            let report = prove_with_stage_options(
+                &pipeline,
+                &implementation,
+                1,
+                StitchObservation::default(),
+                &stages,
+                &options,
+                model,
+            )
+            .unwrap();
             let StitchEquivResult::Disproved(trace) = report.result else {
                 panic!("behavioral comparison must disprove the faulty lowering")
             };
@@ -946,6 +1131,7 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 &pipeline,
                 &implementation,
                 1,
+                StitchObservation::default(),
                 &stage_names,
                 &options,
                 ProofReference::Gates(&formal)
@@ -961,6 +1147,7 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 &pipeline,
                 &implementation,
                 1,
+                StitchObservation::default(),
                 &stage_names,
                 &options,
                 ProofReference::Gates(&formal)

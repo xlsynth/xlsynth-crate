@@ -23,19 +23,58 @@ use xlsynth_prover::solver::{BitVec, Solver};
 use crate::aig::sequential_pipeline::{StitchedGatePipeline, stitch_gate_fns_with_layout};
 use crate::aig::{AigBitVector, GateBuilder, GateBuilderOptions, SequentialPipelineOptions};
 
+/// Data Q words in parameter order followed by the optional valid Q.
+struct RegisterLayer {
+    data: Range<usize>,
+    valid: Option<usize>,
+}
+
+impl RegisterLayer {
+    /// Allocates the layer in the same order as the stitch wrapper.
+    fn allocate(next: &mut usize, data_words: usize, has_valid: bool) -> Self {
+        let data = *next..*next + data_words;
+        let valid = has_valid.then_some(data.end);
+        *next = data.end + usize::from(has_valid);
+        Self { data, valid }
+    }
+
+    /// Packs effective D in logical register order. Data holds during a bubble
+    /// while the valid flop loads every cycle, with synchronous reset priority.
+    fn capture<S: Solver>(
+        &self,
+        solver: &mut S,
+        state: &[BitVec<S::Term>],
+        data: &BitVec<S::Term>,
+        valid: Option<&BitVec<S::Term>>,
+        reset_inactive: Option<&BitVec<S::Term>>,
+    ) -> BitVec<S::Term> {
+        let Some(valid) = valid else {
+            return data.clone();
+        };
+        let held = solver.concat_many(state[self.data.clone()].iter().rev().collect());
+        let next_data = solver.ite(valid, data, &held);
+        let next_valid = match reset_inactive {
+            Some(inactive) => solver.and(valid, inactive),
+            None => valid.clone(),
+        };
+        solver.concat(&next_valid, &next_data)
+    }
+}
+
 /// One DSLX stage and the logical Q words that supply its parameters.
 struct Stage {
     name: String,
     ir_name: String,
-    input_registers: Option<Range<usize>>,
+    input_layer: Option<RegisterLayer>,
     obligation_width: usize,
 }
 
-/// Original stage functions and their free-running register layout.
+/// Original stage functions and the register layout of their stitch wrapper.
 pub(crate) struct BehavioralPipeline {
     package: ir::Package,
     stages: Vec<Stage>,
-    output_register: Option<usize>,
+    output_layer: Option<RegisterLayer>,
+    boundary: SequentialPipelineOptions,
     register_count: usize,
 }
 
@@ -191,8 +230,7 @@ impl BehavioralPipeline {
     pub(crate) fn from_xls(
         source: &IrPackage,
         names: &[(String, String)],
-        flop_inputs: bool,
-        flop_outputs: bool,
+        boundary: &SequentialPipelineOptions,
     ) -> Result<Self, String> {
         let mut members = Vec::new();
         let mut visited = HashSet::new();
@@ -226,15 +264,14 @@ impl BehavioralPipeline {
             file_table: ir::FileTable::new(),
             top: None,
         };
-        Self::new(package, names, flop_inputs, flop_outputs)
+        Self::new(package, names, boundary)
     }
 
     /// Resolves all stage interfaces before constructing any solver terms.
     pub(crate) fn new(
         package: ir::Package,
         names: &[(String, String)],
-        flop_inputs: bool,
-        flop_outputs: bool,
+        boundary: &SequentialPipelineOptions,
     ) -> Result<Self, String> {
         if names.is_empty() {
             return Err("behavioral pipeline needs at least one stage".into());
@@ -243,6 +280,7 @@ impl BehavioralPipeline {
         verify_package(&package).map_err(|e| format!("invalid behavioral stage IR: {e}"))?;
         let mut stages = Vec::with_capacity(names.len());
         let mut register_count = 0;
+        let has_valid = boundary.input_valid_signal.is_some();
         let mut previous_width = None;
         let mut checked = HashSet::new();
         for (index, (name, ir_name)) in names.iter().enumerate() {
@@ -259,44 +297,48 @@ impl BehavioralPipeline {
                     "stage '{name}': expected {input_width} input bits, previous stage returns {width}"
                 ));
             }
-            let input_registers = (index != 0 || flop_inputs).then(|| {
-                let start = register_count;
-                register_count += func.params.len();
-                start..register_count
+            let input_layer = (index != 0 || boundary.flop_inputs).then(|| {
+                RegisterLayer::allocate(&mut register_count, func.params.len(), has_valid)
             });
             let output_width = func.ret_ty.bit_count();
             previous_width = Some(output_width);
             // Every stage has either D bits or an unregistered data output.
             // The last stage with output flops checks both D and visible Q.
             let mut obligation_width = output_width;
-            if index == 0 && flop_inputs {
-                obligation_width += input_width;
+            if index == 0 && boundary.flop_inputs {
+                obligation_width += input_width + usize::from(has_valid);
             }
-            if index + 1 == names.len() && flop_outputs {
-                obligation_width += output_width;
+            if index + 1 < names.len() || boundary.flop_outputs {
+                obligation_width += usize::from(has_valid);
+            }
+            if index + 1 == names.len() {
+                if boundary.flop_outputs {
+                    obligation_width += output_width;
+                }
+                obligation_width += usize::from(boundary.output_valid_signal.is_some());
             }
             stages.push(Stage {
                 name: name.clone(),
                 ir_name: ir_name.clone(),
-                input_registers,
+                input_layer,
                 obligation_width,
             });
         }
-        let output_register = flop_outputs.then_some(register_count);
+        let output_layer = boundary
+            .flop_outputs
+            .then(|| RegisterLayer::allocate(&mut register_count, 1, has_valid));
         Ok(Self {
             package,
             stages,
-            output_register,
-            register_count: register_count + usize::from(flop_outputs),
+            output_layer,
+            boundary: boundary.clone(),
+            register_count,
         })
     }
 
     /// Builds the ABI and state layout from IR signatures alone. Data outputs
     /// are placeholders and must never be used to evaluate or prove behavior.
-    pub(crate) fn interface_layout(
-        &self,
-        boundary: &SequentialPipelineOptions,
-    ) -> Result<StitchedGatePipeline, String> {
+    pub(crate) fn interface_layout(&self) -> Result<StitchedGatePipeline, String> {
         let mut interfaces = Vec::with_capacity(self.stages.len());
         for stage in &self.stages {
             let func = self.function(stage)?;
@@ -310,7 +352,7 @@ impl BehavioralPipeline {
             );
             interfaces.push(builder.build());
         }
-        stitch_gate_fns_with_layout(&interfaces, boundary)
+        stitch_gate_fns_with_layout(&interfaces, &self.boundary)
     }
 
     /// Returns the ordered D and visible output width of a stage obligation.
@@ -407,32 +449,56 @@ impl BehavioralPipeline {
         } else {
             Vec::new()
         };
-        let mut expected = BitVec::ZeroWidth;
-        let args = if let Some(registers) = &stage.input_registers {
-            // Stage zero owns the wrapper input flops' D obligations as well
-            // as its own computation on their independently free Q values.
-            for value in &external {
-                expected = solver.concat(value, &expected);
+        let external_valid = self
+            .boundary
+            .input_valid_signal
+            .as_ref()
+            .map(|name| &inputs[name]);
+        let reset_inactive = self.boundary.reset_signal.as_ref().map(|name| {
+            if self.boundary.reset_active_low {
+                inputs[name].clone()
+            } else {
+                solver.not(&inputs[name])
             }
-            &state[registers.clone()]
+        });
+
+        // Each stage owns the layer following it. Stage zero additionally
+        // owns any wrapper input flops, including a nullary stage's valid flop.
+        let mut expected = BitVec::ZeroWidth;
+        let (args, valid) = if let Some(layer) = &stage.input_layer {
+            if index == 0 {
+                let data = solver.concat_many(external.iter().rev().collect());
+                expected = layer.capture(
+                    solver,
+                    state,
+                    &data,
+                    external_valid,
+                    reset_inactive.as_ref(),
+                );
+            }
+            (&state[layer.data.clone()], layer.valid.map(|q| &state[q]))
         } else {
-            &external[..]
+            (&external[..], external_valid)
         };
         let result = self.translate(solver, stage, func, args)?;
-        expected = solver.concat(&result, &expected);
-        if index + 1 == self.stages.len()
-            && let Some(reg) = self.output_register
-        {
-            let output = &state[reg];
-            if output.get_width() != result.get_width() {
-                return Err(format!(
-                    "stage '{}': output register width {} differs from IR result width {}",
-                    stage.name,
-                    output.get_width(),
-                    result.get_width()
-                ));
-            }
+        let next = self.stages.get(index + 1);
+        let capture = next
+            .and_then(|s| s.input_layer.as_ref())
+            .or(self.output_layer.as_ref());
+        if let Some(layer) = capture {
+            let d = layer.capture(solver, state, &result, valid, reset_inactive.as_ref());
+            expected = solver.concat(&d, &expected);
+        }
+        if next.is_none() {
+            let (output, output_valid) = match &self.output_layer {
+                Some(layer) => (&state[layer.data.start], layer.valid.map(|q| &state[q])),
+                None => (&result, valid),
+            };
             expected = solver.concat(output, &expected);
+            if self.boundary.output_valid_signal.is_some() {
+                let output_valid = output_valid.ok_or("output valid requires input valid")?;
+                expected = solver.concat(output_valid, &expected);
+            }
         }
         Ok(expected)
     }
@@ -532,14 +598,8 @@ fn named_inputs<T: Clone>(
     inputs: &BTreeMap<String, T>,
     width: impl Fn(&T) -> usize,
 ) -> Result<Vec<T>, String> {
-    if inputs.len() != func.params.len() {
-        return Err(format!(
-            "stage '{}': expected {} external inputs, got {}",
-            stage.name,
-            func.params.len(),
-            inputs.len()
-        ));
-    }
+    // A frame may also carry wrapper valid and reset inputs. Only the stage's
+    // declared data parameters participate in the DSLX call.
     func.param_nodes()
         .map(|p| {
             let name = p.param_name();
@@ -565,10 +625,24 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::aig::ClockPort;
     use xlsynth_prover::solver::{
         Response,
         bitwuzla::{Bitwuzla, BitwuzlaOptions},
     };
+
+    fn free_running(flop_inputs: bool, flop_outputs: bool) -> SequentialPipelineOptions {
+        SequentialPipelineOptions {
+            name: "pipe".into(),
+            clock: ClockPort { name: "clk".into() },
+            flop_inputs,
+            flop_outputs,
+            input_valid_signal: None,
+            output_valid_signal: None,
+            reset_signal: None,
+            reset_active_low: false,
+        }
+    }
 
     const AGGREGATE_PIPELINE: &str = r#"package aggregate
 
@@ -593,7 +667,7 @@ fn read(a: bits[1] id=7, b: bits[2][2] id=8) -> bits[3] {
             ("pack".into(), "pack".into()),
             ("read".into(), "read".into()),
         ];
-        let pipeline = BehavioralPipeline::new(package, &names, true, true).unwrap();
+        let pipeline = BehavioralPipeline::new(package, &names, &free_running(true, true)).unwrap();
         let mut inputs = BTreeMap::from([
             ("x".into(), IrBits::make_ubits(5, 0b10011).unwrap()),
             ("en".into(), IrBits::bool(true)),
@@ -615,7 +689,7 @@ fn read(a: bits[1] id=7, b: bits[2][2] id=8) -> bits[3] {
             ("pack".into(), "pack".into()),
             ("read".into(), "read".into()),
         ];
-        let pipeline = BehavioralPipeline::new(package, &names, true, true).unwrap();
+        let pipeline = BehavioralPipeline::new(package, &names, &free_running(true, true)).unwrap();
         let mut solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
         let inputs = BTreeMap::from([
             ("x".into(), solver.numerical(5, 0b10011)),
@@ -671,8 +745,7 @@ fn read(a: bits[1] id=7, b: bits[2][2] id=8) -> bits[3] {
         let pipeline = BehavioralPipeline::from_xls(
             &source.ir,
             &[("stage".into(), "__calls__stage".into())],
-            false,
-            false,
+            &free_running(false, false),
         )
         .unwrap();
         for (correct, expected) in [(true, Response::Unsat), (false, Response::Sat)] {
@@ -712,8 +785,7 @@ fn choose(x: bits[4] id=1, which: bits[0] id=2) -> bits[4] {
         let error = BehavioralPipeline::new(
             package,
             &[("pipe_cycle0".into(), "choose".into())],
-            false,
-            false,
+            &free_running(false, false),
         )
         .err()
         .unwrap();
@@ -738,8 +810,7 @@ fn __pkg__entry(x: bits[4] id=3) -> (bits[4], bits[4]) {
         let error = BehavioralPipeline::new(
             package,
             &[("entry".into(), "__pkg__entry".into())],
-            false,
-            false,
+            &free_running(false, false),
         )
         .err()
         .unwrap();

@@ -208,6 +208,11 @@ impl ResolvedStitchPipeline {
         self.latency
     }
 
+    /// Returns whether the stitch interface qualifies data with input valid.
+    pub fn has_valid_signal(&self) -> bool {
+        self.boundary.input_valid_signal.is_some()
+    }
+
     pub(super) fn validate_wrapper_names(&self) -> Result<(), XlsynthError> {
         let (names, signatures) = collect_stage_name_infos(&self.ir, &self.stages)?;
         validate_stitch_pipeline_names(&names, &signatures, &self.boundary)
