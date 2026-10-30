@@ -1015,7 +1015,8 @@ Key flags:
   sharing statistics, the AND duplication audit, and excluded library cells.
   With `delay`, it includes mapping statistics, the timing model and reference
   slew/load.
-  Diagnostics go to stderr.
+  Diagnostics go to stderr. Keep stderr separate from the netlist when writing
+  protobuf, including when redirecting stdout to a file.
   The JSON destination must differ from the netlist output and stderr, including
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.

@@ -92,6 +92,15 @@ fn resolved_output_path(path: &Path) -> Result<PathBuf> {
                 return resolved_output_path(&parent.join(target));
             }
             let name = path.file_name().context("output path has no file name")?;
+            // file_name() strips trailing separators and "/.". Those spellings
+            // require a directory and cannot designate a new regular file.
+            anyhow::ensure!(
+                path.as_os_str()
+                    .as_encoded_bytes()
+                    .ends_with(name.as_encoded_bytes()),
+                "output path '{}' requires a directory",
+                path.display()
+            );
             Ok(parent.canonicalize()?.join(name))
         }
         Err(error) => Err(error.into()),
@@ -273,14 +282,37 @@ pub(super) fn path_aliases_stream(
     Ok(aliases)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
-    use super::{PendingOutput, output_paths_alias};
+    use super::PendingOutput;
+    #[cfg(target_os = "linux")]
+    use super::output_paths_alias;
     use std::fs;
+    #[cfg(target_os = "linux")]
     use std::io::Write;
+    #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
+    #[test]
+    fn missing_outputs_that_require_a_directory_are_rejected() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("link");
+        symlink("missing/", &link)?;
+        for path in [
+            dir.path().join("missing/"),
+            dir.path().join("missing/."),
+            link.clone(),
+        ] {
+            assert!(PendingOutput::open(&path).is_err(), "{}", path.display());
+            assert!(!dir.path().join("missing").exists());
+        }
+        assert_eq!(fs::read_link(link)?, PathBuf::from("missing/"));
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn descriptor_paths_retain_the_identity_of_unlinked_files() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;

@@ -244,6 +244,65 @@ fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
 }
 
 #[test]
+fn aig_tech_map_rejects_protobuf_output_aliasing_stderr() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pb = dir.path().join("mapped.pb");
+    let json = dir.path().join("report.json");
+    let map = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        cmd.args([
+            "aig-tech-map",
+            "unused.aig",
+            "--liberty_proto",
+            "unused.proto",
+        ])
+        .env_remove("RUST_LOG");
+        cmd
+    };
+    let error = b"aig-tech-map error: protobuf netlist output must not refer to stderr\n";
+
+    // Append diagnostics to an existing file to check that the mapper never
+    // truncates it or writes the sidecar after detecting the alias.
+    let existing = b"existing contents\n";
+    std::fs::write(&pb, existing)?;
+    let stderr = std::fs::OpenOptions::new().append(true).open(&pb)?;
+    let result = map()
+        .arg("-o")
+        .arg(&pb)
+        .arg("--json_out")
+        .arg(&json)
+        .stderr(stderr)
+        .output()?;
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert_eq!(
+        std::fs::read(&pb)?,
+        [existing.as_slice(), error.as_slice()].concat()
+    );
+    assert!(!json.exists());
+
+    let merged = std::fs::File::create(&pb)?;
+    let result = map()
+        .args(["--netlist-format", "pb"])
+        .stdout(merged.try_clone()?)
+        .stderr(merged)
+        .output()?;
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(&pb)?, error);
+
+    #[cfg(unix)]
+    {
+        let result = map()
+            .args(["-o", "/dev/stderr", "--netlist-format", "pb"])
+            .output()?;
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert_eq!(result.stderr, error);
+    }
+    Ok(())
+}
+
+#[test]
 fn nand2_mapping_does_not_require_timing_but_sta_does() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().expect("create temp dir");
