@@ -3,7 +3,8 @@
 use anyhow::Result;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{
-    read_gv_for_roundtrip_from_path, read_gv_from_str, read_ugv_from_str,
+    read_gv_for_proof_from_path, read_gv_for_roundtrip_from_path, read_gv_from_str,
+    read_ugv_from_str,
 };
 
 const MIXED_NETLIST: &str = r#"module top(a, y);
@@ -14,6 +15,79 @@ const MIXED_NETLIST: &str = r#"module top(a, y);
   BUF u_buf (.A(n), .Y(y));
 endmodule
 "#;
+
+#[test]
+fn proof_gv_reader_requires_sized_nonempty_concatenation_operands() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("concat.gv");
+    for (expression, diagnostic) in [
+        (
+            "{0,x}",
+            "unsized decimal in concatenation requires an explicit literal width",
+        ),
+        (
+            "{x,{1,x}}",
+            "unsized decimal in concatenation requires an explicit literal width",
+        ),
+        ("{x,}", "expected a concatenation operand before '}'"),
+        ("{}", "expected a concatenation operand before '}'"),
+    ] {
+        std::fs::write(
+            &path,
+            format!("module top(input x, output [32:0] y);\nassign y = {expression};\nendmodule"),
+        )?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("invalid concatenation");
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!("GV reader: {diagnostic} @ {}:2:", path.display())),
+            "{message}"
+        );
+    }
+    std::fs::write(
+        &path,
+        "module top(input x, output [32:0] y); assign y = {32'd0, {x}}; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_checks_identifiers_and_ansi_port_slots() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("names.gv");
+    for (source, message) in [
+        (
+            "module top(input x, output y,); assign y = x; endmodule",
+            "expected an ANSI port name after ','",
+        ),
+        (
+            "module top(input x, output y); wire signed; assign signed = x; assign y = signed; endmodule",
+            "unsupported keyword 'signed'. Escape the name if it denotes an identifier",
+        ),
+        (
+            r"module top(input x, output y); wire \ ; assign y = x; endmodule",
+            "an escaped identifier must contain printable non-whitespace ASCII",
+        ),
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("invalid proof input");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!("GV reader: {message}"),
+        );
+        read_gv_from_str(source)?;
+    }
+    std::fs::write(
+        &path,
+        r"module top(input x, output y); wire \signed ; assign \signed = x; assign y = \signed ; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
 
 #[test]
 fn readers_accept_ansi_ports_and_shared_wiring() {
@@ -195,6 +269,140 @@ fn roundtrip_reader_requires_a_declaration_site_for_each_net() -> Result<()> {
 }
 
 #[test]
+fn proof_gv_reader_rejects_part_selects_opposite_to_the_declaration() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("select.gv");
+    for (statement, select, declaration) in [
+        ("assign y = x[0:1];", "x[0:1]", "[1:0]"),
+        ("assign y[0:1] = x;", "y[0:1]", "[1:0]"),
+        ("assign y = {{w[1:0]}};", "w[1:0]", "[0:1]"),
+        ("tran(w[1:0], x);", "w[1:0]", "[0:1]"),
+        ("tran(w[0], x[0:1]);", "x[0:1]", "[1:0]"),
+        ("BUF inst(.A({x[0:1]}), .Y(y));", "x[0:1]", "[1:0]"),
+    ] {
+        let source = format!(
+            "module top(x, y); {statement} input [1:0] x; output [1:0] y; wire [0:1] w; endmodule"
+        );
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("a reversed part-select must not become a bit reversal");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!(
+                "GV reader: part-select '{select}' does not follow its declared packed range {declaration}"
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_accepts_ascending_and_singleton_part_selects() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("ascending.gv");
+    std::fs::write(
+        &path,
+        r#"module top(input [1:0] x, output [1:0] y);
+  assign w[0:1] = x[1:0];
+  assign y = {w[0:0], w[1:1]};
+  wire [0:1] w;
+endmodule"#,
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_requires_packed_declarations_for_selects() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("scalar.gv");
+    for (body, select, net) in [
+        ("assign y = x[0];", "x[0]", "x"),
+        ("assign y = {{x[0:0]}};", "x[0:0]", "x"),
+        ("assign y[0] = x;", "y[0]", "y"),
+        ("BUF inst(.A(x[0:0]), .Y(y));", "x[0:0]", "x"),
+        ("tran(y, x[0]);", "x[0]", "x"),
+        ("assign w = x; assign y = w[0];", "w[0]", "w"),
+    ] {
+        let source = format!("module top(x, y); {body} input x; output y; endmodule");
+        std::fs::write(&path, &source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("a scalar cannot be indexed");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!("GV reader: select '{select}' requires a packed net. '{net}' is scalar")
+        );
+        read_gv_from_str(&source)?;
+    }
+
+    // A packed [0:0] net supports both forms of select.
+    std::fs::write(
+        &path,
+        "module top(input [0:0] x, output y); wire [0:0] w; assign w[0] = x[0:0]; assign y = w[0:0]; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn preserved_gv_readers_reject_conflicting_scalar_and_packed_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("declarations.gv");
+    for declarations in [
+        "input x; wire [0:0] x;",
+        "wire [0:0] x; input x;",
+        "input [1:0] x; wire x;",
+        "wire x; input [1:0] x;",
+    ] {
+        let source = format!("module top(x, y); assign y = x; {declarations} output y; endmodule");
+        std::fs::write(&path, &source)?;
+        for result in [
+            read_gv_for_proof_from_path(&path),
+            read_gv_for_roundtrip_from_path(&path),
+        ] {
+            let error = result.err().expect("incompatible explicit declarations");
+            assert_eq!(
+                error.to_string().split(" @ ").next().unwrap(),
+                "GV reader: net 'x' has both scalar and packed declarations"
+            );
+        }
+        read_gv_from_str(&source)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_requires_scalar_tran_terminals_before_elaboration() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tran.gv");
+    for (lhs, rhs, terminal) in [("out", "x", "out"), ("out[0]", "x", "x")] {
+        std::fs::write(
+            &path,
+            format!("module top(input [1:0] x, output [1:0] out); tran({lhs}, {rhs}); endmodule"),
+        )?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("vector tran terminal");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!(
+                "GV reader: plain tran terminal '{terminal}' has width 2. Use one tran primitive per bit"
+            )
+        );
+        // The round-trip codec can preserve the original terminal structure.
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    std::fs::write(
+        &path,
+        "module top(input [1:0] x, output [1:0] out); tran(out[0], x[0]); tran(out[1], x[1]); endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
 fn roundtrip_reader_accepts_implicit_declarations_and_forward_references() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("implicit.gv");
@@ -209,5 +417,79 @@ endmodule
 "#;
     std::fs::write(&path, source)?;
     read_gv_for_roundtrip_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_rejects_repeated_net_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("duplicate_net.gv");
+    for source in [
+        "module top(); wire x, x; endmodule",
+        "module top(); wire x; wire x; endmodule",
+        "module top(input x); wire x; endmodule",
+        "module top(output wire [1:0] x); wire [1:0] x; endmodule",
+        "module top(x); input wire x; wire x; endmodule",
+        "module top(x); wire x; input wire x; endmodule",
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("duplicate net declaration");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: net 'x' is declared more than once in this module"
+        );
+        read_gv_from_str(source)?;
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_rejects_nets_sharing_an_instance_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("instance_name.gv");
+    for source in [
+        "module top(); wire u; BUF u(); endmodule",
+        "module top(); BUF u(); wire u; endmodule",
+        "module top(input u); BUF u(); endmodule",
+        "module top(u); BUF u(); output u; endmodule",
+        "module top(input x); assign u=x; BUF u(); endmodule",
+        "module top(input x); BUF u(); assign u=x; endmodule",
+        "module top(); BUF u(.Y(u)); endmodule",
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("instance and net names must be distinct");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: instance name 'u' is also a net in this module"
+        );
+        read_gv_from_str(source)?;
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_accepts_matching_non_ansi_port_and_wire_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("port_nets.gv");
+    std::fs::write(
+        &path,
+        r#"module child(x, y);
+  input [1:0] x;
+  wire [1:0] x;
+  wire [1:0] y;
+  output [1:0] y;
+  assign y = x;
+endmodule
+module top(input [1:0] a, output [1:0] b);
+  child x(.x(a), .y(b));
+endmodule"#,
+    )?;
+    read_gv_for_proof_from_path(&path)?;
     Ok(())
 }

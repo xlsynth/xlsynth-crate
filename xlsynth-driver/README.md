@@ -4008,6 +4008,88 @@ Notes
 - Enum values are case-insensitive on the CLI but serialized in lowercase/kebab-case in JSON.
 - `dslx_path` is joined with `;` regardless of platform to match upstream tools.
 
+### Shared DSLX stitch specification
+
+`dslx-stitch-pipeline`, `dslx-stitch-g8r-pipeline`, and `stitch-equiv` accept
+the same TOML file via `--spec <PATH>`. The example manifest below selects
+`muladd_cycle0` and `muladd_cycle1`. The first stage multiplies `x` by `y` and carries `z` alongside the product. The second adds `z`. Both operations use `u8` arithmetic. [Two-cycle multiply-add source and manifest](examples/stitch-equiv)
+
+```toml
+dslx_input_file = "muladd.x"
+dslx_top = "muladd"
+flop_inputs = false
+flop_outputs = true
+```
+
+- Supply either `dslx_top` for implicit stage discovery or `stages = ["align", "finish"]` for an explicit order. `output_module_name` defaults to `dslx_top` and is required with `stages`.
+- Implicit stage indices start at zero, are contiguous, and have no leading zeros. Each selected stage needs a concrete data-only IR entry point. A private stage that lowers only to an implicit-token function is rejected by name.
+- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. All three commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
+- `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The multiply-add example above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
+- A stage with one aggregate parameter receives the entire preceding result. Multiple parameters consume slices of the packed result from least-significant bits upward in parameter declaration order. The proof uses the same wiring as the generators.
+- `clock_name` defaults to `"clk"`. Optional `input_valid_signal`, `output_valid_signal`, `reset`, and `reset_active_low` configure the generated valid pipeline. Both `output_valid_signal` and `reset` require `input_valid_signal`. Reset is synchronous and active high by default. Setting `reset_active_low = true` requires a named `reset`.
+- The names `out` and `output_value` are reserved for the generated data output.
+- On the generator commands, `--spec` conflicts with command-line source, stage-selection, and pipeline-interface flags. RTL emission and g8r lowering options remain available.
+
+Library callers resolving a spec with DSLX imports in-process must run
+`StitchPipelineSpec::resolve` from the DSLX source directory. The resolver
+reports a directory mismatch. Once resolved, the same pipeline object can
+generate RTL, lower to g8r, or check a netlist.
+
+### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
+
+Proves bit-exact output equivalence after pipeline fill for a free-running
+pipeline. The checker gatifies the selected DSLX stages, imports the mapped
+module with the supplied Liberty cell functions and flip-flop semantics, and
+builds a CaDiCaL query over the number of register layers in the spec. Each
+side starts with independent arbitrary register contents. Both receive the
+same fresh inputs at each rising edge and at the final observation. A proof
+covers every observation after fill because the window can begin at any cycle.
+
+Inputs and outputs must agree in name and packed bit width, with bit zero as
+the LSB. The native g8r result `output_value` and the stitched RTL result
+`out` identify the same data port. Internal register names, counts, and
+encodings can differ. Valid-enabled pipelines and reset protocols require a
+different observation contract and are rejected. Mapped FFs must share the
+spec's rising-edge clock. The importer rejects latches, derived clocks, and
+asynchronous clear/preset cells.
+
+Supply a valid structural Verilog netlist (`.gv`) with cell instances and wiring assignments.
+The checker uses the strict GV reader and reports the source location for
+unsupported syntax. Give decimal literals an explicit width inside a
+concatenation or when their sign bit is set. Escape identifiers that coincide
+with SystemVerilog keywords. Non-ANSI module headers must agree with their
+port declarations. Selects require a packed net (use
+`[0:0]` for a one-bit vector), and part-selects must follow its declared
+direction. Each plain `tran` terminal must be one bit. The Liberty proto
+must unambiguously describe the pins, functions, and FF clock edges of the
+instantiated cells.
+
+Run these commands from the example directory with a matching cell library and
+Liberty proto.
+
+```shell
+xlsynth-driver dslx-stitch-g8r-pipeline --spec muladd.stitch.toml \
+  --bin-out muladd.g8rbin > muladd.g8r
+xlsynth-driver g8r2gv muladd.g8rbin --liberty cells.lib \
+  --liberty-proto cells.proto > muladd.gv
+xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
+  --netlist muladd.gv --liberty-proto cells.proto
+```
+
+For split libraries such as ASAP7, repeat the mapper's `--liberty` flag and use
+a matching proto as described under `g8r2gv`. A netlist from synthesis of
+`dslx-stitch-pipeline --spec muladd.stitch.toml` can be checked the same way.
+
+- `--spec <PATH>` selects the DSLX stitch spec.
+- `--netlist <PATH>` supplies the mapped gate-level Verilog file.
+- `--liberty-proto <PATH>` supplies the matching Liberty proto.
+- `--module-name <NAME>` overrides the mapped module name. The default is the spec's wrapper name.
+- `--timeout-seconds <N>` limits SAT solving to a positive number of seconds. By default the solve has no time limit.
+
+The command exits zero on proof. A mismatch exits nonzero and prints initial
+register values, cycle inputs, and the disagreeing outputs. A timeout or
+unsupported input also exits nonzero and reports the error.
+
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 
 Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
@@ -4019,6 +4101,7 @@ The generated text is written to **stdout**; diagnostic messages appear on **std
 
 Supported flags:
 
+- `--spec=<PATH>` – read the shared DSLX stitch specification documented above.
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
 - `--gate_format=<TEMPLATE>` – Verilog template for `gate!` operations in every selected stage. Overrides `[toolchain.codegen].gate_format`; when neither is set, uses the default XLS gate emission. An empty template restores the XLS default even when the toolchain sets a template.
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
@@ -4094,6 +4177,7 @@ discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use
 
 Pipeline flags:
 
+- `--spec=<PATH>` - read the shared DSLX stitch specification documented above.
 - `--clock_name=<NAME>` - inserted-register clock name, default `clk`.
 - `--flop_inputs=<BOOL>` and `--flop_outputs=<BOOL>` - add external register
   layers; both default to `true`.
@@ -4106,7 +4190,8 @@ Pipeline flags:
   according to valid rather than being reset.
 
 The standard DSLX path flags and the g8r lowering flags accepted by `ir2g8r`
-are also accepted.
+are also accepted. For this command, formal array alias analysis defaults to
+off when the driver is built without Bitwuzla.
 
 ```shell
 xlsynth-driver dslx-stitch-g8r-pipeline \

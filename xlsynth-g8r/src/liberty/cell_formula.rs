@@ -86,7 +86,8 @@ impl Term {
     ) -> Result<AigOperand, String> {
         match self {
             Term::Input(name) => input_map.get(name).cloned().ok_or_else(|| {
-                let available: Vec<_> = input_map.keys().cloned().collect();
+                let mut available: Vec<_> = input_map.keys().collect();
+                available.sort_unstable();
                 let required: Vec<_> = self.inputs();
                 let mut msg = format!(
                     "Input '{}' not found in map for cell '{}' (formula: \"{}\")",
@@ -97,7 +98,9 @@ impl Term {
                 }
                 if let Some(port_map) = context.port_map {
                     msg.push_str("\n  Port mapping:");
-                    for (port, net) in port_map {
+                    let mut ports: Vec<_> = port_map.iter().collect();
+                    ports.sort_unstable();
+                    for (port, net) in ports {
                         msg.push_str(&format!("\n    .{}({})", port, net));
                     }
                 }
@@ -639,6 +642,11 @@ mod tests {
         let a = gb.add_input("a".to_string(), 1);
         let mut input_map = HashMap::new();
         input_map.insert("A".to_string(), *a.get_lsb(0));
+        input_map.insert("C".to_string(), *a.get_lsb(0));
+        let ports = HashMap::from([
+            ("C".to_string(), "other".to_string()),
+            ("A".to_string(), "data".to_string()),
+        ]);
         // "B" is intentionally missing from input_map
 
         let term = Term::And(
@@ -648,18 +656,20 @@ mod tests {
         let context = EmitContext {
             cell_name: "test_cell_missing_input",
             original_formula: "A * B",
-            instance_name: None,
-            port_map: None,
+            instance_name: Some("inst"),
+            port_map: Some(&ports),
         };
         let result = term.emit_formula_term(&mut gb, &input_map, &context);
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(e.contains(
-                "Input 'B' not found in map for cell 'test_cell_missing_input' (formula: \"A * B\")"
-            ));
-            assert!(e.contains("Available inputs: [\"A\"]"));
-            assert!(e.contains("Required by formula: [\"B\"]"));
-        }
+        assert_eq!(
+            result.unwrap_err(),
+            r#"Input 'B' not found in map for cell 'test_cell_missing_input' (formula: "A * B")
+  Instance name: inst
+  Port mapping:
+    .A(data)
+    .C(other)
+  Available inputs: ["A", "C"]
+  Required by formula: ["B"]"#
+        );
     }
     #[test]
     fn test_parse_and_with_star_and_ampersand() {

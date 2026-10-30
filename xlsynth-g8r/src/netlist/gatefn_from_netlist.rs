@@ -10,6 +10,7 @@ use crate::aig::{
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
+use crate::netlist::bit_ref::select_bit_number;
 use crate::netlist::hierarchy::ElaboratedModuleBoundary;
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
@@ -198,6 +199,7 @@ pub(crate) fn build_cell_formula_map(
     dff_cells_inverted: &HashSet<String>,
 ) -> Result<HashMap<(String, String), (Term, String)>, String> {
     let mut cell_formula_map = HashMap::new();
+    let mut cell_names = HashSet::new();
     let override_cells: HashSet<String> = dff_cells_identity
         .iter()
         .cloned()
@@ -207,13 +209,21 @@ pub(crate) fn build_cell_formula_map(
         if !used_cells.contains(&cell.name) {
             continue;
         }
+        if !cell_names.insert(cell.name.as_str()) {
+            return Err(format!("Liberty contains duplicate cell '{}'", cell.name));
+        }
         cell.validate_functional_semantics()?;
         let collapse_for_cell = collapse_sequential && !override_cells.contains(&cell.name);
-        let pin_names: HashSet<String> = cell
-            .pins
-            .iter()
-            .map(|pin| liberty_lib.resolve_string(&pin.name).to_string())
-            .collect();
+        let mut pin_names = HashSet::new();
+        for pin in &cell.pins {
+            let name = liberty_lib.resolve_string(&pin.name);
+            if !pin_names.insert(name) {
+                return Err(format!(
+                    "Liberty cell '{}' contains duplicate pin '{name}'",
+                    cell.name
+                ));
+            }
+        }
         let state_vars: HashSet<String> = cell
             .sequential
             .iter()
@@ -362,13 +372,11 @@ fn check_undriven_bits(
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<(), String> {
-    for bit_idx in used_as_input {
-        if !driven.contains(bit_idx) {
-            return Err(format!(
-                "net bit '{}' is used as an input but is never driven by any instance, continuous assign, or module input",
-                normalized.render_bit(*bit_idx, nets, interner)
-            ));
-        }
+    if let Some(bit_idx) = used_as_input.difference(driven).min() {
+        return Err(format!(
+            "net bit '{}' is used as an input but is never driven by any instance, continuous assign, or module input",
+            normalized.render_bit(*bit_idx, nets, interner)
+        ));
     }
     Ok(())
 }
@@ -737,9 +745,11 @@ pub fn project_labeled_netlist_aig_with_boundaries(
     })
 }
 
+/// The external clock and each net bit on the wiring paths to its FF pins.
 #[derive(Debug, Clone)]
 struct SelectedSequentialClock {
     bit: BitIndex,
+    wiring_bits: HashSet<BitIndex>,
     port_name: String,
     active_edge: Option<SequentialClockEdge>,
 }
@@ -789,19 +799,20 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
     let normalized =
         NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
     let sequential_specs = collect_gv_eval_sequential_specs(&normalized, interner, liberty_lib)?;
-    validate_labeled_sequential_eval_module(
-        &normalized,
-        nets,
-        interner,
-        liberty_lib,
-        &sequential_specs,
-    )?;
     let selected_clock = select_sequential_clock(
         &normalized,
         nets,
         interner,
         &sequential_specs,
         clock_port_name_hint,
+    )?;
+    validate_labeled_sequential_eval_module(
+        &normalized,
+        nets,
+        interner,
+        liberty_lib,
+        &sequential_specs,
+        selected_clock.as_ref(),
     )?;
 
     let used_cell_names: HashSet<String> = module
@@ -888,6 +899,14 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
                 .is_some_and(|spec| spec.clock.pin_name == pin_name)
         },
     )?;
+    if let Some(clock) = &selected_clock
+        && used_as_input.contains(&clock.bit)
+    {
+        return Err(format!(
+            "top-level clock '{}' feeds data logic. Sequential netlist projection supports clock wiring only to FF clock pins",
+            clock.port_name
+        ));
+    }
     check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
 
     let module_output_bits = collect_module_output_bits(&normalized);
@@ -1183,6 +1202,7 @@ fn collect_gv_eval_sequential_specs(
                     )
                 })?;
             get_gv_eval_sequential_cell_spec(cell, liberty_lib)
+                .map_err(|error| format!("instance '{instance_name}': {error}"))
         })
         .collect()
 }
@@ -1194,16 +1214,17 @@ fn validate_labeled_sequential_eval_module(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     liberty_lib: &Library,
     sequential_specs: &[Option<GvEvalSequentialCellSpec>],
+    clock: Option<&SelectedSequentialClock>,
 ) -> Result<(), String> {
     let module_name = interner.resolve(normalized.raw.name).unwrap_or("<unknown>");
-    if normalized
+    if let Some(port) = normalized
         .ports
         .iter()
-        .any(|port| port.direction == PortDirection::Inout)
+        .find(|port| port.direction == PortDirection::Inout)
     {
+        let port_name = interner.resolve(port.name).unwrap_or("<unknown>");
         return Err(format!(
-            "module '{}' has an inout port; sequential gv-eval supports only input and output module ports",
-            module_name
+            "module '{module_name}' has inout port '{port_name}'. Sequential netlist projection supports only input and output module ports"
         ));
     }
     for (instance_index, inst) in normalized.instances.iter().enumerate() {
@@ -1262,6 +1283,16 @@ fn validate_labeled_sequential_eval_module(
                 }
                 PinDirection::Output => {
                     connected_output_count += 1;
+                    if let [BitSource::Bit(bit)] = connection.bits.as_slice()
+                        && let Some(clock) = clock
+                        && clock.wiring_bits.contains(bit)
+                    {
+                        return Err(format!(
+                            "cell '{type_name}' instance '{instance_name}' output pin '{pin_name}' drives clock net '{}'. Clock wiring must be driven only by top-level input '{}'",
+                            normalized.render_bit(*bit, nets, interner),
+                            clock.port_name,
+                        ));
+                    }
                     if connection.bits.len() > 1 {
                         return Err(format!(
                             "cell '{}' instance '{}' output pin '{}' must connect to at most one bit; got {} ({})",
@@ -1334,6 +1365,21 @@ fn select_sequential_clock(
     sequential_specs: &[Option<GvEvalSequentialCellSpec>],
     clock_port_name_hint: Option<&str>,
 ) -> Result<Option<SelectedSequentialClock>, String> {
+    if clock_port_name_hint.is_none() && sequential_specs.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    // Index the wiring once for all FFs. None marks a net with multiple
+    // assignments, which cannot propagate a unique clock.
+    let mut assign_by_bit = HashMap::new();
+    for assign in &normalized.assigns {
+        for (&bit, rhs) in assign.lhs_bits.iter().zip(&assign.rhs_bits) {
+            assign_by_bit
+                .entry(bit)
+                .and_modify(|entry| *entry = None)
+                .or_insert(Some(rhs));
+        }
+    }
+    let mut wiring_bits = HashSet::new();
     let mut inferred_clock_bit = None;
     let mut inferred_edge = None;
     for (instance_index, spec) in sequential_specs.iter().enumerate() {
@@ -1360,7 +1406,23 @@ fn select_sequential_clock(
                 spec.clock.pin_name, instance_name
             ));
         };
-        let clock_bit = resolve_simple_clock_source(*source, normalized, nets, interner)?;
+        let clock_bit = match (source, inferred_clock_bit) {
+            (BitSource::Bit(bit), Some(root)) if wiring_bits.contains(bit) => root,
+            _ => resolve_simple_clock_source(
+                *source,
+                &assign_by_bit,
+                &mut wiring_bits,
+                normalized,
+                nets,
+                interner,
+            )
+            .map_err(|error| {
+                format!(
+                    "instance '{instance_name}' pin '{}': {error}",
+                    spec.clock.pin_name
+                )
+            })?,
+        };
         match inferred_clock_bit {
             None => inferred_clock_bit = Some(clock_bit),
             Some(existing) if existing != clock_bit => {
@@ -1391,7 +1453,7 @@ fn select_sequential_clock(
     let inferred_port = inferred_clock_bit
         .map(|clock_bit| top_input_clock_port(normalized, nets, interner, clock_bit))
         .transpose()?;
-    if let Some(clock_port_name_hint) = clock_port_name_hint {
+    let (port_name, bit) = if let Some(clock_port_name_hint) = clock_port_name_hint {
         let hinted_port = normalized
             .ports
             .iter()
@@ -1420,19 +1482,32 @@ fn select_sequential_clock(
                 ));
             }
         }
-        return Ok(Some(SelectedSequentialClock {
-            bit: hinted_port.bits[0],
-            port_name: clock_port_name_hint.to_string(),
-            active_edge: inferred_edge,
-        }));
+        (clock_port_name_hint.to_string(), hinted_port.bits[0])
+    } else if let Some(inferred) = inferred_port {
+        inferred
+    } else {
+        return Ok(None);
+    };
+    wiring_bits.insert(bit);
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Input
+            && let Some(bit) = port
+                .bits
+                .iter()
+                .find(|&bit| wiring_bits.contains(bit) && assign_by_bit.contains_key(bit))
+        {
+            return Err(format!(
+                "top-level clock wiring '{}' is also driven by a continuous assignment",
+                normalized.render_bit(*bit, nets, interner),
+            ));
+        }
     }
-    Ok(
-        inferred_port.map(|(port_name, bit)| SelectedSequentialClock {
-            bit,
-            port_name,
-            active_edge: inferred_edge,
-        }),
-    )
+    Ok(Some(SelectedSequentialClock {
+        bit,
+        wiring_bits,
+        port_name,
+        active_edge: inferred_edge,
+    }))
 }
 
 fn top_input_clock_port(
@@ -1466,6 +1541,8 @@ fn top_input_clock_port(
 
 fn resolve_simple_clock_source(
     source: BitSource,
+    assign_by_bit: &HashMap<BitIndex, Option<&BitExpr>>,
+    wiring_bits: &mut HashSet<BitIndex>,
     normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -1488,22 +1565,18 @@ fn resolve_simple_clock_source(
                 normalized.render_bit(bit_idx, nets, interner)
             ));
         }
-        let mut rhs = None;
-        for assign in &normalized.assigns {
-            for (lhs_bit, rhs_expr) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
-                if lhs_bit != bit_idx {
-                    continue;
-                }
-                if rhs.replace(rhs_expr).is_some() {
-                    return Err(format!(
-                        "clock bit '{}' has multiple preserved wiring assigns",
-                        normalized.render_bit(bit_idx, nets, interner)
-                    ));
-                }
+        let rhs = match assign_by_bit.get(&bit_idx) {
+            None => {
+                wiring_bits.extend(seen);
+                return Ok(bit_idx);
             }
-        }
-        let Some(rhs) = rhs else {
-            return Ok(bit_idx);
+            Some(None) => {
+                return Err(format!(
+                    "clock bit '{}' has multiple preserved wiring assigns",
+                    normalized.render_bit(bit_idx, nets, interner)
+                ));
+            }
+            Some(Some(rhs)) => rhs,
         };
         match rhs {
             BitExpr::Source(next) => current = *next,
@@ -1563,11 +1636,14 @@ fn build_sequential_module_port_aig_bindings(
                 .resolve(port.name)
                 .ok_or_else(|| "could not resolve module port name".to_string())?
                 .to_string();
+            // A tran representative may belong to another packed range.
+            // Keep its electrical signal and label it with this port's index.
+            let (msb, lsb) = port.width.unwrap_or((0, 0));
             let bits_lsb_to_msb = port
                 .bits
                 .iter()
-                .map(|bit_idx| {
-                    let bit = normalized.bit(*bit_idx);
+                .enumerate()
+                .map(|(offset, bit_idx)| {
                     let signal = if selected_clock
                         .is_some_and(|clock| clock.bit == *bit_idx)
                     {
@@ -1588,7 +1664,9 @@ fn build_sequential_module_port_aig_bindings(
                         SequentialAigSignal::Operand(operand)
                     };
                     Ok(LabeledSequentialAigBit {
-                        bit_number: bit.bit_number,
+                        bit_number: select_bit_number(msb, lsb, offset).ok_or_else(|| {
+                            format!("bit offset {offset} exceeds declared width of port '{name}'")
+                        })?,
                         signal,
                     })
                 })

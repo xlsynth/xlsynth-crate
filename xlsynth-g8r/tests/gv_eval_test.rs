@@ -14,7 +14,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, GvSequentialSignalToggleActivity, GvToggleAggregate, PinConnection,
     SequentialAigSignal, SequentialClockEdge, TogglePinConnection, load_labeled_netlist_aig,
     load_labeled_netlist_aig_with_liberty, load_labeled_sequential_netlist_aig,
-    load_sequential_netlist_gate_fn,
+    load_labeled_sequential_netlist_aig_with_liberty, load_sequential_netlist_gate_fn,
 };
 use xlsynth_g8r::netlist::parse::PortDirection;
 use xlsynth_g8r::netlist::power::{
@@ -312,6 +312,46 @@ endmodule
         .expect("evaluate true/false");
     assert_eq!(high.to_string(), "bits[1]:0");
     assert_eq!(low.to_string(), "bits[1]:1");
+}
+
+#[test]
+fn sequential_port_labels_use_the_declared_range_across_tran_aliases() {
+    let directory = tempfile::tempdir().unwrap();
+    let netlist_path = directory.path().join("design.gv");
+    std::fs::write(
+        &netlist_path,
+        r#"
+module top(input [2:3] a, output [1:0] y);
+  tran (a[3], y[0]);
+  tran (a[2], y[1]);
+endmodule
+"#,
+    )
+    .unwrap();
+    let model = load_labeled_sequential_netlist_aig_with_liberty(
+        &netlist_path,
+        &Library::default(),
+        &GvEvalOptions::default(),
+    )
+    .unwrap();
+    let labels = model
+        .module_ports
+        .iter()
+        .map(|port| {
+            port.bits_lsb_to_msb
+                .iter()
+                .map(|bit| bit.bit_number)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels, vec![vec![3, 2], vec![0, 1]]);
+    for (input, output) in model.module_ports[0]
+        .bits_lsb_to_msb
+        .iter()
+        .zip(&model.module_ports[1].bits_lsb_to_msb)
+    {
+        assert_eq!(input.signal, output.signal);
+    }
 }
 
 #[test]
@@ -2159,7 +2199,7 @@ endmodule
 }
 
 #[test]
-fn sequential_netlist_gate_fn_rejects_async_reset_cells() {
+fn sequential_netlist_gate_fn_identifies_unsupported_async_controls_and_latches() {
     let liberty = r#"
 format_magic: 5496997758228255311
 cells: {
@@ -2187,11 +2227,40 @@ module top (d, rst, clk, q);
   DFFCLR state (.D(d), .RST(rst), .CLK(clk), .Q(q));
 endmodule
 "#;
-    let (_temp_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
-    let error =
-        load_sequential_netlist_gate_fn(&netlist_path, &liberty_path, &GvEvalOptions::default())
-            .expect_err("asynchronous reset should be rejected");
-    assert!(format!("{error:#}").contains("does not support asynchronous reset cell 'DFFCLR'"));
+    for (cell, control, kind, expected) in [
+        (
+            "DFFCLR",
+            r#"clear_expr: "RST""#,
+            "FF",
+            "cell 'DFFCLR' uses asynchronous clear 'RST'. Sequential netlist projection requires synchronous FF behavior",
+        ),
+        (
+            "DFFPRE",
+            r#"preset_expr: "RST""#,
+            "FF",
+            "cell 'DFFPRE' uses asynchronous preset 'RST'. Sequential netlist projection requires synchronous FF behavior",
+        ),
+        (
+            "LATCH",
+            "",
+            "LATCH",
+            "cell 'LATCH' is a level-sensitive latch. Sequential netlist projection requires edge-triggered FFs",
+        ),
+    ] {
+        let source = netlist.replace("DFFCLR", cell);
+        let library = liberty
+            .replace("DFFCLR", cell)
+            .replace(r#"clear_expr: "RST""#, control)
+            .replace("SEQUENTIAL_KIND_FF", &format!("SEQUENTIAL_KIND_{kind}"));
+        let (_dir, netlist_path, liberty_path) = write_fixture(&source, &library);
+        let error = load_sequential_netlist_gate_fn(
+            &netlist_path,
+            &liberty_path,
+            &GvEvalOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), format!("instance 'state': {expected}"));
+    }
 }
 
 #[test]
