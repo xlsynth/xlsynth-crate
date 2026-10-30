@@ -266,7 +266,7 @@ fn replay(
 ///
 /// A solver interruption is an error. A disproved result includes inputs and
 /// initial states that replay the mismatch in the sequential simulator.
-pub fn prove_stitched_pipeline_equiv(
+pub(crate) fn prove_stitched_pipeline_equiv(
     reference: &SequentialGateFn,
     mapped: &LabeledSequentialNetlistAig,
     latency: usize,
