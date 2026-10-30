@@ -78,6 +78,25 @@ pub fn tick(x: u1, __reg_count: u1) -> (Outputs, u1) {
 }
 
 #[test]
+fn model_generation_rejects_the_general_optimizer_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    for command in ["dslx2lean", "dslx-stateful-fn-to-block"] {
+        let mut args = vec![command, "counter.x", "--top", "tick"];
+        if command == "dslx2lean" {
+            args.extend(["--output-dir", "model"]);
+        }
+        args.push("--opt=true");
+        let result = run(dir.path(), &args);
+        assert_eq!(result.status.code(), Some(2), "{result:?}");
+        let diagnostic = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            diagnostic.contains("unexpected argument '--opt"),
+            "{diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn malformed_register_suffix_leaves_no_model() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
