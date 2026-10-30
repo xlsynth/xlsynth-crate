@@ -2,6 +2,7 @@
 
 //! Helpers for rendering parsed gate-level netlist structures as text.
 
+use crate::netlist::io::ParsedNetlist;
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistAssignKind, NetlistModule, PortDirection,
 };
@@ -145,6 +146,16 @@ fn render_assign_expr(
             render_assign_expr(nets, interner, rhs)?
         )),
     }
+}
+
+/// Emits every module of a netlist as canonical gate-level Verilog in module
+/// order.
+pub fn emit_netlist_as_text(netlist: &ParsedNetlist) -> Result<String> {
+    netlist
+        .modules
+        .iter()
+        .map(|module| emit_module_as_netlist_text(module, &netlist.nets, &netlist.interner))
+        .collect()
 }
 
 /// Emits a module with its net declarations before assignments and instances.

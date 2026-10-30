@@ -929,7 +929,7 @@ The structural mapping design is described in
 ```shell
 xlsynth-driver aig-tech-map my_design.aag \
   --liberty_proto cells.liberty.proto \
-  --netlist_out my_design.mapped.gv
+  -o my_design.mapped.gv
 ```
 
 The `area` strategy matches single-output combinational cells by function and area,
@@ -945,7 +945,7 @@ mapping, and all excluded cells are listed in the optional JSON summary.
 
 ```shell
 xlsynth-driver aig-tech-map my_design.aig --strategy area \
-  --liberty_proto cells.proto --netlist_out my_design.mapped.gv \
+  --liberty_proto cells.proto -o my_design.mapped.pb \
   --json_out mapping.json
 ```
 
@@ -996,7 +996,14 @@ Key flags:
   timing data and an output load (library default or `--module-output-load`).
   `delay` requires usable timing data even with `--fanout-opt=false`.
   `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
-- `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
+- `-o, --output <PATH>` writes the mapped netlist to a file. Omit the option or
+  use `-o -` for stdout. `--netlist_out` is an alias for `--output`.
+- `--netlist-format <gv|pb>` overrides the format inferred from the output path.
+  The extensions `.pb` and `.proto` select binary netlist protobuf, ignoring
+  case. Other paths and stdout default to gate-level Verilog. For protobuf on a
+  pipe or with shell redirection, use `--netlist-format pb`. The mapper encodes
+  the final cells and wiring, including fanout optimization and area recovery.
+  Use `pb2gv` to render the protobuf as Verilog.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` or `delay` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
@@ -1008,7 +1015,8 @@ Key flags:
   sharing statistics, the AND duplication audit, and excluded library cells.
   With `delay`, it includes mapping statistics, the timing model and reference
   slew/load.
-  Netlist text stays on stdout when `--netlist_out -` is used; diagnostics go to stderr.
+  Diagnostics go to stderr. Keep stderr separate from the netlist when writing
+  protobuf, including when redirecting stdout to a file.
   The JSON destination must differ from the netlist output and stderr, including
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
@@ -1028,7 +1036,7 @@ pass is never silently skipped.
 
 ```shell
 xlsynth-driver aig-tech-map design.aig --strategy area \
-  --liberty_proto timed-cells.proto --netlist_out optimized.gv \
+  --liberty_proto timed-cells.proto -o optimized.gv \
   --module-output-load 1 --json_out mapping.json
 ```
 
@@ -1446,10 +1454,10 @@ xlsynth-driver gv-stats --netlist resized.gv \
   --liberty_proto /path/to/cells.timing.proto
 ```
 
-### `g8r2gv`: G8R to mapped gate-level Verilog
+### `g8r2gv`: G8R to mapped gate-level netlist
 
-Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
-on **stdout**, using standalone ABC for combinational logic and native physical
+Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level netlist
+using standalone ABC for combinational logic and native physical
 flip-flop mapping. Supports combinational and sequential designs, including
 explicit synchronous reset/enable controls (legalized before mapping). No Yosys
 is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
@@ -1491,18 +1499,26 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 - `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a
   stored clock or `--add-clk-port`.
 - `--module-name <NAME>` – override the emitted module name.
+- `-o, --output <PATH>` writes the mapped netlist to a file. Omit the option or
+  use `-o -` for stdout.
+- `--netlist-format <gv|pb>` overrides the format inferred from the output path.
+  The extensions `.pb` and `.proto` select binary netlist protobuf, ignoring
+  case. Other paths and stdout default to gate-level Verilog. For protobuf on a
+  pipe or with shell redirection, use `--netlist-format pb`. The protobuf
+  includes physical flip-flops and their connections. Keep stderr separate from
+  the protobuf destination.
 - `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
   including the executable/version, raw Liberty paths, resolved constraints, and
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.
 - `--abc-stdout-out <PATH>`, `--abc-stderr-out <PATH>` – optionally save ABC's
   raw stdout/stderr after successful mapping. Unlike the metadata, these logs
-  can contain nondeterministic timings and memory usage. They are never mixed
-  into the emitted netlist.
+  can contain nondeterministic timings and memory usage. The diagnostics and raw
+  logs must use destinations separate from the netlist, including redirected stdout.
 
 ABC uses global driver/load constraints, including at register Q/D boundaries;
 these are not per-register clock-to-Q/setup constraints or actual D-pin loads.
 Use `gv-stats` with a matching timing-enabled proto for final registered timing.
-Zero-width ports remain in the native design but are omitted from Verilog.
+The mapper omits zero-width ports from the flat netlist in both output formats.
 
 ```bash
 xlsynth-driver ir2g8r pipeline.ir --top main > pipeline.g8r
@@ -1510,7 +1526,8 @@ xlsynth-driver g8r2gv pipeline.g8r \
   --liberty /path/to/buffers.lib --liberty /path/to/logic.lib \
   --liberty /path/to/registers.lib \
   --liberty-proto /path/to/cells.proto \
-  --diagnostics-out mapping.json > mapped.gv
+  -o mapped.pb --diagnostics-out mapping.json
+xlsynth-driver pb2gv mapped.pb -o mapped.gv
 xlsynth-driver gv-stats --netlist mapped.gv \
   --liberty_proto /path/to/cells.timing.proto \
   --primary_input_transition 0.01 --module_output_load 4

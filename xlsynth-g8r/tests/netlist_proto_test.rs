@@ -18,11 +18,7 @@ fn round_trips_mapped_signature_corpus() -> Result<()> {
         let loaded = load_interesting_ir_roundtrip_case(case);
         let mapped = map_gatefn_to_area_netlist(&loaded.gate_fn, &library)?.netlist;
         let expected = emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner)?;
-        let design = ParsedNetlist {
-            modules: vec![mapped.module],
-            nets: mapped.nets,
-            interner: mapped.interner,
-        };
+        let design = ParsedNetlist::from(mapped);
         let restored = decode_netlist(&encode_netlist(&design)?)?;
         assert_eq!(
             emit_module_as_netlist_text(&restored.modules[0], &restored.nets, &restored.interner)?,

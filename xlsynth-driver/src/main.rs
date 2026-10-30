@@ -131,6 +131,7 @@ mod ir_toggle_hotspots;
 mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
+mod mapped_netlist_output;
 mod netlist2aig;
 mod proofs;
 mod prove_enum_in_bound;
@@ -2398,7 +2399,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-tech-map")
-                .about("Maps an AIGER file to library cells using NAND2 lowering or area covering")
+                .about("Maps an AIGER file to library cells using NAND2, area, or delay mapping")
                 .arg(
                     clap::Arg::new("aig_input_file")
                         .help("Input AIGER file (.aag or .aig)")
@@ -2412,13 +2413,8 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
-                .arg(
-                    Arg::new("netlist_out")
-                        .long("netlist_out")
-                        .help("Path to write mapped netlist text (use '-' for stdout)")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
+                .arg(mapped_netlist_output::output_arg().visible_alias("netlist_out"))
+                .arg(mapped_netlist_output::format_arg())
                 .arg(
                     Arg::new("module_name")
                         .long("module_name")

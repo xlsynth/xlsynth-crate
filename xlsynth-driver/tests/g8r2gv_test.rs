@@ -2,7 +2,10 @@
 
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::fmt::Write;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -145,6 +148,48 @@ fn shared_signatures_accept_both_serializations_and_preserve_ports() {
 }
 
 #[test]
+fn protobuf_output_shared_with_stderr_fails_before_mapping() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    // The destination check must run before the driver tries to load this
+    // input.
+    let input = dir.path().join("missing.g8r");
+    let pb = dir.path().join("mapped.pb");
+    let diagnostics = dir.path().join("diagnostics.json");
+    let mut expected_stderr = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("--version")
+        .env("NO_COLOR", "1")
+        .env("RUST_LOG", "info")
+        .output()?
+        .stderr;
+    expected_stderr.extend_from_slice(
+        b"xlsynth-driver: g8r2gv: protobuf netlist output must not refer to stderr\n",
+    );
+    for named_output in [false, true] {
+        let stderr = std::fs::File::create(&pb)?;
+        let mut cmd = command(dir.path(), &input);
+        if named_output {
+            cmd.arg("--output").arg(&pb);
+        } else {
+            // Reproduce shell redirection to the same open file: >mapped.pb
+            // 2>&1.
+            cmd.args(["--netlist-format", "pb"])
+                .stdout(stderr.try_clone()?);
+        }
+        let rejected = cmd
+            .arg("--diagnostics-out")
+            .arg(&diagnostics)
+            .env("RUST_LOG", "info")
+            .stderr(stderr)
+            .output()?;
+        assert_eq!(rejected.status.code(), Some(1));
+        assert!(rejected.stdout.is_empty());
+        assert_eq!(std::fs::read(&pb)?, expected_stderr);
+        assert!(!diagnostics.try_exists()?);
+    }
+    Ok(())
+}
+
+#[test]
 fn boundary_registers_script_constraints_and_diagnostics() {
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let a = builder.add_input("a".into(), 2);
@@ -163,29 +208,33 @@ fn boundary_registers_script_constraints_and_diagnostics() {
     let diagnostics = dir.path().join("diagnostics.json");
     let abc_stdout = dir.path().join("abc.stdout");
     let abc_stderr = dir.path().join("abc.stderr");
-    let mut cmd = command(dir.path(), &input);
-    cmd.args([
-        "--add-clk-port",
-        "clk",
-        "--flop-inputs",
-        "--flop-outputs",
-        "--module-name",
-        "mapped_top",
-        "--register-cell",
-        "DFFN",
-        "--output-load-ff",
-        "7",
-    ])
-    .arg("--abc-script")
-    .arg(&script)
-    .arg("--diagnostics-out")
-    .arg(&diagnostics)
-    .arg("--abc-stdout-out")
-    .arg(&abc_stdout)
-    .arg("--abc-stderr-out")
-    .arg(&abc_stderr)
-    .env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.01s\n")
-    .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 100\n");
+    let map = || {
+        let mut cmd = command(dir.path(), &input);
+        cmd.args([
+            "--add-clk-port",
+            "clk",
+            "--flop-inputs",
+            "--flop-outputs",
+            "--module-name",
+            "mapped_top",
+            "--register-cell",
+            "DFFN",
+            "--output-load-ff",
+            "7",
+        ])
+        .arg("--abc-script")
+        .arg(&script)
+        .arg("--diagnostics-out")
+        .arg(&diagnostics)
+        .arg("--abc-stdout-out")
+        .arg(&abc_stdout)
+        .arg("--abc-stderr-out")
+        .arg(&abc_stderr);
+        cmd
+    };
+    let mut cmd = map();
+    cmd.env("XLSYNTH_TEST_ABC_STDOUT", "elapsed: 0.01s\n")
+        .env("XLSYNTH_TEST_ABC_STDERR", "peak memory: 100\n");
     let result = cmd.output().unwrap();
     assert!(
         result.status.success(),
@@ -237,6 +286,66 @@ fn boundary_registers_script_constraints_and_diagnostics() {
         &(serde_json::to_string_pretty(&json).unwrap() + "\n"),
         "tests/g8r2gv_diagnostics.golden.txt",
     );
+
+    std::fs::remove_file(&diagnostics).unwrap();
+    let binary = cmd.args(["--netlist-format", "pb"]).output().unwrap();
+    assert!(
+        binary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&binary.stderr)
+    );
+    assert!(binary.stderr.is_empty());
+    assert_eq!(first_diagnostics, std::fs::read(&diagnostics).unwrap());
+    let pb = dir.path().join("mapped.pb");
+    for (flag, filename, format_args, expected) in [
+        ("-o", OsStr::new("mapped.pb"), &[][..], &binary.stdout),
+        (
+            "--output",
+            OsStr::new("mapped.proto"),
+            &[][..],
+            &binary.stdout,
+        ),
+        // The default macOS filesystem only accepts UTF-8 filenames.
+        #[cfg(target_os = "linux")]
+        (
+            "--output",
+            OsStr::from_bytes(b"mapped-\xff.proto"),
+            &[][..],
+            &binary.stdout,
+        ),
+        (
+            "--output",
+            OsStr::new("verilog.pb"),
+            &["--netlist-format", "gv"][..],
+            &result.stdout,
+        ),
+    ] {
+        let path = dir.path().join(filename);
+        let named = map()
+            .arg(flag)
+            .arg(&path)
+            .args(format_args)
+            .output()
+            .unwrap();
+        assert!(
+            named.status.success(),
+            "{filename:?}: {}",
+            String::from_utf8_lossy(&named.stderr)
+        );
+        assert!(named.stdout.is_empty(), "{filename:?}");
+        assert_eq!(&std::fs::read(path).unwrap(), expected, "{filename:?}");
+    }
+    let restored = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("pb2gv")
+        .arg(&pb)
+        .output()
+        .unwrap();
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(result.stdout, restored.stdout);
 }
 
 #[test]
@@ -402,4 +511,51 @@ fn defaults_resolve_independently_and_invalid_options_fail_cleanly() {
             .status
             .success()
     );
+
+    let output = dir.path().join("mapped.pb");
+    let alias = dir.path().join("alias");
+    let new_output = dir.path().join("new.pb");
+    std::fs::write(&output, b"original contents").unwrap();
+    std::fs::hard_link(&output, &alias).unwrap();
+    for (destination, flag, sidecar) in [
+        (&output, "--diagnostics-out", &output),
+        (&output, "--abc-stdout-out", &alias),
+        (&output, "--abc-stderr-out", &alias),
+        (&new_output, "--diagnostics-out", &new_output),
+    ] {
+        let rejected = command(dir.path(), &input)
+            .arg("--output")
+            .arg(destination)
+            .arg(flag)
+            .arg(sidecar)
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(1), "{flag}");
+        assert!(rejected.stdout.is_empty(), "{flag}");
+        assert_eq!(
+            String::from_utf8(rejected.stderr).unwrap(),
+            format!(
+                "xlsynth-driver: g8r2gv: {flag} and --output must name different destinations\n"
+            )
+        );
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            b"original contents",
+            "{flag}"
+        );
+    }
+    assert!(!new_output.try_exists().unwrap());
+
+    let diagnostics = dir.path().join("diagnostics.json");
+    std::fs::write(&diagnostics, b"original diagnostics").unwrap();
+    let rejected = command(dir.path(), &input)
+        .arg("--output")
+        .arg(dir.path())
+        .arg("--diagnostics-out")
+        .arg(&diagnostics)
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(rejected.stdout.is_empty());
+    assert_eq!(std::fs::read(diagnostics).unwrap(), b"original diagnostics");
 }
