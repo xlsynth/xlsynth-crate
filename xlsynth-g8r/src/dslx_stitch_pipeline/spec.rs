@@ -509,6 +509,29 @@ dslx_top = "pipe""#,
     }
 
     #[test]
+    fn spec_rejects_a_system_verilog_keyword_as_the_clock_name() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pipe.x"),
+            "fn pipe_cycle0(x: bool) -> bool { x }",
+        )
+        .unwrap();
+        let path = dir.path().join("pipe.toml");
+        fs::write(
+            &path,
+            r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+clock_name = "checker""#,
+        )
+        .unwrap();
+        let spec = StitchPipelineSpec::load(&path).unwrap();
+        assert_eq!(
+            spec.resolve().err().unwrap().0,
+            "name validation failed: clock control port `checker` cannot be emitted as-is: it is a SystemVerilog keyword"
+        );
+    }
+
+    #[test]
     fn spec_reserves_native_result_only_on_the_external_interface() {
         let dir = tempdir().unwrap();
         let source = dir.path().join("stages.x");
