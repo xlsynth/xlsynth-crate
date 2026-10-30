@@ -65,9 +65,10 @@ fn sample_registers(
     if samples.is_empty() {
         return Ok(samples);
     }
-    // An enabled register can retain its initial value across bubbles. Fill
-    // every layer with transactions first so complemented encodings align
-    // even though both simulations started with physical zeroes.
+    // Launch one transaction in every lane and keep reset inactive until it
+    // reaches the last layer. This aligns held data even for complementary
+    // physical encodings that both started at zero. Random valid bits after
+    // that launch distinguish the valid flops throughout the pipeline.
     let warmup = if controls.input_valid.is_some() {
         latency
     } else {
@@ -84,7 +85,7 @@ fn sample_registers(
             let start = offsets[id.index()];
             let port = &design.transition.inputs[id.index()];
             let width = port.get_bit_count();
-            if frame < warmup && controls.input_valid == Some(port.name.as_str()) {
+            if frame == 0 && latency > 0 && controls.input_valid == Some(port.name.as_str()) {
                 inputs[start] = Vec256::splat(true);
                 continue;
             }
@@ -293,7 +294,8 @@ mod tests {
     }
 
     #[test]
-    fn fills_enabled_registers_before_pairing_inverted_data_bits() {
+    fn pairs_renamed_and_reordered_deep_valid_and_inverted_data_flops() {
+        const LAYERS: usize = 12;
         let boundary = SequentialPipelineOptions {
             name: "pipe".into(),
             clock: ClockPort { name: "clk".into() },
@@ -304,27 +306,35 @@ mod tests {
             reset_signal: Some("rst_n".into()),
             reset_active_low: true,
         };
-        // Inverting both stages complements the intermediate data flop while
+        // Inverting all stages complements every other data flop while
         // preserving the observable result. Each data flop holds on bubbles.
         let build = |invert: bool| {
             let mut b = GateBuilder::new("stage".into(), GateBuilderOptions::opt());
             let x = *b.add_input("x".into(), 1).get_lsb(0);
             b.add_output("out".into(), if invert { x.negate() } else { x }.into());
             let stage = b.build();
-            stitch_gate_fns_into_pipeline(&[stage.clone(), stage], &boundary)
+            stitch_gate_fns_into_pipeline(&vec![stage; LAYERS], &boundary)
         };
         let reference = build(false).unwrap();
-        let mapped = build(true).unwrap();
-        let pairs =
-            direct_register_pairs(&reference, &mapped, 2, StitchObservation::from(&boundary))
-                .unwrap();
-        assert_eq!(
-            pairs
-                .iter()
-                .map(|p| (p.mapped_register, p.inverted))
-                .collect::<Vec<_>>(),
-            [(0, true), (1, false), (2, false), (3, false)]
-        );
+        let mut mapped = build(true).unwrap();
+        mapped.registers.reverse();
+        for (index, register) in mapped.registers.iter_mut().enumerate() {
+            register.name = format!("ff_{index}");
+        }
+        let pairs = direct_register_pairs(
+            &reference,
+            &mapped,
+            LAYERS,
+            StitchObservation::from(&boundary),
+        )
+        .unwrap();
+        assert_eq!(pairs.len(), 2 * LAYERS);
+        for (index, pair) in pairs.iter().enumerate() {
+            assert_eq!(pair.reference_register, index);
+            assert_eq!(pair.mapped_register, 2 * LAYERS - 1 - index);
+            // Each layer has a data flop followed by a valid flop.
+            assert_eq!(pair.inverted, index % 4 == 0);
+        }
     }
 
     #[test]
