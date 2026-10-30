@@ -2000,7 +2000,7 @@ pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> 
     )
 }
 
-/// Function results for one value-only evaluation, keyed by ordered XLS values.
+/// Invoke results within a value-only evaluation or one loop iteration.
 type CallValues<'ir> = HashMap<&'ir str, HashMap<Vec<IrValue>, IrValue>>;
 
 fn eval_fn_impl<'a, 'ir>(
@@ -2011,17 +2011,6 @@ fn eval_fn_impl<'a, 'ir>(
     order_policy: EvalOrderPolicy,
     mut call_values: Option<&mut CallValues<'ir>>,
 ) -> FnEvalResult {
-    if let Some(value) = call_values
-        .as_ref()
-        .and_then(|calls| calls.get(f.name.as_str()))
-        .and_then(|results| results.get(args))
-    {
-        return FnEvalResult::Success(FnEvalSuccess {
-            value: value.clone(),
-            trace_messages: Vec::new(),
-            cover_counts: Vec::new(),
-        });
-    }
     debug_assert!(
         f.check_pir_layout_invariants().is_ok(),
         "PIR layout invariants violated for function '{}'",
@@ -2185,21 +2174,36 @@ fn eval_fn_impl<'a, 'ir>(
                     })
                     .collect();
 
-                absorb_nested_eval_result(
-                    eval_fn_impl(
-                        Some(pkg),
-                        callee,
-                        &callee_args,
-                        observer,
-                        order_policy,
-                        call_values.as_deref_mut(),
-                    ),
-                    &mut assertion_failures,
-                    &mut assumption_failures,
-                    &mut trace_messages,
-                    &mut cover_counts,
-                    &mut cover_index_by_text_id,
-                )
+                if let Some(value) = call_values
+                    .as_ref()
+                    .and_then(|calls| calls.get(callee.name.as_str()))
+                    .and_then(|results| results.get(&callee_args))
+                {
+                    value.clone()
+                } else {
+                    let value = absorb_nested_eval_result(
+                        eval_fn_impl(
+                            Some(pkg),
+                            callee,
+                            &callee_args,
+                            observer,
+                            order_policy,
+                            call_values.as_deref_mut(),
+                        ),
+                        &mut assertion_failures,
+                        &mut assumption_failures,
+                        &mut trace_messages,
+                        &mut cover_counts,
+                        &mut cover_index_by_text_id,
+                    );
+                    if let Some(calls) = call_values.as_deref_mut() {
+                        calls
+                            .entry(&callee.name)
+                            .or_default()
+                            .insert(callee_args, value.clone());
+                    }
+                    value
+                }
             }
             P::CountedFor {
                 init,
@@ -2241,6 +2245,9 @@ fn eval_fn_impl<'a, 'ir>(
                     );
                     body_args.push(carry);
                     body_args.extend(invariant_values.iter().cloned());
+                    // Drop nested invoke results before the next iteration to
+                    // avoid retaining every version of an array carry.
+                    let mut iteration_calls = call_values.as_ref().map(|_| CallValues::new());
                     carry = absorb_nested_eval_result(
                         eval_fn_impl(
                             Some(pkg),
@@ -2248,7 +2255,7 @@ fn eval_fn_impl<'a, 'ir>(
                             &body_args,
                             observer,
                             order_policy,
-                            call_values.as_deref_mut(),
+                            iteration_calls.as_mut(),
                         ),
                         &mut assertion_failures,
                         &mut assumption_failures,
@@ -2581,12 +2588,6 @@ fn eval_fn_impl<'a, 'ir>(
         .expect("return value must have been computed")
         .clone();
 
-    if let Some(calls) = call_values {
-        calls
-            .entry(&f.name)
-            .or_default()
-            .insert(args.to_vec(), ret_value.clone());
-    }
     if assertion_failures.is_empty() && assumption_failures.is_empty() {
         FnEvalResult::Success(FnEvalSuccess {
             value: ret_value,
@@ -4499,6 +4500,56 @@ fn f(init: bits[8] id=10, invariant: bits[8] id=11) -> bits[8] {
             panic!("counted_for should evaluate successfully");
         };
         assert_eq!(success.value, IrValue::make_ubits(8, 37).unwrap());
+    }
+
+    #[test]
+    fn counted_for_shares_invokes_without_retaining_array_carries() {
+        let ir_text = r#"package test
+
+fn flip(carry: bits[1][4] id=1, i: bits[2] id=2) -> bits[1] {
+  old: bits[1] = array_index(carry, indices=[i], id=3)
+  ret flipped: bits[1] = not(old, id=4)
+}
+
+fn body(i: bits[2] id=5, carry: bits[1][4] id=6) -> bits[1][4] {
+  a: bits[1] = invoke(carry, i, to_apply=flip, id=7)
+  b: bits[1] = invoke(carry, i, to_apply=flip, id=8)
+  v: bits[1] = and(a, b, id=9)
+  ret next: bits[1][4] = array_update(carry, v, indices=[i], id=10)
+}
+
+fn f() -> bits[1][4] {
+  init: bits[1][4] = literal(value=[0, 0, 0, 0], id=11)
+  ret loop: bits[1][4] = counted_for(init, trip_count=4, stride=1, body=body, id=12)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let mut calls = CallValues::new();
+        let mut observer = RecordingBoolObserver::new();
+        let FnEvalResult::Success(result) = eval_fn_impl(
+            Some(&pkg),
+            pkg.get_fn("f").unwrap(),
+            &[],
+            Some(&mut observer),
+            EvalOrderPolicy::Checked,
+            Some(&mut calls),
+        ) else {
+            panic!("counted_for should evaluate successfully");
+        };
+        assert_eq!(
+            result.value,
+            IrValue::parse_typed("[bits[1]:1, bits[1]:1, bits[1]:1, bits[1]:1]").unwrap()
+        );
+        assert!(calls.is_empty());
+        // Both invokes in an iteration share the computation at node 4.
+        assert_eq!(
+            observer
+                .bool_events
+                .iter()
+                .filter(|(id, _)| *id == 4)
+                .count(),
+            4
+        );
     }
 
     #[test]

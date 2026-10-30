@@ -311,7 +311,7 @@ fn check_mapped_abi(
             }
             Some(SequentialClockEdge::Falling) => {
                 return Err(format!(
-                    "mapped registers use the falling edge of '{}'. stitch-equiv requires rising-edge registers",
+                    "mapped registers use the falling edge of '{}', expected rising-edge registers",
                     clock.port_name
                 ));
             }
@@ -335,7 +335,7 @@ fn check_mapped_abi(
             }
             if index != bit.bit_number as usize {
                 return Err(format!(
-                    "mapped port '{}' has Verilog index {} at bit offset {index}. stitch-equiv requires packed range [{}:0] with index 0 as the LSB",
+                    "mapped port '{}' has Verilog index {} at bit offset {index}, expected packed range [{}:0] with index 0 as the LSB",
                     port.name,
                     bit.bit_number,
                     port.bits_lsb_to_msb.len() - 1
@@ -1260,7 +1260,7 @@ endmodule
                 prove_stitched_pipeline_equiv(&reference, &mapped, 0, GateFormalOptions::default())
                     .unwrap_err(),
                 format!(
-                    "mapped port 'out' has Verilog index {lsb} at bit offset 0. stitch-equiv requires packed range [3:0] with index 0 as the LSB"
+                    "mapped port 'out' has Verilog index {lsb} at bit offset 0, expected packed range [3:0] with index 0 as the LSB"
                 )
             );
         }
@@ -1279,7 +1279,7 @@ endmodule
                 GateFormalOptions::default()
             )
             .unwrap_err(),
-            "mapped registers use the falling edge of 'clk'. stitch-equiv requires rising-edge registers"
+            "mapped registers use the falling edge of 'clk', expected rising-edge registers"
         );
         let mut implementation = mapped(reference.clone());
         implementation.sequential_gate_fn.transition.inputs[0].name = "z".into();

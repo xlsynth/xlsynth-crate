@@ -1522,6 +1522,24 @@ fn check_vectors(directory: &Path, options: &[&str]) -> std::io::Result<Output> 
 }
 
 #[test]
+fn stitch_vectors_reject_ascending_packed_ranges() {
+    let temp = tempfile::tempdir().unwrap();
+    stage_fixture(
+        temp.path(),
+        "fn pipe_cycle0(x: u4) -> u4 { x }",
+        "module pipe(input [3:0] x, output [0:3] out); assign out = x; endmodule",
+    )
+    .unwrap();
+    let result = check_vectors(temp.path(), &["--random-samples", "1"]).unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert_eq!(
+        result.stderr,
+        b"xlsynth-driver: stitch-check-vectors: mapped port 'out' has Verilog index 3 at bit offset 0, expected packed range [3:0] with index 0 as the LSB\n"
+    );
+}
+
+#[test]
 fn stitch_vectors_flush_in_flight_data_and_drain_the_last_transaction() {
     let temp = tempfile::tempdir().unwrap();
     let gv = valid_reset_fixture(temp.path()).unwrap();

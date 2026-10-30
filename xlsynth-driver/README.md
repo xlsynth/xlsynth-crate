@@ -4191,6 +4191,7 @@ xlsynth-driver stitch-check-vectors --spec pipe.toml --netlist pipe.gv \
 Stages and their helpers must have deterministic output bits. The checker
 rejects `smulp` and `umulp` because XLS specifies only the sum of the partial
 products, while concrete implementations can return different component bits.
+A call chain may contain at most 64 functions, counting the stage itself.
 
 A successful run reports how many rows and outputs it checked. A disagreement
 reports the first failing cycle, the output's expected and actual values, and
