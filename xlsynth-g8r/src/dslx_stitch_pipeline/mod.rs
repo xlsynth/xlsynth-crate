@@ -401,8 +401,11 @@ pub fn stitch_pipeline<'a>(
         path,
         top,
         opts.explicit_stages.as_deref(),
-        opts.stdlib_path,
-        &opts.search_paths,
+        spec::StitchImportPaths {
+            stdlib: opts.stdlib_path,
+            search: &opts.search_paths,
+            required_directory: None,
+        },
         opts.boundary_options(),
     )?;
     resolved.validate_wrapper_names()?;

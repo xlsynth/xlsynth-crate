@@ -6,7 +6,8 @@ use std::path::Path;
 
 use xlsynth::optimize_ir;
 
-use super::{ResolvedStitchPipeline, spec::resolve_stages};
+use super::ResolvedStitchPipeline;
+use super::spec::{StitchImportPaths, resolve_stages};
 use crate::aig::{
     ClockPort, SequentialGateFn, SequentialPipelineOptions, stitch_gate_fns_into_pipeline,
 };
@@ -41,8 +42,11 @@ pub fn stitch_g8r_pipeline(
         path,
         top,
         options.explicit_stages.as_deref(),
-        options.stdlib_path,
-        &options.search_paths,
+        StitchImportPaths {
+            stdlib: options.stdlib_path,
+            search: &options.search_paths,
+            required_directory: None,
+        },
         SequentialPipelineOptions {
             name: options.output_design_name.to_string(),
             clock: ClockPort {

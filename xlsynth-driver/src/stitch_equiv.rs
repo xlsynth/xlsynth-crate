@@ -3,9 +3,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::dslx_stitch_pipeline::resolve_stitch_spec;
 use anyhow::{Result, bail};
 use clap::{Arg, ArgMatches, Command, value_parser};
-use xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineSpec;
 use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
 use xlsynth_g8r::stitch_equiv::StitchEquivResult;
 
@@ -29,8 +29,7 @@ pub fn command() -> Command {
 /// Loads the reference and reports the proof result or a replayable
 /// counterexample.
 pub fn handle(matches: &ArgMatches) -> Result<()> {
-    let spec = StitchPipelineSpec::load(matches.get_one::<PathBuf>("spec").unwrap())?;
-    let reference = spec.resolve()?;
+    let reference = resolve_stitch_spec(matches.get_one::<PathBuf>("spec").unwrap())?;
     let mut options = GateFormalOptions::default();
     if let Some(seconds) = matches.get_one::<u64>("timeout-seconds") {
         options = options.with_cadical_timeout(Duration::from_secs(*seconds));

@@ -6,7 +6,9 @@ use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
 use std::path::Path;
 use xlsynth::XlsynthError;
-use xlsynth_g8r::dslx_stitch_pipeline::{StitchPipelineSpec, StitchRtlOptions};
+use xlsynth_g8r::dslx_stitch_pipeline::{
+    ResolvedStitchPipeline, StitchPipelineSpec, StitchRtlOptions,
+};
 use xlsynth_g8r::verilog_version::VerilogVersion;
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
@@ -54,8 +56,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
             .or_else(|| config.as_ref()?.codegen.as_ref()?.gate_format.as_deref()),
     };
     let result = match matches.get_one::<String>("spec") {
-        Some(path) => StitchPipelineSpec::load(Path::new(path))
-            .and_then(|spec| spec.resolve())
+        Some(path) => resolve_stitch_spec(Path::new(path))
             .and_then(|resolved| resolved.emit_rtl(&rtl_options)),
         None => stitch_from_flags(matches, config, rtl_options),
     };
@@ -63,6 +64,31 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         Ok(sv) => println!("{}", sv),
         Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),
     }
+}
+
+/// Anchors libxls's implicit import root while this single-command CLI compiles
+/// the spec.
+pub(crate) fn resolve_stitch_spec(path: &Path) -> Result<ResolvedStitchPipeline, XlsynthError> {
+    // Loading first makes every manifest path absolute. Change directory only
+    // for DSLX compilation, before gate lowering or caller-relative file I/O.
+    let spec = StitchPipelineSpec::load(path)?;
+    let source_dir = spec.source_directory()?;
+    let caller_dir = std::env::current_dir()
+        .map_err(|error| XlsynthError(format!("could not read the working directory: {error}")))?;
+    std::env::set_current_dir(&source_dir).map_err(|error| {
+        XlsynthError(format!(
+            "could not enter DSLX source directory {}: {error}",
+            source_dir.display()
+        ))
+    })?;
+    let result = spec.resolve();
+    std::env::set_current_dir(&caller_dir).map_err(|error| {
+        XlsynthError(format!(
+            "could not restore working directory {}: {error}",
+            caller_dir.display()
+        ))
+    })?;
+    result
 }
 
 /// Emits RTL using the original CLI's stage selection and wrapper semantics.

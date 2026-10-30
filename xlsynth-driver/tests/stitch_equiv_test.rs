@@ -87,6 +87,105 @@ fn stitch_generators_load_spec_from_another_directory() {
     }
 }
 
+/// A working-directory module can change the generated logic even when the
+/// shadowed transitive import contributes only a constant to the stage.
+#[test]
+fn stitch_spec_imports_are_independent_of_the_working_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let design = temp.path().join("design");
+    let imports = design.join("imports");
+    let callers = temp.path().join("callers");
+    let clean = callers.join("clean");
+    let direct = callers.join("direct");
+    let transitive = callers.join("transitive");
+    fs::create_dir_all(&imports).unwrap();
+    fs::create_dir_all(&clean).unwrap();
+    fs::create_dir(&direct).unwrap();
+    fs::create_dir(&transitive).unwrap();
+    fs::write(
+        design.join("pipe.toml"),
+        format!("{SPEC}\ndslx_path = [\"imports\"]\n"),
+    )
+    .unwrap();
+    fs::write(
+        design.join("pipe.x"),
+        r#"import stitch_helper;
+fn pipe_cycle0(x: bool) -> bool { stitch_helper::apply(x) }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        imports.join("stitch_helper.x"),
+        r#"import stitch_constant;
+pub fn apply(x: bool) -> bool { x ^ stitch_constant::INVERT }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        imports.join("stitch_constant.x"),
+        "pub const INVERT = false;",
+    )
+    .unwrap();
+    fs::write(
+        direct.join("stitch_helper.x"),
+        "pub fn apply(x: bool) -> bool { !x }",
+    )
+    .unwrap();
+    fs::write(
+        transitive.join("stitch_constant.x"),
+        "pub const INVERT = true;",
+    )
+    .unwrap();
+
+    fs::write(
+        callers.join("pipe.gv"),
+        r#"module pipe(input clk, input x, output out);
+  DFF r0 (.D(x), .CLK(clk), .Q(out));
+endmodule"#,
+    )
+    .unwrap();
+    fs::write(callers.join("cells.textproto"), LIBERTY).unwrap();
+    for command in [
+        "dslx-stitch-pipeline",
+        "dslx-stitch-g8r-pipeline",
+        "stitch-equiv",
+    ] {
+        let mut args = vec![command, "--spec", "../../design/pipe.toml"];
+        if command == "dslx-stitch-g8r-pipeline" {
+            args.extend(["--bin-out", "pipe.g8rbin"]);
+        }
+        if command == "stitch-equiv" {
+            args.extend([
+                "--netlist",
+                "../pipe.gv",
+                "--liberty-proto",
+                "../cells.textproto",
+            ]);
+        }
+        let expected = driver(&clean, &args).unwrap();
+        assert!(
+            expected.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        for cwd in [&direct, &transitive] {
+            let shadowed = driver(cwd, &args).unwrap();
+            assert!(
+                shadowed.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&shadowed.stderr)
+            );
+            assert_eq!(shadowed.stdout, expected.stdout, "{command} from {cwd:?}");
+            if command == "dslx-stitch-g8r-pipeline" {
+                assert_eq!(
+                    fs::read(cwd.join("pipe.g8rbin")).unwrap(),
+                    fs::read(clean.join("pipe.g8rbin")).unwrap()
+                );
+            }
+        }
+    }
+}
+
 /// A valid-enabled design needs a different observation contract even when
 /// the mapped implementation uses the same control names.
 #[test]

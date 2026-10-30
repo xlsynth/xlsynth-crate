@@ -78,6 +78,21 @@ impl StitchPipelineSpec {
         Ok(spec)
     }
 
+    /// Returns the directory that libxls must use for CWD-relative imports.
+    pub fn source_directory(&self) -> Result<PathBuf, XlsynthError> {
+        let path = std::path::absolute(&self.dslx_input_file)
+            .map_err(|error| XlsynthError(format!("invalid DSLX source path: {error}")))?;
+        let dir = path
+            .parent()
+            .ok_or_else(|| XlsynthError("DSLX source path has no parent directory".into()))?;
+        fs::canonicalize(dir).map_err(|error| {
+            XlsynthError(format!(
+                "could not resolve DSLX source directory {}: {error}",
+                dir.display()
+            ))
+        })
+    }
+
     /// Checks manifest field dependencies and returns the enclosing design
     /// name.
     fn validate(&self) -> Result<&str, XlsynthError> {
@@ -112,7 +127,8 @@ impl StitchPipelineSpec {
     }
 
     /// Loads and typechecks the selected stages once for subsequent RTL and
-    /// proof-model generation.
+    /// proof-model generation. If the source imports another module, run
+    /// resolution in a process whose working directory is `source_directory()`.
     pub fn resolve(&self) -> Result<ResolvedStitchPipeline, XlsynthError> {
         let name = self.validate()?;
         let text = fs::read_to_string(&self.dslx_input_file).map_err(|error| {
@@ -127,8 +143,11 @@ impl StitchPipelineSpec {
             &self.dslx_input_file,
             self.dslx_top.as_deref().unwrap_or(name),
             self.stages.as_deref(),
-            self.dslx_stdlib_path.as_deref(),
-            &search_paths,
+            StitchImportPaths {
+                stdlib: self.dslx_stdlib_path.as_deref(),
+                search: &search_paths,
+                required_directory: Some(&self.source_directory()?),
+            },
             SequentialPipelineOptions {
                 name: name.to_string(),
                 clock: ClockPort {
@@ -208,6 +227,13 @@ fn dslx_path_str<'a>(path: &'a Path, field: &str) -> Result<&'a str, XlsynthErro
     Ok(text)
 }
 
+/// DSLX lookup paths and the working directory required for manifest imports.
+pub(super) struct StitchImportPaths<'a> {
+    pub(super) stdlib: Option<&'a Path>,
+    pub(super) search: &'a [&'a Path],
+    pub(super) required_directory: Option<&'a Path>,
+}
+
 /// Typechecks DSLX, selects the stages in order and verifies their packed
 /// interfaces.
 pub(super) fn resolve_stages(
@@ -215,8 +241,7 @@ pub(super) fn resolve_stages(
     path: &Path,
     top: &str,
     explicit_stages: Option<&[String]>,
-    stdlib_path: Option<&Path>,
-    search_paths: &[&Path],
+    paths: StitchImportPaths<'_>,
     boundary: SequentialPipelineOptions,
 ) -> Result<ResolvedStitchPipeline, XlsynthError> {
     let module_name = path
@@ -224,18 +249,50 @@ pub(super) fn resolve_stages(
         .and_then(|s| s.to_str())
         .ok_or_else(|| XlsynthError("invalid DSLX module filename".into()))?;
     let path_str = dslx_path_str(path, "dslx_input_file")?;
-    if let Some(path) = stdlib_path {
+    if let Some(path) = paths.stdlib {
         dslx_path_str(path, "dslx_stdlib_path")?;
     }
-    for path in search_paths {
+    for path in paths.search {
         dslx_path_str(path, "dslx_path")?;
     }
-    let mut imports = dslx::ImportData::new(stdlib_path, search_paths);
-    let module = dslx::parse_and_typecheck(text, path_str, module_name, &mut imports)?;
+    let mut imports = dslx::ImportData::new(paths.stdlib, paths.search);
+    let typecheck = dslx::parse_and_typecheck(text, path_str, module_name, &mut imports);
+    if let Some(required_dir) = paths.required_directory {
+        // libxls tries its process working directory before additional search
+        // paths. Every transitive import begins at an import/use in this
+        // module.
+        let current_dir = fs::canonicalize(".").map_err(|error| {
+            XlsynthError(format!("could not resolve working directory: {error}"))
+        })?;
+        if current_dir != required_dir {
+            let guidance = format!(
+                "resolve stitch specifications with DSLX imports from the source directory {} (current working directory {})",
+                required_dir.display(),
+                current_dir.display()
+            );
+            match &typecheck {
+                Ok(typechecked) => {
+                    let module = typechecked.get_module();
+                    if (0..module.get_member_count()).any(|i| {
+                        matches!(
+                            module.get_member(i).kind(),
+                            dslx::ModuleMemberKind::Import | dslx::ModuleMemberKind::Use
+                        )
+                    }) {
+                        return Err(XlsynthError(guidance));
+                    }
+                }
+                // Failed typechecking may itself be due to resolving an import
+                // from the wrong directory. Preserve the original diagnostic.
+                Err(error) => return Err(XlsynthError(format!("{error}\n{guidance}"))),
+            }
+        }
+    }
+    let module = typecheck?;
     let names = select_stage_names(&module, top, explicit_stages)?;
     let convert = DslxConvertOptions {
-        dslx_stdlib_path: stdlib_path,
-        additional_search_paths: search_paths.to_vec(),
+        dslx_stdlib_path: paths.stdlib,
+        additional_search_paths: paths.search.to_vec(),
         enable_warnings: None,
         disable_warnings: None,
         force_implicit_token_calling_convention: false,
@@ -267,19 +324,47 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn spec_reuses_stage_order_imports_and_boundaries_across_emitters() {
+    fn spec_requires_the_source_directory_for_import_and_use() {
         let dir = tempdir().unwrap();
         let imports = dir.path().join("imports");
         fs::create_dir(&imports).unwrap();
+        fs::write(imports.join("helper.x"), "pub const ADDEND = u8:1;").unwrap();
+        let path = dir.path().join("pipeline.toml");
         fs::write(
-            imports.join("helper.x"),
-            "pub fn inc(x: u8) -> u8 { x + u8:1 }",
+            &path,
+            r#"dslx_input_file = "stages.x"
+dslx_path = ["imports"]
+dslx_top = "pipe"
+"#,
         )
         .unwrap();
+        let spec = StitchPipelineSpec::load(&path).unwrap();
+        assert_eq!(spec.dslx_input_file, dir.path().join("stages.x"));
+        assert_eq!(spec.dslx_path, [imports]);
+        assert_eq!(
+            spec.source_directory().unwrap(),
+            fs::canonicalize(dir.path()).unwrap()
+        );
+        let expected = format!(
+            "resolve stitch specifications with DSLX imports from the source directory {} (current working directory {})",
+            spec.source_directory().unwrap().display(),
+            fs::canonicalize(".").unwrap().display()
+        );
+        for source in [
+            "import helper;\nfn pipe_cycle0(x: u8) -> u8 { x + helper::ADDEND }",
+            "#![feature(use_syntax)]\nuse helper::ADDEND;\nfn pipe_cycle0(x: u8) -> u8 { x + ADDEND }",
+        ] {
+            fs::write(&spec.dslx_input_file, source).unwrap();
+            assert_eq!(spec.resolve().err().unwrap().0, expected);
+        }
+    }
+
+    #[test]
+    fn spec_reuses_stage_order_and_boundaries_across_emitters() {
+        let dir = tempdir().unwrap();
         fs::write(
             dir.path().join("stages.x"),
-            r#"import helper;
-fn first(x: u8) -> u8 { helper::inc(x) }
+            r#"fn first(x: u8) -> u8 { x + u8:1 }
 fn second(x: u8) -> u8 { !x }
 "#,
         )
@@ -288,7 +373,6 @@ fn second(x: u8) -> u8 { !x }
         fs::write(
             &path,
             r#"dslx_input_file = "stages.x"
-dslx_path = ["imports"]
 stages = ["second", "first"]
 output_module_name = "pipe"
 clock_name = "tick"
@@ -297,8 +381,6 @@ flop_inputs = false
         )
         .unwrap();
         let spec = StitchPipelineSpec::load(&path).unwrap();
-        assert_eq!(spec.dslx_input_file, dir.path().join("stages.x"));
-        assert_eq!(spec.dslx_path, [imports]);
         let pipe = spec.resolve().unwrap();
         assert_eq!(pipe.name(), "pipe");
         assert_eq!(pipe.latency(), 2);

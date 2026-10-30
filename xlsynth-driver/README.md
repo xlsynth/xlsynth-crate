@@ -4023,12 +4023,17 @@ flop_outputs = true
 
 - Supply either `dslx_top` for implicit stage discovery or `stages = ["align", "finish"]` for an explicit order. `output_module_name` defaults to `dslx_top` and is required with `stages`.
 - Implicit stage indices start at zero, are contiguous, and have no leading zeros. Each selected stage needs a concrete data-only IR entry point. A private stage that lowers only to an implicit-token function is rejected by name.
-- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths resolve against the spec's directory. The spec supplies the DSLX search paths for all three commands.
+- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. All three commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
 - `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The two-stage adder above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
 - A stage with one aggregate parameter receives the entire preceding result. Multiple parameters consume slices of the packed result from least-significant bits upward in parameter declaration order. The proof uses the same wiring as the generators.
 - `clock_name` defaults to `"clk"`. Optional `input_valid_signal`, `output_valid_signal`, `reset`, and `reset_active_low` configure the generated valid pipeline. Both `output_valid_signal` and `reset` require `input_valid_signal`. Reset is synchronous and active high by default. Setting `reset_active_low = true` requires a named `reset`.
 - The names `out` and `output_value` are reserved for the generated data output.
 - On the generator commands, `--spec` conflicts with command-line source, stage-selection, and pipeline-interface flags. RTL emission and g8r lowering options remain available.
+
+Library callers resolving a spec with DSLX imports in-process must run
+`StitchPipelineSpec::resolve` from the DSLX source directory. The resolver
+reports a directory mismatch. Once resolved, the same pipeline object can
+generate RTL, lower to g8r, or check a netlist.
 
 ### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
 

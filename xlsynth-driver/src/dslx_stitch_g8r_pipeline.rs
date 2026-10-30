@@ -6,13 +6,13 @@ use clap::ArgMatches;
 use xlsynth::XlsynthError;
 use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
-use xlsynth_g8r::dslx_stitch_pipeline::StitchPipelineSpec;
 use xlsynth_g8r::dslx_stitch_pipeline::g8r_pipeline::{
     StitchG8rPipelineOptions, stitch_g8r_pipeline,
 };
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 
 use crate::common::{get_dslx_paths, write_stdout};
+use crate::dslx_stitch_pipeline::resolve_stitch_spec;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 
@@ -27,8 +27,7 @@ pub fn handle_dslx_stitch_g8r_pipeline(matches: &ArgMatches, config: &Option<Too
         lowering.enable_formal_array_alias_analysis = false;
     }
     let design = match matches.get_one::<String>("spec") {
-        Some(path) => StitchPipelineSpec::load(Path::new(path))
-            .and_then(|spec| spec.resolve())
+        Some(path) => resolve_stitch_spec(Path::new(path))
             .and_then(|resolved| resolved.lower_to_g8r(&lowering)),
         None => stitch_from_flags(matches, config, &lowering),
     }
