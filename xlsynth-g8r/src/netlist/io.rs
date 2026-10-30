@@ -140,9 +140,8 @@ pub fn read_gv_for_roundtrip_from_path(path: &Path) -> Result<ParsedNetlist> {
     read_netlist_from_path(path, NetlistFormat::RoundTripGv).map(|result| result.parsed)
 }
 
-/// Reads mapped GV for a proof, preserving source values and checking
-/// part-select directions and scalar tran terminals before hierarchy
-/// elaboration.
+/// Reads mapped GV for proof, validating declarations and wiring before
+/// hierarchy elaboration.
 pub fn read_gv_for_proof_from_path(path: &Path) -> Result<ParsedNetlist> {
     read_netlist_from_path(path, NetlistFormat::ProofGv).map(|result| result.parsed)
 }
@@ -213,6 +212,7 @@ fn read_netlist<R: Read + 'static>(
     if matches!(format, NetlistFormat::RoundTripGv | NetlistFormat::ProofGv) {
         scanner.require_preserved_structure();
     }
+    scanner.check_proof_syntax = matches!(format, NetlistFormat::ProofGv);
     let mut parser = NetlistParser::new(scanner);
     let render_error = |error: ScanError, parser: &NetlistParser<R>| {
         anyhow!(

@@ -54,6 +54,42 @@ fn proof_gv_reader_requires_sized_nonempty_concatenation_operands() -> Result<()
 }
 
 #[test]
+fn proof_gv_reader_checks_identifiers_and_ansi_port_slots() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("names.gv");
+    for (source, message) in [
+        (
+            "module top(input x, output y,); assign y = x; endmodule",
+            "expected an ANSI port name after ','",
+        ),
+        (
+            "module top(input x, output y); wire signed; assign signed = x; assign y = signed; endmodule",
+            "unsupported keyword 'signed'. Escape the name if it denotes an identifier",
+        ),
+        (
+            r"module top(input x, output y); wire \ ; assign y = x; endmodule",
+            "an escaped identifier must contain printable non-whitespace ASCII",
+        ),
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("invalid proof input");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!("GV reader: {message}"),
+        );
+        read_gv_from_str(source)?;
+    }
+    std::fs::write(
+        &path,
+        r"module top(input x, output y); wire \signed ; assign \signed = x; assign y = \signed ; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
 fn readers_accept_ansi_ports_and_shared_wiring() {
     let source = r#"module top(input wire [1:0] a, output wire [1:0] y);
   assign y = a;
@@ -381,5 +417,79 @@ endmodule
 "#;
     std::fs::write(&path, source)?;
     read_gv_for_roundtrip_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_rejects_repeated_net_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("duplicate_net.gv");
+    for source in [
+        "module top(); wire x, x; endmodule",
+        "module top(); wire x; wire x; endmodule",
+        "module top(input x); wire x; endmodule",
+        "module top(output wire [1:0] x); wire [1:0] x; endmodule",
+        "module top(x); input wire x; wire x; endmodule",
+        "module top(x); wire x; input wire x; endmodule",
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("duplicate net declaration");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: net 'x' is declared more than once in this module"
+        );
+        read_gv_from_str(source)?;
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_rejects_nets_sharing_an_instance_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("instance_name.gv");
+    for source in [
+        "module top(); wire u; BUF u(); endmodule",
+        "module top(); BUF u(); wire u; endmodule",
+        "module top(input u); BUF u(); endmodule",
+        "module top(u); BUF u(); output u; endmodule",
+        "module top(input x); assign u=x; BUF u(); endmodule",
+        "module top(input x); BUF u(); assign u=x; endmodule",
+        "module top(); BUF u(.Y(u)); endmodule",
+    ] {
+        std::fs::write(&path, source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("instance and net names must be distinct");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            "GV reader: instance name 'u' is also a net in this module"
+        );
+        read_gv_from_str(source)?;
+        read_gv_for_roundtrip_from_path(&path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_accepts_matching_non_ansi_port_and_wire_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("port_nets.gv");
+    std::fs::write(
+        &path,
+        r#"module child(x, y);
+  input [1:0] x;
+  wire [1:0] x;
+  wire [1:0] y;
+  output [1:0] y;
+  assign y = x;
+endmodule
+module top(input [1:0] a, output [1:0] b);
+  child x(.x(a), .y(b));
+endmodule"#,
+    )?;
+    read_gv_for_proof_from_path(&path)?;
     Ok(())
 }

@@ -4053,11 +4053,12 @@ different observation contract and are rejected. Mapped FFs must share the
 spec's rising-edge clock. The importer rejects latches, derived clocks, and
 asynchronous clear/preset cells.
 
-Supply structural mapped GV with cell instances and wiring assignments.
+Supply a valid structural Verilog netlist (`.gv`) with cell instances and wiring assignments.
 The checker uses the strict GV reader and reports the source location for
 unsupported syntax. Give decimal literals an explicit width inside a
-concatenation or when their sign bit is set. Non-ANSI module headers must
-agree with their port declarations. Selects require a packed net (use
+concatenation or when their sign bit is set. Escape identifiers that coincide
+with SystemVerilog keywords. Non-ANSI module headers must agree with their
+port declarations. Selects require a packed net (use
 `[0:0]` for a one-bit vector), and part-selects must follow its declared
 direction. Each plain `tran` terminal must be one bit. The Liberty proto
 must unambiguously describe the pins, functions, and FF clock edges of the

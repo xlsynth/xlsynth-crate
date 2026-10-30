@@ -13,6 +13,7 @@ use std::io::{BufRead, BufReader, Read};
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 use xlsynth_pir::{IrBits, IrFormatPreference};
+use xlsynth_vast::is_system_verilog_keyword;
 
 pub type PortId = SymbolU32;
 pub type NetId = SymbolU32;
@@ -386,6 +387,7 @@ pub struct TokenScanner<R: Read + 'static> {
     lookahead: Option<Token>,
     emit_line_comments: bool,
     reject_lossy_constructs: bool,
+    pub(super) check_proof_syntax: bool,
     read_error: Option<std::io::Error>,
     done: bool,
     line_lookup: Box<dyn Fn(u32) -> Option<String>>, // line number -> line text
@@ -459,6 +461,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             lookahead: None,
             emit_line_comments: true,
             reject_lossy_constructs: false,
+            check_proof_syntax: false,
             read_error: None,
             done: false,
             line_lookup,
@@ -855,7 +858,7 @@ impl<R: Read + 'static> TokenScanner<R> {
         })
     }
 
-    fn pop_identifier(&mut self, start: Pos) -> Token {
+    fn pop_identifier(&mut self, start: Pos) -> Result<Token, ScanError> {
         let mut ident = String::new();
         let mut escaped = false;
         // Check if it's an escaped identifier
@@ -915,19 +918,37 @@ impl<R: Read + 'static> TokenScanner<R> {
                 }
             }
         }
-        let limit = self.pos;
+        let span = Span {
+            start,
+            limit: self.pos,
+        };
         if !escaped {
             if let Some(kw) = Keyword::from_str(&ident) {
-                return Token {
+                return Ok(Token {
                     payload: TokenPayload::Keyword(kw),
-                    span: Span { start, limit },
-                };
+                    span,
+                });
             }
+            if self.check_proof_syntax && is_system_verilog_keyword(&ident) {
+                return Err(ScanError {
+                    message: format!(
+                        "unsupported keyword '{ident}'. Escape the name if it denotes an identifier"
+                    ),
+                    span,
+                });
+            }
+        } else if self.check_proof_syntax
+            && (ident.is_empty() || !ident.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            return Err(ScanError {
+                message: "an escaped identifier must contain printable non-whitespace ASCII".into(),
+                span,
+            });
         }
-        Token {
+        Ok(Token {
             payload: TokenPayload::Identifier(ident),
-            span: Span { start, limit },
-        }
+            span,
+        })
     }
 
     /// Reads one timescale argument token, skipping whitespace and comments.
@@ -1094,7 +1115,7 @@ impl<R: Read + 'static> TokenScanner<R> {
         // Note that "escaped identifiers" can begin with the backslash
         // character.
         if b.is_ascii_alphabetic() || b == b'_' || b == b'\\' {
-            return Ok(Some(self.pop_identifier(start)));
+            return self.pop_identifier(start).map(Some);
         }
         // Handle number (plain integer literal or Verilog-style literal)
         if b.is_ascii_digit() {
@@ -1271,6 +1292,12 @@ impl Keyword {
     }
 }
 
+/// Net type information present in a port declaration.
+struct ParsedPortType {
+    explicit_wire: bool,
+    width: Option<(u32, u32)>,
+}
+
 // --- Recursive descent parser ---
 pub(crate) struct Parser<R: Read + 'static> {
     scanner: TokenScanner<R>,
@@ -1292,6 +1319,8 @@ pub(crate) struct Parser<R: Read + 'static> {
     /// net context) rather than via an explicit declaration. Tracked
     /// per-module for diagnostics; not carried into result artifacts.
     implicit_net_by_name: HashSet<NetId>,
+    /// Explicit net declarations in this module, tracked for proof input.
+    declared_wires: HashSet<NetId>,
 }
 
 impl<R: Read + 'static> Parser<R> {
@@ -1309,6 +1338,7 @@ impl<R: Read + 'static> Parser<R> {
             net_width_span_by_name: HashMap::new(),
             allow_implicit_nets,
             implicit_net_by_name: HashSet::new(),
+            declared_wires: HashSet::new(),
         }
     }
 
@@ -2075,14 +2105,29 @@ impl<R: Read + 'static> Parser<R> {
             })
     }
 
+    /// Records each proof input's net declarations separately from references
+    /// that introduce an implicit wire.
+    fn record_wire_declaration(&mut self, name: NetId, span: Span) -> Result<(), ScanError> {
+        if self.scanner.check_proof_syntax && !self.declared_wires.insert(name) {
+            return Err(ScanError {
+                message: format!(
+                    "net '{}' is declared more than once in this module",
+                    self.interner.resolve(name).unwrap()
+                ),
+                span,
+            });
+        }
+        Ok(())
+    }
+
     /// Parses the optional `wire` qualifier and packed width of a port.
-    fn parse_optional_port_type(&mut self) -> Result<Option<(u32, u32)>, ScanError> {
+    fn parse_optional_port_type(&mut self) -> Result<ParsedPortType, ScanError> {
         self.skip_trivia()?;
-        if self
+        let explicit_wire = self
             .scanner
             .peekt()?
-            .is_some_and(|token| matches!(token.payload, TokenPayload::Keyword(Keyword::Wire)))
-        {
+            .is_some_and(|token| matches!(token.payload, TokenPayload::Keyword(Keyword::Wire)));
+        if explicit_wire {
             self.scanner.popt()?;
         }
         self.skip_trivia()?;
@@ -2091,7 +2136,10 @@ impl<R: Read + 'static> Parser<R> {
             .peekt()?
             .is_some_and(|token| matches!(token.payload, TokenPayload::OBrack))
         {
-            return Ok(None);
+            return Ok(ParsedPortType {
+                explicit_wire,
+                width: None,
+            });
         }
         self.scanner.popt()?;
         let msb = self.parse_u32_endpoint("msb in port width")?;
@@ -2122,7 +2170,10 @@ impl<R: Read + 'static> Parser<R> {
                 span: close.span,
             });
         }
-        Ok(Some((msb, lsb)))
+        Ok(ParsedPortType {
+            explicit_wire,
+            width: Some((msb, lsb)),
+        })
     }
 
     /// Parses ANSI port declarations through the closing parenthesis.
@@ -2142,6 +2193,12 @@ impl<R: Read + 'static> Parser<R> {
                 },
             })?;
             if matches!(token.payload, TokenPayload::CParen) {
+                if self.scanner.check_proof_syntax {
+                    return Err(ScanError {
+                        message: "expected an ANSI port name after ','".into(),
+                        span: token.span,
+                    });
+                }
                 self.scanner.popt()?;
                 break;
             }
@@ -2153,7 +2210,7 @@ impl<R: Read + 'static> Parser<R> {
             };
             if let Some(direction) = direction {
                 self.scanner.popt()?;
-                current_type = Some((direction, self.parse_optional_port_type()?));
+                current_type = Some((direction, self.parse_optional_port_type()?.width));
             }
             let (direction, width) = current_type.clone().ok_or_else(|| ScanError {
                 message: "expected direction in ANSI port list".to_string(),
@@ -2191,6 +2248,8 @@ impl<R: Read + 'static> Parser<R> {
                     span: name_token.span,
                 });
             }
+            // An ANSI port declares its net even without an explicit wire type.
+            self.record_wire_declaration(name, name_token.span)?;
             self.ensure_net(name, width, name_token.span)?;
             names.push(name);
             ports.push(NetlistPort {
@@ -2282,6 +2341,7 @@ impl<R: Read + 'static> Parser<R> {
         self.net_index_by_name.clear();
         self.net_width_span_by_name.clear();
         self.implicit_net_by_name.clear();
+        self.declared_wires.clear();
 
         // Expect 'module' keyword
         let tok = self.scanner.popt()?.ok_or_else(|| ScanError {
@@ -2490,6 +2550,28 @@ impl<R: Read + 'static> Parser<R> {
                 }
             }
         }
+        // The completed net index includes every declaration and implicit
+        // net, regardless of whether it precedes or follows the instance.
+        if self.scanner.check_proof_syntax
+            && let Some(instance) = instances
+                .iter()
+                .find(|inst| self.net_index_by_name.contains_key(&inst.instance_name))
+        {
+            let pos = Pos {
+                lineno: instance.inst_lineno,
+                colno: instance.inst_colno,
+            };
+            return Err(ScanError {
+                message: format!(
+                    "instance name '{}' is also a net in this module",
+                    self.interner.resolve(instance.instance_name).unwrap()
+                ),
+                span: Span {
+                    start: pos,
+                    limit: pos,
+                },
+            });
+        }
         if self.scanner.reject_lossy_constructs && !self.implicit_net_by_name.is_empty() {
             self.validate_implicit_nets(&assigns, &instances)?;
         }
@@ -2551,7 +2633,8 @@ impl<R: Read + 'static> Parser<R> {
                 span: kw_tok.span,
             });
         }
-        let width = self.parse_optional_port_type()?;
+        let port_type = self.parse_optional_port_type()?;
+        let width = port_type.width;
         // Parse one or more identifiers (comma-separated)
         let mut ports = Vec::new();
         loop {
@@ -2574,6 +2657,11 @@ impl<R: Read + 'static> Parser<R> {
             // Ensure a corresponding net exists for this port (non-ANSI body
             // decls imply nets). If a width is present here and not
             // previously known, record it; if conflicting, error.
+            // A non-ANSI direction declaration may have a separate wire
+            // declaration unless it already supplies the net type itself.
+            if port_type.explicit_wire {
+                self.record_wire_declaration(name, t.span)?;
+            }
             let _net_index = self.ensure_net(name, width, t.span)?;
             ports.push(NetlistPort {
                 direction: direction.clone(),
@@ -2687,6 +2775,7 @@ impl<R: Read + 'static> Parser<R> {
             };
             // Ensure/dedupe nets for wires too; reconcile widths per rules
             // above.
+            self.record_wire_declaration(name, t.span)?;
             let net_idx = self.ensure_net(name, width, t.span)?;
             net_indices.push(net_idx);
             // If next is ',', continue
