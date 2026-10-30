@@ -17,6 +17,43 @@ endmodule
 "#;
 
 #[test]
+fn proof_gv_reader_requires_sized_nonempty_concatenation_operands() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("concat.gv");
+    for (expression, diagnostic) in [
+        (
+            "{0,x}",
+            "unsized decimal in concatenation requires an explicit literal width",
+        ),
+        (
+            "{x,{1,x}}",
+            "unsized decimal in concatenation requires an explicit literal width",
+        ),
+        ("{x,}", "expected a concatenation operand before '}'"),
+        ("{}", "expected a concatenation operand before '}'"),
+    ] {
+        std::fs::write(
+            &path,
+            format!("module top(input x, output [32:0] y);\nassign y = {expression};\nendmodule"),
+        )?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("invalid concatenation");
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!("GV reader: {diagnostic} @ {}:2:", path.display())),
+            "{message}"
+        );
+    }
+    std::fs::write(
+        &path,
+        "module top(input x, output [32:0] y); assign y = {32'd0, {x}}; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
 fn readers_accept_ansi_ports_and_shared_wiring() {
     let source = r#"module top(input wire [1:0] a, output wire [1:0] y);
   assign y = a;
@@ -237,6 +274,66 @@ fn proof_gv_reader_accepts_ascending_and_singleton_part_selects() -> Result<()> 
 endmodule"#,
     )?;
     read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn proof_gv_reader_requires_packed_declarations_for_selects() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("scalar.gv");
+    for (body, select, net) in [
+        ("assign y = x[0];", "x[0]", "x"),
+        ("assign y = {{x[0:0]}};", "x[0:0]", "x"),
+        ("assign y[0] = x;", "y[0]", "y"),
+        ("BUF inst(.A(x[0:0]), .Y(y));", "x[0:0]", "x"),
+        ("tran(y, x[0]);", "x[0]", "x"),
+        ("assign w = x; assign y = w[0];", "w[0]", "w"),
+    ] {
+        let source = format!("module top(x, y); {body} input x; output y; endmodule");
+        std::fs::write(&path, &source)?;
+        let error = read_gv_for_proof_from_path(&path)
+            .err()
+            .expect("a scalar cannot be indexed");
+        assert_eq!(
+            error.to_string().split(" @ ").next().unwrap(),
+            format!("GV reader: select '{select}' requires a packed net. '{net}' is scalar")
+        );
+        read_gv_from_str(&source)?;
+    }
+
+    // A packed [0:0] net supports both forms of select.
+    std::fs::write(
+        &path,
+        "module top(input [0:0] x, output y); wire [0:0] w; assign w[0] = x[0:0]; assign y = w[0:0]; endmodule",
+    )?;
+    read_gv_for_proof_from_path(&path)?;
+    Ok(())
+}
+
+#[test]
+fn preserved_gv_readers_reject_conflicting_scalar_and_packed_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("declarations.gv");
+    for declarations in [
+        "input x; wire [0:0] x;",
+        "wire [0:0] x; input x;",
+        "input [1:0] x; wire x;",
+        "wire x; input [1:0] x;",
+    ] {
+        let source = format!("module top(x, y); assign y = x; {declarations} output y; endmodule");
+        std::fs::write(&path, &source)?;
+        for result in [
+            read_gv_for_proof_from_path(&path),
+            read_gv_for_roundtrip_from_path(&path),
+        ] {
+            let error = result.err().expect("incompatible explicit declarations");
+            assert_eq!(
+                error.to_string().split(" @ ").next().unwrap(),
+                "GV reader: net 'x' has both scalar and packed declarations"
+            );
+        }
+        read_gv_from_str(&source)?;
+    }
     Ok(())
 }
 

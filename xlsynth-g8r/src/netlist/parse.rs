@@ -1443,10 +1443,10 @@ impl<R: Read + 'static> Parser<R> {
     /// Rejects a reference too deep for the wire format before recursing.
     fn parse_nested_netref(&mut self, depth: usize) -> Result<NetRef, ScanError> {
         self.skip_trivia()?;
-        let enforce_limit = self.scanner.reject_lossy_constructs;
+        let preserve_structure = self.scanner.reject_lossy_constructs;
         if let Some(tok) = self.scanner.peekt()? {
             if matches!(tok.payload, TokenPayload::OBrace) {
-                if enforce_limit && depth >= MAX_CONCAT_DEPTH {
+                if preserve_structure && depth >= MAX_CONCAT_DEPTH {
                     return Err(ScanError {
                         message: format!(
                             "mapped netlists support at most {MAX_CONCAT_DEPTH} nested concatenations"
@@ -1459,9 +1459,14 @@ impl<R: Read + 'static> Parser<R> {
                 let mut elems: Vec<NetRef> = Vec::new();
                 loop {
                     self.skip_trivia()?;
-                    // If next is '}', end of concatenation
                     if let Some(tok2) = self.scanner.peekt()? {
                         if matches!(tok2.payload, TokenPayload::CBrace) {
+                            if preserve_structure {
+                                return Err(ScanError {
+                                    message: "expected a concatenation operand before '}'".into(),
+                                    span: tok2.span,
+                                });
+                            }
                             self.scanner.popt()?; // consume '}'
                             break;
                         }
@@ -1470,6 +1475,7 @@ impl<R: Read + 'static> Parser<R> {
                     // literal, or nested concat)
                     let elem = self.parse_nested_netref(depth + 1)?;
                     elems.push(elem);
+                    self.skip_trivia()?;
                     // Optional comma
                     if let Some(next) = self.scanner.peekt()? {
                         if matches!(next.payload, TokenPayload::Comma) {
@@ -1503,6 +1509,19 @@ impl<R: Read + 'static> Parser<R> {
                 limit: self.scanner.pos,
             },
         })?;
+        if preserve_structure
+            && depth > 0
+            && matches!(
+                net_tok.payload,
+                TokenPayload::VerilogInt { width: None, .. }
+            )
+        {
+            return Err(ScanError {
+                message: "unsized decimal in concatenation requires an explicit literal width"
+                    .into(),
+                span: net_tok.span,
+            });
+        }
         self.parse_non_concat_netref_from_token(net_tok)
     }
 
@@ -1653,7 +1672,8 @@ impl<R: Read + 'static> Parser<R> {
     /// Ensures there is a `Net` with the given `name` present in `self.nets`.
     /// If it already exists, reconciles optional `width` information:
     /// - (None, None) -> keep None
-    /// - (Some(w), None) or (None, Some(w)) -> set to Some(w)
+    /// - Explicit scalar and packed declarations conflict in preserved mode.
+    ///   Other readers retain the packed width for this combination.
     /// - (Some(a), Some(b)) where a != b -> error
     /// Returns the `NetIndex` for the ensured net.
     fn ensure_net(
@@ -1665,6 +1685,18 @@ impl<R: Read + 'static> Parser<R> {
         if let Some(&idx) = self.net_index_by_name.get(&name) {
             let implicit_scalar_placeholder =
                 self.implicit_net_by_name.contains(&name) && self.nets[idx.0].width == Some((0, 0));
+            if self.scanner.reject_lossy_constructs
+                && !implicit_scalar_placeholder
+                && self.nets[idx.0].width.is_some() != width.is_some()
+            {
+                return Err(ScanError {
+                    message: format!(
+                        "net '{}' has both scalar and packed declarations",
+                        self.interner.resolve(name).unwrap_or("<unknown>"),
+                    ),
+                    span: err_span,
+                });
+            }
             let mut clear_implicit_marker = false;
             {
                 let existing = &mut self.nets[idx.0];
@@ -1738,7 +1770,11 @@ impl<R: Read + 'static> Parser<R> {
     fn accept_implicit_declarations(&mut self, reference: &NetRef) {
         match reference {
             NetRef::Simple(index) => {
-                self.implicit_net_by_name.remove(&self.nets[index.0].name);
+                if self.implicit_net_by_name.remove(&self.nets[index.0].name) {
+                    // No later explicit declaration supplied a packed range.
+                    // A net implicitly declared at this terminal is scalar.
+                    self.nets[index.0].width = None;
+                }
             }
             NetRef::Concat(parts) => {
                 for part in parts {

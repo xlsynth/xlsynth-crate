@@ -12,18 +12,29 @@ use crate::netlist::parse::{
     AssignExpr, Net, NetRef, NetlistAssignKind, NetlistModule, Pos, ScanError, Span,
 };
 
-/// Checks selects against the final declarations, including forward-declared
-/// wires. A Verilog part-select cannot reverse the order of the selected bits.
-fn validate_part_select_directions(
+/// Checks that selects refer to packed nets and follow the final declarations.
+fn validate_net_selects(
     reference: &NetRef,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     span: Span,
 ) -> Result<(), ScanError> {
     match reference {
-        NetRef::PartSelect(index, left, right) if left != right => {
-            let (declared_left, declared_right) = nets[index.0].width.unwrap_or((0, 0));
-            if left.cmp(right) != declared_left.cmp(&declared_right) {
+        NetRef::BitSelect(index, _) | NetRef::PartSelect(index, _, _) => {
+            let Some((declared_left, declared_right)) = nets[index.0].width else {
+                return Err(ScanError {
+                    message: format!(
+                        "select '{}' requires a packed net. '{}' is scalar",
+                        bit_ref::render_net_ref(reference, nets, interner),
+                        bit_ref::net_name(*index, nets, interner),
+                    ),
+                    span,
+                });
+            };
+            if let NetRef::PartSelect(_, left, right) = reference
+                && left != right
+                && left.cmp(right) != declared_left.cmp(&declared_right)
+            {
                 return Err(ScanError {
                     message: format!(
                         "part-select '{}' does not follow its declared packed range [{declared_left}:{declared_right}]",
@@ -35,11 +46,11 @@ fn validate_part_select_directions(
         }
         NetRef::Concat(parts) => {
             for part in parts {
-                validate_part_select_directions(part, nets, interner, span)?;
+                validate_net_selects(part, nets, interner, span)?;
             }
         }
         _ => {
-            // Scalar references and singleton slices have no select direction.
+            // Whole nets, literals and open terminals do not select any bits.
         }
     }
     Ok(())
@@ -65,7 +76,7 @@ pub(crate) fn validate_gv_form(
             };
             if check_proof_wiring {
                 for terminal in [&assign.lhs, rhs] {
-                    validate_part_select_directions(terminal, nets, interner, assign.span)?;
+                    validate_net_selects(terminal, nets, interner, assign.span)?;
                     if assign.kind == NetlistAssignKind::Tran {
                         let width = bit_ref::net_ref_width_bits(terminal, nets, interner).map_err(
                             |error| ScanError {
@@ -97,7 +108,7 @@ pub(crate) fn validate_gv_form(
                     limit: pos,
                 };
                 for (_, terminal) in &instance.connections {
-                    validate_part_select_directions(terminal, nets, interner, span)?;
+                    validate_net_selects(terminal, nets, interner, span)?;
                 }
             }
         }
