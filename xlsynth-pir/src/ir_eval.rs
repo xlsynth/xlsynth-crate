@@ -2000,8 +2000,22 @@ pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> 
     )
 }
 
-/// Invoke results within a value-only evaluation or one loop iteration.
-type CallValues<'ir> = HashMap<&'ir str, HashMap<Vec<IrValue>, IrValue>>;
+/// A memoized invoke result and whether the current iteration used it.
+struct CachedCall {
+    value: IrValue,
+    used: bool,
+}
+
+/// Invoke results shared within a value-only evaluation.
+type CallValues<'ir> = HashMap<&'ir str, HashMap<Vec<IrValue>, CachedCall>>;
+
+/// Keeps the last iteration's calls available for reuse in the next one.
+fn begin_call_iteration(calls: &mut CallValues<'_>) {
+    calls.retain(|_, results| {
+        results.retain(|_, call| std::mem::take(&mut call.used));
+        !results.is_empty()
+    });
+}
 
 fn eval_fn_impl<'a, 'ir>(
     pkg: Option<&'ir ir::Package>,
@@ -2174,12 +2188,13 @@ fn eval_fn_impl<'a, 'ir>(
                     })
                     .collect();
 
-                if let Some(value) = call_values
-                    .as_ref()
-                    .and_then(|calls| calls.get(callee.name.as_str()))
-                    .and_then(|results| results.get(&callee_args))
+                if let Some(call) = call_values
+                    .as_deref_mut()
+                    .and_then(|calls| calls.get_mut(callee.name.as_str()))
+                    .and_then(|results| results.get_mut(&callee_args))
                 {
-                    value.clone()
+                    call.used = true;
+                    call.value.clone()
                 } else {
                     let value = absorb_nested_eval_result(
                         eval_fn_impl(
@@ -2197,10 +2212,13 @@ fn eval_fn_impl<'a, 'ir>(
                         &mut cover_index_by_text_id,
                     );
                     if let Some(calls) = call_values.as_deref_mut() {
-                        calls
-                            .entry(&callee.name)
-                            .or_default()
-                            .insert(callee_args, value.clone());
+                        calls.entry(&callee.name).or_default().insert(
+                            callee_args,
+                            CachedCall {
+                                value: value.clone(),
+                                used: true,
+                            },
+                        );
                     }
                     value
                 }
@@ -2232,6 +2250,7 @@ fn eval_fn_impl<'a, 'ir>(
                     .get(init)
                     .expect("counted_for init must be evaluated")
                     .clone();
+                let mut iteration_calls = call_values.as_ref().map(|_| CallValues::new());
                 for iteration in 0..*trip_count {
                     let induction_value = iteration
                         .checked_mul(*stride)
@@ -2245,9 +2264,9 @@ fn eval_fn_impl<'a, 'ir>(
                     );
                     body_args.push(carry);
                     body_args.extend(invariant_values.iter().cloned());
-                    // Drop nested invoke results before the next iteration to
-                    // avoid retaining every version of an array carry.
-                    let mut iteration_calls = call_values.as_ref().map(|_| CallValues::new());
+                    if let Some(calls) = &mut iteration_calls {
+                        begin_call_iteration(calls);
+                    }
                     carry = absorb_nested_eval_result(
                         eval_fn_impl(
                             Some(pkg),
@@ -4549,6 +4568,66 @@ fn f() -> bits[1][4] {
                 .filter(|(id, _)| *id == 4)
                 .count(),
             4
+        );
+    }
+
+    #[test]
+    fn counted_for_reuses_invariant_invokes_and_expires_unused_arguments() {
+        let ir_text = r#"package test
+
+fn toggle(i: bits[2] id=1, carry: bits[1] id=2) -> bits[1] {
+  ret toggled: bits[1] = not(carry, id=3)
+}
+
+fn expensive(x: bits[1] id=4) -> bits[1] {
+  ret inner: bits[1] = counted_for(x, trip_count=3, stride=1, body=toggle, id=5)
+}
+
+fn body(i: bits[2] id=6, carry: bits[1] id=7, x: bits[1] id=8) -> bits[1] {
+  invariant: bits[1] = invoke(x, to_apply=expensive, id=9)
+  low: bits[1] = bit_slice(i, start=0, width=1, id=10)
+  alternating: bits[1] = invoke(low, to_apply=expensive, id=11)
+  ret next: bits[1] = xor(carry, invariant, alternating, id=12)
+}
+
+fn f(x: bits[1] id=13) -> bits[1] {
+  ret outer: bits[1] = counted_for(x, trip_count=4, stride=1, body=body, invariant_args=[x], id=14)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = [IrValue::make_ubits(1, 0).unwrap()];
+        let mut observer = RecordingBoolObserver::new();
+        let FnEvalResult::Success(result) = eval_fn_impl(
+            Some(&pkg),
+            f,
+            &args,
+            Some(&mut observer),
+            EvalOrderPolicy::Checked,
+            Some(&mut CallValues::new()),
+        ) else {
+            panic!("counted_for should evaluate successfully");
+        };
+        assert_eq!(result.value, args[0]);
+        // expensive(0) is used on every iteration. expensive(1) is used
+        // only on iterations 1 and 3 and must have expired between them.
+        let inner_results: Vec<_> = observer
+            .bool_events
+            .iter()
+            .filter(|(id, _)| *id == 5)
+            .map(|(_, value)| *value)
+            .collect();
+        assert_eq!(inner_results, [true, false, false]);
+
+        let mut observer = RecordingBoolObserver::new();
+        eval_fn_in_package_with_observer(&pkg, f, &args, Some(&mut observer));
+        assert_eq!(
+            observer
+                .bool_events
+                .iter()
+                .filter(|(id, _)| *id == 5)
+                .count(),
+            8
         );
     }
 
