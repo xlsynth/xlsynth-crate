@@ -44,6 +44,244 @@ fn driver(directory: &Path, args: &[&str]) -> std::io::Result<Output> {
         .output()
 }
 
+/// Writes a two-stage spec with only the inter-stage register layer.
+fn stage_fixture(directory: &Path, dslx: &str, gv: &str) -> std::io::Result<()> {
+    fs::write(directory.join("pipe.x"), dslx)?;
+    fs::write(directory.join("pipe.gv"), gv)?;
+    fs::write(
+        directory.join("pipe.toml"),
+        SPEC.replace("flop_outputs = true", "flop_outputs = false"),
+    )?;
+    fs::write(directory.join("cells.textproto"), LIBERTY)
+}
+
+/// Builds a stitch-equiv command that reports the proof method.
+fn stage_command(directory: &Path, options: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+    command
+        .current_dir(directory)
+        .args([
+            "stitch-equiv",
+            "--spec",
+            "pipe.toml",
+            "--netlist",
+            "pipe.gv",
+            "--liberty-proto",
+            "cells.textproto",
+            "--show-proof-plan",
+        ])
+        .args(options);
+    command
+}
+
+const SPLIT: &str = r#"[
+  {"selector":["root"],"command":{"Apply":"SplitOutputs"}},
+  {"selector":["root","low"],"command":"Solve"},
+  {"selector":["root","high"],"command":"Solve"}
+]"#;
+
+#[test]
+fn stitch_equiv_defaults_to_stages_and_accepts_one_scripted_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let dslx = r#"fn pipe_cycle0(x: bool, y: bool) -> u2 { x ++ y }
+fn pipe_cycle1(word: u2) -> u2 { word }"#;
+    // Port and flop order are both reversed relative to the reference.
+    let gv = r#"module pipe(output [1:0] out, input y, input clk, input x);
+  DFF alpha (.D(x), .CLK(clk), .Q(out[1]));
+  DFF zebra (.D(y), .CLK(clk), .Q(out[0]));
+endmodule"#;
+    stage_fixture(dir.path(), dslx, gv).unwrap();
+    fs::write(dir.path().join("split.json"), SPLIT).unwrap();
+    let default_plan = "stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n";
+    let split_plan = "stage pipe_cycle0: 2 proved leaves\nstage pipe_cycle1: 1 proved leaf\n";
+    for (options, expected) in [
+        (vec![], default_plan),
+        (vec!["--proof-mode", "stages", "--jobs", "2"], default_plan),
+        (
+            vec!["--proof-mode", "whole-pipeline"],
+            "whole-pipeline proof\n",
+        ),
+        (
+            vec!["--jobs", "1", "--stage-script", "pipe_cycle0=split.json"],
+            split_plan,
+        ),
+        (
+            vec!["--jobs", "4", "--stage-script", "pipe_cycle0=split.json"],
+            split_plan,
+        ),
+    ] {
+        let result = stage_command(dir.path(), &options).output().unwrap();
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            result.stdout,
+            b"Proved pipe equivalent to pipe after 1 rising clock edge.\n"
+        );
+        assert_eq!(String::from_utf8(result.stderr).unwrap(), expected);
+    }
+    fs::write(dir.path().join("unresolved.json"),
+        r#"[{"selector":["root"],"command":{"Apply":"SplitOutputs"}},{"selector":["root","low"],"command":"Solve"}]"#
+    ).unwrap();
+    fs::write(
+        dir.path().join("wrong.json"),
+        r#"[{"selector":["other"],"command":"Solve"}]"#,
+    )
+    .unwrap();
+    for (options, message) in [
+        (
+            vec!["--stage-script", "pipe_cycle1=wrong.json"],
+            r#"stage 'pipe_cycle1' script 'wrong.json': selector ["other"] does not name an open leaf"#,
+        ),
+        (
+            vec!["--stage-script", "pipe_cycle1=unresolved.json"],
+            r#"stage 'pipe_cycle1' script 'unresolved.json': stage proof script leaves ["root", "high"] unsolved"#,
+        ),
+        (
+            vec![
+                "--stage-script",
+                "pipe_cycle1=split.json",
+                "--stage-script",
+                "pipe_cycle1=split.json",
+            ],
+            "more than one script supplied for stage 'pipe_cycle1'",
+        ),
+        (
+            vec!["--stage-script", "unknown=split.json"],
+            "unknown scripted stage 'unknown'. Available stages: pipe_cycle0, pipe_cycle1",
+        ),
+        (
+            vec![
+                "--proof-mode",
+                "whole-pipeline",
+                "--stage-script",
+                "pipe_cycle1=split.json",
+            ],
+            "whole-pipeline proof mode cannot run per-stage scripts",
+        ),
+    ] {
+        let result = stage_command(dir.path(), &options).output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(result.stderr).unwrap(),
+            format!("xlsynth-driver: stitch-equiv: {message}\n")
+        );
+    }
+    fs::write(dir.path().join("pipe.gv"),
+        "module pipe(output [1:0] out, input y, input clk, input x); assign out = {x, y}; endmodule"
+    ).unwrap();
+    let missing = stage_command(dir.path(), &["--stage-script", "pipe_cycle0=split.json"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(missing.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(missing.stderr).unwrap(),
+        "xlsynth-driver: stitch-equiv: cannot run per-stage scripts without a direct register correspondence: no direct mapped partner for reference boundary register 'p0_word[0]' (2 reference bits, 0 mapped bits)\n"
+    );
+}
+
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn stitch_equiv_runs_stages_serially_when_workers_cannot_start() {
+    let dir = tempfile::tempdir().unwrap();
+    stage_fixture(
+        dir.path(),
+        "fn pipe_cycle0(x: bool) -> bool { x }\nfn pipe_cycle1(y: bool) -> bool { y }",
+        "module pipe(input x, input clk, output out); DFF r (.D(x), .CLK(clk), .Q(out)); endmodule",
+    )
+    .unwrap();
+    // A 2^62-byte stack exceeds the Linux user address space, so the child
+    // cannot spawn Rust worker threads, even when running as root in CI.
+    let result = stage_command(dir.path(), &["--jobs", "2", "--proof-mode", "stages"])
+        .env("RUST_MIN_STACK", (1_u64 << 62).to_string())
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        result.stderr,
+        b"stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n"
+    );
+}
+
+#[test]
+fn stitch_equiv_distinguishes_failed_stage_relations_from_post_fill_mismatches() {
+    let dir = tempfile::tempdir().unwrap();
+    // Both stored bits always capture x. The stage's OR and the mapped wire
+    // disagree for an arbitrary cutpoint assignment, but agree after one edge.
+    let dslx = r#"fn pipe_cycle0(x: bool) -> u2 { x ++ x }
+fn pipe_cycle1(pair: u2) -> bool { or_reduce(pair) }"#;
+    let gv = r#"module pipe(input x, input clk, output out);
+  wire a, b;
+  DFF ra (.D(x), .CLK(clk), .Q(a));
+  DFF rb (.D(x), .CLK(clk), .Q(b));
+  assign out = b;
+endmodule"#;
+    stage_fixture(dir.path(), dslx, gv).unwrap();
+    let reason = "the proposed correspondence fails the one-step obligation for 'pipe_cycle1'";
+    let strict = stage_command(dir.path(), &["--proof-mode", "stages"])
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(strict.stderr).unwrap(),
+        format!(
+            "xlsynth-driver: stitch-equiv: {reason}. Use whole-pipeline mode to check the external outputs after fill\n"
+        )
+    );
+    let auto = stage_command(dir.path(), &[]).output().unwrap();
+    assert_eq!(auto.status.code(), Some(0));
+    assert_eq!(
+        auto.stdout,
+        b"Proved pipe equivalent to pipe after 1 rising clock edge.\n"
+    );
+    assert_eq!(
+        String::from_utf8(auto.stderr).unwrap(),
+        format!("whole-pipeline fallback: {reason}\n")
+    );
+
+    fs::write(
+        dir.path().join("pipe.gv"),
+        gv.replace("assign out = b;", "assign out = x;"),
+    )
+    .unwrap();
+    let corrupt = stage_command(dir.path(), &[]).output().unwrap();
+    assert_eq!(corrupt.status.code(), Some(1));
+    assert!(corrupt.stdout.is_empty());
+    let stderr = String::from_utf8(corrupt.stderr).unwrap();
+    // The solver may choose either direction of the transition in its witness.
+    assert_eq!(
+        stderr.lines().take(2).collect::<Vec<_>>(),
+        [
+            format!("whole-pipeline fallback: {reason}"),
+            "xlsynth-driver: stitch-equiv: post-fill output mismatch".into()
+        ]
+    );
+    assert!(stderr.contains("Frame 0 inputs") && stderr.contains("Frame 1 inputs"));
+
+    // Synthesis can merge the identical flops and still implement the delay.
+    fs::write(
+        dir.path().join("pipe.gv"),
+        "module pipe(input x, input clk, output out); DFF r (.D(x), .CLK(clk), .Q(out)); endmodule",
+    )
+    .unwrap();
+    let merged = stage_command(dir.path(), &[]).output().unwrap();
+    assert_eq!(merged.status.code(), Some(0));
+    assert_eq!(
+        merged.stderr,
+        b"whole-pipeline fallback: no direct register correspondence: register bit counts differ (reference 2, mapped 1)\n"
+    );
+}
+
 /// Checks the product and addend at the register separating the example's two
 /// operations.
 #[test]

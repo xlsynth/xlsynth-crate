@@ -4,10 +4,12 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 
 use xlsynth_pir::IrBits;
 
 use crate::aig::import::import_gate_fn;
+use crate::aig::sequential_pipeline::StitchedGatePipeline;
 use crate::aig::topo::extract_cone;
 use crate::aig::{AigBitVector, SequentialGateFn};
 use crate::aig_sim::sequential::{SequentialState, simulate};
@@ -19,6 +21,64 @@ use crate::prove_gate_fn_equiv_sat::{
     CadicalSat, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult, ValidationError,
     build_sat_clauses,
 };
+
+mod correspondence;
+mod stage_graph;
+mod stage_script;
+
+pub use stage_script::StageProofScript;
+
+/// Selects when to use the direct register correspondence proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StitchProofMode {
+    /// Try stage obligations first, then check the post-fill window if needed.
+    #[default]
+    Auto,
+    /// Require a complete, proved correspondence between the two state vectors.
+    Stages,
+    /// Compare only the post-fill external outputs.
+    WholePipeline,
+}
+
+/// Stage scripts override the default single Solve for the named DSLX stages.
+pub struct StitchProofOptions {
+    pub mode: StitchProofMode,
+    pub jobs: NonZeroUsize,
+    pub stage_scripts: BTreeMap<String, StageProofScript>,
+    pub formal: GateFormalOptions,
+}
+
+impl Default for StitchProofOptions {
+    fn default() -> Self {
+        Self {
+            mode: StitchProofMode::Auto,
+            jobs: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+            stage_scripts: BTreeMap::new(),
+            formal: GateFormalOptions::default(),
+        }
+    }
+}
+
+/// Identifies which proof established the result and what it checked.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StitchProofMethod {
+    Stages { stages: Vec<StageProofSummary> },
+    WholePipeline { fallback_reason: Option<String> },
+}
+
+/// Number of discharged leaves for one stage, in stitch specification order.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StageProofSummary {
+    pub name: String,
+    pub leaves: usize,
+}
+
+/// The external equivalence result together with the proof that produced it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StitchProofReport {
+    pub result: StitchEquivResult,
+    pub method: StitchProofMethod,
+}
 
 /// Conclusion of checking every externally visible output after pipeline fill.
 #[derive(Debug, PartialEq, Eq)]
@@ -257,25 +317,23 @@ fn replay(
         .collect())
 }
 
-/// Proves equality at every observation after at least `latency` rising edges.
-/// Independent arbitrary register states model the start of *any* such window.
-/// The two designs share fresh data inputs at each edge and in the observation
-/// frame. All outputs are compared unconditionally, including combinational
-/// paths from the observation inputs. Both models must use effective-D register
-/// bindings. The caller supplies the pipeline's structural latency.
-///
-/// A solver interruption is an error. A disproved result includes inputs and
-/// initial states that replay the mismatch in the sequential simulator.
-pub(crate) fn prove_stitched_pipeline_equiv(
-    reference: &SequentialGateFn,
+/// Checks the named external interface and clock before either proof strategy.
+fn validate_interfaces<'a>(
+    reference: &'a SequentialGateFn,
     mapped: &LabeledSequentialNetlistAig,
-    latency: usize,
-    options: GateFormalOptions,
-) -> Result<StitchEquivResult, String> {
+) -> Result<Interface<'a>, String> {
     reference.validate_legalized()?;
     let implementation = &mapped.sequential_gate_fn;
     implementation.validate_legalized()?;
     check_mapped_abi(reference, mapped)?;
+    matching_interface(reference, implementation)
+}
+
+/// Returns the common named data interface, with packed widths checked.
+fn matching_interface<'a>(
+    reference: &'a SequentialGateFn,
+    implementation: &SequentialGateFn,
+) -> Result<Interface<'a>, String> {
     let expected = interface(reference)?;
     let actual = interface(implementation)?;
     if expected.inputs != actual.inputs {
@@ -290,7 +348,157 @@ pub(crate) fn prove_stitched_pipeline_equiv(
             expected.outputs, actual.outputs
         ));
     }
+    Ok(expected)
+}
 
+/// Whether the proposed register relation establishes external equivalence.
+enum StageAttempt {
+    Proved(Vec<StageProofSummary>),
+    Unresolved(String),
+}
+
+/// Proves the Q relation inductive by checking every D bit and external output.
+/// The bijection gives every mapped power-up state a corresponding reference
+/// state, which the free-running reference flushes within its specified
+/// latency.
+fn prove_stages(
+    pipeline: &StitchedGatePipeline,
+    implementation: &SequentialGateFn,
+    latency: usize,
+    stage_names: &[String],
+    options: &StitchProofOptions,
+) -> Result<StageAttempt, String> {
+    let reference = &pipeline.design;
+    // Auto can go straight to the post-fill check on unequal state widths.
+    // Strict and scripted requests still identify an unmatched register bit.
+    if options.mode == StitchProofMode::Auto && options.stage_scripts.is_empty() {
+        let reference_bits = reference.register_bit_count();
+        let mapped_bits = implementation.register_bit_count();
+        if reference_bits != mapped_bits {
+            return Ok(StageAttempt::Unresolved(format!(
+                "no direct register correspondence: register bit counts differ (reference {reference_bits}, mapped {mapped_bits})"
+            )));
+        }
+    }
+    let pairs = match correspondence::direct_register_pairs(reference, implementation, latency) {
+        Ok(pairs) => pairs,
+        Err(reason) if options.stage_scripts.is_empty() => {
+            return Ok(StageAttempt::Unresolved(format!(
+                "no direct register correspondence: {reason}"
+            )));
+        }
+        Err(reason) => {
+            return Err(format!(
+                "cannot run per-stage scripts without a direct register correspondence: {reason}"
+            ));
+        }
+    };
+    let miters = stage_graph::build_stage_miters(
+        reference,
+        implementation,
+        &pairs,
+        &pipeline.register_stages,
+        stage_names.len(),
+    )?;
+    let outcome = stage_script::run_stage_proofs(
+        &miters,
+        stage_names,
+        &options.stage_scripts,
+        options.jobs.get(),
+        options.formal,
+    )?;
+    Ok(match outcome {
+        stage_script::StageSolveOutcome::Proved { leaf_counts } => StageAttempt::Proved(
+            stage_names
+                .iter()
+                .zip(leaf_counts)
+                .map(|(name, leaves)| StageProofSummary {
+                    name: name.clone(),
+                    leaves,
+                })
+                .collect(),
+        ),
+        stage_script::StageSolveOutcome::Counterexample { location } => StageAttempt::Unresolved(
+            format!("the proposed correspondence fails the one-step obligation for {location}"),
+        ),
+        stage_script::StageSolveOutcome::Inconclusive { location } => {
+            StageAttempt::Unresolved(format!(
+                "stage proof inconclusive for {location}: CaDiCaL interrupted by a timeout or resource limit"
+            ))
+        }
+    })
+}
+
+/// Selects the proof strategy and, when needed, checks the external post-fill
+/// property independently of the proposed register relation.
+pub(crate) fn prove_with_stage_options(
+    pipeline: &StitchedGatePipeline,
+    mapped: &LabeledSequentialNetlistAig,
+    latency: usize,
+    stage_names: &[String],
+    options: &StitchProofOptions,
+) -> Result<StitchProofReport, String> {
+    let reference = &pipeline.design;
+    let implementation = &mapped.sequential_gate_fn;
+    let expected = validate_interfaces(reference, mapped)?;
+    for name in options.stage_scripts.keys() {
+        if !stage_names.contains(name) {
+            return Err(format!(
+                "unknown scripted stage '{name}'. Available stages: {}",
+                stage_names.join(", ")
+            ));
+        }
+    }
+    let fallback_reason = match options.mode {
+        StitchProofMode::WholePipeline => {
+            if !options.stage_scripts.is_empty() {
+                return Err("whole-pipeline proof mode cannot run per-stage scripts".into());
+            }
+            None
+        }
+        StitchProofMode::Auto | StitchProofMode::Stages => {
+            match prove_stages(pipeline, implementation, latency, stage_names, options)? {
+                StageAttempt::Proved(stages) => {
+                    return Ok(StitchProofReport {
+                        result: StitchEquivResult::Proved,
+                        method: StitchProofMethod::Stages { stages },
+                    });
+                }
+                StageAttempt::Unresolved(reason) if options.mode == StitchProofMode::Stages => {
+                    return Err(format!(
+                        "{reason}. Use whole-pipeline mode to check the external outputs after fill"
+                    ));
+                }
+                StageAttempt::Unresolved(reason) => Some(reason),
+            }
+        }
+    };
+    let result = prove_post_fill(
+        reference,
+        implementation,
+        &expected,
+        latency,
+        options.formal,
+    )
+    .map_err(|error| match &fallback_reason {
+        Some(reason) => format!("{reason}; whole-pipeline proof: {error}"),
+        None => error,
+    })?;
+    Ok(StitchProofReport {
+        result,
+        method: StitchProofMethod::WholePipeline { fallback_reason },
+    })
+}
+
+/// Proves output equality after fill, starting with independent arbitrary
+/// register contents on each side. A disproof is replayed in both designs.
+fn prove_post_fill(
+    reference: &SequentialGateFn,
+    implementation: &SequentialGateFn,
+    expected: &Interface,
+    latency: usize,
+    options: GateFormalOptions,
+) -> Result<StitchEquivResult, String> {
     let frame_count = latency.checked_add(1).ok_or("pipeline latency overflow")?;
     let mut builder = GateBuilder::new("stitch_equiv".to_string(), GateBuilderOptions::opt());
     let frames = (0..frame_count)
@@ -398,6 +606,22 @@ mod tests {
     };
     use crate::netlist::io::read_gv_from_str;
 
+    fn prove_stitched_pipeline_equiv(
+        reference: &SequentialGateFn,
+        mapped: &LabeledSequentialNetlistAig,
+        latency: usize,
+        options: GateFormalOptions,
+    ) -> Result<StitchEquivResult, String> {
+        let interface = validate_interfaces(reference, mapped)?;
+        prove_post_fill(
+            reference,
+            &mapped.sequential_gate_fn,
+            &interface,
+            latency,
+            options,
+        )
+    }
+
     /// A two-port design that exposes only x, optionally pipelined.
     fn delayed_x(depth: usize) -> Result<SequentialGateFn, String> {
         let mut builder = GateBuilder::new("delayed_x".to_string(), GateBuilderOptions::opt());
@@ -483,6 +707,53 @@ mod tests {
             )
             .unwrap_err(),
             "stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit"
+        );
+    }
+
+    #[test]
+    fn interrupted_stage_leaf_reports_its_selector_and_auto_fallback() {
+        let pipeline = StitchedGatePipeline {
+            design: delayed_x(1).unwrap(),
+            register_stages: vec![0],
+        };
+        let mut implementation = pipeline.design.clone();
+        // Both designs capture x, but the mapped output bypasses the register
+        // and exposes y. Only the high leaf (the four output bits) can differ.
+        implementation.transition.outputs[implementation.outputs[0].index()].bit_vector =
+            implementation.transition.inputs[implementation.inputs[1].index()]
+                .bit_vector
+                .clone();
+        let implementation = mapped(implementation);
+        let stage_names = ["capture".to_owned()];
+        let split = StageProofScript::from_json(
+            r#"[
+                {"selector":["root"], "command":{"Apply":"SplitOutputs"}},
+                {"selector":["root","low"], "command":"Solve"},
+                {"selector":["root","high"], "command":"Solve"}
+            ]"#,
+        )
+        .unwrap();
+        let mut options = StitchProofOptions {
+            mode: StitchProofMode::Stages,
+            jobs: NonZeroUsize::MIN,
+            stage_scripts: BTreeMap::from([(stage_names[0].clone(), split)]),
+            formal: GateFormalOptions::default().with_cadical_timeout(Duration::ZERO),
+        };
+        let stage_error = "stage proof inconclusive for 'capture' at root/high: CaDiCaL interrupted by a timeout or resource limit";
+        assert_eq!(
+            prove_with_stage_options(&pipeline, &implementation, 1, &stage_names, &options)
+                .unwrap_err(),
+            format!(
+                "{stage_error}. Use whole-pipeline mode to check the external outputs after fill"
+            )
+        );
+        options.mode = StitchProofMode::Auto;
+        assert_eq!(
+            prove_with_stage_options(&pipeline, &implementation, 1, &stage_names, &options)
+                .unwrap_err(),
+            format!(
+                "{stage_error}; whole-pipeline proof: stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit"
+            )
         );
     }
 

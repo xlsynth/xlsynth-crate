@@ -4040,10 +4040,17 @@ generate RTL, lower to g8r, or check a netlist.
 Proves bit-exact output equivalence after pipeline fill for a free-running
 pipeline. The checker gatifies the selected DSLX stages, imports the mapped
 module with the supplied Liberty cell functions and flip-flop semantics, and
-builds a CaDiCaL query over the number of register layers in the spec. Each
-side starts with independent arbitrary register contents. Both receive the
-same fresh inputs at each rising edge and at the final observation. A proof
-covers every observation after fill because the window can begin at any cycle.
+by default runs one CaDiCaL proof per stage concurrently. Simulation proposes a
+one-to-one pairing of register bits, allowing renamed, reordered, and inverted
+flops. SAT checks every paired next-state bit for arbitrary current state and
+inputs. The last stage also checks all external outputs. Together these checks
+prove output equality on every cycle after the reference pipeline fills.
+
+If synthesis changes the state encoding, removes flops, or the proposed pairing
+fails a stage proof, the default mode checks the whole pipeline. This proof
+starts the two sides with independent arbitrary register contents, drives the
+same inputs at every frame, and compares the outputs after the specified
+number of rising edges.
 
 Inputs and outputs must agree in name and packed bit width, with bit zero as
 the LSB. The native g8r result `output_value` and the stitched RTL result
@@ -4084,11 +4091,40 @@ a matching proto as described under `g8r2gv`. A netlist from synthesis of
 - `--netlist <PATH>` supplies the mapped gate-level Verilog file.
 - `--liberty-proto <PATH>` supplies the matching Liberty proto.
 - `--module-name <NAME>` overrides the mapped module name. The default is the spec's wrapper name.
-- `--timeout-seconds <N>` limits SAT solving to a positive number of seconds. By default the solve has no time limit.
+- `--proof-mode <MODE>` defaults to `auto`, which tries stage proofs and falls back to the whole-pipeline check if needed. `stages` requires a complete, proved correspondence and reports the unmatched bit or failing stage. `whole-pipeline` runs the post-fill check directly.
+- `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
+- `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
+- `--show-proof-plan` prints the proved leaf count per stage or the whole-pipeline fallback reason to stderr.
+- `--timeout-seconds <N>` limits each CaDiCaL solve to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
 
-The command exits zero on proof. A mismatch exits nonzero and prints initial
-register values, cycle inputs, and the disagreeing outputs. A timeout or
-unsupported input also exits nonzero and reports the error.
+For example, to split the multiply stage's obligations, save the following as
+`product-proof.json`. Stage scripts use the `xlsynth-prover` selector and
+`Apply`/`Solve` command format. The gate-level tactic `SplitOutputs` divides a
+stage's ordered mismatch bits in half. The bits follow reference register
+order, least-significant bit first, followed on the last stage by the external
+output bits. Each child can be split again if it has at least two bits. Every
+leaf must have a `Solve` step.
+
+```json
+[
+  {"selector": ["root"], "command": {"Apply": "SplitOutputs"}},
+  {"selector": ["root", "low"], "command": "Solve"},
+  {"selector": ["root", "high"], "command": "Solve"}
+]
+```
+
+```shell
+xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
+  --netlist muladd.gv --liberty-proto cells.proto \
+  --stage-script muladd_cycle0=product-proof.json --jobs 3 --show-proof-plan
+```
+
+The command exits zero on proof. A whole-pipeline counterexample exits nonzero
+and prints initial register values, cycle inputs, and the disagreeing outputs.
+An interrupted stage solve triggers fallback in `auto` mode. In `stages` mode
+an interrupted or failed obligation exits nonzero and identifies the stage and
+any selected split leaf. An inconclusive whole-pipeline check or an unsupported
+input also exits nonzero with a diagnostic.
 
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 
