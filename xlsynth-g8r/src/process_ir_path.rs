@@ -115,7 +115,7 @@ fn should_skip_independent_op_stats(payload: &ir::NodePayload) -> bool {
         ir::NodePayload::TupleIndex { .. } => true,
         ir::NodePayload::Array(_) => true,
         ir::NodePayload::Nary(ir::NaryOp::Concat, _) => true,
-        ir::NodePayload::Invoke { .. } => true,
+        ir::NodePayload::Invoke { .. } | ir::NodePayload::Map { .. } => true,
         ir::NodePayload::Cover { .. } => true,
         ir::NodePayload::CountedFor { .. } => true,
         ir::NodePayload::BitSlice { .. } => true,

@@ -765,7 +765,7 @@ fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
         let mut callees = std::collections::BTreeSet::new();
         for node in &function.nodes {
             match &node.payload {
-                NodePayload::Invoke { to_apply, .. } => {
+                NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
                     callees.insert(to_apply.as_str());
                 }
                 NodePayload::CountedFor { body, .. } => {
@@ -1303,7 +1303,7 @@ where
 
         // Validate cross-package references.
         match &node.payload {
-            NodePayload::Invoke { to_apply, operands } => {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
                 let Some(parent) = parent else {
                     return Err(ValidationError::RequiresPackageContext {
                         func: f.name.clone(),
@@ -1320,28 +1320,45 @@ where
                 if checked_callees.insert(callee.name.as_str()) {
                     validate_fn_signature(callee)?;
                 }
-                if operands.len() != callee.params.len() {
+                let argument_types = match &node.payload {
+                    NodePayload::Map { array, .. } => {
+                        let Type::Array(ty) = f.get_node_ty(*array) else {
+                            return Err(ValidationError::NodeSemanticViolation {
+                                func: f.name.clone(),
+                                node_index: i,
+                                reason: "map requires an array".to_owned(),
+                            });
+                        };
+                        vec![ty.element_type.as_ref()]
+                    }
+                    NodePayload::Invoke { operands, .. } => {
+                        operands.iter().map(|r| f.get_node_ty(*r)).collect()
+                    }
+                    _ => unreachable!("matched call operation"),
+                };
+                let op = node.payload.get_operator();
+                if argument_types.len() != callee.params.len() {
                     return Err(ValidationError::NodeSemanticViolation {
                         func: f.name.clone(),
                         node_index: i,
                         reason: format!(
-                            "invoke of '{}' expects {} operands, got {}",
+                            "{op} of '{}' expects {} operands, got {}",
                             to_apply,
                             callee.params.len(),
-                            operands.len()
+                            argument_types.len()
                         ),
                     });
                 }
-                for (operand, parameter) in operands.iter().zip(callee.param_nodes()) {
-                    if f.get_node(*operand).ty != parameter.ty {
+                for (ty, parameter) in argument_types.into_iter().zip(callee.param_nodes()) {
+                    if *ty != parameter.ty {
                         return Err(ValidationError::NodeSemanticViolation {
                             func: f.name.clone(),
                             node_index: i,
                             reason: format!(
-                                "invoke operand for parameter '{}' must have type {}, got {}",
+                                "{op} operand for parameter '{}' must have type {}, got {}",
                                 parameter.param_name(),
                                 parameter.ty,
-                                f.get_node(*operand).ty
+                                ty
                             ),
                         });
                     }

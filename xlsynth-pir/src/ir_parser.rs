@@ -3170,23 +3170,22 @@ impl Parser {
                     )));
                 }                (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
             }
-            "invoke" => {
-                // This is a variadic operands that puts the variadic node refs at the top level
-                // instead of in an attribute.
+            "invoke" | "map" => {
+                // Both calls place their operands before the to_apply attribute.
                 let mut operands = Vec::new();
                 loop {
                     self.drop_whitespace_and_comments();
                     if self.peek_is(")") || self.peek_is("to_apply=") {
                         break;
                     }
-                    let operand = self.parse_node_ref(&node_env, "invoke arg")?;
+                    let operand = self.parse_node_ref(&node_env, "call operand")?;
                     operands.push(operand);
                     if !self.try_drop(",") {
                         break;
                     }
                 }
                 self.drop_or_error("to_apply=")?;
-                let to_apply = self.pop_identifier_or_error("invoke to_apply")?;
+                let to_apply = self.pop_identifier_or_error("call to_apply")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -3194,13 +3193,19 @@ impl Parser {
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
-                        "expected id for invoke; rest_of_line: {:?}",
+                        "expected id for {operator}; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }                (
-                    ir::NodePayload::Invoke { to_apply, operands },
-                    maybe_id.unwrap(),
-                )
+                }
+                let payload = if operator == "map" {
+                    let [array] = operands.as_slice() else {
+                        return Err(ParseError::new("map requires exactly one array operand".to_string()));
+                    };
+                    ir::NodePayload::Map { array: *array, to_apply }
+                } else {
+                    ir::NodePayload::Invoke { to_apply, operands }
+                };
+                (payload, maybe_id.unwrap())
             }
             "concat" => {
                 let operands =

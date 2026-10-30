@@ -266,6 +266,7 @@ fn constant_only_nodes(graph: &NodeGraph, topological: &[NodeRef]) -> Vec<bool> 
             | NodePayload::Cover { .. }
             | NodePayload::AfterAll(_)
             | NodePayload::Invoke { .. }
+            | NodePayload::Map { .. }
             | NodePayload::CountedFor { .. } => false,
         };
     }

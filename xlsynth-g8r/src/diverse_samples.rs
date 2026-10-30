@@ -112,7 +112,7 @@ fn should_exclude_signature_hash_root(f: &ir::Fn, node_ref: ir::NodeRef) -> bool
         ir::NodePayload::Assert { .. } => true,
         ir::NodePayload::Trace { .. } => true,
         ir::NodePayload::Cover { .. } => true,
-        ir::NodePayload::Invoke { .. } => true,
+        ir::NodePayload::Invoke { .. } | ir::NodePayload::Map { .. } => true,
         ir::NodePayload::CountedFor { .. } => true,
         ir::NodePayload::PrioritySel { .. } => true,
         ir::NodePayload::OneHotSel { .. } => true,

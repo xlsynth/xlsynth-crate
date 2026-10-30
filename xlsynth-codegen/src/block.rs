@@ -197,13 +197,15 @@ fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
             block.name
         )));
     }
-    if block
-        .nodes
-        .iter()
-        .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
-    {
+    if let Some(call) = block.nodes.iter().find(|node| {
+        matches!(
+            node.payload,
+            NodePayload::Invoke { .. } | NodePayload::Map { .. }
+        )
+    }) {
         return Err(BlockCodegenError::Unsupported(format!(
-            "invoke is not supported in `{}`; inline function calls before block2sv code generation",
+            "{} is not supported in `{}`; inline function calls before block2sv code generation",
+            call.payload.get_operator(),
             block.name
         )));
     }

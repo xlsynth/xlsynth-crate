@@ -2112,11 +2112,10 @@ function and prints the rewritten IR to **stdout**.
   - `--unroll=true|false` – also run loop unrolling so `counted_for` nodes are
     flattened into the top (default: `true`).
 
-With the default `--unroll=true`, the output is intended to be the most useful
-"desugared" form for downstream inspection: explicit `invoke` sites are inlined
-and `counted_for` loops are unrolled. When `--unroll=false`, explicit
-invocations are still inlined, but loop bodies referenced by `counted_for`
-remain as separate reachable helper functions in the emitted package.
+With `--unroll=true`, the pass expands `map`, inlines `invoke`, and unrolls
+`counted_for`. With `--unroll=false`, it still expands maps and inlines
+invocations. Counted loop bodies remain as separate reachable functions in
+the emitted package.
 
 Example:
 
