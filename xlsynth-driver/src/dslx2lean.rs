@@ -13,6 +13,7 @@ use crate::toolchain_config::ToolchainConfig;
 pub fn command() -> Command {
     Command::new("dslx2lean")
         .about("Compiles a DSLX function with trailing __reg_ parameters to readable Lean")
+        .after_help("Model generation preserves helper calls and skips the general XLS optimizer.")
         .arg(Arg::new("input_file").value_name("SOURCE").required(true))
         .arg(
             Arg::new("top")
