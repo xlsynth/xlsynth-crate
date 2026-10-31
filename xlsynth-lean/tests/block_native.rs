@@ -132,6 +132,45 @@ private def initial : State := { count := 7 }
     check_bundle(bundle, "nested calls across a register update");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn stateful_counted_loop_matches_xls() {
+    use std::fmt::Write as _;
+
+    let source = r#"
+fn fold(seed: u8, mask: u8, offset: u8) -> u8 {
+    for (i, carry): (u8, u8) in u8:0..u8:4 {
+        (carry & mask) + offset + i
+    }(seed)
+}
+fn machine(mask: u8, offset: u8, __reg_count: u8) -> (u8, u8) {
+    (__reg_count, fold(__reg_count, mask, offset))
+}
+"#;
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
+        let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
+        let expected = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(1)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(checks, "#guard (step {{ count := {seed} }} {{ rst := false, mask := {mask}, offset := {offset} }}).count == {expected}").unwrap();
+    }
+    bundle.files.push(("CheckLoop.lean".into(), checks));
+    check_bundle(
+        bundle,
+        "counted loop over a register and two captured inputs",
+    );
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
