@@ -349,10 +349,10 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
     let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
     let machine = package.ir.get_function("__machine__machine").unwrap();
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
-    // The changes are respectively empty, bit 4, and bits 1 and 4 (encoded as
-    // 5).
-    for mask in [1, 17, 19] {
-        let args = [mask, 1].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
+    let previous = 0b0000_0100;
+    // No change, set bit 4, then flip both bits 2 and 4 relative to previous.
+    for mask in [0b0000_0100, 0b0001_0100, 0b0001_0000] {
+        let args = [mask, previous].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
         let index = machine
             .interpret(&args)
             .unwrap()
@@ -362,7 +362,7 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
             .unwrap();
         writeln!(
             checks,
-            "#guard observe {{ previous := 1 }} {{ rst := false, mask := {mask} }} == {index}"
+            "#guard observe {{ previous := {previous} }} {{ rst := false, mask := {mask} }} == {index}"
         )
         .unwrap();
     }
