@@ -105,7 +105,8 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
         .with_context(|| format!("unknown supported source type {name}"))
 }
 
-/// Expand transparent aliases while preserving named struct and enum identities.
+/// Expand transparent aliases while preserving named struct and enum
+/// identities.
 pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
     match ty {
         SourceType::Alias { name } => {
