@@ -1119,8 +1119,9 @@ pub enum OuterAttributeKind {
     NonSynth,
     InitiationInterval(i64),
     FfiProto(ForeignFunctionData),
-    /// The decoded text of the module signature protobuf.
-    Signature(String),
+    /// The C-unescaped module signature textproto, which may contain non-UTF-8
+    /// bytes.
+    Signature(Vec<u8>),
     FuzzTest,
     ChannelPorts,
     Reset(ResetAttribute),

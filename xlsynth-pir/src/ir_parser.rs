@@ -117,6 +117,8 @@ pub struct Parser {
 enum StringEscapes {
     Verbatim,
     Decode,
+    /// PIR file paths historically decode octal escapes modulo 256.
+    FilePath,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -803,22 +805,16 @@ fn convert_ffi_invokes_to_extension_ops_in_graph(
         }
     }
     for node in &f.nodes {
-        match &node.payload {
-            ir::NodePayload::CountedFor { body, .. } => {
-                if wrappers.contains_key(body) {
-                    let node_name = node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
-                    return Err(ParseError::new(format!(
-                        "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in function '{}'; only invoke nodes may reference wrapped extension helpers",
-                        body, node_name, f.name
-                    )));
-                }
-            }
-            _ => {
-                // Wrapped extension helpers are only referenced via
-                // invoke/counted_for today.
+        if let ir::NodePayload::CountedFor { body, .. } = &node.payload {
+            if wrappers.contains_key(body) {
+                let node_name = node
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
+                return Err(ParseError::new(format!(
+                    "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in '{}'",
+                    body, node_name, f.name
+                )));
             }
         }
     }
@@ -849,20 +845,12 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         return Ok(());
     }
 
-    for member in pkg.members.iter_mut() {
-        match member {
-            PackageMember::Function(f) => {
-                convert_ffi_invokes_to_extension_ops_in_graph(&mut f.graph, &wrappers)?
-            }
-            PackageMember::Block(block) => {
-                convert_ffi_invokes_to_extension_ops_in_graph(&mut block.graph, &wrappers)?
-            }
-        }
+    for member in &mut pkg.members {
+        convert_ffi_invokes_to_extension_ops_in_graph(member.graph_mut(), &wrappers)?;
     }
 
-    let wrapper_names: BTreeSet<String> = wrappers.keys().cloned().collect();
     if let Some((top_name, MemberType::Function)) = &pkg.top {
-        if wrapper_names.contains(top_name) {
+        if wrappers.contains_key(top_name) {
             return Err(ParseError::new(format!(
                 "top function '{}' is a wrapped extension helper and cannot be lifted away",
                 top_name
@@ -870,11 +858,53 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         }
     }
 
+    remove_unreferenced_wrappers(pkg, &wrappers);
+    Ok(())
+}
+
+/// Drops lifted wrappers unless a surviving map or extern instance needs their
+/// declaration.
+fn remove_unreferenced_wrappers(
+    pkg: &mut ir::Package,
+    wrappers: &BTreeMap<String, WrappedExtensionSpec>,
+) {
+    let mut unreferenced = BTreeMap::new();
+    let mut worklist = Vec::new();
+    for (index, member) in pkg.members.iter().enumerate() {
+        match member {
+            PackageMember::Function(f) if wrappers.contains_key(&f.name) => {
+                unreferenced.insert(f.name.clone(), index);
+            }
+            _ => worklist.push(index),
+        }
+    }
+
+    // Maps and external instances still need the original declaration. A
+    // retained wrapper's fallback graph can in turn map another wrapper.
+    while let Some(index) = worklist.pop() {
+        let member = &pkg.members[index];
+        let mut retain_target = |name: &str| {
+            if let Some(target) = unreferenced.remove(name) {
+                worklist.push(target);
+            }
+        };
+        for node in &member.graph().nodes {
+            if let ir::NodePayload::Map { to_apply, .. } = &node.payload {
+                retain_target(to_apply);
+            }
+        }
+        if let PackageMember::Block(block) = member {
+            for inst in &block.instantiations {
+                if inst.kind == ir::InstantiationKind::Extern {
+                    retain_target(&inst.block);
+                }
+            }
+        }
+    }
     pkg.members.retain(|member| match member {
-        PackageMember::Function(f) => !wrapper_names.contains(&f.name),
+        PackageMember::Function(f) => !unreferenced.contains_key(&f.name),
         PackageMember::Block(_) => true,
     });
-    Ok(())
 }
 
 impl Parser {
@@ -1028,48 +1058,14 @@ impl Parser {
         self.pop_quoted_string(StringEscapes::Decode)
     }
 
-    /// Reads an FFI token, letting XLS canonicalize escapes its protobuf parser
-    /// accepts beyond the Rust text-format grammar.
-    fn pop_ffi_proto(&mut self) -> Result<ir::ForeignFunctionData, ParseError> {
-        self.drop_whitespace_and_comments();
-        let start = self.offset;
-        let text = self.pop_quoted_string(StringEscapes::Verbatim)?;
-        match parse_foreign_function_data(&text) {
-            Ok(data) => Ok(data),
-            Err(error) if !text.contains('\\') || text.contains('\0') => {
-                // No escape to canonicalize, or a literal NUL unsuitable for
-                // the XLS C API.
-                Err(ParseError::new(format!("invalid ffi_proto: {error}")))
-            }
-            Err(_) => Self::canonicalize_ffi_proto_with_xls(&self.chars[start..self.offset]),
-        }
-    }
-
-    /// Uses XLS's protobuf parser on an isolated function and reads the
-    /// canonical token once. The input slice is exactly one scanned IR string
-    /// token, including both delimiters, so its contents cannot introduce IR.
-    fn canonicalize_ffi_proto_with_xls(
-        token: &[char],
-    ) -> Result<ir::ForeignFunctionData, ParseError> {
-        let mut source = String::from("package ffi\n#[ffi_proto(");
-        source.extend(token);
-        source.push_str(
-            ")]\nfn f() -> bits[1] { ret literal.1: bits[1] = literal(value=0, id=1) }\n",
-        );
-        let declaration = xlsynth::IrPackage::parse_ir(&source, None)
-            .and_then(|package| package.get_function("f")?.to_ir_string())
-            .map_err(|error| ParseError::new(format!("invalid ffi_proto: {error}")))?;
-        let mut canonical = Parser::new(&declaration);
-        canonical.drop_or_error("#[ffi_proto(")?;
-        let text = canonical.pop_quoted_string(StringEscapes::Verbatim)?;
-        canonical.drop_or_error(")]")?;
-        parse_foreign_function_data(&text)
-            .map_err(|error| ParseError::new(format!("invalid XLS-formatted ffi_proto: {error}")))
+    fn pop_quoted_string(&mut self, escapes: StringEscapes) -> Result<String, ParseError> {
+        String::from_utf8(self.pop_quoted_bytes(escapes)?)
+            .map_err(|_| ParseError::new("quoted string is not valid UTF-8".to_string()))
     }
 
     /// Consumes one quoted token, including escaped delimiters and multiline
     /// triple quotes.
-    fn pop_quoted_string(&mut self, escapes: StringEscapes) -> Result<String, ParseError> {
+    fn pop_quoted_bytes(&mut self, escapes: StringEscapes) -> Result<Vec<u8>, ParseError> {
         let delimiter = if self.try_drop("\"\"\"") {
             "\"\"\""
         } else {
@@ -1086,8 +1082,9 @@ impl Parser {
             }
             let literal = if c == '\\' {
                 match escapes {
-                    StringEscapes::Decode => {
-                        bytes.extend(self.pop_c_escape_bytes_or_error()?);
+                    StringEscapes::Decode | StringEscapes::FilePath => {
+                        let truncate_octal = matches!(escapes, StringEscapes::FilePath);
+                        bytes.extend(self.pop_c_escape_bytes_or_error(truncate_octal)?);
                         continue;
                     }
                     StringEscapes::Verbatim => {
@@ -1104,12 +1101,11 @@ impl Parser {
             bytes.extend_from_slice(literal.encode_utf8(&mut utf8).as_bytes());
         }
         self.offset += delimiter.len();
-        String::from_utf8(bytes)
-            .map_err(|_| ParseError::new("quoted string is not valid UTF-8".to_string()))
+        Ok(bytes)
     }
 
-    /// Pops one C-style string escape and returns its UTF-8 bytes.
-    fn pop_c_escape_bytes_or_error(&mut self) -> Result<Vec<u8>, ParseError> {
+    /// Decodes one C-style string escape into bytes.
+    fn pop_c_escape_bytes_or_error(&mut self, truncate_octal: bool) -> Result<Vec<u8>, ParseError> {
         let c = self
             .popc()
             .ok_or_else(|| ParseError::new("unterminated quoted string escape".to_string()))?;
@@ -1137,9 +1133,12 @@ impl Parser {
                     self.dropc()?;
                     value = value * 8 + digit;
                 }
-                vec![u8::try_from(value).map_err(|_| {
-                    ParseError::new("octal quoted string escape exceeds one byte".into())
-                })?]
+                if value > u8::MAX as u32 && !truncate_octal {
+                    return Err(ParseError::new(
+                        "octal quoted string escape exceeds one byte".into(),
+                    ));
+                }
+                vec![value as u8]
             }
             'x' | 'X' => vec![self.pop_hex_escape_byte_or_error()?],
             'u' => self.pop_unicode_escape_bytes_or_error(4)?,
@@ -1235,9 +1234,12 @@ impl Parser {
                 self.drop_or_error("(")?;
                 let kind = if name == "ffi_proto" {
                     // XLS passes this token directly to protobuf TextFormat.
-                    ir::OuterAttributeKind::FfiProto(self.pop_ffi_proto()?)
+                    let text = self.pop_quoted_string(StringEscapes::Verbatim)?;
+                    let data = parse_foreign_function_data(&text)
+                        .map_err(|error| ParseError::new(format!("invalid ffi_proto: {error}")))?;
+                    ir::OuterAttributeKind::FfiProto(data)
                 } else {
-                    ir::OuterAttributeKind::Signature(self.pop_string_or_error()?)
+                    ir::OuterAttributeKind::Signature(self.pop_quoted_bytes(StringEscapes::Decode)?)
                 };
                 self.drop_or_error(")")?;
                 kind
@@ -1855,7 +1857,7 @@ impl Parser {
                 i32::MAX
             )));
         }
-        let path = self.pop_string_or_error()?;
+        let path = self.pop_quoted_string(StringEscapes::FilePath)?;
         file_table.add(id, path)
     }
 
@@ -4203,6 +4205,16 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     }
 
     #[test]
+    fn file_number_decodes_the_low_byte_of_an_octal_escape() {
+        let source = r#"package p
+file_number 1 "source\501test.x"
+"#;
+        xlsynth::IrPackage::parse_ir(source, None).unwrap();
+        let pkg = Parser::new(source).parse_package().unwrap();
+        assert_eq!(pkg.file_table.id_to_path[&1], "sourceAtest.x");
+    }
+
+    #[test]
     fn test_parse_package_rejects_outer_attribute_on_file_number() {
         let mut parser = Parser::new(
             r#"package p
@@ -4400,7 +4412,7 @@ top block m() {{}}
             let signature = &pkg.get_block("m").unwrap().outer_attrs[0];
             assert_eq!(
                 signature.kind(),
-                &ir::OuterAttributeKind::Signature(r#"module_name: "m""#.into())
+                &ir::OuterAttributeKind::Signature(br#"module_name: "m""#.to_vec())
             );
             assert_eq!(signature.as_str(), signature_attr);
         }
@@ -4410,6 +4422,23 @@ top block m() {{}}
     fn ffi_templates_preserve_stock_escaped_bytes_and_ir_delimiters() {
         let cases: &[(&str, &[u8])] = &[
             (r"code_template: '\uD83D\uDE00\501'", "😀A".as_bytes()),
+            (
+                r"code_template: '\501' # \uD83D\uDE00 code_template: 'decoy'",
+                b"A",
+            ),
+            (r"code_template: '\U0000D83D\uDE00'", "😀".as_bytes()),
+            (
+                r"code_template: '\uD83D\U0000DE00'",
+                b"\xed\xa0\xbd\xed\xb8\x80",
+            ),
+            (
+                r"code_template: '\uD83D' '\uDE00'",
+                b"\xed\xa0\xbd\xed\xb8\x80",
+            ),
+            (
+                r"code_template: '\U00110000\U001FFFFF\400'",
+                b"\\U00110000\\U001fffff\0",
+            ),
             (
                 r"code_template: '\\uD83D\\uDE00\\501\501'",
                 br"\uD83D\uDE00\501A",
@@ -4457,6 +4486,21 @@ top fn main(x: bits[1] id=2) -> bits[1] {{
     }
 
     #[test]
+    fn xls_escape_compatibility_preserves_textproto_errors() {
+        for text in [
+            r"code_template: '\uD83D\uDE00\q'",
+            r"code_template: '\501\U00200000'",
+            r"code_template: '\501\u+abc'",
+            r"code_template: '\501' unknown_field: 1",
+            r"code_template: '\501' code_template: 'duplicate'",
+            r"delay_ps: \501",
+        ] {
+            let attr = format!("#[ffi_proto(\"{text}\")]");
+            assert!(parse_outer_attribute(&attr).is_err(), "{text}");
+        }
+    }
+
+    #[test]
     fn malformed_ffi_proto_is_rejected_even_when_superseded() {
         let source = r#"package bad_ffi
 #[ffi_proto("delay_ps: 'invalid'")]
@@ -4478,6 +4522,34 @@ fn f(x: bits[1] id=1) -> bits[1] {
                 let source = format!("package p\n{attr}\ntop block m() {{}}\n");
                 assert!(xlsynth::IrPackage::parse_ir(&source, None).is_err());
                 assert!(parse_outer_attribute(&attr).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn signature_preserves_non_utf8_bytes_in_original_and_xls_emitted_ir() {
+        for quotes in ["\"", "\"\"\""] {
+            let source = format!(
+                r#"package p
+
+#[signature({quotes}module_name: '\377'{quotes})]
+top block m() {{
+}}
+"#
+            );
+            let canonical = xlsynth::IrPackage::parse_ir(&source, None)
+                .unwrap()
+                .to_string();
+            for (input, expected) in [
+                (&source, b"module_name: '\xff'".as_slice()),
+                (&canonical, b"module_name: \"\xff\" ".as_slice()),
+            ] {
+                let pkg = Parser::new(input).parse_package().unwrap();
+                assert_eq!(
+                    pkg.get_block("m").unwrap().outer_attrs[0].kind(),
+                    &ir::OuterAttributeKind::Signature(expected.to_vec())
+                );
+                assert_eq!(pkg.to_string(), *input);
             }
         }
     }
@@ -4529,7 +4601,7 @@ fn f() -> bits[1] {
         assert_eq!(
             attrs[0].kind(),
             &ir::OuterAttributeKind::Signature(
-                "xlsynth_pir_ext=not_metadata;\nquoted \"value]\"".into()
+                b"xlsynth_pir_ext=not_metadata;\nquoted \"value]\"".to_vec()
             )
         );
         assert_eq!(attrs[1].kind(), &ir::OuterAttributeKind::FuzzTest);
