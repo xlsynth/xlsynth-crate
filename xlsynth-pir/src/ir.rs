@@ -1097,16 +1097,76 @@ pub struct FunctionType {
     pub return_type: Type,
 }
 
+/// The validated kind of an outer attribute on an IR function or block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OuterAttributeKind {
+    NonSynth,
+    InitiationInterval(i64),
+    /// The decoded text of the foreign function's protobuf.
+    FfiProto(String),
+    /// The decoded text of the module signature protobuf.
+    Signature(String),
+    FuzzTest,
+    ChannelPorts,
+    Reset,
+    Provenance,
+}
+
+/// A parsed outer attribute with its original IR spelling for lossless
+/// emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterAttribute {
+    kind: OuterAttributeKind,
+    source: String,
+}
+
+impl OuterAttribute {
+    pub(crate) fn new(kind: OuterAttributeKind, source: String) -> Self {
+        Self { kind, source }
+    }
+
+    pub fn kind(&self) -> &OuterAttributeKind {
+        &self.kind
+    }
+
+    /// Returns the original attribute text, including its delimiters.
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+}
+
+impl std::str::FromStr for OuterAttribute {
+    type Err = ir_parser::ParseError;
+
+    fn from_str(source: &str) -> Result<Self, Self::Err> {
+        ir_parser::parse_outer_attribute(source)
+    }
+}
+
+impl std::fmt::Display for OuterAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The shared operation graph, independent of function or block interfaces.
 #[derive(Debug, Clone)]
 pub struct NodeGraph {
     pub name: String,
     pub nodes: Vec<Node>,
-    pub outer_attrs: Vec<String>,
+    pub outer_attrs: Vec<OuterAttribute>,
     pub inner_attrs: Vec<String>,
 }
 
 impl NodeGraph {
+    /// Returns the decoded text of the first `ffi_proto` attribute, if present.
+    pub fn ffi_proto(&self) -> Option<&str> {
+        self.outer_attrs.iter().find_map(|attr| match attr.kind() {
+            OuterAttributeKind::FfiProto(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
     /// Creates an empty graph with the reserved non-emitted sentinel node.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -1296,7 +1356,7 @@ pub fn emit_fn(func: &Fn, is_top: bool) -> String {
     let mut out = String::new();
     // Outer attributes first
     for attr in &func.outer_attrs {
-        out.push_str(attr);
+        out.push_str(attr.as_str());
         out.push('\n');
     }
 
@@ -1343,7 +1403,7 @@ where
     let mut out = String::new();
     // Outer attributes first.
     for attr in &func.outer_attrs {
-        out.push_str(attr);
+        out.push_str(attr.as_str());
         out.push('\n');
     }
 

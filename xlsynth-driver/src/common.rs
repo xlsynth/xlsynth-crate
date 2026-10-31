@@ -72,11 +72,7 @@ pub fn enforce_extern_verilog_codegen_policy(
         .iter()
         .filter_map(|member| {
             let graph = member.graph();
-            graph
-                .outer_attrs
-                .iter()
-                .any(|attr| attr.trim_start().starts_with("#[ffi_proto("))
-                .then(|| graph.name.clone())
+            graph.ffi_proto().map(|_| graph.name.as_str())
         })
         .collect::<Vec<_>>();
 
@@ -692,15 +688,26 @@ top fn main(x: bits[8] id=1) -> bits[8] {
     fn extern_verilog_codegen_policy_accepts_ordinary_ir() {
         enforce_extern_verilog_codegen_policy(IR_WITHOUT_VERILOG_FFI, false)
             .expect("ordinary IR should pass policy check");
+        let decoy = IR_WITHOUT_VERILOG_FFI.replace(
+            "top fn main",
+            "#[ // ffi_proto is mentioned only in this comment\nnon_synth]\ntop fn main",
+        );
+        enforce_extern_verilog_codegen_policy(&decoy, false)
+            .expect("ordinary functions may mention FFI in comments");
     }
 
     #[test]
     fn extern_verilog_codegen_policy_rejects_ffi_ir_when_disabled() {
-        let err = enforce_extern_verilog_codegen_policy(IR_WITH_VERILOG_FFI, false)
-            .expect_err("Verilog FFI IR should require explicit opt-in");
-
-        assert!(err.contains("verilog_passthrough"), "{err}");
-        assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+        let commented = IR_WITH_VERILOG_FFI.replace(
+            "#[ffi_proto(",
+            "#[ // Verilog implementation follows\nffi_proto (",
+        );
+        for ir in [IR_WITH_VERILOG_FFI, &commented] {
+            let err = enforce_extern_verilog_codegen_policy(ir, false)
+                .expect_err("Verilog FFI IR should require explicit opt-in");
+            assert!(err.contains("verilog_passthrough"), "{err}");
+            assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+        }
     }
 
     #[test]

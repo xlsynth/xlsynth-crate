@@ -878,18 +878,16 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 instance.name, instance.block
             ))
         })?;
-        let attribute = foreign
-            .outer_attrs
-            .iter()
-            .find(|attribute| attribute.contains("code_template:"))
+        let remainder = foreign
+            .ffi_proto()
+            .and_then(|proto| proto.split_once("code_template:"))
+            .map(|(_, value)| value.trim_start())
             .ok_or_else(|| {
                 BlockCodegenError::Unsupported(format!(
                     "external function `{}` has no ffi_proto code_template",
                     foreign.name
                 ))
             })?;
-        let marker = attribute.find("code_template:").expect("template marker");
-        let remainder = attribute[marker + "code_template:".len()..].trim_start();
         let start = remainder.find('"').ok_or_else(|| {
             BlockCodegenError::InvalidBlock(format!(
                 "external function `{}` has an invalid ffi_proto code_template",
