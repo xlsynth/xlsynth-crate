@@ -668,11 +668,15 @@ pub(crate) fn node_expression(
                 Ok(format!("(BitVec.append {left} {})", operand(*right)?))
             })
         }
-        NodePayload::Nary(op @ (NaryOp::And | NaryOp::Or | NaryOp::Nor), args) => {
+        NodePayload::Nary(op @ (NaryOp::And | NaryOp::Or | NaryOp::Nor | NaryOp::Xor), args) => {
             let (first, rest) = args
                 .split_first()
                 .context("bitwise operation has no operands")?;
-            let operator = if *op == NaryOp::And { "and" } else { "or" };
+            let operator = match op {
+                NaryOp::And => "and",
+                NaryOp::Xor => "xor",
+                _ => "or",
+            };
             let reduced = rest.iter().try_fold(operand(*first)?, |left, right| {
                 Ok::<_, anyhow::Error>(format!("(BitVec.{operator} {left} {})", operand(*right)?))
             })?;
@@ -681,6 +685,19 @@ pub(crate) fn node_expression(
             } else {
                 reduced
             })
+        }
+        NodePayload::Encode { arg } => {
+            let Type::Bits(input_width) = graph.get_node(*arg).ty else {
+                bail!("encode input must be bits");
+            };
+            let Type::Bits(width) = node.ty else {
+                bail!("encode result must be bits");
+            };
+            // For multi-hot inputs XLS ORs the indices of all set bits.
+            Ok(format!(
+                "((List.range {input_width}).foldl (fun acc i => if ({}).getLsbD i then BitVec.or acc (BitVec.ofNat {width} i) else acc) (BitVec.ofNat {width} 0))",
+                operand(*arg)?
+            ))
         }
         NodePayload::BitSlice { arg, start, width } => Ok(format!(
             "BitVec.extractLsb' {start} {width} {}",

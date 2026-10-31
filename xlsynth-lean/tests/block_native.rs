@@ -336,6 +336,40 @@ private def clock (index : BitVec 64) :=
     check_bundle(bundle, "dynamic bit slice and update");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn encode_changed_bits_matches_xls_for_multihot_masks() {
+    use std::fmt::Write as _;
+    let source = "fn machine(mask: u8, __reg_previous: u8) -> (u3, u8) {
+        (encode(mask ^ __reg_previous), mask)
+    }";
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    // The changes are respectively empty, bit 4, and bits 1 and 4 (encoded as
+    // 5).
+    for mask in [1, 17, 19] {
+        let args = [mask, 1].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
+        let index = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(0)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard observe {{ previous := 1 }} {{ rst := false, mask := {mask} }} == {index}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckEncode.lean".into(), checks));
+    check_bundle(bundle, "encode changed mask bits");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
