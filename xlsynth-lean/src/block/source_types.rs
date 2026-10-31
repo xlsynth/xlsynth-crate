@@ -120,6 +120,26 @@ struct ModuleContext {
     qualifier: String,
 }
 
+impl ModuleContext {
+    /// A captured declaration may belong to a transitive import of the top.
+    fn declaration_owner(&self, module: dslx::Module) -> Result<Self> {
+        let qualifier = module.get_name();
+        if self.module.get_name() == qualifier {
+            Ok(self.clone())
+        } else {
+            let type_info = self
+                .type_info
+                .get_imported_type_info(&module)
+                .with_context(|| format!("missing type information for module {qualifier}"))?;
+            Ok(Self {
+                module,
+                type_info,
+                qualifier,
+            })
+        }
+    }
+}
+
 struct FunctionSignature {
     params: Vec<(String, SourceType)>,
     returns: Vec<SourceType>,
@@ -249,7 +269,10 @@ impl Catalogue<'_> {
                 },
             );
             let local = external.get_attr();
-            let result = if let Some(record) = record.filter(|r| r.get_identifier() == local) {
+            let result = if let Some(record) = record.filter(|r| {
+                r.get_identifier() == local
+                    && r.get_owner_module().get_name() == self.context.qualifier
+            }) {
                 self.concrete_record(&record, ty, arguments.as_deref())
             } else {
                 self.nominal_reference(&local)
@@ -263,11 +286,16 @@ impl Catalogue<'_> {
             let name = alias.get_identifier();
             self.nominal_reference(&name)
         } else if let Some(elements) = annotation.tuple_members() {
+            let concrete = ty
+                .get_tuple_members()
+                .context("expected checked tuple type")?;
+            ensure!(elements.len() == concrete.len(), "tuple arity mismatch");
             let members = elements
                 .iter()
+                .zip(&concrete)
                 .enumerate()
-                .map(|(index, element)| {
-                    self.annotation_type(element)
+                .map(|(index, (element, checked))| {
+                    self.source_type(element, checked)
                         .with_context(|| format!("tuple member {index}"))
                 })
                 .collect::<Result<_>>()?;
@@ -338,6 +366,21 @@ impl Catalogue<'_> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        self.record_instance(
+            &base,
+            fields,
+            arguments,
+            record.get_parametric_binding_count(),
+        )
+    }
+
+    fn record_instance(
+        &mut self,
+        base: &str,
+        fields: Vec<StructField>,
+        arguments: Option<&[String]>,
+        binding_count: usize,
+    ) -> Result<SourceType> {
         let prefix = format!("{base}<");
         for decl in &self.declarations {
             if let TypeDecl::Struct {
@@ -351,7 +394,7 @@ impl Catalogue<'_> {
             }
         }
         let mut name = format!("{base}<{}>", arguments.unwrap_or_default().join(","));
-        if arguments.is_none_or(|args| args.len() != record.get_parametric_binding_count())
+        if arguments.is_none_or(|args| args.len() != binding_count)
             || self.declarations.iter().any(|decl| decl.name() == name)
         {
             name = format!("{base}<instance{}>", self.declarations.len());
@@ -719,6 +762,136 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+    fn with_declaration_owner<T>(
+        &mut self,
+        module: dslx::Module,
+        resolve: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let owner = self.context.declaration_owner(module)?;
+        let previous = std::mem::replace(&mut self.context, owner);
+        let result = resolve(self);
+        self.context = previous;
+        result
+    }
+
+    /// Loop captures may have no written annotation. Resolve their checked
+    /// nominal types in the module that declares them.
+    fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+        if ty.is_struct() {
+            let record = ty.get_struct_def()?;
+            self.with_declaration_owner(record.get_owner_module(), |catalogue| {
+                if record.is_parametric() {
+                    catalogue.concrete_record(&record, ty, None)
+                } else {
+                    catalogue.nominal_reference(&record.get_identifier())
+                }
+            })
+        } else if ty.is_enum() {
+            let enumeration = ty.get_enum_def()?;
+            ensure!(enumeration.get_member_count() != 0, "empty loop enum");
+            let module = enumeration.get_member(0).get_value().get_owner_module();
+            self.with_declaration_owner(module, |catalogue| {
+                catalogue.nominal_reference(&enumeration.get_identifier())
+            })
+        } else if let Some((false, width)) = ty.is_bits_like() {
+            match width {
+                0 => bail!("zero-width loop binding"),
+                1 => Ok(SourceType::Bool),
+                _ => Ok(SourceType::Bits { width }),
+            }
+        } else if ty.is_array() {
+            Ok(SourceType::Array {
+                element: Box::new(self.loop_type(&ty.get_array_element_type())?),
+                size: ty.get_array_size(),
+            })
+        } else if let Some(tuple) = ty.get_tuple_members() {
+            Ok(SourceType::Tuple {
+                members: tuple
+                    .iter()
+                    .map(|item| self.loop_type(item))
+                    .collect::<Result<_>>()?,
+            })
+        } else {
+            bail!("unsupported checked loop type {ty}")
+        }
+    }
+
+    fn collect_loop_helpers(
+        &mut self,
+        block: &BlockContext<'_>,
+        bindings: &[dslx::LoopBinding],
+    ) -> Result<()> {
+        let mut by_body = BTreeMap::<&str, Vec<_>>::new();
+        for binding in bindings {
+            by_body
+                .entry(&binding.ir_function)
+                .or_default()
+                .push(binding);
+        }
+        for function in &block.helpers {
+            let Some(bindings) = by_body.remove(function.name.as_str()) else {
+                continue;
+            };
+            let by_id: BTreeMap<_, _> = bindings
+                .iter()
+                .map(|binding| Ok((usize::try_from(binding.ir_node_id)?, *binding)))
+                .collect::<Result<_>>()?;
+            // A checked binding may refer to the index after adding the range's
+            // lower bound. Keep it on that node; the first physical
+            // argument is a zero-based iteration count.
+            let mut params = Vec::new();
+            for (position, param) in function.params.iter().enumerate() {
+                let node = function.get_node(*param);
+                let source = by_id.get(&node.text_id);
+                let (name, ty) = if let Some(binding) = source {
+                    let Ok(ty) = self.loop_type(&binding.concrete_type) else {
+                        break;
+                    };
+                    (
+                        binding.source_name.as_deref().unwrap_or(node.param_name()),
+                        ty,
+                    )
+                } else if position == 0
+                    && let ir::Type::Bits(width) = node.ty
+                {
+                    ("xls_iteration", SourceType::Bits { width })
+                } else {
+                    break;
+                };
+                if source_shape(&ty, &self.declarations)? != node.ty {
+                    break;
+                }
+                params.push((name.to_owned(), ty));
+            }
+            // A compiler-created argument such as a token-wrapped carry can
+            // still use the existing raw loop body when there is no
+            // matching source signature.
+            if params.len() == function.params.len() && params.len() >= 2 {
+                let mut node_bindings = BTreeMap::new();
+                for node in &function.nodes {
+                    if !matches!(node.payload, ir::NodePayload::Param)
+                        && let Some(binding) = by_id.get(&node.text_id)
+                        && let Some(name) = &binding.source_name
+                        && let Ok(ty) = self.loop_type(&binding.concrete_type)
+                        && source_shape(&ty, &self.declarations)? == node.ty
+                    {
+                        node_bindings.insert(node.text_id, (name.clone(), ty));
+                    }
+                }
+                self.helpers.insert(
+                    function.name.clone(),
+                    HelperSignature {
+                        name: function.name.clone(),
+                        result: params[1].1.clone(),
+                        params,
+                        node_bindings,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn helper_signature<'a>(
         &mut self,
         name: &str,
@@ -738,6 +911,7 @@ impl Catalogue<'_> {
             name: self.qualified_name(name),
             params,
             result,
+            node_bindings: BTreeMap::new(),
         })
     }
 
@@ -768,6 +942,9 @@ pub(super) struct HelperSignature {
     pub(super) name: String,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
+    /// Checked source bindings for body-local values, keyed by the original IR
+    /// node id.
+    pub(super) node_bindings: BTreeMap<usize, (String, SourceType)>,
 }
 
 /// Emit one converted function's block behavior using its typechecked DSLX
@@ -779,6 +956,7 @@ pub(super) fn emit_stateful_readable(
     block: &BlockContext<'_>,
     module: &dslx::TypecheckedModule,
     top: &str,
+    loop_bindings: &[dslx::LoopBinding],
 ) -> Result<block::LeanBlockBundle> {
     let mut catalogue = Catalogue {
         top,
@@ -795,6 +973,7 @@ pub(super) fn emit_stateful_readable(
     convert_imported_module(module, &mut catalogue)
         .with_context(|| format!("source signature of {top}"))?;
     catalogue.collect_imported_helpers(block)?;
+    catalogue.collect_loop_helpers(block, loop_bindings)?;
     let FunctionSignature { params, returns } = catalogue
         .signature
         .context("selected stateful function not found")?;
@@ -886,12 +1065,13 @@ pub(super) fn emit_stateful_readable(
         .values()
         .chain(interface.registers.values())
         .chain(&interface.outputs)
-        .chain(
-            interface
-                .helpers
-                .values()
-                .flat_map(|f| f.params.iter().map(|(_, ty)| ty).chain([&f.result])),
-        )
+        .chain(interface.helpers.values().flat_map(|f| {
+            f.params
+                .iter()
+                .map(|(_, ty)| ty)
+                .chain(f.node_bindings.values().map(|(_, ty)| ty))
+                .chain([&f.result])
+        }))
     {
         ty.collect_names(&mut names);
     }
@@ -924,7 +1104,7 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
 
 /// DSLX aliases are transparent. Structs and enums retain their identity,
 /// including when nested in positional tuples with equal physical shapes.
-fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
+pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
     match ty {
         SourceType::Alias { name } => {
             let TypeDecl::Alias { target, .. } = declaration(declarations, name)? else {

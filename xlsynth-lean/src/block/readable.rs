@@ -15,6 +15,8 @@
 
 use std::{collections::BTreeSet, fmt::Write};
 
+mod loop_correspondence;
+
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::{
     ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop},
@@ -27,7 +29,7 @@ use crate::block::{
         self as lean, LeanBlockBundle, identifier, lean_type, record_value, tuple_element,
         tuple_value,
     },
-    source_types::{SourceType, StatefulInterface, TypeDecl, source_shape},
+    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 
 /// Source type annotations and collision-free names for one verified block.
@@ -95,6 +97,11 @@ impl<'a> Presentation<'a> {
             for (param, (name, _)) in function.params.iter().zip(&signature.params) {
                 preferred[param.index] = Some(name.as_str());
             }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((name, _)) = signature.node_bindings.get(&node.text_id) {
+                    preferred[index] = Some(name);
+                }
+            }
         }
         let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
@@ -158,9 +165,26 @@ impl<'a> Presentation<'a> {
             for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                 result.node_types[param.index] = Some(ty.clone());
             }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((_, ty)) = signature.node_bindings.get(&node.text_id) {
+                    result.node_types[index] = Some(ty.clone());
+                }
+            }
         }
         for reference in ir_utils::get_topological_nodes(&graph.nodes) {
             match &graph.get_node(reference).payload {
+                NodePayload::CountedFor {
+                    init,
+                    body,
+                    invariant_args,
+                    ..
+                } if let Some(signature) = interface.helpers.get(body) => {
+                    result.node_types[reference.index] = Some(signature.result.clone());
+                    result.annotate(*init, &signature.params[1].1)?;
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        result.annotate(*arg, ty)?;
+                    }
+                }
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
@@ -423,7 +447,18 @@ impl<'a> Presentation<'a> {
         to: Option<&SourceType>,
         value: &str,
     ) -> Result<String> {
-        if from == to {
+        // A Lean abbreviation and its target already have the same type,
+        // including underneath Vector and Prod. Keep nominal types distinct.
+        let same_type = match (from, to) {
+            (Some(from), Some(to)) => {
+                from == to
+                    || resolve_aliases(from, self.declarations)?
+                        == resolve_aliases(to, self.declarations)?
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same_type {
             Ok(value.into())
         } else {
             self.convert(to, &self.convert(from, value, true)?, false)
@@ -722,6 +757,28 @@ impl<'a> Presentation<'a> {
         let operand = |r| self.typed_operand(r, target, depth);
         let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
         match &node.payload {
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } if let Some(signature) = self.interface.helpers.get(body) => {
+                let mut step = format!(
+                    "_root_.XlsReadable.Helpers.{}",
+                    identifier(&signature.name)?
+                );
+                if !invariant_args.is_empty() {
+                    step.push_str(" · ·");
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        write!(step, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                    }
+                }
+                let init = self.typed_operand(*init, Some(&signature.result), depth)?;
+                let call =
+                    format!("(_root_.XlsBlock.countedFor {trip_count} {stride} ({step}) ({init}))");
+                self.coerce(Some(&signature.result), target, &call)
+            }
             NodePayload::Invoke { to_apply, operands }
                 if self.interface.helpers.contains_key(to_apply) =>
             {
@@ -1337,6 +1394,21 @@ end XlsReadable
     /// encoders unfold afterward. Successful text generation is not Lean proof
     /// checking and does not establish correspondence to XLS execution.
     fn correspondence(&self) -> Result<String> {
+        if self
+            .block
+            .helpers
+            .iter()
+            .map(|f| &f.graph)
+            .chain([self.graph])
+            .any(|graph| {
+                graph.nodes.iter().any(|node| {
+                    matches!(&node.payload,
+                NodePayload::CountedFor { body, .. } if self.interface.helpers.contains_key(body))
+                })
+            })
+        {
+            return self.loop_correspondence();
+        }
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
         // Expose a record's fields only at a constructor. Unfolding its encoder
@@ -1413,21 +1485,12 @@ end XlsReadable
             // conditionals through each other. Projections also cross selected
             // records and physical tuples, not just their enclosing codecs.
             let mut conditional_rules = BTreeSet::from([
-                "apply_ite XlsCodec.encodeBool".to_owned(),
+                BOOL_ENCODE_ITE.to_owned(),
                 "apply_ite XlsCodec.decodeBool".to_owned(),
             ]);
             for declaration in self.declarations {
                 let name = identifier(declaration.name())?;
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.encode"));
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.decode"));
-                if let TypeDecl::Struct { fields, .. } = declaration {
-                    for field in fields {
-                        conditional_rules.insert(format!(
-                            "apply_ite XlsSource.{name}.{}",
-                            identifier(&field.name)?
-                        ));
-                    }
-                }
+                conditional_rules.extend(declaration_ite_rules(declaration, &name)?);
             }
             for graph in
                 std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
@@ -1443,27 +1506,17 @@ end XlsReadable
                 }
             }
             let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
-            rules.extend([
-                "prod_fst_ite".into(),
-                "prod_snd_ite".into(),
-                "vector_map_ite".into(),
-                "vector_getD_back_map".into(),
-                "Vector.map_setIfInBounds".into(),
-                "Vector.map_map".into(),
-                "Function.comp_def".into(),
-                "Vector.map_id'".into(),
-            ]);
+            rules.extend(PROJECTION_ITE_RULES.map(str::to_owned));
+            rules.extend(VECTOR_MAP_RULES.map(str::to_owned));
             for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
-                rules.push(format!("XlsCodec.{name}.encode_decode"));
-                rules.push(format!("XlsCodec.{name}.decode_encode"));
+                rules.extend(codec_round_trip_rules(&name));
                 if let TypeDecl::Struct { name, .. } = declaration {
                     rules.push(identifier(&format!("encode_{name}_mk"))?);
                 }
             }
-            rules.push("XlsCodec.decode_encodeBool".into());
-            rules.push("XlsCodec.encode_decodeBool".into());
+            rules.extend(BOOL_ROUND_TRIP_RULES.map(str::to_owned));
             rules.join(",\n       ")
         };
         let mut helper_rules = String::new();
@@ -1493,21 +1546,21 @@ end XlsReadable
       [XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
-        let enum_encoders = self
+        let final_encoders = self
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
-                TypeDecl::Enum { name, .. } => {
+                TypeDecl::Enum { name, .. } | TypeDecl::Alias { name, .. } => {
                     Some(identifier(name).map(|name| format!("XlsCodec.{name}.encode")))
                 }
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?;
-        if !enum_encoders.is_empty() {
+        if !final_encoders.is_empty() {
             writeln!(
                 out,
-                "  all_goals\n    -- Enum encodings now have constructor arguments; reduce them last.\n    dsimp (config := {{ instances := true }}) only [{}]",
-                enum_encoders.join(", ")
+                "  all_goals\n    -- Reduce aliases and enum constructors after codec round trips cancel.\n    dsimp (config := {{ instances := true, failIfUnchanged := false }}) only [{}]",
+                final_encoders.join(", ")
             )?;
         }
         // A source tuple is encoded one field at a time, while the raw
@@ -1518,6 +1571,45 @@ end XlsReadable
         out.push_str("\nend XlsReadable\n");
         Ok(out)
     }
+}
+
+// Both correspondence strategies use these laws, but apply them in different
+// orders.
+const BOOL_ENCODE_ITE: &str = "apply_ite XlsCodec.encodeBool";
+const BOOL_ROUND_TRIP_RULES: [&str; 2] =
+    ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
+const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
+const VECTOR_MAP_RULES: [&str; 5] = [
+    "vector_getD_back_map",
+    "Vector.map_setIfInBounds",
+    "Vector.map_map",
+    "Function.comp_def",
+    "Vector.map_id'",
+];
+
+fn codec_round_trip_rules(name: &str) -> [String; 2] {
+    [
+        format!("XlsCodec.{name}.encode_decode"),
+        format!("XlsCodec.{name}.decode_encode"),
+    ]
+}
+
+/// Distribute only these functions across a conditional. A bare apply_ite
+/// could distribute nested conditionals through each other.
+fn declaration_ite_rules(declaration: &TypeDecl, name: &str) -> Result<Vec<String>> {
+    let mut rules = vec![
+        format!("apply_ite XlsCodec.{name}.encode"),
+        format!("apply_ite XlsCodec.{name}.decode"),
+    ];
+    if let TypeDecl::Struct { fields, .. } = declaration {
+        for field in fields {
+            rules.push(format!(
+                "apply_ite XlsSource.{name}.{}",
+                identifier(&field.name)?
+            ));
+        }
+    }
+    Ok(rules)
 }
 
 /// Lean products have no trailing Unit. Only an explicit singleton DSLX

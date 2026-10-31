@@ -59,6 +59,7 @@ pub struct CompiledStatefulFunction {
     package: ir::Package,
     block_ir: String,
     module: dslx::TypecheckedModule,
+    loop_bindings: Vec<dslx::LoopBinding>,
     source_top: String,
 }
 
@@ -71,7 +72,7 @@ impl CompiledStatefulFunction {
     /// Emit both models, preserving the source types of the public interface.
     pub fn emit_readable(&self) -> Result<LeanBlockBundle> {
         let block = BlockContext::new(&self.package, select_block(&self.package, None)?)?;
-        emit_stateful_readable(&block, &self.module, &self.source_top)
+        emit_stateful_readable(&block, &self.module, &self.source_top, &self.loop_bindings)
     }
 }
 
@@ -91,8 +92,8 @@ pub fn compile_stateful_function(
     let module_name = dslx_path_to_module_name(source_path)?;
     let mut imports = dslx::ImportData::new(stdlib, search_paths);
     let module = dslx::parse_and_typecheck(source, path, module_name, &mut imports)?;
-    let ir = module
-        .convert_to_ir_text()
+    let (ir, loop_bindings) = module
+        .convert_to_ir_text_with_loop_bindings()
         .with_context(|| format!("lowering stateful function {source_top}"))?;
     let top = mangle_dslx_name(module_name, source_top)?;
     let (package, block_ir) = verified_stateful_block(&ir, &top)
@@ -101,6 +102,7 @@ pub fn compile_stateful_function(
         package,
         block_ir,
         module,
+        loop_bindings,
         source_top: source_top.to_owned(),
     })
 }
