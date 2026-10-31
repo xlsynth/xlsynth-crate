@@ -683,6 +683,48 @@ example (p : XlsSource.«machine::Packet<3,6,8>») : Helpers.«machine::other» 
     );
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn neg_and_left_shift_match_xls() {
+    let source = r#"
+fn shift_value(min: u64, value: u5) -> u5 { (-value) << min }
+fn machine(amount: u64, current_value: u5) -> (u5, u5) {
+    (current_value, shift_value(amount, current_value))
+}
+"#;
+    let bx = r#"
+extern fn machine::shift_value(min: u64, value: u5) -> u5;
+block shift(clk, rst, amount: u64) -> u5 {
+    reg value: u5 = 0;
+    value := machine::shift_value(amount, value);
+    value
+}
+"#;
+    let (mut bundle, machine) = compile_lean_and_xls_machine(bx, source)
+        .expect("negation and left shift fixture (machine.x)");
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    for amount in [0, 1, 5, 1 << 60] {
+        let args = [
+            xlsynth::XlsIrValue::make_ubits(64, amount).unwrap(),
+            xlsynth::XlsIrValue::make_ubits(5, 3).unwrap(),
+        ];
+        let expected = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(1)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard (step {{ value := 3 }} {{ rst := false, amount := {amount} }}).value == {expected}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckShift.lean".into(), checks));
+    check_bundle(bundle, "negation and variable left shift");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")
