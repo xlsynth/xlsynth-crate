@@ -175,6 +175,17 @@ impl<'a> Presentation<'a> {
                 NodePayload::RegisterRead { register } => {
                     result.node_types[reference.index] = result.register_type(register)?;
                 }
+                NodePayload::ArrayIndex { array, indices, .. } => {
+                    if let Some(ty) = &result.node_types[array.index] {
+                        result.node_types[reference.index] =
+                            Some(result.indexed_type(ty, indices.len())?.clone());
+                    }
+                }
+                NodePayload::ArrayUpdate { array, .. } => {
+                    if let Some(ty) = result.node_types[array.index].clone() {
+                        result.annotate(reference, &ty)?;
+                    }
+                }
                 NodePayload::TupleIndex { tuple, index } => {
                     if let Some(source_type) = &result.node_types[tuple.index]
                         && let SourceType::Struct { name } = result.unalias(source_type)?
@@ -257,6 +268,16 @@ impl<'a> Presentation<'a> {
         }
     }
 
+    fn indexed_type<'b>(&'b self, mut ty: &'b SourceType, rank: usize) -> Result<&'b SourceType> {
+        for _ in 0..rank {
+            let SourceType::Array { element, .. } = self.unalias(ty)? else {
+                anyhow::bail!("indexed source type is not an array: {ty:?}");
+            };
+            ty = element;
+        }
+        Ok(ty)
+    }
+
     /// Propagate destination type context through tuples and selections once.
     ///
     /// A node retains its first inferred type, while each distinct context is
@@ -272,6 +293,22 @@ impl<'a> Presentation<'a> {
             }
             let payload = self.graph.get_node(reference).payload.clone();
             match payload {
+                NodePayload::Array(args) => {
+                    let element = self.indexed_type(ty, 1)?.clone();
+                    for arg in args {
+                        self.annotate(arg, &element)?;
+                    }
+                }
+                NodePayload::ArrayUpdate {
+                    array,
+                    value,
+                    indices,
+                    ..
+                } => {
+                    let element = self.indexed_type(ty, indices.len())?.clone();
+                    self.annotate(array, ty)?;
+                    self.annotate(value, &element)?;
+                }
                 NodePayload::Tuple(args) => {
                     if let SourceType::Struct { name } = self.unalias(ty)? {
                         let TypeDecl::Struct { fields, .. } = self.declaration(name)? else {
@@ -310,6 +347,10 @@ impl<'a> Presentation<'a> {
         match ty {
             SourceType::Bool => Ok("_root_.Bool".into()),
             SourceType::Bits { width } => Ok(format!("_root_.BitVec {width}")),
+            SourceType::Array { element, size } => Ok(format!(
+                "_root_.Vector ({}) {size}",
+                self.source_type(element)?
+            )),
             SourceType::Tuple { members } => Ok(product_type(
                 &members
                     .iter()
@@ -332,6 +373,16 @@ impl<'a> Presentation<'a> {
         match ty {
             None | Some(SourceType::Bits { .. }) => Ok(value.into()),
             Some(SourceType::Bool) => Ok(format!("(XlsCodec.{operation}Bool ({value}))")),
+            Some(SourceType::Array { element, .. }) => {
+                let item = self.convert(Some(element), "item", encode)?;
+                if item == "item" {
+                    Ok(value.into())
+                } else {
+                    Ok(format!(
+                        "(_root_.Vector.map (fun item => {item}) ({value}))"
+                    ))
+                }
+            }
             Some(SourceType::Tuple { members }) => {
                 let fields = members
                     .iter()
@@ -452,7 +503,9 @@ impl<'a> Presentation<'a> {
                 }
             }
         }
-        out.push_str("end XlsSource\n\nnamespace XlsCodec\n\n");
+        out.push_str(
+            "end XlsSource\n\nnamespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n",
+        );
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
             let name = identifier(declaration.name())?;
@@ -683,6 +736,45 @@ impl<'a> Presentation<'a> {
                 self.coerce(Some(&signature.result), target, &format!("({call})"))
             }
             NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
+            NodePayload::Array(args) if let Some(ty) = target => {
+                let element = self.indexed_type(ty, 1)?;
+                let values = args
+                    .iter()
+                    .map(|arg| self.typed_operand(*arg, Some(element), depth))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(format!("#v[{}]", values.join(", ")))
+            }
+            NodePayload::ArrayIndex { array, indices, .. }
+                if let Some(ty) = &self.node_types[array.index] =>
+            {
+                let expr =
+                    indices
+                        .iter()
+                        .try_fold(self.operand(*array, depth)?, |items, index| {
+                            Ok::<_, anyhow::Error>(lean::array_read(
+                                &items,
+                                &self.typed_operand(*index, None, depth)?,
+                            ))
+                        })?;
+                self.coerce(Some(self.indexed_type(ty, indices.len())?), target, &expr)
+            }
+            NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+                ..
+            } if let Some(ty) = target => {
+                let element = self.indexed_type(ty, indices.len())?;
+                let indices = indices
+                    .iter()
+                    .map(|index| self.typed_operand(*index, None, depth))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(lean::array_write(
+                    &self.typed_operand(*array, Some(ty), depth)?,
+                    &indices,
+                    &self.typed_operand(*value, Some(element), depth)?,
+                ))
+            }
             NodePayload::RegisterRead { register } => {
                 let index = self.register_index(register)?;
                 self.coerce(
@@ -1060,7 +1152,9 @@ def eval (q : State) (x : Input) : Evaluation :=
     ///
     /// Inputs and outputs use their source codecs and the block's port names.
     fn representation(&self) -> Result<String> {
-        let mut out = String::from("import ReadableGenerated\n\nnamespace XlsReadable\n\n");
+        let mut out = String::from(
+            "import ReadableGenerated\n\nnamespace XlsReadable\n\nattribute [local simp] Function.comp_def\n\n",
+        );
         let encoded = self
             .block()
             .graph
@@ -1349,7 +1443,16 @@ end XlsReadable
                 }
             }
             let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
-            rules.extend(["prod_fst_ite".into(), "prod_snd_ite".into()]);
+            rules.extend([
+                "prod_fst_ite".into(),
+                "prod_snd_ite".into(),
+                "vector_map_ite".into(),
+                "vector_getD_back_map".into(),
+                "Vector.map_setIfInBounds".into(),
+                "Vector.map_map".into(),
+                "Function.comp_def".into(),
+                "Vector.map_id'".into(),
+            ]);
             for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
@@ -1536,6 +1639,16 @@ private theorem prod_snd_ite {α β : Type} (p : Prop) [Decidable p] (x y : α �
 private theorem ite_prod_mk {α β : Type} (p : Prop) [Decidable p] (a c : α) (b d : β) :
     (if p then (a, b) else (c, d)) = ((if p then a else c), (if p then b else d)) := by
   split <;> rfl
+
+private theorem vector_map_ite {α β : Type} {n : Nat} (f : α → β)
+    (p : Prop) [Decidable p] (x y : Vector α n) :
+    (if p then x else y).map f = (if p then x.map f else y.map f) :=
+  apply_ite (Vector.map f) p x y
+
+private theorem vector_getD_back_map {α β : Type} {n : Nat} [NeZero n]
+    (f : α → β) (xs : Vector α n) (i : Nat) :
+    (xs.map f).getD i (xs.map f).back = f (xs.getD i xs.back) := by
+  by_cases h : i < n <;> simp [Vector.getD, Array.getD, Vector.back_eq_getElem, h]
 
 "#;
 

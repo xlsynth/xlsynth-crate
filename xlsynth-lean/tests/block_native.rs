@@ -250,6 +250,43 @@ fn stateful_neg_and_left_shift_match_xls() {
     check_bundle(bundle, "negation and variable left shift");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn arrays_keep_record_elements_and_xls_index_bounds() {
+    let source = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+fn machine(index: u8, replacement: Slot, __reg_slots: Slot[2]) -> (u8, Slot[2]) {
+    let slot = __reg_slots[index];
+    (slot.write.data, update(__reg_slots, index, replacement))
+}
+"#;
+    let compiled =
+        compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let (_, readable) = bundle
+        .files
+        .iter()
+        .find(|(file, _)| file == "ReadableGenerated.lean")
+        .unwrap();
+    assert!(readable.contains(".«write»") && readable.contains(".«data»"));
+    bundle.files.push((
+        "CheckArray.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 8) :=
+  let q : State := { slots := #v[⟨⟨7⟩⟩, ⟨⟨13⟩⟩] }
+  let x : Input := { rst := false, index, replacement := ⟨⟨19⟩⟩ }
+  let slots := (step q x).slots
+  (observe q x, slots[0].write.data, slots[1].write.data)
+#guard clock 0 == (7, 19, 13)
+#guard clock 255 == (13, 7, 13)
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "array of nested records");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
