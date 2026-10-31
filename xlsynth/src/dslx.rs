@@ -835,6 +835,7 @@ impl TryFrom<&Quickcheck> for ModuleMember {
     }
 }
 
+#[derive(Clone)]
 pub struct Module {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModule,
@@ -2515,6 +2516,14 @@ impl TypeInfo {
             let error_out_str: String = unsafe { c_str_to_rust(error_out) };
             Err(XlsynthError(error_out_str))
         }
+    }
+
+    pub fn get_imported_module(&self, import: &Import) -> Option<Module> {
+        let ptr = unsafe { sys::xls_dslx_type_info_get_imported_module(self.ptr, import.ptr) };
+        (!ptr.is_null()).then(|| Module {
+            parent: self.parent.clone(),
+            ptr,
+        })
     }
 
     pub fn get_imported_type_info(&self, module: &Module) -> Option<TypeInfo> {

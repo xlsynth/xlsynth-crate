@@ -238,6 +238,34 @@ fn convert_type_alias(
     builder.add_alias_typed(&alias_name, type_info, &type_annotation, &alias_type)
 }
 
+/// Visits one named type declaration using the type information of its owning
+/// module. This is useful when an interface refers to a type in another module.
+pub fn convert_named_type_definition(
+    module: &dslx::Module,
+    type_info: &dslx::TypeInfo,
+    name: &str,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    for i in 0..module.get_member_count() {
+        match module.get_member(i).to_matchable() {
+            Some(dslx::MatchableModuleMember::EnumDef(def)) if def.get_identifier() == name => {
+                return convert_enum(&def, type_info, builder);
+            }
+            Some(dslx::MatchableModuleMember::StructDef(def)) if def.get_identifier() == name => {
+                return convert_struct(&def, type_info, builder);
+            }
+            Some(dslx::MatchableModuleMember::TypeAlias(def)) if def.get_identifier() == name => {
+                return convert_type_alias(&def, type_info, builder);
+            }
+            _ => {}
+        }
+    }
+    Err(XlsynthError(format!(
+        "no type declaration {name} in module {}",
+        module.get_name()
+    )))
+}
+
 fn convert_constant(
     constant_def: &dslx::ConstantDef,
     type_info: &dslx::TypeInfo,
@@ -250,7 +278,9 @@ fn convert_constant(
     builder.add_constant(&constant_def.get_name(), constant_def, &ty, &ir_value)
 }
 
-fn convert_function(
+/// Visit a resolved function declaration using the type information from its
+/// owning module.
+pub fn convert_function(
     function: &dslx::Function,
     type_info: &dslx::TypeInfo,
     builder: &mut dyn BridgeBuilder,

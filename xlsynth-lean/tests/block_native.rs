@@ -77,23 +77,43 @@ example (q : State) (x : Input) : (reset q x).next = ⟨0, 0⟩ := by rfl
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn stateful_nested_helper_calls() {
+    let modules = tempfile::tempdir().unwrap();
+    fs::write(
+        modules.path().join("left_side.x"),
+        r#"
+pub struct Packet { base: u8, delta: u8 }
+pub fn advance(command: Packet) -> Packet {
+    Packet { base: command.base + command.delta, ..command }
+}
+"#,
+    )
+    .unwrap();
     let source = r#"
+import left_side as foreign;
 struct Packet { left: u8, right: u8 }
-fn sum_fields(p: Packet) -> u8 { p.left + p.right }
-fn advance(p: Packet, previous: u8) -> u8 { sum_fields(p) + previous }
+fn advance(request: foreign::Packet, previous: u8) -> u8 {
+    foreign::advance(request).base + previous
+}
 fn machine(packet: Packet, __reg_count: u8) -> (u8, u8) {
-    (__reg_count, advance(packet, __reg_count))
+    let request = foreign::Packet { base: packet.left, delta: packet.right };
+    (__reg_count, advance(request, __reg_count))
 }
 "#;
-    let compiled =
-        compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
+    let compiled = compile_stateful_function(
+        source,
+        Path::new("machine.x"),
+        "machine",
+        None,
+        &[modules.path()],
+    )
+    .unwrap();
     let mut bundle = compiled.emit_readable().unwrap();
     let (_, model) = bundle
         .files
         .iter()
         .find(|(name, _)| name == "ReadableGenerated.lean")
         .unwrap();
-    for helper in ["sum_fields", "advance"] {
+    for helper in ["left_side::advance", "advance"] {
         assert!(model.contains(&format!("_root_.XlsReadable.Helpers.«{helper}»")));
     }
     bundle.files.push((
@@ -103,6 +123,7 @@ import ReadableCorrespondence
 open XlsReadable
 private def stimulus : Input := { rst := false, packet := { left := 13, right := 5 } }
 private def initial : State := { count := 7 }
+#guard (Helpers.«left_side::advance» (command := { base := 13, delta := 5 })).base == 18
 #guard observe initial stimulus == 7
 #guard (step initial stimulus).count == 25
 "#
