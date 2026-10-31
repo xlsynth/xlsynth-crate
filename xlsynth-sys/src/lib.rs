@@ -1034,6 +1034,10 @@ unsafe extern "C" {
         type_annotation: *mut CDslxTypeAnnotation,
     ) -> *mut CDslxType;
 
+    pub fn xls_dslx_type_info_get_imported_module(
+        type_info: *mut CDslxTypeInfo,
+        import_node: *mut CDslxImport,
+    ) -> *mut CDslxModule;
     pub fn xls_dslx_type_info_get_imported_type_info(
         type_info: *mut CDslxTypeInfo,
         module: *mut CDslxModule,

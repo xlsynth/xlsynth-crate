@@ -6,7 +6,10 @@ use anyhow::{Context, Result, bail, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use xlsynth::{
     XlsIrValue, XlsynthError, dslx,
-    dslx_bridge::{BridgeBuilder, FunctionParamData, StructMemberData, convert_imported_module},
+    dslx_bridge::{
+        BridgeBuilder, FunctionParamData, StructMemberData, convert_function,
+        convert_imported_module, convert_named_type_definition,
+    },
 };
 use xlsynth_pir::ir;
 /// A supported leaf declaration with nominal names retained from native DSLX.
@@ -98,11 +101,17 @@ impl SourceType {
 struct Catalogue<'a> {
     declarations: Vec<TypeDecl>,
     top: &'a str,
-    module_name: String,
     helpers: BTreeMap<String, HelperSignature>,
-    type_info: dslx::TypeInfo,
+    context: ModuleContext,
     signature: Option<FunctionSignature>,
     unsupported: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct ModuleContext {
+    module: dslx::Module,
+    type_info: dslx::TypeInfo,
+    qualifier: String,
 }
 
 struct FunctionSignature {
@@ -111,12 +120,43 @@ struct FunctionSignature {
 }
 
 impl Catalogue<'_> {
+    fn qualified_name(&self, local: &str) -> String {
+        if self.context.qualifier.is_empty() {
+            local.to_owned()
+        } else {
+            format!("{}::{local}", self.context.qualifier)
+        }
+    }
+
+    // Visit imported declarations on demand. The compiler already resolved each
+    // import, and unrelated declarations need not be suitable for the
+    // model's interface.
+    fn nominal_reference(&mut self, local: &str) -> Result<SourceType> {
+        let name = self.qualified_name(local);
+        if !self.context.qualifier.is_empty()
+            && !self.declarations.iter().any(|decl| decl.name() == name)
+            && !self.unsupported.contains_key(&name)
+        {
+            convert_named_type_definition(
+                &self.context.module.clone(),
+                &self.context.type_info.clone(),
+                local,
+                self,
+            )?;
+        }
+        match self.declaration(&name)? {
+            TypeDecl::Enum { .. } => Ok(SourceType::Enum { name }),
+            TypeDecl::Struct { .. } => Ok(SourceType::Struct { name }),
+            TypeDecl::Alias { .. } => Ok(SourceType::Alias { name }),
+        }
+    }
+
     // For a function, diagnose an unsupported declaration at the interface
     // element that actually needs it. An unrelated type is not an interface.
     fn finish_declaration(&mut self, name: &str, result: Result<()>) -> Result<(), XlsynthError> {
         if let Err(error) = result {
             self.unsupported
-                .insert(name.to_owned(), format!("{error:#}"));
+                .insert(self.qualified_name(name), format!("{error:#}"));
         }
         Ok(())
     }
@@ -142,12 +182,9 @@ impl Catalogue<'_> {
         Ok(())
     }
 
-    /// Retain local nominal references and reject shapes outside version 1.
-    ///
-    /// Referenced declarations must already have been collected in source
-    /// order.
+    /// Resolve each reference in the declaring module's type environment.
     fn source_type(
-        &self,
+        &mut self,
         annotation: &dslx::TypeAnnotation,
         ty: &dslx::Type,
     ) -> Result<SourceType> {
@@ -158,26 +195,43 @@ impl Catalogue<'_> {
             .as_ref()
             .and_then(dslx::TypeDefinition::to_colon_ref)
         {
-            bail!(
-                "imported source type {} is unsupported by stateful Lean; use a concrete leaf declaration",
-                external.get_attr()
-            )
+            let import = external
+                .resolve_import_subject()
+                .context("resolving source type import")?;
+            let module = self
+                .context
+                .type_info
+                .get_imported_module(&import)
+                .context("missing imported module")?;
+            let type_info = self
+                .context
+                .type_info
+                .get_imported_type_info(&module)
+                .context("missing imported type information")?;
+            let qualifier = module.get_name();
+            let previous = std::mem::replace(
+                &mut self.context,
+                ModuleContext {
+                    module,
+                    type_info,
+                    qualifier,
+                },
+            );
+            let result = self.nominal_reference(&external.get_attr());
+            self.context = previous;
+            result
         } else if let Some(alias) = definition
             .as_ref()
             .and_then(dslx::TypeDefinition::to_type_alias)
         {
             let name = alias.get_identifier();
-            ensure!(
-                matches!(self.declaration(&name)?, TypeDecl::Alias { .. }),
-                "source reference {name} is not a collected alias"
-            );
-            Ok(SourceType::Alias { name })
+            self.nominal_reference(&name)
         } else if let Some(elements) = annotation.tuple_members() {
             let members = elements
                 .iter()
                 .enumerate()
                 .map(|(index, element)| {
-                    self.annotation_type(element, &self.type_info)
+                    self.annotation_type(element)
                         .with_context(|| format!("tuple member {index}"))
                 })
                 .collect::<Result<_>>()?;
@@ -187,11 +241,7 @@ impl Catalogue<'_> {
                 .get_enum_def()
                 .context("resolving enum declaration")?
                 .get_identifier();
-            ensure!(
-                matches!(self.declaration(&name)?, TypeDecl::Enum { .. }),
-                "source reference {name} is not a collected enum"
-            );
-            Ok(SourceType::Enum { name })
+            self.nominal_reference(&name)
         } else if ty.is_struct() {
             let definition = ty
                 .get_struct_def()
@@ -201,11 +251,7 @@ impl Catalogue<'_> {
                 !definition.is_parametric(),
                 "parametric source struct {name} is unsupported; use a concrete non-parametric declaration"
             );
-            ensure!(
-                matches!(self.declaration(&name)?, TypeDecl::Struct { .. }),
-                "source reference {name} is not a collected struct"
-            );
-            Ok(SourceType::Struct { name })
+            self.nominal_reference(&name)
         } else if let Some((signed, width)) = ty.is_bits_like() {
             ensure!(
                 !signed,
@@ -222,19 +268,17 @@ impl Catalogue<'_> {
             }
         } else {
             bail!(
-                "unsupported source shape {}; stateful Lean supports unsigned bits, two-bit enums, aliases, and ordered structs",
+                "unsupported source shape {} in stateful Lean",
                 ty.to_string()
                     .context("rendering unsupported source type")?
             )
         }
     }
 
-    fn annotation_type(
-        &self,
-        annotation: &dslx::TypeAnnotation,
-        type_info: &dslx::TypeInfo,
-    ) -> Result<SourceType> {
-        let ty = type_info
+    fn annotation_type(&mut self, annotation: &dslx::TypeAnnotation) -> Result<SourceType> {
+        let ty = self
+            .context
+            .type_info
             .get_type_for_type_annotation(annotation)
             .context("source annotation has no concrete type")?;
         self.source_type(annotation, &ty)
@@ -285,7 +329,7 @@ impl BridgeBuilder for Catalogue<'_> {
                 .collect::<Result<Vec<_>>>()?;
             ensure!(!members.is_empty(), "enum {name} has no members");
             self.add(TypeDecl::Enum {
-                name: name.to_owned(),
+                name: self.qualified_name(name),
                 width,
                 members,
             })
@@ -316,7 +360,7 @@ impl BridgeBuilder for Catalogue<'_> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             self.add(TypeDecl::Struct {
-                name: name.to_owned(),
+                name: self.qualified_name(name),
                 fields,
             })
         })();
@@ -335,7 +379,7 @@ impl BridgeBuilder for Catalogue<'_> {
             .with_context(|| format!("source alias {name}"))
             .and_then(|target| {
                 self.add(TypeDecl::Alias {
-                    name: name.to_owned(),
+                    name: self.qualified_name(name),
                     target,
                 })
             });
@@ -359,12 +403,12 @@ impl BridgeBuilder for Catalogue<'_> {
     fn add_function_signature_typed(
         &mut self,
         name: &str,
-        type_info: &dslx::TypeInfo,
+        _type_info: &dslx::TypeInfo,
         params: &[FunctionParamData],
         return_annotation: Option<&dslx::TypeAnnotation>,
         _return_type: Option<&dslx::Type>,
     ) -> Result<(), XlsynthError> {
-        if self.top == name {
+        if self.context.qualifier.is_empty() && self.top == name {
             let result = (|| -> Result<_> {
                 let params = params
                     .iter()
@@ -375,7 +419,7 @@ impl BridgeBuilder for Catalogue<'_> {
                             "input"
                         };
                         let ty = self
-                            .annotation_type(&param.type_annotation, type_info)
+                            .annotation_type(&param.type_annotation)
                             .with_context(|| format!("{role} {}", param.name))?;
                         Ok((param.name.clone(), ty))
                     })
@@ -395,7 +439,7 @@ impl BridgeBuilder for Catalogue<'_> {
                         .iter()
                         .enumerate()
                         .map(|(index, element)| {
-                            self.annotation_type(element, type_info).with_context(|| {
+                            self.annotation_type(element).with_context(|| {
                                 if index < output_count {
                                     format!("output out{index}")
                                 } else {
@@ -409,7 +453,7 @@ impl BridgeBuilder for Catalogue<'_> {
                         .collect::<Result<_>>()?
                 } else if let Some(annotation) = return_annotation {
                     let ty = self
-                        .annotation_type(annotation, type_info)
+                        .annotation_type(annotation)
                         .context("stateful function return type")?;
                     self.resolve_tuple(&ty)?.to_vec()
                 } else {
@@ -419,12 +463,10 @@ impl BridgeBuilder for Catalogue<'_> {
                 Ok(FunctionSignature { params, returns })
             })();
             self.signature = Some(result.map_err(|error| XlsynthError(format!("{error:#}")))?);
-        } else if let Ok(signature) =
-            self.helper_signature(name, params, return_annotation, type_info)
-        {
+        } else if let Ok(signature) = self.helper_signature(name, params, return_annotation) {
             // Key by the IR symbol so a function of the same name in an import
             // cannot acquire a local function's source types.
-            let symbol = xlsynth::mangle_dslx_name(&self.module_name, name)?;
+            let symbol = xlsynth::mangle_dslx_name(&self.context.module.get_name(), name)?;
             self.helpers.insert(symbol, signature);
         }
         Ok(())
@@ -432,25 +474,93 @@ impl BridgeBuilder for Catalogue<'_> {
 }
 
 impl Catalogue<'_> {
+    fn collect_imported_helpers(&mut self, block: &BlockContext<'_>) -> Result<()> {
+        if block.helpers.is_empty() {
+            return Ok(());
+        }
+        let root = self.context.clone();
+        let root_name = root.module.get_name();
+        let graph = root.type_info.build_function_call_graph(&root.module)?;
+        let top = (0..graph.function_count())
+            .filter_map(|i| graph.get_function(i))
+            .find(|f| f.get_identifier() == self.top)
+            .context("selected DSLX function missing from call graph")?;
+        // The native graph has no callee order. Visit declarations in a stable
+        // order so repeated translations produce the same Lean file.
+        let mut pending = BTreeMap::from([(
+            (root_name.clone(), top.get_identifier()),
+            (root.clone(), top),
+        )]);
+        let mut graphs = BTreeMap::from([(root_name, graph)]);
+        let mut visited = BTreeSet::new();
+        while let Some(((module_name, function_name), (owner, caller))) = pending.pop_first() {
+            if !visited.insert((module_name.clone(), function_name.clone())) {
+                continue;
+            }
+            if !owner.qualifier.is_empty() && caller.get_parametric_binding_count() == 0 {
+                let symbol = xlsynth::mangle_dslx_name(&module_name, &function_name)?;
+                if block.helpers.iter().any(|f| f.name == symbol) {
+                    self.context = owner.clone();
+                    convert_function(&caller, &owner.type_info, self)?;
+                }
+            }
+            let graph = match graphs.entry(module_name.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(owner.type_info.build_function_call_graph(&owner.module)?)
+                }
+            };
+            for index in 0..graph.callee_count(&caller) {
+                let callee = graph
+                    .get_callee(&caller, index)
+                    .context("missing DSLX callee")?;
+                let module = callee.get_body().get_owner_module();
+                let name = module.get_name();
+                // XLS includes its builtins in this graph, but their bodies
+                // lower to IR operations and have no imported DSLX module.
+                if name == "<builtin_stubs>" {
+                    continue;
+                }
+                let key = (name.clone(), callee.get_identifier());
+                let callee_owner = if name == module_name {
+                    owner.clone()
+                } else {
+                    let type_info = owner
+                        .type_info
+                        .get_imported_type_info(&module)
+                        .with_context(|| {
+                            format!("missing type information for imported module {name}")
+                        })?;
+                    ModuleContext {
+                        module,
+                        type_info,
+                        qualifier: name,
+                    }
+                };
+                pending.insert(key, (callee_owner, callee));
+            }
+        }
+        self.context = root;
+        Ok(())
+    }
     fn helper_signature(
-        &self,
+        &mut self,
         name: &str,
         params: &[FunctionParamData],
         return_annotation: Option<&dslx::TypeAnnotation>,
-        type_info: &dslx::TypeInfo,
     ) -> Result<HelperSignature> {
         let params = params
             .iter()
-            .map(|p| self.annotation_type(&p.type_annotation, type_info))
+            .map(|p| Ok((p.name.clone(), self.annotation_type(&p.type_annotation)?)))
             .collect::<Result<_>>()?;
         let result = match return_annotation {
-            Some(annotation) => self.annotation_type(annotation, type_info)?,
+            Some(annotation) => self.annotation_type(annotation)?,
             None => SourceType::Tuple {
                 members: Vec::new(),
             },
         };
         Ok(HelperSignature {
-            name: name.to_owned(),
+            name: self.qualified_name(name),
             params,
             result,
         })
@@ -481,7 +591,7 @@ pub(super) struct StatefulInterface {
 
 pub(super) struct HelperSignature {
     pub(super) name: String,
-    pub(super) params: Vec<SourceType>,
+    pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }
 
@@ -497,15 +607,19 @@ pub(super) fn emit_stateful_readable(
 ) -> Result<block::LeanBlockBundle> {
     let mut catalogue = Catalogue {
         top,
-        module_name: module.get_module().get_name(),
+        context: ModuleContext {
+            module: module.get_module(),
+            type_info: module.get_type_info(),
+            qualifier: String::new(),
+        },
         helpers: BTreeMap::new(),
-        type_info: module.get_type_info(),
         declarations: Vec::new(),
         signature: None,
         unsupported: BTreeMap::new(),
     };
     convert_imported_module(module, &mut catalogue)
         .with_context(|| format!("source signature of {top}"))?;
+    catalogue.collect_imported_helpers(block)?;
     let FunctionSignature { params, returns } = catalogue
         .signature
         .context("selected stateful function not found")?;
@@ -601,7 +715,7 @@ pub(super) fn emit_stateful_readable(
             interface
                 .helpers
                 .values()
-                .flat_map(|f| f.params.iter().chain([&f.result])),
+                .flat_map(|f| f.params.iter().map(|(_, ty)| ty).chain([&f.result])),
         )
     {
         ty.collect_names(&mut names);

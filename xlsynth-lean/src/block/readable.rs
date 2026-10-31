@@ -89,12 +89,14 @@ impl<'a> Presentation<'a> {
             Some(f) => f,
             None => block.graph,
         };
-        let reserved: BTreeSet<_> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(index, _)| ir::node_textual_id(graph, NodeRef { index }))
-            .collect();
+        let signature = helper.and_then(|f| interface.helpers.get(&f.name));
+        let mut preferred: Vec<_> = graph.nodes.iter().map(|n| n.name.as_deref()).collect();
+        if let Some((function, signature)) = helper.zip(signature) {
+            for (param, (name, _)) in function.params.iter().zip(&signature.params) {
+                preferred[param.index] = Some(name.as_str());
+            }
+        }
+        let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
             "Bool",
             "BitVec",
@@ -115,20 +117,18 @@ impl<'a> Presentation<'a> {
         if helper.is_none() {
             used.extend(["q".to_owned(), "x".to_owned()]);
         }
-        let names = graph
-            .nodes
-            .iter()
+        let names = preferred
+            .into_iter()
             .enumerate()
-            .map(|(index, node)| {
-                let source = ir::node_textual_id(graph, NodeRef { index });
-                let name = if node.name.is_none() || used.contains(&source) {
+            .map(|(index, source)| {
+                let name = if let Some(source) = source.filter(|s| !used.contains(*s)) {
+                    source.to_owned()
+                } else {
                     let mut fallback = format!("xls_node_{index}");
-                    while reserved.contains(&fallback) || used.contains(&fallback) {
+                    while reserved.contains(fallback.as_str()) || used.contains(&fallback) {
                         fallback.push('_');
                     }
                     fallback
-                } else {
-                    source
                 };
                 used.insert(name.clone());
                 identifier(&name)
@@ -154,9 +154,8 @@ impl<'a> Presentation<'a> {
             names,
             register_fields,
         };
-        let signature = helper.and_then(|f| interface.helpers.get(&f.name));
         if let Some((function, signature)) = helper.zip(signature) {
-            for (param, ty) in function.params.iter().zip(&signature.params) {
+            for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                 result.node_types[param.index] = Some(ty.clone());
             }
         }
@@ -165,7 +164,7 @@ impl<'a> Presentation<'a> {
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
-                        for (arg, ty) in operands.iter().zip(&signature.params) {
+                        for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                             result.annotate(*arg, ty)?;
                         }
                     }
@@ -678,7 +677,7 @@ impl<'a> Presentation<'a> {
                     "_root_.XlsReadable.Helpers.{}",
                     identifier(&signature.name)?
                 );
-                for (arg, ty) in operands.iter().zip(&signature.params) {
+                for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                     write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
                 }
                 self.coerce(Some(&signature.result), target, &format!("({call})"))
@@ -863,7 +862,7 @@ impl<'a> Presentation<'a> {
             if let Some(signature) = self.interface.helpers.get(&function.name) {
                 let model = Self::new(block, self.declarations, self.interface, Some(function))?;
                 write!(out, "def Helpers.{}", identifier(&signature.name)?)?;
-                for (param, ty) in function.params.iter().zip(&signature.params) {
+                for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                     write!(
                         out,
                         " ({} : {})",
