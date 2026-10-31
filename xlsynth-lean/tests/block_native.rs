@@ -134,6 +134,51 @@ private def initial : State := { count := 7 }
 
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_parametric_helpers_preserve_instances() {
+    let modules = tempfile::tempdir().unwrap();
+    let packets = r#"
+pub struct Packet<N: u32> { value: bits[N], enabled: bool }
+pub fn choose<N: u32>(packet: Packet<N>, fallback: bits[N]) -> Packet<N> {
+    Packet<N> { value: if packet.enabled { packet.value } else { fallback }, ..packet }
+}
+pub fn bias<K: u32>(x: u6) -> u6 { x + (K as u6) }
+"#;
+    std::fs::write(modules.path().join("packets.x"), packets).unwrap();
+    let source = r#"
+import packets;
+fn machine(small: packets::Packet<u32:5>, large: packets::Packet<u32:6>, __reg_last: u6) -> (u6, u6) {
+    let a = packets::choose<u32:5>(small, u5:17);
+    let b = packets::choose<u32:6>(large, u6:41);
+    (__reg_last, packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
+}
+"#;
+    let model = compile_stateful_function(
+        source,
+        Path::new("machine.x"),
+        "machine",
+        None,
+        &[modules.path()],
+    )
+    .unwrap();
+    let mut bundle = model.emit_readable().unwrap();
+    bundle.files.push((
+        "Check.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := {
+  rst := false, small := { value := 3, enabled := false }, large := { value := 37, enabled := true } }
+#guard (Helpers.«packets::choose<5>» (packet := stimulus.small) (fallback := 17)).value == 17
+#guard (Helpers.«packets::choose<6>» (packet := stimulus.large) (fallback := 41)).value == 37
+#guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
+#guard (step { last := 7 } stimulus).last == 57
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "parametric");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn stateful_counted_loop_matches_xls() {
     use std::fmt::Write as _;
 
