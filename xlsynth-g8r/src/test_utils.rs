@@ -951,3 +951,31 @@ pub fn equivalence_test_solver() -> xlsynth_prover::prover::SolverChoice {
         SolverChoice::Toolchain
     }
 }
+
+/// Check a function before and after gate preparation with all inputs symbolic.
+pub fn prove_prepared_ir_equiv(
+    lhs: &ir::Fn,
+    rhs: &ir::Fn,
+) -> xlsynth_prover::prover::types::EquivResult {
+    use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, ProverFn};
+    use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
+
+    let solver = equivalence_test_solver();
+    let mut lhs = lhs.clone();
+    let mut rhs = rhs.clone();
+    if matches!(solver, SolverChoice::Toolchain) {
+        // The XLS tool reads core IR. The in-process prover also understands
+        // PIR extensions.
+        for f in [&mut lhs, &mut rhs] {
+            xlsynth_pir::desugar_extensions::desugar_extensions_in_fn(f).unwrap();
+        }
+    }
+    prover_for_choice(solver, None).prove_ir_equiv(
+        &ProverFn::new(&lhs, None),
+        &ProverFn::new(&rhs, None),
+        EquivParallelism::SingleThreaded,
+        AssertionSemantics::Ignore,
+        None,
+        false,
+    )
+}

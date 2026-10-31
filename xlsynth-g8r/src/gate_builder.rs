@@ -495,6 +495,9 @@ impl GateBuilder {
         bit_vector: &AigBitVector,
         reduction_kind: ReductionKind,
     ) -> AigOperand {
+        if bit_vector.get_bit_count() == 0 {
+            return self.union_current_pir_node_id_into_operand(self.get_true());
+        }
         self.add_and_nary(
             bit_vector
                 .iter_lsb_to_msb()
@@ -793,6 +796,9 @@ impl GateBuilder {
         bit_vector: &AigBitVector,
         reduction_kind: ReductionKind,
     ) -> AigOperand {
+        if bit_vector.get_bit_count() == 0 {
+            return self.union_current_pir_node_id_into_operand(self.get_false());
+        }
         self.add_or_nary(
             bit_vector
                 .iter_lsb_to_msb()
@@ -899,6 +905,9 @@ impl GateBuilder {
         bit_vector: &AigBitVector,
         reduction_kind: ReductionKind,
     ) -> AigOperand {
+        if bit_vector.get_bit_count() == 0 {
+            return self.union_current_pir_node_id_into_operand(self.get_false());
+        }
         self.add_xor_nary(
             bit_vector
                 .iter_lsb_to_msb()

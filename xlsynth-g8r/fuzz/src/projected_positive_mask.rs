@@ -2,8 +2,9 @@
 
 //! Targeted, non-vacuous coverage of projected positive-mask preparation.
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
-use xlsynth_pir::ir::{Binop, NodePayload};
+use xlsynth_pir::ir::NodePayload;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_utils;
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 use xlsynth_prover::solver::bitwuzla::Bitwuzla;
@@ -106,26 +107,30 @@ top fn main(x: bits[{width}] id=1, y: bits[{width}] id=2) -> (bits[{projection_w
         .expect("valid generated IR");
     let original = pkg.get_top_fn().unwrap();
     let prepared = prep_for_gatify(original, None, PrepForGatifyOptions::all_opts_disabled());
-    // Check payloads, not rendered spelling or node indices (compaction changes
-    // indices). The comparison's stable text ID identifies the mutated node.
-    let cmp = prepared
-        .nodes
-        .iter()
-        .find(|n| n.text_id == 5)
-        .expect("live comparison");
-    let should_fire = matches!(kind, "match" | "shared_and");
-    assert_eq!(
-        matches!(cmp.payload, NodePayload::BitSlice { start, width: 1, .. } if start == width - 1),
-        should_fire,
-        "fire/decline: {kind}, width={width}, reversed={reversed}, expression={expression}\n{prepared}"
-    );
-    if !should_fire {
-        assert!(
-            matches!(
-                cmp.payload,
-                NodePayload::Binop(Binop::Sle | Binop::Slt | Binop::Ule, _, _)
-            ),
-            "declining must preserve the comparison: {kind}"
+    // The first return field always projects `masked`. Prep preserves its
+    // operand order, but can give the entire mask predicate chain fresh IDs.
+    let operand = |node, i: usize| ir_utils::operands(&prepared.get_node(node).payload)[i];
+    let out = operand(prepared.ret_node_ref.expect("return tuple"), 0);
+    let masked = operand(out, 0);
+    let mask = operand(masked, usize::from(!reversed));
+    let positive = operand(mask, 0);
+    let cmp = &prepared.get_node(operand(positive, 0)).payload;
+    if matches!(kind, "match" | "shared_and") {
+        let low = operand(masked, usize::from(reversed));
+        assert_eq!(
+            cmp,
+            &NodePayload::BitSlice {
+                arg: operand(low, 0),
+                start: width - 1,
+                width: 1,
+            },
+            "expected sign bit: {kind}, width={width}, reversed={reversed}, expression={expression}\n{prepared}"
+        );
+    } else {
+        assert_eq!(
+            cmp.get_operator(),
+            compare,
+            "declining must preserve the comparison: {kind}, width={width}, reversed={reversed}, expression={expression}\n{prepared}"
         );
     }
     let result = prove_ir_fn_equiv::<Bitwuzla>(
