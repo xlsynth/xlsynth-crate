@@ -11,6 +11,39 @@ fn package(text: &str) -> Package {
     Parser::new(text).parse_and_validate_package().unwrap()
 }
 
+// Verifies: Each indexed dimension contributes one Lean vector operation.
+// Catches: Repeating earlier array reads in a fallback or nested update.
+#[test]
+fn multidimensional_array_operations_emit_each_level_once() {
+    let rank = 10;
+    let array_type = format!("bits[8]{}", "[1]".repeat(rank));
+    let indices = vec!["i"; rank].join(", ");
+    let package = package(&format!(
+        "package arrays
+top block arrays(a: {array_type}, i: bits[1], v: bits[8], read: bits[8], written: {array_type}) {{
+  a: {array_type} = input_port(name=a, id=1)
+  i: bits[1] = input_port(name=i, id=2)
+  v: bits[8] = input_port(name=v, id=3)
+  element: bits[8] = array_index(a, indices=[{indices}], id=4)
+  updated: {array_type} = array_update(a, v, indices=[{indices}], id=5)
+  read: () = output_port(element, name=read, id=6)
+  written: () = output_port(updated, name=written, id=7)
+}}"
+    ));
+    let source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    let read = source
+        .lines()
+        .find(|line| line.contains("Vector.getD") && !line.contains("Vector.setIfInBounds"))
+        .unwrap();
+    let write = source
+        .lines()
+        .find(|line| line.contains("Vector.setIfInBounds"))
+        .unwrap();
+    assert_eq!(read.matches("Vector.getD").count(), rank);
+    assert_eq!(write.matches("Vector.getD").count(), rank - 1);
+    assert_eq!(write.matches("Vector.setIfInBounds").count(), rank);
+}
+
 // Verifies: Raw emission preserves old outputs, simultaneous writes, and
 // assertions. Catches: Port adaptation that changes clock-step semantics or
 // drops assertions.

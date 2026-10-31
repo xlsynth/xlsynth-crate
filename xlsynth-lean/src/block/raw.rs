@@ -349,8 +349,7 @@ fn write_helper(source: &mut String, function: &ir::Fn) -> Result<()> {
     Ok(())
 }
 
-/// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
-/// bits.
+/// Render physical bit, token, tuple, and nonempty array types in Lean.
 pub(crate) fn lean_type(ty: &Type) -> Result<String> {
     physical_type(ty, "")
 }
@@ -377,7 +376,17 @@ fn physical_type(ty: &Type, prefix: &str) -> Result<String> {
                 })
         }
         Type::Token => Ok(format!("{prefix}Unit")),
-        Type::Array(_) => bail!("arrays are outside the supported Lean subset"),
+        Type::Array(array) => {
+            ensure!(
+                array.element_count > 0,
+                "zero-length arrays are unsupported"
+            );
+            Ok(format!(
+                "_root_.Vector ({}) {}",
+                physical_type(&array.element_type, prefix)?,
+                array.element_count
+            ))
+        }
     }
 }
 
@@ -507,7 +516,44 @@ pub(crate) fn literal(ty: &Type, value: &IrValue) -> Result<String> {
             Ok(tuple_value(elements.into_iter()))
         }
         Type::Token => Ok("()".to_string()),
-        Type::Array(_) => bail!("array literal is outside the supported Lean subset"),
+        Type::Array(array) => {
+            let elements = value
+                .get_elements()?
+                .iter()
+                .map(|item| literal(&array.element_type, item))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("#v[{}]", elements.join(", ")))
+        }
+    }
+}
+
+// Whitespace keeps this Lean local distinct from DSLX and IR identifiers.
+const ARRAY_LOCAL: &str = "«indexed array»";
+
+/// XLS clamps reads to the last element of each indexed dimension.
+fn read_bound_array(index: &str) -> String {
+    format!("(_root_.Vector.getD {ARRAY_LOCAL} ({index}).toNat (_root_.Vector.back {ARRAY_LOCAL}))")
+}
+
+/// Share the operand between the lookup and its fallback at each dimension.
+pub(super) fn array_read(array: &str, index: &str) -> String {
+    format!(
+        "(let {ARRAY_LOCAL} := {array}; {})",
+        read_bound_array(index)
+    )
+}
+
+/// Updating an out-of-bounds index leaves the whole array unchanged.
+pub(super) fn array_write(array: &str, indices: &[String], value: &str) -> String {
+    match indices {
+        [] => value.to_owned(),
+        [index] => format!("(_root_.Vector.setIfInBounds ({array}) ({index}).toNat ({value}))"),
+        [index, remaining @ ..] => {
+            let item = array_write(&read_bound_array(index), remaining, value);
+            format!(
+                "(let {ARRAY_LOCAL} := {array}; _root_.Vector.setIfInBounds {ARRAY_LOCAL} ({index}).toNat ({item}))"
+            )
+        }
     }
 }
 
@@ -568,6 +614,30 @@ pub(crate) fn node_expression(
                 .into_iter(),
         )),
         NodePayload::TupleIndex { tuple, index } => Ok(tuple_element(&operand(*tuple)?, *index)),
+        NodePayload::Array(args) => {
+            let elements = args
+                .iter()
+                .map(|arg| operand(*arg))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("#v[{}]", elements.join(", ")))
+        }
+        NodePayload::ArrayIndex { array, indices, .. } => {
+            indices.iter().try_fold(operand(*array)?, |items, index| {
+                Ok(array_read(&items, &operand(*index)?))
+            })
+        }
+        NodePayload::ArrayUpdate {
+            array,
+            value,
+            indices,
+            ..
+        } => {
+            let indices = indices
+                .iter()
+                .map(|index| operand(*index))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(array_write(&operand(*array)?, &indices, &operand(*value)?))
+        }
         NodePayload::Unop(Unop::Neg, arg) => Ok(format!("BitVec.neg {}", operand(*arg)?)),
         NodePayload::Unop(Unop::Not, arg) => Ok(format!("BitVec.not {}", operand(*arg)?)),
         NodePayload::Binop(Binop::Add, lhs, rhs) => {

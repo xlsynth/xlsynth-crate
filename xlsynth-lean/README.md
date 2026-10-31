@@ -80,11 +80,12 @@ from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
 `reset` activates the declared reset input for one ordinary clock edge. It
 does not invent initial values for registers without reset values.
 
-The supported subset includes exact-width bits, nested tuples, tokens,
+The supported subset includes exact-width bits, nested tuples, fixed-size arrays, tokens,
 registers, synchronous resets, assertions, bitwise operations, addition,
 equality, concatenation, slicing, sign extension, one-hot encoding, and
-ordinary, priority, and bits-valued one-hot selection. Unsupported nodes,
-arrays, zero-width bits, block instances, and asynchronous resets return
+ordinary, priority, and bits-valued one-hot selection. Calls to pure functions
+and fixed-trip-count loops remain explicit in the model. Unsupported nodes,
+zero-width bits, block instances, and asynchronous resets return
 contextual errors. Parsing can succeed for operations that emission rejects.
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
@@ -112,7 +113,7 @@ let bundle = compiled.emit_readable(None)?;
 ```
 
 The readable interface preserves unsigned bits, Boolean fields, positional
-tuples and named BX structs. A struct result exposes its fields as output
+tuples, fixed-size arrays and named BX structs. A struct result exposes its fields as output
 ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
 types come from checked declarations, and every equation comes from the linked
