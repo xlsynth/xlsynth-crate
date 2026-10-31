@@ -36,6 +36,7 @@ use crate::block::{
 /// contexts memoize propagation through shared nodes; they are local to one
 /// emission and cannot outlive the validated inputs.
 struct Presentation<'a> {
+    graph: &'a ir::NodeGraph,
     block: &'a BlockContext<'a>,
     declarations: &'a [TypeDecl],
     interface: &'a StatefulInterface,
@@ -54,7 +55,7 @@ pub(super) fn emit(
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
     let raw = lean::emit_with_context(block)?;
-    let presentation = Presentation::new(block, declarations, interface)?;
+    let presentation = Presentation::new(block, declarations, interface, None)?;
     Ok(LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
@@ -82,17 +83,19 @@ impl<'a> Presentation<'a> {
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
         interface: &'a StatefulInterface,
+        helper: Option<&'a ir::Fn>,
     ) -> Result<Self> {
-        let reserved: BTreeSet<_> = block
-            .graph
+        let graph: &ir::NodeGraph = match helper {
+            Some(f) => f,
+            None => block.graph,
+        };
+        let reserved: BTreeSet<_> = graph
             .nodes
             .iter()
             .enumerate()
-            .map(|(index, _)| ir::node_textual_id(block.graph, NodeRef { index }))
+            .map(|(index, _)| ir::node_textual_id(graph, NodeRef { index }))
             .collect();
         let mut used: BTreeSet<String> = [
-            "q",
-            "x",
             "Bool",
             "BitVec",
             "Nat",
@@ -109,13 +112,15 @@ impl<'a> Presentation<'a> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let names = block
-            .graph
+        if helper.is_none() {
+            used.extend(["q".to_owned(), "x".to_owned()]);
+        }
+        let names = graph
             .nodes
             .iter()
             .enumerate()
             .map(|(index, node)| {
-                let source = ir::node_textual_id(block.graph, NodeRef { index });
+                let source = ir::node_textual_id(graph, NodeRef { index });
                 let name = if node.name.is_none() || used.contains(&source) {
                     let mut fallback = format!("xls_node_{index}");
                     while reserved.contains(&fallback) || used.contains(&fallback) {
@@ -136,21 +141,35 @@ impl<'a> Presentation<'a> {
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?;
         let mut result = Self {
+            graph,
             block,
             declarations,
             interface,
-            node_types: block
-                .graph
+            node_types: graph
                 .nodes
                 .iter()
                 .map(|n| (n.ty == Type::Bits(1)).then_some(SourceType::Bool))
                 .collect(),
-            annotation_contexts: vec![Vec::new(); block.graph.nodes.len()],
+            annotation_contexts: vec![Vec::new(); graph.nodes.len()],
             names,
             register_fields,
         };
-        for reference in ir_utils::get_topological_nodes(&block.graph.nodes) {
-            match &block.graph.get_node(reference).payload {
+        let signature = helper.and_then(|f| interface.helpers.get(&f.name));
+        if let Some((function, signature)) = helper.zip(signature) {
+            for (param, ty) in function.params.iter().zip(&signature.params) {
+                result.node_types[param.index] = Some(ty.clone());
+            }
+        }
+        for reference in ir_utils::get_topological_nodes(&graph.nodes) {
+            match &graph.get_node(reference).payload {
+                NodePayload::Invoke { to_apply, operands } => {
+                    if let Some(signature) = interface.helpers.get(to_apply) {
+                        result.node_types[reference.index] = Some(signature.result.clone());
+                        for (arg, ty) in operands.iter().zip(&signature.params) {
+                            result.annotate(*arg, ty)?;
+                        }
+                    }
+                }
                 NodePayload::InputPort { name, .. } => {
                     result.node_types[reference.index] = interface.inputs.get(name).cloned();
                 }
@@ -179,15 +198,24 @@ impl<'a> Presentation<'a> {
         }
         // Register destinations supply exact type context to tuple construction
         // and selections. A reused node can still be converted at another use.
-        for node in &block.graph.nodes {
+        for node in &graph.nodes {
             if let NodePayload::RegisterWrite { arg, register, .. } = &node.payload
                 && let Some(ty) = result.register_type(register)?
             {
                 result.annotate(*arg, &ty)?;
             }
         }
-        for (port, ty) in block.graph.output_ports().zip(&interface.outputs) {
-            result.annotate(block.graph.output_value(port), ty)?;
+        if let Some(function) = helper {
+            if let Some(signature) = signature {
+                result.annotate(
+                    function.ret_node_ref.context("helper has no return node")?,
+                    &signature.result,
+                )?;
+            }
+        } else {
+            for (port, ty) in block.graph.output_ports().zip(&interface.outputs) {
+                result.annotate(block.graph.output_value(port), ty)?;
+            }
         }
         Ok(result)
     }
@@ -243,7 +271,7 @@ impl<'a> Presentation<'a> {
             if self.node_types[reference.index].is_none() {
                 self.node_types[reference.index] = Some(ty.clone());
             }
-            let payload = self.block().graph.get_node(reference).payload.clone();
+            let payload = self.graph.get_node(reference).payload.clone();
             match payload {
                 NodePayload::Tuple(args) => {
                     if let SourceType::Struct { name } = self.unalias(ty)? {
@@ -554,7 +582,7 @@ impl<'a> Presentation<'a> {
     /// Named nodes keep their bindings so readable equations retain graph
     /// sharing.
     fn operand(&self, reference: NodeRef, depth: usize) -> Result<String> {
-        let node = self.block().graph.get_node(reference);
+        let node = self.graph.get_node(reference);
         let structural = matches!(
             node.payload,
             NodePayload::Literal(_) | NodePayload::Tuple(_) | NodePayload::Sel { .. }
@@ -582,7 +610,7 @@ impl<'a> Presentation<'a> {
 
     /// Recognize only the physical encodings used by supported two-bit enums.
     fn literal_number(&self, reference: NodeRef) -> Option<u64> {
-        if let NodePayload::Literal(value) = &self.block().graph.get_node(reference).payload {
+        if let NodePayload::Literal(value) = &self.graph.get_node(reference).payload {
             (0..4).find(|encoding| value.bits_equals_u64_value(*encoding))
         } else {
             None
@@ -595,13 +623,13 @@ impl<'a> Presentation<'a> {
     /// rather than enum declaration order; other selector shapes return `None`.
     fn enum_selector(&self, selector: NodeRef) -> Result<Option<(NodeRef, &str, Vec<u64>)>> {
         let comparisons = if let NodePayload::Nary(NaryOp::Concat, args) =
-            &self.block().graph.get_node(selector).payload
+            &self.graph.get_node(selector).payload
         {
             args.iter()
                 .rev()
                 .map(|reference| {
                     if let NodePayload::Binop(Binop::Eq, left, right) =
-                        self.block().graph.get_node(*reference).payload
+                        self.graph.get_node(*reference).payload
                     {
                         self.literal_number(left)
                             .map(|value| (right, value))
@@ -637,12 +665,24 @@ impl<'a> Presentation<'a> {
     /// codecs; the generated readable evaluator never delegates to the raw
     /// evaluator.
     fn expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
-        let block = self.block();
-        let node = block.graph.get_node(reference);
+        let node = self.graph.get_node(reference);
         let target = self.node_types[reference.index].as_ref();
         let operand = |r| self.typed_operand(r, target, depth);
         let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
         match &node.payload {
+            NodePayload::Invoke { to_apply, operands }
+                if self.interface.helpers.contains_key(to_apply) =>
+            {
+                let signature = &self.interface.helpers[to_apply];
+                let mut call = format!(
+                    "_root_.XlsReadable.Helpers.{}",
+                    identifier(&signature.name)?
+                );
+                for (arg, ty) in operands.iter().zip(&signature.params) {
+                    write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                }
+                self.coerce(Some(&signature.result), target, &format!("({call})"))
+            }
             NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
             NodePayload::RegisterRead { register } => {
                 let index = self.register_index(register)?;
@@ -751,7 +791,7 @@ impl<'a> Presentation<'a> {
                 selector,
                 cases,
                 default: None,
-            } if block.graph.get_node(*selector).ty == Type::Bits(1) && cases.len() == 2 => {
+            } if self.graph.get_node(*selector).ty == Type::Bits(1) && cases.len() == 2 => {
                 Ok(format!(
                     "(if {} then {} else {})",
                     boolean(*selector)?,
@@ -797,7 +837,7 @@ impl<'a> Presentation<'a> {
     /// Reuse one raw graph operation with encoded operands and a decoded
     /// result.
     fn raw_expression(&self, reference: NodeRef, depth: usize) -> Result<String> {
-        let expression = lean::node_expression(self.block(), reference, |operand| {
+        let expression = lean::node_expression(self.graph, reference, |operand| {
             self.typed_operand(operand, None, depth)
         })?;
         self.convert(
@@ -814,11 +854,51 @@ impl<'a> Presentation<'a> {
     /// All equations read old state, and reset takes precedence over load
     /// enable.
     fn executable(&self) -> Result<String> {
-        let block = self.block();
+        let block = self.block;
         let mut out = format!(
             "-- Readable execution of XLS block {}.\n-- Equations come from the block. The DSLX signature supplies interface names and types.\nimport Generated\nimport ReadableTypes\n\nnamespace XlsReadable\n\n",
             lean::comment(&block.graph.name)
         );
+        for function in &block.helpers {
+            if let Some(signature) = self.interface.helpers.get(&function.name) {
+                let model = Self::new(block, self.declarations, self.interface, Some(function))?;
+                write!(out, "def Helpers.{}", identifier(&signature.name)?)?;
+                for (param, ty) in function.params.iter().zip(&signature.params) {
+                    write!(
+                        out,
+                        " ({} : {})",
+                        model.names[param.index],
+                        model.source_type(ty)?
+                    )?;
+                }
+                writeln!(out, " : {} :=", model.source_type(&signature.result)?)?;
+                for reference in ir_utils::get_topological_nodes(&function.nodes) {
+                    let node = function.get_node(reference);
+                    if !matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
+                        let ty = if let Some(ty) = &model.node_types[reference.index] {
+                            model.source_type(ty)?
+                        } else {
+                            lean_type(&node.ty)?
+                        };
+                        writeln!(
+                            out,
+                            "  let {} : {ty} := {}",
+                            model.names[reference.index],
+                            model.expression(reference, 0)?
+                        )?;
+                    }
+                }
+                writeln!(
+                    out,
+                    "  {}\n",
+                    model.typed_operand(
+                        function.ret_node_ref.context("helper has no return node")?,
+                        Some(&signature.result),
+                        0
+                    )?
+                )?;
+            }
+        }
         // These field identifiers have already been quoted by identifier().
         out.push_str(&lean::structure_header(
             "State",
@@ -1256,13 +1336,17 @@ end XlsReadable
                     }
                 }
             }
-            for node in &self.block().graph.nodes {
-                if let NodePayload::TupleIndex { tuple, index } = &node.payload {
-                    conditional_rules.insert(format!(
-                        "apply_ite (fun (value : {}) => {})",
-                        lean_type(&self.block().graph.get_node(*tuple).ty)?,
-                        tuple_element("value", *index)
-                    ));
+            for graph in
+                std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
+            {
+                for node in &graph.nodes {
+                    if let NodePayload::TupleIndex { tuple, index } = &node.payload {
+                        conditional_rules.insert(format!(
+                            "apply_ite (fun (value : {}) => {})",
+                            lean_type(&graph.get_node(*tuple).ty)?,
+                            tuple_element("value", *index)
+                        ));
+                    }
                 }
             }
             let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
@@ -1280,12 +1364,23 @@ end XlsReadable
             rules.push("XlsCodec.encode_decodeBool".into());
             rules.join(",\n       ")
         };
+        let mut helper_rules = String::new();
+        for function in &self.block.helpers {
+            if let Some(signature) = self.interface.helpers.get(&function.name) {
+                write!(
+                    helper_rules,
+                    ", _root_.XlsReadable.Helpers.{}, {}",
+                    identifier(&signature.name)?,
+                    lean::helper_path(&function.name)?
+                )?;
+            }
+        }
         writeln!(
             out,
             r#"  all_goals
     dsimp (config := {{ instances := true }}) only
       [eval, XlsBlock.eval, encodeEvaluation, encodeState, encodeInput,
-       encodeOutput, encodeAssertions]
+       encodeOutput, encodeAssertions{helper_rules}]
   all_goals
     -- Distribute encoders before exposing constructors and cancelling roundtrips.
     simp (config := {{ instances := true }}) only

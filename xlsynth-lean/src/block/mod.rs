@@ -4,6 +4,7 @@
 //! to emit a named, typed interface for the same equations.
 
 use anyhow::{Context, Result, bail, ensure};
+use std::collections::BTreeSet;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod raw;
@@ -21,6 +22,7 @@ pub(crate) struct BlockContext<'a> {
     pub(crate) package_name: &'a str,
     pub(crate) file_table: &'a ir::FileTable,
     pub(crate) graph: &'a ir::Block,
+    pub(crate) helpers: Vec<&'a ir::Fn>,
 }
 
 impl<'a> BlockContext<'a> {
@@ -37,8 +39,49 @@ impl<'a> BlockContext<'a> {
             package_name: &package.name,
             file_table: &package.file_table,
             graph,
+            helpers: reachable_helpers(package, graph)?,
         })
     }
+}
+
+/// Lean requires each helper to be defined before its first caller.
+fn reachable_helpers<'a>(package: &'a ir::Package, block: &ir::Block) -> Result<Vec<&'a ir::Fn>> {
+    fn visit<'a>(
+        package: &'a ir::Package,
+        graph: &ir::NodeGraph,
+        visiting: &mut BTreeSet<&'a str>,
+        emitted: &mut BTreeSet<&'a str>,
+        result: &mut Vec<&'a ir::Fn>,
+    ) -> Result<()> {
+        for node in &graph.nodes {
+            let ir::NodePayload::Invoke { to_apply, .. } = &node.payload else {
+                continue;
+            };
+            if !emitted.contains(to_apply.as_str()) {
+                let callee = package.get_fn(to_apply).with_context(|| {
+                    format!("unknown function {to_apply} invoked by {}", graph.name)
+                })?;
+                ensure!(
+                    visiting.insert(&callee.name),
+                    "recursive invoke of {to_apply}"
+                );
+                visit(package, callee, visiting, emitted, result)?;
+                visiting.remove(callee.name.as_str());
+                emitted.insert(&callee.name);
+                result.push(callee);
+            }
+        }
+        Ok(())
+    }
+    let mut result = Vec::new();
+    visit(
+        package,
+        block,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut result,
+    )?;
+    Ok(result)
 }
 
 /// Select a block from a typed package.

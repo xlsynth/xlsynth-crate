@@ -74,6 +74,43 @@ example (q : State) (x : Input) : (reset q x).next = ⟨0, 0⟩ := by rfl
     check_bundle(bundle, "positional outputs");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn stateful_nested_helper_calls() {
+    let source = r#"
+struct Packet { left: u8, right: u8 }
+fn sum_fields(p: Packet) -> u8 { p.left + p.right }
+fn advance(p: Packet, previous: u8) -> u8 { sum_fields(p) + previous }
+fn machine(packet: Packet, __reg_count: u8) -> (u8, u8) {
+    (__reg_count, advance(packet, __reg_count))
+}
+"#;
+    let compiled =
+        compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let (_, model) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap();
+    for helper in ["sum_fields", "advance"] {
+        assert!(model.contains(&format!("_root_.XlsReadable.Helpers.«{helper}»")));
+    }
+    bundle.files.push((
+        "CheckCalls.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := { rst := false, packet := { left := 13, right := 5 } }
+private def initial : State := { count := 7 }
+#guard observe initial stimulus == 7
+#guard (step initial stimulus).count == 25
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "nested calls across a register update");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]

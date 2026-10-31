@@ -98,6 +98,8 @@ impl SourceType {
 struct Catalogue<'a> {
     declarations: Vec<TypeDecl>,
     top: &'a str,
+    module_name: String,
+    helpers: BTreeMap<String, HelperSignature>,
     type_info: dslx::TypeInfo,
     signature: Option<FunctionSignature>,
     unsupported: BTreeMap<String, String>,
@@ -417,12 +419,43 @@ impl BridgeBuilder for Catalogue<'_> {
                 Ok(FunctionSignature { params, returns })
             })();
             self.signature = Some(result.map_err(|error| XlsynthError(format!("{error:#}")))?);
+        } else if let Ok(signature) =
+            self.helper_signature(name, params, return_annotation, type_info)
+        {
+            // Key by the IR symbol so a function of the same name in an import
+            // cannot acquire a local function's source types.
+            let symbol = xlsynth::mangle_dslx_name(&self.module_name, name)?;
+            self.helpers.insert(symbol, signature);
         }
         Ok(())
     }
 }
 
 impl Catalogue<'_> {
+    fn helper_signature(
+        &self,
+        name: &str,
+        params: &[FunctionParamData],
+        return_annotation: Option<&dslx::TypeAnnotation>,
+        type_info: &dslx::TypeInfo,
+    ) -> Result<HelperSignature> {
+        let params = params
+            .iter()
+            .map(|p| self.annotation_type(&p.type_annotation, type_info))
+            .collect::<Result<_>>()?;
+        let result = match return_annotation {
+            Some(annotation) => self.annotation_type(annotation, type_info)?,
+            None => SourceType::Tuple {
+                members: Vec::new(),
+            },
+        };
+        Ok(HelperSignature {
+            name: name.to_owned(),
+            params,
+            result,
+        })
+    }
+
     fn resolve_tuple<'a>(&'a self, ty: &'a SourceType) -> Result<&'a [SourceType]> {
         match ty {
             SourceType::Tuple { members } => Ok(members),
@@ -440,9 +473,16 @@ impl Catalogue<'_> {
 /// The selected function's proof-facing types, paired with validated block
 /// names.
 pub(super) struct StatefulInterface {
+    pub(super) helpers: BTreeMap<String, HelperSignature>,
     pub(super) inputs: BTreeMap<String, SourceType>,
     pub(super) registers: BTreeMap<String, SourceType>,
     pub(super) outputs: Vec<SourceType>,
+}
+
+pub(super) struct HelperSignature {
+    pub(super) name: String,
+    pub(super) params: Vec<SourceType>,
+    pub(super) result: SourceType,
 }
 
 /// Emit one converted function's block behavior using its typechecked DSLX
@@ -457,6 +497,8 @@ pub(super) fn emit_stateful_readable(
 ) -> Result<block::LeanBlockBundle> {
     let mut catalogue = Catalogue {
         top,
+        module_name: module.get_module().get_name(),
+        helpers: BTreeMap::new(),
         type_info: module.get_type_info(),
         declarations: Vec::new(),
         signature: None,
@@ -538,7 +580,11 @@ pub(super) fn emit_stateful_readable(
         );
         check(&format!("output {name}"), ty, graph.port_type(port))?;
     }
+    catalogue
+        .helpers
+        .retain(|symbol, _| block.helpers.iter().any(|helper| &helper.name == symbol));
     let interface = StatefulInterface {
+        helpers: catalogue.helpers,
         inputs,
         registers,
         outputs: outputs.to_vec(),
@@ -551,6 +597,12 @@ pub(super) fn emit_stateful_readable(
         .values()
         .chain(interface.registers.values())
         .chain(&interface.outputs)
+        .chain(
+            interface
+                .helpers
+                .values()
+                .flat_map(|f| f.params.iter().chain([&f.result])),
+        )
     {
         ty.collect_names(&mut names);
     }

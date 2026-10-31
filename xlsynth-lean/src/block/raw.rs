@@ -136,6 +136,9 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         comment(&graph.name),
         comment(block.package_name)
     );
+    for helper in &block.helpers {
+        write_helper(&mut source, helper)?;
+    }
     source.push_str(&record_type(
         "State",
         block
@@ -196,9 +199,15 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         let node = graph.get_node(reference);
         if !matches!(node.payload, NodePayload::Nil) {
             let context = node_context(block, reference);
+            if let NodePayload::RegisterRead { register } = &node.payload {
+                ensure!(
+                    graph.registers.iter().any(|decl| decl.name == *register),
+                    "{context}: no declaration for register {register}"
+                );
+            }
             let ty = lean_type(&node.ty).with_context(|| context.clone())?;
             let expression =
-                node_expression(block, reference, |operand| Ok(names[operand.index].clone()))
+                node_expression(graph, reference, |operand| Ok(names[operand.index].clone()))
                     .with_context(|| context.clone())?;
             writeln!(source, "  -- {}", comment(&context))?;
             writeln!(
@@ -281,6 +290,46 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     }
     source.push_str("\nend XlsBlock\n");
     Ok(source)
+}
+
+pub(super) fn helper_path(physical: &str) -> Result<String> {
+    Ok(format!("_root_.XlsBlock.Helpers.{}", identifier(physical)?))
+}
+
+fn write_helper(source: &mut String, function: &ir::Fn) -> Result<()> {
+    write!(source, "def Helpers.{}", identifier(&function.name)?)?;
+    for param in &function.params {
+        write!(
+            source,
+            " (n{} : {})",
+            param.index,
+            lean_type(&function.get_node(*param).ty)?
+        )?;
+    }
+    writeln!(source, " : {} :=", lean_type(&function.ret_ty)?)?;
+    for reference in ir_utils::get_topological_nodes(&function.nodes) {
+        let node = function.get_node(reference);
+        if !matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
+            ensure!(
+                !matches!(node.payload, NodePayload::Assert { .. }),
+                "assertion in helper {} is unsupported",
+                function.name
+            );
+            let expr = node_expression(function, reference, |operand| {
+                Ok(format!("n{}", operand.index))
+            })
+            .with_context(|| format!("function {}, node {}", function.name, node.text_id))?;
+            writeln!(
+                source,
+                "  let n{} : {} := {expr}",
+                reference.index,
+                lean_type(&node.ty)?
+            )?;
+        }
+    }
+    let result = function.ret_node_ref.context("helper has no return node")?;
+    writeln!(source, "  n{}\n", result.index)?;
+    Ok(())
 }
 
 /// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
@@ -460,11 +509,10 @@ fn predicate(value: &str) -> String {
 /// Resolve only the operands used by this operation. Register writes and
 /// output ports return unit here; their effects are collected by `emit_block`.
 pub(crate) fn node_expression(
-    block: &BlockContext<'_>,
+    graph: &ir::NodeGraph,
     reference: NodeRef,
     operand: impl Fn(NodeRef) -> Result<String>,
 ) -> Result<String> {
-    let graph = block.graph;
     let node = graph.get_node(reference);
     match &node.payload {
         NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
@@ -472,13 +520,14 @@ pub(crate) fn node_expression(
         // graph-resident output operation itself has the empty tuple type.
         NodePayload::OutputPort { .. } => Ok("()".to_string()),
         NodePayload::Literal(value) => literal(&node.ty, value),
-        NodePayload::RegisterRead { register } => {
-            ensure!(
-                block.graph.registers.iter().any(|r| r.name == *register),
-                "no declaration for register {register}"
-            );
-            Ok(format!("q.{}", identifier(register)?))
+        NodePayload::Invoke { to_apply, operands } => {
+            let mut call = helper_path(to_apply)?;
+            for arg in operands {
+                write!(call, " ({})", operand(*arg)?)?;
+            }
+            Ok(call)
         }
+        NodePayload::RegisterRead { register } => Ok(format!("q.{}", identifier(register)?)),
         NodePayload::RegisterWrite { .. } => Ok("()".to_string()),
         NodePayload::Tuple(args) => Ok(tuple_value(
             args.iter()
