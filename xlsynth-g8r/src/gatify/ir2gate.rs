@@ -3,7 +3,7 @@
 //! Functionality for converting an IR function into a gate function via
 //! `gatify`.
 
-use crate::aig::gate::{AigBitVector, AigNode, AigOperand, GateFn, Split};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, GateFn, PirNodeIds, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::ir2gate_arithmetic::{
@@ -4802,7 +4802,7 @@ fn gatify_internal(
     g8_builder: &mut GateBuilder,
     env: &mut GateEnv,
     options: &GatifyOptions,
-    provenance_by_node: Option<&HashMap<ir::NodeRef, Option<u32>>>,
+    provenance_by_node: Option<&[PirNodeIds]>,
     topological: &[ir::NodeRef],
     observe: Option<&ShiftReductionPredicatePlan>,
 ) -> Result<(), String> {
@@ -4812,23 +4812,25 @@ fn gatify_internal(
     // Gate operands from an earlier mapping trial belong to its builder.
     env.carry_prefixes = CarryPrefixes::new(options.track_pir_node_ids);
 
+    let set_provenance = |gb: &mut GateBuilder, nr: ir::NodeRef| {
+        if let Some(ids) = provenance_by_node {
+            gb.set_current_pir_node_ids(&ids[nr.index]);
+        } else if options.track_pir_node_ids {
+            let text_id = f.get_node(nr).text_id;
+            gb.set_current_pir_node_id(Some(
+                u32::try_from(text_id).expect("node id too large for u32"),
+            ));
+        }
+    };
+
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {
         let param = f.get_node(param_ref);
         assert!(param.payload == ir::NodePayload::Param);
         log::debug!("Gatifying param {:?}", param);
-        let provenance_id = if options.track_pir_node_ids {
-            provenance_by_node.map_or_else(
-                || Some(u32::try_from(param.text_id).expect("node id too large for u32")),
-                |by_node| by_node.get(&param_ref).copied().flatten(),
-            )
-        } else {
-            None
-        };
-        g8_builder.set_current_pir_node_id(provenance_id);
+        set_provenance(g8_builder, param_ref);
         let gate_ref_vec =
             g8_builder.add_input(param.param_name().to_string(), param.ty.bit_count());
-        g8_builder.set_current_pir_node_id(None);
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
@@ -4845,22 +4847,14 @@ fn gatify_internal(
             node.ty,
             node.payload
         );
-        let provenance_id = if options.track_pir_node_ids {
-            provenance_by_node.map_or_else(
-                || Some(u32::try_from(node.text_id).expect("node id too large for u32")),
-                |by_node| by_node.get(&node_ref).copied().flatten(),
-            )
-        } else {
-            None
-        };
-        g8_builder.set_current_pir_node_id(provenance_id);
+        set_provenance(g8_builder, node_ref);
         let first_gate = g8_builder.gates.len();
         gatify_node(f, node_ref, node, g8_builder, env, options)?;
         if let Some(plan) = observe {
             plan.observe_ordinary(node_ref, first_gate, env, g8_builder);
         }
-        g8_builder.set_current_pir_node_id(None);
     }
+    g8_builder.set_current_pir_node_id(None);
     // Resolve the outputs and place them into the builder.
     let ret_node_ref = match f.ret_node_ref {
         Some(ret_node_ref) => ret_node_ref,
@@ -4883,34 +4877,44 @@ fn gatify_internal(
     Ok(())
 }
 
-/// Attributes prepared nodes to their source operation, falling back to an
-/// operand when the rewrite supplied no origin for a helper.
+/// Stable text-ID associations used to map prepared values and gates to their
+/// source.
+struct PrepOrigins {
+    original_refs: HashMap<usize, ir::NodeRef>,
+    rewrite_origins: HashMap<usize, usize>,
+    comparison_origins: HashMap<usize, PirNodeIds>,
+}
+
+/// Attributes helpers to their source operation or comparison observers,
+/// falling back to an operand for helpers without explicit origins.
 fn build_prepared_provenance_map(
     f: &ir::Fn,
-    orig_ref_by_text_id: &HashMap<usize, ir::NodeRef>,
-    origins: &HashMap<usize, usize>,
-) -> HashMap<ir::NodeRef, Option<u32>> {
-    let mut provenance_by_node: HashMap<ir::NodeRef, Option<u32>> = HashMap::new();
-    for (index, node) in f.nodes.iter().enumerate() {
-        let node_ref = ir::NodeRef { index };
-        let origin = origins.get(&node.text_id).unwrap_or(&node.text_id);
-        if orig_ref_by_text_id.contains_key(origin) {
-            provenance_by_node.insert(
-                node_ref,
-                Some(u32::try_from(*origin).expect("node id too large for u32")),
-            );
-        }
+    topological: &[ir::NodeRef],
+    origins: &PrepOrigins,
+) -> Vec<PirNodeIds> {
+    let mut by_node = vec![PirNodeIds::new(); f.nodes.len()];
+    for &nr in topological {
+        let node = f.get_node(nr);
+        let origin = origins
+            .rewrite_origins
+            .get(&node.text_id)
+            .unwrap_or(&node.text_id);
+        by_node[nr.index] = if origins.original_refs.contains_key(origin) {
+            AigNode::with_pir_node_id(Some(
+                u32::try_from(*origin).expect("node id too large for u32"),
+            ))
+        } else if let Some(ids) = origins.comparison_origins.get(&node.text_id) {
+            ids.clone()
+        } else {
+            ir_utils::operands(&node.payload)
+                .into_iter()
+                .map(|operand| &by_node[operand.index])
+                .find(|ids| !ids.is_empty())
+                .cloned()
+                .unwrap_or_default()
+        };
     }
-    for node_ref in ir_utils::get_topological(f) {
-        if provenance_by_node.contains_key(&node_ref) {
-            continue;
-        }
-        let provenance_id = ir_utils::operands(&f.get_node(node_ref).payload)
-            .into_iter()
-            .find_map(|operand| provenance_by_node.get(&operand).copied().flatten());
-        provenance_by_node.insert(node_ref, provenance_id);
-    }
-    provenance_by_node
+    by_node
 }
 
 #[derive(Clone)]
@@ -5012,13 +5016,17 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
 fn gatify_lower_prepared_fn(
     f: &ir::Fn,
     options: &GatifyOptions,
-    orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
+    origins: Option<&PrepOrigins>,
     equiv_fn: &ir::Fn,
-    provenance_by_node: Option<&HashMap<ir::NodeRef, Option<u32>>>,
 ) -> Result<GatifyOutput, String> {
     let topological = ir_utils::get_topological(f);
     let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
     let demanded_bits = demanded_bits::analyze(f, &topological, &outputs);
+    let provenance_by_node = if options.track_pir_node_ids {
+        origins.map(|origins| build_prepared_provenance_map(f, &topological, origins))
+    } else {
+        None
+    };
 
     let lower = |env: &mut GateEnv,
                  observe: Option<&ShiftReductionPredicatePlan>|
@@ -5035,7 +5043,7 @@ fn gatify_lower_prepared_fn(
             &mut gb,
             env,
             options,
-            provenance_by_node,
+            provenance_by_node.as_deref(),
             &topological,
             observe,
         )?;
@@ -5093,9 +5101,9 @@ fn gatify_lower_prepared_fn(
             GateOrVec::BitVector(bv) => bv,
             GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
         };
-        if let Some(orig_ref_by_text_id) = orig_ref_by_text_id {
+        if let Some(origins) = origins {
             let prepared_text_id = f.get_node(node_ref).text_id;
-            let Some(orig_node_ref) = orig_ref_by_text_id.get(&prepared_text_id).copied() else {
+            let Some(orig_node_ref) = origins.original_refs.get(&prepared_text_id).copied() else {
                 continue;
             };
             lowering_map.insert(orig_node_ref, bit_vector);
@@ -5126,7 +5134,7 @@ fn gatify_lower_prepared_fn(
 pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before gatify_prepared_fn: {e}"))?;
-    gatify_lower_prepared_fn(f, &options, None, f, None)
+    gatify_lower_prepared_fn(f, &options, None, f)
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
@@ -5148,12 +5156,17 @@ pub(crate) fn gatify_for_pipeline(
     // consumers want to interpret the lowering map in terms of the original
     // function, so we remap prepared nodes back to original nodes via
     // stable `text_id`.
-    let mut orig_ref_by_text_id: HashMap<usize, ir::NodeRef> = HashMap::new();
-    for (idx, n) in orig_fn.nodes.iter().enumerate() {
-        orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
-    }
+    let mut origins = PrepOrigins {
+        original_refs: orig_fn
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, n)| (n.text_id, ir::NodeRef { index }))
+            .collect(),
+        rewrite_origins: HashMap::new(),
+        comparison_origins: HashMap::new(),
+    };
 
-    let mut origins = options.track_pir_node_ids.then(HashMap::new);
     let prepared_fn = prep_for_gatify_with_origins(
         orig_fn,
         options.range_info.as_deref(),
@@ -5165,7 +5178,12 @@ pub(crate) fn gatify_for_pipeline(
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
-        origins.as_mut(),
+        options
+            .track_pir_node_ids
+            .then_some(&mut origins.rewrite_origins),
+        options
+            .track_pir_node_ids
+            .then_some(&mut origins.comparison_origins),
         GateCostOptions {
             hash: options.hash,
             reassociation: reassociate_gates,
@@ -5173,15 +5191,7 @@ pub(crate) fn gatify_for_pipeline(
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    let provenance_by_node = origins
-        .map(|origins| build_prepared_provenance_map(&prepared_fn, &orig_ref_by_text_id, &origins));
-    gatify_lower_prepared_fn(
-        &prepared_fn,
-        &options,
-        Some(&orig_ref_by_text_id),
-        orig_fn,
-        provenance_by_node.as_ref(),
-    )
+    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&origins), orig_fn)
 }
 
 /// Lowers the original operation with one input per distinct operand, in

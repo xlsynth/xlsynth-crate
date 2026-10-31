@@ -21,9 +21,11 @@
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
+mod mixed_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
 
+use crate::aig::gate::PirNodeIds;
 use std::collections::HashMap;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -125,7 +127,7 @@ struct RewriteIds<'a> {
 impl<'a> RewriteIds<'a> {
     fn new(f: &ir::Fn, origins: Option<&'a mut HashMap<usize, usize>>) -> Self {
         Self {
-            last: f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0),
+            last: max_text_id(f),
             origins,
         }
     }
@@ -1527,13 +1529,28 @@ fn nil_out_node(f: &mut ir::Fn, node_ref: ir::NodeRef) {
     node.ty = Type::nil();
 }
 
+fn max_text_id(f: &ir::Fn) -> usize {
+    f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0)
+}
+
 fn next_text_id(f: &ir::Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+    max_text_id(f).saturating_add(1)
+}
+
+/// Assigns a fresh text ID before a mask rewrite changes an operand's value.
+fn assign_fresh_mask_operand_id(
+    f: &mut ir::Fn,
+    nr: NodeRef,
+    ids: &mut Option<RewriteIds<'_>>,
+) -> bool {
+    let ids = ids.get_or_insert_with(|| RewriteIds::new(f, None));
+    if !ids.has_room(1) {
+        return false;
+    }
+    let node = f.get_node_mut(nr);
+    node.text_id = ids.fresh(node.text_id);
+    node.name = None;
+    true
 }
 
 fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
@@ -2471,8 +2488,8 @@ fn rewrite_not_shifted_all_ones_to_ext_mask_low(f: &mut ir::Fn) -> usize {
 /// Rewrites `shll(shrl(bits[N]:all_ones, count), count)` into
 /// `not(ext_mask_low(count))`.
 fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
-    let mut ids = RewriteIds::new(f, None);
     let use_counts = get_use_counts(f);
+    let mut ids = None;
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
     for node_index in 0..original_len {
@@ -2484,15 +2501,16 @@ fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
         else {
             continue;
         };
-        if use_counts[inner_shrl.index] != 1 || !ids.has_room(1) {
+        if use_counts[inner_shrl.index] != 1 {
             continue;
         }
 
         // The inner `shrl(all_ones, count)` node is changing meaning to
         // `ext_mask_low(count)`; keep the outer node's text id because the
         // overall high-mask value is unchanged.
-        f.nodes[inner_shrl.index].text_id = ids.fresh(f.nodes[inner_shrl.index].text_id);
-        f.nodes[inner_shrl.index].name = None;
+        if !assign_fresh_mask_operand_id(f, inner_shrl, &mut ids) {
+            break;
+        }
         ir_utils::replace_node_payload(
             f,
             inner_shrl,
@@ -2519,8 +2537,8 @@ fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
 /// This preserves textual/SSA ordering without reindexing and catches the
 /// common `bit_slice(shll(all_ones, count), ...)` sticky-mask shape.
 fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
-    let mut ids = RewriteIds::new(f, None);
     let use_counts = get_use_counts(f);
+    let mut ids = None;
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
     for node_index in 0..original_len {
@@ -2534,7 +2552,7 @@ fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
         let NodePayload::Binop(Binop::Shll, lhs, _) = f.nodes[node_index].payload else {
             continue;
         };
-        if use_counts[lhs.index] != 1 || !ids.has_room(1) {
+        if use_counts[lhs.index] != 1 {
             continue;
         }
         if count.index >= lhs.index {
@@ -2543,8 +2561,9 @@ fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
 
         // This node no longer has the old literal's semantics, so give it a
         // fresh text id to avoid applying stale known-bits range info.
-        f.nodes[lhs.index].text_id = ids.fresh(f.nodes[lhs.index].text_id);
-        f.nodes[lhs.index].name = None;
+        if !assign_fresh_mask_operand_id(f, lhs, &mut ids) {
+            break;
+        }
         ir_utils::replace_node_payload(
             f,
             lhs,
@@ -2692,6 +2711,7 @@ pub fn prep_for_gatify(
         range_info,
         options,
         None,
+        None,
         GateCostOptions {
             hash: true,
             reassociation: false,
@@ -2699,12 +2719,14 @@ pub fn prep_for_gatify(
     )
 }
 
-/// Optionally records source operation IDs for helpers whose values change.
+/// Records source operations for rewritten helpers and all observers for shared
+/// comparison helpers. Text IDs keep both associations valid across compaction.
 pub(crate) fn prep_for_gatify_with_origins(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
     mut origins: Option<&mut HashMap<usize, usize>>,
+    comparison_origins: Option<&mut HashMap<usize, PirNodeIds>>,
     gate_cost: GateCostOptions,
 ) -> ir::Fn {
     let mut cloned = f.clone();
@@ -2826,6 +2848,12 @@ pub(crate) fn prep_for_gatify_with_origins(
     }
     diagnostics::run(&mut cloned, "projected_positive_mask", 0, |f| {
         rewrite_projected_positive_mask_to_sign_test(f, origins)
+    });
+    // Expand comparisons after word-level preparation. Their synthetic sign
+    // slices must not trigger rewrites of the original predicate values, and
+    // their checked helper reservation may consume the final text ID.
+    diagnostics::run(&mut cloned, "mixed_comparisons", 0, |f| {
+        mixed_comparisons::rewrite(f, comparison_origins)
     });
     diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
