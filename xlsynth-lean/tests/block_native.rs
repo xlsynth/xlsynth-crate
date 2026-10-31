@@ -850,6 +850,46 @@ private def clock (index : BitVec 64) :=
     check_bundle(bundle, "dynamic bit slice and update");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn encode_changed_bits_matches_xls_for_multihot_masks() {
+    let source = "fn encode_mask(acc: u8) -> u3 { encode(acc) }
+    fn machine(mask: u8, current_previous: u8) -> (u3, u8) {
+        (encode_mask(mask ^ current_previous), mask)
+    }";
+    let bx = r#"
+extern fn machine::encode_mask(acc: u8) -> u3;
+block changed(clk, rst, mask: u8) -> u3 {
+    reg previous: u8 = 0;
+    previous := mask;
+    machine::encode_mask(mask ^ previous)
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("changed-bit mask fixture (machine.x)");
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    let previous = 0b0000_0100;
+    // No change, clear bit 2, set bit 4, then flip both bits relative to
+    // previous.
+    for mask in [0b0000_0100, 0, 0b0001_0100, 0b0001_0000] {
+        let args = [mask, previous].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
+        let index = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(0)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard observe {{ previous := {previous} }} {{ rst := false, mask := {mask} }} == {index}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckEncode.lean".into(), checks));
+    check_bundle(bundle, "encode changed mask bits");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")
