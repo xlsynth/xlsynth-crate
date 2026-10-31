@@ -120,3 +120,111 @@ block accumulate(clk, value: u8) -> u6 {
     .unwrap();
     compiled.emit_readable(None).unwrap();
 }
+
+#[test]
+fn indexed_arrays_use_record_fields_when_the_element_type_is_known() {
+    let constructed = "[Slot { write: Write { data: a } }, Slot { write: Write { data: b } }]";
+    for (inputs, array, next, named) in [
+        ("a: Slot, b: Slot", "[a, b]", "last", true),
+        ("a: Alias, b: Slot", "[a, b]", "last", true),
+        (
+            "c: bool, a: Slot[2], b: Slot[2]",
+            "if c { a } else { b }",
+            "last",
+            true,
+        ),
+        (
+            "c: bool, a: Alias[2], b: Slot[2]",
+            "if c { a } else { b }",
+            "last",
+            true,
+        ),
+        // The indexed value's destination supplies the type of both constructors.
+        ("a: u8, b: u8", constructed, "slot", true),
+        // The block retains only the tuple shapes of these struct literals.
+        ("a: u8, b: u8", constructed, "last", false),
+        // One known operand does not establish the source type of the other.
+        (
+            "a: Slot, b: u8",
+            "[a, Slot { write: Write { data: b } }]",
+            "last",
+            false,
+        ),
+    ] {
+        let source = format!(
+            r#"
+struct Write {{ data: u8 }}
+struct Slot {{ write: Write }}
+type Alias = Slot;
+fn machine({inputs}, index: u8, last: Slot) -> (u8, Slot) {{
+    let slots = {array};
+    let slot = slots[index];
+    (slot.write.data, {next})
+}}
+"#
+        );
+        // Aliases and nominal record projections belong to the pure DSLX
+        // helper. BX supplies its concrete port representation and
+        // register feedback.
+        let bx_inputs = inputs.replace("Alias", "Slot");
+        let arguments = inputs
+            .split(", ")
+            .map(|param| param.split_once(':').unwrap().0)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bx = format!(
+            r#"
+struct Write {{ data: u8 }}
+struct Slot {{ write: Write }}
+extern fn machine::machine({bx_inputs}, index: u8, last: Slot) -> (u8, Slot);
+block storage(clk, {bx_inputs}, index: u8) -> u8 {{
+    reg last: Slot;
+    let result = machine::machine({arguments}, index, last);
+    last := result.1;
+    result.0
+}}
+"#
+        );
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(&source, "machine.x", "machine", &mut imports)
+                .unwrap();
+        let model = xlsynth_lean::block::compile_bx_with_dslx(
+            &bx,
+            module,
+            Default::default(),
+            &Default::default(),
+        )
+        .unwrap()
+        .emit_readable(None)
+        .unwrap();
+        let (_, readable) = model
+            .files
+            .iter()
+            .find(|(file, _)| file == "ReadableGenerated.lean")
+            .unwrap();
+        let projections: Vec<_> = readable
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("let «slot» :")
+                    || line.starts_with("let «slot_write» :")
+                    || line.starts_with("let «slot_write_data» :")
+            })
+            .collect();
+        let expected = if named {
+            [
+                "let «slot» : _root_.XlsSource.«machine::Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
+                "let «slot_write» : _root_.XlsSource.«machine::Write» := («slot»).«write»",
+                "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).«data»",
+            ]
+        } else {
+            [
+                "let «slot» : ((_root_.BitVec 8 × _root_.Unit) × _root_.Unit) := (_root_.XlsynthLean.IR.arrayIndex («slots») («index»).toNat)",
+                "let «slot_write» : (_root_.BitVec 8 × _root_.Unit) := («slot»).1",
+                "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).1",
+            ]
+        };
+        assert_eq!(projections, expected, "{source}\n{readable}");
+    }
+}

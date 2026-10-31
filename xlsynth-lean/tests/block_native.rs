@@ -772,6 +772,88 @@ block shift(clk, amount: u64) -> u5 {
     check_bundle(bundle, "negation and variable left shift");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn source_binding_named_vector_preserves_physical_array_types() {
+    let bx = r#"
+block pick(clk, Vector: u8, b: u8, index: u8) -> u8 {
+    let slots = [(Vector, u8:0), (b, u8:0)];
+    slots[index].0
+}
+"#;
+    let bundle = bx_bundle(bx);
+    let (_, model) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap();
+    assert!(model.contains("let «Vector» :"), "{model}");
+    check_bundle(bundle, "local Vector and a physical array of tuples");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn arrays_keep_record_elements_and_xls_index_bounds() {
+    let source = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+fn replace(slots: Slot[2], index: u8, replacement: Slot) -> Slot[2] {
+    update(slots, index, replacement)
+}
+"#;
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+extern fn machine::replace(slots: Slot[2], index: u8, replacement: Slot) -> Slot[2];
+block storage(clk, index: u8, replacement: Slot) -> u8 {
+    reg slots: Slot[2];
+    slots := machine::replace(slots, index, replacement);
+    slots[index].write.data
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    let (_, readable) = bundle
+        .files
+        .iter()
+        .find(|(file, _)| file == "ReadableGenerated.lean")
+        .unwrap();
+    for projection in [").«write»", ").«data»"] {
+        assert!(readable.contains(projection), "{readable}");
+    }
+    bundle.files.push((
+        "CheckArray.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 8) :=
+  let q : State := { slots := #v[⟨⟨7⟩⟩, ⟨⟨13⟩⟩] }
+  let x : Input := { index, replacement := ⟨⟨19⟩⟩ }
+  let slots := (step q x).slots
+  (observe q x, slots[0].write.data, slots[1].write.data)
+#guard clock 0 == (7, 19, 13)
+#guard clock 255 == (13, 7, 13)
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "array of nested records");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn constructed_and_selected_record_arrays_prove_correspondence() {
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+block pick(clk, choose: bool, a: Slot, b: Slot, supplied: Slot[2], index: u8) -> u8 {
+    reg last: Slot;
+    let slots = if choose { [a, b] } else { supplied };
+    let slot = slots[index];
+    last := slot;
+    slot.write.data
+}
+"#;
+    check_bundle(bx_bundle(bx), "indexed field of a selected record array");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, _fixture: &str) {
     let directory = tempfile::tempdir().unwrap();
