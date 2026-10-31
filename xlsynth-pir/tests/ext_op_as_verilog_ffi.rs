@@ -85,7 +85,7 @@ top fn main(x: bits[4] id=3) -> bits[3] {
         .expect("external declaration retained");
     assert_eq!(
         external.ffi_proto().unwrap().code_template.as_deref(),
-        Some("assign {return} = {x}[2:0];")
+        Some(b"assign {return} = {x}[2:0];".as_slice())
     );
     let main = pkg.get_fn("main").unwrap();
     assert!(matches!(
@@ -220,6 +220,23 @@ fn f(arg: bits[4] id=1) -> bits[3] {
         pkg.to_string()
             .contains("ext_clz(arg, offset=0, new_bit_count=3, id=2)"),
         "expected helper invoke to be lifted to ext_clz"
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_clz_rejects_non_ascii_literal_base() {
+    let ir_text = r#"package invalid_radix
+
+#[ffi_proto("""code_template: "assign {return} = {arg}[2:0]; /* xlsynth_pir_ext=ext_clz;width=32'\u00e9;out_width=3;offset=0 */"
+""")]
+fn external(arg: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(arg, start=0, width=3, id=2)
+}
+"#;
+    xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        r#"invalid ext_clz width literal base: "32'é""#,
     );
 }
 

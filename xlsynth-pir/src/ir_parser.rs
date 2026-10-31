@@ -383,24 +383,24 @@ fn parse_wrapped_extension_usize_field(
     let base_and_digits = base_and_digits
         .strip_prefix(['s', 'S'])
         .unwrap_or(base_and_digits);
-    if base_and_digits.is_empty() {
+    let mut chars = base_and_digits.chars();
+    let Some(base_char) = chars.next() else {
         return Err(ParseError::new(format!(
             "invalid {op_name} {field_name}: {text:?}"
         )));
-    }
-    let (base_char, digits_text) = base_and_digits.split_at(1);
+    };
     let radix = match base_char {
-        "b" | "B" => 2,
-        "o" | "O" => 8,
-        "d" | "D" => 10,
-        "h" | "H" => 16,
+        'b' | 'B' => 2,
+        'o' | 'O' => 8,
+        'd' | 'D' => 10,
+        'h' | 'H' => 16,
         _ => {
             return Err(ParseError::new(format!(
                 "invalid {op_name} {field_name} literal base: {text:?}"
             )));
         }
     };
-    let normalized_digits = digits_text.replace('_', "");
+    let normalized_digits = chars.as_str().replace('_', "");
     usize::from_str_radix(&normalized_digits, radix)
         .map_err(|e| ParseError::new(format!("invalid {op_name} {field_name}: {e}")))
 }
@@ -834,6 +834,11 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         let Some(template) = f.ffi_proto().and_then(|ffi| ffi.code_template.as_deref()) else {
             continue;
         };
+        let Ok(template) = std::str::from_utf8(template) else {
+            // PIR extension helpers have textual templates. Preserve a binary
+            // template and its invocations as an ordinary foreign function.
+            continue;
+        };
         let Some(spec) = parse_wrapped_extension_spec_from_template(template)? else {
             continue;
         };
@@ -1023,6 +1028,45 @@ impl Parser {
         self.pop_quoted_string(StringEscapes::Decode)
     }
 
+    /// Reads an FFI token, letting XLS canonicalize escapes its protobuf parser
+    /// accepts beyond the Rust text-format grammar.
+    fn pop_ffi_proto(&mut self) -> Result<ir::ForeignFunctionData, ParseError> {
+        self.drop_whitespace_and_comments();
+        let start = self.offset;
+        let text = self.pop_quoted_string(StringEscapes::Verbatim)?;
+        match parse_foreign_function_data(&text) {
+            Ok(data) => Ok(data),
+            Err(error) if !text.contains('\\') || text.contains('\0') => {
+                // No escape to canonicalize, or a literal NUL unsuitable for
+                // the XLS C API.
+                Err(ParseError::new(format!("invalid ffi_proto: {error}")))
+            }
+            Err(_) => Self::canonicalize_ffi_proto_with_xls(&self.chars[start..self.offset]),
+        }
+    }
+
+    /// Uses XLS's protobuf parser on an isolated function and reads the
+    /// canonical token once. The input slice is exactly one scanned IR string
+    /// token, including both delimiters, so its contents cannot introduce IR.
+    fn canonicalize_ffi_proto_with_xls(
+        token: &[char],
+    ) -> Result<ir::ForeignFunctionData, ParseError> {
+        let mut source = String::from("package ffi\n#[ffi_proto(");
+        source.extend(token);
+        source.push_str(
+            ")]\nfn f() -> bits[1] { ret literal.1: bits[1] = literal(value=0, id=1) }\n",
+        );
+        let declaration = xlsynth::IrPackage::parse_ir(&source, None)
+            .and_then(|package| package.get_function("f")?.to_ir_string())
+            .map_err(|error| ParseError::new(format!("invalid ffi_proto: {error}")))?;
+        let mut canonical = Parser::new(&declaration);
+        canonical.drop_or_error("#[ffi_proto(")?;
+        let text = canonical.pop_quoted_string(StringEscapes::Verbatim)?;
+        canonical.drop_or_error(")]")?;
+        parse_foreign_function_data(&text)
+            .map_err(|error| ParseError::new(format!("invalid XLS-formatted ffi_proto: {error}")))
+    }
+
     /// Consumes one quoted token, including escaped delimiters and multiline
     /// triple quotes.
     fn pop_quoted_string(&mut self, escapes: StringEscapes) -> Result<String, ParseError> {
@@ -1191,10 +1235,7 @@ impl Parser {
                 self.drop_or_error("(")?;
                 let kind = if name == "ffi_proto" {
                     // XLS passes this token directly to protobuf TextFormat.
-                    let text = self.pop_quoted_string(StringEscapes::Verbatim)?;
-                    let data = parse_foreign_function_data(&text)
-                        .map_err(|error| ParseError::new(format!("invalid ffi_proto: {error}")))?;
-                    ir::OuterAttributeKind::FfiProto(data)
+                    ir::OuterAttributeKind::FfiProto(self.pop_ffi_proto()?)
                 } else {
                     ir::OuterAttributeKind::Signature(self.pop_string_or_error()?)
                 };
@@ -4320,7 +4361,7 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
             f.outer_attrs[0].kind(),
             &ir::OuterAttributeKind::FfiProto(ir::ForeignFunctionData {
                 code_template: Some(
-                    "verilog_module {fn} (.a({x}), .out({return})); /* keep [7:0] */".into()
+                    b"verilog_module {fn} (.a({x}), .out({return})); /* keep [7:0] */".to_vec()
                 ),
                 delay_ps: None,
             })
@@ -4351,7 +4392,7 @@ top block m() {{}}
             assert_eq!(
                 ffi.kind(),
                 &ir::OuterAttributeKind::FfiProto(ir::ForeignFunctionData {
-                    code_template: Some("left\nright\"".into()),
+                    code_template: Some(b"left\nright\"".to_vec()),
                     delay_ps: Some(0),
                 })
             );
@@ -4363,6 +4404,56 @@ top block m() {{}}
             );
             assert_eq!(signature.as_str(), signature_attr);
         }
+    }
+
+    #[test]
+    fn ffi_templates_preserve_stock_escaped_bytes_and_ir_delimiters() {
+        let cases: &[(&str, &[u8])] = &[
+            (r"code_template: '\uD83D\uDE00\501'", "😀A".as_bytes()),
+            (
+                r"code_template: '\\uD83D\\uDE00\\501\501'",
+                br"\uD83D\uDE00\501A",
+            ),
+            (
+                r#"code_template: '[(\"\"\")] #[ffi_proto(\"delay_ps: 7\")] \501'"#,
+                br#"[(""")] #[ffi_proto("delay_ps: 7")] A"#,
+            ),
+            (
+                r"code_template: '/* xlsynth_pir_ext=unknown */\777'",
+                b"/* xlsynth_pir_ext=unknown */\xff",
+            ),
+        ];
+        for (text, expected) in cases {
+            for quotes in ["\"", "\"\"\""] {
+                let attribute = format!("#[ffi_proto({quotes}{text}{quotes})]");
+                let source = format!(
+                    r#"package ffi_bytes
+
+{attribute}
+fn f(x: bits[1] id=1) -> bits[1] {{
+  ret x: bits[1] = param(name=x, id=1)
+}}
+
+top fn main(x: bits[1] id=2) -> bits[1] {{
+  ret result: bits[1] = invoke(x, to_apply=f, id=3)
+}}
+"#
+                );
+                xlsynth::IrPackage::parse_ir(&source, None).unwrap();
+                let pkg = Parser::new(&source).parse_package().unwrap();
+                assert_eq!(pkg.to_string(), source);
+                assert_eq!(
+                    pkg.get_fn("f")
+                        .unwrap()
+                        .ffi_proto()
+                        .unwrap()
+                        .code_template
+                        .as_deref(),
+                    Some(*expected)
+                );
+            }
+        }
+        assert!(parse_outer_attribute("#[ffi_proto(\"code_template: '\\501\0'\")]").is_err());
     }
 
     #[test]

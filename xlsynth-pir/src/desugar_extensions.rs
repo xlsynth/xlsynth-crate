@@ -786,7 +786,7 @@ fn make_unique_helper_name(base: &str, existing_names: &mut BTreeSet<String>) ->
 fn ffi_proto_outer_attr(code_template: String) -> OuterAttribute {
     let source = format!("#[ffi_proto(\"\"\"code_template: {code_template:?}\n\"\"\")]");
     let data = ForeignFunctionData {
-        code_template: Some(code_template),
+        code_template: Some(code_template.into_bytes()),
         delay_ps: None,
     };
     OuterAttribute::new(OuterAttributeKind::FfiProto(data), source)

@@ -1125,6 +1125,21 @@ delay_ps: 1
 }
 
 #[test]
+fn external_function_with_binary_template_has_actionable_error() {
+    let ir = EXTERNAL.replace(
+        EXTERNAL_FFI_ATTRIBUTE,
+        r#"#[ffi_proto("code_template: 'cell \777'")]"#,
+    );
+    assert_stock_xls_accepts(ir.split_once("top block").unwrap().0);
+    assert_eq!(
+        emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
+        Err(BlockCodegenError::InvalidBlock(
+            "external function `external_identity` has a non-UTF-8 ffi_proto code_template at byte 5".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn unresolved_external_template_placeholder_has_actionable_error() {
     let ir = EXTERNAL.replace(".source({value})", ".source({missing})");
     assert_eq!(

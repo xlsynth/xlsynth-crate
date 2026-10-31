@@ -1108,7 +1108,8 @@ pub struct ResetAttribute {
 /// The decoded XLS foreign function metadata used for external implementations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignFunctionData {
-    pub code_template: Option<String>,
+    /// XLS permits arbitrary bytes in the template, including non-UTF-8 data.
+    pub code_template: Option<Vec<u8>>,
     pub delay_ps: Option<i32>,
 }
 

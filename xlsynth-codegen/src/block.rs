@@ -887,6 +887,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     foreign.name
                 ))
             })?;
+        let template = std::str::from_utf8(template).map_err(|error| {
+            BlockCodegenError::InvalidBlock(format!(
+                "external function `{}` has a non-UTF-8 ffi_proto code_template at byte {}",
+                foreign.name,
+                error.valid_up_to()
+            ))
+        })?;
         let bindings = connections
             .iter()
             .map(|(name, value)| (name.as_str(), self.file.emit_expression(value)))
