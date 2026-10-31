@@ -551,6 +551,102 @@ block router(clk, rst, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> 
     }
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_parametric_helpers_preserve_instances() {
+    let modules = tempfile::tempdir().unwrap();
+    let packets = r#"
+#![feature(generics)]
+pub struct Packet<N: u32> { value: bits[N], enabled: bool }
+pub struct Fallback<N: u32> { value: bits[N], enabled: bool }
+pub fn choose<N: u32>(packet: Packet<N>, fallback: bits[N]) -> Packet<N> {
+    Packet<N> { value: if packet.enabled { packet.value } else { fallback }, ..packet }
+}
+pub fn bias<K: u32>(x: u6) -> u6 { x + (K as u6) }
+pub fn passthrough<T: type>(x: T) -> T { x }
+"#;
+    std::fs::write(modules.path().join("packets.x"), packets).unwrap();
+    let source = r#"
+import packets;
+struct Packet { current: u6 }
+fn choose_values(small: packets::Packet<u32:5>, large: packets::Packet<u32:6>,
+           fallback: packets::Fallback<u32:5>, last: u6) -> (u6, u6) {
+    let pair = packets::passthrough<(u8, bool)>((u3:0 ++ fallback.value, small.enabled));
+    let a = packets::choose<u32:5>(small, pair.0 as u5);
+    let b = packets::choose<u32:6>(large, u6:41);
+    let output = packets::passthrough<Packet>(Packet { current: last });
+    (output.current, packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
+}
+fn machine(small: u5, large: u6, fallback: u5, last: u6) -> (u6, u6) {
+    choose_values(packets::Packet<5> { value: small, enabled: false },
+                  packets::Packet<6> { value: large, enabled: true },
+                  packets::Fallback<5> { value: fallback, enabled: true }, last)
+}
+"#;
+    let bx = r#"
+extern fn machine::machine(small: u5, large: u6, fallback: u5, last: u6) -> (u6, u6);
+block select_values(clk, rst, small: u5, large: u6, fallback: u5) -> u6 {
+    reg last: u6 = 0;
+    let result = machine::machine(small, large, fallback, last);
+    last := result.1;
+    result.0
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[modules.path()]).unwrap();
+    bundle.files.push((
+        "Check.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := {rst := false, small := 3, large := 37, fallback := 17}
+private def small : XlsSource.«packets::Packet<5>» := {value := stimulus.small, enabled := false}
+private def large : XlsSource.«packets::Packet<6>» := {value := stimulus.large, enabled := true}
+private def fallback : XlsSource.«packets::Fallback<5>» := {value := 17, enabled := true}
+#guard (Helpers.«packets::choose<5>» (packet := small) (fallback := 17)).value == 17
+#check_failure Helpers.«packets::choose<5>» (packet := fallback) (fallback := 17)
+#guard (Helpers.«packets::choose<6>» (packet := large) (fallback := 41)).value == 37
+#guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
+#guard Helpers.«packets::passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
+#guard (step { last := 7 } stimulus).last == 57
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "parametric");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn helpers_distinguish_equal_layout_struct_instances() {
+    let source = r#"
+const TWO = u32:2;
+struct Tagged<N: u32> { value: u8 }
+fn take_two(x: Tagged<TWO>) -> u8 { x.value }
+fn combine(one: Tagged<1>, two: Tagged<2>) -> u8 { one.value + take_two(two) }
+fn machine(one: u8, two: u8) -> u8 {
+    combine(Tagged<1> { value: one }, Tagged<2> { value: two })
+}
+"#;
+    let bx = r#"
+extern fn machine::machine(one: u8, two: u8) -> u8;
+block distinguish(clk, rst, one: u8, two: u8) -> u8 {
+    reg last: u8 = 0;
+    last := machine::machine(one, two);
+    last
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "Check.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+variable (one : XlsSource.«machine::Tagged<1>») (two : XlsSource.«machine::Tagged<2>»)
+example : Helpers.«machine::take_two» two = two.value := rfl
+#check_failure Helpers.«machine::take_two» one
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "equal-layout struct instances");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")

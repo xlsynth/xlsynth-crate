@@ -1276,6 +1276,13 @@ pub struct StructDef {
 }
 
 impl StructDef {
+    pub fn get_owner_module(&self) -> Module {
+        Module {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_struct_def_get_module(self.ptr) },
+        }
+    }
+
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }
@@ -2608,6 +2615,20 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
+    /// Returns the checked element types in declaration order for a tuple.
+    pub fn get_tuple_members(&self) -> Option<Vec<Type>> {
+        unsafe {
+            sys::xls_dslx_type_is_tuple(self.ptr).then(|| {
+                (0..sys::xls_dslx_type_tuple_get_member_count(self.ptr))
+                    .map(|i| Type {
+                        parent: self.parent.clone(),
+                        ptr: sys::xls_dslx_type_tuple_get_member_type(self.ptr, i).cast_mut(),
+                    })
+                    .collect()
+            })
+        }
+    }
+
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
