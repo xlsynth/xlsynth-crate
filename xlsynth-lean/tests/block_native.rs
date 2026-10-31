@@ -222,6 +222,40 @@ fn machine(mask: u8, offset: u8, __reg_count: u8) -> (u8, u8) {
     );
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn stateful_neg_and_left_shift_match_xls() {
+    use std::fmt::Write as _;
+
+    let source = "fn machine(amount: u64, __reg_value: u5) -> (u5, u5) { (__reg_value, (-__reg_value) << amount) }";
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    for amount in [0, 1, 5, 1 << 60] {
+        let args = [
+            xlsynth::XlsIrValue::make_ubits(64, amount).unwrap(),
+            xlsynth::XlsIrValue::make_ubits(5, 3).unwrap(),
+        ];
+        let expected = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(1)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(
+            checks,
+            "#guard (step {{ value := 3 }} {{ rst := false, amount := {amount} }}).value == {expected}"
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckShift.lean".into(), checks));
+    check_bundle(bundle, "negation and variable left shift");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
