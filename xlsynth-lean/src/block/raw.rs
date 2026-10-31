@@ -569,9 +569,21 @@ pub(crate) fn node_expression(
                 .into_iter(),
         )),
         NodePayload::TupleIndex { tuple, index } => Ok(tuple_element(&operand(*tuple)?, *index)),
+        NodePayload::Unop(Unop::Neg, arg) => Ok(format!("BitVec.neg {}", operand(*arg)?)),
         NodePayload::Unop(Unop::Not, arg) => Ok(format!("BitVec.not {}", operand(*arg)?)),
         NodePayload::Binop(Binop::Add, lhs, rhs) => {
             Ok(format!("BitVec.add {} {}", operand(*lhs)?, operand(*rhs)?))
+        }
+        NodePayload::Binop(Binop::Shll, lhs, rhs) => {
+            let Type::Bits(width) = &node.ty else {
+                bail!("expected bits result for shll");
+            };
+            // Larger shifts also yield zero. Bound the intermediate Nat shift.
+            Ok(format!(
+                "BitVec.shiftLeft {} (min (BitVec.toNat {}) {width})",
+                operand(*lhs)?,
+                operand(*rhs)?
+            ))
         }
         NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
             let operator = if *op == Binop::Eq { "==" } else { "!=" };
