@@ -9,7 +9,7 @@
 //! no enum decoding or payload projection is part of this translation.
 
 use anyhow::{Context, Result, bail, ensure};
-use std::fmt::Write;
+use std::{collections::BTreeSet, fmt::Write};
 use xlsynth_ir_value::{IrFormatPreference, IrValue};
 use xlsynth_pir::{
     ir::{self, Binop, NaryOp, NodePayload, NodeRef, Register, Type, Unop},
@@ -17,6 +17,18 @@ use xlsynth_pir::{
 };
 
 use crate::block::BlockContext;
+
+/// Five Lean source files relating readable execution to the raw block model.
+///
+/// Emission does not run Lean; callers must elaborate the generated proofs.
+pub struct LeanBlockBundle {
+    /// File names and UTF-8 source in dependency order.
+    ///
+    /// The order is `Generated.lean`, `ReadableTypes.lean`,
+    /// `ReadableGenerated.lean`, `ReadableRepresentation.lean`, then
+    /// `ReadableCorrespondence.lean`.
+    pub files: Vec<(String, String)>,
+}
 
 /// Emit a self-contained Lean model of a verified XLS block.
 /// Return an error if the block uses an unsupported operation.
@@ -39,8 +51,11 @@ use crate::block::BlockContext;
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
-    let block = BlockContext::new(package, block)?;
-    emit_block(&block).with_context(|| {
+    emit_with_context(&BlockContext::new(package, block)?)
+}
+
+pub(super) fn emit_with_context(block: &BlockContext<'_>) -> Result<String> {
+    emit_block(block).with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -141,17 +156,29 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
             .output_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
-    source.push_str("structure Assertions where\n");
+    let assertion_fields: Vec<_> = assertions
+        .iter()
+        .map(|reference| ir::node_textual_id(graph, *reference))
+        .collect();
+    source.push_str(&structure_header(
+        "Assertions",
+        assertion_fields.iter().map(String::as_str),
+    )?);
+    let mut fields = RecordFields::default();
     for reference in &assertions {
         let node = graph.get_node(*reference);
         if let NodePayload::Assert { label, message, .. } = &node.payload {
             writeln!(
                 source,
-                "  -- id={}; label={}; message={}\n  {} : Bool",
+                "  -- id={}; label={}; message={}",
                 node.text_id,
                 comment(label),
-                comment(message),
-                identifier(&ir::node_textual_id(graph, *reference))?
+                comment(message)
+            )?;
+            fields.write(
+                &mut source,
+                &identifier(&ir::node_textual_id(graph, *reference))?,
+                "_root_.Bool",
             )?;
         }
     }
@@ -259,19 +286,98 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
 /// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
 /// bits.
 pub(crate) fn lean_type(ty: &Type) -> Result<String> {
+    physical_type(ty, "")
+}
+
+pub(super) fn physical_field_type(ty: &Type) -> Result<String> {
+    physical_type(ty, "_root_.")
+}
+
+fn physical_type(ty: &Type, prefix: &str) -> Result<String> {
     match ty {
         Type::Bits(width) => {
             ensure!(*width > 0, "bits[0] is outside the supported Lean subset");
-            Ok(format!("BitVec {width}"))
+            Ok(format!("{prefix}BitVec {width}"))
         }
-        Type::Tuple(elements) => elements
-            .iter()
-            .rev()
-            .try_fold("Unit".to_string(), |tail, element| {
-                Ok(format!("Prod ({}) ({tail})", lean_type(element)?))
-            }),
-        Type::Token => Ok("Unit".to_string()),
+        Type::Tuple(elements) => {
+            elements
+                .iter()
+                .rev()
+                .try_fold(format!("{prefix}Unit"), |tail, element| {
+                    Ok(format!(
+                        "{prefix}Prod ({}) ({tail})",
+                        physical_type(element, prefix)?
+                    ))
+                })
+        }
+        Type::Token => Ok(format!("{prefix}Unit")),
         Type::Array(_) => bail!("arrays are outside the supported Lean subset"),
+    }
+}
+
+/// Lean generates these declarations for every structure and inductive type.
+/// Quoting a source name preserves its spelling but does not prevent a clash.
+pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
+    ensure!(
+        !matches!(
+            field,
+            "rec"
+                | "recOn"
+                | "casesOn"
+                | "noConfusion"
+                | "noConfusionType"
+                | "ctorIdx"
+                | "_sizeOf_1"
+                | "_sizeOf_inst"
+        ),
+        "cannot emit {owner}.{field}: Lean generates a declaration with this name"
+    );
+    Ok(())
+}
+
+/// Retain the default constructor unless it would occupy a source field's name.
+pub(super) fn structure_header<'a>(
+    name: &str,
+    fields: impl Iterator<Item = &'a str>,
+) -> Result<String> {
+    let fields: BTreeSet<_> = fields.collect();
+    for field in &fields {
+        validate_lean_member(name, field)?;
+    }
+    let mut header = format!("structure {name} where\n");
+    if fields.contains("mk") {
+        let mut constructor = String::from("mk_");
+        while fields.contains(constructor.as_str()) {
+            constructor.push('_');
+        }
+        writeln!(header, "  {constructor} ::")?;
+    }
+    Ok(header)
+}
+
+/// Track the field scope of one Lean structure declaration.
+#[derive(Default)]
+pub(super) struct RecordFields {
+    shadows_root: bool,
+}
+
+impl RecordFields {
+    /// Lean elaborates a field type in the scope of preceding fields. Even the
+    /// root qualifier can be captured if a field itself is named `_root_`.
+    /// All hardware field types are independent of earlier field values.
+    pub(super) fn write(
+        &mut self,
+        out: &mut String,
+        field: &str,
+        rooted_type: &str,
+    ) -> std::fmt::Result {
+        if self.shadows_root {
+            writeln!(out, "  {field} : (by clear «_root_»; exact {rooted_type})")?;
+        } else {
+            writeln!(out, "  {field} : {rooted_type}")?;
+        }
+        self.shadows_root |= field == "«_root_»";
+        Ok(())
     }
 }
 
@@ -280,13 +386,14 @@ fn record_type<'a>(
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
-    let mut source = format!("structure {name} where\n");
+    let fields: Vec<_> = fields.collect();
+    let mut source = structure_header(name, fields.iter().map(|(field, _)| *field))?;
+    let mut scope = RecordFields::default();
     for (field, ty) in fields {
-        writeln!(
-            source,
-            "  {} : {}",
-            identifier(field).with_context(|| format!("{name} field {field}"))?,
-            lean_type(ty).with_context(|| format!("{name} field {field}"))?
+        scope.write(
+            &mut source,
+            &identifier(field).with_context(|| format!("{name} field {field}"))?,
+            &physical_field_type(ty).with_context(|| format!("{name} field {field}"))?,
         )?;
     }
     source.push_str("  deriving Repr\n\n");

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generate Lean models from verified XLS block IR.
-//!
-//! [`emit`] preserves physical values and clock-step behavior.
-//! Emission returns text; it does not invoke Lean or check the generated
-//! proofs.
+//! Emit Lean from XLS block IR, or use the typechecked DSLX function signature
+//! to emit a named, typed interface for the same equations.
 
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod raw;
-pub use raw::emit;
+mod readable;
+mod source_types;
+mod stateful;
+
+pub use stateful::{CompiledStatefulFunction, compile_stateful_function, stateful_ir_to_block};
+
+pub use raw::{LeanBlockBundle, emit};
+use source_types::emit_stateful_readable;
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {
