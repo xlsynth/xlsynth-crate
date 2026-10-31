@@ -681,9 +681,13 @@ impl Catalogue<'_> {
                     let value = values
                         .get(name)
                         .with_context(|| format!("missing binding for {name}"))?;
-                    Ok(value.convert_to_ir()?.to_string_fmt_no_prefix(
-                        xlsynth::ir_value::IrFormatPreference::UnsignedDecimal,
-                    )?)
+                    // Type arguments have DSLX spellings but no IR value.
+                    Ok(match value.convert_to_ir() {
+                        Ok(bits) => bits.to_string_fmt_no_prefix(
+                            xlsynth::ir_value::IrFormatPreference::UnsignedDecimal,
+                        )?,
+                        Err(_) => value.to_text(),
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let name = format!("{}<{}>", function.get_identifier(), arguments.join(","));

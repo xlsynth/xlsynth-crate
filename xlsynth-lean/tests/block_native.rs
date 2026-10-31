@@ -137,12 +137,14 @@ private def initial : State := { count := 7 }
 fn imported_parametric_helpers_preserve_instances() {
     let modules = tempfile::tempdir().unwrap();
     let packets = r#"
+#![feature(generics)]
 pub struct Packet<N: u32> { value: bits[N], enabled: bool }
 pub struct Fallback<N: u32> { value: bits[N], enabled: bool }
 pub fn choose<N: u32>(packet: Packet<N>, fallback: bits[N]) -> Packet<N> {
     Packet<N> { value: if packet.enabled { packet.value } else { fallback }, ..packet }
 }
 pub fn bias<K: u32>(x: u6) -> u6 { x + (K as u6) }
+pub fn passthrough<T: type>(x: T) -> T { x }
 "#;
     std::fs::write(modules.path().join("packets.x"), packets).unwrap();
     let source = r#"
@@ -151,7 +153,7 @@ fn machine(small: packets::Packet<u32:5>, large: packets::Packet<u32:6>,
            fallback: packets::Fallback<u32:5>, __reg_last: u6) -> (u6, u6) {
     let a = packets::choose<u32:5>(small, fallback.value);
     let b = packets::choose<u32:6>(large, u6:41);
-    (__reg_last, packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
+    (packets::passthrough<u6>(__reg_last), packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
 }
 "#;
     let model = compile_stateful_function(
