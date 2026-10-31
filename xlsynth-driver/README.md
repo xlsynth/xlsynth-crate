@@ -434,10 +434,10 @@ Flags:
 - `--output <FILE>` writes the raw model to this file, replacing existing
   contents only after successful generation. The default is stdout.
 
-The supported IR subset includes exact-width bits, nested tuples, tokens,
+The supported IR subset includes exact-width bits, nonempty arrays, nested tuples, tokens,
 registers, synchronous resets, assertions, bitwise operations, addition,
 equality, concatenation, slicing, sign extension, one-hot encoding, and
-ordinary, priority, and bits-valued one-hot selection. Arrays, zero-width bits,
+ordinary, priority, and bits-valued one-hot selection. Empty arrays, zero-width bits,
 block instances, asynchronous resets, and unsupported operations are rejected.
 Assertions are reported as results and do not restrict the model's inputs or
 old state.

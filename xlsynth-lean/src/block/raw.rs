@@ -346,8 +346,7 @@ fn write_helper(source: &mut String, function: &ir::Fn) -> Result<()> {
     Ok(())
 }
 
-/// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
-/// bits.
+/// Render physical bit, token, tuple, and nonempty array types in Lean.
 pub(crate) fn lean_type(ty: &Type) -> Result<String> {
     physical_type(ty, "")
 }

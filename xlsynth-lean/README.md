@@ -78,11 +78,11 @@ from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
 `reset` activates the declared reset input for one ordinary clock edge. It
 does not invent initial values for registers without reset values.
 
-The supported subset includes exact-width bits, nested tuples, tokens,
+The supported subset includes exact-width bits, nonempty arrays, nested tuples, tokens,
 registers, synchronous resets, assertions, bitwise operations, addition,
 equality, concatenation, slicing, sign extension, one-hot encoding, and
 ordinary, priority, and bits-valued one-hot selection. Unsupported nodes,
-arrays, zero-width bits, block instances, and asynchronous resets return
+empty arrays, zero-width bits, block instances, and asynchronous resets return
 contextual errors. Parsing can succeed for operations that emission rejects.
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
