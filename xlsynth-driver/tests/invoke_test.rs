@@ -4024,6 +4024,55 @@ fn test_ir2gates_output_json_file() {
 }
 
 #[test]
+fn tracked_prepared_ir_identifies_the_unmasked_priority_word() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("word.ir");
+    let exported = dir.path().join("prepared.ir");
+    std::fs::write(&input, r#"package p
+
+top fn main(s: bits[5] id=1, en: bits[1] id=2, a: bits[12] id=3, b: bits[12] id=4, c: bits[12] id=5) -> bits[12] {
+  z: bits[12] = literal(value=0, id=6)
+  word: bits[12] = priority_sel(s, cases=[b, a, c, b, a], default=z, id=10)
+  ret guarded: bits[12] = sel(en, cases=[z, word], id=11)
+}"#).unwrap();
+    let path = input.to_str().unwrap();
+    let tracking = "--track-pir-node-ids=true";
+    let arrays = "--enable-formal-array-alias-analysis=false";
+    let text = run_driver_success(&["ir2g8r", path, tracking, arrays, "--fraig=false"]);
+    let gates = parse_g8r(std::str::from_utf8(&text).unwrap()).unwrap();
+    assert!(
+        gates
+            .transition
+            .gates
+            .iter()
+            .any(|n| n.get_pir_node_ids().contains(&10))
+    );
+
+    let prepared = run_driver_success(&["ir-prep-for-gates", path, tracking, arrays]);
+    run_driver_success(&[
+        "ir2gates",
+        path,
+        tracking,
+        arrays,
+        "--fraig=false",
+        "--prepared-ir-out",
+        exported.to_str().unwrap(),
+    ]);
+    assert_eq!(std::fs::read(exported).unwrap(), prepared);
+    let package = ir_parser::Parser::new(std::str::from_utf8(&prepared).unwrap())
+        .parse_and_validate_package()
+        .unwrap();
+    let f = package.get_top_fn().unwrap();
+    let mask = f.get_node(f.ret_node_ref.unwrap());
+    let xlsynth_pir::ir::NodePayload::Sel { cases, .. } = &mask.payload else {
+        panic!("expected the consuming enable mux");
+    };
+    assert_eq!(mask.text_id, 11);
+    let word = f.get_node(cases[1]);
+    assert_eq!((word.text_id, word.name.as_deref()), (10, Some("word")));
+}
+
+#[test]
 fn test_ir2gates_prepared_ir_default_enables_prio_encode_rewrite() {
     let _ = env_logger::builder().is_test(true).try_init();
     let temp_dir = tempfile::tempdir().unwrap();

@@ -4,7 +4,9 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{
+    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_with_origins,
+};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
@@ -464,11 +466,21 @@ fn prepared_ir_text_from_package(
     top_fn_name: &str,
     range_info: &IrRangeInfo,
     prep_opts: PrepForGatifyOptions,
+    track_pir_node_ids: bool,
+    gate_cost: GateCostOptions,
 ) -> Result<String, String> {
     let ir_top = ir_package
         .get_fn(top_fn_name)
         .expect("top fn should exist in pir_package");
-    let prepared_fn = prep_for_gatify(ir_top, Some(range_info), prep_opts);
+    // Match gatify's preparation mode so exported IDs describe the mapped
+    // graph.
+    let prepared_fn = prep_for_gatify_with_origins(
+        ir_top,
+        Some(range_info),
+        prep_opts,
+        track_pir_node_ids.then(HashMap::new).as_mut(),
+        gate_cost,
+    );
     let external_refs = ir_utils::external_function_references(&prepared_fn);
     if !external_refs.is_empty() {
         let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
@@ -515,6 +527,11 @@ pub fn canonical_ir_text_to_prepared_gatify_ir(
         &prepared.top_fn_name,
         prepared.range_info.as_ref(),
         prep_opts,
+        lowering_options.track_pir_node_ids,
+        GateCostOptions {
+            hash: lowering_options.hash,
+            reassociation: lowering_options.reassociation,
+        },
     )
 }
 
@@ -551,8 +568,12 @@ pub fn process_ir_text_with_gatefn(
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
-    let ir2gates_output =
-        ir2gates::ir2gates_from_ir_text(ir_text, options.ir_top.as_deref(), ir2gates_options)?;
+    let ir2gates_output = ir2gates::ir2gates_for_pipeline(
+        ir_text,
+        options.ir_top.as_deref(),
+        ir2gates_options,
+        options.reassociation,
+    )?;
 
     let ir2gates::Ir2GatesOutput {
         pir_package: ir_package,
@@ -573,6 +594,11 @@ pub fn process_ir_text_with_gatefn(
             &top_fn_name,
             range_info.as_ref(),
             prep_opts,
+            options.track_pir_node_ids,
+            GateCostOptions {
+                hash: options.hash,
+                reassociation: options.reassociation,
+            },
         )?;
         std::fs::write(out_path, prepared_text.as_bytes()).map_err(|e| {
             format!(

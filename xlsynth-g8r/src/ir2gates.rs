@@ -230,6 +230,16 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
+    ir2gates_for_pipeline(ir_text, top, options, false)
+}
+
+/// Lower for a pipeline that may subsequently reassociate the emitted gates.
+pub(crate) fn ir2gates_for_pipeline(
+    ir_text: &str,
+    top: Option<&str>,
+    options: Ir2GatesOptions,
+    reassociate_gates: bool,
+) -> Result<Ir2GatesOutput, String> {
     let PreparedIrForGatify {
         pir_package,
         top_fn_name,
@@ -239,7 +249,7 @@ pub fn ir2gates_from_ir_text(
         .get_fn(&top_fn_name)
         .expect("top_fn_name should be present in pir_package");
 
-    let gatify_output = ir2gate::gatify(
+    let gatify_output = ir2gate::gatify_for_pipeline(
         pir_fn,
         ir2gate::GatifyOptions {
             fold: options.fold,
@@ -258,6 +268,7 @@ pub fn ir2gates_from_ir_text(
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
             ..ir2gate::GatifyOptions::all_opts_disabled()
         },
+        reassociate_gates,
     )?;
 
     Ok(Ir2GatesOutput {

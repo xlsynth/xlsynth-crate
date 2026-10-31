@@ -10,7 +10,9 @@ use crate::gatify::ir2gate_arithmetic::{
     gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
 };
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_with_origins};
+use crate::gatify::prep_for_gatify::{
+    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_with_origins,
+};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -4441,10 +4443,16 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::BitSlice { arg, start, width } => {
-            let value_gates = env
-                .get_bit_vector(*arg)
+            // Many narrow slices may share a wide source. Borrow it so each
+            // slice copies only its result bits.
+            let source = env
+                .ir_to_g8
+                .get(arg)
                 .expect("bit_slice value should be present");
-            let slice_gates = value_gates.get_lsb_slice(*start, *width);
+            let slice_gates = match source {
+                GateOrVec::BitVector(bits) => bits.get_lsb_slice(*start, *width),
+                GateOrVec::Gate(bit) => AigBitVector::from_bit(*bit).get_lsb_slice(*start, *width),
+            };
             assert_eq!(slice_gates.get_bit_count(), *width);
             env.add(node_ref, GateOrVec::BitVector(slice_gates));
         }
@@ -5122,6 +5130,15 @@ pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOu
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+    gatify_for_pipeline(orig_fn, options, false)
+}
+
+/// Prepare with the depth model for the caller's gate optimization pipeline.
+pub(crate) fn gatify_for_pipeline(
+    orig_fn: &ir::Fn,
+    options: GatifyOptions,
+    reassociate_gates: bool,
+) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
 
@@ -5149,6 +5166,10 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             ..PrepForGatifyOptions::all_opts_enabled()
         },
         origins.as_mut(),
+        GateCostOptions {
+            hash: options.hash,
+            reassociation: reassociate_gates,
+        },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
