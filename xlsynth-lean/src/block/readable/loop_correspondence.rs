@@ -94,12 +94,23 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             rules.insert(function.name.as_str(), index);
         }
         let deps = call_rules(self.graph, &rules);
+        // Checked captures retain their underlying declaration even when the
+        // caller's input uses an alias. Expose only the alias wrappers so the
+        // underlying codec's round-trip lemma can cancel decode and encode.
+        let mut aliases = Vec::new();
+        for decl in self.declarations {
+            if let TypeDecl::Alias { name, .. } = decl {
+                let name = identifier(name)?;
+                aliases.push(format!("XlsCodec.{name}.encode, XlsCodec.{name}.decode"));
+            }
+        }
+        let aliases = aliases.join(", ");
         writeln!(
             out,
             r#"theorem encoded_eval (q : State) (x : Input) :
     encodeEvaluation (eval q x) = XlsBlock.eval (encodeState q) (encodeInput x) := by
   xls_normalize [eval, XlsBlock.eval, encodeState, encodeInput, encodeOutput, encodeAssertions, encodeEvaluation{}]
-  all_goals first | rfl | (xls_codecs [] <;> rfl)
+  all_goals first | rfl | (xls_normalize [{aliases}] <;> rfl)
 "#,
             if deps.is_empty() {
                 String::new()

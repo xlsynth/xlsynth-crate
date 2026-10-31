@@ -121,33 +121,22 @@ struct ModuleContext {
 }
 
 impl ModuleContext {
-    /// A captured record may be declared in a transitive import of the top.
-    fn record_owner(&self, module: dslx::Module) -> Result<Self> {
+    /// A captured declaration may belong to a transitive import of the top.
+    fn declaration_owner(&self, module: dslx::Module) -> Result<Self> {
         let qualifier = module.get_name();
         if self.module.get_name() == qualifier {
-            return Ok(self.clone());
+            Ok(self.clone())
+        } else {
+            let type_info = self
+                .type_info
+                .get_imported_type_info(&module)
+                .with_context(|| format!("missing type information for module {qualifier}"))?;
+            Ok(Self {
+                module,
+                type_info,
+                qualifier,
+            })
         }
-        let mut pending = vec![(self.module.clone(), self.type_info.clone())];
-        let mut visited = BTreeSet::new();
-        while let Some((current, info)) = pending.pop() {
-            if let Some(type_info) = info.get_imported_type_info(&module) {
-                return Ok(Self {
-                    module,
-                    type_info,
-                    qualifier,
-                });
-            }
-            for i in 0..current.get_member_count() {
-                if let Some(import) = current.get_member(i).to_import()
-                    && let Some(child) = info.get_imported_module(&import)
-                    && visited.insert(child.get_name())
-                    && let Some(child_info) = info.get_imported_type_info(&child)
-                {
-                    pending.push((child, child_info));
-                }
-            }
-        }
-        bail!("missing type information for record module {qualifier}")
     }
 }
 
@@ -773,21 +762,37 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
-    /// Loop captures have a concrete checked Type but may have no written
-    /// annotation. Record field names come from that type's declaration in
-    /// its owning module.
+    fn with_declaration_owner<T>(
+        &mut self,
+        module: dslx::Module,
+        resolve: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let owner = self.context.declaration_owner(module)?;
+        let previous = std::mem::replace(&mut self.context, owner);
+        let result = resolve(self);
+        self.context = previous;
+        result
+    }
+
+    /// Loop captures may have no written annotation. Resolve their checked
+    /// nominal types in the module that declares them.
     fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
         if ty.is_struct() {
             let record = ty.get_struct_def()?;
-            let owner = self.context.record_owner(record.get_owner_module())?;
-            let previous = std::mem::replace(&mut self.context, owner);
-            let result = if record.is_parametric() {
-                self.concrete_record(&record, ty, None)
-            } else {
-                self.nominal_reference(&record.get_identifier())
-            };
-            self.context = previous;
-            result
+            self.with_declaration_owner(record.get_owner_module(), |catalogue| {
+                if record.is_parametric() {
+                    catalogue.concrete_record(&record, ty, None)
+                } else {
+                    catalogue.nominal_reference(&record.get_identifier())
+                }
+            })
+        } else if ty.is_enum() {
+            let enumeration = ty.get_enum_def()?;
+            ensure!(enumeration.get_member_count() != 0, "empty loop enum");
+            let module = enumeration.get_member(0).get_value().get_owner_module();
+            self.with_declaration_owner(module, |catalogue| {
+                catalogue.nominal_reference(&enumeration.get_identifier())
+            })
         } else if let Some((false, width)) = ty.is_bits_like() {
             match width {
                 0 => bail!("zero-width loop binding"),

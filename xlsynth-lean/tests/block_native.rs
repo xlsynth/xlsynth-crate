@@ -573,6 +573,7 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
     let modules = tempfile::tempdir().unwrap();
     let packets = r#"
 type Tag = u8;
+pub enum Mode: u2 { Idle = 0, Run = 2 }
 struct Write { valid: bool, data: u8 }
 struct Slot { write: Write }
 pub struct Pool<N: u32> { slots: Slot[3], status: (bits[N], Tag) }
@@ -580,15 +581,15 @@ pub struct Pool<N: u32> { slots: Slot[3], status: (bits[N], Tag) }
     fs::write(modules.path().join("packets.x"), packets).unwrap();
     fs::write(
         modules.path().join("types.x"),
-        "import packets; pub type Pool = packets::Pool<u32:5>;",
+        "import packets; pub type Pool = packets::Pool<u32:5>; pub type Mode = packets::Mode;",
     )
     .unwrap();
     let source = r#"
 import types;
-fn machine(pool: types::Pool, __reg_count: u8) -> (u8, u8) {
+fn machine(pool: types::Pool, mode: types::Mode, __reg_count: u8) -> (u8, u8) {
     let count = for (bank, acc) in u32:1..u32:3 {
         let slot = pool.slots[bank];
-        if slot.write.valid { acc + slot.write.data } else { acc }
+        if slot.write.valid && mode as u2 == u2:2 { acc + slot.write.data } else { acc }
     }(__reg_count);
     (__reg_count, count)
 }
@@ -617,8 +618,8 @@ private def pool : «packets::Pool<5>» := { status := (3, 4), slots := #v[
   {write := {valid := false, data := 19}},
   {write := {valid := true, data := 23}}] }
 #guard Helpers.«____machine__machine_counted_for_0_body»
-  (xls_iteration := 1) (acc := 7) (pool := pool) == 30
-#guard (step {count := 7} {rst := false, pool := pool}).count == 30
+  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := «packets::Mode».Run) == 30
+#guard (step {count := 7} {rst := false, pool := pool, mode := .Idle}).count == 7
 "#;
     bundle
         .files
