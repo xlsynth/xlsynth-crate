@@ -867,6 +867,49 @@ fn large_constructed_bool_array_elaborates() {
     check_bundle(bx_bundle(&bx), "large constructed Bool array");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn dynamic_slices_match_xls_at_and_beyond_the_boundary() {
+    let source = r#"
+fn replace(data: u8, index: u64) -> u8 { bit_slice_update(data, index, u3:2) }
+fn machine(index: u64, data: u8) -> (u8, u8) {
+    (data[index+:u3] as u8, replace(data, index))
+}
+"#;
+    let bx = r#"
+extern fn machine::replace(data: u8, index: u64) -> u8;
+block slices(clk, index: u64) -> u8 {
+    reg data: u8 = 0;
+    data := machine::replace(data, index);
+    data[index+:u3] as u8
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("dynamic bit slices fixture (machine.x)");
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 64) :=
+  let q : State := { data := 165 }
+  let x : Input := { rst := false, index }
+  (observe q x, (step q x).data)
+"#,
+    );
+    for index in [0, 2, 7, 1 << 60] {
+        let result = machine
+            .interpret(&[
+                xlsynth::XlsIrValue::make_ubits(64, index).unwrap(),
+                xlsynth::XlsIrValue::make_ubits(8, 165).unwrap(),
+            ])
+            .unwrap();
+        let read = result.get_element(0).unwrap().to_u64().unwrap();
+        let updated = result.get_element(1).unwrap().to_u64().unwrap();
+        writeln!(checks, "#guard clock {index} == ({read}, {updated})").unwrap();
+    }
+    bundle.files.push(("CheckSlices.lean".into(), checks));
+    check_bundle(bundle, "dynamic bit slice and update");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, _fixture: &str) {
     let directory = tempfile::tempdir().unwrap();
