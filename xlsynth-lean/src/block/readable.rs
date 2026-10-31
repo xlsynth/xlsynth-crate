@@ -175,6 +175,11 @@ impl<'a> Presentation<'a> {
             for (param, (name, _)) in function.params.iter().zip(&signature.params) {
                 preferred[param.index] = Some(name.as_str());
             }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((name, _)) = signature.node_bindings.get(&node.text_id) {
+                    preferred[index] = Some(name);
+                }
+            }
         }
         let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
@@ -235,6 +240,11 @@ impl<'a> Presentation<'a> {
         if let Some((function, signature)) = helper.zip(signature) {
             for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                 result.node_types[param.index] = Some(ty.clone());
+            }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((_, ty)) = signature.node_bindings.get(&node.text_id) {
+                    result.node_types[index] = Some(ty.clone());
+                }
             }
         }
         let order = ir_utils::get_topological_nodes(&graph.nodes);

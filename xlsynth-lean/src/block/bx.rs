@@ -75,7 +75,40 @@ pub fn compile_bx_with_dslx(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    let (package, link) = super::helper_types::DslxLink::compile(module)?;
+    compile_bx_link(
+        module_name,
+        source,
+        super::helper_types::DslxLink::compile(module)?,
+        reset,
+        options,
+    )
+}
+
+/// Link checked DSLX while recording loop binding names and types.
+#[cfg(feature = "dslx-loop-bindings")]
+pub fn compile_bx_with_dslx_loop_bindings(
+    module_name: &str,
+    source: &str,
+    module: xlsynth::dslx::TypecheckedModule,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
+    compile_bx_link(
+        module_name,
+        source,
+        super::helper_types::DslxLink::compile_with_bindings(module)?,
+        reset,
+        options,
+    )
+}
+
+fn compile_bx_link(
+    module_name: &str,
+    source: &str,
+    (package, link): (ir::Package, super::helper_types::DslxLink),
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
     let compiled = compile_bx(module_name, source, package, reset, options)?;
     Ok(CompiledBx {
         dslx: Some(link),
