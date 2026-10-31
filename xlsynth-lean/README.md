@@ -78,11 +78,11 @@ from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
 `reset` activates the declared reset input for one ordinary clock edge. It
 does not invent initial values for registers without reset values.
 
-The supported subset includes exact-width bits, nested tuples, tokens,
+The supported subset includes exact-width bits, nonempty arrays, nested tuples, tokens,
 registers, synchronous resets, assertions, bitwise operations, addition,
 equality, concatenation, slicing, sign extension, one-hot encoding, and
 ordinary, priority, and bits-valued one-hot selection. Unsupported nodes,
-arrays, zero-width bits, block instances, and asynchronous resets return
+empty arrays, zero-width bits, block instances, and asynchronous resets return
 contextual errors. Parsing can succeed for operations that emission rejects.
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
@@ -120,9 +120,10 @@ let ir = compiled.block_ir();
 let bundle = compiled.emit_readable()?;
 ```
 
-The readable interface supports unsigned bits of positive width, positional
-tuples, nonempty local structs, aliases of supported local types and unsigned
-two-bit enums with distinct encodings. For each unnamed two-bit encoding the
+The readable interface supports positive-width unsigned bits, positional tuples,
+nonempty arrays, nonempty structs, aliases of supported types and unsigned
+two-bit enums with distinct encodings. Imported helpers retain their checked
+parameter and result types, including concrete parametric records. For each unnamed two-bit encoding the
 emitter adds a Lean constructor so every physical value can be decoded and
 encoded again. Exposed struct fields and enum cases must avoid names Lean
 generates for their type, such as `recOn`.
