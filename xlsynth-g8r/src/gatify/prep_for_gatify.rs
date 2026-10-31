@@ -21,6 +21,7 @@
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
+mod mixed_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
 
@@ -2619,6 +2620,12 @@ pub fn prep_for_gatify(
     diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
         grouped_priority::rewrite(f, range_info)
     });
+    diagnostics::run(
+        &mut cloned,
+        "mixed_comparisons",
+        0,
+        mixed_comparisons::rewrite,
+    );
     diagnostics::run(
         &mut cloned,
         "lexicographic_comparisons",
