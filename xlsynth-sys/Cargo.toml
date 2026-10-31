@@ -12,6 +12,9 @@ links = "xlsynth"
 [lints]
 workspace = true
 
+[features]
+dslx-loop-bindings = []
+
 [dependencies]
 libc = "0.2"
 
