@@ -940,3 +940,14 @@ mod tests {
         );
     }
 }
+
+/// Use the in-process bit-vector solver when available and the XLS tool
+/// otherwise.
+pub fn equivalence_test_solver() -> xlsynth_prover::prover::SolverChoice {
+    use xlsynth_prover::prover::SolverChoice;
+    if cfg!(feature = "has-bitwuzla") {
+        SolverChoice::Bitwuzla
+    } else {
+        SolverChoice::Toolchain
+    }
+}
