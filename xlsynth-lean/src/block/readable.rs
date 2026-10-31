@@ -1546,21 +1546,21 @@ end XlsReadable
       [XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
-        let enum_encoders = self
+        let final_encoders = self
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
-                TypeDecl::Enum { name, .. } => {
+                TypeDecl::Enum { name, .. } | TypeDecl::Alias { name, .. } => {
                     Some(identifier(name).map(|name| format!("XlsCodec.{name}.encode")))
                 }
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?;
-        if !enum_encoders.is_empty() {
+        if !final_encoders.is_empty() {
             writeln!(
                 out,
-                "  all_goals\n    -- Enum encodings now have constructor arguments; reduce them last.\n    dsimp (config := {{ instances := true }}) only [{}]",
-                enum_encoders.join(", ")
+                "  all_goals\n    -- Reduce aliases and enum constructors after codec round trips cancel.\n    dsimp (config := {{ instances := true, failIfUnchanged := false }}) only [{}]",
+                final_encoders.join(", ")
             )?;
         }
         // A source tuple is encoded one field at a time, while the raw
