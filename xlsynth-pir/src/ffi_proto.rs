@@ -3,7 +3,7 @@
 use std::fmt::Write;
 use std::sync::LazyLock;
 
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value, text_format};
+use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 
 use crate::ir::ForeignFunctionData;
 
@@ -15,15 +15,18 @@ static FOREIGN_FUNCTION_DATA: LazyLock<MessageDescriptor> = LazyLock::new(|| {
 });
 
 /// Parses the textproto in an XLS FFI attribute, preserving field presence.
-pub(crate) fn parse_foreign_function_data(
-    text: &str,
-) -> Result<ForeignFunctionData, text_format::ParseError> {
+pub(crate) fn parse_foreign_function_data(text: &str) -> Result<ForeignFunctionData, String> {
+    if text.contains('[') && has_structural_open_bracket(text) {
+        return Err("unexpected '[' outside a string or comment in scalar FFI metadata".into());
+    }
     let parse =
         |source: &str| DynamicMessage::parse_text_format(FOREIGN_FUNCTION_DATA.clone(), source);
-    let mut proto = parse(text).or_else(|error| match normalize_xls_escapes(text) {
-        Some(normalized) => parse(&normalized),
-        None => Err(error),
-    })?;
+    let mut proto = parse(text)
+        .or_else(|error| match normalize_xls_escapes(text) {
+            Some(normalized) => parse(&normalized),
+            None => Err(error),
+        })
+        .map_err(|error| error.to_string())?;
     let code_template = proto.take_field_by_name("code_template").map(|value| {
         let Value::Bytes(template) = value else {
             unreachable!("the embedded descriptor declares code_template as bytes");
@@ -39,6 +42,34 @@ pub(crate) fn parse_foreign_function_data(
         code_template,
         delay_ps,
     })
+}
+
+/// FFI has only singular scalar fields. Reject structural brackets before
+/// prost-reflect recursively parses an expanded Any as a candidate field.
+fn has_structural_open_bracket(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            b'[' => return true,
+            b'#' => {
+                bytes.by_ref().find(|&byte| byte == b'\n');
+            }
+            quote @ (b'"' | b'\'') => {
+                while let Some(byte) = bytes.next() {
+                    if byte == quote {
+                        break;
+                    }
+                    if byte == b'\\' {
+                        bytes.next();
+                    }
+                }
+            }
+            _ => {
+                // Other bytes do not affect string or comment boundaries.
+            }
+        }
+    }
+    false
 }
 
 /// Rewrites exceptional C++ TextFormat escapes in a temporary parser input.
@@ -124,4 +155,36 @@ fn hex_digits(text: &str) -> Option<u32> {
     text.bytes().try_fold(0, |value, byte| {
         Some((value << 4) | char::from(byte).to_digit(16)?)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_foreign_function_data;
+
+    #[test]
+    fn rejects_deeply_nested_expanded_any_in_ffi_proto() {
+        let text = format!(
+            "code_template: '[#]' # [ignored\n{}{}",
+            "[t/xlsynth.pir.ForeignFunctionDataBytes]{".repeat(2000),
+            "}".repeat(2000)
+        );
+        assert_eq!(
+            parse_foreign_function_data(&text).unwrap_err(),
+            "unexpected '[' outside a string or comment in scalar FFI metadata"
+        );
+    }
+
+    #[test]
+    fn ffi_proto_allows_brackets_in_strings_and_comments() {
+        let text = r#"# [ignored '"
+code_template: 'v[7:0] # \'[' " \"[\"\\"
+delay_ps: 3 # [ignored
+"#;
+        let data = parse_foreign_function_data(text).unwrap();
+        assert_eq!(
+            data.code_template.as_deref(),
+            Some(&b"v[7:0] # '[ \"[\"\\"[..])
+        );
+        assert_eq!(data.delay_ps, Some(3));
+    }
 }
