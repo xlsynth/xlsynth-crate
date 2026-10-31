@@ -889,3 +889,17 @@ and signed extrema. This is targeted coverage, not an exhaustive enumeration of
 all IR graphs. Run with
 `cargo fuzz run --sanitizer none fuzz_projected_positive_mask --features with-bitwuzla-built -- -max_total_time=30`
 from `xlsynth-g8r`; use `-runs=0` instead of `-max_total_time=30` to run the audit and existing seed corpus without random exploration.
+
+### `fuzz_shift_nonzero`
+
+Targeted equivalence and decision checks for prep-for-gatify's bounded logical
+shift survival predicates. A deterministic startup matrix and byte-driven cases
+cover left/right shifts, windows, wide amounts and high-bit overshifts, wrapping
+and partially constant constructed amounts, binary selects, nested/independent
+predicates, retained numeric consumers and shared boolean results. Multi-shift
+selects exercise the shared term budget. Negative cases exercise arithmetic
+shifts, unsupported effective widths, wide-amount windows/wrapped one-hot data,
+fixed low controls, other comparisons, admission and traversal limits. Every case
+asserts removal or retention of the shift and proves equivalence for all symbolic inputs under both prep option sets.
+Run through the existing cargo-fuzz workflow with `--sanitizer none` and
+`--features with-bitwuzla-built`; no separate CI step is required.
