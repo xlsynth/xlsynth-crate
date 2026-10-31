@@ -338,6 +338,21 @@ impl Catalogue<'_> {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        self.record_instance(
+            &base,
+            fields,
+            arguments,
+            record.get_parametric_binding_count(),
+        )
+    }
+
+    fn record_instance(
+        &mut self,
+        base: &str,
+        fields: Vec<StructField>,
+        arguments: Option<&[String]>,
+        binding_count: usize,
+    ) -> Result<SourceType> {
         let prefix = format!("{base}<");
         for decl in &self.declarations {
             if let TypeDecl::Struct {
@@ -351,7 +366,7 @@ impl Catalogue<'_> {
             }
         }
         let mut name = format!("{base}<{}>", arguments.unwrap_or_default().join(","));
-        if arguments.is_none_or(|args| args.len() != record.get_parametric_binding_count())
+        if arguments.is_none_or(|args| args.len() != binding_count)
             || self.declarations.iter().any(|decl| decl.name() == name)
         {
             name = format!("{base}<instance{}>", self.declarations.len());
@@ -719,6 +734,139 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+    /// Loop captures have a concrete checked Type but may have no written
+    /// annotation. Record field names come from that type's declaration in
+    /// its owning module.
+    fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+        if ty.is_struct() {
+            let record = ty.get_struct_def()?;
+            let owner = record.get_owner_module().get_name();
+            let local = record.get_identifier();
+            let name = if owner == self.context.module.get_name() {
+                local
+            } else {
+                format!("{owner}::{local}")
+            };
+            if !record.is_parametric() && self.declarations.iter().any(|decl| decl.name() == name) {
+                Ok(SourceType::Struct { name })
+            } else {
+                let fields = (0..record.get_member_count())
+                    .map(|index| {
+                        Ok(StructField {
+                            name: record.get_member(index).get_name(),
+                            source_type: self.loop_type(&ty.get_struct_member_type(index))?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if record.is_parametric() {
+                    self.record_instance(&name, fields, None, record.get_parametric_binding_count())
+                } else {
+                    self.add(TypeDecl::Struct {
+                        name: name.clone(),
+                        fields,
+                    })?;
+                    Ok(SourceType::Struct { name })
+                }
+            }
+        } else if let Some((false, width)) = ty.is_bits_like() {
+            match width {
+                0 => bail!("zero-width loop binding"),
+                1 => Ok(SourceType::Bool),
+                _ => Ok(SourceType::Bits { width }),
+            }
+        } else if ty.is_array() {
+            Ok(SourceType::Array {
+                element: Box::new(self.loop_type(&ty.get_array_element_type())?),
+                size: ty.get_array_size(),
+            })
+        } else if let Some(tuple) = ty.get_tuple_members() {
+            Ok(SourceType::Tuple {
+                members: tuple
+                    .iter()
+                    .map(|item| self.loop_type(item))
+                    .collect::<Result<_>>()?,
+            })
+        } else {
+            bail!("unsupported checked loop type {ty}")
+        }
+    }
+
+    fn collect_loop_helpers(
+        &mut self,
+        block: &BlockContext<'_>,
+        bindings: &[dslx::LoopBinding],
+    ) -> Result<()> {
+        let mut by_body = BTreeMap::<&str, Vec<_>>::new();
+        for binding in bindings {
+            by_body
+                .entry(&binding.ir_function)
+                .or_default()
+                .push(binding);
+        }
+        for function in &block.helpers {
+            let Some(bindings) = by_body.remove(function.name.as_str()) else {
+                continue;
+            };
+            let by_id: BTreeMap<_, _> = bindings
+                .iter()
+                .map(|binding| Ok((usize::try_from(binding.ir_node_id)?, *binding)))
+                .collect::<Result<_>>()?;
+            // A checked binding may refer to the index after adding the range's
+            // lower bound. Keep it on that node; the first physical
+            // argument is a zero-based iteration count.
+            let mut params = Vec::new();
+            for (position, param) in function.params.iter().enumerate() {
+                let node = function.get_node(*param);
+                let source = by_id.get(&node.text_id);
+                let (name, ty) = if let Some(binding) = source {
+                    let Ok(ty) = self.loop_type(&binding.concrete_type) else {
+                        break;
+                    };
+                    (
+                        binding.source_name.as_deref().unwrap_or(node.param_name()),
+                        ty,
+                    )
+                } else if position == 0
+                    && let ir::Type::Bits(width) = node.ty
+                {
+                    ("xls_iteration", SourceType::Bits { width })
+                } else {
+                    break;
+                };
+                if source_shape(&ty, &self.declarations)? != node.ty {
+                    break;
+                }
+                params.push((name.to_owned(), ty));
+            }
+            // A compiler-created argument such as a token-wrapped carry can
+            // still use the existing raw loop body when there is no
+            // matching source signature.
+            if params.len() == function.params.len() && params.len() >= 2 {
+                let mut node_bindings = BTreeMap::new();
+                for node in &function.nodes {
+                    if !matches!(node.payload, ir::NodePayload::Param)
+                        && let Some(binding) = by_id.get(&node.text_id)
+                        && let Some(name) = &binding.source_name
+                        && let Ok(ty) = self.loop_type(&binding.concrete_type)
+                        && source_shape(&ty, &self.declarations)? == node.ty
+                    {
+                        node_bindings.insert(node.text_id, (name.clone(), ty));
+                    }
+                }
+                self.helpers.insert(
+                    function.name.clone(),
+                    HelperSignature {
+                        name: function.name.clone(),
+                        result: params[1].1.clone(),
+                        params,
+                        node_bindings,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn helper_signature<'a>(
         &mut self,
         name: &str,
@@ -738,6 +886,7 @@ impl Catalogue<'_> {
             name: self.qualified_name(name),
             params,
             result,
+            node_bindings: BTreeMap::new(),
         })
     }
 
@@ -768,6 +917,9 @@ pub(super) struct HelperSignature {
     pub(super) name: String,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
+    /// Checked source bindings for body-local values, keyed by the original IR
+    /// node id.
+    pub(super) node_bindings: BTreeMap<usize, (String, SourceType)>,
 }
 
 /// Emit one converted function's block behavior using its typechecked DSLX
@@ -779,6 +931,7 @@ pub(super) fn emit_stateful_readable(
     block: &BlockContext<'_>,
     module: &dslx::TypecheckedModule,
     top: &str,
+    loop_bindings: &[dslx::LoopBinding],
 ) -> Result<block::LeanBlockBundle> {
     let mut catalogue = Catalogue {
         top,
@@ -795,6 +948,7 @@ pub(super) fn emit_stateful_readable(
     convert_imported_module(module, &mut catalogue)
         .with_context(|| format!("source signature of {top}"))?;
     catalogue.collect_imported_helpers(block)?;
+    catalogue.collect_loop_helpers(block, loop_bindings)?;
     let FunctionSignature { params, returns } = catalogue
         .signature
         .context("selected stateful function not found")?;
@@ -886,12 +1040,13 @@ pub(super) fn emit_stateful_readable(
         .values()
         .chain(interface.registers.values())
         .chain(&interface.outputs)
-        .chain(
-            interface
-                .helpers
-                .values()
-                .flat_map(|f| f.params.iter().map(|(_, ty)| ty).chain([&f.result])),
-        )
+        .chain(interface.helpers.values().flat_map(|f| {
+            f.params
+                .iter()
+                .map(|(_, ty)| ty)
+                .chain(f.node_bindings.values().map(|(_, ty)| ty))
+                .chain([&f.result])
+        }))
     {
         ty.collect_names(&mut names);
     }

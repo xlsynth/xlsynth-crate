@@ -15,6 +15,8 @@
 
 use std::{collections::BTreeSet, fmt::Write};
 
+mod loop_correspondence;
+
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::{
     ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop},
@@ -95,6 +97,11 @@ impl<'a> Presentation<'a> {
             for (param, (name, _)) in function.params.iter().zip(&signature.params) {
                 preferred[param.index] = Some(name.as_str());
             }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((name, _)) = signature.node_bindings.get(&node.text_id) {
+                    preferred[index] = Some(name);
+                }
+            }
         }
         let reserved: BTreeSet<_> = preferred.iter().flatten().copied().collect();
         let mut used: BTreeSet<String> = [
@@ -158,9 +165,26 @@ impl<'a> Presentation<'a> {
             for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                 result.node_types[param.index] = Some(ty.clone());
             }
+            for (index, node) in graph.nodes.iter().enumerate() {
+                if let Some((_, ty)) = signature.node_bindings.get(&node.text_id) {
+                    result.node_types[index] = Some(ty.clone());
+                }
+            }
         }
         for reference in ir_utils::get_topological_nodes(&graph.nodes) {
             match &graph.get_node(reference).payload {
+                NodePayload::CountedFor {
+                    init,
+                    body,
+                    invariant_args,
+                    ..
+                } if let Some(signature) = interface.helpers.get(body) => {
+                    result.node_types[reference.index] = Some(signature.result.clone());
+                    result.annotate(*init, &signature.params[1].1)?;
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        result.annotate(*arg, ty)?;
+                    }
+                }
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
@@ -722,6 +746,28 @@ impl<'a> Presentation<'a> {
         let operand = |r| self.typed_operand(r, target, depth);
         let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
         match &node.payload {
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } if let Some(signature) = self.interface.helpers.get(body) => {
+                let mut step = format!(
+                    "_root_.XlsReadable.Helpers.{}",
+                    identifier(&signature.name)?
+                );
+                if !invariant_args.is_empty() {
+                    step.push_str(" · ·");
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        write!(step, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                    }
+                }
+                let init = self.typed_operand(*init, Some(&signature.result), depth)?;
+                let call =
+                    format!("(_root_.XlsBlock.countedFor {trip_count} {stride} ({step}) ({init}))");
+                self.coerce(Some(&signature.result), target, &call)
+            }
             NodePayload::Invoke { to_apply, operands }
                 if self.interface.helpers.contains_key(to_apply) =>
             {
@@ -1337,6 +1383,21 @@ end XlsReadable
     /// encoders unfold afterward. Successful text generation is not Lean proof
     /// checking and does not establish correspondence to XLS execution.
     fn correspondence(&self) -> Result<String> {
+        if self
+            .block
+            .helpers
+            .iter()
+            .map(|f| &f.graph)
+            .chain([self.graph])
+            .any(|graph| {
+                graph.nodes.iter().any(|node| {
+                    matches!(&node.payload,
+                NodePayload::CountedFor { body, .. } if self.interface.helpers.contains_key(body))
+                })
+            })
+        {
+            return self.loop_correspondence();
+        }
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
         // Expose a record's fields only at a constructor. Unfolding its encoder
