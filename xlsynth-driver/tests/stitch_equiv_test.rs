@@ -191,7 +191,7 @@ Mapped outputs {{"out": bits[2]:0}}
             assert_eq!(proof.status.code(), Some(1));
             assert_eq!(
                 String::from_utf8(proof.stderr).unwrap(),
-                "xlsynth-driver: stitch-equiv: stage 'pipe_cycle0': Bitwuzla stitch proofs support at most 64 nested XLS functions including the stage. Inline helpers to shorten the call chain\n"
+                "xlsynth-driver: stitch-equiv: stage 'pipe_cycle0': Stitch stage checks support at most 64 nested XLS functions including the stage. Inline helpers to shorten the call chain\n"
             );
         }
     }
@@ -828,16 +828,25 @@ endmodule"#,
     )
     .unwrap();
     fs::write(callers.join("cells.textproto"), LIBERTY).unwrap();
+    fs::write(
+        callers.join("inputs.irvals"),
+        "{x: bits[1]:0}\n{x: bits[1]:1}\n",
+    )
+    .unwrap();
     for command in [
         "dslx-stitch-pipeline",
         "dslx-stitch-g8r-pipeline",
         "stitch-equiv",
+        "stitch-check-vectors",
     ] {
         let mut args = vec![command, "--spec", "../../design/pipe.toml"];
         if command == "dslx-stitch-g8r-pipeline" {
             args.extend(["--bin-out", "pipe.g8rbin"]);
         }
-        if command == "stitch-equiv" {
+        if command == "stitch-check-vectors" {
+            args.extend(["--input-irvals", "../inputs.irvals"]);
+        }
+        if matches!(command, "stitch-equiv" | "stitch-check-vectors") {
             args.extend([
                 "--netlist",
                 "../pipe.gv",
@@ -1494,4 +1503,220 @@ endmodule"#,
         );
         assert_eq!(result.stdout, b"Proved pipe equivalent to pipe under the stitch valid protocol (1 rising clock edge of latency).\n");
     }
+}
+
+/// Runs the concrete checker on the same DSLX, netlist, and cell fixtures as
+/// the stitch proof tests.
+fn check_vectors(directory: &Path, options: &[&str]) -> std::io::Result<Output> {
+    let mut args = vec![
+        "stitch-check-vectors",
+        "--spec",
+        "pipe.toml",
+        "--netlist",
+        "pipe.gv",
+        "--liberty-proto",
+        "cells.textproto",
+    ];
+    args.extend_from_slice(options);
+    driver(directory, &args)
+}
+
+#[test]
+fn stitch_vectors_reject_ascending_packed_ranges() {
+    let temp = tempfile::tempdir().unwrap();
+    stage_fixture(
+        temp.path(),
+        "fn pipe_cycle0(x: u4) -> u4 { x }",
+        "module pipe(input [3:0] x, output [0:3] out); assign out = x; endmodule",
+    )
+    .unwrap();
+    let result = check_vectors(temp.path(), &["--random-samples", "1"]).unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    assert!(result.stdout.is_empty());
+    assert_eq!(
+        result.stderr,
+        b"xlsynth-driver: stitch-check-vectors: mapped port 'out' has Verilog index 3 at bit offset 0, expected packed range [3:0] with index 0 as the LSB\n"
+    );
+}
+
+#[test]
+fn stitch_vectors_flush_in_flight_data_and_drain_the_last_transaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv = valid_reset_fixture(temp.path()).unwrap();
+    let vectors = temp.path().join("vectors.irvals");
+    // Row zero resets the pipeline. The transaction launched in row one is
+    // flushed by row two. After a bubble, rows four and five produce 0 and 1.
+    fs::write(
+        &vectors,
+        r#"{vin: bits[1]:1, rst_n: bits[1]:0, x: bits[1]:0}
+{x: bits[1]:1, vin: bits[1]:1, rst_n: bits[1]:1}
+{rst_n: bits[1]:0, x: bits[1]:1, vin: bits[1]:1}
+{vin: bits[1]:0, x: bits[1]:1, rst_n: bits[1]:1}
+{rst_n: bits[1]:1, vin: bits[1]:1, x: bits[1]:0}
+{vin: bits[1]:1, x: bits[1]:1, rst_n: bits[1]:1}
+"#,
+    )
+    .unwrap();
+    let args = ["--input-irvals", "vectors.irvals"];
+    let result = check_vectors(temp.path(), &args).unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        result.stdout,
+        b"Concrete check passed for pipe (input rows 6, data comparisons 2, output-valid comparisons 7).\n"
+    );
+    let netlist = temp.path().join("pipe.gv");
+    fs::write(&netlist, gv.replace(".D(data0)", ".D(x)")).unwrap();
+    let bypass = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(bypass.status.code(), Some(1));
+    assert!(bypass.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(bypass.stderr).unwrap(),
+        r#"xlsynth-driver: stitch-check-vectors: mismatch at cycle 6 on 'out': expected bits[1]:0, got bits[1]:1
+Source row 4 inputs {"rst_n": bits[1]:1, "vin": bits[1]:1, "x": bits[1]:0}
+Observation inputs {"rst_n": bits[1]:1, "vin": bits[1]:0, "x": bits[1]:0}
+"#
+    );
+
+    // A reset in row zero defines output valid immediately, before any
+    // source transaction could emerge from this two-edge pipeline.
+    fs::write(&netlist, gv.replace(".D(d1)", ".D(vin)")).unwrap();
+    let early = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(early.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(early.stderr).unwrap(),
+        r#"xlsynth-driver: stitch-check-vectors: mismatch at cycle 1 on 'vout': expected bits[1]:0, got bits[1]:1
+Before pipeline fill
+Observation inputs {"rst_n": bits[1]:1, "vin": bits[1]:1, "x": bits[1]:1}
+"#
+    );
+
+    // The output of a single valid row is checked on the final drain cycle.
+    fs::write(&netlist, gv).unwrap();
+    fs::write(
+        &vectors,
+        "{x: bits[1]:1, rst_n: bits[1]:1, vin: bits[1]:1}\n",
+    )
+    .unwrap();
+    let single = check_vectors(temp.path(), &args).unwrap();
+    assert!(
+        single.status.success(),
+        "{}",
+        String::from_utf8_lossy(&single.stderr)
+    );
+    assert_eq!(
+        single.stdout,
+        b"Concrete check passed for pipe (input rows 1, data comparisons 1, output-valid comparisons 1).\n"
+    );
+    fs::write(&vectors, "").unwrap();
+    let empty = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(empty.status.code(), Some(1));
+    assert!(empty.stdout.is_empty());
+    assert_eq!(
+        empty.stderr,
+        b"xlsynth-driver: stitch-check-vectors: no input rows\n"
+    );
+
+    // With no output-valid port, a stream of bubbles gives the checker no
+    // defined external data to compare.
+    let spec = temp.path().join("pipe.toml");
+    let input_valid_only = fs::read_to_string(&spec)
+        .unwrap()
+        .replace("output_valid_signal = \"vout\"\n", "");
+    fs::write(&spec, input_valid_only).unwrap();
+    fs::write(
+        &netlist,
+        gv.replace("output vout, ", "")
+            .replace("wire data0", "wire vout, data0"),
+    )
+    .unwrap();
+    fs::write(
+        &vectors,
+        "{x: bits[1]:1, rst_n: bits[1]:1, vin: bits[1]:0}\n",
+    )
+    .unwrap();
+    let bubbles = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(bubbles.status.code(), Some(1));
+    assert_eq!(bubbles.stderr, b"xlsynth-driver: stitch-check-vectors: the input stream produced no defined output observations\n");
+}
+
+#[test]
+fn stitch_vectors_evaluate_current_dslx_and_bind_ports_by_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv =
+        "module pipe(input [1:0] b, output [1:0] out, input [1:0] a); assign out = a; endmodule";
+    stage_fixture(temp.path(), "fn pipe_cycle0(a: u2, b: u2) -> u2 { a }", gv).unwrap();
+    fs::write(
+        temp.path().join("vectors.irvals"),
+        "{b: bits[2]:1, a: bits[2]:2}\n",
+    )
+    .unwrap();
+    let args = ["--input-irvals", "vectors.irvals"];
+    let result = check_vectors(temp.path(), &args).unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        result.stdout,
+        b"Concrete check passed for pipe (input rows 1, data comparisons 1, output-valid comparisons 0).\n"
+    );
+    fs::write(
+        temp.path().join("pipe.x"),
+        "fn pipe_cycle0(a: u2, b: u2) -> u2 { b }",
+    )
+    .unwrap();
+    let stale = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(stale.status.code(), Some(1));
+    assert!(stale.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(stale.stderr).unwrap(),
+        r#"xlsynth-driver: stitch-check-vectors: mismatch at cycle 0 on 'out': expected bits[2]:1, got bits[2]:2
+Source row 0 inputs {"a": bits[2]:2, "b": bits[2]:1}
+Observation inputs {"a": bits[2]:2, "b": bits[2]:1}
+"#
+    );
+}
+
+#[test]
+fn stitch_random_vectors_reproduce_a_failure_with_the_same_seed() {
+    let temp = tempfile::tempdir().unwrap();
+    let gv = "module pipe(input [128:0] x, output [128:0] out); assign out = x; endmodule";
+    stage_fixture(
+        temp.path(),
+        "fn pipe_cycle0(x: uN[129]) -> uN[129] { x }",
+        gv,
+    )
+    .unwrap();
+    let args = ["--random-samples", "4", "--seed", "42"];
+    let matched = check_vectors(temp.path(), &args).unwrap();
+    assert!(
+        matched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&matched.stderr)
+    );
+    assert_eq!(
+        matched.stdout,
+        b"Concrete check passed for pipe (input rows 4, data comparisons 4, output-valid comparisons 0). Random seed 42.\n"
+    );
+    // Every random input is a failing vector. The report includes the full
+    // arbitrary-width input and observation, so matching reports replay it.
+    fs::write(
+        temp.path().join("pipe.x"),
+        "fn pipe_cycle0(x: uN[129]) -> uN[129] { !x }",
+    )
+    .unwrap();
+    let first = check_vectors(temp.path(), &args).unwrap();
+    let second = check_vectors(temp.path(), &args).unwrap();
+    assert_eq!(first.status.code(), Some(1));
+    assert_eq!(second.status.code(), Some(1));
+    assert_eq!(first.stderr, second.stderr);
+    assert_eq!(
+        String::from_utf8(first.stderr).unwrap().lines().last(),
+        Some("Replay with --random-samples 4 --seed 42")
+    );
 }

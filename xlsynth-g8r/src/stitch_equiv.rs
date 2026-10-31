@@ -24,8 +24,15 @@ use crate::prove_gate_fn_equiv_sat::{
 };
 
 mod correspondence;
+mod stage_functions;
 mod stage_graph;
 mod stage_script;
+mod vectors;
+
+pub(crate) use vectors::check_stitch_vectors;
+pub use vectors::{
+    StitchInputRow, StitchVectorCounts, StitchVectorMismatch, StitchVectorResult, StitchVectors,
+};
 
 #[cfg(feature = "has-bitwuzla")]
 mod behavioral;
@@ -69,18 +76,33 @@ impl StitchObservation<'_> {
     ) -> Option<bool> {
         let (_, edges) = frames.split_last()?;
         let start = edges.len().saturating_sub(latency);
-        if let Some(reset) = self.reset
-            && edges[start..]
-                .iter()
-                .any(|frame| frame[reset].is_zero() == self.reset_active_low)
-        {
-            // Synchronous reset clears every valid register at this edge.
+        let source = (edges.len() >= latency).then(|| &frames[start]);
+        self.valid_for_source(
+            source,
+            self.reset.is_some()
+                && edges[start..]
+                    .iter()
+                    .any(|frame| self.reset_asserted(frame)),
+        )
+    }
+
+    /// Tests the reset level that will be sampled at this frame's edge.
+    fn reset_asserted(&self, frame: &BTreeMap<String, IrBits>) -> bool {
+        self.reset
+            .is_some_and(|reset| frame[reset].is_zero() == self.reset_active_low)
+    }
+
+    /// Qualifies the originating data row once its input edge is known, or a
+    /// reset flushed it.
+    fn valid_for_source(
+        &self,
+        source: Option<&BTreeMap<String, IrBits>>,
+        reset_since_source: bool,
+    ) -> Option<bool> {
+        if reset_since_source {
             return Some(false);
         }
-        (edges.len() >= latency).then(|| {
-            self.input_valid
-                .is_none_or(|valid| !frames[start][valid].is_zero())
-        })
+        source.map(|frame| self.input_valid.is_none_or(|valid| !frame[valid].is_zero()))
     }
 
     /// Tests the named outputs that are observable at the end of this trace.
@@ -289,7 +311,7 @@ fn check_mapped_abi(
             }
             Some(SequentialClockEdge::Falling) => {
                 return Err(format!(
-                    "mapped registers use the falling edge of '{}'. stitch-equiv requires rising-edge registers",
+                    "mapped registers use the falling edge of '{}', expected rising-edge registers",
                     clock.port_name
                 ));
             }
@@ -313,7 +335,7 @@ fn check_mapped_abi(
             }
             if index != bit.bit_number as usize {
                 return Err(format!(
-                    "mapped port '{}' has Verilog index {} at bit offset {index}. stitch-equiv requires packed range [{}:0] with index 0 as the LSB",
+                    "mapped port '{}' has Verilog index {} at bit offset {index}, expected packed range [{}:0] with index 0 as the LSB",
                     port.name,
                     bit.bit_number,
                     port.bits_lsb_to_msb.len() - 1
@@ -1238,7 +1260,7 @@ endmodule
                 prove_stitched_pipeline_equiv(&reference, &mapped, 0, GateFormalOptions::default())
                     .unwrap_err(),
                 format!(
-                    "mapped port 'out' has Verilog index {lsb} at bit offset 0. stitch-equiv requires packed range [3:0] with index 0 as the LSB"
+                    "mapped port 'out' has Verilog index {lsb} at bit offset 0, expected packed range [3:0] with index 0 as the LSB"
                 )
             );
         }
@@ -1257,7 +1279,7 @@ endmodule
                 GateFormalOptions::default()
             )
             .unwrap_err(),
-            "mapped registers use the falling edge of 'clk'. stitch-equiv requires rising-edge registers"
+            "mapped registers use the falling edge of 'clk', expected rising-edge registers"
         );
         let mut implementation = mapped(reference.clone());
         implementation.sequential_gate_fn.transition.inputs[0].name = "z".into();

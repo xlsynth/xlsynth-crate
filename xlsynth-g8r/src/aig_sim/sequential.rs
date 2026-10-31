@@ -171,33 +171,54 @@ pub(crate) struct SequentialSettledPhaseInput {
     pub phase: SequentialSettledPhase,
 }
 
-/// Simulates one input record per cycle, evaluating explicit register controls.
-/// Reset overrides enable; absent controls use D directly. Both
-/// explicit-control and legalized designs are supported, with simultaneous
-/// register updates.
-pub fn simulate(
-    design: &SequentialGateFn,
-    external_inputs: &[Vec<IrBits>],
-    initial_state: SequentialState,
-) -> Result<SequentialTrace, String> {
-    design.validate()?;
-    validate_external_inputs(design, external_inputs)?;
-    let mut state = SequentialState::from_register_values(design, initial_state.into_values())?;
-    let mut external_outputs = Vec::with_capacity(external_inputs.len());
-    let mut register_outputs = Vec::with_capacity(external_inputs.len());
-    let mut register_inputs = Vec::with_capacity(external_inputs.len());
-    let mut transition_inputs_trace = Vec::with_capacity(external_inputs.len());
-    let mut transition_sim = gate_sim::PreparedGateSim::new(&design.transition);
+/// A prepared transition evaluator that can advance without retaining prior
+/// cycles.
+pub(crate) struct SequentialSimulator<'a> {
+    design: &'a SequentialGateFn,
+    transition: gate_sim::PreparedGateSim<'a>,
+    state: SequentialState,
+    cycle: usize,
+}
 
-    for cycle_inputs in external_inputs {
-        let transition_inputs = bind_transition_inputs(design, cycle_inputs, state.values())?;
-        let transition_outputs = transition_sim.eval_outputs(&transition_inputs);
-        let visible_outputs = design
+/// Settled input and output values at the active edge, before Q updates.
+struct SimulatedCycle {
+    transition_inputs: Vec<IrBits>,
+    external_outputs: Vec<IrBits>,
+}
+
+impl<'a> SequentialSimulator<'a> {
+    pub(crate) fn new(
+        design: &'a SequentialGateFn,
+        state: SequentialState,
+    ) -> Result<Self, String> {
+        design.validate()?;
+        let state = SequentialState::from_register_values(design, state.into_values())?;
+        Ok(Self {
+            design,
+            transition: gate_sim::PreparedGateSim::new(&design.transition),
+            state,
+            cycle: 0,
+        })
+    }
+
+    /// Samples the visible outputs and commits every register's next state.
+    pub(crate) fn step(&mut self, inputs: &[IrBits]) -> Result<Vec<IrBits>, String> {
+        Ok(self.step_with_bindings(inputs)?.external_outputs)
+    }
+
+    /// Keeps the settled transition inputs for clients recording a full trace.
+    fn step_with_bindings(&mut self, inputs: &[IrBits]) -> Result<SimulatedCycle, String> {
+        validate_external_input(self.design, self.cycle, inputs)?;
+        let transition_inputs = bind_transition_inputs(self.design, inputs, self.state.values())?;
+        let transition_outputs = self.transition.eval_outputs(&transition_inputs);
+        let visible_outputs = self
+            .design
             .outputs
             .iter()
             .map(|id| transition_outputs[id.index()].clone())
             .collect::<Vec<_>>();
-        let next_register_values = design
+        let next_register_values = self
+            .design
             .registers
             .iter()
             .enumerate()
@@ -217,18 +238,45 @@ pub fn simulate(
                         .expect("validated one-bit enable")
                         != enable.active_low;
                     if !asserted {
-                        return state.values[index].clone();
+                        return self.state.values[index].clone();
                     }
                 }
                 transition_outputs[register.d.index()].clone()
             })
             .collect::<Vec<_>>();
 
-        transition_inputs_trace.push(transition_inputs);
-        external_outputs.push(visible_outputs);
-        register_outputs.push(state.values.clone());
-        register_inputs.push(next_register_values.clone());
-        state = SequentialState::from_register_values(design, next_register_values)?;
+        self.state = SequentialState {
+            values: next_register_values,
+        };
+        self.cycle += 1;
+        Ok(SimulatedCycle {
+            transition_inputs,
+            external_outputs: visible_outputs,
+        })
+    }
+}
+
+/// Simulates one input record per cycle, evaluating explicit register controls.
+/// Reset overrides enable; absent controls use D directly. Both
+/// explicit-control and legalized designs are supported, with simultaneous
+/// register updates.
+pub fn simulate(
+    design: &SequentialGateFn,
+    external_inputs: &[Vec<IrBits>],
+    initial_state: SequentialState,
+) -> Result<SequentialTrace, String> {
+    let mut simulator = SequentialSimulator::new(design, initial_state)?;
+    let mut external_outputs = Vec::with_capacity(external_inputs.len());
+    let mut register_outputs = Vec::with_capacity(external_inputs.len());
+    let mut register_inputs = Vec::with_capacity(external_inputs.len());
+    let mut transition_inputs_trace = Vec::with_capacity(external_inputs.len());
+
+    for cycle_inputs in external_inputs {
+        register_outputs.push(simulator.state.values.clone());
+        let cycle = simulator.step_with_bindings(cycle_inputs)?;
+        transition_inputs_trace.push(cycle.transition_inputs);
+        external_outputs.push(cycle.external_outputs);
+        register_inputs.push(simulator.state.values.clone());
     }
 
     Ok(SequentialTrace {
@@ -237,7 +285,7 @@ pub fn simulate(
         register_outputs,
         register_inputs,
         transition_inputs: transition_inputs_trace,
-        final_state: state,
+        final_state: simulator.state,
     })
 }
 
@@ -475,31 +523,30 @@ fn count_bit_vector_toggles(
     })
 }
 
-fn validate_external_inputs(
+fn validate_external_input(
     design: &SequentialGateFn,
-    external_inputs: &[Vec<IrBits>],
+    cycle_index: usize,
+    cycle: &[IrBits],
 ) -> Result<(), String> {
-    for (cycle_index, cycle) in external_inputs.iter().enumerate() {
-        if cycle.len() != design.inputs.len() {
+    if cycle.len() != design.inputs.len() {
+        return Err(format!(
+            "cycle {} has {} external inputs, expected {}",
+            cycle_index + 1,
+            cycle.len(),
+            design.inputs.len()
+        ));
+    }
+    for (input_index, (value, input_id)) in cycle.iter().zip(&design.inputs).enumerate() {
+        let expected_width = design.transition.inputs[input_id.index()].get_bit_count();
+        if value.get_bit_count() != expected_width {
             return Err(format!(
-                "cycle {} has {} external inputs, expected {}",
+                "cycle {} external input {} ('{}') has width {}, expected {}",
                 cycle_index + 1,
-                cycle.len(),
-                design.inputs.len()
+                input_index,
+                design.transition.inputs[input_id.index()].name,
+                value.get_bit_count(),
+                expected_width
             ));
-        }
-        for (input_index, (value, input_id)) in cycle.iter().zip(&design.inputs).enumerate() {
-            let expected_width = design.transition.inputs[input_id.index()].get_bit_count();
-            if value.get_bit_count() != expected_width {
-                return Err(format!(
-                    "cycle {} external input {} ('{}') has width {}, expected {}",
-                    cycle_index + 1,
-                    input_index,
-                    design.transition.inputs[input_id.index()].name,
-                    value.get_bit_count(),
-                    expected_width
-                ));
-            }
         }
     }
     Ok(())

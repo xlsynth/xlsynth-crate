@@ -26,6 +26,7 @@ pub mod validate_constant_flops;
 mod equiv;
 mod names;
 mod spec;
+mod vectors;
 pub use spec::{ResolvedStitchPipeline, StitchPipelineSpec};
 
 use crate::aig::{ClockPort, SequentialPipelineOptions};

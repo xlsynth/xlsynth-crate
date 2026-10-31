@@ -202,24 +202,18 @@ ______________________________________________________________________
 
 # IR Eval vs Interpreter Fuzz Target
 
-This fuzz target differentially compares our Rust IR evaluator with the libxls
-interpreter on the same directly generated acyclic PIR package, using autocov
-to grow a bounded corpus of interesting typed inputs instead of checking only
-one arbitrary tuple.
+This fuzz target compares the return values of the event-reporting and memoized
+value-only PIR evaluators with the libxls interpreter on directly generated
+acyclic PIR packages. It checks mixed random inputs and a bounded autocov corpus.
+For nullary functions it checks the single empty argument vector.
 
 Target name: `fuzz_ir_eval_interp_equiv`
 
 Essential property under test:
 
-- PIR evaluation agrees with libxls interpretation across autocov-selected
+- Both PIR evaluation modes agree with libxls interpretation across sampled
   inputs for generated upstream-standard packages, including helper functions,
-  `invoke`, `counted_for`, `gate`, and arbitrary-width multiply forms.
-
-Early returns justification:
-
-- Nullary functions are skipped because autocov input exploration has no input
-  space to search and direct evaluator tests cover those functions more
-  directly.
+  `invoke`, `map`, `counted_for`, `gate`, and arbitrary-width multiply forms.
 
 Main failure modes surfaced:
 
