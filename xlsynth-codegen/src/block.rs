@@ -878,51 +878,27 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 instance.name, instance.block
             ))
         })?;
-        let attribute = foreign
-            .outer_attrs
-            .iter()
-            .find(|attribute| attribute.contains("code_template:"))
+        let template = foreign
+            .ffi_proto()
+            .and_then(|ffi| ffi.code_template.as_deref())
             .ok_or_else(|| {
                 BlockCodegenError::Unsupported(format!(
                     "external function `{}` has no ffi_proto code_template",
                     foreign.name
                 ))
             })?;
-        let marker = attribute.find("code_template:").expect("template marker");
-        let remainder = attribute[marker + "code_template:".len()..].trim_start();
-        let start = remainder.find('"').ok_or_else(|| {
+        let template = std::str::from_utf8(template).map_err(|error| {
             BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an invalid ffi_proto code_template",
-                foreign.name
+                "external function `{}` has a non-UTF-8 ffi_proto code_template at byte {}",
+                foreign.name,
+                error.valid_up_to()
             ))
         })?;
-        let mut escaped = false;
-        let mut end = None;
-        for (index, character) in remainder[start + 1..].char_indices() {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                end = Some(start + 1 + index);
-                break;
-            }
-        }
-        let end = end.ok_or_else(|| {
-            BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an unterminated ffi_proto code_template",
-                foreign.name
-            ))
-        })?;
-        let template = remainder[start + 1..end]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
         let bindings = connections
             .iter()
             .map(|(name, value)| (name.as_str(), self.file.emit_expression(value)))
             .collect::<BTreeMap<_, _>>();
-        let template = substitute_external_template(&template, &instance.name, &bindings)?;
+        let template = substitute_external_template(template, &instance.name, &bindings)?;
         let statement = self.file.make_inline_verilog_statement(template.trim());
         self.file
             .add_member_inline_statement(self.module, statement);

@@ -1046,6 +1046,34 @@ fn external_templates_substitute_function_names_and_connected_ports() {
     );
 }
 
+const EXTERNAL_FFI_ATTRIBUTE: &str = r#"#[ffi_proto("""code_template: "external_cell {fn} (.source({value}), .destination({return}));"
+""")]"#;
+
+#[test]
+fn external_template_uses_the_effective_protobuf_field() {
+    let expected = emit(EXTERNAL, &BlockCodegenOptions::default()).replace(
+        ".destination(received));",
+        r#".destination(received)); // "quoted" \n"#,
+    );
+    for attribute in [
+        r#"#[ffi_proto("delay_ps: 1 code_template: 'external_cell {fn} (.source({value}), .destination({return})); // \"quoted\" \\n'")]"#,
+        r#"#[ffi_proto("""code_template: "superseded instance"
+""")]
+#[ // code_template: "decoy in an IR comment"
+ffi_proto("""
+# code_template: "decoy in a protobuf comment"
+delay_ps: 1
+code_template: "external_cell {fn} " "(.source({value}), .destination({return})); // \"quoted\" \\n"
+""")]"#,
+    ] {
+        let ir = EXTERNAL.replace(EXTERNAL_FFI_ATTRIBUTE, attribute);
+        // Stock XLS parses the FFI function but cannot read the extern block it
+        // emits.
+        assert_stock_xls_accepts(ir.split_once("top block").unwrap().0);
+        assert_eq!(emit(&ir, &BlockCodegenOptions::default()), expected);
+    }
+}
+
 #[test]
 fn external_templates_substitute_nested_aggregate_port_paths() {
     let ir = r#"package public_external
@@ -1079,14 +1107,34 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 
 #[test]
 fn external_function_without_code_template_has_actionable_error() {
+    for attribute in [
+        "#[ // code_template: \"decoy in a different attribute\"\nnon_synth]",
+        r#"#[ffi_proto("""
+# code_template: "decoy in a protobuf comment"
+delay_ps: 1
+""")]"#,
+    ] {
+        let ir = EXTERNAL.replace(EXTERNAL_FFI_ATTRIBUTE, attribute);
+        assert_eq!(
+            emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
+            Err(BlockCodegenError::Unsupported(
+                "external function `external_identity` has no ffi_proto code_template".to_owned()
+            ))
+        );
+    }
+}
+
+#[test]
+fn external_function_with_binary_template_has_actionable_error() {
     let ir = EXTERNAL.replace(
-        "#[ffi_proto(\"\"\"code_template: \"external_cell {fn} (.source({value}), .destination({return}));\"\n\"\"\")]\n",
-        "",
+        EXTERNAL_FFI_ATTRIBUTE,
+        r#"#[ffi_proto("code_template: 'cell \777'")]"#,
     );
+    assert_stock_xls_accepts(ir.split_once("top block").unwrap().0);
     assert_eq!(
         emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "external function `external_identity` has no ffi_proto code_template".to_owned()
+        Err(BlockCodegenError::InvalidBlock(
+            "external function `external_identity` has a non-UTF-8 ffi_proto code_template at byte 5".to_owned()
         ))
     );
 }

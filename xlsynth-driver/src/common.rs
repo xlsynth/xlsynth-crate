@@ -61,7 +61,7 @@ pub fn enforce_extern_verilog_codegen_policy(
     }
 
     let mut parser = ir_parser::Parser::new(ir_text);
-    let package = parser.parse_package().map_err(|err| {
+    let package = parser.parse_package_preserving_ffi_invokes().map_err(|err| {
         format!(
             "could not inspect IR for extern Verilog declarations while --allow_extern_verilog=false: {err}"
         )
@@ -72,11 +72,7 @@ pub fn enforce_extern_verilog_codegen_policy(
         .iter()
         .filter_map(|member| {
             let graph = member.graph();
-            graph
-                .outer_attrs
-                .iter()
-                .any(|attr| attr.trim_start().starts_with("#[ffi_proto("))
-                .then(|| graph.name.clone())
+            graph.ffi_proto().map(|_| graph.name.as_str())
         })
         .collect::<Vec<_>>();
 
@@ -692,15 +688,45 @@ top fn main(x: bits[8] id=1) -> bits[8] {
     fn extern_verilog_codegen_policy_accepts_ordinary_ir() {
         enforce_extern_verilog_codegen_policy(IR_WITHOUT_VERILOG_FFI, false)
             .expect("ordinary IR should pass policy check");
+        let decoy = IR_WITHOUT_VERILOG_FFI.replace(
+            "top fn main",
+            "#[ // ffi_proto is mentioned only in this comment\nnon_synth]\ntop fn main",
+        );
+        enforce_extern_verilog_codegen_policy(&decoy, false)
+            .expect("ordinary functions may mention FFI in comments");
     }
 
     #[test]
     fn extern_verilog_codegen_policy_rejects_ffi_ir_when_disabled() {
-        let err = enforce_extern_verilog_codegen_policy(IR_WITH_VERILOG_FFI, false)
-            .expect_err("Verilog FFI IR should require explicit opt-in");
+        let commented = IR_WITH_VERILOG_FFI.replace(
+            "#[ffi_proto(",
+            "#[ // Verilog implementation follows\nffi_proto (",
+        );
+        for ir in [IR_WITH_VERILOG_FFI, &commented] {
+            let err = enforce_extern_verilog_codegen_policy(ir, false)
+                .expect_err("Verilog FFI IR should require explicit opt-in");
+            assert!(err.contains("verilog_passthrough"), "{err}");
+            assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+        }
+    }
 
-        assert!(err.contains("verilog_passthrough"), "{err}");
-        assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+    #[test]
+    fn extern_verilog_codegen_policy_checks_extension_wrappers_before_lifting() {
+        let ir = r#"package wrapped
+#[ffi_proto("""code_template: "assign {return} = 4'hf; /* xlsynth_pir_ext=ext_clz;width=8;out_width=4;offset=0 */"
+""")]
+fn wrapped(x: bits[8] id=1) -> bits[4] {
+  ret low: bits[4] = bit_slice(x, start=0, width=4, id=2)
+}
+top fn main(x: bits[8] id=3) -> bits[4] {
+  ret result: bits[4] = invoke(x, to_apply=wrapped, id=4)
+}
+"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        assert!(pkg.get_fn("wrapped").is_none());
+        let err = enforce_extern_verilog_codegen_policy(ir, false).unwrap_err();
+        assert!(err.contains("on: wrapped."), "{err}");
+        enforce_extern_verilog_codegen_policy(ir, true).unwrap();
     }
 
     #[test]

@@ -569,7 +569,7 @@ fn extern_instantiation_uses_typed_signature_components() {
         .unwrap();
     let mut package = foreign.build_package(input, "externs").unwrap();
     package.get_fn_mut("foreign").unwrap().outer_attrs.push(r#"#[ffi_proto("""code_template: "external_cell {fn} (.value({arg.0}), .result({return.0}));"
-""")]"#.to_string());
+""")]"#.parse().unwrap());
     let mut builder = BlockBuilder::new("wrapper");
     let input = builder.input_port("data", Type::Bits(8)).unwrap();
     let instance = builder
