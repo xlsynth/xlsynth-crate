@@ -11,6 +11,7 @@ use crate::aig::GateFn;
 use crate::aig::cut_db_rewrite::{self, CutDbRewriteMode};
 use crate::aig::dce;
 use crate::aig::fraig::{self, FraigPassStat};
+use crate::aig::get_summary_stats::log_gate_snapshot;
 use crate::aig::reassociation;
 use crate::cut_db::loader::CutDb;
 use crate::prove_gate_fn_equiv_common::GateFormalBackend;
@@ -76,8 +77,17 @@ pub fn optimize_gate_fn(
     gate_fn: GateFn,
     options: &GateFnOptimizeOptions,
 ) -> Result<GateFnOptimizeOutcome, String> {
+    log::debug!(
+        "gate_pipeline function={} fraig={} reassociation={} cut_db={}",
+        gate_fn.name,
+        options.fraig,
+        options.reassociation,
+        options.cut_db.is_some()
+    );
+    log_gate_snapshot(module_path!(), "mapped", &gate_fn);
     let pre_dce_gate_count = gate_fn.gates.len();
     let mut gate_fn = dce::dce(&gate_fn);
+    log_gate_snapshot(module_path!(), "dead_code", &gate_fn);
     log::info!(
         "pre-fraig dce: gate count {} -> {}",
         pre_dce_gate_count,
@@ -119,11 +129,13 @@ pub fn optimize_gate_fn(
         .map_err(|error| format!("Fraig optimization failed: {error}"))?;
         gate_fn = result.optimized_fn;
         fraig_pass_stat = Some(result.stat);
+        log_gate_snapshot(module_path!(), "fraig", &gate_fn);
     }
 
     if options.reassociation && options.cut_db.is_some() {
         log::info!("pre-cut-db ordinary reassociation enabled");
         gate_fn = reassociation::reassociate_gatefn(&gate_fn);
+        log_gate_snapshot(module_path!(), "pre_cut_reassociation", &gate_fn);
     }
 
     if let Some(db) = options.cut_db.as_ref() {
@@ -140,15 +152,19 @@ pub fn optimize_gate_fn(
                 mode: options.cut_db_rewrite_mode,
             },
         );
+        log_gate_snapshot(module_path!(), "cut_db", &gate_fn);
         if options.reassociation {
             log::info!("post-cut-db guarded reuse reassociation enabled");
             gate_fn = reassociation::reassociate_gatefn_selecting_reuse(&gate_fn);
+            log_gate_snapshot(module_path!(), "post_cut_reassociation", &gate_fn);
         }
     } else if options.reassociation {
         log::info!("guarded reuse reassociation enabled");
         gate_fn = reassociation::reassociate_gatefn_selecting_reuse(&gate_fn);
+        log_gate_snapshot(module_path!(), "reuse_reassociation", &gate_fn);
     }
 
+    log_gate_snapshot(module_path!(), "final", &gate_fn);
     Ok(GateFnOptimizeOutcome {
         gate_fn,
         fraig_pass_stat,

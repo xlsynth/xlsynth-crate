@@ -348,6 +348,23 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
     }
 }
 
+/// Logs complete graphs and live structural costs only when requested by the
+/// caller's module target. Graph observations do not alter optimization state.
+pub(crate) fn log_gate_snapshot(target: &'static str, stage: &str, gate_fn: &gate::GateFn) {
+    if log::log_enabled!(target: target, log::Level::Debug) {
+        let stats = get_aig_stats(gate_fn);
+        log::debug!(target: target,
+            "gate_pass function={} stage={} stored_nodes={} product={} live={:?}",
+            gate_fn.name, stage, gate_fn.gates.len(),
+            (stats.and_nodes as u128) * (stats.max_depth as u128), stats
+        );
+    }
+    log::trace!(target: target,
+        "gate_ir function={} stage={}\n{}",
+        gate_fn.name, stage, gate_fn.to_string_including_dead_nodes()
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
