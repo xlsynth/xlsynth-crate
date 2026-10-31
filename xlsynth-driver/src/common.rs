@@ -61,7 +61,7 @@ pub fn enforce_extern_verilog_codegen_policy(
     }
 
     let mut parser = ir_parser::Parser::new(ir_text);
-    let package = parser.parse_package().map_err(|err| {
+    let package = parser.parse_package_preserving_ffi_invokes().map_err(|err| {
         format!(
             "could not inspect IR for extern Verilog declarations while --allow_extern_verilog=false: {err}"
         )
@@ -708,6 +708,25 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             assert!(err.contains("verilog_passthrough"), "{err}");
             assert!(err.contains("--allow_extern_verilog=true"), "{err}");
         }
+    }
+
+    #[test]
+    fn extern_verilog_codegen_policy_checks_extension_wrappers_before_lifting() {
+        let ir = r#"package wrapped
+#[ffi_proto("""code_template: "assign {return} = 4'hf; /* xlsynth_pir_ext=ext_clz;width=8;out_width=4;offset=0 */"
+""")]
+fn wrapped(x: bits[8] id=1) -> bits[4] {
+  ret low: bits[4] = bit_slice(x, start=0, width=4, id=2)
+}
+top fn main(x: bits[8] id=3) -> bits[4] {
+  ret result: bits[4] = invoke(x, to_apply=wrapped, id=4)
+}
+"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        assert!(pkg.get_fn("wrapped").is_none());
+        let err = enforce_extern_verilog_codegen_policy(ir, false).unwrap_err();
+        assert!(err.contains("on: wrapped."), "{err}");
+        enforce_extern_verilog_codegen_policy(ir, true).unwrap();
     }
 
     #[test]

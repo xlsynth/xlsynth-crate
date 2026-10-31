@@ -187,7 +187,7 @@ fn compaction_preserves_metadata_and_reports_every_node_mapping() {
     let mut function = interleaved_function();
     function
         .outer_attrs
-        .push("#[ffi_proto(\"opaque\")]".parse().unwrap());
+        .push(r#"#[ffi_proto("code_template: 'opaque'")]"#.parse().unwrap());
     function.inner_attrs.push("#![opaque]".to_string());
     for (index, node) in function.nodes.iter_mut().enumerate() {
         node.pos = Some(vec![ir::Pos {

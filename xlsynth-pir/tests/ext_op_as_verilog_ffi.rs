@@ -64,6 +64,37 @@ fn assert_wrapped_text_parse_error_contains(ir_text: &str, expected_substr: &str
 }
 
 #[test]
+fn lifting_uses_only_the_effective_code_template() {
+    let ir = r##"package effective_template
+#[ffi_proto("""code_template: "assign {return} = {x}; /* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */"
+""")]
+#[ffi_proto("""# code_template: "/* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */"
+code_template : 'assign {return} = {x}[2:0];'
+""")]
+fn external(x: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(x, start=0, width=3, id=2)
+}
+top fn main(x: bits[4] id=3) -> bits[3] {
+  ret result: bits[3] = invoke(x, to_apply=external, id=4)
+}
+"##;
+    xlsynth::IrPackage::parse_ir(ir, None).unwrap();
+    let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+    let external = pkg
+        .get_fn("external")
+        .expect("external declaration retained");
+    assert_eq!(
+        external.ffi_proto().unwrap().code_template.as_deref(),
+        Some("assign {return} = {x}[2:0];")
+    );
+    let main = pkg.get_fn("main").unwrap();
+    assert!(matches!(
+        &main.get_node(main.ret_node_ref.unwrap()).payload,
+        xlsynth_pir::ir::NodePayload::Invoke { to_apply, .. } if to_apply == "external"
+    ));
+}
+
+#[test]
 fn verilogffi_wrapped_ext_carry_out_round_trips_verbatim() {
     let ir_text = r#"package carry_out_wrapped
 

@@ -1097,18 +1097,32 @@ pub struct FunctionType {
     pub return_type: Type,
 }
 
+/// Reset metadata before the parser resolves the port name to a block input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetAttribute {
+    pub port_name: String,
+    pub asynchronous: bool,
+    pub active_low: bool,
+}
+
+/// The decoded XLS foreign function metadata used for external implementations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignFunctionData {
+    pub code_template: Option<String>,
+    pub delay_ps: Option<i32>,
+}
+
 /// The validated kind of an outer attribute on an IR function or block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OuterAttributeKind {
     NonSynth,
     InitiationInterval(i64),
-    /// The decoded text of the foreign function's protobuf.
-    FfiProto(String),
+    FfiProto(ForeignFunctionData),
     /// The decoded text of the module signature protobuf.
     Signature(String),
     FuzzTest,
     ChannelPorts,
-    Reset,
+    Reset(ResetAttribute),
     Provenance,
 }
 
@@ -1159,12 +1173,15 @@ pub struct NodeGraph {
 }
 
 impl NodeGraph {
-    /// Returns the decoded text of the first `ffi_proto` attribute, if present.
-    pub fn ffi_proto(&self) -> Option<&str> {
-        self.outer_attrs.iter().find_map(|attr| match attr.kind() {
-            OuterAttributeKind::FfiProto(text) => Some(text.as_str()),
-            _ => None,
-        })
+    /// Returns the last `ffi_proto` declaration, which is the one XLS uses.
+    pub fn ffi_proto(&self) -> Option<&ForeignFunctionData> {
+        self.outer_attrs
+            .iter()
+            .rev()
+            .find_map(|attr| match attr.kind() {
+                OuterAttributeKind::FfiProto(data) => Some(data),
+                _ => None,
+            })
     }
 
     /// Creates an empty graph with the reserved non-emitted sentinel node.

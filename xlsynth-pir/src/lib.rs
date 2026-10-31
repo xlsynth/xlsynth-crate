@@ -13,6 +13,7 @@ pub mod corners;
 pub mod dce;
 pub mod desugar_extensions;
 pub mod edit_distance;
+mod ffi_proto;
 pub mod fuzz_utils;
 pub mod greedy_matching_ged;
 pub mod ir;

@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodeGraph, NodePayload, NodeRef,
-    OuterAttribute, OuterAttributeKind, Package, PackageMember, Type, Unop,
+    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, ForeignFunctionData, Node, NodeGraph,
+    NodePayload, NodeRef, OuterAttribute, OuterAttributeKind, Package, PackageMember, Type, Unop,
 };
 use crate::ir_builder::{
     BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
@@ -783,10 +783,13 @@ fn make_unique_helper_name(base: &str, existing_names: &mut BTreeSet<String>) ->
 }
 
 /// Builds the FFI annotation for a generated extension helper.
-fn ffi_proto_outer_attr(code_template: &str) -> OuterAttribute {
-    let proto = format!("code_template: {code_template:?}\n");
-    let source = format!("#[ffi_proto(\"\"\"{proto}\"\"\")]");
-    OuterAttribute::new(OuterAttributeKind::FfiProto(proto), source)
+fn ffi_proto_outer_attr(code_template: String) -> OuterAttribute {
+    let source = format!("#[ffi_proto(\"\"\"code_template: {code_template:?}\n\"\"\")]");
+    let data = ForeignFunctionData {
+        code_template: Some(code_template),
+        delay_ps: None,
+    };
+    OuterAttribute::new(OuterAttributeKind::FfiProto(data), source)
 }
 
 fn format_bool_list_csv(values: &[bool]) -> String {
@@ -970,7 +973,7 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Result<Fn, DesugarError> {
     canonicalize_helper_node_order(&mut helper);
     helper
         .outer_attrs
-        .push(ffi_proto_outer_attr(&helper_code_template(key)));
+        .push(ffi_proto_outer_attr(helper_code_template(key)));
     Ok(helper)
 }
 

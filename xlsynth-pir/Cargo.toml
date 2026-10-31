@@ -25,6 +25,7 @@ bitvec = "1.0.1"
 sha2 = "0.10"
 smallvec = "1.13.2"
 num-bigint = "0.4.6"
+prost-reflect = { version = "0.16.5", features = ["text-format"] }
 
 [dev-dependencies]
 maplit = "1.0.2"

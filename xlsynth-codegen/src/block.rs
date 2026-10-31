@@ -878,49 +878,20 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 instance.name, instance.block
             ))
         })?;
-        let remainder = foreign
+        let template = foreign
             .ffi_proto()
-            .and_then(|proto| proto.split_once("code_template:"))
-            .map(|(_, value)| value.trim_start())
+            .and_then(|ffi| ffi.code_template.as_deref())
             .ok_or_else(|| {
                 BlockCodegenError::Unsupported(format!(
                     "external function `{}` has no ffi_proto code_template",
                     foreign.name
                 ))
             })?;
-        let start = remainder.find('"').ok_or_else(|| {
-            BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an invalid ffi_proto code_template",
-                foreign.name
-            ))
-        })?;
-        let mut escaped = false;
-        let mut end = None;
-        for (index, character) in remainder[start + 1..].char_indices() {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                end = Some(start + 1 + index);
-                break;
-            }
-        }
-        let end = end.ok_or_else(|| {
-            BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an unterminated ffi_proto code_template",
-                foreign.name
-            ))
-        })?;
-        let template = remainder[start + 1..end]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
         let bindings = connections
             .iter()
             .map(|(name, value)| (name.as_str(), self.file.emit_expression(value)))
             .collect::<BTreeMap<_, _>>();
-        let template = substitute_external_template(&template, &instance.name, &bindings)?;
+        let template = substitute_external_template(template, &instance.name, &bindings)?;
         let statement = self.file.make_inline_verilog_statement(template.trim());
         self.file
             .add_member_inline_statement(self.module, statement);
