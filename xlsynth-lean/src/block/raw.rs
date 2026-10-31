@@ -644,6 +644,37 @@ pub(crate) fn node_expression(
         NodePayload::Binop(Binop::Add, lhs, rhs) => {
             Ok(format!("BitVec.add {} {}", operand(*lhs)?, operand(*rhs)?))
         }
+        NodePayload::Binop(Binop::Sub, lhs, rhs) => {
+            Ok(format!("BitVec.sub {} {}", operand(*lhs)?, operand(*rhs)?))
+        }
+        NodePayload::Binop(Binop::Ult, lhs, rhs) => Ok(format!(
+            "BitVec.ofBool (BitVec.ult {} {})",
+            operand(*lhs)?,
+            operand(*rhs)?
+        )),
+        NodePayload::Binop(Binop::Udiv, lhs, rhs) => {
+            // As in XLS, division by zero returns an all-ones unsigned value.
+            Ok(format!(
+                "BitVec.smtUDiv {} {}",
+                operand(*lhs)?,
+                operand(*rhs)?
+            ))
+        }
+        NodePayload::Binop(Binop::Umul, lhs, rhs) => {
+            let Type::Bits(width) = node.ty else {
+                bail!("umul result must be bits");
+            };
+            // XLS permits a product width independent of both operands.
+            let resize = |arg: NodeRef| -> Result<String> {
+                let value = operand(arg)?;
+                if graph.get_node(arg).ty == node.ty {
+                    Ok(value)
+                } else {
+                    Ok(format!("(BitVec.setWidth {width} {value})"))
+                }
+            };
+            Ok(format!("BitVec.mul {} {}", resize(*lhs)?, resize(*rhs)?))
+        }
         NodePayload::Binop(Binop::Shll, lhs, rhs) => {
             let Type::Bits(width) = &node.ty else {
                 bail!("expected bits result for shll");
