@@ -12,7 +12,7 @@ use crate::gatify::ir2gate_arithmetic::{
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_with_origins};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{self, ExtNaryAddArchitecture, StartAndLimit};
@@ -23,7 +23,7 @@ use xlsynth_pir::known_bits::KnownBits;
 use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir2gate_utils::{
-    AdderMapping, Direction, array_add_with_carry_out, barrel_shifter_stage_demands,
+    AdderMapping, CarryPrefixes, Direction, array_add_with_carry_out, barrel_shifter_stage_demands,
     gatify_add_brent_kung, gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
     gatify_barrel_shifter_with_forked_stage_order, gatify_barrel_shifter_with_output_mask,
     gatify_barrel_shifter_with_output_width, gatify_barrel_shifter_with_stage_order,
@@ -193,10 +193,61 @@ enum UseCounts {
     Region(HashMap<ir::NodeRef, usize>),
 }
 
+/// Finds carry terminals whose addends may share logic. Multiplying the users
+/// of a single result does not create another prefix to compute.
+fn potentially_shared_carries(
+    f: &ir::Fn,
+    topo: &[ir::NodeRef],
+    demands: &HashMap<ir::NodeRef, Vec<bool>>,
+) -> HashSet<ir::NodeRef> {
+    let terminal = |nr| match f.get_node(nr).payload {
+        ir::NodePayload::ExtCarryOut { lhs, rhs, .. }
+            if demands.get(&nr).is_some_and(|mask| mask[0]) =>
+        {
+            Some((lhs, rhs))
+        }
+        _ => None,
+    };
+    if topo.iter().copied().filter_map(terminal).nth(1).is_none() {
+        return HashSet::new();
+    }
+    // Each node's addend cone has either one terminal owner or several.
+    // Walk each edge once, even if many terminals reach the same word.
+    let mut owners = HashMap::new();
+    let mut shared = HashSet::new();
+    for &nr in topo.iter().rev() {
+        let payload = &f.get_node(nr).payload;
+        let inherited = owners.get(&nr).copied();
+        let mut visit = |node, owner: Option<ir::NodeRef>| {
+            if matches!(f.get_node(node).payload, ir::NodePayload::Literal(_)) {
+                return;
+            }
+            let previous = owners.entry(node).or_insert(owner);
+            if *previous != owner {
+                shared.extend(*previous);
+                shared.extend(owner);
+                *previous = None;
+            }
+        };
+        if let Some((lhs, rhs)) = terminal(nr) {
+            visit(lhs, Some(nr));
+            visit(rhs, Some(nr));
+        }
+        if let Some(owner) = inherited {
+            for arg in ir_utils::operands(payload) {
+                visit(arg, owner);
+            }
+        }
+    }
+    shared
+}
+
 /// Tracks lowered values and their consumer counts within the mapping boundary.
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
+    shared_carries: HashSet<ir::NodeRef>,
+    carry_prefixes: CarryPrefixes,
     /// When absent, every bit of a lowered value is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
@@ -218,6 +269,8 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            shared_carries: HashSet::new(),
+            carry_prefixes: CarryPrefixes::default(),
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -240,6 +293,8 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            shared_carries: HashSet::new(),
+            carry_prefixes: CarryPrefixes::default(),
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -248,7 +303,7 @@ impl GateEnv {
         }
     }
 
-    /// Returns the mask for a shift in this lowering boundary.
+    /// Returns the demanded output bits for a node in this lowering boundary.
     fn output_mask(&self, node: ir::NodeRef, width: usize) -> Vec<bool> {
         match &self.demanded_bits {
             None => vec![true; width],
@@ -3819,17 +3874,19 @@ fn gatify_node(
                 .try_into()
                 .expect("ExtCarryOut c_in should be bits[1]");
 
-            let w = lhs_bits.get_bit_count();
-            let mut carry: AigOperand = c_in_bit;
-            for i in 0..w {
-                let a_i = *lhs_bits.get_lsb(i);
-                let b_i = *rhs_bits.get_lsb(i);
-                let g_i = g8_builder.add_and_binary(a_i, b_i);
-                let p_i = g8_builder.add_or_binary(a_i, b_i);
-                let p_and_c = g8_builder.add_and_binary(p_i, carry);
-                carry = g8_builder.add_or_binary(g_i, p_and_c);
-            }
-
+            let carry = if env.output_mask(node_ref, 1)[0] {
+                let prefixes = env
+                    .shared_carries
+                    .contains(&node_ref)
+                    .then_some(&mut env.carry_prefixes);
+                crate::ir2gate_utils::gatify_carry_out(
+                    g8_builder, &lhs_bits, &rhs_bits, c_in_bit, prefixes,
+                )
+            } else {
+                // Downstream wiring still needs a bit. The lowering map omits
+                // this undemanded value.
+                g8_builder.get_false()
+            };
             env.add(node_ref, GateOrVec::Gate(carry));
         }
         ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
@@ -4744,6 +4801,9 @@ fn gatify_internal(
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
+    // Gate operands from an earlier mapping trial belong to its builder.
+    env.carry_prefixes = CarryPrefixes::new(options.track_pir_node_ids);
+
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {
         let param = f.get_node(param_ref);
@@ -4974,6 +5034,7 @@ fn gatify_lower_prepared_fn(
         Ok(gb)
     };
     let mut env = GateEnv::new(f);
+    env.shared_carries = potentially_shared_carries(f, &topological, &demanded_bits);
     env.demanded_bits = Some(demanded_bits);
     // Both mappings use the same prepared graph and consumer counts.
     if options.enable_rewrite_nary_add {

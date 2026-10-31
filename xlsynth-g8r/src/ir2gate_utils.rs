@@ -7,9 +7,10 @@
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use xlsynth_pir::ir::ExtNaryAddArchitecture;
 
-use crate::aig::gate::{self, AigBitVector, AigOperand};
+use crate::aig::gate::{self, AigBitVector, AigOperand, AigRef};
 use crate::aig::get_summary_stats::{AigConeStats, get_aig_cone_stats};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
@@ -1245,10 +1246,184 @@ pub fn gatify_one_hot_with_nonzero_flag_for_depth(
     )
 }
 
-#[derive(Clone, Copy)]
+/// Produces the final carry without constructing sum bits or intermediate
+/// carries.
+pub(crate) fn gatify_carry_out(
+    gb: &mut GateBuilder,
+    lhs: &AigBitVector,
+    rhs: &AigBitVector,
+    carry_in: AigOperand,
+    shared: Option<&mut CarryPrefixes>,
+) -> AigOperand {
+    assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
+    // maj(s, s, carry) = s. Only bits above the highest such pair can
+    // affect the output, including when s is an inverted wire or a constant.
+    let width = lhs.get_bit_count();
+    let (start, carry_in) = (0..width)
+        .rev()
+        .find(|&i| lhs.get_lsb(i) == rhs.get_lsb(i))
+        .map_or((0, carry_in), |i| (i + 1, *lhs.get_lsb(i)));
+    if start == width {
+        return gb.union_current_pir_node_id_into_operand(carry_in);
+    }
+    let pairs = (start..width).map(|i| (*lhs.get_lsb(i), *rhs.get_lsb(i)));
+    if let Some(shared) = shared {
+        return shared.carry(gb, pairs, carry_in);
+    }
+    let mut bits: Vec<_> = pairs.map(|(a, b)| PrefixPg::bit(gb, a, b)).collect();
+    bits[0] = bits[0].with_carry_in(gb, carry_in);
+    reduce_prefix_pg(gb, &bits).g
+}
+
+/// Bisects the word when only the final carry is needed.
+fn reduce_prefix_pg(gb: &mut GateBuilder, bits: &[PrefixPg]) -> PrefixPg {
+    if let [bit] = bits {
+        return *bit;
+    }
+    let (low, high) = bits.split_at(bits.len() / 2);
+    let low = reduce_prefix_pg(gb, low);
+    let high = reduce_prefix_pg(gb, high);
+    combine_prefix_pg(gb, low, high)
+}
+
+/// A propagate/generate summary of consecutive bits in significance order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PrefixPg {
     p: AigOperand,
     g: AigOperand,
+}
+
+impl PrefixPg {
+    fn bit(gb: &mut GateBuilder, a: AigOperand, b: AigOperand) -> Self {
+        Self {
+            p: gb.add_or_binary(a, b),
+            g: gb.add_and_binary(a, b),
+        }
+    }
+
+    /// Absorbs the seed into the lowest bit of this reduction.
+    fn with_carry_in(self, gb: &mut GateBuilder, seed: AigOperand) -> Self {
+        let g = if seed == gb.get_true() {
+            self.p
+        } else if seed == gb.get_false() {
+            self.g
+        } else {
+            let propagated = gb.add_and_binary(self.p, seed);
+            gb.add_or_binary(self.g, propagated)
+        };
+        Self {
+            p: gb.get_false(),
+            g,
+        }
+    }
+}
+
+/// The summary of a shared group and its provenance targets when requested.
+struct CarryGroup {
+    pg: PrefixPg,
+    targets: Box<[AigRef]>,
+}
+
+impl CarryGroup {
+    fn emit(
+        gb: &mut GateBuilder,
+        tracked: bool,
+        emit: impl FnOnce(&mut GateBuilder) -> PrefixPg,
+    ) -> Self {
+        let (pg, targets) = if tracked {
+            gb.capture_pir_targets(emit)
+        } else {
+            (emit(gb), Box::default())
+        };
+        Self { pg, targets }
+    }
+
+    fn reuse(&self, gb: &mut GateBuilder) -> PrefixPg {
+        for &node in &self.targets {
+            gb.union_current_pir_node_id_into_operand(node.into());
+        }
+        self.pg
+    }
+}
+
+/// Shared prefix summaries belonging to one gate builder.
+#[derive(Default)]
+pub(crate) struct CarryPrefixes {
+    tracked: bool,
+    // Only the lowest bit consumes the seed. Upper groups depend solely on
+    // their two child summaries, even across terminals with distinct seeds.
+    bits: HashMap<(AigOperand, AigOperand, Option<AigOperand>), CarryGroup>,
+    groups: HashMap<(PrefixPg, PrefixPg), CarryGroup>,
+}
+
+impl CarryPrefixes {
+    pub(crate) fn new(tracked: bool) -> Self {
+        Self {
+            tracked,
+            ..Self::default()
+        }
+    }
+
+    /// Shares whole aligned blocks and the partial block at each terminal.
+    fn carry(
+        &mut self,
+        gb: &mut GateBuilder,
+        pairs: impl Iterator<Item = (AigOperand, AigOperand)>,
+        seed: AigOperand,
+    ) -> AigOperand {
+        let bits: Vec<_> = pairs
+            .enumerate()
+            .map(|(i, (a, b))| {
+                let seed = (i == 0).then_some(seed);
+                self.bits
+                    .entry((a.min(b), a.max(b), seed))
+                    .or_insert_with(|| {
+                        CarryGroup::emit(gb, self.tracked, |gb| {
+                            let bit = PrefixPg::bit(gb, a, b);
+                            seed.map_or(bit, |seed| bit.with_carry_in(gb, seed))
+                        })
+                    })
+                    .reuse(gb)
+            })
+            .collect();
+        if let [bit] = bits.as_slice() {
+            return bit.g;
+        }
+        // For width W choose a power-of-two block B ~ log(W). There are
+        // O(W/B) block boundaries with O(log W) unaligned joins each. Within
+        // a block, extending the tail costs one join per bit and has depth
+        // O(B). The complete low prefix crosses only the final join.
+        let block = 1 << bits.len().ilog2().ilog2();
+        let (whole, tail) = bits.split_at(bits.len() - bits.len() % block);
+        let lower = self.reduce(gb, whole, false);
+        if tail.is_empty() {
+            lower.g
+        } else {
+            let upper = self.reduce(gb, tail, true);
+            combine_prefix_pg(gb, lower, upper).g
+        }
+    }
+
+    /// Reuses each join of the same ordered low and high summaries.
+    fn reduce(&mut self, gb: &mut GateBuilder, bits: &[PrefixPg], tail: bool) -> PrefixPg {
+        if let [bit] = bits {
+            return *bit;
+        }
+        let low_len = if tail {
+            bits.len() - 1
+        } else {
+            1 << (bits.len() / 2).ilog2()
+        };
+        let (low, high) = bits.split_at(low_len);
+        let low = self.reduce(gb, low, tail);
+        let high = self.reduce(gb, high, tail);
+        self.groups
+            .entry((low, high))
+            .or_insert_with(|| {
+                CarryGroup::emit(gb, self.tracked, |gb| combine_prefix_pg(gb, low, high))
+            })
+            .reuse(gb)
+    }
 }
 
 fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> PrefixPg {
@@ -1275,6 +1450,89 @@ mod tests {
 
     use test_case::test_case;
     use xlsynth_pir::IrBits;
+
+    #[test]
+    fn reversed_prefix_requests_build_linear_groups_without_hashing() {
+        let width = 512;
+        let mut gb = GateBuilder::new("prefixes".into(), GateBuilderOptions::no_opt());
+        let a = gb.add_input("a".into(), width);
+        let b = gb.add_input("b".into(), width);
+        let seed = gb.get_false();
+        let mut cache = CarryPrefixes::default();
+        for end in (1..=width).rev() {
+            let (a, b) = if end % 2 == 0 { (&a, &b) } else { (&b, &a) };
+            gatify_carry_out(
+                &mut gb,
+                &a.get_lsb_slice(0, end),
+                &b.get_lsb_slice(0, end),
+                seed,
+                Some(&mut cache),
+            );
+        }
+        assert_eq!(cache.bits.len(), width);
+        assert!(cache.groups.len() <= 4 * width);
+        assert!(gb.gates.len() <= 24 * width);
+    }
+
+    #[test]
+    fn distinct_seeds_share_the_upper_carry_groups() {
+        let width = 64;
+        let mut gb = GateBuilder::new("carries".into(), GateBuilderOptions::opt());
+        let a = gb.add_input("a".into(), width);
+        let b = gb.add_input("b".into(), width);
+        let seeds = gb.add_input("seeds".into(), width);
+        let mut cache = CarryPrefixes::default();
+        let carries: Vec<_> = seeds
+            .iter_lsb_to_msb()
+            .map(|&seed| gatify_carry_out(&mut gb, &a, &b, seed, Some(&mut cache)))
+            .collect();
+        // Each additional seed changes only the lowest bit and its ancestors.
+        assert!(cache.bits.len() <= width + carries.len() - 1);
+        assert!(cache.groups.len() <= width - 1 + (carries.len() - 1) * width.ilog2() as usize);
+
+        gb.add_output("out".into(), AigBitVector::from_lsb_is_index_0(&carries));
+        let gates = gb.build();
+        for i in 0..width {
+            let seeds = IrBits::from_lsb_fn(width, |bit| bit == i);
+            let inputs = [IrBits::all_ones(width), IrBits::zero(width), seeds.clone()];
+            let result = gate_sim::eval(&gates, &inputs, gate_sim::Collect::None);
+            assert_eq!(result.outputs, vec![seeds]);
+        }
+    }
+
+    #[test]
+    fn carry_only_reduction_matches_addition_and_has_logarithmic_depth() {
+        for width in [1, 2, 5, 16, 37, 65] {
+            for carry_in in [None, Some(false), Some(true)] {
+                let build = |prefix, shared: bool| {
+                    let mut gb = GateBuilder::new("carry".into(), GateBuilderOptions::opt());
+                    let a = gb.add_input("a".into(), width);
+                    let b = gb.add_input("b".into(), width);
+                    let cin = match carry_in {
+                        None => *gb.add_input("cin".into(), 1).get_lsb(0),
+                        Some(false) => gb.get_false(),
+                        Some(true) => gb.get_true(),
+                    };
+                    let carry = if prefix {
+                        let mut cache = CarryPrefixes::default();
+                        gatify_carry_out(&mut gb, &a, &b, cin, shared.then_some(&mut cache))
+                    } else {
+                        gatify_add_ripple_carry(&a, &b, cin, None, &mut gb).0
+                    };
+                    gb.add_output("result".into(), AigBitVector::from_lsb_is_index_0(&[carry]));
+                    gb.build()
+                };
+                let expected = build(false, false);
+                for shared in [false, true] {
+                    let actual = build(true, shared);
+                    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&expected, &actual)
+                        .expect("carry-only reduction must agree with addition");
+                    let depth_bound = 3 + 2 * xlsynth_pir::math::ceil_log2(width);
+                    assert!(output_cone_stats(&actual).root_depths[0] <= depth_bound);
+                }
+            }
+        }
+    }
 
     #[test]
     fn demanded_logical_shift_overflow_matches_full_width_shift() {

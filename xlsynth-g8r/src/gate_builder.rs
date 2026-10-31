@@ -57,6 +57,7 @@ pub struct GateBuilder {
     pub(crate) sole_and_producers: HashMap<AigRef, usize>,
     current_pir_node_id: Option<u32>,
     active_append_checkpoint: Option<ActiveAppendCheckpoint>,
+    reused_pir_targets: Option<Vec<AigRef>>,
 }
 
 #[derive(Clone)]
@@ -118,6 +119,9 @@ impl GateBuilder {
         operand: AigOperand,
         pir_node_ids: &[u32],
     ) -> AigOperand {
+        if let Some(targets) = &mut self.reused_pir_targets {
+            targets.push(operand.node);
+        }
         self.add_pir_node_ids(operand.node, pir_node_ids);
         operand
     }
@@ -126,10 +130,30 @@ impl GateBuilder {
         &mut self,
         operand: AigOperand,
     ) -> AigOperand {
+        if let Some(targets) = &mut self.reused_pir_targets {
+            targets.push(operand.node);
+        }
         if let Some(pir_node_id) = self.current_pir_node_id {
             self.add_pir_node_id(operand.node, pir_node_id);
         }
         operand
+    }
+
+    /// Captures the gates an AND/OR construction tags, including folded or
+    /// hash-consed operands, so a later user can attach its own origins.
+    pub(crate) fn capture_pir_targets<T>(
+        &mut self,
+        emit: impl FnOnce(&mut Self) -> T,
+    ) -> (T, Box<[AigRef]>) {
+        let start = self.gates.len();
+        assert!(self.reused_pir_targets.is_none());
+        self.reused_pir_targets = Some(Vec::new());
+        let value = emit(self);
+        let mut targets = self.reused_pir_targets.take().unwrap();
+        targets.extend((start..self.gates.len()).map(|id| AigRef { id }));
+        targets.sort_unstable();
+        targets.dedup();
+        (value, targets.into_boxed_slice())
     }
 
     pub fn new(name: String, options: GateBuilderOptions) -> Self {
@@ -151,6 +175,7 @@ impl GateBuilder {
             sole_and_producers: HashMap::new(),
             current_pir_node_id: None,
             active_append_checkpoint: None,
+            reused_pir_targets: None,
         }
     }
 
