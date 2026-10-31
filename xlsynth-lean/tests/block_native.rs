@@ -359,6 +359,43 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
     check_bundle(bundle, "encode changed mask bits");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn unsigned_arithmetic_matches_xls_at_width_boundaries() {
+    use std::fmt::Write as _;
+    let source = "fn machine(a: u5, b: u5, __reg_value: u5) -> (bool, u5, u5, u5) {
+        (a < b, a - b, a / b, __reg_value * a)
+    }";
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (a b : BitVec 5) :=
+  let q : State := { value := 7 }
+  let x : Input := { rst := false, a, b }
+  (observe q x, (step q x).value)
+"#,
+    );
+    for (a, b) in [(3, 8), (31, 0), (19, 3)] {
+        let args = [a, b, 7].map(|v| xlsynth::XlsIrValue::make_ubits(5, v).unwrap());
+        let result = machine.interpret(&args).unwrap();
+        let [lt, diff, quot, prod] =
+            [0, 1, 2, 3].map(|i| result.get_element(i).unwrap().to_u64().unwrap());
+        writeln!(
+            checks,
+            "#guard clock {a} {b} == (({}, {diff}, {quot}), {prod})",
+            lt != 0
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckArith.lean".into(), checks));
+    check_bundle(bundle, "unsigned fixed-width arithmetic");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
