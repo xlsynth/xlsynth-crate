@@ -54,8 +54,10 @@ fn reachable_helpers<'a>(package: &'a ir::Package, block: &ir::Block) -> Result<
         result: &mut Vec<&'a ir::Fn>,
     ) -> Result<()> {
         for node in &graph.nodes {
-            let ir::NodePayload::Invoke { to_apply, .. } = &node.payload else {
-                continue;
+            let to_apply = match &node.payload {
+                ir::NodePayload::Invoke { to_apply, .. } => to_apply,
+                ir::NodePayload::CountedFor { body, .. } => body,
+                _ => continue,
             };
             if !emitted.contains(to_apply.as_str()) {
                 let callee = package.get_fn(to_apply).with_context(|| {

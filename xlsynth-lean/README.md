@@ -87,6 +87,10 @@ contextual errors. Parsing can succeed for operations that emission rejects.
 Every assertion remains an observable result, including disconnected ones;
 assertions never constrain the model's input or old-state domain.
 
+For a loop with a fixed iteration count, the generated Lean calls a named
+body with the loop index, the current accumulator, and any invariant arguments.
+A loop with zero iterations returns its initial accumulator.
+
 ### Compile a stateful DSLX function
 
 A parameter prefixed with `__reg_` represents the current register value. The

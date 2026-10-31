@@ -136,6 +136,20 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         comment(&graph.name),
         comment(block.package_name)
     );
+    if graph
+        .nodes
+        .iter()
+        .chain(block.helpers.iter().flat_map(|helper| &helper.nodes))
+        .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
+    {
+        source.push_str(
+            "def countedFor {width : Nat} {α : Type} (tripCount stride : Nat)
+    (body : BitVec width → α → α) (init : α) : α :=
+  Nat.fold tripCount (fun iteration _ carry => body (BitVec.ofNat width (iteration * stride)) carry) init
+
+",
+        );
+    }
     for helper in &block.helpers {
         write_helper(&mut source, helper)?;
     }
@@ -526,6 +540,25 @@ pub(crate) fn node_expression(
                 write!(call, " ({})", operand(*arg)?)?;
             }
             Ok(call)
+        }
+        NodePayload::CountedFor {
+            init,
+            trip_count,
+            stride,
+            body,
+            invariant_args,
+        } => {
+            let mut step = helper_path(body)?;
+            if !invariant_args.is_empty() {
+                step.push_str(" · ·");
+                for arg in invariant_args {
+                    write!(step, " ({})", operand(*arg)?)?;
+                }
+            }
+            Ok(format!(
+                "_root_.XlsBlock.countedFor {trip_count} {stride} ({step}) ({})",
+                operand(*init)?
+            ))
         }
         NodePayload::RegisterRead { register } => Ok(format!("q.{}", identifier(register)?)),
         NodePayload::RegisterWrite { .. } => Ok("()".to_string()),

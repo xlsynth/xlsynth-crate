@@ -1382,11 +1382,11 @@ end XlsReadable
        encodeOutput, encodeAssertions{helper_rules}]
   all_goals
     -- Distribute encoders before exposing constructors and cancelling roundtrips.
-    simp (config := {{ instances := true }}) only
+    simp (config := {{ instances := true, failIfUnchanged := false }}) only
       [{structural_rules}]
   all_goals
     -- Keep raw one-bit operations and selectors in the readable Boolean form.
-    simp (config := {{ instances := true }}) only
+    simp (config := {{ instances := true, failIfUnchanged := false }}) only
       [XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
