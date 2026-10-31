@@ -691,7 +691,7 @@ pub(crate) fn node_expression(
                 bail!("dynamic_bit_slice requires a bit-vector input");
             };
             Ok(format!(
-                "BitVec.extractLsb' (_root_.min (BitVec.toNat {}) {input_width}) {width} {}",
+                "BitVec.extractLsb' (_root_.Nat.min (BitVec.toNat {}) {input_width}) {width} {}",
                 operand(*start)?,
                 operand(*arg)?
             ))
