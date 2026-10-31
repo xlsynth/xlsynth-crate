@@ -48,3 +48,4 @@ pretty_assertions = "1.4.1"
 tempfile = "3.20"
 regex = "1.11.1"
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.78.0" }
+xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.78.0" }

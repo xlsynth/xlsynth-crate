@@ -1,0 +1,38 @@
+package invoked_stage_package
+
+fn difference(left: bits[8] id=1, right: bits[8] id=2) -> bits[8] {
+  ret sub.3: bits[8] = sub(left, right, id=3)
+}
+
+fn transform(offset: bits[8] id=4, sample: bits[8] id=5) -> bits[8] {
+  invoke.6: bits[8] = invoke(sample, offset, to_apply=difference, id=6)
+  ret not.7: bits[8] = not(invoke.6, id=7)
+}
+
+top block invoked_stage(clk: clock, sample: bits[8], offset: bits[8], out: bits[8]) {
+  reg state(bits[8])
+  sample: bits[8] = input_port(name=sample, id=8)
+  offset: bits[8] = input_port(name=offset, id=9)
+  invoke.10: bits[8] = invoke(offset, sample, to_apply=transform, id=10)
+  state_d: () = register_write(invoke.10, register=state, id=11)
+  state_q: bits[8] = register_read(register=state, id=12)
+  out: () = output_port(state_q, name=out, id=13)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module invoked_stage(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] sample,
+// EXPECT-SV:   input logic [7:0] offset,
+// EXPECT-SV:   output logic [7:0] out
+// EXPECT-SV: );
+// EXPECT-SV:   logic [7:0] state;
+// EXPECT-SV:   logic [7:0] sub_16;
+// EXPECT-SV:   logic [7:0] identity_10;
+// EXPECT-SV:   assign sub_16 = sample - offset;
+// EXPECT-SV:   assign identity_10 = ~sub_16;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     state <= identity_10;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign out = state;
+// EXPECT-SV: endmodule

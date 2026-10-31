@@ -6,9 +6,11 @@ use pretty_assertions::assert_eq;
 mod cases;
 mod support;
 use cases::*;
+use std::collections::BTreeSet;
 use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_vastly::{Signedness, Value4, compile_combo_module, eval_combo, plan_combo_eval};
 
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
@@ -296,7 +298,7 @@ top block public_block(initial: bits[8], result: bits[8]) {
 }
 
 #[test]
-fn reserved_invoked_function_names_are_rejected_clearly() {
+fn invoked_function_names_can_be_systemverilog_keywords() {
     let ir = r#"package public_names
 
 fn initial(value: bits[8] id=1) -> bits[8] {
@@ -309,18 +311,11 @@ top block caller(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=4)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_eq!(
-        emit_system_verilog(&package(ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "invoke is not supported in `caller`; inline function calls before block2sv code generation"
-                .to_owned()
-        ))
-    );
+    check_invoke_result(ir, &[("value", 8, 0x69)], 0x69);
 }
 
 #[test]
-fn reserved_invoked_function_parameters_are_rejected_clearly() {
+fn invoked_parameter_names_can_be_systemverilog_keywords() {
     let ir = r#"package public_names
 
 fn helper(initial: bits[8] id=1) -> bits[8] {
@@ -333,14 +328,7 @@ top block caller(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=4)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_eq!(
-        emit_system_verilog(&package(ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "invoke is not supported in `caller`; inline function calls before block2sv code generation"
-                .to_owned()
-        ))
-    );
+    check_invoke_result(ir, &[("value", 8, 0xb7)], 0xb7);
 }
 
 #[test]
@@ -986,6 +974,66 @@ fn hierarchy_emits_each_child_once_before_its_parent() {
 }
 
 #[test]
+fn child_function_dependencies_determine_whether_feedback_is_combinational() {
+    let ir = r#"package invoked_child
+
+fn invert(value: bits[8] id=1, ignored: bits[8] id=10) -> bits[8] {
+  ret inverted: bits[8] = not(value, id=2)
+}
+
+block child(value: bits[8], feedback: bits[8], result: bits[8]) {
+  value: bits[8] = input_port(name=value, id=3)
+  feedback: bits[8] = input_port(name=feedback, id=11)
+  negated: bits[8] = invoke(value, feedback, to_apply=invert, id=4)
+  result: () = output_port(negated, name=result, id=5)
+}
+
+top block parent(value: bits[8], result: bits[8]) {
+  instantiation leaf(block=child, kind=block)
+  value: bits[8] = input_port(name=value, id=6)
+  connected: () = instantiation_input(value, instantiation=leaf, port_name=value, id=7)
+  received: bits[8] = instantiation_output(instantiation=leaf, port_name=result, id=8)
+  returned: () = instantiation_input(received, instantiation=leaf, port_name=feedback, id=12)
+  result: () = output_port(received, name=result, id=9)
+}
+"#;
+    let parsed = package(ir);
+    for layout in [Layout::None, Layout::Pipeline] {
+        for top in ["parent", "child"] {
+            let options = BlockCodegenOptions {
+                layout,
+                top: Some(top.to_owned()),
+                ..BlockCodegenOptions::default()
+            };
+            let rtl = support::TestRtl::emit(&parsed, &options);
+            let hierarchy: Vec<_> = rtl
+                .lines()
+                .filter(|line| {
+                    line.starts_with("module ") || line.trim_start().starts_with("child leaf (")
+                })
+                .collect();
+            if top == "parent" {
+                assert_eq!(
+                    hierarchy,
+                    ["module child(", "module parent(", "  child leaf ("]
+                );
+            } else {
+                assert_eq!(hierarchy, ["module child("]);
+                check_combinational_output(&rtl, &[("value", 8, 0x6c), ("feedback", 8, 0)], 0x93);
+            }
+        }
+    }
+    // The same wiring becomes a real combinational loop when the callee
+    // uses the argument driven by its own output.
+    let cyclic = package(&ir.replace("not(value,", "not(ignored,"));
+    assert!(matches!(
+        emit_system_verilog(&cyclic, &BlockCodegenOptions::default()),
+        Err(BlockCodegenError::InvalidBlock(message))
+            if message.contains("block `parent` contains a combinational cycle")
+    ));
+}
+
+#[test]
 fn nested_hierarchy_automatically_connects_parent_clocks() {
     let ir = r#"package public_hierarchy
 
@@ -1320,46 +1368,55 @@ top block guarded(clk: clock, {reset}: bits[1], predicate: bits[1], result: bits
 }
 
 #[test]
-fn invokes_with_debug_operations_are_rejected() {
+fn repeated_invokes_preserve_effects_even_when_the_return_is_unused() {
     let ir = r#"package public_helper_debug
 
-fn checked_helper(value: bits[8] id=1) -> bits[8] {
+fn checked_helper(value: bits[8] id=1) -> () {
   zero: bits[8] = literal(value=0, id=2)
   local_condition: bits[1] = ne(value, zero, id=3)
   start_token: token = after_all(id=4)
   checked: token = assert(start_token, local_condition, message="helper condition", label="helper_valid", id=5)
   observed: token = trace(checked, local_condition, format="helper={:x}", data_operands=[value], verbosity=0, id=6)
-  ret forwarded: bits[8] = identity(value, id=7)
+  covered: () = cover(local_condition, label="observed_value", id=7)
+  ret empty: () = tuple(id=8)
 }
 
-top block wrapper(value: bits[8], result: bits[8]) {
-  value: bits[8] = input_port(name=value, id=8)
-  called: bits[8] = invoke(value, to_apply=checked_helper, id=9)
-  result: () = output_port(called, name=result, id=10)
+top block wrapper(clk: clock, lhs: bits[8], rhs: bits[8], result: bits[8]) {
+  lhs: bits[8] = input_port(name=lhs, id=9)
+  rhs: bits[8] = input_port(name=rhs, id=10)
+  first: () = invoke(lhs, to_apply=checked_helper, id=11)
+  second: () = invoke(rhs, to_apply=checked_helper, id=12)
+  result: () = output_port(rhs, name=result, id=13)
 }
 "#;
     assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "wrapper");
-}
-
-#[test]
-fn invokes_with_coverage_are_rejected() {
-    let ir = r#"package public_helper_debug
-
-fn covered_helper(value: bits[8] id=1) -> bits[8] {
-  condition: bits[1] = literal(value=1, id=2)
-  observed: () = cover(condition, label="helper_covered", id=3)
-  ret forwarded: bits[8] = identity(value, id=4)
-}
-
-top block wrapper(value: bits[8], result: bits[8]) {
-  value: bits[8] = input_port(name=value, id=5)
-  called: bits[8] = invoke(value, to_apply=covered_helper, id=6)
-  result: () = output_port(called, name=result, id=7)
-}
-"#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "wrapper");
+    for layout in [Layout::None, Layout::Pipeline] {
+        for emit_asserts in [true, false] {
+            let rtl = emit(
+                ir,
+                &BlockCodegenOptions {
+                    layout,
+                    emit_asserts,
+                    ..BlockCodegenOptions::default()
+                },
+            );
+            let assert_count = if emit_asserts { 2 } else { 0 };
+            assert_eq!(rtl.matches("assert property").count(), assert_count);
+            assert_eq!(rtl.matches("cover property").count(), 2);
+            let labels: BTreeSet<_> = rtl
+                .lines()
+                .filter_map(|line| {
+                    let (label, statement) = line.trim().split_once(": ")?;
+                    (statement.starts_with("assert property")
+                        || statement.starts_with("cover property"))
+                    .then_some(label)
+                })
+                .collect();
+            assert_eq!(labels.len(), assert_count + 2);
+            assert_eq!(rtl.matches("$display(").count(), 2);
+            xlsynth_test_helpers::assert_valid_sv(&rtl);
+        }
+    }
 }
 
 #[test]
@@ -1646,8 +1703,47 @@ top block invalid_label(clk: clock, predicate: bits[1], result: bits[1]) {{
     }
 }
 
+/// Simulates a single generated module with known packed inputs and checks its
+/// result.
+fn check_combinational_output(rtl: &str, inputs: &[(&str, u32, u64)], expected: u64) {
+    let module = compile_combo_module(rtl).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+    let inputs = inputs
+        .iter()
+        .map(|&(name, width, value)| {
+            (
+                name.to_owned(),
+                Value4::from_u64(width, Signedness::Unsigned, value),
+            )
+        })
+        .collect();
+    let values = eval_combo(&module, &plan, &inputs).unwrap();
+    assert_eq!(values["result"].to_u64_if_known(), Some(expected));
+}
+
+/// Checks the packed result of an invoked function under both codegen layouts.
+fn check_invoke_result(ir: &str, inputs: &[(&str, u32, u64)], expected: u64) {
+    assert_stock_xls_accepts(ir);
+    let parsed = package(ir);
+    let block_name = &parsed.get_top_block().unwrap().name;
+    for layout in [Layout::None, Layout::Pipeline] {
+        let options = BlockCodegenOptions {
+            layout,
+            ..BlockCodegenOptions::default()
+        };
+        let generated = support::TestRtl::emit(&parsed, &options);
+        let modules: Vec<_> = generated
+            .lines()
+            .filter(|line| line.starts_with("module "))
+            .collect();
+        assert_eq!(modules, [format!("module {block_name}(")]);
+        xlsynth_test_helpers::assert_valid_sv(&generated);
+        check_combinational_output(&generated, inputs, expected);
+    }
+}
+
 #[test]
-fn invoked_ir_functions_are_rejected() {
+fn invoked_ir_function_binds_its_argument() {
     let ir = r#"package public_invoke
 
 fn add_one(value: bits[8] id=1) -> bits[8] {
@@ -1661,12 +1757,11 @@ top block invoking(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=6)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoking");
+    check_invoke_result(ir, &[("value", 8, 0xff)], 0);
 }
 
 #[test]
-fn invokes_with_aggregate_results_are_rejected() {
+fn invoked_array_update_preserves_element_order() {
     let ir = r#"package public_invoke_arrays
 
 fn update(values: bits[8][3] id=1, index: bits[2] id=2, replacement: bits[8] id=3) -> bits[8][3] {
@@ -1681,12 +1776,19 @@ top block invoking(values: bits[8][3], index: bits[2], replacement: bits[8], res
   result: () = output_port(called, name=result, id=9)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoking");
+    check_invoke_result(
+        ir,
+        &[
+            ("values", 24, 0x332211),
+            ("index", 2, 0),
+            ("replacement", 8, 0xab),
+        ],
+        0x3322ab,
+    );
 }
 
 #[test]
-fn invokes_with_zero_width_results_are_rejected() {
+fn unused_invoked_zero_width_results_preserve_the_output() {
     let ir = r#"package public_empty_functions
 
 fn empty_result(value: bits[8] id=1) -> bits[0] {
@@ -1699,12 +1801,11 @@ top block ignore_result(value: bits[8], result: bits[8]) {
   result: () = output_port(value, name=result, id=5)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "ignore_result");
+    check_invoke_result(ir, &[("value", 8, 0x81)], 0x81);
 }
 
 #[test]
-fn invokes_with_empty_tuple_results_are_rejected() {
+fn unused_invoked_empty_tuple_results_preserve_the_output() {
     let ir = r#"package public_empty_functions
 
 fn empty_tuple(value: bits[8] id=1) -> (bits[0], ()) {
@@ -1719,12 +1820,11 @@ top block ignore_tuple(value: bits[8], result: bits[8]) {
   result: () = output_port(value, name=result, id=7)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "ignore_tuple");
+    check_invoke_result(ir, &[("value", 8, 0x72)], 0x72);
 }
 
 #[test]
-fn invokes_with_zero_width_parameters_are_rejected() {
+fn invoked_functions_accept_zero_width_parameters() {
     let ir = r#"package public_empty_functions
 
 fn ignore_empty(value: bits[8] id=1, empty: bits[0] id=2) -> bits[8] {
@@ -1738,12 +1838,11 @@ top block invoke_empty(value: bits[8], empty: bits[0], result: bits[8]) {
   result: () = output_port(called, name=result, id=7)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoke_empty");
+    check_invoke_result(ir, &[("value", 8, 0x3a)], 0x3a);
 }
 
 #[test]
-fn invokes_with_only_zero_width_arguments_are_rejected() {
+fn invoked_constant_functions_accept_only_zero_width_arguments() {
     let ir = r#"package public_empty_functions
 
 fn public_constant(empty: bits[0] id=1) -> bits[8] {
@@ -1756,8 +1855,7 @@ top block call_constant(empty: bits[0], result: bits[8]) {
   result: () = output_port(called, name=result, id=5)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "call_constant");
+    check_invoke_result(ir, &[], 42);
 }
 
 #[test]
@@ -1883,11 +1981,22 @@ top block caller(empty: bits[0], out: bits[0]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "caller");
+    for layout in [Layout::None, Layout::Pipeline] {
+        let options = BlockCodegenOptions {
+            layout,
+            ..BlockCodegenOptions::default()
+        };
+        assert_eq!(
+            emit_system_verilog(&package(ir), &options).unwrap_err(),
+            BlockCodegenError::Unsupported(
+                "counted_for is not supported in `caller`; unroll loops before block2sv code generation".to_owned()
+            )
+        );
+    }
 }
 
 #[test]
-fn nested_invocations_are_rejected() {
+fn nested_invocations_bind_each_call_site_independently() {
     let ir = r#"package public_invoke
 
 fn add_one(value: bits[8] id=1) -> bits[8] {
@@ -1905,10 +2014,9 @@ top block nested_helpers(first: bits[8], second: bits[8], result: bits[8]) {
   second: bits[8] = input_port(name=second, id=8)
   left: bits[8] = invoke(first, to_apply=add_two, id=9)
   right: bits[8] = invoke(second, to_apply=add_two, id=10)
-  combined: bits[8] = add(left, right, id=11)
+  combined: bits[8] = xor(left, right, id=11)
   result: () = output_port(combined, name=result, id=12)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "nested_helpers");
+    check_invoke_result(ir, &[("first", 8, 5), ("second", 8, 14)], 7 ^ 16);
 }

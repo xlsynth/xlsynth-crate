@@ -4,9 +4,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use xlsynth_pir::ir::{
-    Block, InstantiationKind, NodeGraph, NodePayload, NodeRef, Package, PackageMember,
-};
+use xlsynth_pir::ir::{Block, InstantiationKind, NodeGraph, NodePayload, NodeRef};
 use xlsynth_pir::ir_utils::{get_topological, operands};
 
 use crate::BlockCodegenError;
@@ -28,7 +26,7 @@ pub(crate) struct StageLayout {
 
 /// Reconstructs feed-forward stages without changing the block's registers.
 pub(crate) fn reconstruct_stages(
-    package: &Package,
+    blocks: &BTreeMap<&str, &Block>,
     block: &Block,
 ) -> Result<StageLayout, BlockCodegenError> {
     if block.nodes.is_empty() {
@@ -83,20 +81,8 @@ pub(crate) fn reconstruct_stages(
             continue;
         };
         let output_delays = if instance.kind == InstantiationKind::Block {
-            let child = package
-                .members
-                .iter()
-                .find_map(|member| match member {
-                    PackageMember::Block(block) if block.name == instance.block => Some(block),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    BlockCodegenError::InvalidBlock(format!(
-                        "instantiated block `{}` does not exist in the package",
-                        instance.block
-                    ))
-                })?;
-            let child_layout = reconstruct_stages(package, child)?;
+            let child = blocks[instance.block.as_str()];
+            let child_layout = reconstruct_stages(blocks, child)?;
             child
                 .output_ports()
                 .map(|port| {

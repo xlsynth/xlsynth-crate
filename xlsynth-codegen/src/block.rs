@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
+use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
 use xlsynth_pir::ir::{
     Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
     PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
-use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
@@ -99,6 +99,7 @@ impl Value {
 /// Builds one module while preserving the source block's interfaces and state.
 pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) package: &'a Package,
+    blocks: &'a BTreeMap<&'a str, &'a Block>,
     pub(crate) options: &'a BlockCodegenOptions,
     pub(crate) block: &'a Block,
     pub(crate) file: &'file mut VastFile,
@@ -123,12 +124,24 @@ pub(crate) fn emit_package(
     options: &BlockCodegenOptions,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
-    verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
+    let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
 
     let mut ordered = Vec::new();
     let mut visited = BTreeSet::new();
     let mut visiting = BTreeSet::new();
     collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
+    // Hierarchy and pipeline layout must see the same data dependencies as
+    // emission, including when a function ignores one of its arguments.
+    let expanded = ordered
+        .into_iter()
+        .map(|block| {
+            inliner
+                .inline_block(&block.name)
+                .map_err(BlockCodegenError::Unsupported)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ordered: Vec<&Block> = expanded.iter().map(|block| block.as_ref()).collect();
+    let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
         validate_single_register_writes(block)?;
     }
@@ -153,7 +166,7 @@ pub(crate) fn emit_package(
         };
         validate_external_identifier(module_name, "module")?;
         let module = file.add_module(module_name);
-        let mut emitter = BlockEmitter::new(package, options, block, &mut file, module);
+        let mut emitter = BlockEmitter::new(package, &blocks, options, block, &mut file, module);
         emitter.emit()?;
     }
 
@@ -197,15 +210,13 @@ fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
             block.name
         )));
     }
-    if let Some(call) = block.nodes.iter().find(|node| {
-        matches!(
-            node.payload,
-            NodePayload::Invoke { .. } | NodePayload::Map { .. }
-        )
-    }) {
+    if block
+        .nodes
+        .iter()
+        .any(|node| matches!(node.payload, NodePayload::Map { .. }))
+    {
         return Err(BlockCodegenError::Unsupported(format!(
-            "{} is not supported in `{}`; inline function calls before block2sv code generation",
-            call.payload.get_operator(),
+            "map is not supported in `{}`; expand maps before block2sv code generation",
             block.name
         )));
     }
@@ -304,6 +315,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// Creates an emitter before constructing the module's public ports.
     fn new(
         package: &'a Package,
+        blocks: &'a BTreeMap<&'a str, &'a Block>,
         options: &'a BlockCodegenOptions,
         block: &'a Block,
         file: &'file mut VastFile,
@@ -317,6 +329,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
         Self {
             package,
+            blocks,
             options,
             block,
             file,
@@ -492,7 +505,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits register-delimited comments without altering sequential behavior.
     fn emit_pipeline(&mut self) -> Result<(), BlockCodegenError> {
-        let layout = reconstruct_stages(self.package, self.block)?;
+        let layout = reconstruct_stages(self.blocks, self.block)?;
         let mut emitted_visible_stage = false;
         for (stage_index, stage) in layout.stages.iter().enumerate() {
             self.current_stage = Some(stage_index);
@@ -799,15 +812,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .collect::<Vec<_>>();
 
             if instance.kind == InstantiationKind::Block {
-                let child = self
-                    .package
-                    .members
-                    .iter()
-                    .find_map(|member| match member {
-                        PackageMember::Block(block) if block.name == instance.block => Some(block),
-                        _ => None,
-                    })
-                    .expect("validated child block exists");
+                let child = self.blocks[instance.block.as_str()];
                 if let Some(clock_name) = child.clock_port_name() {
                     if !connections.iter().any(|(name, _)| name == clock_name) {
                         if let Some(parent_clock) = self
