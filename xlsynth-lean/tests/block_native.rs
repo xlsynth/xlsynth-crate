@@ -227,7 +227,12 @@ fn machine(mask: u8, offset: u8, __reg_count: u8) -> (u8, u8) {
 fn stateful_neg_and_left_shift_match_xls() {
     use std::fmt::Write as _;
 
-    let source = "fn machine(amount: u64, __reg_value: u5) -> (u5, u5) { (__reg_value, (-__reg_value) << amount) }";
+    let source = r#"
+fn shift_value(min: u64, value: u5) -> u5 { (-value) << min }
+fn machine(amount: u64, __reg_value: u5) -> (u5, u5) {
+    (__reg_value, shift_value(amount, __reg_value))
+}
+"#;
     let path = Path::new("machine.x");
     let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
     let mut bundle = compiled.emit_readable().unwrap();

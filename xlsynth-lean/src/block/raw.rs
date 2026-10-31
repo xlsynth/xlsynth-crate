@@ -580,7 +580,7 @@ pub(crate) fn node_expression(
             };
             // Larger shifts also yield zero. Bound the intermediate Nat shift.
             Ok(format!(
-                "BitVec.shiftLeft {} (min (BitVec.toNat {}) {width})",
+                "BitVec.shiftLeft {} (_root_.min (BitVec.toNat {}) {width})",
                 operand(*lhs)?,
                 operand(*rhs)?
             ))
