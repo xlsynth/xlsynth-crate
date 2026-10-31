@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod diagnostics;
+mod grouped_priority;
 mod lexicographic_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
@@ -2615,6 +2616,9 @@ pub fn prep_for_gatify(
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
+        grouped_priority::rewrite(f, range_info)
+    });
     diagnostics::run(
         &mut cloned,
         "lexicographic_comparisons",
