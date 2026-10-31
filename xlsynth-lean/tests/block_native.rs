@@ -340,8 +340,9 @@ private def clock (index : BitVec 64) :=
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn encode_changed_bits_matches_xls_for_multihot_masks() {
     use std::fmt::Write as _;
-    let source = "fn machine(mask: u8, __reg_previous: u8) -> (u3, u8) {
-        (encode(mask ^ __reg_previous), mask)
+    let source = "fn encode_mask(acc: u8) -> u3 { encode(acc) }
+    fn machine(mask: u8, __reg_previous: u8) -> (u3, u8) {
+        (encode_mask(mask ^ __reg_previous), mask)
     }";
     let path = Path::new("machine.x");
     let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
@@ -350,8 +351,9 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
     let machine = package.ir.get_function("__machine__machine").unwrap();
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     let previous = 0b0000_0100;
-    // No change, set bit 4, then flip both bits 2 and 4 relative to previous.
-    for mask in [0b0000_0100, 0b0001_0100, 0b0001_0000] {
+    // No change, clear bit 2, set bit 4, then flip both bits relative to
+    // previous.
+    for mask in [0b0000_0100, 0, 0b0001_0100, 0b0001_0000] {
         let args = [mask, previous].map(|v| xlsynth::XlsIrValue::make_ubits(8, v).unwrap());
         let index = machine
             .interpret(&args)

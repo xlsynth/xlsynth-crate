@@ -694,8 +694,10 @@ pub(crate) fn node_expression(
                 bail!("encode result must be bits");
             };
             // For multi-hot inputs XLS ORs the indices of all set bits.
+            // Bind the operand before the fold so its names stay in caller
+            // scope.
             Ok(format!(
-                "((List.range {input_width}).foldl (fun acc i => if ({}).getLsbD i then BitVec.or acc (BitVec.ofNat {width} i) else acc) (BitVec.ofNat {width} 0))",
+                "(let mask := {}; (List.range {input_width}).foldl (fun acc i => if mask.getLsbD i then BitVec.or acc (BitVec.ofNat {width} i) else acc) (BitVec.ofNat {width} 0))",
                 operand(*arg)?
             ))
         }
