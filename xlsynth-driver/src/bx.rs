@@ -83,7 +83,7 @@ pub fn bx2ir_command() -> Command {
 }
 
 pub fn bx2lean_command() -> Command {
-    add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
+    let command = add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
             Arg::new("link-dslx")
                 .long("link-dslx")
@@ -98,7 +98,16 @@ pub fn bx2lean_command() -> Command {
                 .value_parser(value_parser!(PathBuf))
                 .required(true)
                 .help("Create a new directory for the five Lean modules"),
-        )
+        );
+    #[cfg(feature = "dslx-loop-bindings")]
+    let command = command.arg(
+        Arg::new("readable-loop-names")
+            .long("readable-loop-names")
+            .action(clap::ArgAction::SetTrue)
+            .requires("link-dslx")
+            .help("Use checked DSLX loop bindings to name locals in the readable model"),
+    );
+    command
 }
 
 pub fn bx2gv_command() -> Command {
@@ -214,6 +223,10 @@ pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
             dslx::ImportData::new(imports.dslx_stdlib_path, &imports.additional_search_paths);
         let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
             .with_context(|| format!("checking linked DSLX module '{path}'"))?;
+        #[cfg(feature = "dslx-loop-bindings")]
+        if matches.get_flag("readable-loop-names") {
+            return block::compile_bx_with_dslx_loop_bindings(bx_name, source, module, reset, imports);
+        }
         block::compile_bx_with_dslx(bx_name, source, module, reset, imports)
     })?;
     let top = matches.get_one::<String>("top").map(String::as_str);
