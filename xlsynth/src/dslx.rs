@@ -2689,7 +2689,7 @@ impl Type {
                 (0..sys::xls_dslx_type_tuple_get_member_count(self.ptr))
                     .map(|i| Type {
                         parent: self.parent.clone(),
-                        ptr: sys::xls_dslx_type_tuple_get_member_type(self.ptr, i),
+                        ptr: sys::xls_dslx_type_tuple_get_member_type(self.ptr, i).cast_mut(),
                     })
                     .collect()
             })
