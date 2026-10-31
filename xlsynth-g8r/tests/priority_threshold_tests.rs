@@ -5,13 +5,15 @@ use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_cone_stats;
 use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify, gatify_node_as_fn};
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify, gatify_node_as_fn, gatify_prepared_fn};
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{
     CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
 };
 use xlsynth_pir::IrBits;
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_utils::find_node_by_name;
 use xlsynth_pir::math::ceil_log2;
 
 #[test_matrix([1, 2, 3, 4, 8, 9, 33, 65, 161], [true, false], [true, false])]
@@ -185,6 +187,58 @@ top fn main(a: bits[64], control: bits[1]) -> bits[1] {
     );
 }
 
+#[test_matrix([true, false], [false, true])]
+fn sparse_sum_slices_share_the_full_width_zero_test(prepared: bool, fold: bool) {
+    let ir = r#"fn main(a: bits[64], b: bits[64], control: bits[1]) -> bits[4] {
+  sum: bits[64] = add(a, b, id=4)
+  negative: bits[64] = neg(sum, id=5)
+  selected: bits[64] = sel(control, cases=[sum, negative], id=6)
+  count: bits[7] = ext_clz(selected, offset=0, new_bit_count=7, id=7)
+  high: bits[1] = bit_slice(count, start=6, width=1, id=8)
+  zero: bits[1] = or_reduce(high, id=9)
+  s1: bits[1] = bit_slice(selected, start=1, width=1, id=10)
+  s2: bits[1] = bit_slice(selected, start=2, width=1, id=11)
+  s32: bits[1] = bit_slice(selected, start=32, width=1, id=12)
+  ret result: bits[4] = concat(zero, s1, s2, s32, id=13)
+}"#;
+    let function = Parser::new(ir).parse_fn().unwrap();
+    let lower = if prepared { gatify_prepared_fn } else { gatify };
+    let lowered = lower(
+        &function,
+        GatifyOptions {
+            fold,
+            hash: true,
+            adder_mapping: AdderMapping::RippleCarry,
+            ..GatifyOptions::all_opts_enabled()
+        },
+    )
+    .unwrap();
+    let gates = lowered.gate_fn;
+    let sum = &lowered.lowering_map[&find_node_by_name(&function, "sum").unwrap()];
+    let mut oracle = function;
+    desugar_extensions_in_fn(&mut oracle).unwrap();
+    check_equivalence::validate_same_fn_via_toolchain(&oracle, &gates).unwrap();
+    let outputs = gates.outputs[0]
+        .bit_vector
+        .iter_msb_to_lsb()
+        .copied()
+        .collect::<Vec<_>>();
+    let stats = get_aig_cone_stats(&gates.gates, &outputs);
+    let base = [
+        outputs[0],
+        *sum.get_lsb(1),
+        *sum.get_lsb(2),
+        *sum.get_lsb(32),
+    ];
+    let base_stats = get_aig_cone_stats(&gates.gates, &base);
+    // The three prefixes are already subtrees of the zero test. Each selected
+    // bit costs at most one AND for the control and three ANDs for the XOR.
+    assert!(
+        stats.and_nodes <= base_stats.and_nodes + 3 * 4,
+        "{stats:?}, base {base_stats:?}"
+    );
+}
+
 #[test_matrix([1, 2, 3, 4, 8, 9, 33, 65, 161], [true, false], [true, false], [true, false])]
 fn conditional_sum_priority_predicates_are_equivalent(
     width: usize,
@@ -209,7 +263,6 @@ fn shared_conditional_sum_outputs_are_preserved(exposure: &str, fold: bool) {
 #[test_matrix([false, true], ["high-bit", "full-sum"])]
 fn priority_prefix_preserves_explicit_adder_architectures(truncated: bool, exposure: &str) {
     use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
-    use xlsynth_g8r::ir2gate_utils::AdderMapping;
 
     // Only the low nine bits of the widened sum can vary. Without a separately
     // observed sum, bypassing its low prefix can eliminate the entire mapped
