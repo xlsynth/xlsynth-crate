@@ -606,6 +606,7 @@ private def fallback : XlsSource.«packets::Fallback<5>» := {value := 17, enabl
 #guard (Helpers.«packets::choose<6>» (packet := large) (fallback := 41)).value == 37
 #guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
 #guard Helpers.«packets::passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
+#guard (Helpers.«packets::passthrough<Packet>» (x := { current := 7 })).current == 7
 #guard (step { last := 7 } stimulus).last == 57
 "#
         .into(),
