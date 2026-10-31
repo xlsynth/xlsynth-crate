@@ -287,6 +287,44 @@ private def clock (index : BitVec 8) :=
     check_bundle(bundle, "array of nested records");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn dynamic_slices_match_xls_at_and_beyond_the_boundary() {
+    use std::fmt::Write as _;
+    let source = r#"
+fn machine(index: u64, __reg_data: u8) -> (u8, u8) {
+    (__reg_data[index+:u3] as u8, bit_slice_update(__reg_data, index, u3:2))
+}
+"#;
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let mut bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (index : BitVec 64) :=
+  let q : State := { data := 165 }
+  let x : Input := { rst := false, index }
+  (observe q x, (step q x).data)
+"#,
+    );
+    for index in [0, 2, 7, 1 << 60] {
+        let result = machine
+            .interpret(&[
+                xlsynth::XlsIrValue::make_ubits(64, index).unwrap(),
+                xlsynth::XlsIrValue::make_ubits(8, 165).unwrap(),
+            ])
+            .unwrap();
+        let read = result.get_element(0).unwrap().to_u64().unwrap();
+        let updated = result.get_element(1).unwrap().to_u64().unwrap();
+        writeln!(checks, "#guard clock {index} == ({read}, {updated})").unwrap();
+    }
+    bundle.files.push(("CheckSlices.lean".into(), checks));
+    check_bundle(bundle, "dynamic bit slice and update");
+}
+
 // The outer singleton is a state update; the inner singleton is a tuple.
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
