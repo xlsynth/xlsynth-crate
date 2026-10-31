@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use xlsynth_autocov::{IrFnAutocovGenerateConfig, generate_ir_fn_corpus_from_ir_text};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package, eval_fn_in_package_value};
 use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 use xlsynth_pir_fuzz::generate_upstream_eval_random_pir_package;
@@ -105,6 +105,11 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(
             ours, theirs,
             "eval_fn result disagrees with xlsynth interpreter for corpus sample {tuple_value}"
+        );
+        assert_eq!(
+            eval_fn_in_package_value(&parsed_pkg, parsed_fn, &args),
+            theirs,
+            "value-only result disagrees with xlsynth interpreter for corpus sample {tuple_value}"
         );
     }
 });

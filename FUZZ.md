@@ -446,9 +446,7 @@ Differentially compares our Rust IR function interpreter with the xlsynth C++ in
 
 - Generates an upstream-standard random PIR package, including helper functions, `invoke`, `map`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
 - Draws 32 shared mixed input vectors, seeded from the generated IR, then runs autocov to add semantically interesting tuples. Nullary functions are evaluated on their single empty argument vector without autocov.
-- Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
-
-See inline comments in the target source for early-return rationales.
+- Checks the return values from both the event-reporting PIR evaluator and the memoized value-only evaluator against libxls on every sample, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
 Primarily tests:
 
