@@ -74,6 +74,11 @@ pub(super) enum SourceType {
     Bits { width: usize },
     /// Positional source tuple; its members retain their written types.
     Tuple { members: Vec<SourceType> },
+    /// Fixed-size DSLX array with its written element type.
+    Array {
+        element: Box<SourceType>,
+        size: usize,
+    },
     /// A reference to an enum declaration in the same catalogue.
     Enum { name: String },
     /// A reference to a struct declaration in the same catalogue.
@@ -86,6 +91,7 @@ impl SourceType {
     fn collect_names(&self, names: &mut BTreeSet<String>) {
         match self {
             Self::Bool | Self::Bits { .. } => {}
+            Self::Array { element, .. } => element.collect_names(names),
             Self::Tuple { members } => {
                 for member in members {
                     member.collect_names(names);
@@ -294,6 +300,16 @@ impl Catalogue<'_> {
             } else {
                 Ok(SourceType::Bits { width })
             }
+        } else if ty.is_array() {
+            let array = annotation
+                .to_array_type_annotation()
+                .context("array has no element annotation")?;
+            let element =
+                self.source_type(&array.get_element_type(), &ty.get_array_element_type())?;
+            Ok(SourceType::Array {
+                element: Box::new(element),
+                size: ty.get_array_size(),
+            })
         } else {
             bail!(
                 "unsupported source shape {} in stateful Lean",
@@ -922,6 +938,10 @@ fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceT
                 .map(|ty| resolve_aliases(ty, declarations))
                 .collect::<Result<_>>()?,
         }),
+        SourceType::Array { element, size } => Ok(SourceType::Array {
+            element: Box::new(resolve_aliases(element, declarations)?),
+            size: *size,
+        }),
         nominal_or_primitive => Ok(nominal_or_primitive.clone()),
     }
 }
@@ -934,6 +954,10 @@ pub(super) fn source_shape(
     match source_type {
         SourceType::Bool => Ok(ir::Type::Bits(1)),
         SourceType::Bits { width } => Ok(ir::Type::Bits(*width)),
+        SourceType::Array { element, size } => Ok(ir::Type::Array(ir::ArrayTypeData {
+            element_type: Box::new(source_shape(element, declarations)?),
+            element_count: *size,
+        })),
         SourceType::Tuple { members } => Ok(ir::Type::Tuple(
             members
                 .iter()
