@@ -3700,17 +3700,8 @@ fn gatify_node(
                 .try_into()
                 .expect("ExtCarryOut c_in should be bits[1]");
 
-            let w = lhs_bits.get_bit_count();
-            let mut carry: AigOperand = c_in_bit;
-            for i in 0..w {
-                let a_i = *lhs_bits.get_lsb(i);
-                let b_i = *rhs_bits.get_lsb(i);
-                let g_i = g8_builder.add_and_binary(a_i, b_i);
-                let p_i = g8_builder.add_or_binary(a_i, b_i);
-                let p_and_c = g8_builder.add_and_binary(p_i, carry);
-                carry = g8_builder.add_or_binary(g_i, p_and_c);
-            }
-
+            let carry =
+                crate::ir2gate_utils::gatify_carry_out(g8_builder, &lhs_bits, &rhs_bits, c_in_bit);
             env.add(node_ref, GateOrVec::Gate(carry));
         }
         ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {

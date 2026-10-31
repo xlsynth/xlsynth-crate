@@ -1235,6 +1235,49 @@ pub fn gatify_one_hot_with_nonzero_flag_for_depth(
     )
 }
 
+/// Produces the final carry without constructing sum bits or intermediate
+/// carries.
+pub(crate) fn gatify_carry_out(
+    gb: &mut GateBuilder,
+    lhs: &AigBitVector,
+    rhs: &AigBitVector,
+    carry_in: AigOperand,
+) -> AigOperand {
+    assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
+    let mut bits: Vec<_> = lhs
+        .iter_lsb_to_msb()
+        .zip(rhs.iter_lsb_to_msb())
+        .map(|(&a, &b)| PrefixPg {
+            p: gb.add_or_binary(a, b),
+            g: gb.add_and_binary(a, b),
+        })
+        .collect();
+    let Some(low) = bits.first_mut() else {
+        return carry_in;
+    };
+    low.g = if carry_in == gb.get_true() {
+        low.p
+    } else if carry_in == gb.get_false() {
+        low.g
+    } else {
+        let propagated = gb.add_and_binary(low.p, carry_in);
+        gb.add_or_binary(low.g, propagated)
+    };
+    // The carry-in has already been absorbed at the lowest bit.
+    low.p = gb.get_false();
+    reduce_prefix_pg(gb, &bits).g
+}
+
+fn reduce_prefix_pg(gb: &mut GateBuilder, bits: &[PrefixPg]) -> PrefixPg {
+    if let [bit] = bits {
+        return *bit;
+    }
+    let (low, high) = bits.split_at(bits.len() / 2);
+    let low = reduce_prefix_pg(gb, low);
+    let high = reduce_prefix_pg(gb, high);
+    combine_prefix_pg(gb, low, high)
+}
+
 #[derive(Clone, Copy)]
 struct PrefixPg {
     p: AigOperand,
@@ -1265,6 +1308,37 @@ mod tests {
 
     use test_case::test_case;
     use xlsynth_pir::IrBits;
+
+    #[test]
+    fn carry_only_reduction_matches_addition_and_has_logarithmic_depth() {
+        for width in [1, 2, 5, 16, 37, 65] {
+            for carry_in in [None, Some(false), Some(true)] {
+                let build = |prefix| {
+                    let mut gb = GateBuilder::new("carry".into(), GateBuilderOptions::opt());
+                    let a = gb.add_input("a".into(), width);
+                    let b = gb.add_input("b".into(), width);
+                    let cin = match carry_in {
+                        None => *gb.add_input("cin".into(), 1).get_lsb(0),
+                        Some(false) => gb.get_false(),
+                        Some(true) => gb.get_true(),
+                    };
+                    let carry = if prefix {
+                        gatify_carry_out(&mut gb, &a, &b, cin)
+                    } else {
+                        gatify_add_ripple_carry(&a, &b, cin, None, &mut gb).0
+                    };
+                    gb.add_output("result".into(), AigBitVector::from_lsb_is_index_0(&[carry]));
+                    gb.build()
+                };
+                let expected = build(false);
+                let actual = build(true);
+                check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&expected, &actual)
+                    .expect("carry-only reduction must agree with addition");
+                let depth_bound = 3 + 2 * xlsynth_pir::math::ceil_log2(width);
+                assert!(output_cone_stats(&actual).root_depths[0] <= depth_bound);
+            }
+        }
+    }
 
     #[test]
     fn demanded_logical_shift_overflow_matches_full_width_shift() {
