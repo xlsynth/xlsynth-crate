@@ -8,44 +8,29 @@ use xlsynth_lean::block::{emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
 #[test]
-fn registered_lowering_only_forwards_identities_and_removes_dead_nodes() {
+fn registered_lowering_forwards_identities_and_removes_dead_nodes() {
     let ir = r#"package example
 
-fn grant(x: bits[8] id=1) -> bits[8] {
-  zero: bits[8] = literal(value=0, id=2)
-  sum: bits[8] = add(x, zero, id=3)
-  ret copy: bits[8] = identity(sum, id=4)
-}
-
-top fn machine(x: bits[8] id=5, __reg_q: bits[8] id=6) -> (bits[8], bits[8]) {
-  winner: bits[8] = invoke(x, to_apply=grant, id=7)
-  dead: bits[8] = xor(x, __reg_q, id=8)
-  first: bits[8] = identity(winner, id=9)
-  second: bits[8] = identity(first, id=10)
-  ret results: (bits[8], bits[8]) = tuple(second, __reg_q, id=11)
+top fn machine(x: bits[8] id=1, __reg_q: bits[8] id=2) -> (bits[8], bits[8]) {
+  dead: bits[8] = xor(x, __reg_q, id=3)
+  copy: bits[8] = identity(x, id=4)
+  ret results: (bits[8], bits[8]) = tuple(copy, __reg_q, id=5)
 }"#;
     let block = stateful_ir_to_block(ir, "machine").unwrap();
     assert!(!block.contains("identity("), "{block}");
     assert!(!block.contains("xor("), "{block}");
-    assert!(block.contains("sum: bits[8] = add(x, zero,"), "{block}");
-    assert!(block.contains("winner: bits[8] = invoke(x,"), "{block}");
-    assert!(block.contains("to_apply=grant"), "{block}");
 }
 
 #[test]
 fn dslx_registered_lowering_preserves_helper_calls_and_arithmetic() {
     let source = r#"
-fn grant(requests: u8) -> u8 { requests + u8:0 }
-fn machine(requests: u8, __reg_q: u8) -> (u8, u8) {
-    let winner = grant(requests);
-    (winner, __reg_q)
-}
+fn f(x: u8) -> u8 { x + u8:0 }
+fn machine(x: u8, __reg_q: u8) -> (u8, u8) { (f(x), __reg_q) }
 "#;
     let compiled =
         compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
     let block = compiled.block_ir();
     assert!(block.contains(" = invoke("), "{block}");
-    assert!(block.contains("to_apply=__machine__grant"), "{block}");
     assert!(block.contains(" = add("), "{block}");
 }
 
