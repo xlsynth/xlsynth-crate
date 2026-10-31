@@ -871,6 +871,25 @@ unsafe extern "C" {
         result_out: *mut *mut CDslxTypecheckedModule,
     ) -> bool;
 
+    #[cfg(feature = "dslx-loop-bindings")]
+    pub fn xls_dslx_typechecked_module_convert_to_ir_with_loop_bindings(
+        module: *mut CDslxTypecheckedModule,
+        import_data: *mut CDslxImportData,
+        callback: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *const std::ffi::c_char,
+                i64,
+                *const std::ffi::c_char,
+                *const CDslxType,
+                *const std::ffi::c_char,
+            ),
+        >,
+        context: *mut std::ffi::c_void,
+        error_out: *mut *mut std::ffi::c_char,
+        ir_out: *mut *mut std::ffi::c_char,
+    ) -> bool;
+
     pub fn xls_dslx_typechecked_module_clone_removing_members(
         tm: *mut CDslxTypecheckedModule,
         members: *mut *mut CDslxModuleMember,

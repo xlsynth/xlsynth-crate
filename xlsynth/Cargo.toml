@@ -16,6 +16,7 @@ workspace = true
 
 [features]
 default = []
+dslx-loop-bindings = ["xlsynth-sys/dslx-loop-bindings"]
 
 [dependencies]
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.85.0"}
