@@ -2,9 +2,9 @@
 
 //! Explicit native checks for generated readable block correspondence proofs.
 
-use std::{fs, path::Path, process::Command};
+use std::{fmt::Write as _, fs, path::Path, process::Command};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
@@ -449,6 +449,106 @@ block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j
         "pass-through correspondence splits independent enum inputs"
     );
     check_bundle(bundle, "ten independent enum inputs");
+}
+
+fn compile_lean_and_xls_machine(
+    bx: &str,
+    source: &str,
+) -> Result<(LeanBlockBundle, xlsynth::IrFunction)> {
+    let path = Path::new("machine.x");
+    let bundle = checked_helper_bundle(bx, source, &[]).context("compile BX and emit Lean")?;
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default())
+        .context("convert DSLX to XLS IR")?;
+    let machine = package
+        .ir
+        .get_function("__machine__machine")
+        .context("look up __machine__machine in XLS IR")?;
+    Ok((bundle, machine))
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_matches_xls() {
+    let source = r#"
+fn fold(seed: u8, mask: u8, offset: u8) -> u8 {
+    for (i, carry): (u8, u8) in u8:1..u8:5 {
+        (carry & mask) + offset + i
+    }(seed)
+}
+fn machine(mask: u8, offset: u8, current_count: u8) -> (u8, u8) {
+    (current_count, fold(current_count, mask, offset))
+}
+"#;
+    let bx = r#"
+extern fn machine::fold(seed: u8, mask: u8, offset: u8) -> u8;
+block counter(clk, rst, mask: u8, offset: u8) -> u8 {
+    reg count: u8 = 0;
+    count := machine::fold(count, mask, offset);
+    count
+}
+"#;
+    let (mut bundle, machine) =
+        compile_lean_and_xls_machine(bx, source).expect("counted loop fixture (machine.x)");
+    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
+    for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
+        let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
+        let expected = machine
+            .interpret(&args)
+            .unwrap()
+            .get_element(1)
+            .unwrap()
+            .to_u64()
+            .unwrap();
+        writeln!(checks, "#guard (step {{ count := {seed} }} {{ rst := false, mask := {mask}, offset := {offset} }}).count == {expected}").unwrap();
+    }
+    bundle.files.push(("CheckLoop.lean".into(), checks));
+    check_bundle(
+        bundle,
+        "counted loop over a register and two captured inputs",
+    );
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_proves_computed_enum_dispatch_in_linked_helpers() {
+    let choose = r#"
+        let chosen = if fresh { incoming } else { current };
+        let routed = match chosen { Sender::A => a, Sender::B => b, _ => c };
+        (routed, chosen)"#;
+    let helper = format!(
+        "fn choose(fresh: bool, incoming: Sender, current: Sender,
+        a: bool, b: bool, c: bool) -> (bool, Sender) {{ {choose} }}"
+    );
+    for (name, definition, result) in [
+        ("in the clocked helper", "", choose),
+        (
+            "helper",
+            helper.as_str(),
+            "choose(fresh, incoming, current, a, b, c)",
+        ),
+    ] {
+        let source = format!(
+            r#"
+enum Sender : u2 {{ A = 0, B = 1, C = 2 }}
+{definition}
+fn route(fresh: bool, incoming: Sender, current: Sender, a: bool, b: bool, c: bool)
+         -> (bool, Sender) {{
+    let c = for (i, acc) in u32:0..u32:2 {{ if i == u32:0 {{ acc }} else {{ !acc }} }}(c);
+    {result}
+}}
+"#
+        );
+        let bx = r#"
+extern fn machine::route(fresh: bool, incoming: u2, current: u2, a: bool, b: bool, c: bool) -> (bool, u2);
+block router(clk, rst, fresh: bool, incoming: u2, a: bool, b: bool, c: bool) -> bool {
+    reg sender: u2 = 0;
+    let result = machine::route(fresh, incoming, sender, a, b, c);
+    sender := result.1;
+    result.0
+}
+"#;
+        check_bundle(checked_helper_bundle(bx, &source, &[]).unwrap(), name);
+    }
 }
 
 /// Elaborate every generated file in dependency order with the requested Lean.
