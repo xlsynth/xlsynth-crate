@@ -1372,6 +1372,19 @@ fn append_emitted_node_line(
 
 /// Emits a function as text, including outer/inner attributes and body.
 pub fn emit_fn(func: &Fn, is_top: bool) -> String {
+    emit_fn_in_order(
+        func,
+        is_top,
+        (0..func.nodes.len()).map(|index| NodeRef { index }),
+    )
+}
+
+/// Emits all stored operations with definitions before uses, even mid-rewrite.
+pub fn emit_fn_topological(func: &Fn, is_top: bool) -> String {
+    emit_fn_in_order(func, is_top, crate::ir_utils::get_topological(func))
+}
+
+fn emit_fn_in_order(func: &Fn, is_top: bool, order: impl IntoIterator<Item = NodeRef>) -> String {
     let mut out = String::new();
     // Outer attributes first
     for attr in &func.outer_attrs {
@@ -1402,8 +1415,7 @@ pub fn emit_fn(func: &Fn, is_top: bool) -> String {
     }
 
     // Body nodes.
-    for (i, _node) in func.nodes.iter().enumerate() {
-        let node_ref = NodeRef { index: i };
+    for node_ref in order {
         append_emitted_node_line(&mut out, func, node_ref, None);
     }
 
