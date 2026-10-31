@@ -389,6 +389,26 @@ pub struct InvocationRewriteRule<'a> {
 }
 
 impl TypecheckedModule {
+    /// Converts this checked module and its resolved imports to an unoptimized
+    /// IR package with source positions.
+    pub fn convert_to_ir_text(&self) -> Result<String, XlsynthError> {
+        let mut error_out = std::ptr::null_mut();
+        let mut ir_out = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_dslx_typechecked_module_convert_to_ir(
+                self.ptr.ptr,
+                self.ptr.parent.ptr,
+                &mut error_out,
+                &mut ir_out,
+            )
+        };
+        if success {
+            Ok(unsafe { c_str_to_rust(ir_out) })
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
     pub fn get_module(&self) -> Module {
         Module {
             parent: self.ptr.clone(),
@@ -1090,6 +1110,27 @@ pub struct TypeAnnotation {
 }
 
 impl TypeAnnotation {
+    /// Returns the written members of a tuple annotation in source order.
+    /// An alias reference remains a reference, even if its target is a tuple.
+    pub fn tuple_members(&self) -> Option<Vec<TypeAnnotation>> {
+        let mut count = 0;
+        let is_tuple =
+            unsafe { sys::xls_dslx_type_annotation_get_tuple_member_count(self.ptr, &mut count) };
+        is_tuple.then(|| {
+            (0..count)
+                .map(|index| {
+                    let ptr =
+                        unsafe { sys::xls_dslx_type_annotation_get_tuple_member(self.ptr, index) };
+                    assert!(!ptr.is_null(), "missing member of a DSLX tuple annotation");
+                    TypeAnnotation {
+                        parent: self.parent.clone(),
+                        ptr,
+                    }
+                })
+                .collect()
+        })
+    }
+
     pub fn to_type_ref_type_annotation(&self) -> Option<TypeRefTypeAnnotation> {
         let casted =
             unsafe { sys::xls_dslx_type_annotation_get_type_ref_type_annotation(self.ptr) };
@@ -3147,6 +3188,75 @@ fn explicit(x: u32) -> u32 { x }
         assert!(
             explicit_fn.get_return_type().is_some(),
             "explicit return should provide a return annotation"
+        );
+    }
+
+    #[test]
+    fn tuple_return_members_preserve_written_types() {
+        let source = r#"
+struct Packet { payload: u8 }
+type Alias = Packet;
+fn step(x: Packet) -> (Packet, (Alias, ())) { (x, (x, ())) }
+"#;
+        let mut imports = ImportData::default();
+        let checked = parse_and_typecheck(source, "tuples.x", "tuples", &mut imports).unwrap();
+        let Some(MatchableModuleMember::Function(step)) =
+            checked.get_module().get_member(2).to_matchable()
+        else {
+            panic!("expected step function");
+        };
+        let return_type = step.get_return_type().unwrap();
+        let members = return_type.tuple_members().unwrap();
+        let [packet, nested] = members.as_slice() else {
+            panic!("expected two outer members");
+        };
+        let nested_members = nested.tuple_members().unwrap();
+        let [alias, unit] = nested_members.as_slice() else {
+            panic!("expected two nested members");
+        };
+        let alias_def = alias
+            .to_type_ref_type_annotation()
+            .unwrap()
+            .get_type_ref()
+            .get_type_definition()
+            .to_type_alias()
+            .unwrap();
+        assert_eq!(alias_def.get_identifier(), "Alias");
+        assert!(packet.tuple_members().is_none());
+        assert!(unit.tuple_members().unwrap().is_empty());
+        for annotation in [packet, alias] {
+            let ty = checked
+                .get_type_info()
+                .get_type_for_type_annotation(annotation)
+                .unwrap();
+            assert_eq!(ty.get_struct_def().unwrap().get_identifier(), "Packet");
+        }
+    }
+
+    #[test]
+    fn checked_module_conversion_uses_its_resolved_imports() {
+        let mut imports = ImportData::default();
+        // This dependency exists only in the import data used to typecheck top.
+        parse_and_typecheck(
+            "pub const VALUE = u8:7;",
+            "in_memory.x",
+            "in_memory",
+            &mut imports,
+        )
+        .unwrap();
+        let top = parse_and_typecheck(
+            "import in_memory; fn value() -> u8 { in_memory::VALUE }",
+            "top.x",
+            "top",
+            &mut imports,
+        )
+        .unwrap();
+        let ir = top.convert_to_ir_text().unwrap();
+        let package = crate::IrPackage::parse_ir(&ir, None).unwrap();
+        let value = package.get_function("__top__value").unwrap();
+        assert_eq!(
+            value.interpret(&[]).unwrap(),
+            XlsIrValue::make_ubits(8, 7).unwrap()
         );
     }
 
