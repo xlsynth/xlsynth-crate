@@ -570,11 +570,22 @@ fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn loop_keeps_the_source_index_and_captured_record_fields() {
-    let source = r#"
+    let modules = tempfile::tempdir().unwrap();
+    let packets = r#"
+type Tag = u8;
 struct Write { valid: bool, data: u8 }
 struct Slot { write: Write }
-struct Pool { slots: Slot[3] }
-fn machine(pool: Pool, __reg_count: u8) -> (u8, u8) {
+pub struct Pool<N: u32> { slots: Slot[3], status: (bits[N], Tag) }
+"#;
+    fs::write(modules.path().join("packets.x"), packets).unwrap();
+    fs::write(
+        modules.path().join("types.x"),
+        "import packets; pub type Pool = packets::Pool<u32:5>;",
+    )
+    .unwrap();
+    let source = r#"
+import types;
+fn machine(pool: types::Pool, __reg_count: u8) -> (u8, u8) {
     let count = for (bank, acc) in u32:1..u32:3 {
         let slot = pool.slots[bank];
         if slot.write.valid { acc + slot.write.data } else { acc }
@@ -582,8 +593,14 @@ fn machine(pool: Pool, __reg_count: u8) -> (u8, u8) {
     (__reg_count, count)
 }
 "#;
-    let compiled =
-        compile_stateful_function(source, Path::new("machine.x"), "machine", None, &[]).unwrap();
+    let compiled = compile_stateful_function(
+        source,
+        Path::new("machine.x"),
+        "machine",
+        None,
+        &[modules.path()],
+    )
+    .unwrap();
     let mut bundle = compiled.emit_readable().unwrap();
     let (_, model) = bundle
         .files
@@ -595,10 +612,12 @@ fn machine(pool: Pool, __reg_count: u8) -> (u8, u8) {
     assert!(model.contains("let «bank»") && model.contains(".«valid»"));
     let checks = r#"import ReadableCorrespondence
 open XlsReadable XlsSource
-private def pool : Pool := { slots := #v[
+private def pool : «packets::Pool<5>» := { status := (3, 4), slots := #v[
   {write := {valid := true, data := 11}},
   {write := {valid := false, data := 19}},
   {write := {valid := true, data := 23}}] }
+#guard Helpers.«____machine__machine_counted_for_0_body»
+  (xls_iteration := 1) (acc := 7) (pool := pool) == 30
 #guard (step {count := 7} {rst := false, pool := pool}).count == 30
 "#;
     bundle

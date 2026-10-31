@@ -120,6 +120,37 @@ struct ModuleContext {
     qualifier: String,
 }
 
+impl ModuleContext {
+    /// A captured record may be declared in a transitive import of the top.
+    fn record_owner(&self, module: dslx::Module) -> Result<Self> {
+        let qualifier = module.get_name();
+        if self.module.get_name() == qualifier {
+            return Ok(self.clone());
+        }
+        let mut pending = vec![(self.module.clone(), self.type_info.clone())];
+        let mut visited = BTreeSet::new();
+        while let Some((current, info)) = pending.pop() {
+            if let Some(type_info) = info.get_imported_type_info(&module) {
+                return Ok(Self {
+                    module,
+                    type_info,
+                    qualifier,
+                });
+            }
+            for i in 0..current.get_member_count() {
+                if let Some(import) = current.get_member(i).to_import()
+                    && let Some(child) = info.get_imported_module(&import)
+                    && visited.insert(child.get_name())
+                    && let Some(child_info) = info.get_imported_type_info(&child)
+                {
+                    pending.push((child, child_info));
+                }
+            }
+        }
+        bail!("missing type information for record module {qualifier}")
+    }
+}
+
 struct FunctionSignature {
     params: Vec<(String, SourceType)>,
     returns: Vec<SourceType>,
@@ -249,7 +280,10 @@ impl Catalogue<'_> {
                 },
             );
             let local = external.get_attr();
-            let result = if let Some(record) = record.filter(|r| r.get_identifier() == local) {
+            let result = if let Some(record) = record.filter(|r| {
+                r.get_identifier() == local
+                    && r.get_owner_module().get_name() == self.context.qualifier
+            }) {
                 self.concrete_record(&record, ty, arguments.as_deref())
             } else {
                 self.nominal_reference(&local)
@@ -263,11 +297,16 @@ impl Catalogue<'_> {
             let name = alias.get_identifier();
             self.nominal_reference(&name)
         } else if let Some(elements) = annotation.tuple_members() {
+            let concrete = ty
+                .get_tuple_members()
+                .context("expected checked tuple type")?;
+            ensure!(elements.len() == concrete.len(), "tuple arity mismatch");
             let members = elements
                 .iter()
+                .zip(&concrete)
                 .enumerate()
-                .map(|(index, element)| {
-                    self.annotation_type(element)
+                .map(|(index, (element, checked))| {
+                    self.source_type(element, checked)
                         .with_context(|| format!("tuple member {index}"))
                 })
                 .collect::<Result<_>>()?;
@@ -740,34 +779,15 @@ impl Catalogue<'_> {
     fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
         if ty.is_struct() {
             let record = ty.get_struct_def()?;
-            let owner = record.get_owner_module().get_name();
-            let local = record.get_identifier();
-            let name = if owner == self.context.module.get_name() {
-                local
+            let owner = self.context.record_owner(record.get_owner_module())?;
+            let previous = std::mem::replace(&mut self.context, owner);
+            let result = if record.is_parametric() {
+                self.concrete_record(&record, ty, None)
             } else {
-                format!("{owner}::{local}")
+                self.nominal_reference(&record.get_identifier())
             };
-            if !record.is_parametric() && self.declarations.iter().any(|decl| decl.name() == name) {
-                Ok(SourceType::Struct { name })
-            } else {
-                let fields = (0..record.get_member_count())
-                    .map(|index| {
-                        Ok(StructField {
-                            name: record.get_member(index).get_name(),
-                            source_type: self.loop_type(&ty.get_struct_member_type(index))?,
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                if record.is_parametric() {
-                    self.record_instance(&name, fields, None, record.get_parametric_binding_count())
-                } else {
-                    self.add(TypeDecl::Struct {
-                        name: name.clone(),
-                        fields,
-                    })?;
-                    Ok(SourceType::Struct { name })
-                }
-            }
+            self.context = previous;
+            result
         } else if let Some((false, width)) = ty.is_bits_like() {
             match width {
                 0 => bail!("zero-width loop binding"),
@@ -1079,7 +1099,7 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
 
 /// DSLX aliases are transparent. Structs and enums retain their identity,
 /// including when nested in positional tuples with equal physical shapes.
-fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
+pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
     match ty {
         SourceType::Alias { name } => {
             let TypeDecl::Alias { target, .. } = declaration(declarations, name)? else {
