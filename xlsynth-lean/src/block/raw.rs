@@ -150,6 +150,16 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
 ",
         );
     }
+    if graph
+        .nodes
+        .iter()
+        .chain(block.helpers.iter().flat_map(|f| &f.nodes))
+        .any(|n| matches!(n.payload, NodePayload::BitSliceUpdate { .. }))
+    {
+        source.push_str(
+            "def bitSliceUpdate {n s w : Nat} (value : BitVec n) (start : BitVec s) (update : BitVec w) : BitVec n :=\n  let offset := min start.toNat n\n  let mask := ((BitVec.allOnes w).setWidth n) <<< offset\n  (value &&& ~~~mask) ||| ((update.setWidth n) <<< offset)\n\n",
+        );
+    }
     for helper in &block.helpers {
         write_helper(&mut source, helper)?;
     }
@@ -674,6 +684,30 @@ pub(crate) fn node_expression(
         }
         NodePayload::BitSlice { arg, start, width } => Ok(format!(
             "BitVec.extractLsb' {start} {width} {}",
+            operand(*arg)?
+        )),
+        NodePayload::DynamicBitSlice { arg, start, width } => {
+            let Type::Bits(input_width) = graph.get_node(*arg).ty else {
+                bail!("dynamic_bit_slice requires a bit-vector input");
+            };
+            Ok(format!(
+                "BitVec.extractLsb' (min (BitVec.toNat {}) {input_width}) {width} {}",
+                operand(*start)?,
+                operand(*arg)?
+            ))
+        }
+        NodePayload::BitSliceUpdate {
+            arg,
+            start,
+            update_value,
+        } => Ok(format!(
+            "_root_.XlsBlock.bitSliceUpdate ({}) ({}) ({})",
+            operand(*arg)?,
+            operand(*start)?,
+            operand(*update_value)?
+        )),
+        NodePayload::ZeroExt { arg, new_bit_count } => Ok(format!(
+            "BitVec.setWidth {new_bit_count} {}",
             operand(*arg)?
         )),
         NodePayload::SignExt { arg, new_bit_count } => Ok(format!(
