@@ -120,9 +120,10 @@ let ir = compiled.block_ir();
 let bundle = compiled.emit_readable()?;
 ```
 
-The readable interface supports unsigned bits of positive width, positional
-tuples, nonempty local structs, aliases of supported local types and unsigned
-two-bit enums with distinct encodings. For each unnamed two-bit encoding the
+The readable interface supports positive-width unsigned bits, positional tuples,
+nonempty arrays, nonempty structs, aliases of supported types and unsigned
+two-bit enums with distinct encodings. Imported helpers retain their checked
+parameter and result types, including concrete parametric records. For each unnamed two-bit encoding the
 emitter adds a Lean constructor so every physical value can be decoded and
 encoded again. Exposed struct fields and enum cases must avoid names Lean
 generates for their type, such as `recOn`.

@@ -470,9 +470,10 @@ effect together on the clock edge. Asserting `rst` writes zero to each register.
 To convert an existing IR function, use `ir-stateful-fn-to-block` with its
 IR name as `--top`. Readable generation requires the DSLX source, and uses
 the existing Lean emitter's supported block operations. Proof-facing types
-support unsigned bits of positive width, positional tuples, nonempty local
-structs, local aliases of supported types, and unsigned two-bit enums with
-distinct encodings. Local computations stay inside the generated step.
+support positive-width unsigned bits, positional tuples, nonempty arrays,
+nonempty structs, aliases of supported types, and unsigned two-bit enums with
+distinct encodings. Imported helper signatures retain their concrete DSLX
+types, including parametric records.
 
 The command produces `Generated.lean`, `ReadableTypes.lean`,
 `ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
