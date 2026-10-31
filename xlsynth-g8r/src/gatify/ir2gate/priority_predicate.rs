@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lower priority predicates on conditionally negated sums without serial
-//! carries.
+//! Lower priority predicates using only the observed conditional-negation bits.
 
 use super::GateEnv;
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::{GateBuilder, ReductionKind};
 use crate::prefix_scan_utils::{PrefixScanStrategy, prefix_scan_inclusive};
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NodePayload, NodeRef, Unop};
 use xlsynth_pir::ir_utils;
@@ -15,19 +15,29 @@ use xlsynth_pir::ir_utils;
 #[derive(Default)]
 pub(super) struct PriorityPredicatePlan {
     selections: HashMap<NodeRef, Selection>,
-    reductions: HashMap<NodeRef, NodeRef>,
+    reductions: HashMap<NodeRef, (NodeRef, usize)>,
 }
 
-/// Captures a conditional sum and the first high bit its consumers observe.
+/// Captures a conditional negation and the first high bit its consumers
+/// observe.
 struct Selection {
-    sum: NodeRef,
-    lhs: ExtNaryAddTerm,
-    rhs: ExtNaryAddTerm,
+    value: NodeRef,
+    prefix_source: PrefixSource,
     selector: NodeRef,
     /// First bit tested by the ordinal threshold. Zero means a sum-zero test.
     first_tested_bit: usize,
     /// Lowest selected bit needed by any consumer, or the word width if none.
     first_selected_bit: usize,
+    high_zero: OnceCell<AigOperand>,
+}
+
+/// Supplies nonzero prefixes directly or without an addition's carry chain.
+enum PrefixSource {
+    Operand,
+    Sum {
+        lhs: ExtNaryAddTerm,
+        rhs: ExtNaryAddTerm,
+    },
 }
 
 impl PriorityPredicatePlan {
@@ -40,16 +50,28 @@ impl PriorityPredicatePlan {
             }
         }
         let mut result = Self::default();
+        let mut candidates = 0usize;
         for (index, node) in f.nodes.iter().enumerate() {
             let NodePayload::Unop(Unop::OrReduce, arg) = node.payload else {
                 continue;
             };
+            candidates += 1;
             let Some((selected, selection)) = match_predicate(f, env, arg, &users) else {
                 continue;
             };
-            result.reductions.insert(NodeRef { index }, selected);
+            result
+                .reductions
+                .insert(NodeRef { index }, (selected, selection.first_tested_bit));
             result.selections.insert(selected, selection);
         }
+        log::debug!(
+            "priority_predicate summary function={} candidates={} accepted={} rejected={} selections={}",
+            f.name,
+            candidates,
+            result.reductions.len(),
+            candidates - result.reductions.len(),
+            result.selections.len()
+        );
         result
     }
 
@@ -61,7 +83,7 @@ impl PriorityPredicatePlan {
         }
         let tested: HashSet<_> = args
             .iter()
-            .filter_map(|arg| self.reductions.get(arg).copied())
+            .filter_map(|arg| self.reductions.get(arg).map(|&(selected, _)| selected))
             .collect();
         !tested.is_empty() && args.iter().any(|arg| {
             matches!(
@@ -86,25 +108,28 @@ impl PriorityPredicatePlan {
         if plan.first_selected_bit == ordinary.get_bit_count() {
             return ordinary;
         }
-        let sum = env
-            .get_bit_vector(plan.sum)
-            .expect("planned sum is lowered");
+        let value = env
+            .get_bit_vector(plan.value)
+            .expect("planned value is lowered");
         let selector = *env
             .get_bit_vector(plan.selector)
             .expect("planned selector is lowered")
             .get_lsb(0);
-        let width = sum.get_bit_count();
-        let mismatches = plan.sum_prefix_mismatches(width - 1, env, gb);
+        let width = value.get_bit_count();
+        let prefix_bits = plan.prefix_bits(width - 1, env, gb);
         // Only the high selected bits need negation carries. Share one tree
         // reduction of the lower region instead of building its unused
         // prefixes.
         let lower_nonzero = if plan.first_selected_bit == 0 {
             gb.get_false()
         } else {
-            gb.add_or_nary(&mismatches[..plan.first_selected_bit], ReductionKind::Tree)
+            gb.add_or_reduce(
+                &AigBitVector::from_lsb_is_index_0(&prefix_bits[..plan.first_selected_bit]),
+                ReductionKind::Tree,
+            )
         };
         let mut needed = vec![lower_nonzero];
-        needed.extend_from_slice(&mismatches[plan.first_selected_bit..]);
+        needed.extend_from_slice(&prefix_bits[plan.first_selected_bit..]);
         let prefixes = prefix_scan_inclusive(
             gb,
             &needed,
@@ -116,7 +141,38 @@ impl PriorityPredicatePlan {
         for i in plan.first_selected_bit..width {
             let lower_nonzero = prefixes[i - plan.first_selected_bit];
             let flip = gb.add_and_binary(selector, lower_nonzero);
-            bits[i] = gb.add_xor_binary(*sum.get_lsb(i), flip);
+            bits[i] = gb.add_xor_binary(*value.get_lsb(i), flip);
+        }
+        if matches!(plan.prefix_source, PrefixSource::Operand) {
+            let high =
+                value.get_lsb_slice(plan.first_selected_bit, width - plan.first_selected_bit);
+            let zero = if plan.first_tested_bit == 0 {
+                gb.add_or_reduce(&value, ReductionKind::Tree).negate()
+            } else if high.get_bit_count() == 1 {
+                bits[plan.first_selected_bit].negate()
+            } else {
+                // With a nonzero low region, negation complements the high
+                // word; otherwise it preserves whether that word is zero.
+                let all_zero = gb.add_or_reduce(&high, ReductionKind::Tree).negate();
+                let all_ones = gb.add_and_reduce(&high, ReductionKind::Tree);
+                let complement = gb.add_and_binary(selector, lower_nonzero);
+                gb.add_mux2(complement, all_ones, all_zero)
+            };
+            // Expose the implication to shared high-bit consumers. This lets
+            // Boolean folding remove tests already implied by the zero
+            // predicate.
+            for bit in &mut bits[plan.first_selected_bit..] {
+                *bit = gb.add_and_binary(*bit, zero.negate());
+            }
+            plan.high_zero
+                .set(zero)
+                .expect("planned selection is lowered once");
+            log::debug!(
+                "priority_predicate direct_zero selected_index={} first_bit={} high_bits={}",
+                node.index,
+                plan.first_selected_bit,
+                width - plan.first_selected_bit
+            );
         }
         AigBitVector::from_lsb_is_index_0(&bits)
     }
@@ -128,13 +184,14 @@ impl PriorityPredicatePlan {
         env: &GateEnv,
         gb: &mut GateBuilder,
     ) -> Option<AigOperand> {
-        let selected = self.reductions.get(&node)?;
-        let plan = &self.selections[selected];
-        let first = plan.first_tested_bit;
-        let bits = env.get_bit_vector(*selected).ok()?;
+        let &(selected, first) = self.reductions.get(&node)?;
+        if let Some(zero) = self.selections.get(&selected)?.high_zero.get() {
+            return Some(*zero);
+        }
+        let bits = env.get_bit_vector(selected).ok()?;
         if first == 0 {
-            let mismatches = plan.sum_prefix_mismatches(bits.get_bit_count(), env, gb);
-            return Some(gb.add_or_nary(&mismatches, ReductionKind::Tree).negate());
+            let prefix = self.selections[&selected].prefix_bits(bits.get_bit_count(), env, gb);
+            return Some(gb.add_or_nary(&prefix, ReductionKind::Tree).negate());
         }
         let high = bits.get_lsb_slice(first, bits.get_bit_count() - first);
         Some(gb.add_or_reduce(&high, ReductionKind::Tree).negate())
@@ -142,19 +199,28 @@ impl PriorityPredicatePlan {
 }
 
 impl Selection {
-    /// A prefix of the sum is nonzero if any of its operand bits mismatch the
-    /// zero-sum relation.
-    fn sum_prefix_mismatches(
+    /// A prefix is nonzero if any of these bits is set. For sums, use the
+    /// operand mismatches that witness a nonzero prefix without a carry chain.
+    fn prefix_bits(
         &self,
         bit_count: usize,
         env: &GateEnv,
         gb: &mut GateBuilder,
     ) -> Vec<AigOperand> {
-        let lhs = env
-            .get_bit_vector(self.lhs.operand)
+        let PrefixSource::Sum { lhs, rhs } = &self.prefix_source else {
+            return env
+                .get_bit_vector(self.value)
+                .expect("planned operand is lowered")
+                .iter_lsb_to_msb()
+                .take(bit_count)
+                .copied()
+                .collect();
+        };
+        let lhs_bits = env
+            .get_bit_vector(lhs.operand)
             .expect("planned sum operand is lowered");
-        let rhs = env
-            .get_bit_vector(self.rhs.operand)
+        let rhs_bits = env
+            .get_bit_vector(rhs.operand)
             .expect("planned sum operand is lowered");
         // A sum prefix is zero iff p[0] = 0 and p[i] = a[i-1] | b[i-1].
         // Detect mismatches directly, without waiting for the addition carry.
@@ -171,8 +237,8 @@ impl Selection {
         };
         let mut previous_either = zero;
         for i in 0..bit_count {
-            let a = extended_bit(&lhs, self.lhs.signed, i);
-            let b = extended_bit(&rhs, self.rhs.signed, i);
+            let a = extended_bit(&lhs_bits, lhs.signed, i);
+            let b = extended_bit(&rhs_bits, rhs.signed, i);
             let propagate = gb.add_xor_binary(a, b);
             mismatches.push(gb.add_xor_binary(propagate, previous_either));
             previous_either = gb.add_or_binary(a, b);
@@ -188,6 +254,15 @@ fn match_predicate(
     arg: NodeRef,
     users: &[Vec<NodeRef>],
 ) -> Option<(NodeRef, Selection)> {
+    let reject = |reason: &str| -> Option<(NodeRef, Selection)> {
+        log::debug!(
+            "priority_predicate reject function={} input_text_id={} reason={}",
+            f.name,
+            f.get_node(arg).text_id,
+            reason
+        );
+        None
+    };
     let (encoded, start) = match f.get_node(arg).payload {
         NodePayload::BitSlice {
             arg: encoded,
@@ -195,14 +270,14 @@ fn match_predicate(
             width,
         } => {
             if !env.has_single_use(arg) || start + width != f.get_node_ty(encoded).bit_count() {
-                return None;
+                return reject("shared_or_partial_ordinal_slice");
             }
             (encoded, start)
         }
         _ => (arg, 0),
     };
     if !env.has_single_use(encoded) {
-        return None;
+        return reject("shared_priority_chain");
     }
     let (selected, priority_user) = match f.get_node(encoded).payload {
         NodePayload::ExtClz { arg, offset: 0, .. } => (arg, encoded),
@@ -212,21 +287,21 @@ fn match_predicate(
                 lsb_prio: true,
             } = f.get_node(hot).payload
             else {
-                return None;
+                return reject("shared_priority_chain");
             };
             let NodePayload::Unop(Unop::Reverse, selected) = f.get_node(reversed).payload else {
-                return None;
+                return reject("not_priority_ordinal");
             };
             if !env.has_single_use(hot) || !env.has_single_use(reversed) {
-                return None;
+                return reject("not_priority_ordinal");
             }
             (selected, reversed)
         }
-        _ => return None,
+        _ => return reject("not_priority_ordinal"),
     };
     let width = f.get_node_ty(selected).bit_count();
     if f.get_node_ty(encoded).bit_count() < xlsynth_pir::math::ceil_log2(width.checked_add(1)?) {
-        return None;
+        return reject("truncated_zero_ordinal");
     }
     let NodePayload::Sel {
         selector,
@@ -234,23 +309,28 @@ fn match_predicate(
         default: None,
     } = &f.get_node(selected).payload
     else {
-        return None;
+        return reject("not_selection_without_default");
     };
     if cases.len() != 2
         || f.get_node_ty(*selector).bit_count() != 1
         || !env.has_single_use(cases[1])
     {
-        return None;
+        return reject("selection_shape_or_shared_negation");
     }
-    let NodePayload::Unop(Unop::Neg, sum) = f.get_node(cases[1]).payload else {
-        return None;
+    let NodePayload::Unop(Unop::Neg, value) = f.get_node(cases[1]).payload else {
+        return reject("not_negation");
     };
-    if cases[0] != sum {
-        return None;
+    if cases[0] != value {
+        return reject("different_positive_operand");
     }
-    let threshold = 1usize.checked_shl(u32::try_from(start).ok()?)?;
+    let Some(threshold) = u32::try_from(start)
+        .ok()
+        .and_then(|shift| 1usize.checked_shl(shift))
+    else {
+        return reject("threshold_overflow");
+    };
     if threshold > width || f.ret_node_ref == Some(selected) {
-        return None;
+        return reject("threshold_or_returned_selection");
     }
     let first_tested_bit = width - threshold;
     // Negation preserves zero, so a full-width test needs no selected bits.
@@ -264,50 +344,75 @@ fn match_predicate(
             continue;
         }
         let NodePayload::BitSlice { start, .. } = f.get_node(user).payload else {
-            return None;
+            return reject("other_selection_consumer");
         };
         if start < first_tested_bit {
-            return None;
+            return reject("other_selection_consumer");
         }
         first_selected_bit = first_selected_bit.min(start);
     }
-    let added = match f.get_node(sum).payload {
+    let added = match f.get_node(value).payload {
         NodePayload::BitSlice { arg, start: 0, .. } => arg,
-        _ => sum,
+        _ => value,
     };
-    let (lhs, rhs) = match &f.get_node(added).payload {
-        NodePayload::Binop(Binop::Add, lhs, rhs) => (
-            ExtNaryAddTerm {
+    let prefix_source = match &f.get_node(added).payload {
+        NodePayload::Binop(Binop::Add, lhs, rhs) => PrefixSource::Sum {
+            lhs: ExtNaryAddTerm {
                 operand: *lhs,
                 signed: false,
                 negated: false,
             },
-            ExtNaryAddTerm {
+            rhs: ExtNaryAddTerm {
                 operand: *rhs,
                 signed: false,
                 negated: false,
             },
-        ),
+        },
         // An explicitly mapped sum stays opaque to the carry-free prefix.
         NodePayload::ExtNaryAdd { terms, arch: None }
             if terms.len() == 2 && terms.iter().all(|term| !term.negated) =>
         {
-            (terms[0], terms[1])
+            PrefixSource::Sum {
+                lhs: terms[0],
+                rhs: terms[1],
+            }
         }
-        _ => return None,
+        _ => PrefixSource::Operand,
     };
-    if env.product_is_deferred(lhs.operand) || env.product_is_deferred(rhs.operand) {
-        return None;
+    match &prefix_source {
+        PrefixSource::Sum { lhs, rhs } => {
+            if env.product_is_deferred(lhs.operand) || env.product_is_deferred(rhs.operand) {
+                return reject("deferred_sum_operand");
+            }
+        }
+        PrefixSource::Operand => {
+            if env.product_is_deferred(value) {
+                return reject("deferred_operand");
+            }
+        }
     }
+    log::debug!(
+        "priority_predicate accept function={} input_text_id={} selected_text_id={} value_text_id={} width={} first_bit={} source={}",
+        f.name,
+        f.get_node(arg).text_id,
+        f.get_node(selected).text_id,
+        f.get_node(value).text_id,
+        width,
+        first_tested_bit,
+        match &prefix_source {
+            PrefixSource::Operand => "operand",
+            PrefixSource::Sum { .. } => "sum",
+        }
+    );
     Some((
         selected,
         Selection {
-            sum,
-            lhs,
-            rhs,
+            value,
+            prefix_source,
             selector: *selector,
             first_tested_bit,
             first_selected_bit,
+            high_zero: OnceCell::new(),
         },
     ))
 }
