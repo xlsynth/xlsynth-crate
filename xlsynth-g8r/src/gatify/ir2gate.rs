@@ -36,9 +36,11 @@ use crate::gate_builder::ReductionKind;
 mod arithmetic_cluster;
 mod demanded_bits;
 mod priority_predicate;
+mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 use priority_predicate::PriorityPredicatePlan;
+use shift_reduction_predicate::ShiftReductionPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
 
@@ -198,6 +200,7 @@ pub(super) struct GateEnv {
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
     priority_predicate_plan: PriorityPredicatePlan,
+    shift_reduction_predicate_plan: ShiftReductionPredicatePlan,
 }
 
 impl GateEnv {
@@ -218,6 +221,7 @@ impl GateEnv {
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
 
@@ -239,6 +243,7 @@ impl GateEnv {
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
 
@@ -3657,6 +3662,9 @@ fn gatify_node(
                         .expect("unop arg should be present");
                     g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree)
                 });
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3934,6 +3942,9 @@ fn gatify_node(
             let b_bits = env.get_bit_vector(*b).expect("eq rhs should be present");
             assert_eq!(a_bits.get_bit_count(), b_bits.get_bit_count());
             let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3947,6 +3958,9 @@ fn gatify_node(
             );
             let gate: AigOperand =
                 g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs, ReductionKind::Tree);
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -4611,6 +4625,9 @@ fn gatify_internal(
         env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, env);
     }
     env.priority_predicate_plan = PriorityPredicatePlan::extract(f, env);
+    if options.hash {
+        env.shift_reduction_predicate_plan = ShiftReductionPredicatePlan::extract(f, env);
+    }
 
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {

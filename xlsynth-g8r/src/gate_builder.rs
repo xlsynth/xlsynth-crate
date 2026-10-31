@@ -36,6 +36,7 @@ use crate::{
 };
 
 mod full_adder;
+mod region_trial;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionKind {
