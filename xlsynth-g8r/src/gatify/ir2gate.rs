@@ -1284,19 +1284,28 @@ fn gatify_mul(
                 return result;
             }
 
-            // Pre-sign-extend operands to the final output width.
-            let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
-                gatify_sign_ext(gb, 0, output_bit_count, lhs_bits)
-            } else {
-                lhs_bits.clone()
-            };
-            let rhs_ext = if rhs_bits.get_bit_count() < output_bit_count {
-                gatify_sign_ext(gb, 0, output_bit_count, rhs_bits)
-            } else {
-                rhs_bits.clone()
-            };
+            let lhs_ext = sign_extend_mul_operand_if_needed(lhs_bits, output_bit_count, gb);
+            let rhs_ext = sign_extend_mul_operand_if_needed(rhs_bits, output_bit_count, gb);
             gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, mul_adder_mapping, gb)
         }
+    }
+}
+
+/// Preserves nonnegative operand widths for unsigned partial-product lowering.
+fn sign_extend_mul_operand_if_needed(
+    bits: &AigBitVector,
+    output_width: usize,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    // Unsigned multiplication already zero-extends its operands. Keeping their
+    // natural widths avoids padding a narrow multiplier with all-zero rows.
+    if bits.get_bit_count() > 0
+        && bits.get_bit_count() < output_width
+        && !gb.is_known_false(*bits.get_msb(0))
+    {
+        gatify_sign_ext(gb, 0, output_width, bits)
+    } else {
+        bits.clone()
     }
 }
 
@@ -1716,8 +1725,14 @@ pub(super) fn gatify_fused_product_rows(
         {
             return gatify_smul_baugh_wooley_partial_products(&lhs, &rhs, output_width, gb);
         }
-        lhs = gatify_sext_or_truncate(gb, 0, output_width, &lhs);
-        rhs = gatify_sext_or_truncate(gb, 0, output_width, &rhs);
+        lhs = sign_extend_mul_operand_if_needed(&lhs, output_width, gb);
+        rhs = sign_extend_mul_operand_if_needed(&rhs, output_width, gb);
+        if lhs.get_bit_count() > output_width {
+            lhs = lhs.get_lsb_slice(0, output_width);
+        }
+        if rhs.get_bit_count() > output_width {
+            rhs = rhs.get_lsb_slice(0, output_width);
+        }
     }
     let (multiplicand, multiplier) = if rhs.get_bit_count() <= lhs.get_bit_count() {
         (&lhs, &rhs)
