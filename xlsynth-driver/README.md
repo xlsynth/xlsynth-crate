@@ -410,6 +410,82 @@ xlsynth-driver block2fn \
   --drop-output-ports "unused_out" > ~/my_netlist.fn.ir
 ```
 
+### `block2lean`: Block IR to Lean
+
+Generates a Lean clock-step model from package-form XLS block IR. By default,
+the raw model goes to stdout; `--output` writes it to a file instead. For
+example, this exports the block named `counter`:
+
+```shell
+xlsynth-driver block2lean counter.block.ir --top counter --output Generated.lean
+```
+
+The model takes old register values and current inputs and returns outputs,
+next register values, and assertion results. Register updates are simultaneous:
+if `a` receives `b` and `b` receives `a`, old state `(a=1, b=2)` produces next
+state `(a=2, b=1)`, while an output driven by `a` still reads `1` on that edge.
+
+Flags:
+
+- `--top <NAME>` selects a block, overriding the package top. Without it, the
+  declared block top is selected, or the sole block if no top is declared.
+  Multiple blocks without a top require `--top`; a function top requires an
+  explicit block selection.
+- `--output <FILE>` writes the raw model to this file, replacing existing
+  contents only after successful generation. The default is stdout.
+
+The supported IR subset includes exact-width bits, nested tuples, tokens,
+registers, synchronous resets, assertions, bitwise operations, addition,
+equality, concatenation, slicing, sign extension, one-hot encoding, and
+ordinary, priority, and bits-valued one-hot selection. Arrays, zero-width bits,
+block instances, asynchronous resets, and unsupported operations are rejected.
+Assertions are reported as results and do not restrict the model's inputs or
+old state.
+
+### `dslx2lean`: Stateful DSLX function to readable Lean
+
+A trailing parameter named `__reg_count` reads the current value of the
+`count` register. The final return element supplies its next value. With
+multiple registers, the final elements follow register parameter order.
+The preceding elements of the outer tuple become `out0`, `out1`, and so on.
+For example, this function exposes a single output with named fields.
+
+```dslx
+struct Outputs { seen: u1, valid: u1 }
+
+pub fn tick(x: u1, __reg_count: u1) -> (Outputs, u1) {
+    (Outputs { seen: __reg_count, valid: x }, x)
+}
+```
+
+```shell
+xlsynth-driver dslx-stateful-fn-to-block counter.x --top tick > counter.block.ir
+xlsynth-driver dslx2lean counter.x --top tick --output-dir lean
+```
+
+The second command uses the same typechecked DSLX module for lowering and
+for naming the readable interface. A proof can bind the observed output to
+`out0` and refer to `out0.seen` and `out0.valid`. All register writes take
+effect together on the clock edge. Asserting `rst` writes zero to each register.
+To convert an existing IR function, use `ir-stateful-fn-to-block` with its
+IR name as `--top`. Readable generation requires the DSLX source, and uses
+the existing Lean emitter's supported block operations. Proof-facing types
+support unsigned bits of positive width, positional tuples, nonempty local
+structs, local aliases of supported types, and unsigned two-bit enums with
+distinct encodings. Local computations stay inside the generated step.
+
+The command produces `Generated.lean`, `ReadableTypes.lean`,
+`ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
+`ReadableCorrespondence.lean`. The output directory must be new and its
+parent must exist. All modules are generated before any files are opened.
+To check the correspondence proofs, compile the modules with Lean as
+described in the [library documentation](../xlsynth-lean/README.md).
+
+Use `--dslx-stdlib-path <DIR>` to override the linked compiler's standard
+library and repeat `--dslx-search-path <DIR>` to add import directories.
+The command uses the linked compiler and rejects external toolchain
+configuration.
+
 ### `block2sv`: Block IR to SystemVerilog
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native

@@ -46,9 +46,11 @@ mod aig_tech_map;
 mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
+mod block2lean;
 mod block2sv;
 mod common;
 mod dslx2ir;
+mod dslx2lean;
 mod dslx2pipeline;
 mod dslx2pipeline_eco;
 mod dslx2sv_types;
@@ -2076,6 +2078,34 @@ fn main() {
                         .long("drop-output-ports")
                         .help("Comma-separated output port names to drop")
                         .required(false)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(dslx2lean::command())
+        .subcommand(dslx2lean::to_block_command(true))
+        .subcommand(dslx2lean::to_block_command(false))
+        .subcommand(
+            clap::Command::new("block2lean")
+                .about("Converts an XLS block IR package to Lean without invoking Lean")
+                .arg(
+                    Arg::new("input_file")
+                        .value_name("INPUT_FILE")
+                        .help("Input package-form block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("NAME")
+                        .help("Select a block, overriding the package top")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Write to a file instead of stdout")
                         .action(ArgAction::Set),
                 ),
         )
@@ -4282,6 +4312,24 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("block2fn", subm)) => {
             block2fn::handle_block2fn(subm, &config);
+        }
+        Some(("block2lean", subm)) => {
+            if let Err(error) = block2lean::handle_block2lean(subm) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        Some(("dslx2lean", subm)) => {
+            if let Err(error) = dslx2lean::handle_dslx2lean(subm, &config) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        Some((name @ ("dslx-stateful-fn-to-block" | "ir-stateful-fn-to-block"), subm)) => {
+            if let Err(error) = dslx2lean::handle_to_block(name, subm, &config) {
+                eprintln!("error: {error:#}");
+                std::process::exit(1);
+            }
         }
         Some(("block2sv", subm)) => {
             if let Err(error) = block2sv::handle_block2sv(subm) {
