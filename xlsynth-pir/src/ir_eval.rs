@@ -2005,7 +2005,7 @@ pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> 
 const MAX_LOOP_CALLS_PER_CALLEE: usize = 8;
 
 /// Shares function results across one value-only evaluation. Ordinary calls
-/// retain their results, and sibling and nested loops share per-callee LRUs.
+/// retain their results, and maps and counted loops share per-callee LRUs.
 #[derive(Default)]
 struct CallValues<'ir> {
     ordinary: HashMap<&'ir str, HashMap<Vec<IrValue>, IrValue>>,
@@ -2183,6 +2183,9 @@ fn eval_fn_impl<'a, 'ir>(
                     .expect("map array evaluated")
                     .as_elements()
                     .expect("verified array");
+                if let Some(calls) = call_values.as_deref_mut() {
+                    calls.loop_depth += 1;
+                }
                 let values = elements
                     .iter()
                     .map(|element| {
@@ -2203,6 +2206,9 @@ fn eval_fn_impl<'a, 'ir>(
                         )
                     })
                     .collect::<Vec<_>>();
+                if let Some(calls) = call_values.as_deref_mut() {
+                    calls.loop_depth -= 1;
+                }
                 IrValue::make_array_typed(callee.ret_ty.clone(), &values)
                     .expect("verified map result")
             }
@@ -4537,6 +4543,48 @@ fn f(init: bits[8] id=10, invariant: bits[8] id=11) -> bits[8] {
             panic!("counted_for should evaluate successfully");
         };
         assert_eq!(success.value, IrValue::make_ubits(8, 37).unwrap());
+    }
+
+    #[test]
+    fn map_bounds_cached_element_calls_and_nested_invokes() {
+        let ir_text = r#"package test
+
+fn complement(x: bits[4] id=1) -> bits[4] {
+  ret flipped: bits[4] = not(x, id=2)
+}
+
+fn body(x: bits[4] id=3) -> bits[4] {
+  ret result: bits[4] = invoke(x, to_apply=complement, id=4)
+}
+
+fn f(xs: bits[4][16] id=5) -> bits[4][16] {
+  ret mapped: bits[4][16] = map(xs, to_apply=body, id=6)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let mut elements: Vec<_> = (0..16)
+            .map(|x| IrValue::make_ubits(4, x).unwrap())
+            .collect();
+        let mut calls = CallValues::default();
+        let FnEvalResult::Success(result) = eval_fn_impl(
+            Some(&pkg),
+            pkg.get_fn("f").unwrap(),
+            &[IrValue::make_array(&elements).unwrap()],
+            None,
+            EvalOrderPolicy::Checked,
+            Some(&mut calls),
+        ) else {
+            panic!("map should evaluate successfully");
+        };
+        elements.reverse();
+        assert_eq!(result.value, IrValue::make_array(&elements).unwrap());
+        assert_eq!(calls.ordinary.len(), 1);
+        assert_eq!(calls.ordinary["f"].len(), 1);
+        assert_eq!(calls.in_loops["body"].len(), MAX_LOOP_CALLS_PER_CALLEE);
+        assert_eq!(
+            calls.in_loops["complement"].len(),
+            MAX_LOOP_CALLS_PER_CALLEE
+        );
     }
 
     #[test]

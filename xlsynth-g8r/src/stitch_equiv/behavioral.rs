@@ -140,6 +140,7 @@ fn check_smt_support<'a>(
                 ));
             }
             NodePayload::Invoke { to_apply, .. }
+            | NodePayload::Map { to_apply, .. }
             | NodePayload::CountedFor { body: to_apply, .. } => {
                 let callee = package.get_fn(to_apply).ok_or_else(|| {
                     format!("missing IR callee '{to_apply}' in function '{}'", func.name)
@@ -623,8 +624,11 @@ fn choose(x: bits[4] id=1, which: bits[0] id=2) -> bits[4] {
 fn helper(x: bits[4] id=1) -> (bits[4], bits[4]) {
     ret product: (bits[4], bits[4]) = umulp(x, x, id=2)
 }
-fn __pkg__entry(x: bits[4] id=3) -> (bits[4], bits[4]) {
+fn element(x: bits[4] id=3) -> (bits[4], bits[4]) {
     ret result: (bits[4], bits[4]) = invoke(x, to_apply=helper, id=4)
+}
+fn __pkg__entry(xs: bits[4][2] id=5) -> (bits[4], bits[4])[2] {
+    ret result: (bits[4], bits[4])[2] = map(xs, to_apply=element, id=6)
 }
 "#;
         let package = Parser::new(ir).parse_package().unwrap();

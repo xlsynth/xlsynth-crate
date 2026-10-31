@@ -42,6 +42,7 @@ fn call_height<'a>(
     let mut height = 1;
     for node in &function.nodes {
         if let NodePayload::Invoke { to_apply, .. }
+        | NodePayload::Map { to_apply, .. }
         | NodePayload::CountedFor { body: to_apply, .. } = &node.payload
         {
             let callee = functions.get(to_apply.as_str()).ok_or_else(|| {
@@ -261,4 +262,42 @@ pub(super) fn named_inputs<T: Clone>(
             Ok(value.clone())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_callee_counts_toward_stage_call_depth() {
+        let mut helpers = String::from(
+            "package pipeline\nfn h0(x: bits[1] id=1) -> bits[1] { ret y: bits[1] = identity(x, id=2) }\n",
+        );
+        for i in 1..MAX_CALL_DEPTH {
+            helpers.push_str(&format!(
+                "fn h{i}(x: bits[1] id={}) -> bits[1] {{ ret y: bits[1] = invoke(x, to_apply=h{}, id={}) }}\n",
+                2 * i + 1, i - 1, 2 * i + 2
+            ));
+        }
+        for (last_helper, expected) in [
+            (MAX_CALL_DEPTH - 2, Ok(())),
+            (
+                MAX_CALL_DEPTH - 1,
+                Err(format!(
+                    "stage 'stage': Stitch stage checks support at most {MAX_CALL_DEPTH} nested XLS functions including the stage. Inline helpers to shorten the call chain"
+                )),
+            ),
+        ] {
+            let source = format!(
+                "{helpers}fn stage(a: bits[1][1] id={}) -> bits[1][1] {{ ret y: bits[1][1] = map(a, to_apply=h{last_helper}, id={}) }}",
+                2 * MAX_CALL_DEPTH + 1,
+                2 * MAX_CALL_DEPTH + 2
+            );
+            let package = Parser::new(&source).parse_package().unwrap();
+            assert_eq!(
+                validate_stage_package(&package, &[("stage".into(), "stage".into())]),
+                expected
+            );
+        }
+    }
 }
