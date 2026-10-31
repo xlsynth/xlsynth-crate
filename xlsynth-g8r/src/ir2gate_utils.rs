@@ -7,6 +7,7 @@
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
 use serde::{Deserialize, Serialize};
+use xlsynth_pir::ir::ExtNaryAddArchitecture;
 
 use crate::aig::gate::{self, AigBitVector, AigOperand};
 use crate::aig::get_summary_stats::{AigConeStats, get_aig_cone_stats};
@@ -17,17 +18,25 @@ use crate::prefix_scan_utils::{prefix_scan_exclusive, prefix_scan_inclusive};
 pub use crate::prefix_scan_utils::PrefixScanStrategy;
 
 /// Selects the adder implementation to use when lowering addition operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AdderMapping {
     RippleCarry,
     BrentKung,
     KoggeStone,
+    /// Allow specialized scalar sums and use Brent-Kung for carry propagation.
+    #[default]
+    Auto,
 }
 
-impl Default for AdderMapping {
-    fn default() -> Self {
-        AdderMapping::BrentKung
+impl AdderMapping {
+    /// Returns the topology to use when a carry-propagate adder is needed.
+    pub fn carry_propagate_architecture(self) -> ExtNaryAddArchitecture {
+        match self {
+            Self::RippleCarry => ExtNaryAddArchitecture::RippleCarry,
+            Self::KoggeStone => ExtNaryAddArchitecture::KoggeStone,
+            Self::BrentKung | Self::Auto => ExtNaryAddArchitecture::BrentKung,
+        }
     }
 }
 
@@ -37,16 +46,17 @@ impl std::fmt::Display for AdderMapping {
             AdderMapping::RippleCarry => write!(f, "ripple-carry"),
             AdderMapping::BrentKung => write!(f, "brent-kung"),
             AdderMapping::KoggeStone => write!(f, "kogge-stone"),
+            AdderMapping::Auto => write!(f, "auto"),
         }
     }
 }
 
-impl From<xlsynth_pir::ir::ExtNaryAddArchitecture> for AdderMapping {
-    fn from(value: xlsynth_pir::ir::ExtNaryAddArchitecture) -> Self {
+impl From<ExtNaryAddArchitecture> for AdderMapping {
+    fn from(value: ExtNaryAddArchitecture) -> Self {
         match value {
-            xlsynth_pir::ir::ExtNaryAddArchitecture::RippleCarry => Self::RippleCarry,
-            xlsynth_pir::ir::ExtNaryAddArchitecture::KoggeStone => Self::KoggeStone,
-            xlsynth_pir::ir::ExtNaryAddArchitecture::BrentKung => Self::BrentKung,
+            ExtNaryAddArchitecture::RippleCarry => Self::RippleCarry,
+            ExtNaryAddArchitecture::KoggeStone => Self::KoggeStone,
+            ExtNaryAddArchitecture::BrentKung => Self::BrentKung,
         }
     }
 }
@@ -304,10 +314,10 @@ fn add_with_mapping(
     c_in: AigOperand,
     gb: &mut GateBuilder,
 ) -> (AigOperand, AigBitVector) {
-    match adder_mapping {
-        AdderMapping::RippleCarry => gatify_add_ripple_carry(lhs, rhs, c_in, None, gb),
-        AdderMapping::BrentKung => gatify_add_brent_kung(lhs, rhs, c_in, None, gb),
-        AdderMapping::KoggeStone => gatify_add_kogge_stone(lhs, rhs, c_in, None, gb),
+    match adder_mapping.carry_propagate_architecture() {
+        ExtNaryAddArchitecture::RippleCarry => gatify_add_ripple_carry(lhs, rhs, c_in, None, gb),
+        ExtNaryAddArchitecture::BrentKung => gatify_add_brent_kung(lhs, rhs, c_in, None, gb),
+        ExtNaryAddArchitecture::KoggeStone => gatify_add_kogge_stone(lhs, rhs, c_in, None, gb),
     }
 }
 

@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
-use xlsynth_pir::ir::{self, StartAndLimit};
+use xlsynth_pir::ir::{self, ExtNaryAddArchitecture, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::ir_verify;
@@ -401,10 +401,16 @@ pub(super) fn gatify_add_with_mapping(
     tag: Option<&str>,
     gb: &mut GateBuilder,
 ) -> (AigOperand, AigBitVector) {
-    match adder_mapping {
-        AdderMapping::RippleCarry => gatify_add_ripple_carry(lhs_bits, rhs_bits, c_in, tag, gb),
-        AdderMapping::BrentKung => gatify_add_brent_kung(lhs_bits, rhs_bits, c_in, tag, gb),
-        AdderMapping::KoggeStone => gatify_add_kogge_stone(lhs_bits, rhs_bits, c_in, tag, gb),
+    match adder_mapping.carry_propagate_architecture() {
+        ExtNaryAddArchitecture::RippleCarry => {
+            gatify_add_ripple_carry(lhs_bits, rhs_bits, c_in, tag, gb)
+        }
+        ExtNaryAddArchitecture::BrentKung => {
+            gatify_add_brent_kung(lhs_bits, rhs_bits, c_in, tag, gb)
+        }
+        ExtNaryAddArchitecture::KoggeStone => {
+            gatify_add_kogge_stone(lhs_bits, rhs_bits, c_in, tag, gb)
+        }
     }
 }
 
@@ -4035,17 +4041,30 @@ fn gatify_node(
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
+            let mapping = arch
+                .map(AdderMapping::from)
+                .unwrap_or(options.adder_mapping);
             let gates = gatify_ext_nary_add(
                 f,
                 &env,
                 node.text_id,
                 terms,
-                *arch,
                 output_width,
-                options.adder_mapping,
+                mapping,
                 options.enable_rewrite_nary_add,
                 g8_builder,
             );
+            let arch = mapping.carry_propagate_architecture();
+            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
+                // Only AND nodes carry tags. A wide scalar sum can have many
+                // constant extension bits.
+                if matches!(g8_builder.gates[gate.node.id], AigNode::And2 { .. }) {
+                    g8_builder.add_tag(
+                        gate.node,
+                        format!("ext_nary_add_{}_{arch}_output_bit_{i}", node.text_id),
+                    );
+                }
+            }
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
 

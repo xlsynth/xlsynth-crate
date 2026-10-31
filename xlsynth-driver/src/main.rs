@@ -582,8 +582,8 @@ impl AppExt for clap::Command {
                 clap::Arg::new("adder_mapping")
                     .long("adder-mapping")
                     .value_name("ADDER_MAPPING")
-                    .help("The adder mapping strategy to use (default: brent-kung).")
-                    .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                    .help("Adder mapping strategy. Auto uses Brent-Kung for carry propagation and permits specialized scalar sums.")
+                    .value_parser(["auto", "ripple-carry", "brent-kung", "kogge-stone"])
                     .default_value(DEFAULT_ADDER_MAPPING.as_str())
                     .action(clap::ArgAction::Set),
             )

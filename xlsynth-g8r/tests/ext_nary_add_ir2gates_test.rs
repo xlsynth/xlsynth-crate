@@ -253,13 +253,8 @@ fn f(a: bits[32] id=1, b: bits[32] id=2) -> bits[32] {{
     }
 
     fn get_ext_nary_add_gate_count(mapping: AdderMapping) -> usize {
-        let arch = match mapping {
-            AdderMapping::RippleCarry => "ripple_carry",
-            AdderMapping::KoggeStone => "kogge_stone",
-            AdderMapping::BrentKung => "brent_kung",
-        };
         get_ir_gate_stats(
-            &build_binary_ext_nary_add_ir_text(arch),
+            &build_binary_ext_nary_add_ir_text(&mapping.carry_propagate_architecture().to_string()),
             /* fold= */ false,
             /* hash= */ false,
         )

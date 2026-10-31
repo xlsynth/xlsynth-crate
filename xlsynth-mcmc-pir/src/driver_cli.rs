@@ -248,7 +248,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .long("adder-mapping")
                 .value_name("ADDER_MAPPING")
                 .help("The adder mapping strategy to use.")
-                .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                .value_parser(["auto", "ripple-carry", "brent-kung", "kogge-stone"])
                 .action(ArgAction::Set),
         )
         .arg(

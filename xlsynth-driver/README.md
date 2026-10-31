@@ -2878,8 +2878,9 @@ Supported flags include the common gate-optimization controls:
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
 - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
-- `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
-  topology.
+- `--adder-mapping=<auto|ripple-carry|brent-kung|kogge-stone>` – choose the adder
+  topology. The default, `auto`, uses Brent-Kung for carry propagation and
+  permits shared-parity lowering for sums of three unsigned one-bit terms.
 - `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override
   for the adder topology used inside multipliers. If not set, inherits
   `--adder-mapping`.

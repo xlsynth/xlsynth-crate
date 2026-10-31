@@ -874,9 +874,8 @@ pub(super) fn gatify_ext_nary_add(
     env: &GateEnv,
     text_id: usize,
     terms: &[ir::ExtNaryAddTerm],
-    arch: Option<ir::ExtNaryAddArchitecture>,
     output_width: usize,
-    default_adder_mapping: AdderMapping,
+    adder_mapping: AdderMapping,
     enable_rewrite_nary_add: bool,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
@@ -885,6 +884,60 @@ pub(super) fn gatify_ext_nary_add(
     }
     if terms.is_empty() {
         return AigBitVector::zeros(output_width);
+    }
+
+    // Three unsigned scalar terms form one full-adder. Keep their arrival-aware
+    // placement and share propagate/generate logic across sum and carry.
+    if enable_rewrite_nary_add
+        && g8_builder.options.hash
+        && adder_mapping == AdderMapping::Auto
+        && output_width >= 2
+        && terms.len() == 3
+        && terms.iter().all(|term| {
+            !term.signed
+                && !term.negated
+                && !env.product_is_deferred(term.operand)
+                && f.get_node_ty(term.operand) == &ir::Type::Bits(1)
+        })
+    {
+        let inputs: [AigOperand; 3] = std::array::from_fn(|i| {
+            *env.get_bit_vector(terms[i].operand)
+                .expect("scalar sum operand should be present")
+                .get_lsb(0)
+        });
+        let arrivals = inputs.map(|input| {
+            g8_builder
+                .aig_depth(input)
+                .expect("hashed builder has cached arrivals")
+        });
+        // The CPA pairs inputs 1 and 2. Keep that parity available for folding
+        // and sharing unless one of those inputs is uniquely late.
+        // Constant terms use the existing literal accumulation and folding
+        // path.
+        if arrivals[0] < arrivals[1].max(arrivals[2])
+            && arrivals[1] != arrivals[2]
+            && inputs.iter().all(|input| {
+                !g8_builder.is_known_false(*input) && !g8_builder.is_known_true(*input)
+            })
+        {
+            let mut ordered = inputs;
+            let latest = (0..3).max_by_key(|&i| arrivals[i]).expect("three inputs");
+            ordered.swap(2, latest);
+            let full =
+                g8_builder.add_full_adder_using_shared_parity(ordered[0], ordered[1], ordered[2]);
+            log::debug!(
+                "scalar full-adder: node={} width={} arrivals={:?} sum_depth={:?} carry_depth={:?}",
+                text_id,
+                output_width,
+                arrivals,
+                g8_builder.aig_depth(full.sum),
+                g8_builder.aig_depth(full.carry)
+            );
+            let mut bits = vec![g8_builder.get_false(); output_width];
+            bits[0] = full.sum;
+            bits[1] = full.carry;
+            return AigBitVector::from_lsb_is_index_0(&bits);
+        }
     }
 
     let false_bit = g8_builder.get_false();
@@ -1047,29 +1100,11 @@ pub(super) fn gatify_ext_nary_add(
         }
     }
 
-    let selected_adder_mapping = arch
-        .map(AdderMapping::from)
-        .unwrap_or(default_adder_mapping);
-    let selected_adder_mapping_name = match selected_adder_mapping {
-        AdderMapping::RippleCarry => "ripple_carry",
-        AdderMapping::BrentKung => "brent_kung",
-        AdderMapping::KoggeStone => "kogge_stone",
-    };
-    let sum = gatify_dense_ext_nary_add_terms(
+    gatify_dense_ext_nary_add_terms(
         g8_builder,
         lowered_terms,
         &literal_sum,
         carry_in,
-        selected_adder_mapping,
-    );
-    for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
-        g8_builder.add_tag(
-            gate.node,
-            format!(
-                "ext_nary_add_{}_{}_output_bit_{}",
-                text_id, selected_adder_mapping_name, i
-            ),
-        );
-    }
-    sum
+        adder_mapping,
+    )
 }
