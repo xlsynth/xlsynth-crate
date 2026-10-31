@@ -887,6 +887,58 @@ pub(super) fn gatify_ext_nary_add(
         return AigBitVector::zeros(output_width);
     }
 
+    // Three unsigned scalar terms form one full-adder. Keep their arrival-aware
+    // placement and share propagate/generate logic across sum and carry.
+    if enable_rewrite_nary_add
+        && g8_builder.options.hash
+        && arch.is_none()
+        && output_width >= 2
+        && terms.len() == 3
+        && terms.iter().all(|term| {
+            !term.signed
+                && !term.negated
+                && !env.product_is_deferred(term.operand)
+                && f.get_node_ty(term.operand) == &ir::Type::Bits(1)
+        })
+    {
+        let inputs: [AigOperand; 3] = std::array::from_fn(|i| {
+            *env.get_bit_vector(terms[i].operand)
+                .expect("scalar sum operand should be present")
+                .get_lsb(0)
+        });
+        let arrivals = inputs.map(|input| {
+            g8_builder
+                .aig_depth(input)
+                .expect("hashed builder has cached arrivals")
+        });
+        // Preserve the CPA when its carry-in is already the late input.
+        // Constant terms use the existing literal accumulation and folding
+        // path.
+        if arrivals[0] < arrivals[1].max(arrivals[2])
+            && inputs.iter().all(|input| {
+                !g8_builder.is_known_false(*input) && !g8_builder.is_known_true(*input)
+            })
+        {
+            let mut ordered = inputs;
+            let latest = (0..3).max_by_key(|&i| arrivals[i]).expect("three inputs");
+            ordered.swap(2, latest);
+            let full =
+                g8_builder.add_full_adder_using_shared_parity(ordered[0], ordered[1], ordered[2]);
+            log::debug!(
+                "scalar full-adder: node={} width={} arrivals={:?} sum_depth={:?} carry_depth={:?}",
+                text_id,
+                output_width,
+                arrivals,
+                g8_builder.aig_depth(full.sum),
+                g8_builder.aig_depth(full.carry)
+            );
+            let mut bits = vec![g8_builder.get_false(); output_width];
+            bits[0] = full.sum;
+            bits[1] = full.carry;
+            return AigBitVector::from_lsb_is_index_0(&bits);
+        }
+    }
+
     let false_bit = g8_builder.get_false();
     let selected_negates: Vec<Option<SelectedNegateMatch>> = if enable_rewrite_nary_add {
         terms
