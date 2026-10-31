@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod diagnostics;
+mod redundant_nonzero_mask;
 mod shifted_nonzero;
 
 use xlsynth_pir::IrValue;
@@ -2613,6 +2614,12 @@ pub fn prep_for_gatify(
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    diagnostics::run(
+        &mut cloned,
+        "redundant_nonzero_mask",
+        0,
+        redundant_nonzero_mask::rewrite,
+    );
     diagnostics::run(&mut cloned, "shifted_nonzero", 0, shifted_nonzero::rewrite);
     diagnostics::run(&mut cloned, "combine_or_reduces", 0, combine_or_reduces);
     diagnostics::run(
