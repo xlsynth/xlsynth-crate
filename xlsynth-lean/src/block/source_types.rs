@@ -105,6 +105,7 @@ impl SourceType {
 }
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
+    entry: ModuleContext,
     declarations: Vec<TypeDecl>,
     top: &'a str,
     helpers: BTreeMap<String, HelperSignature>,
@@ -300,20 +301,8 @@ impl Catalogue<'_> {
                 })
                 .collect::<Result<_>>()?;
             Ok(SourceType::Tuple { members })
-        } else if ty.is_enum() {
-            let name = ty
-                .get_enum_def()
-                .context("resolving enum declaration")?
-                .get_identifier();
-            self.nominal_reference(&name)
-        } else if let Some(record) = record {
-            self.concrete_record(&record, ty, arguments.as_deref())
-        } else if ty.is_struct() {
-            let definition = ty
-                .get_struct_def()
-                .context("resolving struct declaration")?;
-            let name = definition.get_identifier();
-            self.nominal_reference(&name)
+        } else if ty.is_enum() || ty.is_struct() {
+            self.checked_nominal_type(ty, arguments.as_deref())
         } else if let Some((signed, width)) = ty.is_bits_like() {
             ensure!(
                 !signed,
@@ -767,32 +756,44 @@ impl Catalogue<'_> {
         module: dslx::Module,
         resolve: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
-        let owner = self.context.declaration_owner(module)?;
-        let previous = std::mem::replace(&mut self.context, owner);
-        let result = resolve(self);
-        self.context = previous;
-        result
+        if module.get_name() == self.context.module.get_name() {
+            resolve(self)
+        } else {
+            let owner = self.entry.declaration_owner(module)?;
+            let previous = std::mem::replace(&mut self.context, owner);
+            let result = resolve(self);
+            self.context = previous;
+            result
+        }
     }
 
-    /// Loop captures may have no written annotation. Resolve their checked
-    /// nominal types in the module that declares them.
-    fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+    fn checked_nominal_type(
+        &mut self,
+        ty: &dslx::Type,
+        arguments: Option<&[String]>,
+    ) -> Result<SourceType> {
         if ty.is_struct() {
             let record = ty.get_struct_def()?;
             self.with_declaration_owner(record.get_owner_module(), |catalogue| {
                 if record.is_parametric() {
-                    catalogue.concrete_record(&record, ty, None)
+                    catalogue.concrete_record(&record, ty, arguments)
                 } else {
                     catalogue.nominal_reference(&record.get_identifier())
                 }
             })
-        } else if ty.is_enum() {
+        } else {
             let enumeration = ty.get_enum_def()?;
-            ensure!(enumeration.get_member_count() != 0, "empty loop enum");
+            ensure!(enumeration.get_member_count() != 0, "empty enum");
             let module = enumeration.get_member(0).get_value().get_owner_module();
             self.with_declaration_owner(module, |catalogue| {
                 catalogue.nominal_reference(&enumeration.get_identifier())
             })
+        }
+    }
+
+    fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+        if ty.is_enum() || ty.is_struct() {
+            self.checked_nominal_type(ty, None)
         } else if let Some((false, width)) = ty.is_bits_like() {
             match width {
                 0 => bail!("zero-width loop binding"),
@@ -958,13 +959,15 @@ pub(super) fn emit_stateful_readable(
     top: &str,
     loop_bindings: &[dslx::LoopBinding],
 ) -> Result<block::LeanBlockBundle> {
+    let entry = ModuleContext {
+        module: module.get_module(),
+        type_info: module.get_type_info(),
+        qualifier: String::new(),
+    };
     let mut catalogue = Catalogue {
         top,
-        context: ModuleContext {
-            module: module.get_module(),
-            type_info: module.get_type_info(),
-            qualifier: String::new(),
-        },
+        context: entry.clone(),
+        entry,
         helpers: BTreeMap::new(),
         declarations: Vec::new(),
         signature: None,

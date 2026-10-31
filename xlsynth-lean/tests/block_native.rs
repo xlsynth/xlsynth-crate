@@ -149,11 +149,13 @@ pub fn passthrough<T: type>(x: T) -> T { x }
     std::fs::write(modules.path().join("packets.x"), packets).unwrap();
     let source = r#"
 import packets;
+struct Packet { current: u6 }
 fn machine(small: packets::Packet<u32:5>, large: packets::Packet<u32:6>,
            fallback: packets::Fallback<u32:5>, __reg_last: u6) -> (u6, u6) {
     let a = packets::choose<u32:5>(small, fallback.value);
     let b = packets::choose<u32:6>(large, u6:41);
-    (packets::passthrough<u6>(__reg_last), packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
+    let output = packets::passthrough<Packet>(Packet { current: __reg_last });
+    (output.current, packets::bias<u32:1>(u1:0 ++ a.value) + packets::bias<u32:2>(b.value))
 }
 "#;
     let model = compile_stateful_function(
@@ -176,6 +178,7 @@ private def stimulus : Input := {
 #check_failure Helpers.«packets::choose<5>» (packet := stimulus.fallback) (fallback := 17)
 #guard (Helpers.«packets::choose<6>» (packet := stimulus.large) (fallback := 41)).value == 37
 #guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
+#guard (Helpers.«packets::passthrough<Packet>» (x := { current := 7 })).current == 7
 #guard (step { last := 7 } stimulus).last == 57
 "#
         .into(),
