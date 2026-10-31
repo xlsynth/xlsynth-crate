@@ -863,6 +863,22 @@ unsafe extern "C" {
         ir_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
 
+    pub fn xls_dslx_typechecked_module_convert_to_ir_with_loop_bindings(
+        module: *mut CDslxTypecheckedModule,
+        import_data: *mut CDslxImportData,
+        callback: Option<
+            unsafe extern "C" fn(
+                *mut std::ffi::c_void,
+                *const std::ffi::c_char,
+                i64,
+                *const std::ffi::c_char,
+                *const CDslxType,
+            ),
+        >,
+        context: *mut std::ffi::c_void,
+        error_out: *mut *mut std::ffi::c_char,
+        ir_out: *mut *mut std::ffi::c_char,
+    ) -> bool;
     pub fn xls_dslx_typechecked_module_clone_removing_members(
         tm: *mut CDslxTypecheckedModule,
         members: *mut *mut CDslxModuleMember,
@@ -1211,6 +1227,7 @@ unsafe extern "C" {
     ) -> *mut CDslxExpr;
 
     // -- StructDef
+    pub fn xls_dslx_struct_def_get_module(def: *mut CDslxStructDef) -> *mut CDslxModule;
 
     pub fn xls_dslx_struct_def_get_identifier(
         struct_def: *const CDslxStructDef,
@@ -1404,6 +1421,10 @@ unsafe extern "C" {
     pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_array(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_tuple(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_tuple_get_member_count(type_: *mut CDslxType) -> i64;
+    pub fn xls_dslx_type_tuple_get_member_type(type_: *mut CDslxType, index: i64)
+    -> *mut CDslxType;
 
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(

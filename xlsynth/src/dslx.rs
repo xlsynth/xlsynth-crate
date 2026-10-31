@@ -388,7 +388,76 @@ pub struct InvocationRewriteRule<'a> {
     pub to_callee_env: Option<ParametricEnv>,
 }
 
+/// The checked DSLX value bound at an IR node in a counted loop body.
+pub struct LoopBinding {
+    pub ir_function: String,
+    pub ir_node_id: i64,
+    /// A destructured accumulator has an anonymous aggregate and named leaves.
+    pub source_name: Option<String>,
+    pub concrete_type: Type,
+}
+
 impl TypecheckedModule {
+    /// Converts the module and identifies the IR values bound by DSLX loop
+    /// patterns.
+    pub fn convert_to_ir_text_with_loop_bindings(
+        &self,
+    ) -> Result<(String, Vec<LoopBinding>), XlsynthError> {
+        struct Bindings<'a> {
+            parent: &'a Rc<TypecheckedModulePtr>,
+            items: Vec<LoopBinding>,
+        }
+
+        unsafe extern "C" fn collect(
+            context: *mut std::ffi::c_void,
+            ir_function: *const std::ffi::c_char,
+            ir_node_id: i64,
+            source_name: *const std::ffi::c_char,
+            concrete_type: *const sys::CDslxType,
+        ) {
+            // XLS borrows context synchronously. Copy its temporary names and
+            // retain the checked module that owns the import data
+            // backing each concrete type.
+            let bindings = unsafe { &mut *context.cast::<Bindings<'_>>() };
+            let copy_name = |ptr| {
+                unsafe { std::ffi::CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            bindings.items.push(LoopBinding {
+                ir_function: copy_name(ir_function),
+                ir_node_id,
+                source_name: (!source_name.is_null()).then(|| copy_name(source_name)),
+                concrete_type: Type {
+                    parent: Rc::clone(bindings.parent),
+                    ptr: concrete_type.cast_mut(),
+                },
+            });
+        }
+
+        let mut bindings = Bindings {
+            parent: &self.ptr,
+            items: Vec::new(),
+        };
+        let mut error_out = std::ptr::null_mut();
+        let mut ir_out = std::ptr::null_mut();
+        let success = unsafe {
+            sys::xls_dslx_typechecked_module_convert_to_ir_with_loop_bindings(
+                self.ptr.ptr,
+                self.ptr.parent.ptr,
+                Some(collect),
+                std::ptr::from_mut(&mut bindings).cast(),
+                &mut error_out,
+                &mut ir_out,
+            )
+        };
+        if success {
+            Ok((unsafe { c_str_to_rust(ir_out) }, bindings.items))
+        } else {
+            Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
+        }
+    }
+
     /// Converts this checked module and its resolved imports to an unoptimized
     /// IR package with source positions.
     pub fn convert_to_ir_text(&self) -> Result<String, XlsynthError> {
@@ -1281,6 +1350,13 @@ pub struct StructDef {
 }
 
 impl StructDef {
+    pub fn get_owner_module(&self) -> Module {
+        Module {
+            parent: self.parent.clone(),
+            ptr: unsafe { sys::xls_dslx_struct_def_get_module(self.ptr) },
+        }
+    }
+
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }
@@ -2606,6 +2682,20 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
+    /// Returns the checked element types in declaration order for a tuple.
+    pub fn get_tuple_members(&self) -> Option<Vec<Type>> {
+        unsafe {
+            sys::xls_dslx_type_is_tuple(self.ptr).then(|| {
+                (0..sys::xls_dslx_type_tuple_get_member_count(self.ptr))
+                    .map(|i| Type {
+                        parent: self.parent.clone(),
+                        ptr: sys::xls_dslx_type_tuple_get_member_type(self.ptr, i),
+                    })
+                    .collect()
+            })
+        }
+    }
+
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
@@ -3240,6 +3330,25 @@ fn step(x: Packet) -> (Packet, (Alias, ())) { (x, (x, ())) }
                 .unwrap();
             assert_eq!(ty.get_struct_def().unwrap().get_identifier(), "Packet");
         }
+    }
+
+    #[test]
+    fn collecting_loop_bindings_preserves_ir_with_an_unused_index() {
+        let mut imports = ImportData::default();
+        let source = "fn step(seed: u8) -> u8 {
+            for (_index, carry): (u32, u8) in u32:1..u32:3 { carry + u8:1 }(seed)
+        }";
+        let checked = parse_and_typecheck(source, "loop.x", "loop_example", &mut imports).unwrap();
+        let expected = checked.convert_to_ir_text().unwrap();
+        let (actual, bindings) = checked.convert_to_ir_text_with_loop_bindings().unwrap();
+        assert_eq!(actual, expected);
+        drop(checked);
+        drop(imports);
+        let carry = bindings
+            .iter()
+            .find(|b| b.source_name.as_deref() == Some("carry"))
+            .unwrap();
+        assert_eq!(carry.concrete_type.is_bits_like(), Some((false, 8)));
     }
 
     #[test]
