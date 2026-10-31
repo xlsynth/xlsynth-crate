@@ -34,6 +34,7 @@ use crate::ir2gate_utils::{
 use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
+mod conditional_select;
 mod demanded_bits;
 mod priority_predicate;
 mod shift_reduction_predicate;
@@ -196,6 +197,7 @@ enum UseCounts {
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
+    select_proof_visits: usize,
     /// Absent for standalone node lowering, where every target bit is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
@@ -217,6 +219,7 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            select_proof_visits: 0,
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -239,6 +242,7 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            select_proof_visits: 0,
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -3588,6 +3592,16 @@ fn gatify_node(
                 default.map(|d| env.get_bit_vector(d).expect("default should be present"));
 
             let gates = early_unit_delta
+                .or_else(|| {
+                    conditional_select::equivalent_general_arm(
+                        f,
+                        env,
+                        g8_builder,
+                        *selector,
+                        &cases,
+                        default_bits.is_some(),
+                    )
+                })
                 .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
             let gates = env
                 .priority_predicate_plan
