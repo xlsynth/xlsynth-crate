@@ -374,7 +374,17 @@ fn physical_type(ty: &Type, prefix: &str) -> Result<String> {
                 })
         }
         Type::Token => Ok(format!("{prefix}Unit")),
-        Type::Array(_) => bail!("arrays are outside the supported Lean subset"),
+        Type::Array(array) => {
+            ensure!(
+                array.element_count > 0,
+                "zero-length arrays are unsupported"
+            );
+            Ok(format!(
+                "{prefix}Vector ({}) {}",
+                physical_type(&array.element_type, prefix)?,
+                array.element_count
+            ))
+        }
     }
 }
 
@@ -508,7 +518,33 @@ pub(crate) fn literal(ty: &Type, value: &IrValue) -> Result<String> {
             Ok(tuple_value(elements.into_iter()))
         }
         Type::Token => Ok("()".to_string()),
-        Type::Array(_) => bail!("array literal is outside the supported Lean subset"),
+        Type::Array(array) => {
+            let elements = value
+                .get_elements()?
+                .iter()
+                .map(|item| literal(&array.element_type, item))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("#v[{}]", elements.join(", ")))
+        }
+    }
+}
+
+/// XLS clamps reads to the last element of each indexed dimension.
+pub(super) fn array_read(array: &str, index: &str) -> String {
+    format!("(_root_.Vector.getD ({array}) ({index}).toNat (_root_.Vector.back ({array})))")
+}
+
+/// Updating an out-of-bounds index leaves the whole array unchanged.
+pub(super) fn array_write(array: &str, indices: &[String], value: &str) -> String {
+    if let Some((index, remaining)) = indices.split_first() {
+        let item = if remaining.is_empty() {
+            value.to_owned()
+        } else {
+            array_write(&array_read(array, index), remaining, value)
+        };
+        format!("(_root_.Vector.setIfInBounds ({array}) ({index}).toNat ({item}))")
+    } else {
+        value.to_owned()
     }
 }
 
@@ -569,6 +605,30 @@ pub(crate) fn node_expression(
                 .into_iter(),
         )),
         NodePayload::TupleIndex { tuple, index } => Ok(tuple_element(&operand(*tuple)?, *index)),
+        NodePayload::Array(args) => {
+            let elements = args
+                .iter()
+                .map(|arg| operand(*arg))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("#v[{}]", elements.join(", ")))
+        }
+        NodePayload::ArrayIndex { array, indices, .. } => {
+            indices.iter().try_fold(operand(*array)?, |items, index| {
+                Ok(array_read(&items, &operand(*index)?))
+            })
+        }
+        NodePayload::ArrayUpdate {
+            array,
+            value,
+            indices,
+            ..
+        } => {
+            let indices = indices
+                .iter()
+                .map(|index| operand(*index))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(array_write(&operand(*array)?, &indices, &operand(*value)?))
+        }
         NodePayload::Unop(Unop::Neg, arg) => Ok(format!("BitVec.neg {}", operand(*arg)?)),
         NodePayload::Unop(Unop::Not, arg) => Ok(format!("BitVec.not {}", operand(*arg)?)),
         NodePayload::Binop(Binop::Add, lhs, rhs) => {
