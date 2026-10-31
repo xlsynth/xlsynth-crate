@@ -241,6 +241,12 @@ the stored source artifacts.
 
 ## Validation
 
+The source-aware emitter uses the native DSLX conversion API in
+[xlsynth/xlsynth#80](https://github.com/xlsynth/xlsynth/pull/80).
+Before building or testing, set both `XLS_DSO_PATH` to the library built
+from that revision and `DSLX_STDLIB_PATH` to its `xls/dslx/stdlib`.
+Make the same library available to the dynamic loader when running the tests.
+
 Rust export tests run normally:
 
 ```sh
