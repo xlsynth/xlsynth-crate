@@ -516,6 +516,11 @@ impl Catalogue<'_> {
                     .context("missing DSLX callee")?;
                 let module = callee.get_body().get_owner_module();
                 let name = module.get_name();
+                // XLS includes its builtins in this graph, but their bodies
+                // lower to IR operations and have no imported DSLX module.
+                if name == "<builtin_stubs>" {
+                    continue;
+                }
                 let key = (name.clone(), callee.get_identifier());
                 let callee_owner = if name == module_name {
                     owner.clone()

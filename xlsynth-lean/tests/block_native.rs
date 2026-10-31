@@ -81,16 +81,16 @@ fn stateful_nested_helper_calls() {
     fs::write(
         modules.path().join("left_side.x"),
         r#"
-pub struct Packet { base: u8, delta: u8 }
+pub struct Packet { base: u8, delta: u4 }
 pub fn advance(command: Packet) -> Packet {
-    Packet { base: command.base + command.delta, ..command }
+    Packet { base: command.base + signex(command.delta, command.base), ..command }
 }
 "#,
     )
     .unwrap();
     let source = r#"
 import left_side as foreign;
-struct Packet { left: u8, right: u8 }
+struct Packet { left: u8, right: u4 }
 fn advance(request: foreign::Packet, previous: u8) -> u8 {
     foreign::advance(request).base + previous
 }
