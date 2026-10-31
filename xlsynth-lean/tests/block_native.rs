@@ -198,11 +198,7 @@ fn machine(mask: u8, offset: u8, __reg_count: u8) -> (u8, u8) {
     (__reg_count, fold(__reg_count, mask, offset))
 }
 "#;
-    let path = Path::new("machine.x");
-    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
-    let mut bundle = compiled.emit_readable().unwrap();
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
-    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let (mut bundle, machine) = compile_lean_and_xls_machine(source);
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
         let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
@@ -233,11 +229,7 @@ fn machine(amount: u64, __reg_value: u5) -> (u5, u5) {
     (__reg_value, shift_value(amount, __reg_value))
 }
 "#;
-    let path = Path::new("machine.x");
-    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
-    let mut bundle = compiled.emit_readable().unwrap();
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
-    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let (mut bundle, machine) = compile_lean_and_xls_machine(source);
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     for amount in [0, 1, 5, 1 << 60] {
         let args = [
@@ -307,11 +299,7 @@ fn machine(index: u64, __reg_data: u8) -> (u8, u8) {
     (__reg_data[index+:u3] as u8, bit_slice_update(__reg_data, index, u3:2))
 }
 "#;
-    let path = Path::new("machine.x");
-    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
-    let mut bundle = compiled.emit_readable().unwrap();
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
-    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let (mut bundle, machine) = compile_lean_and_xls_machine(source);
     let mut checks = String::from(
         r#"import ReadableCorrespondence
 open XlsReadable
@@ -344,11 +332,7 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
     fn machine(mask: u8, __reg_previous: u8) -> (u3, u8) {
         (encode_mask(mask ^ __reg_previous), mask)
     }";
-    let path = Path::new("machine.x");
-    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
-    let mut bundle = compiled.emit_readable().unwrap();
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
-    let machine = package.ir.get_function("__machine__machine").unwrap();
+    let (mut bundle, machine) = compile_lean_and_xls_machine(source);
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     let previous = 0b0000_0100;
     // No change, clear bit 2, set bit 4, then flip both bits relative to
@@ -370,6 +354,39 @@ fn encode_changed_bits_matches_xls_for_multihot_masks() {
     }
     bundle.files.push(("CheckEncode.lean".into(), checks));
     check_bundle(bundle, "encode changed mask bits");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn unsigned_arithmetic_matches_xls_at_width_boundaries() {
+    use std::fmt::Write as _;
+    let source = "fn machine(a: u5, b: u5, __reg_value: u5) -> (bool, u5, u5, u5) {
+        (a < b, a - b, a / b, __reg_value * a)
+    }";
+    let (mut bundle, machine) = compile_lean_and_xls_machine(source);
+    let mut checks = String::from(
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def clock (a b : BitVec 5) :=
+  let q : State := { value := 7 }
+  let x : Input := { rst := false, a, b }
+  (observe q x, (step q x).value)
+"#,
+    );
+    for (a, b) in [(3, 8), (31, 0), (19, 3)] {
+        let args = [a, b, 7].map(|v| xlsynth::XlsIrValue::make_ubits(5, v).unwrap());
+        let result = machine.interpret(&args).unwrap();
+        let [lt, diff, quot, prod] =
+            [0, 1, 2, 3].map(|i| result.get_element(i).unwrap().to_u64().unwrap());
+        writeln!(
+            checks,
+            "#guard clock {a} {b} == (({}, {diff}, {quot}), {prod})",
+            lt != 0
+        )
+        .unwrap();
+    }
+    bundle.files.push(("CheckArith.lean".into(), checks));
+    check_bundle(bundle, "unsigned fixed-width arithmetic");
 }
 
 // The outer singleton is a state update; the inner singleton is a tuple.
@@ -513,6 +530,15 @@ top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
         },
         "raw output and assertion field types",
     );
+}
+
+fn compile_lean_and_xls_machine(source: &str) -> (LeanBlockBundle, xlsynth::IrFunction) {
+    let path = Path::new("machine.x");
+    let compiled = compile_stateful_function(source, path, "machine", None, &[]).unwrap();
+    let bundle = compiled.emit_readable().unwrap();
+    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default()).unwrap();
+    let machine = package.ir.get_function("__machine__machine").unwrap();
+    (bundle, machine)
 }
 
 /// Elaborate every generated file in dependency order with the requested Lean.
