@@ -1742,31 +1742,30 @@ fn gatify_udiv(
 ) -> AigBitVector {
     assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
     let bit_count = lhs_bits.get_bit_count();
-
-    let mut remainder = AigBitVector::zeros(bit_count);
+    let mut remainder = AigBitVector::zeros(0);
     let mut quotient_bits = Vec::with_capacity(bit_count);
 
-    for dividend_bit in lhs_bits.iter_msb_to_lsb() {
-        let mut shifted_ops = Vec::with_capacity(bit_count);
+    for (i, dividend_bit) in lhs_bits.iter_msb_to_lsb().enumerate() {
+        // After consuming k bits, the remainder cannot exceed that k-bit
+        // dividend prefix. A divisor with higher bits set cannot be subtracted.
+        let width = i + 1;
+        let mut shifted_ops = Vec::with_capacity(width);
         shifted_ops.push(*dividend_bit);
-        for i in 0..bit_count - 1 {
-            shifted_ops.push(*remainder.get_lsb(i));
-        }
+        shifted_ops.extend(remainder.iter_lsb_to_msb().copied());
         let shifted = AigBitVector::from_lsb_is_index_0(&shifted_ops);
-
-        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted, rhs_bits);
-        let rhs_comp = gb.add_not_vec(rhs_bits);
-        let (_c, diff) = gatify_add_ripple_carry(&shifted, &rhs_comp, gb.get_true(), None, gb);
+        shifted_ops.resize(bit_count, gb.get_false());
+        let shifted_full = AigBitVector::from_lsb_is_index_0(&shifted_ops);
+        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted_full, rhs_bits);
+        let divisor_low = rhs_bits.get_lsb_slice(0, width);
+        let rhs_comp = gb.add_not_vec(&divisor_low);
+        let (_, diff) = gatify_add_brent_kung(&shifted, &rhs_comp, gb.get_true(), None, gb);
         remainder = gb.add_mux2_vec(&ge, &diff, &shifted);
         quotient_bits.push(ge);
     }
 
     quotient_bits.reverse();
-    let quotient = AigBitVector::from_lsb_is_index_0(&quotient_bits);
-
-    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
-    let ones = gb.replicate(gb.get_true(), bit_count);
-    gb.add_mux2_vec(&divisor_zero, &ones, &quotient)
+    // A zero divisor makes every comparison true, so the quotient is all ones.
+    AigBitVector::from_lsb_is_index_0(&quotient_bits)
 }
 
 fn gatify_div(

@@ -7,12 +7,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use test_case::{test_case, test_matrix};
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
+use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify, gatify_ule_via_bit_tests};
 use xlsynth_g8r::ir2gate_utils::gatify_one_hot;
 use xlsynth_g8r::test_utils::Opt;
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
+use xlsynth_pir::{IrBits, IrValue};
 
 use maplit::btreemap;
 
@@ -729,6 +733,82 @@ fn do_umod(x: bits[{bit_count}], y: bits[{bit_count}]) -> bits[{bit_count}] {{
         ),
         opt,
     );
+}
+
+#[test_matrix(["udiv", "umod", "sdiv", "smod"], [3, 4, 5, 8], [Opt::Yes, Opt::No])]
+fn test_divmod_wider_ir_to_gates(op: &str, bit_count: u32, opt: Opt) {
+    do_test_ir_conversion(
+        &format!(
+            "package sample
+top fn main(x: bits[{bit_count}], y: bits[{bit_count}]) -> bits[{bit_count}] {{
+    ret result: bits[{bit_count}] = {op}(x, y, id=3)
+}}",
+        ),
+        opt,
+    );
+}
+
+#[test_matrix(["udiv", "umod", "sdiv", "smod"], [16, 32, 65, 128], [Opt::Yes, Opt::No])]
+fn test_divmod_wide_simulation(op: &str, width: usize, opt: Opt) {
+    let text = format!(
+        "package sample
+top fn main(x: bits[{width}], y: bits[{width}]) -> bits[{width}] {{
+    ret result: bits[{width}] = {op}(x, y, id=3)
+}}"
+    );
+    let package = ir_parser::Parser::new(&text)
+        .parse_and_validate_package()
+        .unwrap();
+    let function = package.get_top_fn().unwrap();
+    let gates = gatify(
+        function,
+        GatifyOptions {
+            fold: opt == Opt::Yes,
+            hash: opt == Opt::Yes,
+            ..GatifyOptions::all_opts_disabled()
+        },
+    )
+    .unwrap()
+    .gate_fn;
+    let mut simulator = PreparedGateSim::new(&gates);
+    let special = [
+        IrValue::make_ubits(width, 0).unwrap(),
+        IrValue::make_ubits(width, 1).unwrap(),
+        IrValue::make_sbits(width, -1).unwrap(),
+        IrValue::make_sbits(width, 3).unwrap(),
+        IrValue::make_sbits(width, -3).unwrap(),
+        IrValue::signed_min_bits(width),
+        IrValue::signed_max_bits(width),
+    ];
+    let mut cases = generate_argument_sets_from_seed(function, 0xd1_5100, 128);
+    for lhs in &special {
+        for rhs in &special {
+            cases.push(vec![lhs.clone(), rhs.clone()]);
+        }
+    }
+    // Exercise high divisor bits that must suppress a narrow subtraction.
+    for bit in [0, 1, width / 2, width - 2, width - 1] {
+        let mut bits = vec![false; width];
+        bits[bit] = true;
+        let power = IrValue::from_bits(&IrBits::from_lsb_is_0(&bits));
+        cases.push(vec![IrValue::all_ones_bits(width), power.clone()]);
+        cases.push(vec![power.clone(), power]);
+    }
+    for inputs in cases {
+        let bits = inputs
+            .iter()
+            .map(|v| v.to_bits().unwrap())
+            .collect::<Vec<_>>();
+        let actual = simulator.eval_outputs(&bits);
+        let FnEvalResult::Success(expected) = eval_fn(function, &inputs) else {
+            panic!("division reference evaluation failed");
+        };
+        assert_eq!(
+            IrValue::from_bits(&actual[0]),
+            expected.value,
+            "{op} bits[{width}] inputs={inputs:?}"
+        );
+    }
 }
 
 bit_count_test_cases!(test_sdiv_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
