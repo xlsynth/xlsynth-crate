@@ -29,7 +29,7 @@ use crate::block::{
         self as lean, LeanBlockBundle, identifier, lean_type, record_value, tuple_element,
         tuple_value,
     },
-    source_types::{SourceType, StatefulInterface, TypeDecl, source_shape},
+    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 
 /// Source type annotations and collision-free names for one verified block.
@@ -447,7 +447,18 @@ impl<'a> Presentation<'a> {
         to: Option<&SourceType>,
         value: &str,
     ) -> Result<String> {
-        if from == to {
+        // A Lean abbreviation and its target already have the same type,
+        // including underneath Vector and Prod. Keep nominal types distinct.
+        let same_type = match (from, to) {
+            (Some(from), Some(to)) => {
+                from == to
+                    || resolve_aliases(from, self.declarations)?
+                        == resolve_aliases(to, self.declarations)?
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same_type {
             Ok(value.into())
         } else {
             self.convert(to, &self.convert(from, value, true)?, false)
@@ -1474,21 +1485,12 @@ end XlsReadable
             // conditionals through each other. Projections also cross selected
             // records and physical tuples, not just their enclosing codecs.
             let mut conditional_rules = BTreeSet::from([
-                "apply_ite XlsCodec.encodeBool".to_owned(),
+                BOOL_ENCODE_ITE.to_owned(),
                 "apply_ite XlsCodec.decodeBool".to_owned(),
             ]);
             for declaration in self.declarations {
                 let name = identifier(declaration.name())?;
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.encode"));
-                conditional_rules.insert(format!("apply_ite XlsCodec.{name}.decode"));
-                if let TypeDecl::Struct { fields, .. } = declaration {
-                    for field in fields {
-                        conditional_rules.insert(format!(
-                            "apply_ite XlsSource.{name}.{}",
-                            identifier(&field.name)?
-                        ));
-                    }
-                }
+                conditional_rules.extend(declaration_ite_rules(declaration, &name)?);
             }
             for graph in
                 std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
@@ -1504,27 +1506,17 @@ end XlsReadable
                 }
             }
             let mut rules = conditional_rules.into_iter().collect::<Vec<_>>();
-            rules.extend([
-                "prod_fst_ite".into(),
-                "prod_snd_ite".into(),
-                "vector_map_ite".into(),
-                "vector_getD_back_map".into(),
-                "Vector.map_setIfInBounds".into(),
-                "Vector.map_map".into(),
-                "Function.comp_def".into(),
-                "Vector.map_id'".into(),
-            ]);
+            rules.extend(PROJECTION_ITE_RULES.map(str::to_owned));
+            rules.extend(VECTOR_MAP_RULES.map(str::to_owned));
             for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
-                rules.push(format!("XlsCodec.{name}.encode_decode"));
-                rules.push(format!("XlsCodec.{name}.decode_encode"));
+                rules.extend(codec_round_trip_rules(&name));
                 if let TypeDecl::Struct { name, .. } = declaration {
                     rules.push(identifier(&format!("encode_{name}_mk"))?);
                 }
             }
-            rules.push("XlsCodec.decode_encodeBool".into());
-            rules.push("XlsCodec.encode_decodeBool".into());
+            rules.extend(BOOL_ROUND_TRIP_RULES.map(str::to_owned));
             rules.join(",\n       ")
         };
         let mut helper_rules = String::new();
@@ -1579,6 +1571,45 @@ end XlsReadable
         out.push_str("\nend XlsReadable\n");
         Ok(out)
     }
+}
+
+// Both correspondence strategies use these laws, but apply them in different
+// orders.
+const BOOL_ENCODE_ITE: &str = "apply_ite XlsCodec.encodeBool";
+const BOOL_ROUND_TRIP_RULES: [&str; 2] =
+    ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
+const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
+const VECTOR_MAP_RULES: [&str; 5] = [
+    "vector_getD_back_map",
+    "Vector.map_setIfInBounds",
+    "Vector.map_map",
+    "Function.comp_def",
+    "Vector.map_id'",
+];
+
+fn codec_round_trip_rules(name: &str) -> [String; 2] {
+    [
+        format!("XlsCodec.{name}.encode_decode"),
+        format!("XlsCodec.{name}.decode_encode"),
+    ]
+}
+
+/// Distribute only these functions across a conditional. A bare apply_ite
+/// could distribute nested conditionals through each other.
+fn declaration_ite_rules(declaration: &TypeDecl, name: &str) -> Result<Vec<String>> {
+    let mut rules = vec![
+        format!("apply_ite XlsCodec.{name}.encode"),
+        format!("apply_ite XlsCodec.{name}.decode"),
+    ];
+    if let TypeDecl::Struct { fields, .. } = declaration {
+        for field in fields {
+            rules.push(format!(
+                "apply_ite XlsSource.{name}.{}",
+                identifier(&field.name)?
+            ));
+        }
+    }
+    Ok(rules)
 }
 
 /// Lean products have no trailing Unit. Only an explicit singleton DSLX
