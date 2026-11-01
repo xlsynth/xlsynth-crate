@@ -194,6 +194,42 @@ reset_active_low = true"#,
 }
 
 #[test]
+fn packed_tuple_with_an_empty_array_round_trips_through_a_stage() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::write(
+        directory.path().join("empty_array.x"),
+        "fn echo(x: (u4[0], u4)) -> (u4[0], u4) { x }",
+    )
+    .unwrap();
+    let ir = stdout(
+        directory.path(),
+        &[
+            "dslx-stitch-pipeline",
+            "--output-format=block-ir",
+            "--dslx_input_file=empty_array.x",
+            "--stages=echo",
+            "--output_module_name=echo_pipe",
+            "--flop_inputs=false",
+            "--flop_outputs=false",
+        ],
+    )
+    .unwrap();
+    let rtl = render_block(&ir).unwrap();
+    let module = compile_combo_module(&rtl).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+    for nibble in 0..16 {
+        let x = Value4::from_u64(4, Signedness::Unsigned, nibble);
+        let inputs = [
+            ("clk".to_owned(), Value4::zeros(1, Signedness::Unsigned)),
+            ("x".to_owned(), x.clone()),
+        ]
+        .into();
+        let outputs = eval_combo(&module, &plan, &inputs).unwrap();
+        assert_eq!(outputs["out"], x);
+    }
+}
+
+#[test]
 fn a_nullary_stage_without_valid_needs_no_input_register() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(

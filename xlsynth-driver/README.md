@@ -4212,6 +4212,12 @@ result and each successive parameter receives the next slice. Both formats use
 the same stage order, pipeline name, and valid/reset settings.
 The generated text goes to stdout and diagnostics go to stderr.
 
+In four-state simulation, the two RTL paths can differ when reset is unknown
+at a rising edge. For example, with active-high reset at `X` and input valid
+at `1`, the direct RTL wrapper's conditional expression writes `X` to the
+first valid register. The default `block2sv` procedural `if (rst)` takes the
+else branch and writes `1`. XLS block IR represents reset as a single bit.
+
 The block IR package retains the stage bodies and their helper functions.
 `block2sv` inlines calls to DSLX function bodies when generating SystemVerilog.
 Its existing operation restrictions also apply to stage bodies. Expand `map`,

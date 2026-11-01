@@ -688,13 +688,8 @@ impl<S: sealed::State> Builder<S> {
         element_type: Type,
         elements: &[BValue],
     ) -> Result<BValue, BuilderError> {
-        let ty = Type::new_array(element_type.clone(), elements.len());
+        let ty = Type::new_array(element_type, elements.len());
         checked_flat_width(&ty)?;
-        if elements.is_empty() {
-            let value = IrValue::make_array_typed(element_type, &[])
-                .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-            return self.literal(value);
-        }
         self.add_node(NodePayload::Array(self.nodes(elements)?), Some(ty))
     }
 
@@ -1133,9 +1128,9 @@ mod tests {
                 IrValue::make_array_typed(Type::Bits(17), &[]).unwrap(),
             ])
         );
-        let parsed = Parser::new(&package.to_string())
-            .parse_and_validate_package()
-            .unwrap();
+        let text = package.to_string();
+        xlsynth::IrPackage::parse_ir(&text, None).unwrap();
+        let parsed = Parser::new(&text).parse_and_validate_package().unwrap();
         assert_eq!(parsed.get_top_fn().unwrap().ret_ty, function.ret_ty);
     }
 
