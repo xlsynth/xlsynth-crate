@@ -620,8 +620,9 @@ pub fn process_ir_text_with_gatefn(
 
     let mut gate_fn = gatify_output.gate_fn;
     let lowering_map = gatify_output.lowering_map;
-    let terminal_wrap =
-        capture.and_then(|obs| crate::terminal_wrap_graft::TerminalWrapPlan::new(&gate_fn, obs));
+    let terminal_wrap = capture
+        .wrap
+        .and_then(|obs| crate::terminal_wrap_graft::TerminalWrapPlan::new(&gate_fn, obs));
 
     let independent_op_stats = if options.emit_independent_op_stats {
         let gatify_options = ir2gate::GatifyOptions::from(GatifyOptionsInput {
@@ -739,6 +740,7 @@ pub fn process_ir_text_with_gatefn(
         }
         None => optimize_outcome.gate_fn,
     };
+    gate_fn = ir2gate::priority_ordinal::apply(gate_fn, &capture.ordinals);
     let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());

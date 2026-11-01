@@ -2,6 +2,7 @@
 
 //! Lower priority-ordinal thresholds using the input bits they observe.
 
+use super::priority_ordinal::{self, Order};
 use super::{GateEnv, GatifyOptions};
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::{GateBuilder, ReductionKind};
@@ -46,13 +47,6 @@ impl Threshold {
             Order::HighestSetIndex => None,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum Order {
-    TrailingZeros,
-    LeadingZeros,
-    HighestSetIndex,
 }
 
 /// Captures a conditional negation and the bits its consumers observe.
@@ -515,35 +509,29 @@ fn match_threshold(
         }
         _ => (arg, 0),
     };
-    if !env.has_single_use(encoded) {
-        return None;
-    }
-    let priority_order = |lsb_prio| {
-        if lsb_prio {
-            Order::TrailingZeros
-        } else {
-            Order::HighestSetIndex
-        }
-    };
-    let (input, order) = match f.get_node(encoded).payload {
-        NodePayload::ExtClz { arg, offset: 0, .. } => (arg, Order::LeadingZeros),
-        NodePayload::ExtPrioEncode { arg, lsb_prio } => (arg, priority_order(lsb_prio)),
-        NodePayload::Encode { arg: hot } if env.has_single_use(hot) => {
-            let NodePayload::OneHot { arg, lsb_prio } = f.get_node(hot).payload else {
-                return None;
-            };
-            (arg, priority_order(lsb_prio))
-        }
-        _ => return None,
-    };
+    let priority_ordinal::Ordinal {
+        input,
+        order,
+        leading_user,
+    } = priority_ordinal::owned(f, env, encoded)?;
     // A truncated sentinel can wrap to zero, invalidating the region test.
     let width = f.get_node_ty(input).bit_count();
     if f.get_node_ty(encoded).bit_count() < xlsynth_pir::math::ceil_log2(width.checked_add(1)?) {
         return None;
     }
     let cutoff = 1usize.checked_shl(u32::try_from(start).ok()?)?;
-    let text_id = f.get_node(input).text_id;
     let use_outside_hit = range_info.is_some_and(|ri| {
+        // The recognizer can look through a reverse. Population is unchanged,
+        // but range facts may be recorded only on the encoder's actual operand.
+        let encoder = match f.get_node(encoded).payload {
+            NodePayload::Encode { arg } => arg,
+            _ => encoded,
+        };
+        let fact_input = match f.get_node(encoder).payload {
+            NodePayload::OneHot { arg, .. } | NodePayload::ExtPrioEncode { arg, .. } => arg,
+            _ => input,
+        };
+        let text_id = f.get_node(fact_input).text_id;
         // A full-width count tests only the zero sentinel. When just one
         // bit lies outside a count's zero region on an exactly-one word,
         // that bit is the predicate.
@@ -555,15 +543,6 @@ fn match_threshold(
         (matches!(order, Order::HighestSetIndex) || cutoff == width || single_outside_bit)
             && ri.proves_nonzero(text_id)
     });
-    let (input, order, leading_user) = match (order, &f.get_node(input).payload) {
-        (Order::TrailingZeros, NodePayload::Unop(Unop::Reverse, source)) => (
-            *source,
-            Order::LeadingZeros,
-            env.has_single_use(input).then_some(input),
-        ),
-        (Order::LeadingZeros, _) => (input, order, Some(encoded)),
-        _ => (input, order, None),
-    };
     Some((
         Threshold {
             input,
