@@ -240,3 +240,27 @@ fn e2e_netlist_load_enable_feedback_cycle_errors() {
         "unexpected error: {err}"
     );
 }
+
+#[test]
+fn constant_products_have_the_declared_result_width() {
+    for (op, width, expected) in [
+        ("umul", 2, 2),
+        ("smul", 7, 122),
+        ("umul", 7, 6),
+        ("smul", 2, 2),
+    ] {
+        let block_ir = format!(
+            "package test\n\ntop block top(out: bits[{width}]) {{\n\
+             a: bits[2] = literal(value=2, id=1)\n\
+             b: bits[3] = literal(value=3, id=2)\n\
+             p: bits[{width}] = {op}(a, b, id=3)\n\
+             out: () = output_port(p, name=out, id=4)\n}}"
+        );
+        let f = run_block2fn(&block_ir, &[], &[]);
+        let node = f.get_node(f.ret_node_ref.unwrap());
+        let NodePayload::Literal(value) = &node.payload else {
+            panic!("expected folded {op} result");
+        };
+        assert_eq!(*value, IrValue::make_ubits(width, expected).unwrap());
+    }
+}
