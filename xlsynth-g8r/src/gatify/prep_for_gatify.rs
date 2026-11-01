@@ -18,6 +18,7 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
+mod affine_equality;
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
@@ -2848,7 +2849,7 @@ pub(crate) fn prep_for_gatify_with_origins(
         );
     }
     diagnostics::run(&mut cloned, "projected_positive_mask", 0, |f| {
-        rewrite_projected_positive_mask_to_sign_test(f, origins)
+        rewrite_projected_positive_mask_to_sign_test(f, origins.as_deref_mut())
     });
     // Expand comparisons after word-level preparation. Their synthetic sign
     // slices must not trigger rewrites of the original predicate values, and
@@ -2858,7 +2859,19 @@ pub(crate) fn prep_for_gatify_with_origins(
     });
     diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
     diagnostics::run(&mut cloned, "widened_sum_threshold", 0, |f| {
-        widened_sum_threshold::rewrite(f, comparison_origins)
+        widened_sum_threshold::rewrite(f, comparison_origins.as_deref_mut())
+    });
+    diagnostics::run(&mut cloned, "affine_equality", 0, |prepared| {
+        affine_equality::rewrite(
+            prepared,
+            origins
+                .zip(comparison_origins)
+                .map(|(rewrites, comparisons)| affine_equality::Origins {
+                    original: f,
+                    rewrites,
+                    comparisons,
+                }),
+        )
     });
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
