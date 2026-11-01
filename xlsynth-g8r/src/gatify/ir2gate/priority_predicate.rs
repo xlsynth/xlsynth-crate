@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lower priority predicates using only the observed conditional-negation bits.
+//! Lower priority-ordinal thresholds using the input bits they observe.
 
 use super::GateEnv;
 use crate::aig::gate::{AigBitVector, AigOperand};
@@ -8,14 +8,43 @@ use crate::gate_builder::{GateBuilder, ReductionKind};
 use crate::prefix_scan_utils::{PrefixScanStrategy, prefix_scan_inclusive};
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
-use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NodePayload, NodeRef, Unop};
+use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Unop};
 use xlsynth_pir::ir_utils;
 
-/// Plans priority thresholds whose selected high bits avoid serial carries.
+/// Plans priority thresholds and specializes eligible conditional negations.
 #[derive(Default)]
 pub(super) struct PriorityPredicatePlan {
     selections: HashMap<NodeRef, Selection>,
-    reductions: HashMap<NodeRef, (NodeRef, usize)>,
+    reductions: HashMap<NodeRef, Threshold>,
+    pub(super) zero_conjunctions: HashSet<NodeRef>,
+}
+
+/// The complete high part of an ordinal is nonzero iff it reaches the cutoff.
+struct Threshold {
+    input: NodeRef,
+    cutoff: usize,
+    order: Order,
+}
+
+impl Threshold {
+    /// Bits that must all be zero when this ordinal predicate is true.
+    fn required_zero_bits(&self, width: usize) -> Option<std::ops::Range<usize>> {
+        if self.cutoff > width {
+            return None;
+        }
+        match self.order {
+            Order::LeadingZeros => Some(width - self.cutoff..width),
+            Order::TrailingZeros => Some(0..self.cutoff),
+            Order::HighestSetIndex => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Order {
+    TrailingZeros,
+    LeadingZeros,
+    HighestSetIndex,
 }
 
 /// Captures a conditional negation and the first high bit its consumers
@@ -42,7 +71,7 @@ enum PrefixSource {
 
 impl PriorityPredicatePlan {
     /// Finds eligible chains once using consumer counts from prepared IR.
-    pub(super) fn extract(f: &ir::Fn, env: &GateEnv) -> Self {
+    pub(super) fn extract(f: &ir::Fn, env: &GateEnv, fold: bool) -> Self {
         let mut users = vec![Vec::new(); f.nodes.len()];
         for (index, node) in f.nodes.iter().enumerate() {
             for operand in ir_utils::operands(&node.payload) {
@@ -56,13 +85,48 @@ impl PriorityPredicatePlan {
                 continue;
             };
             candidates += 1;
-            let Some((selected, selection)) = match_predicate(f, env, arg, &users) else {
+            let Some((threshold, leading_user)) = match_threshold(f, env, arg) else {
                 continue;
             };
-            result
-                .reductions
-                .insert(NodeRef { index }, (selected, selection.first_tested_bit));
-            result.selections.insert(selected, selection);
+            let selection = leading_user.and_then(|user| {
+                match_selection(f, env, arg, threshold.input, user, threshold.cutoff, &users)
+            });
+            // Specialized conditional selections already fold contradictory bit
+            // tests. Enable the broader ordinal folds only when general folding
+            // is requested.
+            if (fold || selection.is_some())
+                && let Some(region) =
+                    threshold.required_zero_bits(f.get_node_ty(threshold.input).bit_count())
+            {
+                for &user in &users[index] {
+                    let NodePayload::Nary(NaryOp::And | NaryOp::Nand, terms) =
+                        &f.get_node(user).payload
+                    else {
+                        continue;
+                    };
+                    if terms.iter().any(|&term| {
+                        (fold && term == threshold.input)
+                            || matches!(
+                                f.get_node(term).payload,
+                                NodePayload::BitSlice { arg, start, width: 1 }
+                                    if arg == threshold.input && region.contains(&start)
+                            )
+                    }) {
+                        result.zero_conjunctions.insert(user);
+                    }
+                }
+            }
+            if let Some(selection) = selection {
+                result.selections.insert(threshold.input, selection);
+            }
+            log::debug!(
+                "priority_predicate threshold function={} reduction_text_id={} input_text_id={} cutoff={}",
+                f.name,
+                node.text_id,
+                f.get_node(threshold.input).text_id,
+                threshold.cutoff
+            );
+            result.reductions.insert(NodeRef { index }, threshold);
         }
         log::debug!(
             "priority_predicate summary function={} candidates={} accepted={} rejected={} selections={}",
@@ -73,25 +137,6 @@ impl PriorityPredicatePlan {
             result.selections.len()
         );
         result
-    }
-
-    /// A true threshold requires every tested high bit of its selection to be
-    /// zero.
-    pub(super) fn contradicts_selected_bit(&self, f: &ir::Fn, args: &[NodeRef]) -> bool {
-        if self.reductions.is_empty() {
-            return false;
-        }
-        let tested: HashSet<_> = args
-            .iter()
-            .filter_map(|arg| self.reductions.get(arg).map(|&(selected, _)| selected))
-            .collect();
-        !tested.is_empty() && args.iter().any(|arg| {
-            matches!(
-                f.get_node(*arg).payload,
-                NodePayload::BitSlice { arg: selected, start, width: 1 }
-                    if tested.contains(&selected) && start >= self.selections[&selected].first_tested_bit
-            )
-        })
     }
 
     /// Derives observed selection bits from carry-free operand prefixes.
@@ -184,17 +229,40 @@ impl PriorityPredicatePlan {
         env: &GateEnv,
         gb: &mut GateBuilder,
     ) -> Option<AigOperand> {
-        let &(selected, first) = self.reductions.get(&node)?;
-        if let Some(zero) = self.selections.get(&selected)?.high_zero.get() {
-            return Some(*zero);
+        let threshold = self.reductions.get(&node)?;
+        let bits = env.get_bit_vector(threshold.input).ok()?;
+        let width = bits.get_bit_count();
+        let count = threshold.cutoff;
+        if count > width {
+            return Some(gb.get_false());
         }
-        let bits = env.get_bit_vector(selected).ok()?;
-        if first == 0 {
-            let prefix = self.selections[&selected].prefix_bits(bits.get_bit_count(), env, gb);
-            return Some(gb.add_or_nary(&prefix, ReductionKind::Tree).negate());
+        let first = if matches!(threshold.order, Order::LeadingZeros) {
+            let first = width - count;
+            if let Some(selection) = self.selections.get(&threshold.input)
+                && selection.first_tested_bit == first
+            {
+                if let Some(zero) = selection.high_zero.get() {
+                    return Some(*zero);
+                }
+                if first == 0 {
+                    let prefix = selection.prefix_bits(width, env, gb);
+                    return Some(gb.add_or_nary(&prefix, ReductionKind::Tree).negate());
+                }
+            }
+            first
+        } else {
+            0
+        };
+        let region = bits.get_lsb_slice(first, count);
+        let region_zero = gb.add_or_reduce(&region, ReductionKind::Tree).negate();
+        if matches!(threshold.order, Order::HighestSetIndex) && count < width {
+            // A high hit qualifies regardless of the low region. With no high
+            // hit, only the all-zero word qualifies via its sentinel ordinal N.
+            let high = bits.get_lsb_slice(count, width - count);
+            let high_hit = gb.add_or_reduce(&high, ReductionKind::Tree);
+            return Some(gb.add_or_binary(high_hit, region_zero));
         }
-        let high = bits.get_lsb_slice(first, bits.get_bit_count() - first);
-        Some(gb.add_or_reduce(&high, ReductionKind::Tree).negate())
+        Some(region_zero)
     }
 }
 
@@ -247,22 +315,13 @@ impl Selection {
     }
 }
 
-/// Matches complete high-ordinal tests without full-vector selection consumers.
-fn match_predicate(
+/// Matches an exclusive priority encoder observed only above a bit boundary.
+/// The optional leading-count consumer allows specializing its input selection.
+fn match_threshold(
     f: &ir::Fn,
     env: &GateEnv,
     arg: NodeRef,
-    users: &[Vec<NodeRef>],
-) -> Option<(NodeRef, Selection)> {
-    let reject = |reason: &str| -> Option<(NodeRef, Selection)> {
-        log::debug!(
-            "priority_predicate reject function={} input_text_id={} reason={}",
-            f.name,
-            f.get_node(arg).text_id,
-            reason
-        );
-        None
-    };
+) -> Option<(Threshold, Option<NodeRef>)> {
     let (encoded, start) = match f.get_node(arg).payload {
         NodePayload::BitSlice {
             arg: encoded,
@@ -270,39 +329,76 @@ fn match_predicate(
             width,
         } => {
             if !env.has_single_use(arg) || start + width != f.get_node_ty(encoded).bit_count() {
-                return reject("shared_or_partial_ordinal_slice");
+                return None;
             }
             (encoded, start)
         }
         _ => (arg, 0),
     };
     if !env.has_single_use(encoded) {
-        return reject("shared_priority_chain");
+        return None;
     }
-    let (selected, priority_user) = match f.get_node(encoded).payload {
-        NodePayload::ExtClz { arg, offset: 0, .. } => (arg, encoded),
-        NodePayload::Encode { arg: hot } => {
-            let NodePayload::OneHot {
-                arg: reversed,
-                lsb_prio: true,
-            } = f.get_node(hot).payload
-            else {
-                return reject("shared_priority_chain");
+    let (input, order, leading_user) = match f.get_node(encoded).payload {
+        NodePayload::ExtClz { arg, offset: 0, .. } => (arg, Order::LeadingZeros, Some(encoded)),
+        ref payload => {
+            let (input, lsb_prio) = match *payload {
+                NodePayload::ExtPrioEncode { arg, lsb_prio } => (arg, lsb_prio),
+                NodePayload::Encode { arg: hot } if env.has_single_use(hot) => {
+                    let NodePayload::OneHot { arg, lsb_prio } = f.get_node(hot).payload else {
+                        return None;
+                    };
+                    (arg, lsb_prio)
+                }
+                _ => return None,
             };
-            let NodePayload::Unop(Unop::Reverse, selected) = f.get_node(reversed).payload else {
-                return reject("not_priority_ordinal");
-            };
-            if !env.has_single_use(hot) || !env.has_single_use(reversed) {
-                return reject("not_priority_ordinal");
+            if !lsb_prio {
+                (input, Order::HighestSetIndex, None)
+            } else if let NodePayload::Unop(Unop::Reverse, source) = f.get_node(input).payload {
+                (
+                    source,
+                    Order::LeadingZeros,
+                    env.has_single_use(input).then_some(input),
+                )
+            } else {
+                (input, Order::TrailingZeros, None)
             }
-            (selected, reversed)
         }
-        _ => return reject("not_priority_ordinal"),
     };
-    let width = f.get_node_ty(selected).bit_count();
+    // A truncated sentinel can wrap to zero, invalidating the region test.
+    let width = f.get_node_ty(input).bit_count();
     if f.get_node_ty(encoded).bit_count() < xlsynth_pir::math::ceil_log2(width.checked_add(1)?) {
-        return reject("truncated_zero_ordinal");
+        return None;
     }
+    let cutoff = 1usize.checked_shl(u32::try_from(start).ok()?)?;
+    Some((
+        Threshold {
+            input,
+            cutoff,
+            order,
+        },
+        leading_user,
+    ))
+}
+
+/// Matches conditional negations whose other uses observe the same high bits.
+fn match_selection(
+    f: &ir::Fn,
+    env: &GateEnv,
+    arg: NodeRef,
+    selected: NodeRef,
+    leading_user: NodeRef,
+    threshold: usize,
+    users: &[Vec<NodeRef>],
+) -> Option<Selection> {
+    let reject = |reason: &str| {
+        log::debug!(
+            "priority_predicate selection reject function={} input_text_id={} reason={}",
+            f.name,
+            f.get_node(arg).text_id,
+            reason
+        );
+        None
+    };
     let NodePayload::Sel {
         selector,
         cases,
@@ -323,12 +419,7 @@ fn match_predicate(
     if cases[0] != value {
         return reject("different_positive_operand");
     }
-    let Some(threshold) = u32::try_from(start)
-        .ok()
-        .and_then(|shift| 1usize.checked_shl(shift))
-    else {
-        return reject("threshold_overflow");
-    };
+    let width = f.get_node_ty(value).bit_count();
     if threshold > width || f.ret_node_ref == Some(selected) {
         return reject("threshold_or_returned_selection");
     }
@@ -340,7 +431,7 @@ fn match_predicate(
         first_tested_bit
     };
     for &user in &users[selected.index] {
-        if user == priority_user {
+        if user == leading_user {
             continue;
         }
         let NodePayload::BitSlice { start, .. } = f.get_node(user).payload else {
@@ -404,15 +495,12 @@ fn match_predicate(
             PrefixSource::Sum { .. } => "sum",
         }
     );
-    Some((
-        selected,
-        Selection {
-            value,
-            prefix_source,
-            selector: *selector,
-            first_tested_bit,
-            first_selected_bit,
-            high_zero: OnceCell::new(),
-        },
-    ))
+    Some(Selection {
+        value,
+        prefix_source,
+        selector: *selector,
+        first_tested_bit,
+        first_selected_bit,
+        high_zero: OnceCell::new(),
+    })
 }

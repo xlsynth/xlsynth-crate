@@ -125,6 +125,40 @@ fn opposite_priority_direction_preserves_ordinal_semantics(fold: bool) {
     lower_and_prove(&ir, fold);
 }
 
+#[test_matrix([3, 8, 9, 65, 161], [true, false], [true, false])]
+fn ordinal_threshold_uses_only_the_observed_region(width: usize, lowest: bool, reverse: bool) {
+    let encoded = ceil_log2(width + 1);
+    let input = if reverse { "reversed" } else { "x" };
+    for start in 0..encoded {
+        let cutoff = 1 << start;
+        let hot_width = width + 1;
+        let slice_width = encoded - start;
+        let ir = format!(
+            r#"package sample
+top fn main(x: bits[{width}] id=1) -> bits[1] {{
+  reversed: bits[{width}] = reverse(x, id=2)
+  hot: bits[{hot_width}] = one_hot({input}, lsb_prio={lowest}, id=3)
+  ordinal: bits[{encoded}] = encode(hot, id=4)
+  high: bits[{slice_width}] = bit_slice(ordinal, start={start}, width={slice_width}, id=5)
+  ret predicate: bits[1] = or_reduce(high, id=6)
+}}
+"#
+        );
+        let gates = lower_and_prove(&ir, true);
+        let stats = get_aig_stats(&gates);
+        let bound = if lowest { cutoff - 1 } else { width - 1 };
+        assert!(
+            stats.and_nodes <= bound,
+            "width={width} start={start} {stats:?}"
+        );
+        // All-zero input has ordinal N under either priority convention.
+        assert_eq!(
+            PreparedGateSim::new(&gates).eval_outputs(&[IrBits::make_ubits(width, 0).unwrap()]),
+            vec![IrBits::bool(true)]
+        );
+    }
+}
+
 /// Builds the predicate with independent or packed operand and selector inputs.
 fn predicate_ir(width: usize, start: usize, packed: bool, exposure: &str) -> String {
     let encoded_width = ceil_log2(width + 1);
@@ -212,4 +246,111 @@ fn lower_and_prove(ir: &str, fold: bool) -> GateFn {
     .gate_fn;
     check_equivalence::validate_same_fn_via_toolchain(function, &gates).unwrap();
     gates
+}
+
+/// A true leading/trailing count threshold rules out each set bit in its zero
+/// region.
+#[test_matrix([1, 3, 5, 8], [false, true])]
+fn ordinal_zero_region_excludes_its_required_bits(width: usize, leading: bool) {
+    for start in 0..ceil_log2(width + 1) {
+        let cutoff = 1 << start;
+        for bit in 0..width {
+            let inside = if leading {
+                bit >= width - cutoff
+            } else {
+                bit < cutoff
+            };
+            for nand in [false, true] {
+                let ir = required_bit_ir(width, start, bit, leading, true, "observed", nand);
+                let gates = lower_and_prove(&ir, true);
+                if inside {
+                    assert_eq!(get_aig_stats(&gates).and_nodes, 0);
+                }
+                let value = IrBits::make_ubits(width, 1 << bit).unwrap();
+                let mut sim = PreparedGateSim::new(&gates);
+                let outputs = sim.eval_outputs(&[value.clone(), value, IrBits::bool(true)]);
+                assert_eq!(outputs, vec![IrBits::bool(inside == nand)]);
+            }
+        }
+    }
+}
+
+#[test_matrix([false, true])]
+fn ordinal_zero_region_preserves_unrelated_observations(nand: bool) {
+    let width = 5;
+    for (leading, lowest, name, bit, x, y) in [
+        (true, true, "other", 4, 0, 16),
+        (true, true, "inverted", 4, 0, 0),
+        (false, false, "observed", 4, 31, 0),
+        (false, false, "observed", 0, 31, 0),
+    ] {
+        let ir = required_bit_ir(width, 1, bit, leading, lowest, name, nand);
+        let gates = lower_and_prove(&ir, true);
+        let mut sim = PreparedGateSim::new(&gates);
+        let inputs = [
+            IrBits::make_ubits(width, x).unwrap(),
+            IrBits::make_ubits(width, y).unwrap(),
+            IrBits::bool(true),
+        ];
+        assert_eq!(sim.eval_outputs(&inputs), vec![IrBits::bool(!nand)]);
+    }
+    // Truncating the zero-input ordinal 5 to two bits yields 1, below the
+    // cutoff 2.
+    let truncated = required_bit_ir(width, 1, 4, true, true, "other", nand).replace(
+        "high: bits[2] = bit_slice(ordinal, start=1, width=2, id=7)",
+        "short: bits[2] = bit_slice(ordinal, start=0, width=2, id=13)\n  high: bits[1] = bit_slice(short, start=1, width=1, id=7)",
+    );
+    let gates = lower_and_prove(&truncated, true);
+    let mut sim = PreparedGateSim::new(&gates);
+    assert_eq!(
+        sim.eval_outputs(&[
+            IrBits::make_ubits(width, 0).unwrap(),
+            IrBits::make_ubits(width, 16).unwrap(),
+            IrBits::bool(true)
+        ]),
+        vec![IrBits::bool(nand)],
+    );
+    let ir = required_bit_ir(width, 1, 4, true, true, "observed", nand);
+    assert!(get_aig_stats(&lower_and_prove(&ir, false)).and_nodes > 0);
+}
+
+fn required_bit_ir(
+    width: usize,
+    start: usize,
+    bit: usize,
+    leading: bool,
+    lowest: bool,
+    observation: &str,
+    nand: bool,
+) -> String {
+    let encoded = ceil_log2(width + 1);
+    let hot = width + 1;
+    let slice = encoded - start;
+    let input = if leading { "rev" } else { "x" };
+    let observer = if width == 1 && observation == "observed" {
+        "x"
+    } else {
+        observation
+    };
+    let op = if nand { "nand" } else { "and" };
+    let args = if nand {
+        format!("{observer}, enable, threshold")
+    } else {
+        format!("threshold, enable, {observer}")
+    };
+    format!(
+        r#"package sample
+top fn main(x: bits[{width}] id=1, y: bits[{width}] id=2, enable: bits[1] id=3) -> bits[1] {{
+  rev: bits[{width}] = reverse(x, id=4)
+  hot: bits[{hot}] = one_hot({input}, lsb_prio={lowest}, id=5)
+  ordinal: bits[{encoded}] = encode(hot, id=6)
+  high: bits[{slice}] = bit_slice(ordinal, start={start}, width={slice}, id=7)
+  threshold: bits[1] = or_reduce(high, id=8)
+  observed: bits[1] = bit_slice(x, start={bit}, width=1, id=9)
+  other: bits[1] = bit_slice(y, start={bit}, width=1, id=10)
+  inverted: bits[1] = not(observed, id=11)
+  ret output: bits[1] = {op}({args}, id=12)
+}}
+"#
+    )
 }
