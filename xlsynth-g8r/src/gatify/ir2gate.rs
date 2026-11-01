@@ -45,6 +45,7 @@ mod guarded_unit;
 pub(crate) mod joint_word;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
+mod priority_word_update;
 
 pub(crate) mod observed_select_rails;
 mod read_predicates;
@@ -224,6 +225,7 @@ pub(super) struct GateEnv {
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
     priority_predicate_plan: PriorityPredicatePlan,
+    word_recipients: priority_word_update::Recipients,
     shift_reduction_predicate_plan: ShiftReductionPredicatePlan,
 }
 
@@ -247,6 +249,7 @@ impl GateEnv {
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
             shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
@@ -271,6 +274,7 @@ impl GateEnv {
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
             shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
@@ -4269,6 +4273,7 @@ fn gatify_node(
                 default_bits,
                 selector_facts,
             );
+            let gates = priority_word_update::lower(f, node_ref, env, g8_builder, gates);
             // Tag the result.
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
@@ -4975,31 +4980,70 @@ fn gatify_lower_prepared_fn(
     equiv_fn: &ir::Fn,
     observations: Option<&mut TerminalObservations>,
 ) -> Result<GatifyOutput, String> {
-    let mut g8_builder = GateBuilder::new(
-        f.name.clone(),
-        GateBuilderOptions {
-            fold: options.fold,
-            hash: options.hash,
-        },
-    );
-    let mut env = GateEnv::new(f);
     let topological = ir_utils::get_topological(f);
-    let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
-    env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
     let provenance_by_node = if options.track_pir_node_ids {
         orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
     } else {
         None
     };
-    gatify_internal(
-        f,
-        &mut g8_builder,
-        &mut env,
-        options,
-        provenance_by_node.as_ref(),
-        &topological,
-    )?;
-    let gate_fn = g8_builder.build();
+    let map = |env: &mut GateEnv| -> Result<(GateFn, Option<std::time::Duration>), String> {
+        let start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+        let mut builder = GateBuilder::new(
+            f.name.clone(),
+            GateBuilderOptions {
+                fold: options.fold,
+                hash: options.hash,
+            },
+        );
+        gatify_internal(
+            f,
+            &mut builder,
+            env,
+            options,
+            provenance_by_node.as_ref(),
+            &topological,
+        )?;
+        let graph = builder.build();
+        Ok((graph, start.map(|t| t.elapsed())))
+    };
+    let mut env = GateEnv::new(f);
+    let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
+    env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
+    let (mut gate_fn, ordinary_map) = map(&mut env)?;
+    if let Some(trial) = env.word_recipients.take_trial(env.demanded_bits.as_ref()) {
+        let mut other = GateEnv::new(f);
+        other.word_recipients = trial;
+        other.demanded_bits = env.demanded_bits.take();
+        // Keep each topological walk and its provenance together, including
+        // ordinary users of an early word and payloads derived from that word.
+        let alternative = map(&mut other)
+            .inspect_err(|error| log::debug!("joint priority grant mapping failed: {error}"));
+        let demanded = other.demanded_bits.take();
+        if let Ok((graph, alternative_map)) = alternative {
+            let complete = other.word_recipients.complete();
+            log::debug!(
+                "joint priority grants: complete={complete} ordinary_map={ordinary_map:?} alternative_map={alternative_map:?}"
+            );
+            if complete {
+                let cost_start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+                use crate::aig::get_summary_stats::get_output_cone_stats;
+                let before = get_output_cone_stats(&gate_fn);
+                let after = get_output_cone_stats(&graph);
+                let take = priority_word_update::improves(&before, &after);
+                log::debug!(
+                    "joint priority grants: accepted={take} compare={:?} live ANDs {} -> {}",
+                    cost_start.map(|t| t.elapsed()),
+                    before.and_nodes,
+                    after.and_nodes
+                );
+                if take {
+                    gate_fn = graph;
+                    env = other;
+                }
+            }
+        }
+        env.demanded_bits = demanded;
+    }
     if let Some(captures) = observations {
         priority_ordinal::capture(
             f,
