@@ -22,9 +22,9 @@ module __my_module__main(
   end
 
   // ===== Pipe stage 1:
-  wire [31:0] p1_literal_24_comb;
+  wire [1:0] p1_literal_24_comb;
   wire [32:0] p1_array_update_28_comb[4];
-  assign p1_literal_24_comb = 32'h0000_0001;
+  assign p1_literal_24_comb = 2'h1;
   assign out = {p1_array_update_28_comb[3], p1_array_update_28_comb[2], p1_array_update_28_comb[1], p1_array_update_28_comb[0]};
   assign idle = p0_literal_29_comb;
   for (genvar __i0 = 0; __i0 < 4; __i0 = __i0 + 1) begin : gen__array_update_28_0
