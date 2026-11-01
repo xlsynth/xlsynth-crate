@@ -2,6 +2,8 @@
 
 //! Accepts input IR and then performs the g8r IR-to-gates mapping on it.
 
+mod word_choices;
+
 use clap::ArgMatches;
 
 use crate::toolchain_config::ToolchainConfig;
@@ -132,27 +134,47 @@ fn lower_ir2g8r_design(
     ir_text: &str,
     requested_top: Option<&str>,
     lowering_options: &CanonicalG8rOptions,
-) -> Result<Ir2G8rLowering, String> {
+    export_word_choices: bool,
+) -> Result<(Ir2G8rLowering, Option<process_ir_path::WordChoices>), String> {
     let (package, top_name, member_type) = select_ir2g8r_member(ir_text, requested_top)?;
     match member_type {
         MemberType::Function => {
-            let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
-                ir_text,
-                Some(&top_name),
-                lowering_options,
-            )?;
-            Ok(Ir2G8rLowering::Function {
-                design: SequentialGateFn::from_gate_fn(artifacts.gate_fn),
-                stats: artifacts.stats,
-            })
+            let (artifacts, choices) = if export_word_choices {
+                let (incumbent, choices) =
+                    process_ir_path::canonical_ir_text_to_g8r_with_word_choices(
+                        ir_text,
+                        Some(&top_name),
+                        lowering_options,
+                    )?;
+                (incumbent, Some(choices))
+            } else {
+                (
+                    canonical_ir_text_to_g8r_lowering_artifacts(
+                        ir_text,
+                        Some(&top_name),
+                        lowering_options,
+                    )?,
+                    None,
+                )
+            };
+            Ok((
+                Ir2G8rLowering::Function {
+                    design: SequentialGateFn::from_gate_fn(artifacts.gate_fn),
+                    stats: artifacts.stats,
+                },
+                choices,
+            ))
         }
         MemberType::Block => {
+            if export_word_choices {
+                return Err("--word-choice-dir requires a function top".into());
+            }
             let design = block_package_to_sequential_gate_fn(
                 &package,
                 block_gatify_options(lowering_options),
             )
             .map_err(|e| format!("failed to lower selected IR block '{top_name}': {e}"))?;
-            Ok(Ir2G8rLowering::Block { design })
+            Ok((Ir2G8rLowering::Block { design }, None))
         }
     }
 }
@@ -228,7 +250,22 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let ir_text = std::fs::read_to_string(input_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_path.display(), e));
     let lowering_options = crate::g8r_cli::parse_g8r_cli_options(matches);
-    let lowering = lower_ir2g8r_design(&ir_text, ir_top, &lowering_options).unwrap_or_else(|err| {
+    let word_choice_dir = matches
+        .get_one::<String>("word_choice_dir")
+        .map(std::path::Path::new);
+    if let Some(dir) = word_choice_dir {
+        if let Err(err) = word_choices::require_new_destination(dir) {
+            eprintln!("Invalid --word-choice-dir: {err:#}");
+            std::process::exit(1);
+        }
+    }
+    let (lowering, choices) = lower_ir2g8r_design(
+        &ir_text,
+        ir_top,
+        &lowering_options,
+        word_choice_dir.is_some(),
+    )
+    .unwrap_or_else(|err| {
         eprintln!("Error encountered lowering IR to gates: {}", err);
         std::process::exit(1);
     });
@@ -311,5 +348,14 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         let mut f = File::create(netlist_path).expect("Failed to create ugv_out file");
         f.write_all(netlist.as_bytes())
             .expect("Failed to write ugv_out file");
+    }
+    if let (Some(dir), Some(choices)) = (word_choice_dir, choices) {
+        if let Err(err) = word_choices::publish(dir, &choices) {
+            eprintln!(
+                "Failed to export word choices to {}: {err:#}",
+                dir.display()
+            );
+            std::process::exit(1);
+        }
     }
 }

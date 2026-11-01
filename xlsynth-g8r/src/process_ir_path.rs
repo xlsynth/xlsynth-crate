@@ -554,18 +554,51 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
     }
 }
 
+/// One complete native implementation of a shared conditional-word choice.
+pub struct WordChoice {
+    pub graph: crate::aig::GateFn,
+    pub mode: &'static str,
+    pub scope: &'static str,
+    /// Pairs of prepared PIR text IDs identifying the variable word inputs.
+    pub source_pairs: Vec<[usize; 2]>,
+    /// Mapped output roots rewritten during construction, in AIGER symbol
+    /// order. Subsequent ordinary optimization can restructure other cones as
+    /// well.
+    pub output_bits: Vec<usize>,
+}
+
+/// Alternatives returned alongside the unchanged canonical lowering.
+pub struct WordChoices {
+    pub status: &'static str,
+    /// A search stopped at the per-group speculative AND budget.
+    pub construction_limited: bool,
+    pub candidates: Vec<WordChoice>,
+}
+
 /// Processes IR text through the canonical g8r lowering path.
 pub fn process_ir_text_with_gatefn(
     ir_text: &str,
     options: &Options,
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
+    process_ir_text_with_optional_word_choices(ir_text, options, None)
+}
+
+fn process_ir_text_with_optional_word_choices(
+    ir_text: &str,
+    options: &Options,
+    choices: Option<&mut WordChoices>,
+) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
-    let (ir2gates_output, mut capture) = ir2gates::ir2gates_with_terminal_observations(
+    let (ir2gates_output, capture) = ir2gates::ir2gates_with_terminal_observations(
         ir_text,
         options.ir_top.as_deref(),
         ir2gates_options,
-        true,
+        if choices.is_some() && !options.fraig {
+            ir2gate::TerminalObservationMode::WordChoices
+        } else {
+            ir2gate::TerminalObservationMode::Incumbent
+        },
     )?;
 
     let ir2gates::Ir2GatesOutput {
@@ -715,7 +748,28 @@ pub fn process_ir_text_with_gatefn(
         )
     };
 
-    let optimize_outcome = optimize_gate_fn(gate_fn, &GateFnOptimizeOptions::from(options))?;
+    let native_options = GateFnOptimizeOptions::from(options);
+    let word_alternatives = choices.map(|sink| {
+        sink.status = if native_options.fraig {
+            "fraig-enabled"
+        } else if capture.word_groups.is_none() {
+            "ineligible-lowering"
+        } else if terminal_wrap.is_some() {
+            "terminal-wrap"
+        } else {
+            "no-offers"
+        };
+        // Terminal wrap proofs bind the mapped incumbent. A different graph
+        // needs its own proof before those replacements can be applied.
+        let offers = match (&capture.word_groups, &terminal_wrap) {
+            (Some(groups), None) => {
+                ir2gate::joint_word::offers(&gate_fn, groups, &mut sink.construction_limited)
+            }
+            _ => Vec::new(),
+        };
+        (sink, offers)
+    });
+    let optimize_outcome = optimize_gate_fn(gate_fn, &native_options)?;
     gate_fn = match terminal_wrap {
         Some(plan) => {
             let result = plan.apply(optimize_outcome.gate_fn)?;
@@ -728,10 +782,24 @@ pub fn process_ir_text_with_gatefn(
         }
         None => optimize_outcome.gate_fn,
     };
-    gate_fn =
-        ir2gate::priority_ordinal::apply(gate_fn, &capture.ordinals, &mut capture.rail_budget);
-    gate_fn =
-        ir2gate::observed_select_rails::apply(gate_fn, &capture.words, &mut capture.rail_budget);
+    // Every graph starts the terminal rail passes with the allowance left by
+    // capture.
+    let apply_terminal_rails = |graph| {
+        let mut budget = capture.rail_budget.clone();
+        let graph = ir2gate::priority_ordinal::apply(graph, &capture.ordinals, &mut budget);
+        ir2gate::observed_select_rails::apply(graph, &capture.words, &mut budget)
+    };
+    gate_fn = apply_terminal_rails(gate_fn);
+    if let Some((sink, offers)) = word_alternatives {
+        for mut offer in offers {
+            let optimized = optimize_gate_fn(offer.graph, &native_options)?;
+            offer.graph = apply_terminal_rails(optimized.gate_fn);
+            sink.candidates.push(offer);
+        }
+        if !sink.candidates.is_empty() {
+            sink.status = "offered";
+        }
+    }
     let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
@@ -965,11 +1033,42 @@ pub fn canonical_ir_text_to_g8r_lowering_artifacts(
     ir_top: Option<&str>,
     lowering_options: &CanonicalG8rOptions,
 ) -> Result<CanonicalG8rLoweringArtifacts, String> {
+    canonical_lowering_with_optional_choices(ir_text, ir_top, lowering_options, None)
+}
+
+/// Runs canonical function lowering and returns native-terminal word
+/// alternatives. The primary design and its statistics always describe the
+/// ordinary compiler result, regardless of how many choices are available.
+pub fn canonical_ir_text_to_g8r_with_word_choices(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<(CanonicalG8rLoweringArtifacts, WordChoices), String> {
+    let mut choices = WordChoices {
+        status: "no-offers",
+        construction_limited: false,
+        candidates: Vec::new(),
+    };
+    let incumbent = canonical_lowering_with_optional_choices(
+        ir_text,
+        ir_top,
+        lowering_options,
+        Some(&mut choices),
+    )?;
+    Ok((incumbent, choices))
+}
+
+fn canonical_lowering_with_optional_choices(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+    choices: Option<&mut WordChoices>,
+) -> Result<CanonicalG8rLoweringArtifacts, String> {
     let options = lowering_options.to_process_ir_path_options(
         ir_top, /* quiet= */ true, /* emit_netlist= */ false,
         /* emit_independent_op_stats= */ false, /* prepared_ir_out= */ None,
     );
-    let (gate_fn, stats) = process_ir_text_with_gatefn(ir_text, &options)?;
+    let (gate_fn, stats) = process_ir_text_with_optional_word_choices(ir_text, &options, choices)?;
     Ok(CanonicalG8rLoweringArtifacts { gate_fn, stats })
 }
 

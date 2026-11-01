@@ -4,7 +4,9 @@ use crate::aig::AigBitVector;
 use crate::aig::get_summary_stats::get_output_cone_stats;
 use crate::aig_sim::gate_sim::PreparedGateSim;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-use crate::gatify::ir2gate::{GatifyOptions, gatify_with_terminal_observations};
+use crate::gatify::ir2gate::{
+    GatifyOptions, TerminalObservationMode, gatify_with_terminal_observations,
+};
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_parser::Parser;
 
@@ -28,7 +30,8 @@ top fn f(x: bits[3] id=1, sel_bit: bits[1] id=2) -> (bits[1], bits[3]) {
         hash: true,
         ..GatifyOptions::all_opts_disabled()
     };
-    let (out, mut plans) = gatify_with_terminal_observations(f, opts, true).unwrap();
+    let (out, mut plans) =
+        gatify_with_terminal_observations(f, opts, TerminalObservationMode::Incumbent).unwrap();
     assert_eq!(plans.words.len(), 1);
     assert_eq!(plans.words[0].bits.len(), 4);
     let candidate = apply(out.gate_fn, &plans.words, &mut plans.rail_budget);

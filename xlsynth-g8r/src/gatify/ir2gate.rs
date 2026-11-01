@@ -42,6 +42,7 @@ mod bounded_conjunction;
 mod conditional_select;
 mod demanded_bits;
 mod guarded_unit;
+pub(crate) mod joint_word;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
 
@@ -59,6 +60,7 @@ pub use region::{IrRegion, gatify_region};
 #[derive(Default)]
 pub(crate) struct TerminalObservations {
     pub(crate) wrap: Option<TerminalWrapCapture>,
+    pub(crate) word_groups: Option<Vec<joint_word::CapturedGroup>>,
     pub(crate) ordinals: Vec<priority_ordinal::ReturnBit>,
     pub(crate) words: Vec<observed_select_rails::WordObservation>,
     pub(crate) rail_budget: crate::aig::retained_rails::RailBudget,
@@ -5008,6 +5010,9 @@ fn gatify_lower_prepared_fn(
         );
         captures.words =
             observed_select_rails::capture(f, &env, &gate_fn, &mut captures.rail_budget);
+        if let Some(groups) = &mut captures.word_groups {
+            *groups = joint_word::capture(f, &env, &gate_fn);
+        }
     }
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -5068,15 +5073,23 @@ pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOu
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
-    gatify_with_terminal_observations(orig_fn, options, false).map(|(output, _)| output)
+    gatify_with_terminal_observations(orig_fn, options, TerminalObservationMode::None)
+        .map(|(output, _)| output)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalObservationMode {
+    None,
+    Incumbent,
+    WordChoices,
 }
 
 pub(crate) fn gatify_with_terminal_observations(
     orig_fn: &ir::Fn,
     options: GatifyOptions,
-    observe: bool,
+    mode: TerminalObservationMode,
 ) -> Result<(GatifyOutput, TerminalObservations), String> {
-    let observe = observe
+    let observe = mode != TerminalObservationMode::None
         && !options.unsafe_gatify_gate_operation
         && options.adder_mapping == Default::default();
     validate_fn_for_gatify(orig_fn)
@@ -5115,14 +5128,21 @@ pub(crate) fn gatify_with_terminal_observations(
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    let mut captures = TerminalObservations::default();
-    let outputs = (observe && options.fold && options.hash).then_some(&mut captures);
+    let mut captures = TerminalObservations {
+        word_groups: (observe
+            && options.fold
+            && options.hash
+            && mode == TerminalObservationMode::WordChoices)
+            .then(Vec::new),
+        ..TerminalObservations::default()
+    };
+    let observations = (observe && options.fold && options.hash).then_some(&mut captures);
     let out = gatify_lower_prepared_fn(
         &prepared_fn,
         &options,
         Some(&orig_ref_by_text_id),
         orig_fn,
-        outputs,
+        observations,
     )?;
     captures.wrap = permit.and_then(|p| {
         p.capture(&prepared_fn, &out.gate_fn, |n| {
