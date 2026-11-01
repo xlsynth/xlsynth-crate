@@ -9,7 +9,7 @@ use crate::IrValue;
 use crate::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 use crate::ir_deduce::deduce_result_type;
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
-use crate::ir_utils::{is_valid_identifier_name, operands};
+use crate::ir_utils::{is_valid_identifier_name, is_valid_package_name, operands};
 use crate::ir_verify::{
     verify_function, verify_function_in_package, verify_function_signature,
     verify_node_xls_semantics, verify_package,
@@ -187,7 +187,7 @@ pub fn is_valid_identifier(name: &str) -> bool {
 /// XLS accepts identifier and keyword tokens as package names, excluding
 /// literals.
 fn check_package_name(name: &str) -> Result<(), BuilderError> {
-    if is_valid_identifier_name(name) && !matches!(name, "true" | "false") {
+    if is_valid_package_name(name) {
         Ok(())
     } else {
         Err(BuilderError::InvalidName(name.to_string()))
@@ -1534,7 +1534,7 @@ mod tests {
             builder.build(value),
             Err(BuilderError::InvalidName(_))
         ));
-        for name in ["bad name", "true", "false", "42"] {
+        for name in ["bad name", "true", "false", "42", ".a", "a$b", "a-b"] {
             let mut builder = FnBuilder::new("valid");
             let value = builder.tuple(&[]).unwrap();
             assert!(matches!(
@@ -1553,14 +1553,20 @@ mod tests {
     }
 
     #[test]
-    fn keyword_named_packages_roundtrip_and_accept_new_members() {
-        let mut function = FnBuilder::new("identity");
-        let x = function.param("x", Type::Bits(1)).unwrap();
-        let mut package = function.build_package(x, "stage").unwrap();
-        BlockBuilder::new("wrapper")
-            .build_into_package(&mut package)
-            .unwrap();
-        xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+    fn keyword_and_dotted_packages_roundtrip_and_accept_new_members() {
+        for name in ["stage", "alu.pipe", "a..b", "a.", "a.1", "true.a", "top.a"] {
+            let mut function = FnBuilder::new("identity");
+            let x = function.param("x", Type::Bits(1)).unwrap();
+            let mut package = function.build_package(x, name).unwrap();
+            BlockBuilder::new("wrapper")
+                .build_into_package(&mut package)
+                .unwrap();
+            let xls = xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+            let parsed = crate::ir_parser::Parser::new(&xls.to_string())
+                .parse_package()
+                .unwrap();
+            assert_eq!(parsed.name, name);
+        }
 
         let mut package = BlockBuilder::new("wrapper").build_package("clock").unwrap();
         let mut function = FnBuilder::new("identity");

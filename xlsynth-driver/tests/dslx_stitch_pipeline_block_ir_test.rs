@@ -41,6 +41,41 @@ fn render_block(ir: &str) -> anyhow::Result<String> {
 }
 
 #[test]
+fn emitted_source_locations_refer_to_the_original_dslx_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = Path::new(r"dir\z").join("alu.pipe.x");
+    fs::create_dir_all(directory.path().join(source.parent().unwrap())).unwrap();
+    fs::write(
+        directory.path().join(&source),
+        "fn alu_cycle0(x: u8) -> u8 { x + u8:1 }",
+    )
+    .unwrap();
+    let ir = stdout(
+        directory.path(),
+        &[
+            "dslx-stitch-pipeline",
+            "--output-format=block-ir",
+            "--dslx_input_file",
+            source.to_str().unwrap(),
+            "--dslx_top=alu",
+        ],
+    )
+    .unwrap();
+    let package = xlsynth_pir::ir_parser::Parser::new(&ir)
+        .parse_package()
+        .unwrap();
+    assert_eq!(package.name, "alu.pipe");
+    assert_eq!(package.file_table.id_to_path[&0], source.to_str().unwrap());
+    // Native XLS prints the stored filename verbatim. Check both consumers
+    // resolve the stage's positions to the same file.
+    let native = xlsynth::IrPackage::parse_ir(&ir, None).unwrap().to_string();
+    assert_eq!(
+        native.lines().find(|line| line.starts_with("file_number ")),
+        Some(format!("file_number 0 \"{}\"", source.display()).as_str())
+    );
+}
+
+#[test]
 fn muladd_spec_and_flags_emit_the_same_block_and_take_two_edges() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stitch-equiv");
     let spec = example.join("muladd.stitch.toml");

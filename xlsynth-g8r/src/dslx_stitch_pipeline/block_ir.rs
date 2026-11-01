@@ -65,7 +65,12 @@ fn pipeline_builder(
     for param in first.param_nodes() {
         let port = builder.input_port(param.param_name(), Type::Bits(param.ty.bit_count()))?;
         let mut offset = 0;
-        arguments.push(unpack_value(&mut builder, port, &param.ty, &mut offset)?);
+        arguments.push(unpack_for_storage(
+            &mut builder,
+            port,
+            &param.ty,
+            &mut offset,
+        )?);
     }
     let valid = boundary
         .input_valid_signal
@@ -87,23 +92,22 @@ fn pipeline_builder(
         )?;
     }
 
-    let mut result = builder.invoke(first, &arguments)?;
-    builder.set_name(result, &stage_output_wire_name(0))?;
+    let mut result = invoke_stage(&mut builder, first, arguments, 0)?;
     for (i, stage) in rest.iter().enumerate() {
-        // A unary stage takes the preceding result whole, including its type.
-        // With multiple parameters the wrapper instead slices the packed result
-        // starting at the LSB, so a parameter can span tuple fields.
-        let mut arguments = if stage.params.len() == 1 {
-            vec![result]
-        } else {
-            let ty = builder.get_type(result)?.clone();
-            let packed = pack_value(&mut builder, result, &ty)?;
-            let mut offset = 0;
-            stage
-                .param_nodes()
-                .map(|p| unpack_value(&mut builder, packed, &p.ty, &mut offset))
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        // A token-free unary argument can cross the register layer whole.
+        // Multiple arguments split the packed result starting at the LSB.
+        let mut arguments =
+            if stage.params.len() == 1 && !builder.get_type(result)?.contains_token() {
+                vec![result]
+            } else {
+                let ty = builder.get_type(result)?.clone();
+                let packed = pack_value(&mut builder, result, &ty)?;
+                let mut offset = 0;
+                stage
+                    .param_nodes()
+                    .map(|p| unpack_for_storage(&mut builder, packed, &p.ty, &mut offset))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
         layers.insert(
             &mut builder,
             stage
@@ -111,8 +115,7 @@ fn pipeline_builder(
                 .map(|p| p.param_name())
                 .zip(&mut arguments),
         )?;
-        result = builder.invoke(stage, &arguments)?;
-        builder.set_name(result, &stage_output_wire_name(i + 1))?;
+        result = invoke_stage(&mut builder, stage, arguments, i + 1)?;
     }
 
     let ty = builder.get_type(result)?.clone();
@@ -125,6 +128,39 @@ fn pipeline_builder(
         builder.output_port(name, valid)?;
     }
     Ok(builder)
+}
+
+/// Leaves token-bearing arguments packed because XLS cannot trace a token
+/// through a register read.
+fn unpack_for_storage(
+    builder: &mut BlockBuilder,
+    packed: BValue,
+    ty: &Type,
+    offset: &mut usize,
+) -> Result<BValue, BuilderError> {
+    if ty.contains_token() {
+        unpack_value(builder, packed, &Type::Bits(ty.bit_count()), offset)
+    } else {
+        unpack_value(builder, packed, ty, offset)
+    }
+}
+
+/// Restores token-bearing arguments from their data bits before the stage call.
+fn invoke_stage(
+    builder: &mut BlockBuilder,
+    stage: &ir::Fn,
+    mut arguments: Vec<BValue>,
+    stage_index: usize,
+) -> Result<BValue, BuilderError> {
+    for (argument, param) in arguments.iter_mut().zip(stage.param_nodes()) {
+        if param.ty.contains_token() {
+            let mut offset = 0;
+            *argument = unpack_value(builder, *argument, &param.ty, &mut offset)?;
+        }
+    }
+    let result = builder.invoke(stage, &arguments)?;
+    builder.set_name(result, &stage_output_wire_name(stage_index))?;
+    Ok(result)
 }
 
 /// Tracks register numbering and the valid signal at the current pipeline
@@ -197,6 +233,14 @@ fn pack_value(
             builder.concat(&parts)
         }
         Type::Array(array) => {
+            if array.element_count == 0 || array.element_type.bit_count() == 0 {
+                return builder.concat(&[]);
+            }
+            if array.element_type.contains_token() {
+                return Err(BuilderError::InvalidOperation(format!(
+                    "cannot pack stage result containing {ty}: XLS array_index cannot extract an element containing a token"
+                )));
+            }
             let mut parts = Vec::with_capacity(array.element_count);
             for i in (0..array.element_count).rev() {
                 let index = builder.literal(IrValue::u64(i as u64))?;
@@ -243,5 +287,52 @@ fn unpack_value(
             builder.array((*array.element_type).clone(), &elements)
         }
         Type::Token => builder.literal(IrValue::make_token()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use xlsynth_pir::ir::Type;
+
+    use crate::dslx_stitch_pipeline::StitchPipelineSpec;
+
+    #[test]
+    fn token_tuple_arguments_cross_registers_as_data_bits() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("echo.x"),
+            r#"fn first(x: (token, u4)) -> (token, u4) { x }
+fn second(x: (token, u4)) -> (token, u4) { x }"#,
+        )
+        .unwrap();
+        let manifest = directory.path().join("echo.toml");
+        fs::write(
+            &manifest,
+            r#"dslx_input_file = "echo.x"
+stages = ["first", "second"]
+output_module_name = "pipe"
+flop_outputs = false
+input_valid_signal = "present"
+output_valid_signal = "out_valid"
+"#,
+        )
+        .unwrap();
+        let mut spec = StitchPipelineSpec::load(&manifest).unwrap();
+        for flop_inputs in [false, true] {
+            spec.flop_inputs = flop_inputs;
+            let package = spec.resolve().unwrap().emit_block_ir().unwrap();
+            let block = package.get_top_block().unwrap();
+            let types: Vec<&Type> = block
+                .registers
+                .iter()
+                .map(|register| &register.ty)
+                .collect();
+            let layer_types = [&Type::Bits(4), &Type::Bits(1)];
+            assert_eq!(types, layer_types.repeat(1 + usize::from(flop_inputs)));
+            let native = xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+            xlsynth::optimize_ir(&native, "pipe").unwrap();
+        }
     }
 }

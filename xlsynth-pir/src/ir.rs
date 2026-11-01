@@ -1475,9 +1475,9 @@ where
     for file_id in sorted_file_ids {
         let path = pkg.file_table.id_to_path[file_id].as_str();
         out.push_str(&format!(
-            "file_number {} \"{}\"\n",
+            "file_number {} {}\n",
             file_id,
-            escape_xls_ir_string(path)
+            quote_file_path(path)
         ));
     }
     if !pkg.file_table.id_to_path.is_empty() {
@@ -1512,6 +1512,30 @@ where
     }
 
     out
+}
+
+/// Quotes a source path for both XLS (verbatim) and PIR (legacy C escapes).
+fn quote_file_path(path: &str) -> String {
+    let escaped = escape_xls_ir_string(path);
+    if escaped != path && !path.contains('\0') {
+        let quoted = format!("\"\"\"{path}\"\"\"");
+        let mut bytes = quoted.as_bytes()[3..].iter();
+        // The XLS lexer skips the byte after a backslash and stops at the
+        // first unescaped delimiter, including one spanning the path's end.
+        while let Some(&byte) = bytes.next() {
+            if byte == b'\\' {
+                bytes.next();
+            } else if byte == b'"' && bytes.as_slice().starts_with(b"\"\"") {
+                if bytes.len() == 2 {
+                    return quoted;
+                }
+                break;
+            }
+        }
+    }
+    // Ordinary paths and paths without a verbatim spelling use PIR's
+    // original representation.
+    format!("\"{escaped}\"")
 }
 
 /// Escapes a UTF-8 string for an XLS IR double-quoted string literal.

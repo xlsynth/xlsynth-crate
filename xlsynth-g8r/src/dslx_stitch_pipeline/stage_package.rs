@@ -24,7 +24,7 @@ pub(crate) fn load_stage_package(
     // libxls prints its file_number declarations before all package members.
     // The package can also contain unrelated procs which PIR cannot parse.
     let mut package = Parser::new(&source.to_string())
-        .parse_package_header()
+        .parse_xls_package_header()
         .map_err(|e| format!("could not read XLS package header: {e}"))?;
     let mut visited = HashSet::new();
     for (stage, root) in stages {

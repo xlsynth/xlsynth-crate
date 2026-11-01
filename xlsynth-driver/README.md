@@ -4224,6 +4224,12 @@ Its existing operation restrictions also apply to stage bodies. Expand `map`,
 unroll `counted_for`, and lower calls to FFI functions to external instantiations
 before rendering stages that use them.
 
+Tokens occupy no bits in a packed data port or register. To pack an array
+with data bits, the wrapper uses `array_index`, whose result type must be
+token-free. A data tuple may include a zero-length array. The pinned XLS
+optimizer can reject that array during constant folding even though `block2sv`
+can render the package.
+
 Supported flags
 
 - `--spec=<PATH>` – read the shared DSLX stitch specification documented above.

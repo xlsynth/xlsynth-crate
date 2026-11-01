@@ -10,6 +10,7 @@ use crate::ir::{
     operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
+use crate::ir_utils::is_valid_package_name;
 use crate::ir_verify;
 use crate::math::ceil_log2;
 
@@ -114,10 +115,12 @@ pub struct Parser {
 }
 
 /// Some XLS productions consume a quoted token verbatim, others C-unescape it.
+#[derive(Clone, Copy)]
 enum StringEscapes {
     Verbatim,
     Decode,
-    /// PIR file paths historically decode octal escapes modulo 256.
+    /// Ordinary PIR file path strings historically C-unescape with octal
+    /// values taken modulo 256. Triple-quoted paths use XLS's verbatim syntax.
     FilePath,
 }
 
@@ -1848,7 +1851,11 @@ impl Parser {
         }
     }
 
-    fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
+    fn parse_file_number(
+        &mut self,
+        file_table: &mut FileTable,
+        escapes: StringEscapes,
+    ) -> Result<(), ParseError> {
         self.drop_or_error("file_number")?;
         let id = self.pop_number_usize_or_error("file_number")?;
         if id > i32::MAX as usize {
@@ -1857,7 +1864,12 @@ impl Parser {
                 i32::MAX
             )));
         }
-        let path = self.pop_quoted_string(StringEscapes::FilePath)?;
+        self.drop_whitespace_and_comments();
+        let path = if self.peek_is("\"\"\"") {
+            self.pop_quoted_string(StringEscapes::Verbatim)?
+        } else {
+            self.pop_quoted_string(escapes)?
+        };
         file_table.add(id, path)
     }
 
@@ -3911,15 +3923,34 @@ impl Parser {
         Ok(pkg)
     }
 
-    /// Reads the package name and leading file declarations, leaving the
-    /// parser at the first member.
-    pub fn parse_package_header(&mut self) -> Result<ir::Package, ParseError> {
+    /// Reads a libxls package dump's name and verbatim source paths, leaving
+    /// the parser at the first member.
+    pub fn parse_xls_package_header(&mut self) -> Result<ir::Package, ParseError> {
+        self.parse_package_header_with_file_paths(StringEscapes::Verbatim)
+    }
+
+    fn parse_package_header_with_file_paths(
+        &mut self,
+        escapes: StringEscapes,
+    ) -> Result<ir::Package, ParseError> {
         self.drop_keyword_or_error("package", "package header")?;
-        let name = self.pop_identifier_or_error("package name")?;
+        self.drop_whitespace_and_comments();
+        let start = self.offset;
+        while let Some(c) = self.peekc() {
+            // Comments and member attributes can directly follow the name.
+            if matches!(c, ' ' | '\t' | '\n' | '\r' | '#') || self.peek_is("//") {
+                break;
+            }
+            self.offset += 1;
+        }
+        let name: String = self.chars[start..self.offset].iter().collect();
+        if !is_valid_package_name(&name) {
+            return Err(ParseError::new(format!("invalid package name: {name:?}")));
+        }
         let mut file_table = FileTable::new();
         self.drop_whitespace_and_comments();
         while self.peek_keyword_is("file_number") {
-            self.parse_file_number(&mut file_table)?;
+            self.parse_file_number(&mut file_table, escapes)?;
             self.drop_whitespace_and_comments();
         }
         Ok(ir::Package {
@@ -3933,7 +3964,7 @@ impl Parser {
     /// Parses declarations and invokes as written so callers can inspect FFI
     /// before lifting.
     pub fn parse_package_preserving_ffi_invokes(&mut self) -> Result<ir::Package, ParseError> {
-        let mut package = self.parse_package_header()?;
+        let mut package = self.parse_package_header_with_file_paths(StringEscapes::FilePath)?;
         log::debug!("parse_package: {}", package.name);
         while !self.at_eof() {
             let outer_attrs = self.parse_outer_attributes()?;
@@ -3980,7 +4011,7 @@ impl Parser {
                         "attributes are not supported on file_number declarations".to_string(),
                     ));
                 }
-                self.parse_file_number(&mut package.file_table)?;
+                self.parse_file_number(&mut package.file_table, StringEscapes::FilePath)?;
             } else {
                 return Err(ParseError::new(format!(
                     "expected top, fn, block, or file_number, got {:?}; rest: {:?}",
@@ -4138,14 +4169,18 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = "file_number 1 \"foo.x\"";
         let mut parser = Parser::new(input);
-        let file_table = parser.parse_file_number(&mut FileTable::new()).unwrap();
+        let file_table = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap();
         println!("{:?}", file_table);
     }
 
     #[test]
     fn test_parse_file_number_rejects_leading_zero_decimal() {
         let mut parser = Parser::new("file_number 00 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid leading-zero decimal number \"00\"")
@@ -4165,7 +4200,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_leading_underscore() {
         let mut parser = Parser::new("file_number ___2_ \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid underscore placement in decimal number")
@@ -4175,7 +4212,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_trailing_underscore() {
         let mut parser = Parser::new("file_number 2_ \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid trailing underscore in decimal number")
@@ -4185,7 +4224,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_repeated_underscores() {
         let mut parser = Parser::new("file_number 2__3 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid underscore placement in decimal number")
@@ -4195,7 +4236,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_i32_overflow() {
         let mut parser = Parser::new("file_number 2147483648 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), StringEscapes::FilePath)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("file number 2147483648 exceeds the XLS maximum of 2147483647")
@@ -4206,7 +4249,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     fn test_parse_file_number_decodes_c_escapes() {
         let mut parser = Parser::new(r#"file_number 2 "a\"b\\c\n\141\u03bb""#);
         let mut file_table = FileTable::new();
-        parser.parse_file_number(&mut file_table).unwrap();
+        parser
+            .parse_file_number(&mut file_table, StringEscapes::FilePath)
+            .unwrap();
         assert_eq!(file_table.id_to_path[&2], "a\"b\\c\na\u{03bb}");
     }
 
@@ -4265,8 +4310,55 @@ file_number 2 "a\"b\\c\n\141\u03bb"
         );
         let pkg = parser.parse_package().unwrap();
         let emitted = pkg.to_string();
-        assert!(emitted.contains(r#"file_number 2 "a\"b\\c\naλ""#));
-        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(
+            emitted,
+            r#"package p
+
+file_number 2 """a"b\c
+aλ"""
+
+"#
+        );
+        let reparsed = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(reparsed.file_table.id_to_path, pkg.file_table.id_to_path);
+        let xls = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(
+            xls.to_string(),
+            format!(
+                "package p\n\nfile_number 2 \"{}\"\n",
+                pkg.file_table.id_to_path[&2]
+            )
+        );
+    }
+
+    #[test]
+    fn libxls_header_paths_round_trip_verbatim_through_both_parsers() {
+        let path = r"C:\tmp\a\z\foo.x";
+        let source = format!("package p\n\nfile_number 0 \"{path}\"\n");
+        let xls = xlsynth::IrPackage::parse_ir(&source, None).unwrap();
+        let pkg = Parser::new(&xls.to_string())
+            .parse_xls_package_header()
+            .unwrap();
+        assert_eq!(pkg.file_table.id_to_path[&0], path);
+        let emitted = pkg.to_string();
+        let pir = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(pir.file_table.id_to_path[&0], path);
+        let xls = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(xls.to_string(), source);
+    }
+
+    #[test]
+    fn file_paths_without_a_verbatim_spelling_round_trip_through_pir() {
+        let mut pkg = Parser::new("package p").parse_package().unwrap();
+        for (id, path) in ["trailing\\", "trailing\"", "a\"\"\"b", "a\0b"]
+            .iter()
+            .enumerate()
+        {
+            pkg.file_table.add(id, path.to_string()).unwrap();
+        }
+        let emitted = pkg.to_string();
+        let reparsed = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(reparsed.file_table.id_to_path, pkg.file_table.id_to_path);
     }
 
     #[test]
@@ -5438,7 +5530,7 @@ fn f(x: bits[1] id=1) -> token {
 
     #[test]
     fn test_package_pos_retention() {
-        let ir = r#"package pos_pkg
+        let ir = r#"package alu.pipe// package source locations
 file_number 0 "a.x"
 file_number 1 "b.x"
 
@@ -5448,6 +5540,7 @@ top fn main() -> bits[32] {
 "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
+        assert_eq!(pkg.name, "alu.pipe");
         let main_fn = pkg.get_top_fn().unwrap();
         let data = main_fn.nodes[1].pos.as_ref().unwrap();
         assert_eq!(data.len(), 2);
@@ -5459,6 +5552,20 @@ top fn main() -> bits[32] {
             data[1].to_human_string(&pkg.file_table).as_deref(),
             Some("b.x:2:2")
         );
+        let original = xlsynth::IrPackage::parse_ir(ir, None).unwrap();
+        let emitted = xlsynth::IrPackage::parse_ir(&pkg.to_string(), None).unwrap();
+        assert_eq!(emitted.to_string(), original.to_string());
+    }
+
+    #[test]
+    fn package_header_rejects_invalid_name_tokens() {
+        for name in [".a", "a$b", "a-b", "true", "false", "1a"] {
+            let input = format!("package {name}\nfile_number 0 \"a.x\"");
+            assert!(
+                Parser::new(&input).parse_xls_package_header().is_err(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

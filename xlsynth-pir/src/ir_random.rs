@@ -2536,7 +2536,7 @@ fn random_block_interface_type<S: EntropySource>(
 }
 
 fn type_is_block_data(ty: &Type) -> bool {
-    !type_contains_token(ty)
+    !ty.contains_token()
 }
 
 fn block_data_types(generator: &FunctionGenerator<'_>, allow_zero_width: bool) -> Vec<Type> {
@@ -2553,15 +2553,6 @@ fn type_leaf_count(ty: &Type) -> usize {
         Type::Token | Type::Bits(_) => 1,
         Type::Tuple(fields) => fields.iter().map(|field| type_leaf_count(field)).sum(),
         Type::Array(array) => type_leaf_count(&array.element_type) * array.element_count,
-    }
-}
-
-fn type_contains_token(ty: &Type) -> bool {
-    match ty {
-        Type::Token => true,
-        Type::Bits(_) => false,
-        Type::Tuple(fields) => fields.iter().any(|field| type_contains_token(field)),
-        Type::Array(array) => type_contains_token(&array.element_type),
     }
 }
 
@@ -3858,7 +3849,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .keys()
             .filter(|ty| {
-                !type_contains_token(ty)
+                !ty.contains_token()
                     && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
@@ -3874,7 +3865,7 @@ impl<'a> FunctionGenerator<'a> {
     fn array_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| matches!(ty, Type::Array(_)) && !type_contains_token(ty))
+            .filter(|ty| matches!(ty, Type::Array(_)) && !ty.contains_token())
             .cloned()
             .collect()
     }
@@ -4053,7 +4044,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .iter()
             .filter(|(ty, _)| {
-                !type_contains_token(ty)
+                !ty.contains_token()
                     && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
@@ -4065,7 +4056,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .keys()
             .filter(|ty| {
-                matches!(ty, Type::Tuple(fields) if !fields.is_empty()) && !type_contains_token(ty)
+                matches!(ty, Type::Tuple(fields) if !fields.is_empty()) && !ty.contains_token()
             })
             .cloned()
             .collect()
@@ -4079,7 +4070,7 @@ impl<'a> FunctionGenerator<'a> {
     fn selectable_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| !type_contains_token(ty))
+            .filter(|ty| !ty.contains_token())
             .cloned()
             .collect()
     }
