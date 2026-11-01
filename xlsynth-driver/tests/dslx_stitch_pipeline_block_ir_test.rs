@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use test_case::test_case;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{
@@ -141,8 +142,9 @@ fn muladd_spec_and_flags_emit_the_same_block_and_take_two_edges() {
     }
 }
 
-#[test]
-fn packed_stage_arguments_bubbles_and_synchronous_reset() {
+#[test_case(false; "active_high")]
+#[test_case(true; "active_low")]
+fn packed_stage_arguments_bubbles_and_synchronous_reset(reset_active_low: bool) {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("pipe.x"),
@@ -155,14 +157,16 @@ fn combine(lo: u3, hi: u5) -> u8 { join_bits(lo, hi) }"#,
     .unwrap();
     fs::write(
         directory.path().join("pipe.toml"),
-        r#"dslx_input_file = "pipe.x"
+        format!(
+            r#"dslx_input_file = "pipe.x"
 stages = ["split", "combine"]
 output_module_name = "repacked"
 clock_name = "sample_clk"
 input_valid_signal = "present"
 output_valid_signal = "ready_out"
-reset = "rst_n"
-reset_active_low = true"#,
+reset = "rst"
+reset_active_low = {reset_active_low}"#
+        ),
     )
     .unwrap();
     let ir = stdout(
@@ -182,31 +186,33 @@ reset_active_low = true"#,
     let ports = runner.port_bindings();
     let samples = ports.input_with_width("samples", 8).unwrap();
     let present = ports.input_with_width("present", 1).unwrap();
-    let rst_n = ports.input_with_width("rst_n", 1).unwrap();
+    let rst = ports.input_with_width("rst", 1).unwrap();
+    let asserted = u64::from(!reset_active_low);
+    let released = u64::from(reset_active_low);
 
     // 0xb6 represents array [6, 11]. The tuple (u3:6, u5:11) packs to
     // 0xcb, so the low-first formals get (u3:3, u5:25), yielding 0x79.
     // Input, inter-stage and output registers each consume one edge.
     let mut previous = (None, None);
-    for (sample, valid, reset_n, expected_valid, expected_data) in [
-        (0, 0, 0, 0, None),
-        (0xb6, 1, 1, 0, None),
-        (0x18, 1, 1, 0, None),
-        (0xff, 0, 1, 1, Some(0x79)),
+    for (sample, valid, reset_level, expected_valid, expected_data) in [
+        (0, 0, asserted, 0, None),
+        (0xb6, 1, released, 0, None),
+        (0x18, 1, released, 0, None),
+        (0xff, 0, released, 1, Some(0x79)),
         // Reset clears every valid register on the edge. The output data
         // register still loads the second sample under its incoming valid.
-        (0xaa, 1, 0, 0, Some(0x20)),
-        (0x00, 0, 1, 0, Some(0x20)),
-        (0x7d, 1, 1, 0, Some(0x20)),
-        (0xee, 0, 1, 0, Some(0x20)),
-        (0xff, 0, 1, 1, Some(0xf4)),
-        (0x00, 0, 1, 0, Some(0xf4)),
+        (0xaa, 1, asserted, 0, Some(0x20)),
+        (0x00, 0, released, 0, Some(0x20)),
+        (0x7d, 1, released, 0, Some(0x20)),
+        (0xee, 0, released, 0, Some(0x20)),
+        (0xff, 0, released, 1, Some(0xf4)),
+        (0x00, 0, released, 0, Some(0xf4)),
     ] {
         let edge = runner
             .step_cycle_with_drive(&mut [], |drive| {
                 drive.set_u64(&samples, sample)?;
                 drive.set_u64(&present, valid)?;
-                drive.set_u64(&rst_n, reset_n)
+                drive.set_u64(&rst, reset_level)
             })
             .unwrap();
         let before = &edge.pre_outputs;
@@ -296,6 +302,73 @@ fn a_nullary_stage_without_valid_needs_no_input_register() {
     let inputs = [("clk".to_owned(), Value4::zeros(1, Signedness::Unsigned))].into();
     let outputs = eval_combo(&module, &plan, &inputs).unwrap();
     assert_eq!(outputs["out"].to_u64_if_known(), Some(73));
+}
+
+#[test]
+fn zero_latency_valid_and_data_pass_through_during_reset() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stitch-equiv");
+    let ir = stdout(
+        &example,
+        &[
+            "dslx-stitch-pipeline",
+            "--output-format=block-ir",
+            "--dslx_input_file=muladd.x",
+            "--stages=muladd_cycle1",
+            "--output_module_name=adder",
+            "--flop_inputs=false",
+            "--flop_outputs=false",
+            "--input_valid_signal=in_valid",
+            "--output_valid_signal=out_valid",
+            "--reset=rst",
+        ],
+    )
+    .unwrap();
+    let rtl = render_block(&ir).unwrap();
+    let module = compile_combo_module(&rtl).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+
+    // eval_combo ignores extra inputs and returns internal wires as well as
+    // outputs.
+    let inputs = &module.input_ports;
+    let outputs = &module.output_ports;
+    for (ports, name, width) in [
+        (inputs, "clk", 1),
+        (inputs, "rst", 1),
+        (inputs, "in_valid", 1),
+        (inputs, "partials", 16),
+        (outputs, "out_valid", 1),
+        (outputs, "out", 8),
+    ] {
+        assert!(
+            ports.iter().any(|p| p.name == name && p.width == width),
+            "missing {width}-bit port {name}"
+        );
+    }
+
+    // The stage adds the two bytes in the packed partials port.
+    for (rst, valid, partials, sum) in [
+        (0, 0, 0x0302, 5),
+        (0, 1, 0x09ff, 8),
+        (1, 0, 0x0406, 10),
+        (1, 1, 0xc710, 215),
+    ] {
+        let inputs = [
+            ("clk", 1, 0),
+            ("rst", 1, rst),
+            ("in_valid", 1, valid),
+            ("partials", 16, partials),
+        ]
+        .map(|(name, width, value)| {
+            (
+                name.to_owned(),
+                Value4::from_u64(width, Signedness::Unsigned, value),
+            )
+        })
+        .into();
+        let outputs = eval_combo(&module, &plan, &inputs).unwrap();
+        assert_eq!(outputs["out_valid"].to_u64_if_known(), Some(valid));
+        assert_eq!(outputs["out"].to_u64_if_known(), Some(sum));
+    }
 }
 
 #[test]
