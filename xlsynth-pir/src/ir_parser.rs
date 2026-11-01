@@ -3945,7 +3945,9 @@ impl Parser {
         }
         let name: String = self.chars[start..self.offset].iter().collect();
         if !is_valid_package_name(&name) {
-            return Err(ParseError::new(format!("invalid package name: {name:?}")));
+            return Err(ParseError::new(format!(
+                "expected identifier for package name, got {name:?}"
+            )));
         }
         let mut file_table = FileTable::new();
         self.drop_whitespace_and_comments();
