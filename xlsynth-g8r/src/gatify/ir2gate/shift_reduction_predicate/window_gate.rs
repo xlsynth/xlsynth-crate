@@ -2,6 +2,8 @@
 
 //! Contract a guarded source-bit observation in a reversible gate region.
 
+mod source_guard;
+
 use super::super::GateEnv;
 use super::window::{Cell, Plan};
 use crate::aig::gate::{AigBitVector, AigOperand};
@@ -46,6 +48,33 @@ pub(super) fn lower(
     let partitions: usize = bounds.values().map(|xs| xs.len().saturating_sub(1)).sum();
     if partitions.checked_mul(plan.cells.len())? > 32_768 {
         return None;
+    }
+    if let Some(guard) = &plan.guard
+        && let Ok(selector_bits) = env.get_bit_vector(guard.selector)
+        && selector_bits.get_bit_count() == 1
+        && let Some(split) = source_guard::Split::prepare(&plan.cells, &guard.values, &bounds)
+    {
+        let selector = *selector_bits.get_lsb(0);
+        let (result, trial) = gb.try_region_alternative(ordinary.into(), 0, &boundary, |gb| {
+            let value = split.emit(&words, &controls, selector, gb);
+            (if plan.inverted { value.negate() } else { value }).into()
+        });
+        log::debug!(
+            "shift_window source_guard root={:?} selector={:?} rail={selector:?} level={:?} residual={:?} cost={trial:?}",
+            plan.root,
+            guard.selector,
+            gb.aig_depth(selector),
+            split.widths()
+        );
+        let value = *result.get_lsb(0);
+        if value != ordinary {
+            log::debug!(
+                "shift_window trial node={:?} named={} cost={trial:?}",
+                plan.root,
+                plan.named
+            );
+            return Some(value);
+        }
     }
     let (result, trial) = gb.try_region_alternative(ordinary.into(), 0, &boundary, |gb| {
         let value = if plan.named {
