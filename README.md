@@ -59,6 +59,8 @@ The `xlsynth` crate builds on top of the shared library `libxls.{so,dylib}` rele
 - `xlsynth-pir`: Rust IR representation, parsing, matching, analysis, and manipulation
 - [`xlsynth-bx`](xlsynth-bx/README.md): parser, type checker, and XLS block IR
   converter for clocked blocks that call separately compiled DSLX functions
+- [`xlsynth-dslx-fuzzer`](xlsynth-dslx-fuzzer/README.md): compositional DSLX AST
+  generation with independent IR semantics and formal equivalence fuzzing
 - `xlsynth-g8r`: _experimental_ XLS IR to gate mapping library
 - [`xlsynth-aug-opt`](xlsynth-aug-opt/README.md): augmented IR optimization that
   combines XLS passes, PIR rewrites, and g8r cost estimates

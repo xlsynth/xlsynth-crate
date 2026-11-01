@@ -7,6 +7,8 @@ xlsynth-aug-opt/fuzz/corpus/
 xlsynth-aug-opt/fuzz/artifacts/
 xlsynth-bx/fuzz/corpus/
 xlsynth-bx/fuzz/artifacts/
+xlsynth-dslx-fuzzer/fuzz/corpus/
+xlsynth-dslx-fuzzer/fuzz/artifacts/
 xlsynth-g8r/fuzz/Cargo.lock
 xlsynth-g8r/fuzz/corpus/
 xlsynth-g8r/fuzz/artifacts/
