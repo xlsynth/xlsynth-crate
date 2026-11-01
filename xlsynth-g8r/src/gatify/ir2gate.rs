@@ -42,7 +42,9 @@ mod bounded_conjunction;
 mod conditional_select;
 mod demanded_bits;
 mod guarded_unit;
+pub(crate) mod priority_ordinal;
 mod priority_predicate;
+
 mod read_predicates;
 mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
@@ -51,6 +53,12 @@ use priority_predicate::PriorityPredicatePlan;
 use shift_reduction_predicate::ShiftReductionPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
+
+#[derive(Default)]
+pub(crate) struct TerminalObservations {
+    pub(crate) wrap: Option<TerminalWrapCapture>,
+    pub(crate) ordinals: Vec<priority_ordinal::ReturnBit>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayIndexLoweringStrategy {
@@ -4959,6 +4967,7 @@ fn gatify_lower_prepared_fn(
     options: &GatifyOptions,
     orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
     equiv_fn: &ir::Fn,
+    ordinal_outputs: Option<&mut Vec<priority_ordinal::ReturnBit>>,
 ) -> Result<GatifyOutput, String> {
     let mut g8_builder = GateBuilder::new(
         f.name.clone(),
@@ -4985,6 +4994,9 @@ fn gatify_lower_prepared_fn(
         &topological,
     )?;
     let gate_fn = g8_builder.build();
+    if let Some(outputs) = ordinal_outputs {
+        priority_ordinal::capture(f, &env, &gate_fn, outputs);
+    }
     log::debug!(
         "converted IR function to gate function:\n{}",
         gate_fn.to_string()
@@ -5040,19 +5052,19 @@ fn gatify_lower_prepared_fn(
 pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before gatify_prepared_fn: {e}"))?;
-    gatify_lower_prepared_fn(f, &options, None, f)
+    gatify_lower_prepared_fn(f, &options, None, f, None)
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
-    gatify_with_terminal_wrap(orig_fn, options, false).map(|(output, _)| output)
+    gatify_with_terminal_observations(orig_fn, options, false).map(|(output, _)| output)
 }
 
-pub(crate) fn gatify_with_terminal_wrap(
+pub(crate) fn gatify_with_terminal_observations(
     orig_fn: &ir::Fn,
     options: GatifyOptions,
-    observe_wrap: bool,
-) -> Result<(GatifyOutput, Option<TerminalWrapCapture>), String> {
-    let observe_wrap = observe_wrap
+    observe: bool,
+) -> Result<(GatifyOutput, TerminalObservations), String> {
+    let observe = observe
         && !options.unsafe_gatify_gate_operation
         && options.adder_mapping == Default::default();
     validate_fn_for_gatify(orig_fn)
@@ -5082,22 +5094,30 @@ pub(crate) fn gatify_with_terminal_wrap(
             ..PrepForGatifyOptions::all_opts_enabled()
         },
         |f| {
-            if observe_wrap {
+            if observe {
                 permit = TerminalWrapPermit::at_source(f);
             }
         },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    let out =
-        gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)?;
-    let capture = permit.and_then(|p| {
+    let mut captures = TerminalObservations::default();
+    let ordinal_outputs =
+        (observe && options.fold && options.hash).then_some(&mut captures.ordinals);
+    let out = gatify_lower_prepared_fn(
+        &prepared_fn,
+        &options,
+        Some(&orig_ref_by_text_id),
+        orig_fn,
+        ordinal_outputs,
+    )?;
+    captures.wrap = permit.and_then(|p| {
         p.capture(&prepared_fn, &out.gate_fn, |n| {
             let original = orig_ref_by_text_id.get(&prepared_fn.get_node(n).text_id)?;
             out.lowering_map.get(original)
         })
     });
-    Ok((out, capture))
+    Ok((out, captures))
 }
 
 pub fn gatify_node_as_fn(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 use crate::gatify::ir2gate::{
-    GatifyOptions, gatify, gatify_prepared_fn, gatify_with_terminal_wrap,
+    GatifyOptions, gatify, gatify_prepared_fn, gatify_with_terminal_observations,
 };
 use crate::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_parser::Parser;
@@ -28,12 +28,12 @@ fn ordinary(text: &str) -> Option<TerminalWrapCapture> {
     let f = parse(text);
     let opt = GatifyOptions::all_opts_enabled();
     let reference = gatify(&f, opt.clone()).unwrap();
-    let (observed, capture) = gatify_with_terminal_wrap(&f, opt, true).unwrap();
+    let (observed, observations) = gatify_with_terminal_observations(&f, opt, true).unwrap();
     assert_eq!(
         reference.gate_fn.to_string_including_dead_nodes(),
         observed.gate_fn.to_string_including_dead_nodes()
     );
-    capture
+    observations.wrap
 }
 
 #[test]
@@ -175,9 +175,10 @@ fn declines_changed_roots_sums_carry_definitions_and_explicit_architecture() {
     let mut options = GatifyOptions::all_opts_enabled();
     options.adder_mapping = AdderMapping::RippleCarry;
     assert!(
-        gatify_with_terminal_wrap(&f, options, true)
+        gatify_with_terminal_observations(&f, options, true)
             .unwrap()
             .1
+            .wrap
             .is_none()
     );
 }
@@ -209,7 +210,10 @@ fn captures_only_the_original_tracked_predicate_id() {
     for track in [false, true] {
         let mut options = GatifyOptions::all_opts_enabled();
         options.track_pir_node_ids = track;
-        let (_, capture) = gatify_with_terminal_wrap(&f, options, true).unwrap();
-        assert_eq!(capture.unwrap().predicate_pir_id, track.then_some(root));
+        let (_, observations) = gatify_with_terminal_observations(&f, options, true).unwrap();
+        assert_eq!(
+            observations.wrap.unwrap().predicate_pir_id,
+            track.then_some(root)
+        );
     }
 }

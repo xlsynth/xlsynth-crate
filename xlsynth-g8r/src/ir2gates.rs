@@ -231,21 +231,15 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
-    ir2gates_with_terminal_wrap(ir_text, top, options, false).map(|(output, _)| output)
+    ir2gates_with_terminal_observations(ir_text, top, options, false).map(|(output, _)| output)
 }
 
-pub(crate) fn ir2gates_with_terminal_wrap(
+pub(crate) fn ir2gates_with_terminal_observations(
     ir_text: &str,
     top: Option<&str>,
     options: Ir2GatesOptions,
-    observe_wrap: bool,
-) -> Result<
-    (
-        Ir2GatesOutput,
-        Option<crate::gatify::terminal_wrap::TerminalWrapCapture>,
-    ),
-    String,
-> {
+    observe: bool,
+) -> Result<(Ir2GatesOutput, ir2gate::TerminalObservations), String> {
     let PreparedIrForGatify {
         pir_package,
         top_fn_name,
@@ -255,7 +249,7 @@ pub(crate) fn ir2gates_with_terminal_wrap(
         .get_fn(&top_fn_name)
         .expect("top_fn_name should be present in pir_package");
 
-    let (gatify_output, capture) = ir2gate::gatify_with_terminal_wrap(
+    let (gatify_output, capture) = ir2gate::gatify_with_terminal_observations(
         pir_fn,
         ir2gate::GatifyOptions {
             fold: options.fold,
@@ -274,7 +268,7 @@ pub(crate) fn ir2gates_with_terminal_wrap(
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
             ..ir2gate::GatifyOptions::all_opts_disabled()
         },
-        observe_wrap,
+        observe,
     )?;
 
     let output = Ir2GatesOutput {

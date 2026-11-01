@@ -3,6 +3,7 @@
 //! Lower priority-ordinal thresholds using the input bits they observe.
 
 use super::GateEnv;
+use super::priority_ordinal::{self, Order};
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::{GateBuilder, ReductionKind};
 use crate::prefix_scan_utils::{PrefixScanStrategy, prefix_scan_inclusive};
@@ -38,13 +39,6 @@ impl Threshold {
             Order::HighestSetIndex => None,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum Order {
-    TrailingZeros,
-    LeadingZeros,
-    HighestSetIndex,
 }
 
 /// Captures a conditional negation and the first high bit its consumers
@@ -335,35 +329,10 @@ fn match_threshold(
         }
         _ => (arg, 0),
     };
-    if !env.has_single_use(encoded) {
-        return None;
-    }
-    let (input, order, leading_user) = match f.get_node(encoded).payload {
-        NodePayload::ExtClz { arg, offset: 0, .. } => (arg, Order::LeadingZeros, Some(encoded)),
-        ref payload => {
-            let (input, lsb_prio) = match *payload {
-                NodePayload::ExtPrioEncode { arg, lsb_prio } => (arg, lsb_prio),
-                NodePayload::Encode { arg: hot } if env.has_single_use(hot) => {
-                    let NodePayload::OneHot { arg, lsb_prio } = f.get_node(hot).payload else {
-                        return None;
-                    };
-                    (arg, lsb_prio)
-                }
-                _ => return None,
-            };
-            if !lsb_prio {
-                (input, Order::HighestSetIndex, None)
-            } else if let NodePayload::Unop(Unop::Reverse, source) = f.get_node(input).payload {
-                (
-                    source,
-                    Order::LeadingZeros,
-                    env.has_single_use(input).then_some(input),
-                )
-            } else {
-                (input, Order::TrailingZeros, None)
-            }
-        }
-    };
+    let ordinal = priority_ordinal::owned(f, env, encoded)?;
+    let input = ordinal.input;
+    let order = ordinal.order;
+    let leading_user = ordinal.leading_user;
     // A truncated sentinel can wrap to zero, invalidating the region test.
     let width = f.get_node_ty(input).bit_count();
     if f.get_node_ty(encoded).bit_count() < xlsynth_pir::math::ceil_log2(width.checked_add(1)?) {

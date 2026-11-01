@@ -14,6 +14,230 @@ use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::math::ceil_log2;
 
+#[test_matrix([false, true])]
+fn masked_affine_priority_bit_forwards_the_winning_input(output_inverted: bool) {
+    for (operation, constant, invert) in [("sub", 16, false), ("add", 15, true)] {
+        let returned = if output_inverted {
+            "bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)\n  ret flag: bits[1] = not(bit, id=10)"
+        } else {
+            "ret bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)"
+        };
+        let ir = format!(
+            r#"package affine
+top fn main(word: bits[13], mask: bits[5]) -> bits[1] {{
+  hot: bits[14] = one_hot(word, lsb_prio=true, id=3)
+  index: bits[4] = encode(hot, id=4)
+  extended: bits[5] = zero_ext(index, new_bit_count=5, id=5)
+  k: bits[5] = literal(value={constant}, id=6)
+  value: bits[5] = {operation}(k, extended, id=7)
+  masked: bits[5] = and(mask, value, id=8)
+  {returned}
+}}"#
+        );
+        let gates = canonical_ir_text_to_g8r_lowering_artifacts(
+            &ir,
+            Some("main"),
+            &CanonicalG8rOptions {
+                enable_formal_array_alias_analysis: false,
+                fraig: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let root = *gates.outputs[0].bit_vector.get_lsb(0);
+        assert_eq!(get_aig_cone_stats(&gates.gates, &[root]).and_nodes, 1);
+        let mut sim = PreparedGateSim::new(&gates);
+        for word in 0..8192 {
+            for mask in [15, 16] {
+                let inputs = [
+                    IrBits::make_ubits(13, word).unwrap(),
+                    IrBits::make_ubits(5, mask).unwrap(),
+                ];
+                assert_eq!(
+                    sim.eval_outputs(&inputs),
+                    vec![IrBits::bool(
+                        (mask == 16 && ((word & 1 != 0) ^ invert)) ^ output_inverted
+                    )]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn affine_priority_preserves_an_independent_output_through_rewriting() {
+    use xlsynth_g8r::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
+    use xlsynth_g8r::ir2gates::{Ir2GatesOptions, ir2gates_from_ir_text};
+    use xlsynth_g8r::process_ir_path::canonical_ir_text_to_g8r_artifacts;
+
+    let ir = r#"package dispatch
+top fn main(request: bits[13] id=1, bank: bits[3] id=2) -> (bits[1], bits[1]) {
+  hot: bits[14] = one_hot(request, lsb_prio=true, id=3)
+  ordinal: bits[4] = encode(hot, id=4)
+  wide: bits[6] = zero_ext(ordinal, new_bit_count=6, id=5)
+  bias: bits[6] = literal(value=31, id=6)
+  stamp: bits[6] = add(wide, bias, id=7)
+  defer: bits[1] = bit_slice(stamp, start=5, width=1, id=8)
+  lanes: bits[7] = bit_slice(request, start=4, width=7, id=9)
+  high: bits[8] = one_hot(lanes, lsb_prio=false, id=10)
+  idx: bits[3] = encode(high, id=11)
+  matches: bits[1] = eq(idx, bank, id=12)
+  ret result: (bits[1], bits[1]) = tuple(defer, matches, id=13)
+}"#;
+    let settings = CanonicalG8rOptions {
+        enable_formal_array_alias_analysis: false,
+        fraig: false,
+        enable_rewrite_prio_encode: false,
+        enable_rewrite_carry_out: false,
+        ..Default::default()
+    };
+    let options = settings.to_process_ir_path_options(Some("main"), true, false, false, None);
+    let ordinary =
+        ir2gates_from_ir_text(ir, Some("main"), Ir2GatesOptions::from(&options)).unwrap();
+    let finished = optimize_gate_fn(
+        ordinary.gatify_output.gate_fn,
+        &GateFnOptimizeOptions::from(&options),
+    )
+    .unwrap()
+    .gate_fn;
+    let actual = canonical_ir_text_to_g8r_artifacts(ir, Some("main"), &settings).unwrap();
+    let direct = *finished.inputs[0].bit_vector.get_lsb(0);
+    assert_eq!(*finished.outputs[0].bit_vector.get_lsb(1), direct.negate());
+    assert_eq!(
+        actual.binary_aiger,
+        xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary(&finished, true).unwrap()
+    );
+}
+
+#[test_matrix([("hot", 9), ("index", 4), ("extended", 5), ("difference", 5)])]
+fn shared_affine_ordinal_intermediates_preserve_the_word(exposure: (&str, usize)) {
+    let (other, width) = exposure;
+    let ir = format!(
+        r#"package shared
+top fn main(x: bits[8], mask: bits[5]) -> (bits[1], bits[{width}]) {{
+  hot: bits[9] = one_hot(x, lsb_prio=true, id=3)
+  index: bits[4] = encode(hot, id=4)
+  extended: bits[5] = zero_ext(index, new_bit_count=5, id=5)
+  k: bits[5] = literal(value=16, id=6)
+  difference: bits[5] = sub(k, extended, id=7)
+  masked: bits[5] = and(mask, difference, id=8)
+  bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)
+  ret result: (bits[1], bits[{width}]) = tuple(bit, {other}, id=10)
+}}"#
+    );
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    let gates = gatify(
+        package.get_top_fn().unwrap(),
+        GatifyOptions {
+            fold: true,
+            hash: true,
+            ..GatifyOptions::all_opts_disabled()
+        },
+    )
+    .unwrap()
+    .gate_fn;
+    let root = *gates.outputs[0].bit_vector.get_lsb(width);
+    assert!(
+        get_aig_cone_stats(&gates.gates, &[root]).and_nodes > 1,
+        "the observed word keeps the priority arithmetic for {other}"
+    );
+    let mut sim = PreparedGateSim::new(&gates);
+    for x in 0u64..256 {
+        let ordinal = u64::from(x.trailing_zeros().min(8));
+        let retained = match other {
+            "hot" => 1 << ordinal,
+            "difference" => 16 - ordinal,
+            _ => ordinal,
+        };
+        for mask in [0, 16] {
+            let expected = (u64::from(mask != 0 && x & 1 != 0) << width) | retained;
+            let inputs = [
+                IrBits::make_ubits(8, x).unwrap(),
+                IrBits::make_ubits(5, mask).unwrap(),
+            ];
+            assert_eq!(
+                sim.eval_outputs(&inputs),
+                vec![IrBits::make_ubits(width + 1, expected).unwrap()]
+            );
+        }
+    }
+}
+
+#[test_matrix([false, true])]
+fn computed_priority_or_mask_bit_retains_the_affine_cone(compute_mask: bool) {
+    let (source, mask) = if compute_mask {
+        ("x", "lt")
+    } else {
+        ("sum", "m")
+    };
+    let mut bare =
+        String::from("package computed\n\ntop fn main(x: bits[4], y: bits[4], m: bits[1])");
+    let body = format!(
+        r#"
+  sum: bits[4] = xor(x, y, id=4)
+  lt: bits[1] = ult(x, y, id=5)
+  hot: bits[5] = one_hot({source}, lsb_prio=true, id=6)
+  index: bits[3] = encode(hot, id=7)
+  wide: bits[4] = zero_ext(index, new_bit_count=4, id=8)
+  k: bits[4] = literal(value=8, id=9)
+  difference: bits[4] = sub(k, wide, id=10)
+  mask: bits[4] = sign_ext({mask}, new_bit_count=4, id=11)
+  masked: bits[4] = xor(difference, mask, id=12)
+  flag: bits[1] = bit_slice(masked, start=3, width=1, id=13)"#
+    );
+    let retained = format!(
+        "{bare} -> (bits[1], bits[4]) {{{body}\n  ret out: (bits[1], bits[4]) = tuple(flag, difference, id=14)\n}}"
+    );
+    bare.push_str(&format!(
+        " -> bits[1] {{{}\n}}",
+        body.replace("  flag: ", "  ret flag: ")
+    ));
+
+    let mut sizes = Vec::new();
+    for (ir, retained_width) in [(&bare, 0), (&retained, 4)] {
+        let package = Parser::new(ir).parse_and_validate_package().unwrap();
+        let gates = gatify(
+            package.get_top_fn().unwrap(),
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let flag = *gates.outputs[0].bit_vector.get_lsb(retained_width);
+        sizes.push(get_aig_cone_stats(&gates.gates, &[flag]).and_nodes);
+        let mut sim = PreparedGateSim::new(&gates);
+        for x in 0u64..16 {
+            for y in 0u64..16 {
+                for m in [false, true] {
+                    let source = if compute_mask { x } else { x ^ y };
+                    let mask = if compute_mask { x < y } else { m };
+                    let difference = 8 - u64::from(source.trailing_zeros().min(4));
+                    let value = u64::from((source & 1 != 0) ^ mask);
+                    let expected = if retained_width == 0 {
+                        value
+                    } else {
+                        (value << 4) | difference
+                    };
+                    let inputs = [
+                        IrBits::make_ubits(4, x).unwrap(),
+                        IrBits::make_ubits(4, y).unwrap(),
+                        IrBits::bool(m),
+                    ];
+                    assert_eq!(
+                        sim.eval_outputs(&inputs),
+                        vec![IrBits::make_ubits(retained_width + 1, expected).unwrap()]
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(sizes[0], sizes[1]);
+}
+
 #[test_matrix([1, 2, 3, 4, 8, 9, 33, 65, 161], [true, false], [true, false])]
 fn priority_threshold_preserves_ordinal_semantics(width: usize, lsb_prio: bool, fold: bool) {
     let encoded_width = ceil_log2(width + 1);
