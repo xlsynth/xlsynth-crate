@@ -14,6 +14,7 @@ use xlsynth_vast::{ModulePortDirection, VastFile, VastFileType};
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
 
+mod block_ir;
 mod build_pipeline;
 use build_pipeline::{
     PipelineConfig as BuildPipelineConfig, StageModuleInterface, StagePortInterface,
@@ -26,6 +27,7 @@ pub mod validate_constant_flops;
 mod equiv;
 mod names;
 mod spec;
+pub(crate) mod stage_package;
 mod vectors;
 pub use spec::{ResolvedStitchPipeline, StitchPipelineSpec};
 
@@ -392,6 +394,22 @@ pub fn stitch_pipeline<'a>(
     top: &str,
     opts: &StitchPipelineOptions<'a>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    resolve_pipeline(dslx, path, top, opts)?.emit_rtl(&StitchRtlOptions {
+        verilog_version: opts.verilog_version,
+        validate_no_constant_flops: opts.validate_no_constant_flops,
+        add_invariant_assertions: opts.add_invariant_assertions,
+        array_index_bounds_checking: opts.array_index_bounds_checking,
+        gate_format: opts.gate_format,
+    })
+}
+
+/// Resolves source, stages and pipeline boundaries for either output format.
+pub fn resolve_pipeline(
+    dslx: &str,
+    path: &Path,
+    top: &str,
+    opts: &StitchPipelineOptions<'_>,
+) -> Result<ResolvedStitchPipeline, xlsynth::XlsynthError> {
     if opts.output_valid_signal.is_some() && opts.input_valid_signal.is_none() {
         return Err(xlsynth::XlsynthError(
             "output_valid_signal requires input_valid_signal in dslx-stitch-pipeline".to_string(),
@@ -410,16 +428,50 @@ pub fn stitch_pipeline<'a>(
         opts.boundary_options(),
     )?;
     resolved.validate_wrapper_names()?;
-    resolved.emit_rtl(&StitchRtlOptions {
-        verilog_version: opts.verilog_version,
-        validate_no_constant_flops: opts.validate_no_constant_flops,
-        add_invariant_assertions: opts.add_invariant_assertions,
-        array_index_bounds_checking: opts.array_index_bounds_checking,
-        gate_format: opts.gate_format,
-    })
+    Ok(resolved)
 }
 
 impl ResolvedStitchPipeline {
+    /// Emits the selected stage functions and a top block that invokes them.
+    pub fn emit_block_ir(&self) -> Result<xlsynth_pir::ir::Package, xlsynth::XlsynthError> {
+        let mut package = stage_package::load_stage_package(&self.ir, &self.stages)
+            .map_err(xlsynth::XlsynthError)?;
+        block_ir::build_pipeline_block(&mut package, &self.stages, &self.boundary)
+            .map_err(xlsynth::XlsynthError)?;
+        Ok(package)
+    }
+
+    /// Rejects registered stage-output bits that are constant for all inputs.
+    pub fn validate_no_constant_flops(&self) -> Result<(), xlsynth::XlsynthError> {
+        let constant_flops = validate_constant_flops::find_constant_flops(
+            &self.ir,
+            &self.stages,
+            self.boundary.flop_outputs,
+        )
+        .map_err(|error| {
+            xlsynth::XlsynthError(format!("constant-flop validation failed: {error}"))
+        })?;
+        if !constant_flops.is_empty() {
+            let details = constant_flops
+                .iter()
+                .map(|flop| {
+                    format!(
+                        "  stage '{}' (index {}), output bit {} is always {}",
+                        flop.stage_name,
+                        flop.stage_index,
+                        flop.output_bit_index,
+                        u8::from(flop.value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(xlsynth::XlsynthError(format!(
+                "constant-flop validation failed:\n{details}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Emits combinational stage modules and the clocked wrapper for the
     /// resolved specification.
     pub fn emit_rtl(&self, opts: &StitchRtlOptions<'_>) -> Result<String, xlsynth::XlsynthError> {
@@ -437,32 +489,7 @@ impl ResolvedStitchPipeline {
         };
         let stages = &self.stages;
         if opts.validate_no_constant_flops {
-            let constant_flops = validate_constant_flops::find_constant_flops(
-                &self.ir,
-                stages,
-                self.boundary.flop_outputs,
-            )
-            .map_err(|error| {
-                xlsynth::XlsynthError(format!("constant-flop validation failed: {error}"))
-            })?;
-            if !constant_flops.is_empty() {
-                let details = constant_flops
-                    .iter()
-                    .map(|flop| {
-                        format!(
-                            "  stage '{}' (index {}), output bit {} is always {}",
-                            flop.stage_name,
-                            flop.stage_index,
-                            flop.output_bit_index,
-                            u8::from(flop.value)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(xlsynth::XlsynthError(format!(
-                    "constant-flop validation failed:\n{details}"
-                )));
-            }
+            self.validate_no_constant_flops()?;
         }
 
         // For each stage run codegen immediately so we can parse its port list.

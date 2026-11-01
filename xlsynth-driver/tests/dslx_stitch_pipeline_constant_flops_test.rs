@@ -44,10 +44,11 @@ fn run_stitch_in(dir: &Path, dslx: &str, args: &[&str]) -> Result<Output, Box<dy
         .output()?)
 }
 
-#[test_case("--validate-no-constant-flops"; "bare_flag")]
-#[test_case("--validate-no-constant-flops=true"; "explicit_true")]
-fn rejects_constant_bits_at_every_registered_stage(flag: &str) {
-    let output = run_stitch(CONSTANT_STAGES, &[flag]).unwrap();
+#[test_case(&["--validate-no-constant-flops"]; "bare_flag")]
+#[test_case(&["--validate-no-constant-flops=true"]; "explicit_true")]
+#[test_case(&["--validate-no-constant-flops", "--output-format=block-ir"]; "block_ir")]
+fn rejects_constant_bits_at_every_registered_stage(flags: &[&str]) {
+    let output = run_stitch(CONSTANT_STAGES, flags).unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     compare_golden_text(

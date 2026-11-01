@@ -3911,36 +3911,47 @@ impl Parser {
         Ok(pkg)
     }
 
+    /// Reads the package name and leading file declarations, leaving the
+    /// parser at the first member.
+    pub fn parse_package_header(&mut self) -> Result<ir::Package, ParseError> {
+        self.drop_keyword_or_error("package", "package header")?;
+        let name = self.pop_identifier_or_error("package name")?;
+        let mut file_table = FileTable::new();
+        self.drop_whitespace_and_comments();
+        while self.peek_keyword_is("file_number") {
+            self.parse_file_number(&mut file_table)?;
+            self.drop_whitespace_and_comments();
+        }
+        Ok(ir::Package {
+            name,
+            file_table,
+            members: Vec::new(),
+            top: None,
+        })
+    }
+
     /// Parses declarations and invokes as written so callers can inspect FFI
     /// before lifting.
     pub fn parse_package_preserving_ffi_invokes(&mut self) -> Result<ir::Package, ParseError> {
-        log::debug!("parse_package");
-        let mut members: Vec<PackageMember> = Vec::new();
-        let mut top: Option<(String, MemberType)> = None;
-
-        self.drop_keyword_or_error("package", "package header")?;
-        let package_name = self.pop_identifier_or_error("package name")?;
-        log::debug!("package_name: {}", package_name);
-
-        let mut file_table = FileTable::new();
-
+        let mut package = self.parse_package_header()?;
+        log::debug!("parse_package: {}", package.name);
         while !self.at_eof() {
             let outer_attrs = self.parse_outer_attributes()?;
             if self.try_drop_keyword("top") {
-                if top.is_some() {
+                if package.top.is_some() {
                     return Err(ParseError::new("top declared more than once".to_string()));
                 }
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
                     let f = self.parse_fn_with_attributes(outer_attrs)?;
-                    top = Some((f.name.clone(), MemberType::Function));
-                    members.push(PackageMember::Function(f));
+                    package.top = Some((f.name.clone(), MemberType::Function));
+                    package.members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
                     let block = self.parse_block_with_attributes(outer_attrs)?;
-                    top = Some((block.name.clone(), MemberType::Block));
-                    members.push(PackageMember::Block(block));
+                    package.top = Some((block.name.clone(), MemberType::Block));
+                    package.members.push(PackageMember::Block(block));
                 } else {
                     return Err(ParseError::new(format!(
                         "expected fn or block after top; rest: {:?}",
@@ -3949,10 +3960,10 @@ impl Parser {
                 }
             } else if self.peek_keyword_is("fn") {
                 let f = self.parse_fn_with_attributes(outer_attrs)?;
-                members.push(PackageMember::Function(f));
+                package.members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
                 let block = self.parse_block_with_attributes(outer_attrs)?;
-                members.push(PackageMember::Block(block));
+                package.members.push(PackageMember::Block(block));
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
@@ -3969,7 +3980,7 @@ impl Parser {
                         "attributes are not supported on file_number declarations".to_string(),
                     ));
                 }
-                self.parse_file_number(&mut file_table)?;
+                self.parse_file_number(&mut package.file_table)?;
             } else {
                 return Err(ParseError::new(format!(
                     "expected top, fn, block, or file_number, got {:?}; rest: {:?}",
@@ -3978,12 +3989,7 @@ impl Parser {
                 )));
             }
         }
-        Ok(ir::Package {
-            name: package_name,
-            file_table,
-            members,
-            top,
-        })
+        Ok(package)
     }
 }
 

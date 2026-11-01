@@ -17,6 +17,7 @@ use super::stage_functions;
 use super::stage_functions::named_inputs;
 use crate::aig::SequentialPipelineOptions;
 use crate::aig::sequential_pipeline::StitchedGatePipeline;
+use crate::dslx_stitch_pipeline::stage_package::load_stage_package;
 
 /// Data Q words in parameter order followed by the optional valid Q.
 struct RegisterLayer {
@@ -163,7 +164,7 @@ impl BehavioralPipeline {
         names: &[(String, String)],
         boundary: &SequentialPipelineOptions,
     ) -> Result<Self, String> {
-        let package = stage_functions::load_stage_package(source, names)?;
+        let package = load_stage_package(source, names)?;
         Self::new(package, names, boundary)
     }
 

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BValue, Builder, BuilderError, check_name, checked_flat_width};
+use super::{BValue, Builder, BuilderError, check_name, check_package_name, checked_flat_width};
 use crate::IrValue;
 use crate::ir::{
     self, Block, BlockPort, BlockReset, Instantiation, InstantiationKind, NodePayload, NodeRef,
@@ -606,7 +606,7 @@ impl Builder<BlockState> {
 
     /// Builds a one-block package with the block selected as top.
     pub fn build_package(self, package_name: &str) -> Result<Package, BuilderError> {
-        check_name(package_name)?;
+        check_package_name(package_name)?;
         let block = self.build()?;
         let mut package = empty_package(package_name);
         package.top = Some((block.name.clone(), ir::MemberType::Block));
@@ -621,7 +621,7 @@ impl Builder<BlockState> {
     /// unchanged.
     pub fn build_in_package(self, package: &Package) -> Result<Block, BuilderError> {
         check_name(&self.graph.name)?;
-        check_name(&package.name)?;
+        check_package_name(&package.name)?;
         if package
             .members
             .iter()

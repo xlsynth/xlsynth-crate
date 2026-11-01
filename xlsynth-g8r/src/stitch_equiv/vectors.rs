@@ -15,12 +15,12 @@ use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
 use xlsynth_pir::{IrBits, NamedIrValueSet};
 
 use super::stage_functions::{
-    compose_concrete, interface_layout, load_stage_package, resolve_functions,
-    validate_stage_package,
+    compose_concrete, interface_layout, resolve_functions, validate_stage_package,
 };
 use super::{StitchObservation, output_name, validate_interfaces};
 use crate::aig::SequentialPipelineOptions;
 use crate::aig_sim::sequential::{SequentialSimulator, SequentialState};
+use crate::dslx_stitch_pipeline::stage_package::load_stage_package;
 use crate::netlist::gv_eval::LabeledSequentialNetlistAig;
 
 /// One named record per cycle, or a deterministic generator of such records.

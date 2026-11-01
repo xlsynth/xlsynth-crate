@@ -9,7 +9,7 @@ use crate::IrValue;
 use crate::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 use crate::ir_deduce::deduce_result_type;
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
-use crate::ir_utils::operands;
+use crate::ir_utils::{is_valid_identifier_name, operands};
 use crate::ir_verify::{
     verify_function, verify_function_in_package, verify_function_signature,
     verify_node_xls_semantics, verify_package,
@@ -160,10 +160,6 @@ macro_rules! unary_op {
 /// Adapters importing external names can use this before applying their own
 /// legalization and collision-resolution policy.
 pub fn is_valid_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let valid_start = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
     let reserved = matches!(
         name,
         "fn" | "bits"
@@ -185,7 +181,17 @@ pub fn is_valid_identifier(name: &str) -> bool {
             | "true"
             | "false"
     );
-    valid_start && !reserved && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    is_valid_identifier_name(name) && !reserved
+}
+
+/// XLS accepts identifier and keyword tokens as package names, excluding
+/// literals.
+fn check_package_name(name: &str) -> Result<(), BuilderError> {
+    if is_valid_identifier_name(name) && !matches!(name, "true" | "false") {
+        Ok(())
+    } else {
+        Err(BuilderError::InvalidName(name.to_string()))
+    }
 }
 
 /// Validates a name without modifying or silently uniquifying it.
@@ -961,7 +967,7 @@ impl Builder<FunctionState> {
         return_value: BValue,
         package_name: &str,
     ) -> Result<ir::Package, BuilderError> {
-        check_name(package_name)?;
+        check_package_name(package_name)?;
         let function = self.build(return_value)?;
         let top = Some((function.name.clone(), ir::MemberType::Function));
         Ok(ir::Package {
@@ -984,7 +990,7 @@ impl Builder<FunctionState> {
         return_value: BValue,
         package: &ir::Package,
     ) -> Result<ir::Fn, BuilderError> {
-        check_name(&package.name)?;
+        check_package_name(&package.name)?;
         if package
             .members
             .iter()
@@ -1533,12 +1539,14 @@ mod tests {
             builder.build(value),
             Err(BuilderError::InvalidName(_))
         ));
-        let mut builder = FnBuilder::new("valid");
-        let value = builder.tuple(&[]).unwrap();
-        assert!(matches!(
-            builder.build_package(value, "bad name"),
-            Err(BuilderError::InvalidName(_))
-        ));
+        for name in ["bad name", "true", "false", "42"] {
+            let mut builder = FnBuilder::new("valid");
+            let value = builder.tuple(&[]).unwrap();
+            assert!(matches!(
+                builder.build_package(value, name),
+                Err(BuilderError::InvalidName(_))
+            ));
+        }
         for name in ["ret", "bits", "token", "fn", "true", "false"] {
             let mut builder = FnBuilder::new(name);
             let value = builder.tuple(&[]).unwrap();
@@ -1547,6 +1555,23 @@ mod tests {
                 Err(BuilderError::InvalidName(_))
             ));
         }
+    }
+
+    #[test]
+    fn keyword_named_packages_roundtrip_and_accept_new_members() {
+        let mut function = FnBuilder::new("identity");
+        let x = function.param("x", Type::Bits(1)).unwrap();
+        let mut package = function.build_package(x, "stage").unwrap();
+        BlockBuilder::new("wrapper")
+            .build_into_package(&mut package)
+            .unwrap();
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+
+        let mut package = BlockBuilder::new("wrapper").build_package("clock").unwrap();
+        let mut function = FnBuilder::new("identity");
+        let x = function.param("x", Type::Bits(1)).unwrap();
+        function.build_into_package(x, &mut package).unwrap();
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
     }
 
     #[test]

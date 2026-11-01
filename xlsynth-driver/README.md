@@ -4033,7 +4033,7 @@ flop_outputs = true
 Library callers resolving a spec with DSLX imports in-process must run
 `StitchPipelineSpec::resolve` from the DSLX source directory. The resolver
 reports a directory mismatch. Once resolved, the same pipeline object can
-generate RTL, lower to g8r, or check a netlist.
+generate RTL, emit a block IR package, lower to g8r, or check a netlist.
 
 ### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
 
@@ -4201,21 +4201,40 @@ start at zero. Use `stitch-equiv` for a proof covering all permitted traces.
 
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 
-Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
+Stitches the selected DSLX stage functions into a pipeline. By default, the
+command emits a Verilog or SystemVerilog module for each stage and a wrapper
+that connects them. With `--output-format=block-ir`, it emits a textual XLS IR
+package whose top block invokes the stage functions and implements the register
+boundaries. The block has a packed input port named for each parameter of the
+first stage and drives the packed data output `out`. When a later stage takes
+multiple parameters, its first parameter receives the low bits of the preceding
+result and each successive parameter receives the next slice. Both formats use
+the same stage order, pipeline name, and valid/reset settings.
+The generated text goes to stdout and diagnostics go to stderr.
 
-1. Generates Verilog/SystemVerilog for **each** stage function.
-1. Emits a wrapper module named exactly `<output_module_name>` (or `<dslx_top>` when `--stages` is not used) that instantiates the stages and wires them together to form the complete pipeline.
+The block IR package retains the stage bodies and their helper functions.
+`block2sv` inlines calls to DSLX function bodies when generating SystemVerilog.
+Its existing operation restrictions also apply to stage bodies. Expand `map`,
+unroll `counted_for`, and lower calls to FFI functions to external instantiations
+before rendering stages that use them.
 
-The generated text is written to **stdout**; diagnostic messages appear on **stderr**.
-
-Supported flags:
+Supported flags
 
 - `--spec=<PATH>` – read the shared DSLX stitch specification documented above.
+- `--output-format=rtl|block-ir` – select the output format for either a spec or command-line stage selection. Defaults to `rtl`.
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
 - `--gate_format=<TEMPLATE>` – Verilog template for `gate!` operations in every selected stage. Overrides `[toolchain.codegen].gate_format`; when neither is set, uses the default XLS gate emission. An empty template restores the XLS default even when the toolchain sets a template.
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
-- `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
-- `--validate-no-constant-flops[=<BOOL>]` – prove every registered stage-output bit can take both values; fail before emitting Verilog if any bit is always constant. Defaults to `false`; the bare flag enables validation. Interprets the composed stages with zero-valued pipeline inputs, then proves each bit can differ from its observed value for some pipeline input. This includes constants caused by correlations between preceding stage outputs. The final stage is excluded when `--flop_outputs=false`; input and valid-signal registers are not checked. Diagnostics identify the stage, flattened output-bit index, and constant value.
+- `--output_module_name=<NAME>` – name of the RTL wrapper or top IR block. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
+- `--array_index_bounds_checking=<BOOL>` – control array index bounds checking for RTL emission. Defaults to `true`, matching XLS IR array index semantics.
+- `--validate-no-constant-flops[=<BOOL>]` – prove every registered stage-output bit can take both values before emitting either format. Defaults to `false`. The bare flag enables validation. Interprets the composed stages with zero-valued pipeline inputs, then proves each bit can differ from its observed value for some pipeline input. This includes constants caused by correlations between preceding stage outputs. The final stage is excluded when `--flop_outputs=false`. The check skips input and valid-signal registers. Diagnostics identify the stage, flattened output-bit index, and constant value.
+
+Block IR uses XLS array index semantics. It accepts
+`--array_index_bounds_checking=true` and rejects `false`. The
+`--use_system_verilog` and `--gate_format` flags require RTL output.
+Block IR ignores toolchain codegen settings. The top block and port names
+must also be valid XLS IR identifiers. For example, use `clk` as the
+clock port name because `clock` is an IR keyword.
 
 The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are accepted. Entry-point selection is via either `--dslx_top` (implicit discovery) or `--stages` (explicit list) — these are mutually exclusive.
 
@@ -4255,6 +4274,11 @@ Examples:
 xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
   --dslx_top foo > foo.sv
+
+# Emit XLS block IR from the shared stitch spec
+xlsynth-driver dslx-stitch-pipeline \
+  --spec muladd.stitch.toml --output-format=block-ir > muladd.ir
+xlsynth-driver block2sv muladd.ir > muladd.sv
 
 # Explicit stages (wrapper name required)
 xlsynth-driver dslx-stitch-pipeline \

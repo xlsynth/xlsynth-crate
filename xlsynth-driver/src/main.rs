@@ -730,6 +730,14 @@ fn main() {
                 .about("Stitches DSLX pipeline stages")
                 .add_stitch_input_args("output_module_name")
                 .arg(
+                    Arg::new("output-format")
+                        .long("output-format")
+                        .value_name("FORMAT")
+                        .value_parser(["rtl", "block-ir"])
+                        .default_value("rtl")
+                        .help("Emit stitched RTL or an XLS IR package with a top pipeline block"),
+                )
+                .arg(
                     Arg::new("gate_format")
                         .long("gate_format")
                         .value_name("TEMPLATE")
