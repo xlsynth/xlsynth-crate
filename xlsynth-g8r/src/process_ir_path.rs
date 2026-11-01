@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod source_positions;
+
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 use crate::gatify::prep_for_gatify::{
-    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_with_origins,
+    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_observing,
 };
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -474,13 +476,14 @@ fn prepared_ir_text_from_package(
         .expect("top fn should exist in pir_package");
     // Match gatify's preparation mode so exported IDs describe the mapped
     // graph.
-    let prepared_fn = prep_for_gatify_with_origins(
+    let prepared_fn = prep_for_gatify_observing(
         ir_top,
         Some(range_info),
         prep_opts,
         track_pir_node_ids.then(HashMap::new).as_mut(),
         track_pir_node_ids.then(HashMap::new).as_mut(),
         gate_cost,
+        |_| {},
     );
     let external_refs = ir_utils::external_function_references(&prepared_fn);
     if !external_refs.is_empty() {
@@ -569,11 +572,12 @@ pub fn process_ir_text_with_gatefn(
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
-    let ir2gates_output = ir2gates::ir2gates_for_pipeline(
+    let (ir2gates_output, capture) = ir2gates::ir2gates_for_pipeline(
         ir_text,
         options.ir_top.as_deref(),
         ir2gates_options,
         options.reassociation,
+        options.hash && options.fold,
     )?;
 
     let ir2gates::Ir2GatesOutput {
@@ -616,6 +620,8 @@ pub fn process_ir_text_with_gatefn(
 
     let mut gate_fn = gatify_output.gate_fn;
     let lowering_map = gatify_output.lowering_map;
+    let terminal_wrap =
+        capture.and_then(|obs| crate::terminal_wrap_graft::TerminalWrapPlan::new(&gate_fn, obs));
 
     let independent_op_stats = if options.emit_independent_op_stats {
         let gatify_options = ir2gate::GatifyOptions::from(GatifyOptionsInput {
@@ -709,25 +715,30 @@ pub fn process_ir_text_with_gatefn(
         None
     };
 
-    // Map each gate reference back to the IR node positions, if available.
-    let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
-    for (node_ref, bit_vec) in lowering_map.iter() {
-        if let Some(pos_data) = ir_top.get_node(*node_ref).pos.as_ref() {
-            let sources: Vec<String> = pos_data
-                .iter()
-                .filter_map(|p| p.to_human_string(&ir_package.file_table))
-                .collect();
-            for operand in bit_vec.iter_lsb_to_msb() {
-                gate_to_sources
-                    .entry(operand.node.id)
-                    .or_default()
-                    .extend(sources.clone());
-            }
-        }
-    }
+    let positions = if options.quiet {
+        None
+    } else {
+        source_positions::SourcePositions::capture(
+            ir_top,
+            &ir_package.file_table,
+            &gate_fn,
+            &lowering_map,
+        )
+    };
 
     let optimize_outcome = optimize_gate_fn(gate_fn, &GateFnOptimizeOptions::from(options))?;
-    gate_fn = optimize_outcome.gate_fn;
+    gate_fn = match terminal_wrap {
+        Some(plan) => {
+            let result = plan.apply(optimize_outcome.gate_fn)?;
+            crate::aig::get_summary_stats::log_gate_snapshot(
+                module_path!(),
+                "after_terminal_wrap",
+                &result,
+            );
+            result
+        }
+        None => optimize_outcome.gate_fn,
+    };
     let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
@@ -822,6 +833,7 @@ pub fn process_ir_text_with_gatefn(
         return Ok((gate_fn, summary_stats));
     }
 
+    let gate_to_sources = positions.map(|p| p.on_final(&gate_fn)).unwrap_or_default();
     println!("== Deepest path ({}):", depth_stats.deepest_path.len());
     for gate_ref in depth_stats.deepest_path.iter() {
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
@@ -835,12 +847,7 @@ pub fn process_ir_text_with_gatefn(
             }
         }
         if let Some(srcs) = gate_to_sources.get(&gate_ref.id) {
-            if !srcs.is_empty() {
-                let mut unique = srcs.clone();
-                unique.sort();
-                unique.dedup();
-                println!("          source: {}", unique.join(" "));
-            }
+            println!("          source: {}", srcs.join(" "));
         }
         println!(
             "          uses: {}",

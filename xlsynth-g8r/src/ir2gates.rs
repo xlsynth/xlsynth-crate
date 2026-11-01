@@ -231,16 +231,26 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
-    ir2gates_for_pipeline(ir_text, top, options, false)
+    ir2gates_for_pipeline(
+        ir_text, top, options, /* reassociate_gates= */ false, /* observe_wrap= */ false,
+    )
+    .map(|(output, _)| output)
 }
 
-/// Lower for a pipeline that may subsequently reassociate the emitted gates.
+/// Uses the pipeline's depth model and optionally captures terminal wraps.
 pub(crate) fn ir2gates_for_pipeline(
     ir_text: &str,
     top: Option<&str>,
     options: Ir2GatesOptions,
     reassociate_gates: bool,
-) -> Result<Ir2GatesOutput, String> {
+    observe_wrap: bool,
+) -> Result<
+    (
+        Ir2GatesOutput,
+        Option<crate::gatify::terminal_wrap::TerminalWrapCapture>,
+    ),
+    String,
+> {
     let PreparedIrForGatify {
         pir_package,
         top_fn_name,
@@ -250,7 +260,7 @@ pub(crate) fn ir2gates_for_pipeline(
         .get_fn(&top_fn_name)
         .expect("top_fn_name should be present in pir_package");
 
-    let gatify_output = ir2gate::gatify_for_pipeline(
+    let (gatify_output, capture) = ir2gate::gatify_for_pipeline(
         pir_fn,
         ir2gate::GatifyOptions {
             fold: options.fold,
@@ -270,14 +280,16 @@ pub(crate) fn ir2gates_for_pipeline(
             ..ir2gate::GatifyOptions::all_opts_disabled()
         },
         reassociate_gates,
+        observe_wrap,
     )?;
 
-    Ok(Ir2GatesOutput {
+    let output = Ir2GatesOutput {
         pir_package,
         top_fn_name,
         gatify_output,
         range_info,
-    })
+    };
+    Ok((output, capture))
 }
 
 #[cfg(test)]

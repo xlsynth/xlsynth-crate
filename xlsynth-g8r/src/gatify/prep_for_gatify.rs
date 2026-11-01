@@ -2716,7 +2716,7 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
-    prep_for_gatify_with_origins(
+    prep_for_gatify_observing(
         f,
         range_info,
         options,
@@ -2726,18 +2726,21 @@ pub fn prep_for_gatify(
             hash: true,
             reassociation: false,
         },
+        |_| {},
     )
 }
 
+/// Observes ordinary adds before arithmetic rewrites.
 /// Records source operations for rewritten helpers and all observers for
 /// comparison helpers. Text IDs preserve both across compaction.
-pub(crate) fn prep_for_gatify_with_origins(
+pub(crate) fn prep_for_gatify_observing(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
     mut origins: Option<&mut HashMap<usize, usize>>,
     mut comparison_origins: Option<&mut HashMap<usize, PirNodeIds>>,
     gate_cost: GateCostOptions,
+    observe_ordinary_adds: impl FnOnce(&ir::Fn),
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
@@ -2753,6 +2756,7 @@ pub(crate) fn prep_for_gatify_with_origins(
     diagnostics::run(&mut cloned, "redundant_nonzero_mask", 0, |f| {
         redundant_nonzero_mask::rewrite(f, origins.as_deref_mut())
     });
+    observe_ordinary_adds(&cloned);
     diagnostics::run(&mut cloned, "shifted_nonzero", 0, shifted_nonzero::rewrite);
     diagnostics::run(&mut cloned, "combine_or_reduces", 0, |f| {
         combine_or_reduces(f, origins.as_deref_mut())

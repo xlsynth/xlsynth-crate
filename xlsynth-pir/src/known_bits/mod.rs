@@ -13,6 +13,10 @@ use crate::{IrValue, ir_utils, ir_verify};
 pub use crate::analysis_utils::AnalysisError;
 
 pub(crate) mod bits;
+mod conditional;
+pub use conditional::{
+    ConditionalBit, LowWordBooleanFacts, LowWordQuery, QueryLimit, boolean_under_low_word_extremes,
+};
 mod eval;
 pub(crate) mod extensions;
 
