@@ -327,15 +327,21 @@ fn zero_latency_valid_and_data_pass_through_during_reset() {
     let module = compile_combo_module(&rtl).unwrap();
     let plan = plan_combo_eval(&module).unwrap();
 
-    // Vastly ignores stimulus for undeclared inputs. Both control ports
-    // must still be present when there are no registers to drive.
-    for name in ["clk", "rst"] {
+    // eval_combo ignores extra inputs and returns internal wires as well as
+    // outputs.
+    let inputs = &module.input_ports;
+    let outputs = &module.output_ports;
+    for (ports, name, width) in [
+        (inputs, "clk", 1),
+        (inputs, "rst", 1),
+        (inputs, "in_valid", 1),
+        (inputs, "partials", 16),
+        (outputs, "out_valid", 1),
+        (outputs, "out", 8),
+    ] {
         assert!(
-            module
-                .input_ports
-                .iter()
-                .any(|p| p.name == name && p.width == 1),
-            "missing one-bit input {name}"
+            ports.iter().any(|p| p.name == name && p.width == width),
+            "missing {width}-bit port {name}"
         );
     }
 
@@ -344,7 +350,7 @@ fn zero_latency_valid_and_data_pass_through_during_reset() {
         (0, 0, 0x0302, 5),
         (0, 1, 0x09ff, 8),
         (1, 0, 0x0406, 10),
-        (1, 1, 0x0710, 23),
+        (1, 1, 0xc710, 215),
     ] {
         let inputs = [
             ("clk", 1, 0),
