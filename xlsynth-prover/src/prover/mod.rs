@@ -5,6 +5,7 @@ use std::{collections::HashMap, fmt, path::Path};
 use serde::{Deserialize, Serialize};
 
 pub mod assertion_filter;
+pub mod conditional_independence;
 pub mod corner_prover;
 pub mod enum_in_bound;
 pub mod external_prover;
@@ -115,6 +116,21 @@ impl FromStr for SolverChoice {
 use xlsynth_pir::{ir, ir_parser};
 
 pub trait Prover {
+    /// Proves conditional independence using the selected solver backend.
+    fn prove_conditional_independence(
+        &self,
+        function: &ProverFn<'_>,
+        when: &ProverFn<'_>,
+        vary: &[conditional_independence::InputBitSelection],
+        observe: &[conditional_independence::BitSelection],
+    ) -> Result<conditional_independence::IndependenceResult, String> {
+        let _ = (function, when, vary, observe);
+        Err(
+            "conditional independence requires an available in-process or SMT solver backend"
+                .into(),
+        )
+    }
+
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
         let lhs_fn = ProverFn::new(lhs, None);
         let rhs_fn = ProverFn::new(rhs, None);
@@ -316,6 +332,19 @@ impl Prover for UnavailableProver {
 }
 
 impl<S: SolverConfig> Prover for S {
+    /// Proves conditional independence using the selected solver backend.
+    fn prove_conditional_independence(
+        &self,
+        function: &ProverFn<'_>,
+        when: &ProverFn<'_>,
+        vary: &[conditional_independence::InputBitSelection],
+        observe: &[conditional_independence::BitSelection],
+    ) -> Result<conditional_independence::IndependenceResult, String> {
+        conditional_independence::prove_with_solver::<S::Solver>(
+            self, function, when, vary, observe,
+        )
+    }
+
     fn prove_ir_pkg_text_equiv(
         self: &Self,
         lhs_pkg_text: &str,
