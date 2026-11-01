@@ -5105,6 +5105,8 @@ pub(crate) fn gatify_with_terminal_observations(
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
+        options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && !options.unsafe_gatify_gate_operation,
         |f| {
             if observe {
                 permit = TerminalWrapPermit::at_source(f);

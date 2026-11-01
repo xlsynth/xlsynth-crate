@@ -24,6 +24,7 @@ mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
 mod mixed_comparisons;
+mod quantized_affine_read;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
 mod widened_sum_threshold;
@@ -2618,17 +2619,28 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
-    prep_for_gatify_observing(f, range_info, options, |_| {})
+    // Without a lowering policy, keep table operands available to node-only and
+    // forced strategies.
+    prep_for_gatify_observing(f, range_info, options, false, |_| {})
 }
 
-pub(super) fn prep_for_gatify_observing(
+pub(crate) fn prep_for_gatify_observing(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
     observe_ordinary_adds: impl FnOnce(&ir::Fn),
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    if synthesize_literal_reads {
+        diagnostics::run(
+            &mut cloned,
+            "quantized_affine_read",
+            0,
+            quantized_affine_read::rewrite,
+        );
+    }
     diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
         grouped_priority::rewrite(f, range_info)
     });

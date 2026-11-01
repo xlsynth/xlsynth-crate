@@ -6,7 +6,7 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_observing};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
@@ -466,11 +466,18 @@ fn prepared_ir_text_from_package(
     top_fn_name: &str,
     range_info: &IrRangeInfo,
     prep_opts: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
 ) -> Result<String, String> {
     let ir_top = ir_package
         .get_fn(top_fn_name)
         .expect("top fn should exist in pir_package");
-    let prepared_fn = prep_for_gatify(ir_top, Some(range_info), prep_opts);
+    let prepared_fn = prep_for_gatify_observing(
+        ir_top,
+        Some(range_info),
+        prep_opts,
+        synthesize_literal_reads,
+        |_| {},
+    );
     let external_refs = ir_utils::external_function_references(&prepared_fn);
     if !external_refs.is_empty() {
         let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
@@ -517,6 +524,7 @@ pub fn canonical_ir_text_to_prepared_gatify_ir(
         &prepared.top_fn_name,
         prepared.range_info.as_ref(),
         prep_opts,
+        !lowering_options.unsafe_gatify_gate_operation,
     )
 }
 
@@ -579,6 +587,7 @@ pub fn process_ir_text_with_gatefn(
             &top_fn_name,
             range_info.as_ref(),
             prep_opts,
+            !options.unsafe_gatify_gate_operation,
         )?;
         std::fs::write(out_path, prepared_text.as_bytes()).map_err(|e| {
             format!(
