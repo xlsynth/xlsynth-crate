@@ -40,6 +40,7 @@ mod conditional_select;
 mod demanded_bits;
 mod guarded_unit;
 mod priority_predicate;
+mod read_predicates;
 mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
@@ -4765,6 +4766,7 @@ fn gatify_internal(
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
+    let mut read_predicates = read_predicates::ReadPredicates::default();
     for &node_ref in topological {
         if env.product_is_deferred(node_ref) {
             // Its only consumer takes partial rows, so do not emit a product
@@ -4787,7 +4789,20 @@ fn gatify_internal(
             None
         };
         g8_builder.set_current_pir_node_id(provenance_id);
-        gatify_node(f, node_ref, node, g8_builder, env, options)?;
+        if options.hash
+            && options.fold
+            && options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && matches!(node.payload, ir::NodePayload::ArrayIndex { .. })
+        {
+            read_predicates.consider(f, node_ref, g8_builder, env, options);
+        }
+        if let Some(rail) = read_predicates.take(node_ref) {
+            let value = g8_builder.union_current_pir_node_id_into_operand(rail);
+            env.add(node_ref, GateOrVec::Gate(value));
+            env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
+        } else {
+            gatify_node(f, node_ref, node, g8_builder, env, options)?;
+        }
         g8_builder.set_current_pir_node_id(None);
     }
     // Resolve the outputs and place them into the builder.
