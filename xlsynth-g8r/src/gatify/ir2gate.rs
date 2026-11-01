@@ -43,10 +43,12 @@ mod bounded_conjunction;
 mod conditional_select;
 mod demanded_bits;
 mod guarded_unit;
+pub(crate) mod observed_select_rails;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
 mod read_predicates;
 mod shift_reduction_predicate;
+mod word_observations;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 use priority_predicate::PriorityPredicatePlan;
@@ -54,12 +56,14 @@ use shift_reduction_predicate::ShiftReductionPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
 
-/// Records return-value substitutions to try after whole-function gate
+/// Records output and word observations for use after whole-function gate
 /// optimization.
 #[derive(Default)]
 pub(crate) struct TerminalObservations {
     pub(crate) wrap: Option<TerminalWrapCapture>,
     pub(crate) ordinals: Vec<priority_ordinal::ReturnBit>,
+    pub(crate) words: Vec<observed_select_rails::WordObservation>,
+    pub(crate) rail_budget: crate::aig::retained_rails::RailBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3939,12 +3943,35 @@ fn gatify_node(
         }
 
         // -- unary operations
-        ir::NodePayload::Unop(ir::Unop::Not, arg) => {
+        ir::NodePayload::Unop(op @ (ir::Unop::Identity | ir::Unop::Not), arg) => {
             let arg_gates = env
                 .get_bit_vector(*arg)
                 .expect("unop arg should be present");
-            let gates: AigBitVector = g8_builder.add_not_vec(&arg_gates);
-            env.add(node_ref, GateOrVec::BitVector(gates));
+            let gates = if *op == ir::Unop::Not {
+                g8_builder.add_not_vec(&arg_gates)
+            } else {
+                arg_gates
+            };
+            // Retain the origin of a predicate and each signed alias on their
+            // shared gate. Scalar comparisons and reductions already lower to
+            // Gate; bitwise conjunctions and disjunctions lower to vectors.
+            let value = if options.track_pir_node_ids
+                && node.ty == ir::Type::Bits(1)
+                && (matches!(env.ir_to_g8[arg], GateOrVec::Gate(_))
+                    || matches!(
+                        f.get_node(*arg).payload,
+                        ir::NodePayload::Nary(
+                            ir::NaryOp::And | ir::NaryOp::Nand | ir::NaryOp::Or | ir::NaryOp::Nor,
+                            _
+                        )
+                    )) {
+                GateOrVec::Gate(
+                    g8_builder.union_current_pir_node_id_into_operand(*gates.get_lsb(0)),
+                )
+            } else {
+                GateOrVec::BitVector(gates)
+            };
+            env.add(node_ref, value);
         }
         ir::NodePayload::Unop(ir::Unop::Neg, arg) => {
             let arg_gates = env
@@ -3963,12 +3990,6 @@ fn gatify_node(
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(result));
-        }
-        ir::NodePayload::Unop(ir::Unop::Identity, arg) => {
-            let arg_gates = env
-                .get_bit_vector(*arg)
-                .expect("unop arg should be present");
-            env.add(node_ref, GateOrVec::BitVector(arg_gates));
         }
         ir::NodePayload::Unop(ir::Unop::Reverse, arg) => {
             let arg_gates = env
@@ -5251,7 +5272,7 @@ fn gatify_lower_prepared_fn(
     options: &GatifyOptions,
     origins: Option<&PrepOrigins>,
     equiv_fn: &ir::Fn,
-    ordinal_outputs: Option<&mut Vec<priority_ordinal::ReturnBit>>,
+    observations: Option<&mut TerminalObservations>,
 ) -> Result<GatifyOutput, String> {
     let topological = ir_utils::get_topological(f);
     let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
@@ -5339,7 +5360,7 @@ fn gatify_lower_prepared_fn(
         }
     }
     let gate_fn = g8_builder.build();
-    if let Some(outputs) = ordinal_outputs {
+    if let Some(captures) = observations {
         priority_ordinal::capture(
             f,
             &env,
@@ -5354,8 +5375,11 @@ fn gatify_lower_prepared_fn(
                     }))
                 }
             },
-            outputs,
+            &mut captures.ordinals,
+            &mut captures.rail_budget,
         );
+        captures.words =
+            observed_select_rails::capture(f, &env, &gate_fn, &mut captures.rail_budget);
     }
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -5489,15 +5513,8 @@ pub(crate) fn gatify_for_pipeline(
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
     let mut captures = TerminalObservations::default();
-    let ordinal_outputs =
-        (observe && options.fold && options.hash).then_some(&mut captures.ordinals);
-    let out = gatify_lower_prepared_fn(
-        &prepared_fn,
-        &options,
-        Some(&origins),
-        orig_fn,
-        ordinal_outputs,
-    )?;
+    let outputs = (observe && options.fold && options.hash).then_some(&mut captures);
+    let out = gatify_lower_prepared_fn(&prepared_fn, &options, Some(&origins), orig_fn, outputs)?;
     captures.wrap = permit.and_then(|p| {
         p.capture(&prepared_fn, &out.gate_fn, |n| {
             let original = origins

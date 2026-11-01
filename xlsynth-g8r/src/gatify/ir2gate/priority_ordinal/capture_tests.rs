@@ -7,7 +7,8 @@ use crate::aig_sim::gate_sim::PreparedGateSim;
 use crate::gate_builder::GateBuilderOptions;
 use crate::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
 use crate::gatify::ir2gate::{
-    GatifyOptions, gatify_lower_prepared_fn, gatify_with_terminal_observations,
+    GatifyOptions, TerminalObservations, gatify_lower_prepared_fn,
+    gatify_with_terminal_observations,
 };
 use crate::ir2gates::ir2gates_with_terminal_observations;
 use crate::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts};
@@ -31,18 +32,18 @@ fn zero_width_concat_dag_in_return_wiring() {
     ir.push_str("  ret out: (bits[1], bits[0]) = tuple(x, e34, id=37)\n}");
     let package = Parser::new(&ir).parse_and_validate_package().unwrap();
     let f = package.get_top_fn().unwrap();
-    let mut plans = Vec::new();
+    let mut observations = TerminalObservations::default();
     // Lower the DAG as written so prep cannot simplify away the empty parts.
     let gates = gatify_lower_prepared_fn(
         f,
         &GatifyOptions::all_opts_enabled(),
         None,
         f,
-        Some(&mut plans),
+        Some(&mut observations),
     )
     .unwrap()
     .gate_fn;
-    assert!(plans.is_empty());
+    assert!(observations.ordinals.is_empty());
     assert_eq!(gates.outputs[0].get_bit_count(), 1);
     assert_eq!(
         gates.outputs[0].bit_vector.get_lsb(0),
@@ -62,17 +63,17 @@ fn shared_nonempty_concat_with_many_empty_operands() {
         "p, ".repeat(COPIES),
     );
     let f = Parser::new(&ir).parse_fn().unwrap();
-    let mut plans = Vec::new();
+    let mut observations = TerminalObservations::default();
     let mapped = gatify_lower_prepared_fn(
         &f,
         &GatifyOptions::all_opts_enabled(),
         None,
         &f,
-        Some(&mut plans),
+        Some(&mut observations),
     )
     .unwrap()
     .gate_fn;
-    assert!(plans.is_empty());
+    assert!(observations.ordinals.is_empty());
     let x = mapped.inputs[0].bit_vector.get_lsb(0);
     assert!(
         mapped.outputs[0]
@@ -137,7 +138,7 @@ top fn main({}, mask: bits[5]) -> bits[{width}] {{
         ..Default::default()
     };
     let opts = options.to_process_ir_path_options(Some("main"), true, false, false, None);
-    let (ordinary, capture) =
+    let (ordinary, mut capture) =
         ir2gates_with_terminal_observations(&ir, Some("main"), (&opts).into(), true).unwrap();
     let stock = optimize_gate_fn(
         ordinary.gatify_output.gate_fn,
@@ -147,7 +148,10 @@ top fn main({}, mask: bits[5]) -> bits[{width}] {{
     .gate_fn;
     let stock_bits = &stock.outputs[0].bit_vector;
     assert!(get_aig_cone_stats(&stock.gates, &[*stock_bits.get_lsb(0)]).and_nodes > 1);
-    let trial = build_trial(&stock, &capture.ordinals).unwrap();
+    let trial = build_trial(&stock, &capture.ordinals, &mut capture.rail_budget, || {
+        GateBuilder::append_to(stock.clone())
+    })
+    .unwrap();
     let bits = &trial.graph.outputs[0].bit_vector;
     let literal = bits.get_msb(0).node;
     let variable = bits.get_lsb(0).node;
@@ -205,7 +209,10 @@ fn apply_resolves_many_pins_by_name_and_bit_after_port_reordering() {
         // A redundant AND makes forwarding each inverted input profitable.
         outputs.push(builder.add_and_binary(rail, rail));
         plans.push(ReturnBit {
-            positions: vec![(bit, false)],
+            positions: vec![ReturnPosition {
+                bit,
+                inverted: false,
+            }],
             width: OUTPUT_COUNT,
             lhs: Pin::Input {
                 name,
@@ -221,7 +228,7 @@ fn apply_resolves_many_pins_by_name_and_bit_after_port_reordering() {
     );
     let mut stock = builder.build();
     stock.inputs.reverse();
-    let forwarded = apply(stock.clone(), &plans);
+    let forwarded = apply(stock.clone(), &plans, &mut RailBudget::default());
     for (pin, word) in forwarded.outputs[0]
         .bit_vector
         .iter_lsb_to_msb()
@@ -233,7 +240,7 @@ fn apply_resolves_many_pins_by_name_and_bit_after_port_reordering() {
     // A coordinate missing from the rewritten port invalidates the entire
     // trial.
     stock.inputs[0].bit_vector = stock.inputs[0].bit_vector.get_lsb_slice(0, 1);
-    let retained = apply(stock, &plans);
+    let retained = apply(stock, &plans, &mut RailBudget::default());
     assert!(
         retained.outputs[0]
             .bit_vector
@@ -301,7 +308,7 @@ top fn main(x: bits[8], mask: bits[5]) -> (bits[1], bits[{width}]) {{
 }
 
 #[test_matrix([false, true])]
-fn computed_priority_or_mask_bit_retains_the_affine_cone(compute_mask: bool) {
+fn computed_mask_capture_requires_an_unshared_ordinal_with_an_input_rail(compute_mask: bool) {
     let (source, mask) = if compute_mask {
         ("x", "lt")
     } else {
@@ -343,7 +350,21 @@ fn computed_priority_or_mask_bit_retains_the_affine_cone(compute_mask: bool) {
             true,
         )
         .unwrap();
-        assert!(observations.ordinals.is_empty());
+        if compute_mask && retained_width == 0 {
+            assert!(matches!(
+                observations.ordinals.as_slice(),
+                [ReturnBit {
+                    mask: Some(MaskOperation {
+                        op: NaryOp::Xor,
+                        rhs: MaskBit::Cone { .. },
+                        ..
+                    }),
+                    ..
+                }]
+            ));
+        } else {
+            assert!(observations.ordinals.is_empty());
+        }
         let gates = mapped.gate_fn;
         let flag = *gates.outputs[0].bit_vector.get_lsb(retained_width);
         sizes.push(get_aig_cone_stats(&gates.gates, &[flag]).and_nodes);
