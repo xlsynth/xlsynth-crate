@@ -14,6 +14,7 @@ pub(crate) use truth::{CutBit, CutIndex, CutSignature};
 
 /// Limit aggregate capture, index and candidate work across a function's
 /// clients.
+#[derive(Clone)]
 pub(crate) struct RailBudget(usize);
 
 impl Default for RailBudget {

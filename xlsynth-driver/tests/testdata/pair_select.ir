@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package pair_select
+
+top fn f(a: bits[7] id=1, b: bits[7] id=2, x: bits[1] id=3, y: bits[1] id=4, t: bits[1] id=5) -> (bits[7], bits[7]) {
+  fallback: bits[7] = literal(value=82, id=6)
+  xy: bits[7] = sel(x, cases=[b, a], id=7)
+  bypass: bits[7] = sel(y, cases=[xy, a], id=8)
+  left: bits[7] = sel(t, cases=[bypass, fallback], id=9)
+  controls: bits[3] = concat(x, y, t, id=10)
+  right: bits[7] = priority_sel(controls, cases=[fallback, a, b], default=a, id=11)
+  ret outputs: (bits[7], bits[7]) = tuple(left, right, id=12)
+}

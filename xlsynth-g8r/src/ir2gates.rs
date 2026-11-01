@@ -231,7 +231,13 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
-    ir2gates_with_terminal_observations(ir_text, top, options, false).map(|(output, _)| output)
+    ir2gates_with_terminal_observations(
+        ir_text,
+        top,
+        options,
+        ir2gate::TerminalObservationMode::None,
+    )
+    .map(|(output, _)| output)
 }
 
 /// Uses unreassociated depths and optionally captures terminal observations.
@@ -239,7 +245,7 @@ pub(crate) fn ir2gates_with_terminal_observations(
     ir_text: &str,
     top: Option<&str>,
     options: Ir2GatesOptions,
-    observe: bool,
+    observe: ir2gate::TerminalObservationMode,
 ) -> Result<(Ir2GatesOutput, ir2gate::TerminalObservations), String> {
     ir2gates_for_pipeline(ir_text, top, options, false, observe)
 }
@@ -250,7 +256,7 @@ pub(crate) fn ir2gates_for_pipeline(
     top: Option<&str>,
     options: Ir2GatesOptions,
     reassociate_gates: bool,
-    observe: bool,
+    observe: ir2gate::TerminalObservationMode,
 ) -> Result<(Ir2GatesOutput, ir2gate::TerminalObservations), String> {
     let PreparedIrForGatify {
         pir_package,

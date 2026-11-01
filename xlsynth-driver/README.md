@@ -1236,6 +1236,7 @@ combinational transition logic is lowered into the stored transition function.
   - `--aiger-out <PATH>` – write a clockless, register-free result as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
+  - `--word-choice-dir <NEW_DIR>` – for a function top, write `manifest.json` and one binary AIGER file per offered conditional-word alternative. The directory must be new. Search requires `--fraig=false`. With the default `--fraig=true`, the manifest reports `fraig-enabled` and an empty candidate list. Omit this flag to skip export. Ordinary outputs describe the incumbent.
   - `--stats-out <PATH>` – write a JSON summary of structural statistics for a selected function. Sequential block statistics are not yet exposed by this command.
   - `--ugv-out <PATH>` – write unmapped gate Verilog to a file.
 - For selected functions, the same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--reassociation`, `--toggle-sample-count`, ...).
@@ -1282,6 +1283,14 @@ The function example above leaves three artifacts:
 1. `my_module.g8r` – human-readable native g8r file containing the combinational design.
 1. `my_module.g8rbin` – compact native g8r binary file containing the same design.
 1. `my_module.stats.json` – structural summary statistics as JSON.
+
+For a function that returns words selected from shared inputs, `--fraig=false` enables the alternative search.
+
+```shell
+xlsynth-driver ir2g8r xlsynth-driver/tests/testdata/pair_select.ir --top f \
+  --fraig=false --enable-formal-array-alias-analysis=false \
+  --word-choice-dir pair-choices > pair.g8r
+```
 
 Every native `.g8r` and `.g8rbin` file stores a `SequentialGateFn`: transition
 logic plus optional clock and register bindings. Its single clock is an XLS

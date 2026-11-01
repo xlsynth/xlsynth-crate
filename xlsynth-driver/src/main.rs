@@ -1833,6 +1833,13 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("word_choice_dir")
+                        .long("word-choice-dir")
+                        .value_name("NEW_DIR")
+                        .help("Write a manifest and conditional-word alternatives to a new directory. Search requires a function top and --fraig=false. Ordinary outputs retain the incumbent.")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
                     clap::Arg::new("stats_out")
                         .long("stats-out")
                         .value_name("PATH")
