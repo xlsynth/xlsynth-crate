@@ -64,6 +64,115 @@ fn assert_wrapped_text_parse_error_contains(ir_text: &str, expected_substr: &str
 }
 
 #[test]
+fn lifting_uses_only_the_effective_code_template() {
+    let ir = r##"package effective_template
+#[ffi_proto("""code_template: "assign {return} = {x}; /* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */"
+""")]
+#[ffi_proto("""# code_template: "/* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */"
+code_template : 'assign {return} = {x}[2:0];'
+""")]
+fn external(x: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(x, start=0, width=3, id=2)
+}
+top fn main(x: bits[4] id=3) -> bits[3] {
+  ret result: bits[3] = invoke(x, to_apply=external, id=4)
+}
+"##;
+    xlsynth::IrPackage::parse_ir(ir, None).unwrap();
+    let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+    let external = pkg
+        .get_fn("external")
+        .expect("external declaration retained");
+    assert_eq!(
+        external.ffi_proto().unwrap().code_template.as_deref(),
+        Some(b"assign {return} = {x}[2:0];".as_slice())
+    );
+    let main = pkg.get_fn("main").unwrap();
+    assert!(matches!(
+        &main.get_node(main.ret_node_ref.unwrap()).payload,
+        xlsynth_pir::ir::NodePayload::Invoke { to_apply, .. } if to_apply == "external"
+    ));
+}
+
+#[test]
+fn lifted_invokes_preserve_helpers_used_by_extern_instantiations_or_maps() {
+    let shared = r#"package mixed_uses
+
+#[ffi_proto("""code_template: "pir_ext_clz {fn} (.arg({arg}), .out({return})); /* \170lsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */"
+""")]
+fn external(arg: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(arg, start=0, width=3, id=2)
+}
+
+fn caller(x: bits[4] id=3) -> bits[3] {
+  ret result: bits[3] = invoke(x, to_apply=external, id=4)
+}
+"#;
+    let extern_instance = r#"top block user(x: bits[4], out: bits[3]) {
+  instantiation u(foreign_function=external, kind=extern)
+  x: bits[4] = input_port(name=x, id=5)
+  instantiation_input.6: () = instantiation_input(x, instantiation=u, port_name=arg, id=6)
+  instantiation_output.7: bits[3] = instantiation_output(instantiation=u, port_name=return, id=7)
+  out: () = output_port(instantiation_output.7, name=out, id=8)
+}
+"#;
+    let map = r#"top fn user(xs: bits[4][2] id=5) -> bits[3][2] {
+  ret result: bits[3][2] = map(xs, to_apply=external, id=6)
+}
+"#;
+    for user in [extern_instance, map] {
+        let ir = format!("{shared}\n{user}");
+        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+        assert!(package.get_fn("external").is_some());
+        let caller = package.get_fn("caller").unwrap();
+        assert!(matches!(
+            caller.get_node(caller.ret_node_ref.unwrap()).payload,
+            xlsynth_pir::ir::NodePayload::ExtClz { .. }
+        ));
+        let emitted =
+            emit_package_with_extension_mode(&package, ExtensionEmitMode::AsFfiFunction).unwrap();
+        let round_trip = Parser::new(&emitted).parse_and_validate_package().unwrap();
+        assert_eq!(round_trip.to_string(), package.to_string());
+    }
+}
+
+#[test]
+fn map_in_wrapper_fallback_retains_its_callee_only_when_wrapper_survives() {
+    let wrappers = r#"package fallback_maps
+
+#[ffi_proto("""code_template: "/* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */" """)]
+fn leaf(arg: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(arg, start=0, width=3, id=2)
+}
+
+#[ffi_proto("""code_template: "/* xlsynth_pir_ext=ext_clz;width=4;out_width=3;offset=0 */" """)]
+fn outer(arg: bits[4] id=3) -> bits[3] {
+  xs: bits[4][1] = array(arg, id=4)
+  ys: bits[3][1] = map(xs, to_apply=leaf, id=5)
+  zero: bits[1] = literal(value=0, id=6)
+  ret result: bits[3] = array_index(ys, indices=[zero], id=7)
+}
+"#;
+    let invoke = r#"top fn user(x: bits[4] id=8) -> bits[3] {
+  ret result: bits[3] = invoke(x, to_apply=outer, id=9)
+}
+"#;
+    let map = r#"top fn user(xs: bits[4][2] id=8) -> bits[3][2] {
+  ret result: bits[3][2] = map(xs, to_apply=outer, id=9)
+}
+"#;
+    for (user, retain_helpers) in [(invoke, false), (map, true)] {
+        let ir = format!("{wrappers}\n{user}");
+        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+        assert_eq!(package.get_fn("outer").is_some(), retain_helpers);
+        assert_eq!(package.get_fn("leaf").is_some(), retain_helpers);
+        let emitted = package.to_string();
+        let round_trip = Parser::new(&emitted).parse_and_validate_package().unwrap();
+        assert_eq!(round_trip.to_string(), emitted);
+    }
+}
+
+#[test]
 fn verilogffi_wrapped_ext_carry_out_round_trips_verbatim() {
     let ir_text = r#"package carry_out_wrapped
 
@@ -189,6 +298,23 @@ fn f(arg: bits[4] id=1) -> bits[3] {
         pkg.to_string()
             .contains("ext_clz(arg, offset=0, new_bit_count=3, id=2)"),
         "expected helper invoke to be lifted to ext_clz"
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_clz_rejects_non_ascii_literal_base() {
+    let ir_text = r#"package invalid_radix
+
+#[ffi_proto("""code_template: "assign {return} = {arg}[2:0]; /* xlsynth_pir_ext=ext_clz;width=32'\u00e9;out_width=3;offset=0 */"
+""")]
+fn external(arg: bits[4] id=1) -> bits[3] {
+  ret low: bits[3] = bit_slice(arg, start=0, width=3, id=2)
+}
+"#;
+    xlsynth::IrPackage::parse_ir(ir_text, None).unwrap();
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        r#"invalid ext_clz width literal base: "32'é""#,
     );
 }
 
@@ -358,6 +484,6 @@ fn f(init: bits[1] id=1) -> bits[1] {
 
     assert_wrapped_text_parse_error_contains(
         ir_text,
-        "only invoke nodes may reference wrapped extension helpers",
+        "wrapped extension helper '__pir_ext__ext_carry_out__w8' is referenced from counted_for body by node 'loop' in 'f'",
     );
 }

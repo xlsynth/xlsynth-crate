@@ -209,6 +209,7 @@ fn options() -> FanoutOptimizationOptions {
         area_weight: 0.0,
         primary_input_transition: 1.0,
         module_output_load: 1.0,
+        wire_load: WireLoadModel::default(),
     }
 }
 
@@ -1181,4 +1182,100 @@ fn area_index_does_not_prune_timing_alternatives() {
         .map(|choice| lib.cells[choice.index].name.clone())
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["A_SLOW", "B_FAST"]);
+}
+
+#[test]
+fn affine_wire_load_is_shared_by_graph_full_and_incremental_timing() -> Result<()> {
+    let lib = library(&[
+        Spec::new("DRIVE", "!A", 1.0, 10.0),
+        Spec::new("LOAD", "A", 1.0, 0.1),
+        Spec::new("BUF", "A", 0.25, 0.5),
+    ]);
+    let original = circuit(16, false, true);
+    let mut opts = options();
+    opts.wire_load = WireLoadModel {
+        constant_capacitance: 0.5,
+        capacitance_per_sink: 0.25,
+    };
+    let (_, _, graph) = measure(&original, &lib, &opts)?;
+    let driver = graph.drivers.iter().find(|d| d.sinks.len() == 16).unwrap();
+    // Sixteen pin loads, two external loads, and one affine wire term.
+    assert_eq!(driver.load, [22.5, 22.5]);
+    assert_eq!(driver.fixed_output_load, 2.0);
+    let output_only = graph.drivers.iter().find(|d| d.sinks.is_empty()).unwrap();
+    assert_eq!(output_only.load, [1.5, 1.5]);
+
+    let mut incremental = original.clone();
+    let incremental_report = optimize_fanout(&mut incremental, &lib, opts.clone())?;
+    assert!(!incremental_report.decisions.is_empty());
+    let mut full = original.clone();
+    opts.verify_incremental = false;
+    opts.full_sta = true;
+    let full_report = optimize_fanout(&mut full, &lib, opts)?;
+    assert_eq!(incremental_report.before, full_report.before);
+    assert_eq!(incremental_report.after, full_report.after);
+    assert_eq!(
+        emit_module_as_netlist_text(
+            &incremental.module,
+            &incremental.nets,
+            &incremental.interner
+        )?,
+        emit_module_as_netlist_text(&full.module, &full.nets, &full.interner)?
+    );
+    equivalent(&original, &incremental, &lib);
+    Ok(())
+}
+
+#[test]
+fn fanout_rejects_invalid_wire_model_before_mutation() {
+    let lib = library(&[
+        Spec::new("DRIVE", "!A", 1.0, 10.0),
+        Spec::new("LOAD", "A", 1.0, 0.1),
+    ]);
+    let original = circuit(1, false, false);
+    for value in [-1.0, f64::NAN, f64::INFINITY] {
+        let mut mapped = original.clone();
+        let mut opts = options();
+        opts.wire_load.capacitance_per_sink = value;
+        assert!(optimize_fanout(&mut mapped, &lib, opts).is_err());
+        assert_eq!(
+            emit_module_as_netlist_text(&mapped.module, &mapped.nets, &mapped.interner).unwrap(),
+            emit_module_as_netlist_text(&original.module, &original.nets, &original.interner)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn partition_includes_wire_per_sink_without_charging_ports_as_sinks() -> Result<()> {
+    let lib = library(&[
+        Spec::new("DRIVE", "!A", 1.0, 10.0),
+        Spec::new("LIGHT", "A", 1.0, 0.1),
+        Spec::new("HEAVY", "A", 3.0, 0.1),
+    ]);
+    let mapped = parsed(
+        r#"module top(a,o0,o1,o2,o3);
+        input a; output o0,o1,o2,o3; wire n;
+        DRIVE driver(.A(a),.Y(n));
+        HEAVY h(.A(n),.Y(o0));
+        LIGHT l1(.A(n),.Y(o1));
+        LIGHT l2(.A(n),.Y(o2));
+        LIGHT l3(.A(n),.Y(o3));
+        endmodule"#,
+    );
+    let mut opts = options();
+    opts.wire_load.capacitance_per_sink = 10.0;
+    let g = graph(&mapped, &lib, &opts)?;
+    let driver = g.drivers.iter().find(|d| d.sinks.len() == 4).unwrap();
+    assert_eq!(driver.load, [46.0, 46.0]);
+    let groups = partition(&driver.sinks, 2, driver.fixed_output_load);
+    assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 2]);
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| g.iter().map(|s| s.capacitance).sum::<f64>())
+            .collect::<Vec<_>>(),
+        vec![24.0, 22.0]
+    );
+    Ok(())
 }

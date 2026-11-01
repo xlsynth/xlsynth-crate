@@ -504,7 +504,7 @@ fn wired_result(
     )
 }
 
-/// A one-bit reduction or unsigned comparison of an exact-width index.
+/// A bit selection, reduction, or unsigned comparison of an exact-width index.
 enum IndexPredicate {
     Reduction {
         op: Unop,
@@ -551,13 +551,27 @@ impl IndexPredicate {
     }
 }
 
-/// Matches reductions of index bits, or comparisons with a literal on either
-/// side.
+/// Matches scalar index bits, reductions, or comparisons with a literal on
+/// either side.
 fn priority_index_predicate(f: &ir::Fn, root: NodeRef) -> Option<(PriorityIndex, IndexPredicate)> {
     if bits_width(&f.get_node(root).ty) != Some(1) {
         return None;
     }
     let (amount, predicate) = match &f.get_node(root).payload {
+        // A one-bit slice is a scalar predicate even when XLS has removed
+        // the redundant reduction around it.
+        NodePayload::BitSlice {
+            arg,
+            start,
+            width: 1,
+        } => (
+            *arg,
+            IndexPredicate::Reduction {
+                op: Unop::OrReduce,
+                start: *start,
+                width: 1,
+            },
+        ),
         NodePayload::Unop(op @ (Unop::OrReduce | Unop::AndReduce | Unop::XorReduce), arg) => {
             let (amount, start, width) = match f.get_node(*arg).payload {
                 NodePayload::BitSlice { arg, start, width } => (arg, start, width),
@@ -647,6 +661,13 @@ struct PredicateGroup {
     roots: Vec<NodeRef>,
 }
 
+/// A matched predicate captured before any overlapping root is rewritten.
+struct PredicateRewrite {
+    root: NodeRef,
+    index: PriorityIndex,
+    predicate: IndexPredicate,
+}
+
 /// Replaces scalar consumers together only when their shared count arithmetic
 /// has no remaining live users. Whole-function costing still checks loads.
 fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
@@ -674,17 +695,26 @@ fn rewrite_priority_predicates(f: &mut ir::Fn) -> Option<usize> {
     // Check every group against the original graph before appending nodes or
     // replacing payloads, so all groups can reuse the same liveness snapshot.
     groups.retain(|_, group| predicate_group_is_exclusive(f, &group.roots, group.hot, &live));
-    let mut rewrites = 0;
-    let mut builder = NodeAppender::new(f);
+    // A scalar slice can also be an intermediate of a matched reduction.
+    // Capture both descriptions now: replacing the slice must not invalidate
+    // the reduction's match or discard independent groups in this candidate.
+    let mut rewrites = Vec::new();
     for group in groups.into_values() {
         for root in group.roots {
-            let (index_expr, predicate) = priority_index_predicate(f, root)?;
-            let wired = wired_predicate(f, &mut builder, &index_expr, &predicate)?;
-            f.nodes[root.index].payload = f.get_node(wired).payload.clone();
-            rewrites += 1;
+            let (index, predicate) = priority_index_predicate(f, root)?;
+            rewrites.push(PredicateRewrite {
+                root,
+                index,
+                predicate,
+            });
         }
     }
-    Some(rewrites)
+    let mut builder = NodeAppender::new(f);
+    for rewrite in &rewrites {
+        let wired = wired_predicate(f, &mut builder, &rewrite.index, &rewrite.predicate)?;
+        f.nodes[rewrite.root.index].payload = f.get_node(wired).payload.clone();
+    }
+    Some(rewrites.len())
 }
 
 /// Rewrites exclusive affine-index decoders, returning None if text IDs run
@@ -1112,6 +1142,14 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
             "amount"
         };
         let consumer = match predicate {
+            "bit_low" | "bit_middle" | "bit_high" => {
+                let start = match predicate {
+                    "bit_low" => 0,
+                    "bit_middle" => aw / 2,
+                    _ => aw - 1,
+                };
+                format!("  ret out: bits[1] = bit_slice({amount}, start={start}, width=1, id=9)")
+            }
             "or_slice" => {
                 let start = usize::from(aw > 1);
                 format!(
@@ -1150,7 +1188,11 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
                     let mut rewritten = package.get_top_fn().unwrap().clone();
                     assert_eq!(
                         rewrite_priority_predicates(&mut rewritten),
-                        Some(1),
+                        Some(if predicate == "or_slice" && n <= 3 {
+                            2
+                        } else {
+                            1
+                        }),
                         "{n} {low} {form} {predicate}"
                     );
                     ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
@@ -1170,6 +1212,123 @@ top fn main(x: bits[32] id=1, p: bits[1] id=2) -> bits[33] {
             ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
             check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
                 .unwrap();
+        }
+    }
+
+    #[test]
+    fn scalar_bit_slices_prove_both_priorities_widths_and_wrapping() {
+        for (n, form) in [
+            (1, "identity"),
+            (2, "identity"),
+            (3, "wrap_add"),
+            (8, "wrap_sub"),
+            (32, "identity"),
+            (65, "reflect"),
+            (129, "identity"),
+            (7, "wide_add"),
+        ] {
+            for low in [false, true] {
+                for predicate in ["bit_low", "bit_middle", "bit_high"] {
+                    let source = scalar_case(n, low, form, predicate);
+                    let package = Parser::new(&source).parse_and_validate_package().unwrap();
+                    let mut rewritten = package.get_top_fn().unwrap().clone();
+                    assert_eq!(
+                        rewrite_priority_predicates(&mut rewritten),
+                        Some(1),
+                        "{n} {low} {form} {predicate}"
+                    );
+                    ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
+                    check_equivalence_via_toolchain(
+                        &source,
+                        &format!(
+                            "package result
+
+top {rewritten}"
+                        ),
+                    )
+                    .unwrap_or_else(|e| panic!("{n} {low} {form} {predicate}: {e}"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_bit_slice_overlap_preserves_independent_and_observed_roots() {
+        for shared in [false, true] {
+            let (result_type, result_args) = if shared {
+                ("(bits[1], bits[1], bits[1])", "reduced, independent, view")
+            } else {
+                ("(bits[1], bits[1])", "reduced, independent")
+            };
+            let source = format!(
+                r#"package overlapping_predicates
+top fn main(x: bits[8] id=1, y: bits[32] id=2) -> {result_type} {{
+  hot: bits[9] = one_hot(x, lsb_prio=true, id=3)
+  count: bits[4] = encode(hot, id=4)
+  view: bits[1] = bit_slice(count, start=1, width=1, id=5)
+  reduced: bits[1] = or_reduce(view, id=6)
+  other_hot: bits[33] = one_hot(y, lsb_prio=false, id=7)
+  other_count: bits[6] = encode(other_hot, id=8)
+  independent: bits[1] = bit_slice(other_count, start=5, width=1, id=9)
+  ret result: {result_type} = tuple({result_args}, id=10)
+}}
+"#
+            );
+            let package = Parser::new(&source).parse_and_validate_package().unwrap();
+            let original = package.get_top_fn().unwrap();
+            let rewritten = candidate(original).expect("overlap must not veto the candidate");
+            // Count initially live matched roots, including the view whose
+            // reduction is also rewritten and may make that view dead.
+            assert_eq!(rewritten.rewrites, 3);
+            let result = xlsynth_pir::dce::remove_dead_nodes(&rewritten.function);
+            assert!(
+                !result
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.payload, NodePayload::Encode { .. }))
+            );
+            check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {result}"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scalar_bit_slices_reject_retained_counts_and_unsupported_sources() {
+        let source = scalar_case(8, true, "identity", "bit_high");
+        let shared = source
+            .replace("-> bits[1]", "-> (bits[1], bits[4])")
+            .replace("ret out:", "out:")
+            .replace(
+                "
+}",
+                "
+  ret both: (bits[1], bits[4]) = tuple(out, count, id=10)
+}",
+            );
+        let multibit = source.replace("-> bits[1]", "-> bits[2]").replace(
+            "out: bits[1] = bit_slice(count, start=3, width=1",
+            "out: bits[2] = bit_slice(count, start=1, width=2",
+        );
+        let unknown_hot = source
+            .replace("x: bits[8] id=1", "x: bits[8] id=1, unknown: bits[9] id=11")
+            .replace("encode(hot,", "encode(unknown,");
+        let truncated = source.replace(
+            "  ret out: bits[1] = bit_slice(count, start=3, width=1, id=9)",
+            "  trunc: bits[3] = bit_slice(count, start=0, width=3, id=11)
+  one: bits[3] = literal(value=1, id=12)
+  sum: bits[3] = add(trunc, one, id=13)
+  ret out: bits[1] = bit_slice(sum, start=2, width=1, id=9)",
+        );
+        for input in [shared, multibit, unknown_hot, truncated] {
+            let package = Parser::new(&input).parse_and_validate_package().unwrap();
+            let mut rewritten = package.get_top_fn().unwrap().clone();
+            let before = rewritten.to_string();
+            assert_eq!(
+                rewrite_priority_predicates(&mut rewritten),
+                Some(0),
+                "{input}"
+            );
+            assert_eq!(rewritten.to_string(), before);
         }
     }
 

@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::ffi::OsStr;
 #[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -14,6 +17,7 @@ use std::process::Stdio;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 
+use test_case::test_case;
 use xlsynth_g8r::aig::AigBitVector;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
@@ -162,6 +166,154 @@ fn aig_tech_map_then_gv_sta_smoke() {
         .parse()
         .expect("worst_output_arrival should parse as f64");
     assert!(value > 0.0, "expected positive arrival, got {}", value);
+}
+
+#[test_case(&[]; "default_nand2")]
+#[test_case(&["--strategy", "area"]; "area_with_fanout_optimization")]
+#[test_case(&["--strategy", "delay", "--primary-input-transition", "0.01", "--module-output-load", "0.01"]; "delay_with_area_recovery")]
+fn aig_tech_map_protobuf_matches_gv_for_file_and_stdout(
+    strategy_args: &[&str],
+) -> anyhow::Result<()> {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let dir = tempfile::tempdir()?;
+    let aig = dir.path().join("input.aag");
+    let liberty = dir.path().join("cells.textproto");
+    let pb = dir.path().join("mapped.pb");
+    let report = dir.path().join("mapping.json");
+    std::fs::write(&aig, make_two_input_and_aig())?;
+    std::fs::write(&liberty, make_timing_enabled_inv_nand2_liberty_textproto())?;
+
+    let map = || {
+        let mut cmd = Command::new(driver);
+        cmd.arg("aig-tech-map")
+            .arg(&aig)
+            .args(strategy_args)
+            .arg("--liberty_proto")
+            .arg(&liberty)
+            .args(["--module_name", "mapped_top"])
+            .env_remove("RUST_LOG");
+        cmd
+    };
+    let gv = map().output()?;
+    let binary = map().args(["-o", "-", "--netlist-format", "pb"]).output()?;
+    let file = map()
+        .arg("--output")
+        .arg(&pb)
+        .arg("--json_out")
+        .arg(&report)
+        .output()?;
+    for result in [&gv, &binary, &file] {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert!(file.stdout.is_empty());
+    assert_eq!(gv.stderr, binary.stderr);
+    assert_eq!(std::fs::read(&pb)?, binary.stdout);
+    let summary: serde_json::Value = serde_json::from_slice(&std::fs::read(report)?)?;
+    assert_eq!(summary["module"], "mapped_top");
+
+    let restored = Command::new(driver).arg("pb2gv").arg(&pb).output()?;
+    assert!(
+        restored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(gv.stdout, restored.stdout);
+
+    // Format selection is shared across strategies, so exercise the remaining
+    // destination and override cases once with the default mapper.
+    if strategy_args.is_empty() {
+        for (filename, flags, expected) in [
+            (OsStr::new("mapped.PrOtO"), &[][..], &binary.stdout),
+            // The default macOS filesystem only accepts UTF-8 filenames.
+            #[cfg(target_os = "linux")]
+            (
+                OsStr::from_bytes(b"mapped-\xff.pb"),
+                &[][..],
+                &binary.stdout,
+            ),
+            (
+                OsStr::new("verilog.pb"),
+                &["--netlist-format", "gv"][..],
+                &gv.stdout,
+            ),
+            (OsStr::new("mapped.netlist"), &[][..], &gv.stdout),
+            (OsStr::new("mapped"), &[][..], &gv.stdout),
+        ] {
+            let path = dir.path().join(filename);
+            let result = map().arg("-o").arg(&path).args(flags).output()?;
+            assert!(
+                result.status.success(),
+                "{filename:?}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(result.stdout.is_empty(), "{filename:?}");
+            assert_eq!(&std::fs::read(path)?, expected, "{filename:?}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn aig_tech_map_rejects_protobuf_output_aliasing_stderr() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pb = dir.path().join("mapped.pb");
+    let json = dir.path().join("report.json");
+    let map = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+        cmd.args([
+            "aig-tech-map",
+            "unused.aig",
+            "--liberty_proto",
+            "unused.proto",
+        ])
+        .env_remove("RUST_LOG");
+        cmd
+    };
+    let error = b"aig-tech-map error: protobuf netlist output must not refer to stderr\n";
+
+    // Append diagnostics to an existing file to check that the mapper never
+    // truncates it or writes the sidecar after detecting the alias.
+    let existing = b"existing contents\n";
+    std::fs::write(&pb, existing)?;
+    let stderr = std::fs::OpenOptions::new().append(true).open(&pb)?;
+    let result = map()
+        .arg("-o")
+        .arg(&pb)
+        .arg("--json_out")
+        .arg(&json)
+        .stderr(stderr)
+        .output()?;
+    assert!(!result.status.success());
+    assert!(result.stdout.is_empty());
+    assert_eq!(
+        std::fs::read(&pb)?,
+        [existing.as_slice(), error.as_slice()].concat()
+    );
+    assert!(!json.exists());
+
+    let merged = std::fs::File::create(&pb)?;
+    let result = map()
+        .args(["--netlist-format", "pb"])
+        .stdout(merged.try_clone()?)
+        .stderr(merged)
+        .output()?;
+    assert!(!result.status.success());
+    assert_eq!(std::fs::read(&pb)?, error);
+
+    #[cfg(unix)]
+    {
+        let result = map()
+            .args(["-o", "/dev/stderr", "--netlist-format", "pb"])
+            .output()?;
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert_eq!(result.stderr, error);
+    }
+    Ok(())
 }
 
 #[test]
@@ -1018,7 +1170,7 @@ fn cli_rejects_aliased_outputs_without_clobbering() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+        "aig-tech-map error: --json_out and --output must name different files\n"
     );
     assert_eq!(
         std::fs::read_to_string(&output_path).unwrap(),
@@ -1052,7 +1204,7 @@ fn cli_rejects_json_aliasing_redirected_stdout() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+        "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
     );
     assert_eq!(
         std::fs::read_to_string(&output_path).unwrap(),
@@ -1088,7 +1240,7 @@ fn cli_rejects_json_aliasing_stdout_pipe() {
         assert!(output.stdout.is_empty());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
     }
 }
@@ -1120,7 +1272,7 @@ fn cli_rejects_stdout_device_alias_with_redirected_file() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
         assert_eq!(
             std::fs::read_to_string(&output_path).unwrap(),
@@ -1224,7 +1376,7 @@ fn cli_rejects_stdout_device_alias_with_socket() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out must not refer to stdout when --netlist_out is '-'\n"
+            "aig-tech-map error: --json_out must not refer to stdout when the netlist is written to stdout\n"
         );
         peer.set_nonblocking(true).unwrap();
         let mut byte = [0];
@@ -1357,7 +1509,7 @@ fn cli_handles_case_dependent_output_aliases() {
             assert!(!output.status.success());
             assert_eq!(
                 String::from_utf8(output.stderr).unwrap(),
-                "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+                "aig-tech-map error: --json_out and --output must name different files\n"
             );
             if exists {
                 assert_eq!(
@@ -1478,7 +1630,7 @@ fn cli_rejects_symlinked_output_aliases() {
         assert!(!output.status.success());
         assert_eq!(
             String::from_utf8(output.stderr).unwrap(),
-            "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+            "aig-tech-map error: --json_out and --output must name different files\n"
         );
         if exists {
             assert_eq!(
@@ -1516,7 +1668,7 @@ fn cli_rejects_hard_linked_output_aliases() {
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "aig-tech-map error: --json_out and --netlist_out must name different files\n"
+        "aig-tech-map error: --json_out and --output must name different files\n"
     );
     assert_eq!(
         std::fs::read_to_string(output_path).unwrap(),
@@ -1663,5 +1815,206 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
                 previous = Some((json, netlist_text));
             }
         }
+    }
+}
+
+/// Composed recovery must match an explicit native resize with the same model.
+#[test]
+fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig = dir.path().join("input.aag");
+    let lib = dir.path().join("library.textproto");
+    std::fs::write(&aig, make_two_input_and_aig()).unwrap();
+    let text = make_timing_enabled_inv_nand2_liberty_textproto();
+    // A size-only cell is deliberately unavailable to covering, but recovery
+    // must select its smaller, equally fast implementation.
+    let recovery_cell = text
+        .split("cells: {")
+        .nth(2)
+        .unwrap()
+        .split("default_output_load:")
+        .next()
+        .unwrap()
+        .replace(
+            "name: \"NAND2\"",
+            "name: \"NAND2_SMALL\" use_for_size_only: true",
+        )
+        .replace("area: 2.0", "area: 1.0");
+    std::fs::write(&lib, format!("{text}\ncells: {{{recovery_cell}")).unwrap();
+    for repair in [false, true] {
+        let run_map = |filename: &str, extra: &[&str]| {
+            let netlist = dir.path().join(filename);
+            let report = netlist.with_extension("json");
+            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .arg("aig-tech-map")
+                .arg(&aig)
+                .args(["--strategy", "delay", "--liberty_proto"])
+                .arg(&lib)
+                .arg(format!("--fanout-opt={repair}"))
+                .args([
+                    "--primary-input-transition",
+                    "0.03",
+                    "--module-output-load",
+                    "0.02",
+                    "--netlist_out",
+                ])
+                .arg(&netlist)
+                .arg("--json_out")
+                .arg(&report)
+                .args(extra)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+            (netlist, json)
+        };
+        let (raw, raw_report) = run_map("raw.gv", &["--area-recovery=false"]);
+        assert!(raw_report.get("area_recovery").is_none());
+        let (zero, zero_report) = run_map("zero.gv", &["--area-recovery-evaluation-budget", "0"]);
+        assert_eq!(std::fs::read(&raw).unwrap(), std::fs::read(zero).unwrap());
+        assert_eq!(
+            zero_report["area_recovery"]["work_limits"]["recovery_evaluations"],
+            0
+        );
+        assert_eq!(
+            zero_report["area_recovery"]["downsize"]["propagated_instances"],
+            0
+        );
+        let (_, rounds_report) = run_map("rounds.gv", &["--area-recovery-rounds", "0"]);
+        assert_eq!(
+            rounds_report["area_recovery"]["downsize"]["stop_reason"],
+            "disabled"
+        );
+
+        let wire = [
+            "--wire-capacitance-constant-ff",
+            "500",
+            "--wire-capacitance-per-sink-ff",
+            "250",
+        ];
+        let (before, _) = if repair {
+            run_map(
+                "before.gv",
+                &["--area-recovery=false", wire[0], wire[1], wire[2], wire[3]],
+            )
+        } else {
+            (raw, raw_report)
+        };
+        let (after, report) = run_map("after.gv", &wire);
+        let explicit = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("gv-resize")
+            .arg("--netlist")
+            .arg(before)
+            .arg("--liberty_proto")
+            .arg(&lib)
+            .args([
+                "--primary_input_transition",
+                "0.03",
+                "--module_output_load",
+                "0.02",
+                "--upsize-rounds",
+                "0",
+                "--max-area-growth",
+                "0",
+            ])
+            .args(wire)
+            .output()
+            .unwrap();
+        assert!(
+            explicit.status.success(),
+            "{}",
+            String::from_utf8_lossy(&explicit.stderr)
+        );
+        let optimized_gv = std::fs::read(after).unwrap();
+        assert_eq!(optimized_gv, explicit.stdout);
+        assert_eq!(
+            report["post_mapping_timing"]["wire_load"]["constant_capacitance"],
+            0.5
+        );
+        assert_eq!(
+            report["post_mapping_timing"]["wire_load"]["capacitance_per_sink"],
+            0.25
+        );
+        assert_eq!(report["area_recovery_rounds"], 2);
+        assert_eq!(report["area_recovery"]["initial_area"], 3.0);
+        assert_eq!(report["area_recovery"]["final_area"], 2.0);
+        assert_eq!(report["area_recovery"]["downsize"]["accepted"], 1);
+        assert_eq!(report["area_recovery"]["upsize"]["stop_reason"], "disabled");
+        assert_eq!(
+            report["area_recovery"]["work_limits"]["timing_evaluations"],
+            0
+        );
+        if repair {
+            assert_eq!(
+                report["fanout_optimization"]["options"]["wire_load"],
+                report["post_mapping_timing"]["wire_load"]
+            );
+            assert_eq!(
+                report["fanout_optimization"]["after"]["area"],
+                report["area_recovery"]["initial_area"]
+            );
+        }
+        let (pb, repeated) = run_map("repeat.pb", &wire);
+        assert_eq!(report, repeated);
+        let decoded = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("pb2gv")
+            .arg(pb)
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(decoded.stdout, optimized_gv);
+    }
+}
+
+#[test]
+fn recovery_flags_reject_inapplicable_stages_before_outputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let aig = dir.path().join("unused.aag");
+    for (extra, error) in [
+        (
+            vec!["--area-recovery=true"],
+            "--area-recovery requires --strategy area or delay",
+        ),
+        (
+            vec!["--area-recovery-rounds", "0"],
+            "area recovery tuning options require --area-recovery=true",
+        ),
+        (
+            vec!["--wire-capacitance-constant-ff", "0"],
+            "wire capacitance options require fanout optimization or area recovery",
+        ),
+        (
+            vec![
+                "--strategy",
+                "delay",
+                "--area-recovery=false",
+                "--area-recovery-evaluation-budget",
+                "1",
+            ],
+            "area recovery tuning options require --area-recovery=true",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("aig-tech-map")
+            .arg(&aig)
+            .args(["--liberty_proto", "unused.proto", "--netlist_out", "-"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("aig-tech-map error: {error}\n")
+        );
+        assert!(output.stdout.is_empty());
     }
 }

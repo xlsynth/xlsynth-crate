@@ -110,15 +110,16 @@ fn verify_folded_literal_operands(gate_fn: &GateFn) -> Result<()> {
     Ok(())
 }
 
-/// Finds and reserves an internal name that cannot collide with a port.
-fn fresh_internal_net_name(base: String, used_net_names: &mut HashSet<String>) -> String {
-    if used_net_names.insert(base.clone()) {
+/// Reserves a name in the module namespace shared by ports, wires, and
+/// instances.
+fn fresh_internal_name(base: String, used_names: &mut HashSet<String>) -> String {
+    if used_names.insert(base.clone()) {
         return base;
     }
     let mut suffix = 1usize;
     loop {
         let candidate = format!("{}__{}", base, suffix);
-        if used_net_names.insert(candidate.clone()) {
+        if used_names.insert(candidate.clone()) {
             return candidate;
         }
         suffix += 1;
@@ -165,12 +166,13 @@ fn ensure_net(
 fn add_instance(
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
     instances: &mut Vec<NetlistInstance>,
+    used_names: &mut HashSet<String>,
     type_name: &str,
-    instance_name: &str,
+    instance_name: String,
     connections: Vec<(&str, NetRef)>,
 ) {
     let type_sym = interner.get_or_intern(type_name);
-    let instance_sym = interner.get_or_intern(instance_name);
+    let instance_sym = interner.get_or_intern(fresh_internal_name(instance_name, used_names));
 
     let mut conn_vec: Vec<(SymbolU32, NetRef)> = connections
         .into_iter()
@@ -224,7 +226,7 @@ fn materialize_operand_signal_for_cell_input(
     port_net_indices: &mut HashSet<NetIndex>,
     wire_net_indices: &mut Vec<NetIndex>,
     wire_net_set: &mut HashSet<NetIndex>,
-    used_net_names: &mut HashSet<String>,
+    used_names: &mut HashSet<String>,
     instances: &mut Vec<NetlistInstance>,
 ) -> Result<TechSignal> {
     let base = resolve_node_signal(gate_fn, node_signals, operand.node)?;
@@ -238,8 +240,7 @@ fn materialize_operand_signal_for_cell_input(
             let inv_id = *edge_inv_counter;
             *edge_inv_counter += 1;
 
-            let out_name =
-                fresh_internal_net_name(format!("n_inv_edge_{}", inv_id), used_net_names);
+            let out_name = fresh_internal_name(format!("n_inv_edge_{}", inv_id), used_names);
             let out_net = ensure_net(
                 interner,
                 nets,
@@ -253,8 +254,9 @@ fn materialize_operand_signal_for_cell_input(
             add_instance(
                 interner,
                 instances,
+                used_names,
                 options.inv_cell_name.as_str(),
-                format!("u_inv_edge_{}", inv_id).as_str(),
+                format!("u_inv_edge_{}", inv_id),
                 vec![
                     (options.inv_input_pin_name.as_str(), NetRef::Simple(src)),
                     (
@@ -292,8 +294,7 @@ pub fn map_gatefn_to_structural_netlist(
     let mut wire_net_set: HashSet<NetIndex> = HashSet::new();
     let mut ports: Vec<NetlistPort> = Vec::new();
     let mut output_plans: Vec<OutputBitPlan> = Vec::new();
-    let mut port_names_seen: HashSet<String> = HashSet::new();
-    let mut used_net_names: HashSet<String> = HashSet::new();
+    let mut used_names: HashSet<String> = HashSet::new();
 
     let mut node_signals: Vec<Option<NetIndex>> = vec![None; gate_fn.gates.len()];
 
@@ -301,13 +302,12 @@ pub fn map_gatefn_to_structural_netlist(
         let bit_count = input.get_bit_count();
         for (bit_index, bit) in input.bit_vector.iter_lsb_to_msb().enumerate() {
             let port_name = scalar_bit_name(input.name.as_str(), bit_index, bit_count);
-            if !port_names_seen.insert(port_name.clone()) {
+            if !used_names.insert(port_name.clone()) {
                 return Err(anyhow!(
                     "duplicate mapped port name '{}' in input set",
                     port_name
                 ));
             }
-            used_net_names.insert(port_name.clone());
             let port_sym = interner.get_or_intern(port_name.as_str());
             let net_idx = ensure_net(
                 &mut interner,
@@ -338,13 +338,12 @@ pub fn map_gatefn_to_structural_netlist(
         let bit_count = output.get_bit_count();
         for (bit_index, bit) in output.bit_vector.iter_lsb_to_msb().enumerate() {
             let port_name = scalar_bit_name(output.name.as_str(), bit_index, bit_count);
-            if !port_names_seen.insert(port_name.clone()) {
+            if !used_names.insert(port_name.clone()) {
                 return Err(anyhow!(
                     "duplicate mapped port name '{}' in output set",
                     port_name
                 ));
             }
-            used_net_names.insert(port_name.clone());
             let port_sym = interner.get_or_intern(port_name.as_str());
             let net_idx = ensure_net(
                 &mut interner,
@@ -401,7 +400,7 @@ pub fn map_gatefn_to_structural_netlist(
                     &mut port_net_indices,
                     &mut wire_net_indices,
                     &mut wire_net_set,
-                    &mut used_net_names,
+                    &mut used_names,
                     &mut instances,
                 )?;
                 let b_signal = materialize_operand_signal_for_cell_input(
@@ -416,12 +415,12 @@ pub fn map_gatefn_to_structural_netlist(
                     &mut port_net_indices,
                     &mut wire_net_indices,
                     &mut wire_net_set,
-                    &mut used_net_names,
+                    &mut used_names,
                     &mut instances,
                 )?;
 
                 let nand_out_name =
-                    fresh_internal_net_name(format!("n_nand_g{}", gate_id), &mut used_net_names);
+                    fresh_internal_name(format!("n_nand_g{}", gate_id), &mut used_names);
                 let nand_out_net = ensure_net(
                     &mut interner,
                     &mut nets,
@@ -435,8 +434,9 @@ pub fn map_gatefn_to_structural_netlist(
                 add_instance(
                     &mut interner,
                     &mut instances,
+                    &mut used_names,
                     options.nand2_cell_name.as_str(),
-                    format!("u_nand_g{}", gate_id).as_str(),
+                    format!("u_nand_g{}", gate_id),
                     vec![
                         (
                             options.nand2_input_pin_names[0].as_str(),
@@ -457,7 +457,7 @@ pub fn map_gatefn_to_structural_netlist(
                     .get(&gate_id)
                     .cloned()
                     .unwrap_or_else(|| {
-                        fresh_internal_net_name(format!("n_g{}", gate_id), &mut used_net_names)
+                        fresh_internal_name(format!("n_g{}", gate_id), &mut used_names)
                     });
                 let node_out_net = ensure_net(
                     &mut interner,
@@ -472,8 +472,9 @@ pub fn map_gatefn_to_structural_netlist(
                 add_instance(
                     &mut interner,
                     &mut instances,
+                    &mut used_names,
                     options.inv_cell_name.as_str(),
-                    format!("u_inv_g{}", gate_id).as_str(),
+                    format!("u_inv_g{}", gate_id),
                     vec![
                         (
                             options.inv_input_pin_name.as_str(),
@@ -506,8 +507,9 @@ pub fn map_gatefn_to_structural_netlist(
                 add_instance(
                     &mut interner,
                     &mut instances,
+                    &mut used_names,
                     options.inv_cell_name.as_str(),
-                    format!("u_inv_out_neg_{}", output_index).as_str(),
+                    format!("u_inv_out_neg_{}", output_index),
                     vec![
                         (options.inv_input_pin_name.as_str(), NetRef::Simple(src)),
                         (
@@ -523,10 +525,8 @@ pub fn map_gatefn_to_structural_netlist(
                     // distinct output port must mirror an existing signal,
                     // realize that connection through cells instead of a
                     // continuous assign.
-                    let tmp_name = fresh_internal_net_name(
-                        format!("n_out_buf_{}", output_index),
-                        &mut used_net_names,
-                    );
+                    let tmp_name =
+                        fresh_internal_name(format!("n_out_buf_{}", output_index), &mut used_names);
                     let tmp_net = ensure_net(
                         &mut interner,
                         &mut nets,
@@ -540,8 +540,9 @@ pub fn map_gatefn_to_structural_netlist(
                     add_instance(
                         &mut interner,
                         &mut instances,
+                        &mut used_names,
                         options.inv_cell_name.as_str(),
-                        format!("u_inv_out_buf0_{}", output_index).as_str(),
+                        format!("u_inv_out_buf0_{}", output_index),
                         vec![
                             (options.inv_input_pin_name.as_str(), NetRef::Simple(src)),
                             (
@@ -553,8 +554,9 @@ pub fn map_gatefn_to_structural_netlist(
                     add_instance(
                         &mut interner,
                         &mut instances,
+                        &mut used_names,
                         options.inv_cell_name.as_str(),
-                        format!("u_inv_out_buf1_{}", output_index).as_str(),
+                        format!("u_inv_out_buf1_{}", output_index),
                         vec![
                             (options.inv_input_pin_name.as_str(), NetRef::Simple(tmp_net)),
                             (
@@ -1026,7 +1028,9 @@ mod tests {
     use crate::aig_sim::gate_sim::{Collect, eval};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::liberty_model::{Cell, Library as LibertyLibrary, Pin, PinDirection};
+    use crate::netlist::emit::emit_netlist_as_text;
     use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
+    use crate::netlist::proto::{decode_netlist, encode_netlist};
     use std::collections::HashSet;
 
     /// Resolves the name of a mapped net for structural assertions.
@@ -1222,41 +1226,29 @@ mod tests {
     }
 
     #[test]
-    fn generated_internal_nets_do_not_reuse_port_names() {
+    fn generated_nets_and_instances_do_not_reuse_port_names() -> Result<()> {
         let mut gb = GateBuilder::new("collision".to_string(), GateBuilderOptions::no_opt());
         let a = gb.add_input("n_nand_g3".to_string(), 1);
-        let b = gb.add_input("b".to_string(), 1);
+        let b = gb.add_input("u_nand_g3".to_string(), 1);
         let and_out = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
         gb.add_output("y".to_string(), and_out.into());
-        let gate_fn = gb.build();
 
         let mapped =
-            map_gatefn_to_structural_netlist(&gate_fn, &StructuralTechMapOptions::default())
-                .expect("mapping should succeed");
-        let input_port_names: HashSet<String> = mapped
-            .module
-            .ports
-            .iter()
-            .filter(|port| port.direction == PortDirection::Input)
-            .map(|port| sym_name(&mapped.interner, port.name))
-            .collect();
-        let nand = mapped
-            .module
-            .instances
-            .iter()
-            .find(|inst| sym_name(&mapped.interner, inst.instance_name).starts_with("u_nand_g"))
-            .expect("nand instance expected");
-        let nand_output = nand
-            .connections
-            .iter()
-            .find_map(|(pin, netref)| (sym_name(&mapped.interner, *pin) == "Y").then_some(netref))
-            .expect("nand output connection expected");
-        let NetRef::Simple(nand_output_net) = nand_output else {
-            panic!("nand output should be a simple net");
-        };
-        let nand_output_name = net_name(&mapped, *nand_output_net);
-        assert!(!input_port_names.contains(&nand_output_name));
-        assert!(nand_output_name.starts_with("n_nand_g3"));
+            map_gatefn_to_structural_netlist(&gb.build(), &StructuralTechMapOptions::default())?;
+        let parsed = mapped.into();
+        let restored = decode_netlist(&encode_netlist(&parsed)?)?;
+        let expected = r#"module collision(n_nand_g3, u_nand_g3, y);
+  input n_nand_g3;
+  input u_nand_g3;
+  output y;
+  wire n_nand_g3__1;
+  NAND2 u_nand_g3__1 (.A(n_nand_g3), .B(u_nand_g3), .Y(n_nand_g3__1));
+  INV u_inv_g3 (.A(n_nand_g3__1), .Y(y));
+endmodule
+"#;
+        assert_eq!(emit_netlist_as_text(&parsed)?, expected);
+        assert_eq!(emit_netlist_as_text(&restored)?, expected);
+        Ok(())
     }
 
     #[test]

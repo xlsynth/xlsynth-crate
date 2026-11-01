@@ -62,26 +62,29 @@ pub struct DslxToIrTextResult {
     pub warnings: Vec<String>,
 }
 
+/// Keeps the strings alive while the XLS C API reads the pointer array.
 struct CStringPtrArray {
     _storage: Vec<CString>,
     pointers: Vec<*const c_char>,
 }
 
 impl CStringPtrArray {
-    fn from_strings(strings: &[String]) -> Self {
-        let c_strings = strings
-            .iter()
-            .map(|s| CString::new(s.as_str()).unwrap())
-            .collect::<Vec<_>>();
+    fn from_option(field: &str, strings: Option<&[String]>) -> Result<Self, XlsynthError> {
+        let mut c_strings = Vec::new();
+        for (i, string) in strings.unwrap_or_default().iter().enumerate() {
+            let value = CString::new(string.as_str()).map_err(|e| {
+                XlsynthError(format!(
+                    "{field}[{i}] contains a NUL byte at offset {}",
+                    e.nul_position()
+                ))
+            })?;
+            c_strings.push(value);
+        }
         let pointers = c_strings.iter().map(|cstr| cstr.as_ptr()).collect();
-        Self {
+        Ok(Self {
             _storage: c_strings,
             pointers,
-        }
-    }
-
-    fn from_optional(strings: Option<&[String]>) -> Option<Self> {
-        strings.map(Self::from_strings)
+        })
     }
 
     fn parts(&self) -> (*const *const c_char, usize) {
@@ -93,10 +96,15 @@ impl CStringPtrArray {
     }
 }
 
-fn optional_ptr_parts(array: Option<&CStringPtrArray>) -> (*const *const c_char, usize) {
-    array
-        .map(|list| list.parts())
-        .unwrap_or((std::ptr::null(), 0))
+/// Rejects source the XLS C API cannot represent, reporting the byte offset
+/// without echoing the program.
+fn dslx_source_c_string(source: &str) -> Result<CString, XlsynthError> {
+    CString::new(source).map_err(|e| {
+        XlsynthError(format!(
+            "DSLX source contains a NUL byte at offset {}",
+            e.nul_position()
+        ))
+    })
 }
 
 /// Converts a DSLX module's source text into an IR package. Returns the IR
@@ -127,13 +135,14 @@ pub fn convert_dslx_to_ir_text(
         search_paths_cstrs.push(CString::new(p).unwrap());
     }
 
-    let dslx = CString::new(dslx).unwrap();
+    let dslx = dslx_source_c_string(dslx)?;
     let c_path = CString::new(path_str).unwrap();
     let c_module_name = CString::new(module_name).unwrap();
     let dslx_stdlib_path = CString::new(stdlib_path).unwrap();
 
-    let enable_warnings = CStringPtrArray::from_optional(options.enable_warnings);
-    let disable_warnings = CStringPtrArray::from_optional(options.disable_warnings);
+    let enable_warnings = CStringPtrArray::from_option("enable_warnings", options.enable_warnings)?;
+    let disable_warnings =
+        CStringPtrArray::from_option("disable_warnings", options.disable_warnings)?;
 
     unsafe {
         let additional_search_paths_ptrs: Vec<*const std::os::raw::c_char> = search_paths_cstrs
@@ -141,10 +150,8 @@ pub fn convert_dslx_to_ir_text(
             .map(|cstr| cstr.as_ptr())
             .collect();
 
-        let (enable_warnings_ptr, enable_warnings_len) =
-            optional_ptr_parts(enable_warnings.as_ref());
-        let (disable_warnings_ptr, disable_warnings_len) =
-            optional_ptr_parts(disable_warnings.as_ref());
+        let (enable_warnings_ptr, enable_warnings_len) = enable_warnings.parts();
+        let (disable_warnings_ptr, disable_warnings_len) = disable_warnings.parts();
 
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -425,6 +432,36 @@ mod tests {
         )
         .expect("mangle composed");
         assert_eq!(mangled, "__itok__my_mod__Impl__g_step1__7_9");
+    }
+
+    #[test]
+    fn conversion_rejects_nul_after_valid_dslx() {
+        let result = convert_dslx_to_ir_text(
+            "fn main() -> u1 { u1:1 }\0ignored",
+            std::path::Path::new("test.x"),
+            &DslxConvertOptions::default(),
+        );
+        assert_eq!(
+            result.err().unwrap().0,
+            "DSLX source contains a NUL byte at offset 24"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_nul_in_disabled_warning() {
+        let warnings = ["unused_definition".to_string(), "bad\0warning".to_string()];
+        let result = convert_dslx_to_ir_text(
+            "fn main() -> u1 { u1:1 }",
+            std::path::Path::new("test.x"),
+            &DslxConvertOptions {
+                disable_warnings: Some(&warnings),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.err().unwrap().0,
+            "disable_warnings[1] contains a NUL byte at offset 3"
+        );
     }
 
     #[test]

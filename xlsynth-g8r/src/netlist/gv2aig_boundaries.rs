@@ -597,7 +597,7 @@ impl<'a> BoundaryExtractor<'a> {
         let cell = &library.cells[self.cell_index_by_name[&type_name]];
         if !self.collapse_sequential && !cell.sequential.is_empty() {
             return Err(format!(
-                "reached sequential cell '{}' instance '{}' output '{}'; select it as a source or enable collapse_sequential",
+                "reached sequential cell '{}' instance '{}' output '{}'; select it as a source or set collapse_sequential=true (CLI: --collapse_sequential_cells true)",
                 type_name, instance_name, pin_name
             ));
         }

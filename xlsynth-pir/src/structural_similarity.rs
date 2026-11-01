@@ -203,6 +203,10 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                     child_depths.push(depths[rst.index]);
                 }
             }
+            NodePayload::Map { array, .. } => {
+                child_hashes.push(hashes[array.index]);
+                child_depths.push(depths[array.index]);
+            }
             NodePayload::Invoke { operands, .. } => {
                 for r in operands.iter() {
                     child_hashes.push(hashes[r.index]);

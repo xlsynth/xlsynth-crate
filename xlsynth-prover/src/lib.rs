@@ -3,12 +3,17 @@
 pub mod array_alias_analysis;
 pub mod dslx_assertions;
 pub mod dslx_equiv;
+pub mod dslx_quickcheck;
 pub mod dslx_specializer;
 pub mod dslx_tactics;
 pub mod dslx_utils;
 pub mod ir_equiv;
 pub mod ir_operand_gate;
 pub mod ir_utils;
+pub mod proof_outcome;
+pub mod proof_phases;
+pub mod proof_plan;
+pub mod proof_timing;
 pub mod prover;
 pub mod solver;
 pub mod toolchain_shim;

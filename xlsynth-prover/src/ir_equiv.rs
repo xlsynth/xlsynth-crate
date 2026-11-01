@@ -3,6 +3,9 @@
 //! Library helpers for IR equivalence flows shared by multiple driver commands.
 
 use crate::ir_utils;
+use crate::proof_outcome::{ProofStatus, ProofSummary};
+use crate::proof_phases::PhaseCollector;
+use crate::proof_timing::ProofTiming;
 use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
@@ -89,6 +92,12 @@ pub struct IrEquivRequest<'a> {
 }
 
 impl<'a> IrEquivRequest<'a> {
+    /// Checks the request and records preparation and backend phases, including
+    /// failures.
+    pub fn prove(&self) -> ProofSummary {
+        ProofSummary::run_with_phases(|phases| run_ir_equiv_with_phases(self, phases))
+    }
+
     /// Creates a new request with default comparison settings.
     pub fn new(lhs: IrModule<'a>, rhs: IrModule<'a>) -> Self {
         Self {
@@ -149,6 +158,15 @@ impl<'a> IrEquivRequest<'a> {
 
 /// Dispatches an IR equivalence comparison using the requested solver.
 pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String> {
+    run_ir_equiv_with_phases(request, &PhaseCollector::default())
+}
+
+fn run_ir_equiv_with_phases(
+    request: &IrEquivRequest<'_>,
+    phases: &PhaseCollector,
+) -> Result<EquivReport, String> {
+    let request_start = Instant::now();
+    let prepare = phases.start_prepare();
     let choice = request.solver.unwrap_or(SolverChoice::Bitwuzla);
     let prover = prover_for_choice_with_limits(choice, request.tool_path, request.solver_limits);
     let (lhs_pkg, lhs_fn_dropped) = ir_utils::parse_package_and_drop_params(
@@ -174,13 +192,15 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
         .with_uf_map(request.rhs.uf_map.clone().into_owned());
 
     let start_time = Instant::now();
-    let result = prover.prove_ir_equiv(
+    drop(prepare);
+    let result = prover.prove_ir_equiv_with_phases(
         &lhs_side,
         &rhs_side,
         request.parallelism,
         request.assertion_semantics,
         assert_label_filter,
         request.flatten_aggregates,
+        phases,
     );
     let duration = start_time.elapsed();
 
@@ -188,7 +208,63 @@ pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String>
         EquivResult::Error(msg) => Err(msg),
         other => Ok(EquivReport {
             duration,
+            timing: ProofTiming::elapsed(request_start).with_phases(phases.snapshot()),
             result: other,
         }),
+    }
+}
+
+impl From<EquivReport> for ProofSummary {
+    fn from(report: EquivReport) -> Self {
+        Self {
+            time_micros: report.duration.as_micros(),
+            timing: report.timing.clone(),
+            conclusion: ProofStatus::from(&report.result).into(),
+            error_str: report.error_str(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn equivalence_json_preserves_non_counterexample_results() {
+        for (result, status, error) in [
+            (EquivResult::Proved, "proved", None),
+            (
+                EquivResult::Inconclusive("unknown".into()),
+                "inconclusive",
+                Some("unknown"),
+            ),
+            (
+                EquivResult::Error("solver failed".into()),
+                "execution-error",
+                Some("solver failed"),
+            ),
+            (
+                EquivResult::ToolchainDisproved("tool failed".into()),
+                "execution-error",
+                Some("tool failed"),
+            ),
+        ] {
+            let outcome = ProofSummary::from(EquivReport {
+                duration: Duration::ZERO,
+                timing: Duration::from_micros(11).into(),
+                result,
+            });
+            assert_eq!(
+                serde_json::to_value(outcome).unwrap(),
+                serde_json::json!({
+                    "time_micros": 0,
+                    "timing": { "wall_micros": 11 },
+                    "status": status,
+                    "success": status == "proved",
+                    "error_str": error,
+                }),
+            );
+        }
     }
 }

@@ -438,6 +438,14 @@ impl SequentialGateFn {
             .any(|r| r.enable.is_some() || r.reset.is_some())
     }
 
+    /// Counts state bits across all packed register bindings.
+    pub(crate) fn register_bit_count(&self) -> usize {
+        self.registers
+            .iter()
+            .map(|reg| self.transition.inputs[reg.q.index()].get_bit_count())
+            .sum()
+    }
+
     /// Validates the design and requires D to be the complete next-state value.
     pub fn validate_legalized(&self) -> Result<(), String> {
         self.validate()?;

@@ -116,10 +116,13 @@ child outputs are analyzed separately. Each declared register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-`invoke` and `counted_for` are unsupported, including unused and zero-width
-results and zero-trip loops. Inline function calls and unroll loops before code
-generation. This does not affect generated arithmetic helpers or external
-instantiations. Name collisions use double-underscore suffixes such as `add_3__1`.
+The emitter inlines the function body at each `invoke` node, including nested
+calls and their assertion, coverage, and trace operations. Register
+boundaries are preserved. Use an explicit external instantiation for a function
+marked `#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
+before emission.
+
+Name collisions use double-underscore suffixes such as `add_3__1`.
 Emitted ports (including clocks), instance names, and assertion/coverage labels
 are fixed module-scope names. They are validated and reserved before any generated
 declarations; fixed-name collisions produce an error, while generated names are
@@ -156,6 +159,7 @@ representation.
 present in the input block. It does not infer new invariants or disable coverage
 and trace statements.
 
+The default invoke tests use Vastly to evaluate the generated RTL.
 Semantic tests selected with `iverilog-tests` require iverilog and vvp. Generated RTL
 is compiled once per design and simulated against the independent PIR block
 interpreter, with exact four-state output comparisons and cycle-by-cycle
@@ -168,8 +172,6 @@ against PIR expectations. These mapping checks require `XLSYNTH_YOSYS_PATH`
 and `XLSYNTH_LIBERTY_FILES`, a comma-separated list of standard-cell Liberty
 files. Include flip-flop cells for sequential mapping. The same files supply
 cell definitions to Yosys/ABC and our netlist evaluator.
-These codegen paths do not use C++ compilation or the `xlsynth-vastly`
-evaluator.
 
 Shared compilation, syntax checks, and finite simulations live in
 `xlsynth-test-helpers::iverilog::IcarusToolchain`; the persistent vector/cycle

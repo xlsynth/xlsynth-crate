@@ -248,9 +248,24 @@ The [integration tests](../tests/) include `aug_opt_*` tests
 for equivalence and mapped quality, including local cost decisions and their
 composition with XLS optimization.
 
+Single-bit slices of a priority count or its supported affine arithmetic are
+scalar predicates too, including slices left after XLS removes a redundant
+reduction. They use the same reachable-ordinal evaluation, including the
+all-zero input sentinel and each arithmetic operation's original width.
+
 Scalar priority predicates that share a count are rewritten as a group only
 when every live use of the intervening count arithmetic is removed. For example,
 two equality tests exposed by bounded shift expansion can use one-hot bits
 directly. A retained numeric count or shift amount blocks that group; the
 whole-function AND/graph-LE profitability check still applies. Dead count users
 do not block a live group. Decoder sharing rules are unchanged.
+
+### Signed increment positivity
+
+For a width-`N` modular addition, `sgt(add(x, 1), 0)` becomes
+`nor(x[N-1], and_reduce(x[0:N-1]))`. This excludes both negative inputs
+and the maximum positive input, whose increment overflows. At width one,
+the predicate is always false. Either addition operand may hold the
+width-matched literal one. Only the comparison is replaced, preserving
+any numeric consumers of the addition. This rewrite also runs in PIR-only
+mode and does not require downstream AIG optimization.

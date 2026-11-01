@@ -6,9 +6,14 @@ use pretty_assertions::assert_eq;
 mod cases;
 mod support;
 use cases::*;
+use std::collections::BTreeSet;
 use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_vastly::{
+    FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
+    eval_combo, plan_combo_eval,
+};
 
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
@@ -296,7 +301,7 @@ top block public_block(initial: bits[8], result: bits[8]) {
 }
 
 #[test]
-fn reserved_invoked_function_names_are_rejected_clearly() {
+fn invoked_function_names_can_be_systemverilog_keywords() {
     let ir = r#"package public_names
 
 fn initial(value: bits[8] id=1) -> bits[8] {
@@ -309,18 +314,11 @@ top block caller(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=4)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_eq!(
-        emit_system_verilog(&package(ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "invoke is not supported in `caller`; inline function calls before block2sv code generation"
-                .to_owned()
-        ))
-    );
+    check_invoke_result(ir, &[("value", 8, 0x69)], 0x69);
 }
 
 #[test]
-fn reserved_invoked_function_parameters_are_rejected_clearly() {
+fn invoked_parameter_names_can_be_systemverilog_keywords() {
     let ir = r#"package public_names
 
 fn helper(initial: bits[8] id=1) -> bits[8] {
@@ -333,14 +331,7 @@ top block caller(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=4)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_eq!(
-        emit_system_verilog(&package(ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "invoke is not supported in `caller`; inline function calls before block2sv code generation"
-                .to_owned()
-        ))
-    );
+    check_invoke_result(ir, &[("value", 8, 0xb7)], 0xb7);
 }
 
 #[test]
@@ -849,15 +840,23 @@ fn registered_child_adds_its_latency_between_parent_register_stages() {
 
 #[test]
 fn heterogeneous_child_outputs_keep_their_individual_pipeline_latencies() {
+    // The parent's faststate and the child's delayed register capture the same
+    // cycle. Both reach slowstate at stage 2 when the callee uses both inputs.
     let ir = r#"package public_hierarchy
 
-block child(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
+fn sum(lhs: bits[8] id=18, rhs: bits[8] id=19) -> bits[8] {
+  ret total: bits[8] = add(lhs, rhs, id=20)
+}
+
+block child(clk: clock, value: bits[8], bias: bits[8], fast: bits[8], slow: bits[8]) {
   reg delayed(bits[8])
   value: bits[8] = input_port(name=value, id=1)
+  bias: bits[8] = input_port(name=bias, id=21)
   delayed_write: () = register_write(value, register=delayed, id=2)
   delayed_read: bits[8] = register_read(register=delayed, id=3)
   fast: () = output_port(value, name=fast, id=4)
-  slow: () = output_port(delayed_read, name=slow, id=5)
+  combined: bits[8] = invoke(delayed_read, bias, to_apply=sum, id=22)
+  slow: () = output_port(combined, name=slow, id=5)
 }
 
 top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
@@ -873,66 +872,82 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
   slow_value: bits[8] = instantiation_output(instantiation=component, port_name=slow, id=11)
   fast_write: () = register_write(fast_value, register=faststate, id=12)
   fast_read: bits[8] = register_read(register=faststate, id=13)
+  bias_input: () = instantiation_input(fast_read, instantiation=component, port_name=bias, id=23)
   slow_write: () = register_write(slow_value, register=slowstate, id=14)
   slow_read: bits[8] = register_read(register=slowstate, id=15)
   fast: () = output_port(fast_read, name=fast, id=16)
   slow: () = output_port(slow_read, name=slow, id=17)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    let generated = emit(
-        ir,
-        &BlockCodegenOptions {
-            layout: Layout::Pipeline,
-            ..BlockCodegenOptions::default()
-        },
-    );
-    assert_eq!(
-        pipeline_stage_comments(&generated, "parent"),
-        [
-            "  // ===== Pipe stage 0:",
-            "  // ===== Pipe stage 1:",
-            "  // ===== Pipe stage 2:",
-        ],
-        "generated heterogeneous hierarchy:\n{generated}"
-    );
-    let parent = generated
-        .split("module parent(")
-        .nth(1)
-        .expect("parent module must be emitted");
-    let fast_stage = parent.find("// ===== Pipe stage 1:").unwrap();
-    let fast_register = parent.find("logic [7:0] faststate;").unwrap();
-    let slow_stage = parent.find("// ===== Pipe stage 2:").unwrap();
-    let slow_register = parent.find("logic [7:0] slowstate;").unwrap();
-    assert!(fast_stage < fast_register);
-    assert!(fast_register < slow_stage);
-    assert!(slow_stage < slow_register);
+    // Ignoring bias leaves one live input for two distinct output values.
+    for expression in ["add(lhs, rhs, id=20)", "identity(lhs, id=20)"] {
+        let source = ir.replace("add(lhs, rhs, id=20)", expression);
+        assert_stock_xls_accepts(&source);
+        let generated = emit(
+            &source,
+            &BlockCodegenOptions {
+                layout: Layout::Pipeline,
+                ..BlockCodegenOptions::default()
+            },
+        );
+        let (_, parent) = generated.split_once("module parent(").unwrap();
+        let register_layout: Vec<_> = parent
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("// ===== Pipe stage")
+                    || matches!(*line, "logic [7:0] faststate;" | "logic [7:0] slowstate;")
+            })
+            .collect();
+        assert_eq!(
+            register_layout,
+            [
+                "// ===== Pipe stage 0:",
+                "// ===== Pipe stage 1:",
+                "logic [7:0] faststate;",
+                "// ===== Pipe stage 2:",
+                "logic [7:0] slowstate;",
+            ],
+            "{expression}"
+        );
+    }
 }
 
 #[test]
-fn external_function_remains_between_parent_register_stages() {
+fn opaque_child_feedback_remains_between_parent_register_stages() {
     let ir = r#"package public_external
 
-#[ffi_proto("""code_template: "external_cell {fn} (.value({value}), .result({return}));"
+#[ffi_proto("""code_template: "external_cell {fn} (.value({value}), .feedback({feedback}), .result({return}));"
 """)]
-fn external_identity(value: bits[8] id=1) -> bits[8] {
+fn external_identity(value: bits[8] id=1, feedback: bits[8] id=10) -> bits[8] {
   ret value: bits[8] = param(name=value, id=1)
+}
+
+block child(value: bits[8], result: bits[8]) {
+  instantiation foreign_cell(foreign_function=external_identity, kind=extern)
+  value: bits[8] = input_port(name=value, id=11)
+  driven: () = instantiation_input(value, instantiation=foreign_cell, port_name=value, id=12)
+  returned: bits[8] = instantiation_output(instantiation=foreign_cell, port_name=return, id=13)
+  feedback: () = instantiation_input(returned, instantiation=foreign_cell, port_name=feedback, id=14)
+  result: () = output_port(returned, name=result, id=15)
 }
 
 top block parent(clk: clock, value: bits[8], result: bits[8]) {
   reg before(bits[8])
   reg after(bits[8])
-  instantiation component(foreign_function=external_identity, kind=extern)
+  instantiation component(block=child, kind=block)
   value: bits[8] = input_port(name=value, id=2)
   before_write: () = register_write(value, register=before, id=3)
   before_read: bits[8] = register_read(register=before, id=4)
   connected: () = instantiation_input(before_read, instantiation=component, port_name=value, id=5)
-  received: bits[8] = instantiation_output(instantiation=component, port_name=return, id=6)
+  received: bits[8] = instantiation_output(instantiation=component, port_name=result, id=6)
   after_write: () = register_write(received, register=after, id=7)
   after_read: bits[8] = register_read(register=after, id=8)
   result: () = output_port(after_read, name=result, id=9)
 }
 "#;
+    // A foreign output may feed one of its own inputs. Its zero-delay cycle
+    // must still propagate the child input's stage to the parent capture.
     let generated = emit(
         ir,
         &BlockCodegenOptions {
@@ -950,7 +965,7 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
         .collect::<Vec<_>>();
     assert_eq!(
         instances,
-        ["  external_cell component (.value(before_), .result(received));"]
+        ["  external_cell foreign_cell (.value(value), .feedback(returned), .result(returned));"]
     );
 }
 
@@ -983,6 +998,158 @@ fn hierarchy_emits_each_child_once_before_its_parent() {
         .filter(|line| line.starts_with("  child "))
         .collect::<Vec<_>>();
     assert_eq!(instances, ["  child left (", "  child right ("]);
+}
+
+#[test]
+fn child_function_dependencies_determine_whether_feedback_is_combinational() {
+    let ir = r#"package invoked_child
+
+fn invert(value: bits[8] id=1, ignored: bits[8] id=10) -> bits[8] {
+  ret inverted: bits[8] = not(value, id=2)
+}
+
+block child(value: bits[8], feedback: bits[8], result: bits[8]) {
+  value: bits[8] = input_port(name=value, id=3)
+  feedback: bits[8] = input_port(name=feedback, id=11)
+  negated: bits[8] = invoke(value, feedback, to_apply=invert, id=4)
+  result: () = output_port(negated, name=result, id=5)
+}
+
+top block parent(value: bits[8], result: bits[8]) {
+  instantiation leaf(block=child, kind=block)
+  value: bits[8] = input_port(name=value, id=6)
+  connected: () = instantiation_input(value, instantiation=leaf, port_name=value, id=7)
+  received: bits[8] = instantiation_output(instantiation=leaf, port_name=result, id=8)
+  returned: () = instantiation_input(received, instantiation=leaf, port_name=feedback, id=12)
+  result: () = output_port(received, name=result, id=9)
+}
+"#;
+    let parsed = package(ir);
+    for layout in [Layout::None, Layout::Pipeline] {
+        for top in ["parent", "child"] {
+            let options = BlockCodegenOptions {
+                layout,
+                top: Some(top.to_owned()),
+                ..BlockCodegenOptions::default()
+            };
+            let rtl = support::TestRtl::emit(&parsed, &options);
+            let hierarchy: Vec<_> = rtl
+                .lines()
+                .filter(|line| {
+                    line.starts_with("module ") || line.trim_start().starts_with("child leaf (")
+                })
+                .collect();
+            if top == "parent" {
+                assert_eq!(
+                    hierarchy,
+                    ["module child(", "module parent(", "  child leaf ("]
+                );
+            } else {
+                assert_eq!(hierarchy, ["module child("]);
+                check_combinational_output(&rtl, &[("value", 8, 0x6c), ("feedback", 8, 0)], 0x93);
+            }
+        }
+    }
+    // The same wiring becomes a real combinational loop when the callee
+    // uses the argument driven by its own output.
+    let cyclic = package(&ir.replace("not(value,", "not(ignored,"));
+    assert!(matches!(
+        emit_system_verilog(&cyclic, &BlockCodegenOptions::default()),
+        Err(BlockCodegenError::InvalidBlock(message))
+            if message.contains("block `parent` contains a combinational cycle")
+    ));
+}
+
+#[test]
+fn registered_child_invokes_place_only_live_inputs_on_the_pipeline_path() {
+    let ir = r#"package registered_child
+
+fn compute(value: bits[8] id=1, feedback: bits[8] id=2) -> bits[8] {
+  ret computed: bits[8] = not(value, id=3)
+}
+
+block child(clk: clock, value: bits[8], feedback: bits[8], result: bits[8]) {
+  reg state(bits[8])
+  value: bits[8] = input_port(name=value, id=4)
+  feedback: bits[8] = input_port(name=feedback, id=5)
+  computed: bits[8] = invoke(value, feedback, to_apply=compute, id=6)
+  written: () = register_write(computed, register=state, id=7)
+  current: bits[8] = register_read(register=state, id=8)
+  result: () = output_port(current, name=result, id=9)
+}
+
+top block parent(clk: clock, value: bits[8], result: bits[8]) {
+  reg before_child(bits[8])
+  reg after_child(bits[8])
+  instantiation leaf(block=child, kind=block)
+  value: bits[8] = input_port(name=value, id=10)
+  before_write: () = register_write(value, register=before_child, id=11)
+  before_read: bits[8] = register_read(register=before_child, id=12)
+  connected: () = instantiation_input(before_read, instantiation=leaf, port_name=value, id=13)
+  received: bits[8] = instantiation_output(instantiation=leaf, port_name=result, id=14)
+  returned: () = instantiation_input(received, instantiation=leaf, port_name=feedback, id=15)
+  after_write: () = register_write(received, register=after_child, id=16)
+  after_read: bits[8] = register_read(register=after_child, id=17)
+  result: () = output_port(after_read, name=result, id=18)
+}
+"#;
+    let pipeline = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    for (expression, expected, capture_stage) in [
+        ("not(value, id=3)", [0x00, 0xcb], Some(2)),
+        ("literal(value=90, id=3)", [0x5a, 0x5a], Some(1)),
+        ("or(value, feedback, id=3)", [0xff, 0xff], None),
+    ] {
+        let source = ir.replace("not(value, id=3)", expression);
+        assert_stock_xls_accepts(&source);
+        let parsed = package(&source);
+        let flat = support::TestRtl::emit(&parsed, &BlockCodegenOptions::default());
+        // Vastly executes one module. Drive the emitted child's feedback port
+        // from its last registered output, as it is wired in the parent.
+        let child_rtl = flat.split_inclusive("endmodule").next().unwrap();
+        let child = compile_pipeline_module(child_rtl).unwrap();
+        let mut runner = FixtureRunner::new(&child).unwrap();
+        let ports = runner.port_bindings();
+        let value = ports.input_with_width("value", 8).unwrap();
+        let feedback = ports.input_with_width("feedback", 8).unwrap();
+        let mut previous = Value4::new(8, Signedness::Unsigned, vec![LogicBit::X; 8]);
+        for (input, expected) in [0xff, 0x34].into_iter().zip(expected) {
+            let cycle = runner
+                .step_cycle_with_drive(&mut [], |drive| {
+                    drive.set_u64(&value, input)?;
+                    drive.set(&feedback, previous.clone())
+                })
+                .unwrap();
+            assert_eq!(cycle.pre_outputs["result"], previous);
+            previous = cycle.outputs["result"].clone();
+            assert_eq!(previous.to_u64_if_known(), Some(expected), "{expression}");
+        }
+
+        let generated = emit_system_verilog(&parsed, &pipeline);
+        if let Some(capture_stage) = capture_stage {
+            let rtl = generated.unwrap().system_verilog;
+            let (_, parent) = rtl.split_once("module parent(").unwrap();
+            let register_stages: Vec<_> = parent
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("// Registers for pipe stage"))
+                .collect();
+            assert_eq!(
+                register_stages,
+                [
+                    "// Registers for pipe stage 0:",
+                    &format!("// Registers for pipe stage {capture_stage}:")
+                ],
+                "{expression}"
+            );
+        } else {
+            assert!(
+                matches!(generated, Err(BlockCodegenError::NotPipeline(message)) if message.contains("block `parent`"))
+            );
+        }
+    }
 }
 
 #[test]
@@ -1046,6 +1213,34 @@ fn external_templates_substitute_function_names_and_connected_ports() {
     );
 }
 
+const EXTERNAL_FFI_ATTRIBUTE: &str = r#"#[ffi_proto("""code_template: "external_cell {fn} (.source({value}), .destination({return}));"
+""")]"#;
+
+#[test]
+fn external_template_uses_the_effective_protobuf_field() {
+    let expected = emit(EXTERNAL, &BlockCodegenOptions::default()).replace(
+        ".destination(received));",
+        r#".destination(received)); // "quoted" \n"#,
+    );
+    for attribute in [
+        r#"#[ffi_proto("delay_ps: 1 code_template: 'external_cell {fn} (.source({value}), .destination({return})); // \"quoted\" \\n'")]"#,
+        r#"#[ffi_proto("""code_template: "superseded instance"
+""")]
+#[ // code_template: "decoy in an IR comment"
+ffi_proto("""
+# code_template: "decoy in a protobuf comment"
+delay_ps: 1
+code_template: "external_cell {fn} " "(.source({value}), .destination({return})); // \"quoted\" \\n"
+""")]"#,
+    ] {
+        let ir = EXTERNAL.replace(EXTERNAL_FFI_ATTRIBUTE, attribute);
+        // Stock XLS parses the FFI function but cannot read the extern block it
+        // emits.
+        assert_stock_xls_accepts(ir.split_once("top block").unwrap().0);
+        assert_eq!(emit(&ir, &BlockCodegenOptions::default()), expected);
+    }
+}
+
 #[test]
 fn external_templates_substitute_nested_aggregate_port_paths() {
     let ir = r#"package public_external
@@ -1079,14 +1274,34 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 
 #[test]
 fn external_function_without_code_template_has_actionable_error() {
+    for attribute in [
+        "#[ // code_template: \"decoy in a different attribute\"\nnon_synth]",
+        r#"#[ffi_proto("""
+# code_template: "decoy in a protobuf comment"
+delay_ps: 1
+""")]"#,
+    ] {
+        let ir = EXTERNAL.replace(EXTERNAL_FFI_ATTRIBUTE, attribute);
+        assert_eq!(
+            emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
+            Err(BlockCodegenError::Unsupported(
+                "external function `external_identity` has no ffi_proto code_template".to_owned()
+            ))
+        );
+    }
+}
+
+#[test]
+fn external_function_with_binary_template_has_actionable_error() {
     let ir = EXTERNAL.replace(
-        "#[ffi_proto(\"\"\"code_template: \"external_cell {fn} (.source({value}), .destination({return}));\"\n\"\"\")]\n",
-        "",
+        EXTERNAL_FFI_ATTRIBUTE,
+        r#"#[ffi_proto("code_template: 'cell \777'")]"#,
     );
+    assert_stock_xls_accepts(ir.split_once("top block").unwrap().0);
     assert_eq!(
         emit_system_verilog(&package(&ir), &BlockCodegenOptions::default()),
-        Err(BlockCodegenError::Unsupported(
-            "external function `external_identity` has no ffi_proto code_template".to_owned()
+        Err(BlockCodegenError::InvalidBlock(
+            "external function `external_identity` has a non-UTF-8 ffi_proto code_template at byte 5".to_owned()
         ))
     );
 }
@@ -1272,46 +1487,55 @@ top block guarded(clk: clock, {reset}: bits[1], predicate: bits[1], result: bits
 }
 
 #[test]
-fn invokes_with_debug_operations_are_rejected() {
+fn repeated_invokes_preserve_effects_even_when_the_return_is_unused() {
     let ir = r#"package public_helper_debug
 
-fn checked_helper(value: bits[8] id=1) -> bits[8] {
+fn checked_helper(value: bits[8] id=1) -> () {
   zero: bits[8] = literal(value=0, id=2)
   local_condition: bits[1] = ne(value, zero, id=3)
   start_token: token = after_all(id=4)
   checked: token = assert(start_token, local_condition, message="helper condition", label="helper_valid", id=5)
   observed: token = trace(checked, local_condition, format="helper={:x}", data_operands=[value], verbosity=0, id=6)
-  ret forwarded: bits[8] = identity(value, id=7)
+  covered: () = cover(local_condition, label="observed_value", id=7)
+  ret empty: () = tuple(id=8)
 }
 
-top block wrapper(value: bits[8], result: bits[8]) {
-  value: bits[8] = input_port(name=value, id=8)
-  called: bits[8] = invoke(value, to_apply=checked_helper, id=9)
-  result: () = output_port(called, name=result, id=10)
+top block wrapper(clk: clock, lhs: bits[8], rhs: bits[8], result: bits[8]) {
+  lhs: bits[8] = input_port(name=lhs, id=9)
+  rhs: bits[8] = input_port(name=rhs, id=10)
+  first: () = invoke(lhs, to_apply=checked_helper, id=11)
+  second: () = invoke(rhs, to_apply=checked_helper, id=12)
+  result: () = output_port(rhs, name=result, id=13)
 }
 "#;
     assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "wrapper");
-}
-
-#[test]
-fn invokes_with_coverage_are_rejected() {
-    let ir = r#"package public_helper_debug
-
-fn covered_helper(value: bits[8] id=1) -> bits[8] {
-  condition: bits[1] = literal(value=1, id=2)
-  observed: () = cover(condition, label="helper_covered", id=3)
-  ret forwarded: bits[8] = identity(value, id=4)
-}
-
-top block wrapper(value: bits[8], result: bits[8]) {
-  value: bits[8] = input_port(name=value, id=5)
-  called: bits[8] = invoke(value, to_apply=covered_helper, id=6)
-  result: () = output_port(called, name=result, id=7)
-}
-"#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "wrapper");
+    for layout in [Layout::None, Layout::Pipeline] {
+        for emit_asserts in [true, false] {
+            let rtl = emit(
+                ir,
+                &BlockCodegenOptions {
+                    layout,
+                    emit_asserts,
+                    ..BlockCodegenOptions::default()
+                },
+            );
+            let assert_count = if emit_asserts { 2 } else { 0 };
+            assert_eq!(rtl.matches("assert property").count(), assert_count);
+            assert_eq!(rtl.matches("cover property").count(), 2);
+            let labels: BTreeSet<_> = rtl
+                .lines()
+                .filter_map(|line| {
+                    let (label, statement) = line.trim().split_once(": ")?;
+                    (statement.starts_with("assert property")
+                        || statement.starts_with("cover property"))
+                    .then_some(label)
+                })
+                .collect();
+            assert_eq!(labels.len(), assert_count + 2);
+            assert_eq!(rtl.matches("$display(").count(), 2);
+            xlsynth_test_helpers::assert_valid_sv(&rtl);
+        }
+    }
 }
 
 #[test]
@@ -1598,8 +1822,47 @@ top block invalid_label(clk: clock, predicate: bits[1], result: bits[1]) {{
     }
 }
 
+/// Simulates a single generated module with known packed inputs and checks its
+/// result.
+fn check_combinational_output(rtl: &str, inputs: &[(&str, u32, u64)], expected: u64) {
+    let module = compile_combo_module(rtl).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+    let inputs = inputs
+        .iter()
+        .map(|&(name, width, value)| {
+            (
+                name.to_owned(),
+                Value4::from_u64(width, Signedness::Unsigned, value),
+            )
+        })
+        .collect();
+    let values = eval_combo(&module, &plan, &inputs).unwrap();
+    assert_eq!(values["result"].to_u64_if_known(), Some(expected));
+}
+
+/// Checks the packed result of an invoked function under both codegen layouts.
+fn check_invoke_result(ir: &str, inputs: &[(&str, u32, u64)], expected: u64) {
+    assert_stock_xls_accepts(ir);
+    let parsed = package(ir);
+    let block_name = &parsed.get_top_block().unwrap().name;
+    for layout in [Layout::None, Layout::Pipeline] {
+        let options = BlockCodegenOptions {
+            layout,
+            ..BlockCodegenOptions::default()
+        };
+        let generated = support::TestRtl::emit(&parsed, &options);
+        let modules: Vec<_> = generated
+            .lines()
+            .filter(|line| line.starts_with("module "))
+            .collect();
+        assert_eq!(modules, [format!("module {block_name}(")]);
+        xlsynth_test_helpers::assert_valid_sv(&generated);
+        check_combinational_output(&generated, inputs, expected);
+    }
+}
+
 #[test]
-fn invoked_ir_functions_are_rejected() {
+fn invoked_ir_function_binds_its_argument() {
     let ir = r#"package public_invoke
 
 fn add_one(value: bits[8] id=1) -> bits[8] {
@@ -1613,12 +1876,11 @@ top block invoking(value: bits[8], result: bits[8]) {
   result: () = output_port(called, name=result, id=6)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoking");
+    check_invoke_result(ir, &[("value", 8, 0xff)], 0);
 }
 
 #[test]
-fn invokes_with_aggregate_results_are_rejected() {
+fn invoked_array_update_preserves_element_order() {
     let ir = r#"package public_invoke_arrays
 
 fn update(values: bits[8][3] id=1, index: bits[2] id=2, replacement: bits[8] id=3) -> bits[8][3] {
@@ -1633,12 +1895,19 @@ top block invoking(values: bits[8][3], index: bits[2], replacement: bits[8], res
   result: () = output_port(called, name=result, id=9)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoking");
+    check_invoke_result(
+        ir,
+        &[
+            ("values", 24, 0x332211),
+            ("index", 2, 0),
+            ("replacement", 8, 0xab),
+        ],
+        0x3322ab,
+    );
 }
 
 #[test]
-fn invokes_with_zero_width_results_are_rejected() {
+fn unused_invoked_zero_width_results_preserve_the_output() {
     let ir = r#"package public_empty_functions
 
 fn empty_result(value: bits[8] id=1) -> bits[0] {
@@ -1651,12 +1920,11 @@ top block ignore_result(value: bits[8], result: bits[8]) {
   result: () = output_port(value, name=result, id=5)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "ignore_result");
+    check_invoke_result(ir, &[("value", 8, 0x81)], 0x81);
 }
 
 #[test]
-fn invokes_with_empty_tuple_results_are_rejected() {
+fn unused_invoked_empty_tuple_results_preserve_the_output() {
     let ir = r#"package public_empty_functions
 
 fn empty_tuple(value: bits[8] id=1) -> (bits[0], ()) {
@@ -1671,12 +1939,11 @@ top block ignore_tuple(value: bits[8], result: bits[8]) {
   result: () = output_port(value, name=result, id=7)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "ignore_tuple");
+    check_invoke_result(ir, &[("value", 8, 0x72)], 0x72);
 }
 
 #[test]
-fn invokes_with_zero_width_parameters_are_rejected() {
+fn invoked_functions_accept_zero_width_parameters() {
     let ir = r#"package public_empty_functions
 
 fn ignore_empty(value: bits[8] id=1, empty: bits[0] id=2) -> bits[8] {
@@ -1690,12 +1957,11 @@ top block invoke_empty(value: bits[8], empty: bits[0], result: bits[8]) {
   result: () = output_port(called, name=result, id=7)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "invoke_empty");
+    check_invoke_result(ir, &[("value", 8, 0x3a)], 0x3a);
 }
 
 #[test]
-fn invokes_with_only_zero_width_arguments_are_rejected() {
+fn invoked_constant_functions_accept_only_zero_width_arguments() {
     let ir = r#"package public_empty_functions
 
 fn public_constant(empty: bits[0] id=1) -> bits[8] {
@@ -1708,8 +1974,7 @@ top block call_constant(empty: bits[0], result: bits[8]) {
   result: () = output_port(called, name=result, id=5)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "call_constant");
+    check_invoke_result(ir, &[], 42);
 }
 
 #[test]
@@ -1835,11 +2100,22 @@ top block caller(empty: bits[0], out: bits[0]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "caller");
+    for layout in [Layout::None, Layout::Pipeline] {
+        let options = BlockCodegenOptions {
+            layout,
+            ..BlockCodegenOptions::default()
+        };
+        assert_eq!(
+            emit_system_verilog(&package(ir), &options).unwrap_err(),
+            BlockCodegenError::Unsupported(
+                "counted_for is not supported in `caller`; unroll loops before block2sv code generation".to_owned()
+            )
+        );
+    }
 }
 
 #[test]
-fn nested_invocations_are_rejected() {
+fn nested_invocations_bind_each_call_site_independently() {
     let ir = r#"package public_invoke
 
 fn add_one(value: bits[8] id=1) -> bits[8] {
@@ -1857,10 +2133,9 @@ top block nested_helpers(first: bits[8], second: bits[8], result: bits[8]) {
   second: bits[8] = input_port(name=second, id=8)
   left: bits[8] = invoke(first, to_apply=add_two, id=9)
   right: bits[8] = invoke(second, to_apply=add_two, id=10)
-  combined: bits[8] = add(left, right, id=11)
+  combined: bits[8] = xor(left, right, id=11)
   result: () = output_port(combined, name=result, id=12)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    assert_invoke_rejected(ir, "nested_helpers");
+    check_invoke_result(ir, &[("first", 8, 5), ("second", 8, 14)], 7 ^ 16);
 }

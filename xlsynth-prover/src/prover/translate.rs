@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::io;
 
 use xlsynth_pir::IrValue;
 
@@ -46,11 +48,12 @@ const fn min_bits_u128(n: u128) -> usize {
     (u128::BITS - n.leading_zeros()) as usize
 }
 
+/// Declares the free inputs of a function, propagating solver failures.
 pub fn get_fn_inputs<'a, S: Solver>(
     solver: &mut S,
     prover_fn: ProverFn<'a>,
     name_prefix: Option<&str>,
-) -> FnInputs<'a, S::Term> {
+) -> io::Result<FnInputs<'a, S::Term>> {
     let mut params_iter = prover_fn.fn_ref.param_nodes();
     let mut inputs = HashMap::new();
     let prefix_name = |name: &str| match name_prefix {
@@ -70,7 +73,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
         let iact = params_iter.next().unwrap();
         assert_eq!(iact.ty, ir::Type::Bits(1));
         inputs.insert(
-            prefix_name(iact.param_name()),
+            iact.param_name().to_string(),
             IrTypedBitVec {
                 ir_type: &iact.ty,
                 bitvec: solver.one(1),
@@ -79,9 +82,7 @@ pub fn get_fn_inputs<'a, S: Solver>(
     }
     for p in params_iter {
         let name = prefix_name(p.param_name());
-        let bv = solver
-            .declare_fresh(&name, p.ty.bit_count() as usize)
-            .unwrap();
+        let bv = solver.declare_fresh(&name, p.ty.bit_count())?;
         inputs.insert(
             p.param_name().to_string(),
             IrTypedBitVec {
@@ -90,7 +91,93 @@ pub fn get_fn_inputs<'a, S: Solver>(
             },
         );
     }
-    FnInputs { prover_fn, inputs }
+    Ok(FnInputs { prover_fn, inputs })
+}
+
+/// Restricts each constrained parameter to one of its permitted values.
+pub(crate) fn assert_param_domains<S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'_, S::Term>,
+) -> io::Result<()> {
+    let Some(domains) = &inputs.prover_fn.domains else {
+        return Ok(());
+    };
+    for param in inputs.params() {
+        let Some(values) = domains.get(param.param_name()) else {
+            continue;
+        };
+        let symbol = &inputs.inputs[param.param_name()].bitvec;
+        let mut constraint = None;
+        for value in values {
+            let constant = ir_value_to_bv(solver, value, &param.ty);
+            let equal = solver.eq(symbol, &constant.bitvec);
+            constraint = Some(match constraint {
+                None => equal,
+                Some(prev) => solver.or(&prev, &equal),
+            });
+        }
+        if let Some(constraint) = constraint {
+            solver.assert(&constraint)?;
+        }
+    }
+    Ok(())
+}
+
+/// Applies the same subroutine or uninterpreted function for an invoke or a map
+/// element.
+fn translate_call<'ir, S: Solver>(
+    solver: &mut S,
+    caller: &FnInputs<'ir, S::Term>,
+    name: &str,
+    args: Vec<BitVec<S::Term>>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+    inline_call: impl FnOnce(&mut S, &FnInputs<'ir, S::Term>) -> BitVec<S::Term>,
+) -> IrTypedBitVec<'ir, S::Term> {
+    let callee = caller.get_fn(name);
+    assert_eq!(args.len(), callee.params.len(), "call arity mismatch");
+    if let Some(symbol) = uf_map.get(name.strip_prefix("__itok").unwrap_or(name)) {
+        let uf = uf_registry
+            .ufs
+            .get(symbol)
+            .expect("declared uninterpreted function");
+        let has_itok = name.starts_with("__itok")
+            || (callee.params.len() >= 2
+                && matches!(callee.get_param(0).ty, ir::Type::Token)
+                && matches!(callee.get_param(1).ty, ir::Type::Bits(1)))
+            || matches!(&callee.ret_ty, ir::Type::Tuple(fields) if fields.len() >= 2 && matches!(*fields[0], ir::Type::Token));
+        let visible_args = if has_itok {
+            log::warn!("calling UF {symbol} for {name}, ignoring side effects");
+            &args[2..]
+        } else {
+            &args
+        };
+        return IrTypedBitVec {
+            ir_type: &callee.ret_ty,
+            bitvec: solver.apply_uf(uf, &visible_args.iter().collect::<Vec<_>>()),
+        };
+    }
+    let callee_inputs = FnInputs {
+        prover_fn: ProverFn::new(callee, caller.prover_fn.pkg_ref)
+            .with_fixed_implicit_activation(false),
+        inputs: callee
+            .param_nodes()
+            .zip(args)
+            .map(|(param, bitvec)| {
+                (
+                    param.param_name().to_string(),
+                    IrTypedBitVec {
+                        ir_type: &param.ty,
+                        bitvec,
+                    },
+                )
+            })
+            .collect(),
+    };
+    IrTypedBitVec {
+        ir_type: &callee.ret_ty,
+        bitvec: inline_call(solver, &callee_inputs),
+    }
 }
 
 fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
@@ -98,6 +185,35 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
     inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
+) -> (
+    HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
+    Vec<Assertion<'ir, S::Term>>,
+) {
+    translate_nodes(
+        solver,
+        inputs,
+        uf_map,
+        uf_registry,
+        &mut |s, args, assertions| {
+            let callee = ir_to_smt(s, args, uf_map, uf_registry);
+            assertions.extend(callee.assertions);
+            callee.output.bitvec
+        },
+    )
+}
+
+/// Translates the nodes of one function using the caller's policy for nested
+/// calls. A counted_for body contributes only its value to the accumulator.
+fn translate_nodes<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+    inline_call: &mut dyn FnMut(
+        &mut S,
+        &FnInputs<'ir, S::Term>,
+        &mut Vec<Assertion<'ir, S::Term>>,
+    ) -> BitVec<S::Term>,
 ) -> (
     HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
     Vec<Assertion<'ir, S::Term>>,
@@ -248,10 +364,9 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                         prover_fn: callee_prover_fn.clone(),
                         inputs: callee_input_map,
                     };
-                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
                     acc = IrTypedBitVec {
                         ir_type: &node.ty,
-                        bitvec: callee_smt.output.bitvec,
+                        bitvec: inline_call(solver, &callee_inputs, &mut Vec::new()),
                     };
                 }
 
@@ -675,17 +790,13 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     let max_selectable = get_num_indexable_elements::<S>(index_bv, children.len());
                     let index_width = index_bv.bitvec.get_width();
 
-                    let mut result = children[max_selectable - 1].bitvec.clone();
+                    let mut result = children[max_selectable - 1].clone();
                     for i in (0..max_selectable - 1).rev() {
                         let idx_val = solver.numerical(index_width, i as u64);
                         let cond = solver.eq(&index_bv.bitvec, &idx_val);
-                        result = solver.ite(&cond, &children[i].bitvec, &result);
+                        result.bitvec = solver.ite(&cond, &children[i].bitvec, &result.bitvec);
                     }
-
-                    IrTypedBitVec {
-                        ir_type: elem_ty,
-                        bitvec: result,
-                    }
+                    result
                 }
 
                 // Gather the index bit-vectors in evaluation order.
@@ -904,115 +1015,48 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 }
             }
             NodePayload::Invoke { to_apply, operands } => {
-                let callee = inputs.get_fn(to_apply);
-
-                // Build callee inputs by mapping current env operands to callee
-                // params.
-                assert_eq!(
-                    callee.params.len(),
-                    operands.len(),
-                    "Invoke operand count does not match callee params"
-                );
-
-                let mut callee_input_map: HashMap<String, IrTypedBitVec<'ir, S::Term>> =
-                    HashMap::new();
-                for (param, arg_ref) in callee.param_nodes().zip(operands.iter()) {
-                    let arg_bv = env.get(arg_ref).unwrap_or_else(|| {
-                        panic!("Invoke arg BV missing for {}", param.param_name())
-                    });
-                    callee_input_map.insert(
-                        param.param_name().to_string(),
-                        IrTypedBitVec {
-                            ir_type: &param.ty,
-                            bitvec: arg_bv.bitvec.clone(),
-                        },
-                    );
-                }
-
-                // Kind of hacky as this is just determining whether it is
-                // implicit token calling convention based on
-                // the name of the function. But this seems to
-                // be the only way to determine it from the IR.
-                let has_itok_in_name = callee.name.starts_with("__itok");
-                let has_itok_calling_convention_in_param = callee.params.len() >= 2
-                    && matches!(callee.get_param(0).ty, ir::Type::Token)
-                    && matches!(callee.get_param(1).ty, ir::Type::Bits(1));
-                let has_itok_calling_convention_in_ret = match &callee.ret_ty {
-                    ir::Type::Tuple(types) => {
-                        types.len() >= 2 && matches!(*types[0], ir::Type::Token)
-                    }
-                    _ => false,
+                let args = operands.iter().map(|r| env[r].bitvec.clone()).collect();
+                translate_call(
+                    solver,
+                    inputs,
+                    to_apply,
+                    args,
+                    uf_map,
+                    uf_registry,
+                    |s, call| inline_call(s, call, &mut assertions),
+                )
+            }
+            NodePayload::Map { array, to_apply } => {
+                let arg = &env[array];
+                let ir::Type::Array(array_ty) = arg.ir_type else {
+                    unreachable!("verified map operand must be an array")
                 };
-                let has_itok = has_itok_in_name
-                    || has_itok_calling_convention_in_param
-                    || has_itok_calling_convention_in_ret;
-                if has_itok_in_name && !has_itok {
-                    log::warn!(
-                        "Warning: function {} has __itok in name but does not conform to implicit token calling convention",
-                        callee.name
-                    );
-                }
-                let no_itok_name = if has_itok {
-                    callee.name[6..].to_string()
-                } else {
-                    callee.name.clone()
-                };
-                // If this callee is configured to be treated as an
-                // uninterpreted function, apply the UF instead
-                // of inlining the body.
-                if let Some(uf_sym) = uf_map.get(&no_itok_name) {
-                    let uf = uf_registry
-                        .ufs
-                        .get(uf_sym)
-                        .unwrap_or_else(|| panic!("UF symbol '{}' not declared", uf_sym));
-
-                    if has_itok {
-                        log::warn!(
-                            "Warning: calling uf {} for {}, any side effects are ignored.",
-                            uf_sym,
-                            callee.name
-                        );
-                        assert!(
-                            callee.params.len() >= 2,
-                            "Implicit token calling convention requires at least 2 params"
-                        );
-                        let args: Vec<&BitVec<S::Term>> = callee
-                            .param_nodes()
-                            .skip(2)
-                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
-                            .collect();
-                        let app = solver.apply_uf(uf, &args);
-                        // It is okay to use this result as token has zero width
-                        IrTypedBitVec {
-                            ir_type: &node.ty,
-                            bitvec: app,
-                        }
+                let width = array_ty.element_type.bit_count();
+                let mut bitvec = BitVec::ZeroWidth;
+                for i in 0..array_ty.element_count {
+                    let element = if width == 0 {
+                        BitVec::ZeroWidth
                     } else {
-                        // Build argument vector in callee param order.
-                        let args: Vec<&BitVec<S::Term>> = callee
-                            .param_nodes()
-                            .map(|p| &callee_input_map.get(p.param_name()).unwrap().bitvec)
-                            .collect();
-                        let app = solver.apply_uf(uf, &args);
-                        IrTypedBitVec {
-                            ir_type: &node.ty,
-                            bitvec: app,
-                        }
-                    }
-                } else {
-                    // Otherwise inline the callee recursively.
-                    let callee_inputs = FnInputs {
-                        prover_fn: ProverFn::new(callee, inputs.prover_fn.pkg_ref)
-                            .with_fixed_implicit_activation(false),
-                        inputs: callee_input_map,
+                        let low = i32::try_from(i * width).expect("SMT bit index fits i32");
+                        let high =
+                            i32::try_from((i + 1) * width - 1).expect("SMT bit index fits i32");
+                        solver.extract(&arg.bitvec, high, low)
                     };
-                    let callee_smt = ir_to_smt(solver, &callee_inputs, uf_map, uf_registry);
-                    assertions.extend(callee_smt.assertions.iter().cloned());
-                    let callee_output_bv = callee_smt.output.bitvec;
-                    IrTypedBitVec {
-                        ir_type: &node.ty,
-                        bitvec: callee_output_bv,
-                    }
+                    let result = translate_call(
+                        solver,
+                        inputs,
+                        to_apply,
+                        vec![element],
+                        uf_map,
+                        uf_registry,
+                        |s, call| inline_call(s, call, &mut assertions),
+                    );
+                    // Array element zero occupies the low bits.
+                    bitvec = solver.concat(&result.bitvec, &bitvec);
+                }
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec,
                 }
             }
             NodePayload::OneHot { arg, lsb_prio } => {
@@ -1162,6 +1206,56 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
         env.insert(nr, exp);
     }
     (env, assertions)
+}
+
+/// Translates the returned data of a verified function using its actual
+/// callees. Calls with identical solver terms share an output within this
+/// evaluation. Assertion events are neither returned nor imposed as input
+/// constraints.
+pub fn ir_to_smt_data<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+) -> BitVec<S::Term>
+where
+    S::Term: Eq + Hash,
+{
+    translate_data_call(solver, inputs, &mut HashMap::new())
+}
+
+/// This cache belongs to one package and one solver. Parameter order, widths
+/// and term identity distinguish calls to the same function.
+type DataCallCache<'ir, T> = HashMap<(&'ir str, Vec<BitVec<T>>), BitVec<T>>;
+
+/// Reuses the data term even if another path in the call graph computed it.
+fn translate_data_call<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    calls: &mut DataCallCache<'ir, S::Term>,
+) -> BitVec<S::Term>
+where
+    S::Term: Eq + Hash,
+{
+    let function = inputs.prover_fn.fn_ref;
+    let arguments = inputs
+        .params()
+        .map(|p| inputs.inputs[p.param_name()].bitvec.clone())
+        .collect();
+    let key = (function.name.as_str(), arguments);
+    if let Some(output) = calls.get(&key) {
+        return output.clone();
+    }
+    let (mut env, _) = translate_nodes(
+        solver,
+        inputs,
+        &HashMap::new(),
+        &UfRegistry {
+            ufs: HashMap::new(),
+        },
+        &mut |s, args, _| translate_data_call(s, args, calls),
+    );
+    let output = env.remove(&function.ret_node_ref.unwrap()).unwrap().bitvec;
+    calls.insert(key, output.clone());
+    output
 }
 
 pub fn ir_to_smt<'ir, 'inputs, S: Solver>(

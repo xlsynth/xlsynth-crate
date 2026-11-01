@@ -6,7 +6,8 @@ use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_pir;
 use xlsynth_prover::prover::SolverChoice;
 
-use crate::ir_equiv::{EquivOutcome, IrEquivRequest, IrModule, dispatch_ir_equiv};
+use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
+use xlsynth_prover::proof_outcome::ProofSummary;
 
 /// Proves equivalence between two gate functions by lifting both sides to IR
 /// and then dispatching through the normal IR equivalence flow.
@@ -16,7 +17,7 @@ pub fn prove_gate_fns_equiv_via_ir(
     solver: Option<SolverChoice>,
     tool_path: Option<&Path>,
     subcommand: &str,
-) -> Result<EquivOutcome, String> {
+) -> Result<ProofSummary, String> {
     let lhs_type = lhs.get_flat_type();
     let rhs_type = rhs.get_flat_type();
     if lhs_type != rhs_type {

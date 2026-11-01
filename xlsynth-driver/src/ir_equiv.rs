@@ -1,26 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::proofs::report_setup_error;
 use crate::toolchain_config::ToolchainConfig;
-use serde::Serialize;
 use std::path::Path;
-use xlsynth_prover::ir_equiv::run_ir_equiv as prover_run_ir_equiv;
+use std::time::Instant;
 pub use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule};
+use xlsynth_prover::proof_outcome::ProofSummary;
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::EquivParallelism;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivReport};
 
 const SUBCOMMAND: &str = "ir-equiv";
-
-#[derive(Debug, Serialize, Clone)]
-pub struct EquivOutcome {
-    pub time_micros: u128,
-    pub success: bool,
-    pub error_str: Option<String>,
-}
 
 /// Implements the "ir-equiv" subcommand.
 pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_ir_equiv");
+    let start = Instant::now();
+    let output_json = matches.get_one::<String>("output_json");
+    let fail = |message: &str| -> ! {
+        report_setup_error(start, output_json.map(String::as_str), SUBCOMMAND, message)
+    };
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let rhs = matches.get_one::<String>("rhs_ir_file").unwrap();
 
@@ -30,12 +29,10 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     let top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
 
     if top.is_some() && (lhs_top.is_some() || rhs_top.is_some()) {
-        eprintln!("Error: --ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");
-        std::process::exit(1);
+        fail("--ir_top and --lhs_ir_top/--rhs_ir_top cannot be used together");
     }
     if lhs_top.is_some() ^ rhs_top.is_some() {
-        eprintln!("Error: --lhs_ir_top and --rhs_ir_top must be used together");
-        std::process::exit(1);
+        fail("--lhs_ir_top and --rhs_ir_top must be used together");
     }
     if top.is_some() {
         lhs_top = top;
@@ -70,18 +67,14 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
         .get_one::<String>("rhs_fixed_implicit_activation")
         .map(|s| s.parse().unwrap())
         .unwrap_or(false);
-    let output_json = matches.get_one::<String>("output_json");
-
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
 
-    let lhs_ir_text = std::fs::read_to_string(lhs).unwrap_or_else(|e| {
-        eprintln!("Failed to read lhs IR file: {}", e);
-        std::process::exit(1)
-    });
-    let rhs_ir_text = std::fs::read_to_string(rhs).unwrap_or_else(|e| {
-        eprintln!("Failed to read rhs IR file: {}", e);
-        std::process::exit(1)
-    });
+    let read_side = |side, path: &str| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|err| fail(&format!("Failed to read {side} IR file: {err}")))
+    };
+    let lhs_ir_text = read_side("lhs", lhs);
+    let rhs_ir_text = read_side("rhs", rhs);
 
     let assert_label_filter = matches
         .get_one::<String>("assert_label_filter")
@@ -111,31 +104,17 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
 }
 
-pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> EquivOutcome {
+pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> ProofSummary {
     log::info!(
-        "dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
+        "[{subcommand}] dispatch_ir_equiv; solver_choice: {:?}, tool_path: {:?}",
         request.solver,
         request.tool_path
     );
-    match prover_run_ir_equiv(request) {
-        Ok(report) => outcome_from_report(report),
-        Err(err) => {
-            eprintln!("[{}] {}", subcommand, err);
-            std::process::exit(1);
-        }
-    }
-}
-
-pub fn outcome_from_report(report: EquivReport) -> EquivOutcome {
-    EquivOutcome {
-        time_micros: report.duration.as_micros(),
-        success: report.is_success(),
-        error_str: report.error_str(),
-    }
+    request.prove()
 }
 
 pub fn emit_equiv_outcome_and_exit(
-    outcome: &EquivOutcome,
+    outcome: &ProofSummary,
     subcommand: &str,
     output_json: Option<&String>,
 ) -> ! {
@@ -143,10 +122,9 @@ pub fn emit_equiv_outcome_and_exit(
         std::fs::write(path, serde_json::to_string(outcome).unwrap()).unwrap();
     }
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("[{}] Time taken: {:?}", subcommand, dur);
         println!("[{}] success: Solver proved equivalence", subcommand);
-        std::process::exit(0);
     } else {
         eprintln!("[{}] Time taken: {:?}", subcommand, dur);
         if let Some(err) = outcome.error_str.as_ref() {
@@ -154,6 +132,6 @@ pub fn emit_equiv_outcome_and_exit(
         } else {
             eprintln!("[{}] failure", subcommand);
         }
-        std::process::exit(1);
     }
+    std::process::exit(outcome.conclusion.status.exit_code());
 }

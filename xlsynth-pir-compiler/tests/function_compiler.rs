@@ -510,6 +510,78 @@ top fn f(x: bits[1] id=7) -> bits[1] {
 }
 
 #[test]
+fn package_compiler_maps_nested_arrays_with_distinct_input_and_output_strides() {
+    let ir = r#"package test
+
+fn widen(x: bits[4] id=1) -> bits[73] {
+  t: token = after_all(id=2)
+  enabled: bits[1] = literal(value=1, id=3)
+  tr: token = trace(t, enabled, format="x={}", data_operands=[x], verbosity=0, id=4)
+  ret wide: bits[73] = sign_ext(x, new_bit_count=73, id=5)
+}
+fn row(xs: bits[4][2] id=6) -> bits[73][2] {
+  ret mapped: bits[73][2] = map(xs, to_apply=widen, id=7)
+}
+top fn f(rows: bits[4][2][3] id=8) -> (bits[73][2][3], bits[4][2][3]) {
+  mapped: bits[73][2][3] = map(rows, to_apply=row, id=9)
+  ret both: (bits[73][2][3], bits[4][2][3]) = tuple(mapped, rows, id=10)
+}
+"#;
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let compiler = PirFunctionCompiler::compile_package(&package).unwrap();
+    let input =
+        IrValue::make_array(&[array(4, &[8, 7]), array(4, &[0, 15]), array(4, &[9, 2])]).unwrap();
+    let args = [input];
+    let FnEvalResult::Success(expected) =
+        eval_fn_in_package(&package, package.get_top_fn().unwrap(), &args)
+    else {
+        panic!("PIR evaluation failed");
+    };
+    let actual = compiler
+        .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
+        .unwrap();
+    assert_eq!(actual.value, expected.value);
+    assert_eq!(
+        actual
+            .events
+            .trace_messages
+            .iter()
+            .map(|t| &t.message)
+            .collect::<Vec<_>>(),
+        expected
+            .trace_messages
+            .iter()
+            .map(|t| &t.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn package_compiler_runs_map_events_for_unused_zero_sized_elements() {
+    let compiler = compile_package(
+        r#"package test
+
+fn observe(x: bits[0] id=1) -> bits[0] {
+  enabled: bits[1] = literal(value=1, id=2)
+  hit: () = cover(enabled, label="element", id=3)
+  ret pass: bits[0] = identity(x, id=4)
+}
+top fn f(xs: bits[0][3] id=5) -> bits[1] {
+  observed: bits[0][3] = map(xs, to_apply=observe, id=6)
+  ret result: bits[1] = literal(value=1, id=7)
+}
+"#,
+    );
+    let actual = compiler
+        .run_ir_values_with_events(&[array(0, &[0, 0, 0])], ExecutionOptions::collect_all())
+        .unwrap();
+    assert_eq!(actual.value, bits(1, 1));
+    assert_eq!(actual.events.cover_counts.len(), 1);
+    assert_eq!(actual.events.cover_counts[0].node_text_id, 3);
+    assert_eq!(actual.events.cover_counts[0].count, 3);
+}
+
+#[test]
 fn package_compiler_reuses_static_callee_scratch_across_invoke_sites() {
     let compiler = compile_package(
         r#"package test

@@ -2,9 +2,11 @@
 
 //! Library entry point for running equivalence checks between two DSLX modules.
 //!
-//! The driver crate parses CLI arguments and reads DSLX files; this module
-//! performs the remaining work: converting source text to IR, preparing UF
-//! metadata, selecting a solver, and dispatching the equivalence proof.
+//! [`DslxEquivFiles`] specializes file inputs or creates a tactic tree with the
+//! same assumptions. [`run_dslx_equiv`] accepts already specialized modules.
+
+mod files;
+pub use files::{DslxEquivFile, DslxEquivFiles};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -16,6 +18,8 @@ use xlsynth::{DslxConvertOptions, IrPackage, mangle_dslx_name, optimize_ir};
 use xlsynth_pir::IrValue;
 
 use crate::ir_utils;
+use crate::proof_phases::PhaseCollector;
+use crate::proof_timing::ProofTiming;
 use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
@@ -228,7 +232,15 @@ impl<'a> DslxEquivRequest<'a> {
 
 /// Proves equivalence between two DSLX modules described by `request`.
 pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, String> {
+    run_dslx_equiv_with_phases(request, &PhaseCollector::default())
+}
+
+fn run_dslx_equiv_with_phases(
+    request: &DslxEquivRequest<'_>,
+    phases: &PhaseCollector,
+) -> Result<EquivReport, String> {
     let start = Instant::now();
+    let prepare = phases.start_prepare();
 
     let lhs_ir = prepare_side(request, &request.lhs)?;
     let rhs_ir = prepare_side(request, &request.rhs)?;
@@ -261,13 +273,15 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         .with_domains(rhs_ir.param_domains.clone())
         .with_uf_map(request.rhs.uf_map.clone().into_owned());
 
-    let result = prover.prove_ir_equiv(
+    drop(prepare);
+    let result = prover.prove_ir_equiv_with_phases(
         &lhs_side,
         &rhs_side,
         request.parallelism,
         request.assertion_semantics,
         assert_label_filter,
         request.flatten_aggregates,
+        phases,
     );
 
     let duration = start.elapsed();
@@ -275,6 +289,7 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
         EquivResult::Error(msg) => Err(msg),
         other => Ok(EquivReport {
             duration,
+            timing: ProofTiming::from(duration).with_phases(phases.snapshot()),
             result: other,
         }),
     }
@@ -304,9 +319,25 @@ fn prepare_side(
         let module_path = module.path.ok_or_else(|| {
             "--tool_path requires DSLX modules to carry a filesystem path".to_string()
         })?;
+        // The prover works from a source snapshot, which may have a newly
+        // specialized top. The external converter reads files, so give
+        // it those exact bytes under the same basename to preserve the
+        // IR module name.
+        let source_dir =
+            tempfile::tempdir().map_err(|e| format!("create DSLX source directory: {e}"))?;
+        let source_path = source_dir
+            .path()
+            .join(module_path.file_name().ok_or_else(|| {
+                format!(
+                    "DSLX source path has no filename: {}",
+                    module_path.display()
+                )
+            })?);
+        std::fs::write(&source_path, module.source)
+            .map_err(|e| format!("write DSLX source: {e}"))?;
         let mut ir_text = toolchain_shim::run_ir_converter_main(
             options.tool_path.unwrap(),
-            module_path,
+            &source_path,
             Some(module.top),
             options.dslx_stdlib_path,
             &additional_path_refs,

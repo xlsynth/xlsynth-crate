@@ -250,7 +250,7 @@ pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> 
 }
 
 /// Evaluates one chunk using a previously computed traversal and node storage.
-fn eval_node_values_in_order_into(
+pub(crate) fn eval_node_values_in_order_into(
     gate_fn: &GateFn,
     inputs: &[Vec256],
     order: &[AigRef],

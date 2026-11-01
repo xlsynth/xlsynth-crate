@@ -2,7 +2,7 @@
 
 use super::support::TestRtl;
 use std::collections::BTreeMap;
-use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_codegen::BlockCodegenOptions;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_parser::Parser;
@@ -97,26 +97,6 @@ pub(super) fn assert_stock_xls_accepts(ir: &str) {
 /// Emits SystemVerilog using the requested public backend configuration.
 pub(super) fn emit(ir: &str, options: &BlockCodegenOptions) -> TestRtl {
     TestRtl::emit(&package(ir), options)
-}
-
-/// Checks unsupported calls in both layouts, even when their result is unused.
-pub(super) fn assert_invoke_rejected(ir: &str, block: &str) {
-    for layout in [Layout::None, Layout::Pipeline] {
-        let error = emit_system_verilog(
-            &package(ir),
-            &BlockCodegenOptions {
-                layout,
-                ..BlockCodegenOptions::default()
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error,
-            BlockCodegenError::Unsupported(format!(
-                "invoke is not supported in `{block}`; inline function calls before block2sv code generation"
-            ))
-        );
-    }
 }
 
 /// Evaluates generated combinational output with independently compiled RTL.

@@ -210,7 +210,7 @@ pub fn handle_aig_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
     }
 
     let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
+    if outcome.conclusion.status.is_proved() {
         println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
         println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
         std::process::exit(0);

@@ -131,7 +131,8 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
     ) -> Result<Self, String> {
         let mut solver = S::new(cfg).map_err(|e| e.to_string())?;
         let prover_fn = ProverFn::new(f, Some(pkg));
-        let fn_inputs = get_fn_inputs(&mut solver, prover_fn, None);
+        let fn_inputs =
+            get_fn_inputs(&mut solver, prover_fn, None).map_err(|error| error.to_string())?;
         let empty_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let empty_registry = UfRegistry {
             ufs: std::collections::HashMap::new(),

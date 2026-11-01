@@ -99,6 +99,7 @@ pub fn operations(aggregates: bool) -> OperationSet {
         if matches!(
             operation,
             RandomOperation::Invoke
+                | RandomOperation::Map
                 | RandomOperation::CountedFor
                 | RandomOperation::Umulp
                 | RandomOperation::Smulp
@@ -252,6 +253,7 @@ mod tests {
         );
         for operation in [
             RandomOperation::Invoke,
+            RandomOperation::Map,
             RandomOperation::CountedFor,
             RandomOperation::Umulp,
             RandomOperation::Smulp,

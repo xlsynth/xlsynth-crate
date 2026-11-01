@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{
-    AssertionViolation, BoolPropertyResult, FnInput, FnOutput, ProverFn,
-    QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult, UfRegistry,
+    BoolPropertyResult, ProverFn, QuickCheckAssertionSemantics, QuickCheckOptions,
+    QuickCheckRunResult, UfRegistry, UfSignature,
 };
 use super::{
     assertion_filter,
-    translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
+    translate::{assert_param_domains, get_fn_inputs, ir_to_smt},
     uf::infer_uf_signatures,
 };
+use crate::dslx_utils::validate_dslx_paths;
+use crate::proof_phases::{Phase, PhaseCollector};
 use crate::solver::{BitVec, Response, Solver, SolverConfig};
 
 use regex::Regex;
 use std::collections::HashMap;
-use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 mod source_index;
 use xlsynth::dslx::{ImportData, MatchableModuleMember};
@@ -62,6 +64,26 @@ where
     S: Solver,
     S::Term: 'a,
 {
+    prove_ir_quickcheck_with_phases::<S>(
+        solver_config,
+        prover_fn,
+        assertion_semantics,
+        assert_label_include,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_quickcheck_with_phases<'a, S>(
+    solver_config: &S::Config,
+    prover_fn: &ProverFn<'a>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    phases: &PhaseCollector,
+) -> BoolPropertyResult
+where
+    S: Solver,
+    S::Term: 'a,
+{
     // Ensure the function indeed returns a single-bit value.
     assert_eq!(
         prover_fn.fn_ref.ret_ty.bit_count(),
@@ -69,6 +91,7 @@ where
         "Function must return a single-bit value"
     );
 
+    let setup = phases.start_prepare();
     let mut solver = match S::new(solver_config) {
         Ok(solver) => solver,
         Err(error) => {
@@ -77,30 +100,6 @@ where
             ));
         }
     };
-
-    // Generate SMT representation with UF mapping/registry.
-    let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
-
-    if let Some(domains) = &prover_fn.domains {
-        for param in fn_inputs.params() {
-            if let Some(allowed) = domains.get(param.param_name()) {
-                if let Some(sym) = fn_inputs.inputs.get(param.param_name()) {
-                    let mut domain_constraint: Option<BitVec<S::Term>> = None;
-                    for value in allowed {
-                        let value_bv = ir_value_to_bv(&mut solver, value, &param.ty).bitvec;
-                        let eq = solver.eq(&sym.bitvec, &value_bv);
-                        domain_constraint = Some(match domain_constraint {
-                            None => eq,
-                            Some(prev) => solver.or(&prev, &eq),
-                        });
-                    }
-                    if let Some(expr) = domain_constraint {
-                        solver.assert(&expr).unwrap();
-                    }
-                }
-            }
-        }
-    }
 
     let uf_signatures = if prover_fn.uf_map.is_empty() {
         HashMap::new()
@@ -117,15 +116,39 @@ where
             }
         }
     };
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
-    let smt_fn = ir_to_smt(&mut solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
+    drop(setup);
+    check_quickcheck_query(
+        &mut solver,
+        prover_fn,
+        assertion_semantics,
+        assert_label_include,
+        &uf_signatures,
+        phases,
+    )
+    .unwrap_or_else(|error| BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}")))
+}
+
+/// Checks the property and reads all parts of its counterexample on SAT.
+fn check_quickcheck_query<S: Solver>(
+    solver: &mut S,
+    prover_fn: &ProverFn<'_>,
+    assertion_semantics: QuickCheckAssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    uf_signatures: &HashMap<String, UfSignature>,
+    phases: &PhaseCollector,
+) -> io::Result<BoolPropertyResult> {
+    let encoding = phases.start(Phase::SmtEncode);
+    let fn_inputs = get_fn_inputs(solver, prover_fn.clone(), None)?;
+    assert_param_domains(solver, &fn_inputs)?;
+    let uf_registry = UfRegistry::from_uf_signatures(solver, uf_signatures)?;
+    let smt_fn = ir_to_smt(solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
 
     // Optionally filter assertions by label before applying semantics.
     let filtered_assertions =
         assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
 
-    // Build a 1-bit flag that is `1` iff *all* selected in-function assertions
-    // pass.
+    // Build a 1-bit flag that is `1` iff *all* selected in-function
+    // assertions pass.
     let success_flag: BitVec<S::Term> = if filtered_assertions.is_empty() {
         solver.numerical(1, 1)
     } else {
@@ -161,64 +184,34 @@ where
     };
 
     // Ask solver for a model that satisfies the *negation* of the property.
-    solver.assert(&condition).unwrap();
-
-    let response = match solver.check() {
-        Ok(response) => response,
-        Err(error) => {
-            return BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}"));
-        }
+    solver.assert(&condition)?;
+    drop(encoding);
+    let response = {
+        let _check = phases.start(Phase::SolverCheck);
+        solver.check()?
     };
     match response {
-        Response::Unsat => BoolPropertyResult::Proved,
+        Response::Unsat => Ok(BoolPropertyResult::Proved),
         Response::Sat => {
-            // Extract counter-example values.
-            let inputs: Vec<FnInput> = smt_fn
-                .fn_ref
-                .param_nodes()
-                .zip(smt_fn.inputs.iter())
-                .map(|(p, i)| FnInput {
-                    name: p.param_name().to_string(),
-                    value: solver.get_value(&i.bitvec, &i.ir_type).unwrap(),
-                })
-                .collect();
-
-            // Determine if any assertion violated and build FnOutput
-            // accordingly
-            let mut violation: Option<(String, String)> = None;
-            for a in filtered_assertions.iter() {
-                let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
-                let bits = val.to_bits().unwrap();
-                if !bits.get_bit(0).unwrap() {
-                    violation = Some((a.message.to_string(), a.label.to_string()));
-                    break;
-                }
-            }
-
-            let output: FnOutput = {
-                FnOutput {
-                    value: solver
-                        .get_value(&smt_fn.output.bitvec, &smt_fn.output.ir_type)
-                        .unwrap(),
-                    assertion_violation: violation.map(|(msg, lbl)| AssertionViolation {
-                        message: msg,
-                        label: lbl,
-                    }),
-                }
-            };
-
-            BoolPropertyResult::Disproved { inputs, output }
+            let _read = phases.start(Phase::CounterexampleRead);
+            let witness = smt_fn.read_counterexample(solver, &filtered_assertions)?;
+            Ok(BoolPropertyResult::Disproved {
+                inputs: witness.inputs,
+                output: witness.output,
+            })
         }
-        Response::Unknown => {
-            BoolPropertyResult::Inconclusive("solver returned unknown".to_string())
-        }
+        Response::Unknown => Ok(BoolPropertyResult::Inconclusive(
+            "solver returned unknown".to_string(),
+        )),
     }
 }
 
-pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Option<Regex> {
-    filter.map(|pattern| {
-        Regex::new(pattern).expect("invalid regular expression in assert label filter")
-    })
+/// Compiles the optional assertion label filter before a proof starts.
+pub(crate) fn build_assert_label_regex(filter: Option<&str>) -> Result<Option<Regex>, String> {
+    filter
+        .map(Regex::new)
+        .transpose()
+        .map_err(|e| format!("invalid regular expression in assert label filter: {e}"))
 }
 
 /// The stage at which preparing or selecting a QuickCheck failed.
@@ -229,20 +222,41 @@ pub enum QuickCheckErrorKind {
     Discovery,
     Conversion,
     InvalidProperty,
+    NoMatchingProperties,
+    OptimizingUninterpretedFunctions,
 }
 
 /// A recoverable setup error, separate from a property's proof outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Equality compares the kind and message, independently of when they were
+/// observed.
+#[derive(Debug, Clone, Eq)]
 pub struct QuickCheckError {
     pub kind: QuickCheckErrorKind,
     pub message: String,
+    /// Measurements available when the containing request observed this
+    /// failure.
+    pub timing: Option<crate::proof_timing::ProofTiming>,
+}
+
+impl PartialEq for QuickCheckError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.message == other.message
+    }
 }
 
 impl QuickCheckError {
+    pub(crate) fn no_matching_properties() -> Self {
+        Self::new(
+            QuickCheckErrorKind::NoMatchingProperties,
+            "No matching quickcheck functions found",
+        )
+    }
+
     pub(crate) fn new(kind: QuickCheckErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
+            timing: None,
         }
     }
 }
@@ -278,7 +292,11 @@ pub(crate) struct QuickCheckProofResult {
 }
 
 pub(crate) trait PreparedQuickCheckBackend {
-    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult;
+    fn prove(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckProofResult;
 }
 
 /// A parsed suite whose properties are proved only when requested.
@@ -315,18 +333,32 @@ impl<'a> PreparedQuickCheckSuite<'a> {
     /// Optimizes (if enabled) and proves exactly one property, timing that
     /// work.
     pub fn prove(&self, id: usize) -> Result<QuickCheckRunResult, QuickCheckError> {
+        self.prove_with_phases(id, &PhaseCollector::default())
+    }
+
+    /// Proves one property, recording the preparation and backend phases it
+    /// reaches.
+    pub fn prove_with_phases(
+        &self,
+        id: usize,
+        phases: &PhaseCollector,
+    ) -> Result<QuickCheckRunResult, QuickCheckError> {
         let property = self.properties().get(id).ok_or_else(|| {
             QuickCheckError::new(
                 QuickCheckErrorKind::InvalidProperty,
                 format!("No QuickCheck property with id {id}"),
             )
         })?;
-        Ok(self.prove_property(property))
+        Ok(self.prove_property(property, phases))
     }
 
-    fn prove_property(&self, property: &QuickCheckProperty) -> QuickCheckRunResult {
+    fn prove_property(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckRunResult {
         let start = std::time::Instant::now();
-        let proof = self.backend.prove(property);
+        let proof = self.backend.prove(property, phases);
         QuickCheckRunResult {
             name: property.name.clone(),
             implicit_token: proof.implicit_token,
@@ -339,7 +371,7 @@ impl<'a> PreparedQuickCheckSuite<'a> {
     pub fn prove_all(&self) -> Vec<QuickCheckRunResult> {
         self.properties()
             .iter()
-            .map(|property| self.prove_property(property))
+            .map(|property| self.prove_property(property, &PhaseCollector::default()))
             .collect()
     }
 }
@@ -351,6 +383,12 @@ pub(crate) fn load_quickcheck_context(
     additional_search_paths: &[&Path],
     test_filter: Option<&str>,
 ) -> Result<QuickCheckContext, QuickCheckError> {
+    validate_dslx_paths(
+        std::iter::once(entry_file)
+            .chain(dslx_stdlib_path)
+            .chain(additional_search_paths.iter().copied()),
+    )
+    .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
     let test_regex = test_filter
         .map(|pattern| {
             Regex::new(pattern).map_err(|e| {
@@ -435,9 +473,14 @@ struct InProcessQuickChecks<'a, S> {
 }
 
 impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> {
-    fn prove(&self, property: &QuickCheckProperty) -> QuickCheckProofResult {
+    fn prove(
+        &self,
+        property: &QuickCheckProperty,
+        phases: &PhaseCollector,
+    ) -> QuickCheckProofResult {
         let mut implicit_token = false;
         let result = (|| -> Result<BoolPropertyResult, String> {
+            let preparation = phases.start(Phase::Prepare);
             let mangled_itok = xlsynth::mangle_dslx_name_with_calling_convention(
                 &self.module_name,
                 &property.name,
@@ -479,7 +522,8 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
             let prover_fn = ProverFn::new(fn_ref, Some(proof_pkg))
                 .with_fixed_implicit_activation(fixed_implicit_activation)
                 .with_uf_map(self.uf_map.clone());
-            Ok(prove_ir_quickcheck::<S::Solver>(
+            drop(preparation);
+            Ok(prove_ir_quickcheck_with_phases::<S::Solver>(
                 self.solver_config,
                 &prover_fn,
                 self.assertion_semantics,
@@ -490,6 +534,7 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
                 } else {
                     self.assert_label_regex.as_ref()
                 },
+                phases,
             ))
         })()
         .unwrap_or_else(BoolPropertyResult::Error);
@@ -497,6 +542,22 @@ impl<S: SolverConfig> PreparedQuickCheckBackend for InProcessQuickChecks<'_, S> 
             implicit_token,
             result,
         }
+    }
+}
+
+impl QuickCheckOptions {
+    /// Rejects inlining which would erase the requested uninterpreted calls.
+    pub(crate) fn validate_uf_optimization(
+        &self,
+        uf_map: &HashMap<String, String>,
+    ) -> Result<(), QuickCheckError> {
+        if self.optimize && !uf_map.is_empty() {
+            return Err(QuickCheckError::new(
+                QuickCheckErrorKind::OptimizingUninterpretedFunctions,
+                "XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -512,22 +573,9 @@ pub(crate) fn prepare_dslx_quickchecks<'a, S: SolverConfig>(
     uf_map: &HashMap<String, String>,
     options: QuickCheckOptions,
 ) -> Result<PreparedQuickCheckSuite<'a>, QuickCheckError> {
-    if options.optimize && !uf_map.is_empty() {
-        return Err(QuickCheckError::new(
-            QuickCheckErrorKind::Configuration,
-            "XLS IR optimization cannot be combined with uninterpreted functions: inlining would erase UF boundaries; set optimize=false",
-        ));
-    }
-    let assert_label_regex = assert_label_filter
-        .map(|pattern| {
-            Regex::new(pattern).map_err(|e| {
-                QuickCheckError::new(
-                    QuickCheckErrorKind::Configuration,
-                    format!("invalid regular expression in assert label filter: {e}"),
-                )
-            })
-        })
-        .transpose()?;
+    options.validate_uf_optimization(uf_map)?;
+    let assert_label_regex = build_assert_label_regex(assert_label_filter)
+        .map_err(|e| QuickCheckError::new(QuickCheckErrorKind::Configuration, e))?;
     let context = load_quickcheck_context(
         entry_file,
         dslx_stdlib_path,
@@ -641,7 +689,7 @@ pub fn discover_quickcheck_tests(
 ))]
 mod test_utils {
     use super::*;
-    use crate::prover::types::{ParamDomains, ProverFn};
+    use crate::prover::types::{FnOutput, ParamDomains, ProverFn};
     use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_parser::Parser;
 

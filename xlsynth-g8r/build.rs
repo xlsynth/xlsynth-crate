@@ -10,6 +10,12 @@ fn main() {
         .file_descriptor_set_path(&descriptor_path)
         .compile_protos(&["proto/liberty.proto", "proto/result.proto"], &["proto"])
         .expect("Failed to compile proto");
+    // Only the Liberty schemas participate in the checked-in descriptor set.
+    prost_build::Config::new()
+        .protoc_arg("--experimental_allow_proto3_optional")
+        .compile_protos(&["proto/netlist.proto"], &["proto"])
+        .expect("Failed to compile netlist proto");
+    println!("cargo:rerun-if-changed=proto/netlist.proto");
     println!("cargo:rerun-if-changed=proto/liberty.proto");
     println!("cargo:rerun-if-changed=proto/result.proto");
 }

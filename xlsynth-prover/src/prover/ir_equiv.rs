@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
-use xlsynth_pir::IrValue;
+use std::io;
+use std::ops::Range;
+use std::sync::Mutex;
 
 use super::types::{
-    Assertion, AssertionSemantics, AssertionViolation, EquivResult, FnInput, FnInputs, FnOutput,
-    IrTypedBitVec, ParamDomains, ProverFn, SmtFn, UfRegistry, UfSignature,
+    Assertion, AssertionSemantics, EquivResult, FnInputs, IrTypedBitVec, ProverFn, SmtFn,
+    UfRegistry, UfSignature,
 };
 use super::{
-    translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
+    translate::{assert_param_domains, get_fn_inputs, ir_to_smt},
     uf::infer_merged_uf_signatures,
 };
+use crate::proof_outcome::{ProofStatus, aggregate_proof_statuses};
+use crate::proof_phases::{Phase, PhaseCollector};
 use crate::solver::{BitVec, Response, Solver};
 use regex::Regex;
 use xlsynth_pir::ir;
@@ -23,62 +24,94 @@ pub struct AlignedFnInputs<'a, R> {
     pub flattened: BitVec<R>,
 }
 
-/// Given the bit-vector representation of the two functions' inputs, this
-/// function generates a flattened bit-vector, and use slices of the flattened
-/// bit-vector for inputs to both functions.
-///
-/// We need this is to enhance term sharing. For example, when two functions
-/// shares the same prelude, they will be compiled into exactly the same SMT
-/// terms with the aligned inputs. The solver will then be able to just reason
-/// about the behavior of the remaining parts of the functions.
-pub fn align_fn_inputs<'a, S: Solver>(
+/// Returns the inputs left free after checking the implicit calling convention.
+fn free_params<'a>(
+    f: &ProverFn<'a>,
+    side: &str,
+) -> Result<impl ExactSizeIterator<Item = &'a ir::Node>, String> {
+    let mut params = f.params();
+    if f.fixed_implicit_activation
+        && !(params.next().is_some_and(|p| p.ty == ir::Type::Token)
+            && params.next().is_some_and(|p| p.ty == ir::Type::Bits(1)))
+    {
+        return Err(format!(
+            "Fixed implicit activation on {side} requires leading token and bits[1] parameters"
+        ));
+    }
+    Ok(params)
+}
+
+/// Checks that inputs can share an SMT bit vector and that flattened outputs
+/// have the same width. Tokens contribute no result bits.
+fn validate_equiv_signatures(
+    lhs: &ProverFn<'_>,
+    rhs: &ProverFn<'_>,
+    allow_flatten: bool,
+) -> Result<(), String> {
+    let lparams = free_params(lhs, "LHS")?;
+    let rparams = free_params(rhs, "RHS")?;
+    if allow_flatten {
+        let lwidth: usize = lparams.map(|p| p.ty.bit_count()).sum();
+        let rwidth: usize = rparams.map(|p| p.ty.bit_count()).sum();
+        if lwidth != rwidth {
+            return Err(format!(
+                "Free input widths differ: LHS has {lwidth} bits, RHS has {rwidth} bits"
+            ));
+        }
+    } else {
+        if lparams.len() != rparams.len() {
+            return Err(format!(
+                "Free input counts differ: LHS has {}, RHS has {}",
+                lparams.len(),
+                rparams.len()
+            ));
+        }
+        for (l, r) in lparams.zip(rparams) {
+            if l.ty != r.ty {
+                return Err(format!(
+                    "Input type mismatch for {} vs {}: {} vs {}",
+                    l.param_name(),
+                    r.param_name(),
+                    l.ty,
+                    r.ty
+                ));
+            }
+        }
+    }
+    let lwidth = lhs.fn_ref.ret_ty.bit_count();
+    let rwidth = rhs.fn_ref.ret_ty.bit_count();
+    if lwidth != rwidth {
+        return Err(format!(
+            "Return widths differ: LHS has {lwidth} bits, RHS has {rwidth} bits"
+        ));
+    }
+    Ok(())
+}
+
+/// Binds both functions' inputs to slices of one shared SMT bit vector.
+/// Requires compatible signatures as defined by [`validate_equiv_signatures`].
+fn align_compatible_inputs<'a, S: Solver>(
     solver: &mut S,
     lhs_inputs: &FnInputs<'a, S::Term>,
     rhs_inputs: &FnInputs<'a, S::Term>,
-    allow_flatten: bool,
-) -> AlignedFnInputs<'a, S::Term> {
+) -> io::Result<AlignedFnInputs<'a, S::Term>> {
     let lhs_inputs_total_width = lhs_inputs.total_free_width();
-    let rhs_inputs_total_width = rhs_inputs.total_free_width();
-    assert_eq!(
-        lhs_inputs_total_width, rhs_inputs_total_width,
-        "LHS and RHS must have the same number of bits"
-    );
-    if !allow_flatten {
-        assert_eq!(
-            lhs_inputs.free_params_len(),
-            rhs_inputs.free_params_len(),
-            "LHS and RHS must have the same number of inputs"
-        );
-        for (l, r) in lhs_inputs.free_params().zip(rhs_inputs.free_params()) {
-            assert_eq!(
-                l.ty,
-                r.ty,
-                "Input type mismatch for {} vs {}: {:?} vs {:?}",
-                l.param_name(),
-                r.param_name(),
-                l.ty,
-                r.ty
-            );
-        }
-    }
     if lhs_inputs_total_width == 0 {
-        return AlignedFnInputs {
+        return Ok(AlignedFnInputs {
             lhs: lhs_inputs.clone(),
             rhs: rhs_inputs.clone(),
             flattened: BitVec::ZeroWidth,
-        };
+        });
     }
     let params_name = format!(
         "__flattened_params__{}__{}",
         lhs_inputs.name(),
         rhs_inputs.name()
     );
-    let flattened = solver
-        .declare_fresh(&params_name, lhs_inputs_total_width)
-        .unwrap();
+    let flattened = solver.declare_fresh(&params_name, lhs_inputs_total_width)?;
     // Split into individual param symbols
     let mut split_map =
-        |inputs: &FnInputs<'a, S::Term>| -> HashMap<String, IrTypedBitVec<'a, S::Term>> {
+        |inputs: &FnInputs<'a, S::Term>| -> io::Result<HashMap<String, IrTypedBitVec<'a, S::Term>>> {
             let mut m = HashMap::new();
             let mut params_iter = inputs.params();
 
@@ -113,7 +146,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
                     offset += w;
                     let extracted = solver.extract(&flattened, h, l);
                     let eq_expr = solver.eq(&extracted, &existing_bitvec.bitvec);
-                    solver.assert(&eq_expr).unwrap();
+                    solver.assert(&eq_expr)?;
                     extracted
                 };
                 m.insert(
@@ -124,12 +157,12 @@ pub fn align_fn_inputs<'a, S: Solver>(
                     },
                 );
             }
-            m
+            Ok(m)
         };
-    let lhs_params = split_map(&lhs_inputs);
-    let rhs_params = split_map(&rhs_inputs);
+    let lhs_params = split_map(lhs_inputs)?;
+    let rhs_params = split_map(rhs_inputs)?;
 
-    AlignedFnInputs {
+    Ok(AlignedFnInputs {
         lhs: FnInputs {
             prover_fn: lhs_inputs.prover_fn.clone(),
             inputs: lhs_params,
@@ -139,7 +172,7 @@ pub fn align_fn_inputs<'a, S: Solver>(
             inputs: rhs_params,
         },
         flattened,
-    }
+    })
 }
 
 fn check_aligned_fn_equiv_internal<'a, S: Solver>(
@@ -148,7 +181,9 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     rhs: &SmtFn<'a, S::Term>,
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
-) -> EquivResult {
+    phases: &PhaseCollector,
+) -> io::Result<EquivResult> {
+    let encoding = phases.start(Phase::SmtEncode);
     // --------------------------------------------
     // Helper: build a 1-bit "failed" flag for each
     // side indicating whether **any** assertion is
@@ -213,77 +248,32 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
         }
     };
 
-    solver.assert(&condition).unwrap();
-
-    match solver.check().unwrap() {
+    solver.assert(&condition)?;
+    drop(encoding);
+    let response = {
+        let _check = phases.start(Phase::SolverCheck);
+        solver.check()?
+    };
+    match response {
         Response::Sat => {
-            // Helper to fetch first violated assertion (if any)
-            let get_assertion =
-                |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| -> Option<(String, String)> {
-                    for a in asserts.iter() {
-                        let val = solver.get_value(&a.active, &ir::Type::Bits(1)).unwrap();
-                        let bits = val.to_bits().unwrap();
-                        let ok = bits.get_bit(0).unwrap();
-                        if !ok {
-                            return Some((a.message.to_string(), a.label.to_string()));
-                        }
-                    }
-                    None
-                };
-
-            let (lhs_violation, rhs_violation) = match assertion_semantics {
-                AssertionSemantics::Ignore => (None, None),
-                _ => (
-                    get_assertion(solver, &lhs_asserts),
-                    get_assertion(solver, &rhs_asserts),
-                ),
+            let _read = phases.start(Phase::CounterexampleRead);
+            let (lhs_asserts, rhs_asserts) = match assertion_semantics {
+                AssertionSemantics::Ignore => (&[][..], &[][..]),
+                _ => (&lhs_asserts[..], &rhs_asserts[..]),
             };
-
-            // Now we can safely create a helper closure that borrows `solver`
-            // again
-            let get_value = |solver: &mut S, i: &IrTypedBitVec<'a, S::Term>| -> IrValue {
-                solver.get_value(&i.bitvec, &i.ir_type).unwrap()
-            };
-
-            // Helper to produce FnOutput given optional violation info.
-            let get_output =
-                |solver: &mut S,
-                 vio: Option<(String, String)>,
-                 tbv: &IrTypedBitVec<'a, S::Term>| FnOutput {
-                    value: get_value(solver, tbv),
-                    assertion_violation: vio.map(|(msg, lbl)| AssertionViolation {
-                        message: msg,
-                        label: lbl,
-                    }),
-                };
-
-            let build_inputs = |solver: &mut S, smt_fn: &SmtFn<'a, S::Term>| {
-                smt_fn
-                    .fn_ref
-                    .param_nodes()
-                    .zip(smt_fn.inputs.iter())
-                    .map(|(p, i)| FnInput {
-                        name: p.param_name().to_string(),
-                        value: get_value(solver, i),
-                    })
-                    .collect()
-            };
-
-            let lhs_inputs = build_inputs(solver, lhs);
-            let rhs_inputs = build_inputs(solver, rhs);
-
-            let lhs_output = get_output(solver, lhs_violation, &lhs.output);
-            let rhs_output = get_output(solver, rhs_violation, &rhs.output);
-
-            EquivResult::Disproved {
-                lhs_inputs,
-                rhs_inputs,
-                lhs_output,
-                rhs_output,
-            }
+            let left = lhs.read_counterexample(solver, lhs_asserts)?;
+            let right = rhs.read_counterexample(solver, rhs_asserts)?;
+            Ok(EquivResult::Disproved {
+                lhs_inputs: left.inputs,
+                rhs_inputs: right.inputs,
+                lhs_output: left.output,
+                rhs_output: right.output,
+            })
         }
-        Response::Unsat => EquivResult::Proved,
-        Response::Unknown => EquivResult::Inconclusive("solver returned unknown".to_string()),
+        Response::Unsat => Ok(EquivResult::Proved),
+        Response::Unknown => Ok(EquivResult::Inconclusive(
+            "solver returned unknown".to_string(),
+        )),
     }
 }
 
@@ -297,6 +287,58 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
+    prove_equiv_partition::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        None,
+        phases,
+    )
+}
+
+/// One bit constraint on the shared inputs of an equivalence partition.
+struct InputBitConstraint<'a> {
+    param: &'a str,
+    index: usize,
+    value: u64,
+}
+
+/// Builds the same query for the unsplit proof and each constrained partition.
+fn prove_equiv_partition<S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'_>,
+    rhs: &ProverFn<'_>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    constraint: Option<InputBitConstraint<'_>>,
+    phases: &PhaseCollector,
+) -> EquivResult {
+    let setup = phases.start_prepare();
     let uf_signatures: HashMap<String, UfSignature> =
         if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
             HashMap::new()
@@ -322,54 +364,43 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
                 Err(e) => return EquivResult::Error(e),
             }
         };
-    let mut solver = S::new(solver_config).unwrap();
-    let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
-    let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
-
-    let mut assert_domains = |inputs: &FnInputs<'_, S::Term>, domains: &Option<ParamDomains>| {
-        if let Some(dom) = domains {
-            for p in inputs.params() {
-                if let Some(allowed) = dom.get(p.param_name()) {
-                    if let Some(sym) = inputs.inputs.get(p.param_name()) {
-                        let mut or_chain: Option<BitVec<S::Term>> = None;
-                        for v in allowed {
-                            let bv = ir_value_to_bv(&mut solver, v, &p.ty).bitvec;
-                            let eq = solver.eq(&sym.bitvec, &bv);
-                            or_chain = Some(match or_chain {
-                                None => eq,
-                                Some(prev) => solver.or(&prev, &eq),
-                            });
-                        }
-                        if let Some(expr) = or_chain {
-                            solver.assert(&expr).unwrap();
-                        }
-                    }
-                }
-            }
+    let mut solver = match S::new(solver_config) {
+        Ok(solver) => solver,
+        Err(error) => {
+            return EquivResult::Error(format!("Failed to create equivalence solver: {error}"));
         }
     };
-
-    assert_domains(&fn_inputs_lhs, &lhs.domains);
-    assert_domains(&fn_inputs_rhs, &rhs.domains);
-
-    let uf_registry = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures);
-
-    let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-    let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
-    let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
-    check_aligned_fn_equiv_internal(
-        &mut solver,
-        &smt_lhs,
-        &smt_rhs,
-        assertion_semantics,
-        assert_label_include,
-    )
+    drop(setup);
+    let mut prove = || {
+        let encoding = phases.start(Phase::SmtEncode);
+        let lhs_inputs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"))?;
+        let rhs_inputs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"))?;
+        assert_param_domains(&mut solver, &lhs_inputs)?;
+        assert_param_domains(&mut solver, &rhs_inputs)?;
+        let ufs = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures)?;
+        let aligned = align_compatible_inputs(&mut solver, &lhs_inputs, &rhs_inputs)?;
+        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &ufs);
+        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &ufs);
+        if let Some(bit) = &constraint {
+            let param = &aligned.lhs.inputs[bit.param].bitvec;
+            let bit_bv = solver.slice(param, bit.index, 1);
+            let value = solver.numerical(1, bit.value);
+            let equal = solver.eq(&bit_bv, &value);
+            solver.assert(&equal)?;
+        }
+        drop(encoding);
+        check_aligned_fn_equiv_internal(
+            &mut solver,
+            &smt_lhs,
+            &smt_rhs,
+            assertion_semantics,
+            assert_label_include,
+            phases,
+        )
+    };
+    prove()
+        .unwrap_or_else(|error| EquivResult::Error(format!("Equivalence solver failed: {error}")))
 }
-
-// Add parallel equivalence-checking strategies that were previously only
-// implemented in the Boolector-specific backend.  These generic versions work
-// with any `Solver` implementation by accepting a factory closure that can
-// create fresh solver instances on demand.
 
 /// Helper: create a variant of `f` that returns only the single output bit at
 /// position `bit`.
@@ -397,9 +428,7 @@ fn make_bit_fn(f: &ir::Fn, bit: usize) -> ir::Fn {
     nf
 }
 
-/// Prove equivalence by splitting on each output bit in parallel.
-/// `solver_factory` must be able to create an independent solver instance for
-/// each spawned thread.
+/// Prove equivalence with an independent solver for each output bit.
 pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     solver_config: &S::Config,
     lhs: &ProverFn<'a>,
@@ -408,91 +437,123 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_output_bits_parallel_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_output_bits_parallel_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
     let width = lhs.fn_ref.ret_ty.bit_count();
-    assert_eq!(
-        width,
-        rhs.fn_ref.ret_ty.bit_count(),
-        "Return widths must match"
-    );
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover
         // because there is no bit to split on.
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_phases::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            phases,
         );
     };
 
-    let found = Arc::new(AtomicBool::new(false));
-    let counterexample: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
-    let next_bit = Arc::new(AtomicUsize::new(0));
+    prove_partitions(width, width.min(num_cpus::get()), |idx| {
+        let prepare = phases.start_prepare();
+        let lf_ir = make_bit_fn(lhs.fn_ref, idx);
+        let rf_ir = make_bit_fn(rhs.fn_ref, idx);
+        let lf = ProverFn {
+            fn_ref: &lf_ir,
+            ..lhs.clone()
+        };
+        let rf = ProverFn {
+            fn_ref: &rf_ir,
+            ..rhs.clone()
+        };
+        drop(prepare);
+        prove_ir_fn_equiv_with_phases::<S>(
+            solver_config,
+            &lf,
+            &rf,
+            assertion_semantics,
+            assert_label_include,
+            allow_flatten,
+            phases,
+        )
+    })
+}
 
-    let thread_cnt = std::cmp::min(width, num_cpus::get());
+/// Tracks unclaimed partitions and the strongest completed proof result.
+struct PartitionProof {
+    remaining: Range<usize>,
+    result_index: usize,
+    result: EquivResult,
+}
 
-    std::thread::scope(|scope| {
-        for _ in 0..thread_cnt {
-            let lhs_cl = lhs.clone();
-            let rhs_cl = rhs.clone();
-            let found_cl = found.clone();
-            let cex_cl = counterexample.clone();
-            let next_cl = next_bit.clone();
-
-            scope.spawn(move || {
-                loop {
-                    if found_cl.load(Ordering::SeqCst) {
-                        break;
-                    }
-                    let idx = next_cl.fetch_add(1, Ordering::SeqCst);
-                    if idx >= width {
-                        break;
-                    }
-
-                    let lf_ir = make_bit_fn(&lhs_cl.fn_ref, idx);
-                    let rf_ir = make_bit_fn(&rhs_cl.fn_ref, idx);
-                    let lf = ProverFn::new(&lf_ir, None)
-                        .with_fixed_implicit_activation(lhs_cl.fixed_implicit_activation)
-                        .with_domains(lhs_cl.domains.clone());
-                    let rf = ProverFn::new(&rf_ir, None)
-                        .with_fixed_implicit_activation(rhs_cl.fixed_implicit_activation)
-                        .with_domains(rhs_cl.domains.clone());
-                    let res = prove_ir_fn_equiv::<S>(
-                        solver_config,
-                        &lf,
-                        &rf,
-                        assertion_semantics.clone(),
-                        assert_label_include,
-                        allow_flatten,
-                    );
-                    match &res {
-                        EquivResult::Proved => {}
-                        EquivResult::Disproved { .. }
-                        | EquivResult::Inconclusive(_)
-                        | EquivResult::ToolchainDisproved(_)
-                        | EquivResult::Error(_) => {
-                            let mut guard = cex_cl.lock().unwrap();
-                            *guard = Some(res.clone());
-                            found_cl.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                    }
-                }
-            });
+impl PartitionProof {
+    fn new(count: usize) -> Self {
+        Self {
+            remaining: 0..count,
+            result_index: usize::MAX,
+            result: EquivResult::Proved,
         }
-    });
-
-    let maybe_cex = {
-        let mut guard = counterexample.lock().unwrap();
-        guard.take()
-    };
-    if let Some(res) = maybe_cex {
-        res
-    } else {
-        EquivResult::Proved
     }
+
+    /// Retains the lowest-index payload for the combined status. Once a
+    /// counterexample arrives, all smaller indices are already in flight or
+    /// done.
+    fn record(&mut self, index: usize, result: EquivResult) {
+        let status = ProofStatus::from(&result);
+        if status == ProofStatus::Disproved {
+            self.remaining = 0..0;
+        }
+        let prior = ProofStatus::from(&self.result);
+        if aggregate_proof_statuses([prior, status]) == status
+            && (prior != status || index < self.result_index)
+        {
+            self.result_index = index;
+            self.result = result;
+        }
+    }
+}
+
+/// Checks the required partitions using up to `workers` independent solvers.
+fn prove_partitions(
+    count: usize,
+    workers: usize,
+    prove: impl Fn(usize) -> EquivResult + Sync,
+) -> EquivResult {
+    let proof = Mutex::new(PartitionProof::new(count));
+    let worker = || loop {
+        let next = proof.lock().unwrap().remaining.next();
+        let Some(index) = next else { break };
+        let result = prove(index);
+        proof.lock().unwrap().record(index, result);
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            scope.spawn(worker);
+        }
+        worker();
+    });
+    proof.into_inner().unwrap().result
 }
 
 /// Prove equivalence by case-splitting on a single input bit value (0 / 1).
@@ -508,73 +569,127 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_split_input_bit_with_phases::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        split_input_index,
+        split_input_bit_index,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        &PhaseCollector::default(),
+    )
+}
+
+pub(super) fn prove_ir_fn_equiv_split_input_bit_with_phases<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    split_input_index: usize,
+    split_input_bit_index: usize,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    phases: &PhaseCollector,
+) -> EquivResult {
+    if let Err(e) = validate_equiv_signatures(lhs, rhs, allow_flatten) {
+        return EquivResult::Error(e);
+    }
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_phases::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            phases,
         );
     }
 
-    assert_eq!(
-        lhs.fn_ref.params.len(),
-        rhs.fn_ref.params.len(),
-        "Parameter count mismatch"
-    );
-    assert!(
-        split_input_index < lhs.fn_ref.params.len(),
-        "split_input_index out of bounds"
-    );
-    assert!(
-        split_input_bit_index < lhs.fn_ref.get_param(split_input_index).ty.bit_count(),
-        "split_input_bit_index out of bounds"
-    );
+    let Some(param) = lhs.params().nth(split_input_index) else {
+        return EquivResult::Error(format!(
+            "LHS split input index {split_input_index} is out of bounds"
+        ));
+    };
+    if split_input_bit_index >= param.ty.bit_count() {
+        return EquivResult::Error(format!(
+            "Split bit {split_input_bit_index} is out of bounds for LHS parameter {} of type {}",
+            param.param_name(),
+            param.ty
+        ));
+    }
 
-    for bit_val in 0..=1u64 {
-        let mut solver = S::new(solver_config).unwrap();
-        // Build aligned SMT representations first so we can assert the
-        // bit-constraint.
-        let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
-        let fn_inputs_rhs = get_fn_inputs(&mut solver, rhs.clone(), Some("rhs"));
-        let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
-        let empty_map: HashMap<String, String> = HashMap::new();
-        let empty_registry = UfRegistry {
-            ufs: HashMap::new(),
-        };
-        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &empty_map, &empty_registry);
-        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &empty_map, &empty_registry);
-
-        // Locate the chosen parameter on the LHS side.
-        let param_name = lhs.fn_ref.get_param(split_input_index).param_name();
-
-        let param_bv = aligned
-            .lhs
-            .inputs
-            .get(param_name)
-            .expect("Parameter BV missing")
-            .bitvec
-            .clone();
-        let bit_bv = solver.slice(&param_bv, split_input_bit_index, 1);
-        let val_bv = solver.numerical(1, bit_val);
-        let eq_bv = solver.eq(&bit_bv, &val_bv);
-        solver.assert(&eq_bv).unwrap();
-
-        let result = check_aligned_fn_equiv_internal(
-            &mut solver,
-            &smt_lhs,
-            &smt_rhs,
+    prove_partitions(2, 1, |value| {
+        prove_equiv_partition::<S>(
+            solver_config,
+            lhs,
+            rhs,
             assertion_semantics,
             assert_label_include,
-        );
-        if !matches!(result, EquivResult::Proved) {
-            return result;
+            Some(InputBitConstraint {
+                param: param.param_name(),
+                index: split_input_bit_index,
+                value: value as u64,
+            }),
+            phases,
+        )
+    })
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::{EquivResult, PartitionProof, prove_partitions};
+    use crate::prover::types::FnOutput;
+    use xlsynth_pir::IrValue;
+
+    fn disproof() -> EquivResult {
+        EquivResult::Disproved {
+            lhs_inputs: vec![],
+            rhs_inputs: vec![],
+            lhs_output: FnOutput {
+                value: IrValue::bool(false),
+                assertion_violation: None,
+            },
+            rhs_output: FnOutput {
+                value: IrValue::bool(true),
+                assertion_violation: None,
+            },
         }
     }
 
-    EquivResult::Proved
+    #[test]
+    fn in_flight_error_cannot_overwrite_a_counterexample() {
+        let mut proof = PartitionProof::new(2);
+        proof.record(1, disproof());
+        proof.record(0, EquivResult::Error("solver failed".into()));
+        assert!(matches!(proof.result, EquivResult::Disproved { .. }));
+        assert_eq!(proof.result_index, 1);
+    }
+
+    #[test]
+    fn lowest_index_error_survives_inconclusive_results() {
+        let mut proof = PartitionProof::new(4);
+        proof.record(2, EquivResult::Error("second error".into()));
+        proof.record(1, EquivResult::Error("first error".into()));
+        proof.record(0, EquivResult::Inconclusive("unknown".into()));
+        proof.record(3, EquivResult::Error("last error".into()));
+        assert!(matches!(proof.result, EquivResult::Error(ref err) if err == "first error"));
+    }
+
+    #[test]
+    fn pending_partition_can_disprove_after_a_solver_failure() {
+        let result = prove_partitions(3, 1, |bit| match bit {
+            0 => EquivResult::Error("solver failed".into()),
+            1 => disproof(),
+            _ => panic!("checked another output bit after finding a counterexample"),
+        });
+        assert!(
+            matches!(result, EquivResult::Disproved { .. }),
+            "{result:?}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -584,10 +699,48 @@ pub mod test_utils {
 
     use xlsynth_pir::IrValue;
 
-    use super::{align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv};
-    use crate::prover::types::{AssertionSemantics, EquivResult, FnInputs, ParamDomains, ProverFn};
+    use super::{align_compatible_inputs, ir_to_smt, prove_ir_fn_equiv};
+    use crate::proof_phases::PhaseCollector;
+    use crate::prover::Prover;
+    use crate::prover::translate::{get_fn_inputs, ir_value_to_bv};
+    use crate::prover::types::{
+        AssertionSemantics, EquivParallelism, EquivResult, FnInputs, ParamDomains, ProverFn,
+    };
     use crate::solver::{BitVec, Solver, test_utils::assert_solver_eq};
     use xlsynth_pir::{ir, ir_eval, ir_parser};
+
+    /// Every partition of this equivalence is required and returns UNSAT.
+    pub fn measured_partition_checks<S: Solver>(config: &S::Config) {
+        let ir = r#"package p
+top fn f(x: bits[3] id=1) -> bits[3] {
+  ret y: bits[3] = identity(x, id=2)
+}"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        let f = ProverFn::new(pkg.get_top_fn().unwrap(), Some(&pkg));
+        for (strategy, expected) in [
+            (EquivParallelism::SingleThreaded, 1),
+            (EquivParallelism::OutputBits, 3),
+            (EquivParallelism::InputBitSplit, 2),
+        ] {
+            let phases = PhaseCollector::default();
+            let result = config.prove_ir_equiv_with_phases(
+                &f,
+                &f,
+                strategy,
+                AssertionSemantics::Ignore,
+                None,
+                false,
+                &phases,
+            );
+            assert_eq!(result, EquivResult::Proved);
+            let measured = phases.snapshot();
+            assert_eq!(measured.solver_check_count, expected);
+            assert!(measured.smt_encode_work_micros.is_some());
+            assert!(measured.solver_check_work_micros.is_some());
+            assert_eq!(measured.counterexample_read_work_micros, None);
+            assert_eq!(measured.external_tool_work_micros, None);
+        }
+    }
 
     pub fn test_invoke_basic<S: Solver>(solver_config: &S::Config) {
         // Package with a callee that doubles its input and two wrappers:
@@ -1111,9 +1264,9 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         // Must not panic.
-        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+        align_compatible_inputs(&mut solver, &fn_inputs, &fn_inputs).unwrap();
     }
 
     pub fn align_non_zero_width_fn_inputs_first_token<S: Solver>(solver_config: &S::Config) {
@@ -1127,9 +1280,9 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         // Must not panic.
-        let _ = align_fn_inputs(&mut solver, &fn_inputs, &fn_inputs, false);
+        align_compatible_inputs(&mut solver, &fn_inputs, &fn_inputs).unwrap();
     }
 
     pub fn assert_smt_fn_eq<S: Solver>(
@@ -1141,7 +1294,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -1614,7 +1767,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = parser.parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let fn_inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -2050,7 +2203,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         // This call should not panic
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2245,7 +2398,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         // Should panic during conversion due to missing default
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
@@ -2267,7 +2420,7 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         let f = ir_parser::Parser::new(ir).parse_fn().unwrap();
         let mut solver = S::new(solver_config).unwrap();
         let prover_fn = ProverFn::new(&f, None);
-        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None);
+        let inputs = get_fn_inputs(&mut solver, prover_fn.clone(), None).unwrap();
         let empty_map: HashMap<String, String> = HashMap::new();
         let empty_registry = super::UfRegistry {
             ufs: HashMap::new(),
@@ -2820,6 +2973,11 @@ macro_rules! test_with_solver {
         mod $mod_ident {
             use super::*;
             use crate::prover::ir_equiv::test_utils;
+
+            #[test]
+            fn measured_partition_checks() {
+                test_utils::measured_partition_checks::<$solver_type>($solver_config);
+            }
 
             #[test]
             fn test_align_zero_width_fn_inputs() {

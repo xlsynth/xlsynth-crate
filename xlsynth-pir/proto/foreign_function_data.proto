@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2023 The XLS Authors
+
+// XLS uses a string for code_template, but its C++ text parser accepts
+// arbitrary bytes. The bytes field has identical text quoting and wire
+// encoding and preserves those templates until a consumer needs UTF-8.
+// Regenerate the descriptor from this directory with protoc 28.0-rc3.
+// protoc --descriptor_set_out=foreign_function_data.bin foreign_function_data.proto
+syntax = "proto2";
+package xlsynth.pir;
+
+message ForeignFunctionDataBytes {
+  optional bytes code_template = 1;
+  optional int32 delay_ps = 2;
+}

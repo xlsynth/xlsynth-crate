@@ -83,7 +83,10 @@ pub fn generate_upstream_formal_random_pir_package(data: &[u8], package_name: &s
 
 /// Generates upstream-compatible PIR for differential interpreter checks.
 pub fn generate_upstream_eval_random_pir_package(data: &[u8], package_name: &str) -> Package {
-    let options = upstream_formal_random_pir_options(32);
+    let options = RandomFnOptions {
+        allow_map: true,
+        ..upstream_formal_random_pir_options(32)
+    };
     let mut entropy = DepletableBytes::new(data);
     let mut generated = generate_package(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
         .expect("fixed standard PIR fuzz options should construct a valid package");

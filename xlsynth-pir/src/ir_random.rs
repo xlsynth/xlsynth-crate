@@ -94,6 +94,7 @@ pub enum RandomOperation {
     Assert,
     Trace,
     Invoke,
+    Map,
     CountedFor,
 }
 
@@ -167,6 +168,7 @@ impl RandomOperation {
             Self::Assert,
             Self::Trace,
             Self::Invoke,
+            Self::Map,
             Self::CountedFor,
         ]
     }
@@ -241,6 +243,7 @@ impl RandomOperation {
             Self::Assert => "assert",
             Self::Trace => "trace",
             Self::Invoke => "invoke",
+            Self::Map => "map",
             Self::CountedFor => "counted_for",
         }
     }
@@ -349,8 +352,12 @@ pub struct RandomFnOptions {
     /// Maximum total number of generated functions, including the top, when
     /// constructing a package.
     pub max_functions: usize,
-    /// Maximum number of invoke nodes emitted in any one generated function.
+    /// Maximum combined number of `invoke` and `map` nodes per generated
+    /// function.
     pub max_invokes_per_function: usize,
+    /// Allows fixed-array maps of generated unary functions, sharing the invoke
+    /// budget.
+    pub allow_map: bool,
     /// Maximum number of `counted_for` nodes emitted in any one generated
     /// function.
     pub max_counted_fors_per_function: usize,
@@ -390,6 +397,7 @@ impl Default for RandomFnOptions {
             array_assumption_mode: ArrayAssumptionMode::Disabled,
             max_functions: 5,
             max_invokes_per_function: 3,
+            allow_map: false,
             max_counted_fors_per_function: 3,
             max_counted_for_trip_count: 8,
             max_counted_for_stride: 8,
@@ -898,6 +906,8 @@ pub fn generate_fn<S: EntropySource>(
 /// Each function body is generated node by node. An ordinary node request
 /// occasionally emits an `invoke` or `counted_for` to a completed function or
 /// recursively creates a new callee with an independently generated signature.
+/// With `allow_map`, a map can call a fresh unary leaf function whose input
+/// and output have the array element type.
 /// Functions under construction are never eligible callees, so the resulting
 /// call graph is acyclic by construction.
 pub fn generate_package<S: EntropySource>(
@@ -1706,6 +1716,18 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
     ) -> Result<usize, GenerationError> {
         let state = generator.begin_budgeted_operation(self.source, budget);
         let mut applicable = generator.applicable_operations();
+        if self.options.allow_map
+            && self
+                .options
+                .enabled_operations
+                .contains(RandomOperation::Map)
+            && self.options.max_params > 0
+            && *invoke_count < self.options.max_invokes_per_function
+            && self.next_function_index < self.options.max_functions
+            && !generator.array_types().is_empty()
+        {
+            applicable.push(RandomOperation::Map);
+        }
         if *invoke_count < self.options.max_invokes_per_function
             && self.can_emit_invoke(generator, nested_iteration_budget)
         {
@@ -1723,6 +1745,36 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
             ));
         }
         let operation = applicable[choose_count(self.source, applicable.len())];
+        if operation == RandomOperation::Map {
+            generator.discard_budgeted_operation();
+            *invoke_count += 1;
+            let ty = generator.choose_array_type(self.source);
+            let array = generator.choose_ref_for_type(self.source, &ty);
+            let element = ty.get_array_element_type();
+            let signature = FunctionSignature {
+                params: vec![element.clone()],
+                return_type: element.clone(),
+            };
+            // A leaf callee keeps map expansion bounded even in packages with
+            // nested loops.
+            let callee = generate_fn_with_signature(
+                self.source,
+                self.options,
+                self.stop_policy,
+                &signature,
+            )?;
+            let name = self.allocate_function_name();
+            self.finish_function(name.clone(), callee.function);
+            generator.add_node(
+                ty,
+                NodePayload::Map {
+                    array,
+                    to_apply: name,
+                },
+                None,
+            );
+            return Ok(1);
+        }
         if operation == RandomOperation::Invoke {
             generator.discard_budgeted_operation();
             *invoke_count += 1;
@@ -2484,7 +2536,7 @@ fn random_block_interface_type<S: EntropySource>(
 }
 
 fn type_is_block_data(ty: &Type) -> bool {
-    !type_contains_token(ty)
+    !ty.contains_token()
 }
 
 fn block_data_types(generator: &FunctionGenerator<'_>, allow_zero_width: bool) -> Vec<Type> {
@@ -2501,15 +2553,6 @@ fn type_leaf_count(ty: &Type) -> usize {
         Type::Token | Type::Bits(_) => 1,
         Type::Tuple(fields) => fields.iter().map(|field| type_leaf_count(field)).sum(),
         Type::Array(array) => type_leaf_count(&array.element_type) * array.element_count,
-    }
-}
-
-fn type_contains_token(ty: &Type) -> bool {
-    match ty {
-        Type::Token => true,
-        Type::Bits(_) => false,
-        Type::Tuple(fields) => fields.iter().any(|field| type_contains_token(field)),
-        Type::Array(array) => type_contains_token(&array.element_type),
     }
 }
 
@@ -2819,7 +2862,7 @@ impl<'a> FunctionGenerator<'a> {
                     && self.nodes_by_type.contains_key(&Type::Token)
                     && self.nodes_by_type.contains_key(&Type::Bits(1))
             }
-            RandomOperation::Invoke | RandomOperation::CountedFor => false,
+            RandomOperation::Invoke | RandomOperation::Map | RandomOperation::CountedFor => false,
         }
     }
 
@@ -3513,7 +3556,7 @@ impl<'a> FunctionGenerator<'a> {
                     None,
                 ))
             }
-            RandomOperation::Invoke | RandomOperation::CountedFor => {
+            RandomOperation::Invoke | RandomOperation::Map | RandomOperation::CountedFor => {
                 unreachable!("package generation emits calls with package-level call-graph state")
             }
         }
@@ -3806,7 +3849,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .keys()
             .filter(|ty| {
-                !type_contains_token(ty)
+                !ty.contains_token()
                     && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
@@ -3822,7 +3865,7 @@ impl<'a> FunctionGenerator<'a> {
     fn array_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| matches!(ty, Type::Array(_)) && !type_contains_token(ty))
+            .filter(|ty| matches!(ty, Type::Array(_)) && !ty.contains_token())
             .cloned()
             .collect()
     }
@@ -4001,7 +4044,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .iter()
             .filter(|(ty, _)| {
-                !type_contains_token(ty)
+                !ty.contains_token()
                     && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
@@ -4013,7 +4056,7 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .keys()
             .filter(|ty| {
-                matches!(ty, Type::Tuple(fields) if !fields.is_empty()) && !type_contains_token(ty)
+                matches!(ty, Type::Tuple(fields) if !fields.is_empty()) && !ty.contains_token()
             })
             .cloned()
             .collect()
@@ -4027,7 +4070,7 @@ impl<'a> FunctionGenerator<'a> {
     fn selectable_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| !type_contains_token(ty))
+            .filter(|ty| !ty.contains_token())
             .cloned()
             .collect()
     }

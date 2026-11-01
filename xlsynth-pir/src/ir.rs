@@ -419,6 +419,11 @@ pub enum NodePayload {
         to_apply: String,
         operands: Vec<NodeRef>,
     },
+    /// Applies a unary function to each element of a fixed-length array.
+    Map {
+        array: NodeRef,
+        to_apply: String,
+    },
     PrioritySel {
         selector: NodeRef,
         cases: Vec<NodeRef>,
@@ -513,6 +518,7 @@ impl NodePayload {
             NodePayload::AfterAll(_) => "after_all",
             NodePayload::Nary(op, _) => nary_op_to_operator(*op),
             NodePayload::Invoke { .. } => "invoke",
+            NodePayload::Map { .. } => "map",
             NodePayload::PrioritySel { .. } => "priority_sel",
             NodePayload::OneHotSel { .. } => "one_hot_sel",
             NodePayload::OneHot { .. } => "one_hot",
@@ -838,6 +844,9 @@ impl NodePayload {
                 parts.push(format!("to_apply={}", to_apply));
                 parts
             }
+            NodePayload::Map { array, to_apply } => {
+                vec![format_operand(*array), format!("to_apply={to_apply}")]
+            }
             NodePayload::PrioritySel {
                 selector,
                 cases,
@@ -1088,16 +1097,95 @@ pub struct FunctionType {
     pub return_type: Type,
 }
 
+/// Reset metadata before the parser resolves the port name to a block input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetAttribute {
+    pub port_name: String,
+    pub asynchronous: bool,
+    pub active_low: bool,
+}
+
+/// The decoded XLS foreign function metadata used for external implementations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignFunctionData {
+    /// XLS permits arbitrary bytes in the template, including non-UTF-8 data.
+    pub code_template: Option<Vec<u8>>,
+    pub delay_ps: Option<i32>,
+}
+
+/// The validated kind of an outer attribute on an IR function or block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OuterAttributeKind {
+    NonSynth,
+    InitiationInterval(i64),
+    FfiProto(ForeignFunctionData),
+    /// The C-unescaped module signature textproto, which may contain non-UTF-8
+    /// bytes.
+    Signature(Vec<u8>),
+    FuzzTest,
+    ChannelPorts,
+    Reset(ResetAttribute),
+    Provenance,
+}
+
+/// A parsed outer attribute with its original IR spelling for lossless
+/// emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OuterAttribute {
+    kind: OuterAttributeKind,
+    source: String,
+}
+
+impl OuterAttribute {
+    pub(crate) fn new(kind: OuterAttributeKind, source: String) -> Self {
+        Self { kind, source }
+    }
+
+    pub fn kind(&self) -> &OuterAttributeKind {
+        &self.kind
+    }
+
+    /// Returns the original attribute text, including its delimiters.
+    pub fn as_str(&self) -> &str {
+        &self.source
+    }
+}
+
+impl std::str::FromStr for OuterAttribute {
+    type Err = ir_parser::ParseError;
+
+    fn from_str(source: &str) -> Result<Self, Self::Err> {
+        ir_parser::parse_outer_attribute(source)
+    }
+}
+
+impl std::fmt::Display for OuterAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The shared operation graph, independent of function or block interfaces.
 #[derive(Debug, Clone)]
 pub struct NodeGraph {
     pub name: String,
     pub nodes: Vec<Node>,
-    pub outer_attrs: Vec<String>,
+    pub outer_attrs: Vec<OuterAttribute>,
     pub inner_attrs: Vec<String>,
 }
 
 impl NodeGraph {
+    /// Returns the last `ffi_proto` declaration, which is the one XLS uses.
+    pub fn ffi_proto(&self) -> Option<&ForeignFunctionData> {
+        self.outer_attrs
+            .iter()
+            .rev()
+            .find_map(|attr| match attr.kind() {
+                OuterAttributeKind::FfiProto(data) => Some(data),
+                _ => None,
+            })
+    }
+
     /// Creates an empty graph with the reserved non-emitted sentinel node.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -1287,7 +1375,7 @@ pub fn emit_fn(func: &Fn, is_top: bool) -> String {
     let mut out = String::new();
     // Outer attributes first
     for attr in &func.outer_attrs {
-        out.push_str(attr);
+        out.push_str(attr.as_str());
         out.push('\n');
     }
 
@@ -1334,7 +1422,7 @@ where
     let mut out = String::new();
     // Outer attributes first.
     for attr in &func.outer_attrs {
-        out.push_str(attr);
+        out.push_str(attr.as_str());
         out.push('\n');
     }
 
@@ -1387,9 +1475,9 @@ where
     for file_id in sorted_file_ids {
         let path = pkg.file_table.id_to_path[file_id].as_str();
         out.push_str(&format!(
-            "file_number {} \"{}\"\n",
+            "file_number {} {}\n",
             file_id,
-            escape_xls_ir_string(path)
+            quote_file_path(path)
         ));
     }
     if !pkg.file_table.id_to_path.is_empty() {
@@ -1424,6 +1512,30 @@ where
     }
 
     out
+}
+
+/// Quotes a source path for both XLS (verbatim) and PIR (legacy C escapes).
+fn quote_file_path(path: &str) -> String {
+    let escaped = escape_xls_ir_string(path);
+    if escaped != path && !path.contains('\0') {
+        let quoted = format!("\"\"\"{path}\"\"\"");
+        let mut bytes = quoted.as_bytes()[3..].iter();
+        // The XLS lexer skips the byte after a backslash and stops at the
+        // first unescaped delimiter, including one spanning the path's end.
+        while let Some(&byte) = bytes.next() {
+            if byte == b'\\' {
+                bytes.next();
+            } else if byte == b'"' && bytes.as_slice().starts_with(b"\"\"") {
+                if bytes.len() == 2 {
+                    return quoted;
+                }
+                break;
+            }
+        }
+    }
+    // Ordinary paths and paths without a verbatim spelling use PIR's
+    // original representation.
+    format!("\"{escaped}\"")
 }
 
 /// Escapes a UTF-8 string for an XLS IR double-quoted string literal.

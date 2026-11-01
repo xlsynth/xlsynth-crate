@@ -3,18 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
+use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
 use xlsynth_pir::ir::{
     Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
     PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
-use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
 };
 
-use crate::stages::{Stage, reconstruct_stages};
+use crate::stages::{ChildTimings, Stage, reconstruct_stages};
 use crate::{BlockCodegenError, BlockCodegenOptions, BlockCodegenOutput, Layout};
 
 /// Holds a packed SystemVerilog value and its expression-inlining information.
@@ -99,6 +99,7 @@ impl Value {
 /// Builds one module while preserving the source block's interfaces and state.
 pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) package: &'a Package,
+    blocks: &'a BTreeMap<&'a str, &'a Block>,
     pub(crate) options: &'a BlockCodegenOptions,
     pub(crate) block: &'a Block,
     pub(crate) file: &'file mut VastFile,
@@ -123,12 +124,24 @@ pub(crate) fn emit_package(
     options: &BlockCodegenOptions,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
-    verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
+    let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
 
     let mut ordered = Vec::new();
     let mut visited = BTreeSet::new();
     let mut visiting = BTreeSet::new();
     collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
+    // Hierarchy and pipeline layout must see the same data dependencies as
+    // emission, including when a function ignores one of its arguments.
+    let expanded = ordered
+        .into_iter()
+        .map(|block| {
+            inliner
+                .inline_block(&block.name)
+                .map_err(BlockCodegenError::Unsupported)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ordered: Vec<&Block> = expanded.iter().map(|block| block.as_ref()).collect();
+    let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
         validate_single_register_writes(block)?;
     }
@@ -145,6 +158,7 @@ pub(crate) fn emit_package(
     }
 
     let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut child_timings = ChildTimings::new();
     for block in ordered {
         let module_name = if block.name == top {
             options.module_name.as_deref().unwrap_or(&block.name)
@@ -153,8 +167,8 @@ pub(crate) fn emit_package(
         };
         validate_external_identifier(module_name, "module")?;
         let module = file.add_module(module_name);
-        let mut emitter = BlockEmitter::new(package, options, block, &mut file, module);
-        emitter.emit()?;
+        let mut emitter = BlockEmitter::new(package, &blocks, options, block, &mut file, module);
+        emitter.emit(&mut child_timings, block.name != top)?;
     }
 
     Ok(BlockCodegenOutput {
@@ -200,10 +214,10 @@ fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
     if block
         .nodes
         .iter()
-        .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
+        .any(|node| matches!(node.payload, NodePayload::Map { .. }))
     {
         return Err(BlockCodegenError::Unsupported(format!(
-            "invoke is not supported in `{}`; inline function calls before block2sv code generation",
+            "map is not supported in `{}`; expand maps before block2sv code generation",
             block.name
         )));
     }
@@ -302,6 +316,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// Creates an emitter before constructing the module's public ports.
     fn new(
         package: &'a Package,
+        blocks: &'a BTreeMap<&'a str, &'a Block>,
         options: &'a BlockCodegenOptions,
         block: &'a Block,
         file: &'file mut VastFile,
@@ -315,6 +330,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
         Self {
             package,
+            blocks,
             options,
             block,
             file,
@@ -335,7 +351,11 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Emits ports, logic, state, output assignments, and child instances.
-    fn emit(&mut self) -> Result<(), BlockCodegenError> {
+    fn emit(
+        &mut self,
+        child_timings: &mut ChildTimings<'a>,
+        summarize_for_parent: bool,
+    ) -> Result<(), BlockCodegenError> {
         validate_supported_nodes(self.block)?;
         self.reserve_fixed_names()?;
         self.emit_ports()?;
@@ -344,7 +364,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         self.emit_priority_helpers(self.block)?;
         match self.options.layout {
             Layout::None => self.emit_flat()?,
-            Layout::Pipeline => self.emit_pipeline()?,
+            Layout::Pipeline => {
+                let stages = reconstruct_stages(self.block, child_timings, summarize_for_parent)?;
+                self.emit_pipeline(&stages)?;
+            }
         }
         self.emit_outputs()?;
         self.emit_instantiations()?;
@@ -489,10 +512,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Emits register-delimited comments without altering sequential behavior.
-    fn emit_pipeline(&mut self) -> Result<(), BlockCodegenError> {
-        let layout = reconstruct_stages(self.package, self.block)?;
+    fn emit_pipeline(&mut self, stages: &[Stage]) -> Result<(), BlockCodegenError> {
         let mut emitted_visible_stage = false;
-        for (stage_index, stage) in layout.stages.iter().enumerate() {
+        for (stage_index, stage) in stages.iter().enumerate() {
             self.current_stage = Some(stage_index);
             let visible =
                 !stage.combinational_nodes.is_empty() || !stage.register_writes.is_empty();
@@ -797,15 +819,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 .collect::<Vec<_>>();
 
             if instance.kind == InstantiationKind::Block {
-                let child = self
-                    .package
-                    .members
-                    .iter()
-                    .find_map(|member| match member {
-                        PackageMember::Block(block) if block.name == instance.block => Some(block),
-                        _ => None,
-                    })
-                    .expect("validated child block exists");
+                let child = self.blocks[instance.block.as_str()];
                 if let Some(clock_name) = child.clock_port_name() {
                     if !connections.iter().any(|(name, _)| name == clock_name) {
                         if let Some(parent_clock) = self
@@ -876,51 +890,27 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                 instance.name, instance.block
             ))
         })?;
-        let attribute = foreign
-            .outer_attrs
-            .iter()
-            .find(|attribute| attribute.contains("code_template:"))
+        let template = foreign
+            .ffi_proto()
+            .and_then(|ffi| ffi.code_template.as_deref())
             .ok_or_else(|| {
                 BlockCodegenError::Unsupported(format!(
                     "external function `{}` has no ffi_proto code_template",
                     foreign.name
                 ))
             })?;
-        let marker = attribute.find("code_template:").expect("template marker");
-        let remainder = attribute[marker + "code_template:".len()..].trim_start();
-        let start = remainder.find('"').ok_or_else(|| {
+        let template = std::str::from_utf8(template).map_err(|error| {
             BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an invalid ffi_proto code_template",
-                foreign.name
+                "external function `{}` has a non-UTF-8 ffi_proto code_template at byte {}",
+                foreign.name,
+                error.valid_up_to()
             ))
         })?;
-        let mut escaped = false;
-        let mut end = None;
-        for (index, character) in remainder[start + 1..].char_indices() {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                end = Some(start + 1 + index);
-                break;
-            }
-        }
-        let end = end.ok_or_else(|| {
-            BlockCodegenError::InvalidBlock(format!(
-                "external function `{}` has an unterminated ffi_proto code_template",
-                foreign.name
-            ))
-        })?;
-        let template = remainder[start + 1..end]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
         let bindings = connections
             .iter()
             .map(|(name, value)| (name.as_str(), self.file.emit_expression(value)))
             .collect::<BTreeMap<_, _>>();
-        let template = substitute_external_template(&template, &instance.name, &bindings)?;
+        let template = substitute_external_template(template, &instance.name, &bindings)?;
         let statement = self.file.make_inline_verilog_statement(template.trim());
         self.file
             .add_member_inline_statement(self.module, statement);

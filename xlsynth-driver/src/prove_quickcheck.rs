@@ -4,43 +4,25 @@
 //! `#[quickcheck]` function in a DSLX file (or a selected one) always
 //! returns `true` for every possible input using an SMT solver.
 
-use crate::common::parse_uf_spec;
-use crate::proofs::obligations::{
-    FileWithHistory, ObligationPayload, ProverObligation, QcObligation,
-};
-use crate::proofs::script::{
-    OblTree, OblTreeConfig, execute_script, read_script_steps_from_json_path,
-    read_script_steps_from_jsonl_path,
-};
+use crate::common::parse_dslx_uf_spec;
+use crate::proofs::report_setup_error;
+use crate::proofs::script::TacticScript;
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
-
+use crate::toolchain_config::{
+    ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path, proof_driver,
+};
 use annotate_snippets::{AnnotationKind, Group, Level, Origin, Renderer, Snippet};
-use serde::Serialize;
-use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use xlsynth_prover::dslx_quickcheck::{DslxQuickCheckRequest, QuickCheckProgress};
+use xlsynth_prover::proof_outcome::ProofSummary;
+use xlsynth_prover::prover::QuickCheckErrorKind;
 use xlsynth_prover::prover::types::{
     BoolPropertyResult, QuickCheckAssertionSemantics, QuickCheckOptions, QuickCheckRunResult,
 };
-use xlsynth_prover::prover::{Prover, SolverChoice, discover_quickcheck_tests};
 
 const SUBCOMMAND: &str = "prove-quickcheck";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QuickCheckTestOutcome {
-    pub name: String,
-    pub time_micros: u128,
-    pub success: bool,
-    pub counterexample: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct QuickCheckOutcome {
-    pub success: bool,
-    pub tests: Vec<QuickCheckTestOutcome>,
-}
 
 /// Flushes the start boundary before the caller begins optimization/solving.
 fn write_quickcheck_started(writer: &mut impl Write, name: &str) -> io::Result<()> {
@@ -92,56 +74,40 @@ fn write_quickcheck_finished(
         } else {
             report = report.element(Origin::path(path));
         }
-        match &run.result {
-            BoolPropertyResult::Disproved { inputs, output } => {
-                let inputs = if run.implicit_token {
-                    inputs.get(2..).unwrap_or_default()
-                } else {
-                    inputs.as_slice()
-                };
-                if !inputs.is_empty() {
-                    report = report.element(
-                        Level::NOTE.message(
-                            inputs
-                                .iter()
-                                .map(|input| format!("{} = {}", input.name, input.value))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
-                    );
-                }
-                let return_value = if run.implicit_token {
-                    output
-                        .value
-                        .get_element(1)
-                        .unwrap_or_else(|_| output.value.clone())
-                } else {
-                    output.value.clone()
-                };
-                let returned = if return_value.bits_equals_u64_value(0) {
-                    "false".into()
-                } else if return_value.bits_equals_u64_value(1) {
-                    "true".into()
-                } else {
-                    return_value.to_string()
-                };
-                report = report.element(Level::NOTE.message(format!("returned {returned}")));
-                if let Some(violation) = &output.assertion_violation {
-                    report = report
-                        .element(
-                            Level::NOTE.message(format!("assertion failed: {}", violation.message)),
-                        )
-                        .element(
-                            Level::NOTE.message(format!("assertion label: {}", violation.label)),
-                        );
-                }
+        if let Some(counterexample) = run.dslx_counterexample() {
+            let inputs = counterexample.inputs;
+            if !inputs.is_empty() {
+                report = report.element(
+                    Level::NOTE.message(
+                        inputs
+                            .iter()
+                            .map(|input| format!("{} = {}", input.name, input.value))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
+                );
             }
-            BoolPropertyResult::Inconclusive(message)
-            | BoolPropertyResult::ToolchainDisproved(message)
-            | BoolPropertyResult::Error(message) => {
-                report = report.element(Level::NOTE.message(message));
+            let return_value = counterexample.return_value;
+            let returned = if return_value.bits_equals_u64_value(0) {
+                "false".into()
+            } else if return_value.bits_equals_u64_value(1) {
+                "true".into()
+            } else {
+                return_value.to_string()
+            };
+            report = report.element(Level::NOTE.message(format!("returned {returned}")));
+            if let Some(violation) = counterexample.assertion_violation {
+                report = report
+                    .element(
+                        Level::NOTE.message(format!("assertion failed: {}", violation.message)),
+                    )
+                    .element(Level::NOTE.message(format!("assertion label: {}", violation.label)));
             }
-            BoolPropertyResult::Proved => unreachable!("success handled above"),
+        } else if let BoolPropertyResult::Inconclusive(message)
+        | BoolPropertyResult::ToolchainDisproved(message)
+        | BoolPropertyResult::Error(message) = &run.result
+        {
+            report = report.element(Level::NOTE.message(message));
         }
         writeln!(writer, "{}", renderer.render(&[report]))?;
         writeln!(writer, "[                FAILED ] {}", run.name)?;
@@ -170,297 +136,110 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
         .get_one::<String>("dslx_input_file")
         .expect("dslx_input_file arg missing");
     let input_path = std::path::Path::new(input_file_str);
+    let start = std::time::Instant::now();
+    let output_json = matches.get_one::<String>("output_json").map(String::as_str);
 
-    // Gather optional assertion-label filter regex.
-    let assert_label_filter = matches.get_one::<String>("assert_label_filter").cloned();
-
-    let test_filter = matches.get_one::<String>("test_filter").map(|s| s.as_str());
-
-    // DSLX search/stdlib path handling.
-    let dslx_stdlib_path = get_dslx_stdlib_path(matches, config);
-    let dslx_stdlib_path_buf = dslx_stdlib_path.as_deref().map(PathBuf::from);
-    let dslx_path = get_dslx_path(matches, config);
-    let additional_search_paths: Vec<PathBuf> = dslx_path
-        .as_deref()
-        .map(|s| {
-            s.split(';')
-                .filter(|p| !p.is_empty())
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let additional_search_paths_refs: Vec<&std::path::Path> = additional_search_paths
-        .iter()
-        .map(|p| p.as_path())
-        .collect();
-
-    // Solver selection (optional). If omitted, use auto-selected prover.
-    let solver_choice_opt: Option<SolverChoice> = matches
-        .get_one::<String>("solver")
-        .map(|s| s.parse().unwrap());
-
-    // Assertion semantics.
-    let assertion_semantics = matches
-        .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
-        .unwrap_or(&QuickCheckAssertionSemantics::Ignore);
-
-    let module_name = input_path.file_stem().unwrap().to_str().unwrap();
-    let uf_map = parse_uf_spec(module_name, matches.get_many::<String>("uf"));
-
-    let tactic_json_path = matches.get_one::<String>("tactic_json").cloned();
-    let tactic_jsonl_path = matches.get_one::<String>("tactic_jsonl").cloned();
-    if tactic_json_path.is_some() && tactic_jsonl_path.is_some() {
-        eprintln!(
-            "[{}] Error: --tactic_json and --tactic_jsonl cannot be used together",
-            SUBCOMMAND
+    let request = DslxQuickCheckRequest {
+        entry_file: input_path.to_path_buf(),
+        dslx_stdlib_path: get_dslx_stdlib_path(matches, config).map(PathBuf::from),
+        dslx_paths: get_dslx_search_paths(matches, config),
+        solver: matches
+            .get_one::<String>("solver")
+            .map(|s| s.parse().unwrap()),
+        test_filter: matches.get_one::<String>("test_filter").cloned(),
+        assertion_semantics: *matches
+            .get_one::<QuickCheckAssertionSemantics>("assertion_semantics")
+            .expect("assertion semantics default"),
+        assert_label_filter: matches.get_one::<String>("assert_label_filter").cloned(),
+        uf_map: parse_dslx_uf_spec(matches.get_many::<String>("uf"))
+            .unwrap_or_else(|message| report_setup_error(start, output_json, SUBCOMMAND, &message)),
+    };
+    if let Some(script) = TacticScript::from_matches(matches) {
+        script.execute_and_exit(
+            start,
+            request.tactic_tree().map_err(|e| e.to_string()),
+            SUBCOMMAND,
+            "QuickCheck obligations proved",
+            output_json,
+            proof_driver(matches),
         );
-        std::process::exit(1);
     }
-    let output_json = matches.get_one::<String>("output_json").cloned();
 
-    if tactic_json_path.is_some() || tactic_jsonl_path.is_some() {
-        let quickcheck_tests = match discover_quickcheck_tests(
-            input_path,
-            dslx_stdlib_path_buf.as_deref(),
-            &additional_search_paths_refs,
-            test_filter,
-        ) {
-            Ok(tests) => tests,
-            Err(e) => {
-                report_cli_error_and_exit(&e, Some(SUBCOMMAND), vec![("file", input_file_str)]);
+    let optimize = *matches.get_one::<bool>("opt").expect("opt default");
+    let tool_path = config
+        .as_ref()
+        .and_then(|c| c.tool_path.as_deref())
+        .map(Path::new);
+    let mut stderr = io::stderr().lock();
+    let renderer = if stderr.is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        Renderer::styled()
+    } else {
+        Renderer::plain()
+    };
+    let result = request.run(QuickCheckOptions { optimize }, tool_path, |event| {
+        let written = match event {
+            QuickCheckProgress::Started(name) => write_quickcheck_started(&mut stderr, name),
+            QuickCheckProgress::Finished { location, run } => {
+                write_quickcheck_finished(&mut stderr, input_path, location, run, &renderer)
             }
         };
-
-        if quickcheck_tests.is_empty() {
+        if let Err(error) = written {
             report_cli_error_and_exit(
-                "No matching quickcheck functions found",
+                &format!("Failed to report QuickCheck proof: {error}"),
                 Some(SUBCOMMAND),
-                vec![("file", input_file_str)],
+                vec![],
             );
         }
-
-        let input_path_buf = input_path.to_path_buf();
-        let qc_uf_map: BTreeMap<String, String> =
-            uf_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let root_qc = QcObligation {
-            file: FileWithHistory::from_path(&input_path_buf),
-            tests: quickcheck_tests.clone(),
-            uf_map: qc_uf_map,
-        };
-
-        let cfg = OblTreeConfig {
-            dslx_stdlib_path: dslx_stdlib_path_buf.clone(),
-            dslx_paths: additional_search_paths.clone(),
-            solver: solver_choice_opt.clone(),
-            timeout_ms: None,
-        };
-
-        let root_obligation = ProverObligation {
-            selector_segment: String::new(),
-            description: None,
-            payload: ObligationPayload::QuickCheck(root_qc),
-        };
-        let mut tree = OblTree::new(root_obligation, cfg);
-
-        let steps = if let Some(path) = tactic_json_path.as_ref() {
-            match read_script_steps_from_json_path(path) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[{}] {}", SUBCOMMAND, e);
-                    std::process::exit(2);
+    });
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(path) = output_json {
+                let mut report = ProofSummary::execution_error(start.elapsed(), error.to_string());
+                if let Some(timing) = &error.timing {
+                    report.timing = timing.clone();
                 }
+                std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
             }
-        } else if let Some(path) = tactic_jsonl_path.as_ref() {
-            match read_script_steps_from_jsonl_path(path) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[{}] {}", SUBCOMMAND, e);
-                    std::process::exit(2);
-                }
-            }
-        } else {
-            unreachable!("tactic script presence already checked");
-        };
-
-        let start = std::time::Instant::now();
-        let report = match execute_script(&mut tree, &steps) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[{}] execute_script error: {}", SUBCOMMAND, e);
-                std::process::exit(2);
-            }
-        };
-        let dur = start.elapsed();
-        let success = report.failed.is_empty() && report.indefinite.is_empty();
-        if let Some(path) = output_json.as_ref() {
-            let json = serde_json::json!({
-                "success": success,
-                "report": report,
-            });
-            std::fs::write(path, serde_json::to_string(&json).unwrap()).unwrap();
-        }
-        if success {
-            println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            println!("[{}] success: QuickCheck obligations proved", SUBCOMMAND);
-            std::process::exit(0);
-        } else {
-            eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-            eprintln!("[{}] failure", SUBCOMMAND);
-            std::process::exit(1);
-        }
-    }
-    let optimize = *matches.get_one::<bool>("opt").expect("opt default");
-    if optimize && !uf_map.is_empty() {
-        report_cli_error_and_exit(
-            "--uf cannot be combined with --opt=true\n  XLS optimization inlines calls and would erase UF boundaries.\n  Use --opt=false to preserve uninterpreted functions.",
-            Some(SUBCOMMAND),
-            vec![],
-        );
-    }
-    // UF semantics: functions mapped to the same <uf_name> are treated as the
-    // same uninterpreted symbol (assumed equivalent) and assertions inside them
-    // are ignored during proving.
-    // Helper: run proofs for a given prover over all quickchecks, using the
-    // trait's DSLX-based entry point which handles implicit-token mangling.
-    fn run_for_prover(
-        prover: &dyn Prover,
-        entry_file: &std::path::Path,
-        semantics: QuickCheckAssertionSemantics,
-        assert_label_filter: Option<&str>,
-        uf_map: &std::collections::HashMap<String, String>,
-        dslx_stdlib_path: Option<&std::path::Path>,
-        additional_search_paths: &[&std::path::Path],
-        test_filter: Option<&str>,
-        options: QuickCheckOptions,
-    ) -> Vec<QuickCheckTestOutcome> {
-        let mut stderr = io::stderr().lock();
-        let renderer = if stderr.is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-            Renderer::styled()
-        } else {
-            Renderer::plain()
-        };
-        let suite = match prover.prepare_dslx_quickchecks(
-            entry_file,
-            dslx_stdlib_path,
-            additional_search_paths,
-            test_filter,
-            semantics,
-            assert_label_filter,
-            uf_map,
-            options,
-        ) {
-            Ok(suite) => suite,
-            Err(error) => {
-                if let Err(write_error) = write_quickcheck_preparation_error(
-                    &mut stderr,
-                    entry_file,
-                    &error.to_string(),
-                    &renderer,
-                ) {
-                    report_cli_error_and_exit(
-                        &format!("Failed to write proof diagnostic: {write_error}"),
-                        Some(SUBCOMMAND),
-                        vec![],
-                    );
-                }
-                std::process::exit(1);
-            }
-        };
-        let mut runs = Vec::with_capacity(suite.properties().len());
-        for property in suite.properties() {
-            let run = (|| -> io::Result<QuickCheckRunResult> {
-                write_quickcheck_started(&mut stderr, &property.name)?;
-                let run = suite.prove(property.id).map_err(io::Error::other)?;
-                write_quickcheck_finished(
-                    &mut stderr,
-                    suite.path(),
-                    property
-                        .name_span
-                        .clone()
-                        .map(|span| (suite.source(), span)),
-                    &run,
-                    &renderer,
-                )?;
-                Ok(run)
-            })()
-            .unwrap_or_else(|error| {
-                report_cli_error_and_exit(
-                    &format!("Failed to report QuickCheck proof: {error}"),
+            match error.kind {
+                QuickCheckErrorKind::OptimizingUninterpretedFunctions => report_cli_error_and_exit(
+                    "--uf cannot be combined with --opt=true\n  XLS optimization inlines calls and would erase UF boundaries.\n  Use --opt=false to preserve uninterpreted functions.",
                     Some(SUBCOMMAND),
                     vec![],
-                )
-            });
-            runs.push(run);
-        }
-
-        runs.into_iter()
-            .map(|run| {
-                let (success, counterexample) = match run.result {
-                    BoolPropertyResult::Proved => (true, None),
-                    BoolPropertyResult::Disproved { inputs, output } => {
-                        let cex_str = format!("inputs: {:?}, output: {:?}", inputs, output);
-                        (false, Some(cex_str))
+                ),
+                QuickCheckErrorKind::NoMatchingProperties => report_cli_error_and_exit(
+                    &error.to_string(),
+                    Some(SUBCOMMAND),
+                    vec![("file", input_file_str)],
+                ),
+                _ => {
+                    if let Err(write_error) = write_quickcheck_preparation_error(
+                        &mut stderr,
+                        input_path,
+                        &error.to_string(),
+                        &renderer,
+                    ) {
+                        report_cli_error_and_exit(
+                            &format!("Failed to write proof diagnostic: {write_error}"),
+                            Some(SUBCOMMAND),
+                            vec![],
+                        );
                     }
-                    BoolPropertyResult::Inconclusive(msg)
-                    | BoolPropertyResult::ToolchainDisproved(msg)
-                    | BoolPropertyResult::Error(msg) => (false, Some(msg)),
-                };
-
-                QuickCheckTestOutcome {
-                    name: run.name,
-                    time_micros: run.duration.as_micros(),
-                    success,
-                    counterexample,
+                    std::process::exit(1);
                 }
-            })
-            .collect()
-    }
-
-    let solver_choice = solver_choice_opt.unwrap_or(SolverChoice::Bitwuzla);
-    let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
-    let prover = xlsynth_prover::prover::prover_for_choice(
-        solver_choice,
-        tool_path.map(std::path::Path::new),
-    );
-    let results: Vec<QuickCheckTestOutcome> = run_for_prover(
-        &*prover,
-        input_path,
-        *assertion_semantics,
-        assert_label_filter.as_deref(),
-        &uf_map,
-        dslx_stdlib_path_buf.as_deref(),
-        &additional_search_paths_refs,
-        test_filter.as_deref(),
-        QuickCheckOptions { optimize },
-    );
-
-    if results.is_empty() {
-        report_cli_error_and_exit(
-            "No matching quickcheck functions found",
-            Some("prove-quickcheck"),
-            vec![("file", input_file_str)],
-        );
-    }
-
-    let all_passed = results.iter().all(|r| r.success);
-
-    let outcome = QuickCheckOutcome {
-        success: all_passed,
-        tests: results,
+            }
+        }
     };
-
-    if let Some(path) = output_json.as_ref() {
+    if let Some(path) = output_json {
         std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
     }
-
-    if all_passed {
+    let status = outcome.conclusion.status;
+    if status.is_proved() {
         println!("Success: All QuickChecks proved");
-        std::process::exit(0);
     } else {
         println!("Failure: Some QuickChecks did not succeed");
-        std::process::exit(1);
     }
+    std::process::exit(status.exit_code());
 }
 
 #[cfg(test)]

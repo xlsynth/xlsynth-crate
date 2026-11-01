@@ -138,7 +138,7 @@ pub fn has_nonlocal_callee_refs(f: &ir::Fn) -> bool {
     f.nodes.iter().any(|n| {
         matches!(
             n.payload,
-            NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
+            NodePayload::Invoke { .. } | NodePayload::Map { .. } | NodePayload::CountedFor { .. }
         )
     })
 }
@@ -407,7 +407,7 @@ pub fn extract_mffc(
         let old_node = &f.nodes[old_idx];
         if matches!(
             old_node.payload,
-            NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
+            NodePayload::Invoke { .. } | NodePayload::Map { .. } | NodePayload::CountedFor { .. }
         ) {
             return Err(ExtractMffcError::UnsupportedNodePayload {
                 old_node_index: old_idx,

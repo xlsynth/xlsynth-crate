@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-pir"
-version = "0.77.0"
+version = "0.78.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "partial XLS IR focused on functions"
@@ -12,8 +12,8 @@ documentation = "https://docs.rs/xlsynth"
 workspace = true
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.77.0" }
-xlsynth-ir-value = { path = "../xlsynth-ir-value", version = "0.77.0" }
+xlsynth = { path = "../xlsynth", version = "0.78.0" }
+xlsynth-ir-value = { path = "../xlsynth-ir-value", version = "0.78.0" }
 env_logger = "0.11"
 log = "0.4"
 clap = { version = "4.5.21", features = ["derive"] }
@@ -25,6 +25,7 @@ bitvec = "1.0.1"
 sha2 = "0.10"
 smallvec = "1.13.2"
 num-bigint = "0.4.6"
+prost-reflect = { version = "0.16.5", features = ["text-format"] }
 
 [dev-dependencies]
 maplit = "1.0.2"

@@ -63,15 +63,13 @@ across packages; the runner checks this before any builds. Corpora and crash
 artifacts stay in each original fuzz package's `corpus/` and `artifacts/`
 directories, separate from the build cache.
 
-CI resolves the existing fuzz packages' lockfiles before restoring cached build
-outputs. Its cache key includes all fuzz dependency graphs, the Rust toolchain,
-Cargo configuration, XLS release, manifests/lockfiles, and the runner script.
-Only build outputs under `target/fuzz-ci` and Cargo's dependency cache persist;
-package lockfiles, corpora and run artifacts are not restored from that cache.
-Nightly remains floating; a compiler update invalidates the compiled-artifact
-cache. Only successful jobs save the cache, so interrupted setup cannot establish
-an incomplete cache entry. Fuzz runs use four workers by
-default. CI retains its `-max_total_time=5` override and
+Each CI run starts with an empty `target/fuzz-ci`. The smoke job pins its Rust
+nightly and restores the most recent sccache archive available for that
+toolchain and runner platform. A fresh checkout can reuse compilations whose
+inputs match even when Cargo sees new source timestamps. Successful `main`
+runs save the updated compiler cache for subsequent pushes and pull requests.
+
+Fuzz runs use four workers by default. CI retains its `-max_total_time=5` override and
 `--sanitizer none`. Without a `--fuzz-bin-args` override, the runner also sets a
 60-second per-input watchdog. These smoke runs do not replace longer fuzz
 campaigns. Optional external-tool targets still require explicit selection and
@@ -140,7 +138,7 @@ reset feedback graphs remain outside the reset-based fuzz oracle.
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including
-helper functions, `invoke`, `counted_for`, `gate`, arbitrary-width multiply,
+helper functions, `invoke`, `map`, `counted_for`, `gate`, arbitrary-width multiply,
 product-pair, token, and event forms (`after_all`, `assert`, `trace`, and
 `cover`), parses and re-emits it through libxls, then reparses with the Rust
 parser and checks IR-level structural equivalence across the PIR roundtrip.
@@ -287,6 +285,15 @@ audit requires proved real-cost acceptance in PIR-only mode for each family and
 priority direction, and checks width/wrap/sentinel/sharing controls. CI's Fuzz Smoke
 Test job requires this standalone audit to pass before the short mutation smoke
 test and retains the coverage counts in its log.
+
+The existing target also runs a bounded scalar-bit proof matrix during
+initialization, before random mutation, with no additional binary or CI step.
+It covers bare count bits, nested reductions/comparisons, independent and dependent
+predicate groups, separately observed slices, retained count/amount users, and
+unsupported multibit/truncated/variable/arbitrary-encode inputs. Exact forced
+rewrite counts prevent a missed match from passing on equivalence alone.
+Widths, both priorities, zero sentinels and wrapping/widening arithmetic vary in
+the byte grammar; startup requires proved acceptance and rejection coverage.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
 
@@ -437,11 +444,9 @@ Primarily tests:
 
 Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated acyclic PIR package, using the shared mixed-vector sampler plus a bounded autocov corpus of interesting typed inputs.
 
-- Generates an upstream-standard random PIR package, including helper functions, `invoke`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
+- Generates an upstream-standard random PIR package, including helper functions, `invoke`, `map`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
 - Draws 32 shared mixed input vectors, seeded from the generated IR, then runs autocov to add semantically interesting tuples. Nullary functions are evaluated on their single empty argument vector without autocov.
-- Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
-
-See inline comments in the target source for early-return rationales.
+- Checks the return values from both the event-reporting PIR evaluator and the memoized value-only evaluator against libxls on every sample, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
 Primarily tests:
 
@@ -676,6 +681,16 @@ Primarily tests:
   cases that appear near structural punctuation so that implicit nets and
   concatenations are tokenized correctly.
 - Top-level annotation tokenization with string-valued fields
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_mapped_netlist_proto_roundtrip.rs
+
+Generates small acyclic mapped GV designs with four input bits. It varies
+the connectivity, cell types, pin order, literal tieoffs, port declarations,
+implicit wires, comments, line endings, and directive layout. After converting
+the GV to protobuf and back, Icarus Verilog elaborates both designs with the same
+cell models and compares every gate output for all 16 binary inputs using
+four-state equality. This catches lost modules, invalid emitted Verilog, and
+wiring changes. The target requires `iverilog` and `vvp`.
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_netlist_resize.rs
 

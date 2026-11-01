@@ -28,6 +28,12 @@ pub struct SequentialPipelineOptions {
     pub reset_active_low: bool,
 }
 
+/// A stitched transition graph and the stage responsible for each register's D.
+pub(crate) struct StitchedGatePipeline {
+    pub design: SequentialGateFn,
+    pub register_stages: Vec<usize>,
+}
+
 /// Stitches combinational gate functions into one sequential pipeline design.
 ///
 /// Every adjacent pair of stages receives one register layer. Stage output bits
@@ -37,7 +43,17 @@ pub fn stitch_gate_fns_into_pipeline(
     stages: &[GateFn],
     options: &SequentialPipelineOptions,
 ) -> Result<SequentialGateFn, String> {
-    stitch_gate_fns_into_pipeline_with_controls(stages, options)?.legalize_register_controls()
+    Ok(stitch_gate_fns_with_layout(stages, options)?.design)
+}
+
+/// Retains the stage boundaries while lowering controls to effective D.
+pub(crate) fn stitch_gate_fns_with_layout(
+    stages: &[GateFn],
+    options: &SequentialPipelineOptions,
+) -> Result<StitchedGatePipeline, String> {
+    let mut stitched = assemble_pipeline(stages, options)?;
+    stitched.design = stitched.design.legalize_register_controls()?;
+    Ok(stitched)
 }
 
 /// Stitches stages while keeping valid enables and synchronous resets explicit.
@@ -48,6 +64,14 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
     stages: &[GateFn],
     options: &SequentialPipelineOptions,
 ) -> Result<SequentialGateFn, String> {
+    Ok(assemble_pipeline(stages, options)?.design)
+}
+
+/// Builds register bindings in stage order, including optional wrapper flops.
+fn assemble_pipeline(
+    stages: &[GateFn],
+    options: &SequentialPipelineOptions,
+) -> Result<StitchedGatePipeline, String> {
     if stages.is_empty() {
         return Err("cannot stitch an empty stage list into a pipeline".to_string());
     }
@@ -66,6 +90,7 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
     let mut external_inputs = Vec::new();
     let mut external_outputs = Vec::new();
     let mut registers = Vec::new();
+    let mut register_stages = Vec::new();
     let mut register_names = BTreeSet::new();
     let mut transition_input_names = BTreeSet::new();
     let mut transition_output_names = stages
@@ -202,6 +227,7 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
                 builder.add_output(output_valid_signal.clone(), AigBitVector::from_bit(valid));
                 external_outputs.push(TransitionOutputId::new(builder.outputs.len() - 1));
             }
+            register_stages.resize(registers.len(), stage_index);
             continue;
         }
 
@@ -234,6 +260,8 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
         );
         input_bindings = layer.data_values;
         current_valid = layer.valid;
+        // The first stage also checks the optional wrapper input flops.
+        register_stages.resize(registers.len(), stage_index);
     }
 
     let clock = if registers.is_empty() {
@@ -250,7 +278,10 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
         registers,
     )?;
     result.validate()?;
-    Ok(result)
+    Ok(StitchedGatePipeline {
+        design: result,
+        register_stages,
+    })
 }
 
 struct RegisterLayer {

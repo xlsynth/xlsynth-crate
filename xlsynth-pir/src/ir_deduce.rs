@@ -146,10 +146,10 @@ where
             Ok(Some(Type::Tuple(elems)))
         }
         NodePayload::Array(_) => {
-            if operand_types.is_empty() {
-                return Err(DeduceError::ArrayEmpty);
-            }
-            let first = operand_types.first().unwrap();
+            let Some(first) = operand_types.first() else {
+                // An empty array's declared type supplies its element type.
+                return Ok(None);
+            };
             for t in operand_types.iter() {
                 if t != first {
                     return Err(DeduceError::ArrayElementsNotSameType);
@@ -548,8 +548,13 @@ where
             Ok(Some(init_ty.clone()))
         }
         NodePayload::Cover { .. } => Ok(Some(Type::nil())),
-        // We can deduce invoke result types if the caller provides a callee
-        // return type resolver.
+        // Call result types depend on the callee signature.
+        NodePayload::Map { to_apply, .. } => {
+            let [Type::Array(array)] = operand_types else {
+                return Err(DeduceError::ExpectedArray("map"));
+            };
+            Ok(resolve_callee_ret_ty(to_apply).map(|ty| Type::new_array(ty, array.element_count)))
+        }
         NodePayload::Invoke { to_apply, .. } => {
             if let Some(ret_ty) = resolve_callee_ret_ty(to_apply.as_str()) {
                 Ok(Some(ret_ty))

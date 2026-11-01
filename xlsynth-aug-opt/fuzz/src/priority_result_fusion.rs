@@ -16,7 +16,9 @@ use xlsynth_prover::prover::types::EquivResult;
 use xlsynth_prover::prover::{SolverChoice, prover_for_choice_with_limits};
 
 use crate::fuzz_solver_limits;
-use crate::priority_result_fusion_sample::{CASE_NAMES, SCALAR_DIRECTIONS, generate_sample};
+use crate::priority_result_fusion_sample::{
+    CASE_NAMES, SCALAR_DIRECTIONS, generate_sample, scalar_bit_validation_inputs,
+};
 
 /// Distinguishes reached shapes, accepted rewrites, and completed proofs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -75,7 +77,8 @@ impl CoverageReport {
                 .cases
                 .get(*name)
                 .ok_or_else(|| format!("missing case {name}"))?;
-            if matches!(case, 4..=9 | 13 | 15 | 25 | 26 | 30..=33 | 36) {
+            if matches!(case, 4..=9 | 13 | 15 | 25 | 26 | 30..=33 | 36 | 42 | 43 | 45 | 46 | 48 | 49)
+            {
                 if coverage.rejection_checks == 0 || coverage.proofs == 0 {
                     return Err(format!(
                         "case {name} lacks a checked rejection and completed proof"
@@ -217,6 +220,37 @@ impl CoverageReport {
     }
 }
 
+/// Runs scalar-bit fire/decline and proof checks before random mutation starts.
+pub fn scalar_bit_initialization() -> Result<CoverageReport, String> {
+    let mut report = CoverageReport::default();
+    for input in scalar_bit_validation_inputs() {
+        report.accumulate(
+            check_input(&input).map_err(|error| format!("startup bytes={input:02x?}: {error}"))?,
+        );
+    }
+    for case in 38..CASE_NAMES.len() {
+        let name = CASE_NAMES[case];
+        let counts = report
+            .cases
+            .get(name)
+            .ok_or_else(|| format!("missing {name}"))?;
+        if matches!(case, 42 | 43 | 45 | 46 | 48 | 49) {
+            if counts.rejection_checks == 0 || counts.proofs == 0 {
+                return Err(format!("{name} lacks a proved rejection"));
+            }
+        } else if counts.forced_proofs == 0 || counts.real_proofs == 0 {
+            return Err(format!("{name} lacks forced and real-cost proofs"));
+        }
+    }
+    if report.total.inconclusive != 0 {
+        return Err(format!(
+            "inconclusive startup proofs: {}",
+            report.total.inconclusive
+        ));
+    }
+    Ok(report)
+}
+
 /// Uses direct PIR-to-SMT translation, independently of the mapper's costs.
 fn prove(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
     prover_for_choice_with_limits(SolverChoice::Bitwuzla, None, fuzz_solver_limits())
@@ -295,6 +329,14 @@ pub fn check_input(data: &[u8]) -> Result<CoverageReport, String> {
             delay: 100.0,
         })
     });
+    if let Some(expected) = sample.expected_fusions {
+        if fusions != expected {
+            return Err(format!(
+                "{} expected {expected} matched roots, got {fusions}\\n{original}",
+                CASE_NAMES[sample.case]
+            ));
+        }
+    }
     if sample.must_reject && fusions != 0 {
         return Err(format!(
             "{} unexpectedly fused\n{original}",
@@ -403,6 +445,16 @@ mod tests {
     use super::*;
     use crate::priority_result_fusion_sample::validation_inputs;
     use xlsynth_pir::ir::{NodePayload, Type};
+
+    #[test]
+    fn scalar_bit_startup_exercises_acceptance_rejection_and_overlap() {
+        let coverage = scalar_bit_initialization().unwrap();
+        assert!(coverage.features["scalar_bit_overlap"].forced_proofs > 0);
+        assert!(coverage.features["scalar_bit_dependent"].forced_proofs > 0);
+        for direction in ["scalar_bit_msb", "scalar_bit_lsb"] {
+            assert!(coverage.features[direction].real_proofs > 0);
+        }
+    }
 
     #[test]
     fn deterministic_corpus_exercises_required_semantic_cases() {

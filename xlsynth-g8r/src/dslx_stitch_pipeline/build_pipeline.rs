@@ -2,49 +2,28 @@
 
 use std::collections::HashMap;
 
-use xlsynth_vast::{
-    Expr, LiteralFormat, LogicRef, ModulePortDirection, VastDataType, VastFile, VastModule,
+use xlsynth_vast::{Expr, LiteralFormat, LogicRef, VastDataType, VastFile, VastModule};
+
+use super::layout::PipelineLayout;
+use super::names::{
+    flop_reg_name, slice_wire_name, stage_instance_name, stage_output_wire_name, valid_reg_name,
 };
 
-/// Describes a stage port independently of the VAST file that emitted it.
-#[derive(Clone, Debug)]
-pub(crate) struct StagePortInterface {
-    pub(crate) name: String,
-    pub(crate) direction: ModulePortDirection,
-    pub(crate) width: i64,
-}
-
-/// Owns the interface information needed to instantiate a pipeline stage.
+/// Identifies the combinational module and result port for a pipeline stage.
 #[derive(Clone, Debug)]
 pub(crate) struct StageModuleInterface {
     pub(crate) name: String,
-    pub(crate) ports: Vec<StagePortInterface>,
+    pub(crate) output_port: String,
 }
 
-impl StageModuleInterface {
-    /// Returns input ports in their declaration order.
-    fn input_ports(&self) -> impl Iterator<Item = &StagePortInterface> {
-        self.ports
-            .iter()
-            .filter(|port| port.direction == ModulePortDirection::Input)
-    }
-
-    /// Returns output ports in their declaration order.
-    fn output_ports(&self) -> impl Iterator<Item = &StagePortInterface> {
-        self.ports
-            .iter()
-            .filter(|port| port.direction == ModulePortDirection::Output)
-    }
-}
-
+/// Describes the packed Verilog wrapper and the modules it instantiates.
 pub struct PipelineConfig<'a> {
     pub top_module_name: String,
     pub clk_port_name: String,
 
     pub stage_modules: Vec<StageModuleInterface>,
 
-    pub flop_inputs: bool,
-    pub flop_outputs: bool,
+    pub layout: &'a PipelineLayout,
 
     pub input_valid_signal: Option<&'a str>,
     pub output_valid_signal: Option<&'a str>,
@@ -52,26 +31,7 @@ pub struct PipelineConfig<'a> {
     pub reset_active_low: bool,
 }
 
-pub(crate) fn stage_instance_name(stage_index: usize) -> String {
-    format!("stage_{stage_index}")
-}
-
-pub(crate) fn stage_output_wire_name(stage_index: usize) -> String {
-    format!("stage_{stage_index}_out_comb")
-}
-
-pub(crate) fn flop_reg_name(pipe_stage_number: u32, name: &str) -> String {
-    format!("p{pipe_stage_number}_{name}")
-}
-
-pub(crate) fn slice_wire_name(pipe_stage_number: u32, dest_name: &str) -> String {
-    format!("p{pipe_stage_number}_{dest_name}_comb")
-}
-
-pub(crate) fn valid_reg_name(pipe_stage_number: u32) -> String {
-    format!("p{pipe_stage_number}_valid")
-}
-
+/// Tracks the current data and valid signals on either side of a flop layer.
 struct NetBundle {
     name_to_ref: HashMap<String, (LogicRef, VastDataType)>,
     valid_signal: Option<LogicRef>,
@@ -93,21 +53,6 @@ impl std::fmt::Debug for NetBundle {
     }
 }
 
-fn to_net_bundle(
-    names: &[String],
-    ports: &[(LogicRef, VastDataType)],
-    valid_signal: Option<LogicRef>,
-) -> NetBundle {
-    let mut name_to_ref = HashMap::new();
-    for (name, (logic_ref, data_type)) in names.iter().zip(ports) {
-        name_to_ref.insert(name.to_string(), (*logic_ref, *data_type));
-    }
-    NetBundle {
-        name_to_ref,
-        valid_signal,
-    }
-}
-
 /// Creates a layer of flops using the input combinational signals given in
 /// `current_inputs`. Returns the new `current_inputs` bundle.
 fn make_flop_layer(
@@ -116,7 +61,7 @@ fn make_flop_layer(
     posedge_clk: &Expr,
     bit_type: &VastDataType,
     current_inputs: NetBundle,
-    next_pipe_stage_number: u32,
+    layer: usize,
     reset_signal: Option<LogicRef>,
     reset_active_low: bool,
 ) -> NetBundle {
@@ -140,11 +85,7 @@ fn make_flop_layer(
 
     for (name, (logic_ref, data_type)) in &entries {
         let reg = file
-            .add_reg(
-                outer_module,
-                &flop_reg_name(next_pipe_stage_number, name),
-                data_type,
-            )
+            .add_reg(outer_module, &flop_reg_name(layer, name), data_type)
             .unwrap();
         new_name_to_ref.insert(name.clone(), (reg, *data_type));
         assign_info.push((reg, *logic_ref, IsValidReg::No));
@@ -153,11 +94,7 @@ fn make_flop_layer(
     // Handle valid signal register declaration (if any) before always.
     let flopped_valid_signal = if let Some(valid_signal) = current_inputs.valid_signal {
         let reg = file
-            .add_reg(
-                outer_module,
-                &valid_reg_name(next_pipe_stage_number),
-                bit_type,
-            )
+            .add_reg(outer_module, &valid_reg_name(layer), bit_type)
             .unwrap();
         assign_info.push((reg, valid_signal, IsValidReg::Yes));
         Some(reg)
@@ -218,21 +155,14 @@ fn create_outer_io_ports(
     file: &mut VastFile,
     outer_module: VastModule,
     config: &PipelineConfig,
-) -> (NetBundle, Vec<(LogicRef, VastDataType)>) {
+) -> (NetBundle, LogicRef) {
     log::debug!("Creating outer I/O ports");
 
-    // Create I/O ports based on the stage modules.
-    // Start with inputs from the first stage module.
-    let stage_first_module = &config.stage_modules[0];
-    let mut outer_module_inputs: Vec<(LogicRef, VastDataType)> = Vec::new();
-    let outer_module_input_names = stage_first_module
-        .input_ports()
-        .map(|port| port.name.clone())
-        .collect::<Vec<_>>();
-    for port in stage_first_module.input_ports() {
-        let vast_type = file.make_bit_vector_type(port.width, false);
+    let mut name_to_ref = HashMap::new();
+    for port in &config.layout.stage_inputs[0].ports {
+        let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false);
         let outer_module_input = file.add_input(outer_module, &port.name, &vast_type);
-        outer_module_inputs.push((outer_module_input, vast_type));
+        name_to_ref.insert(port.name.clone(), (outer_module_input, vast_type));
     }
 
     // A LogicRef that represents the input valid signal coming combinationally
@@ -247,27 +177,19 @@ fn create_outer_io_ports(
             None
         };
 
-    // Now do outputs on the outer module, which come from the last stage
-    // module.
-    let stage_last_module = config.stage_modules.last().unwrap();
-    let mut outer_module_outputs: Vec<(LogicRef, VastDataType)> = Vec::new();
-    for port in stage_last_module.output_ports() {
-        let vast_type = file.make_bit_vector_type(port.width, false);
-        let outer_module_output = file.add_output(outer_module, &port.name, &vast_type);
-        outer_module_outputs.push((outer_module_output, vast_type));
-    }
-
-    // The bundle we give back just has the input-side of the equation so we can
-    // feed it to the first stage.
-    let net_bundle = to_net_bundle(
-        &outer_module_input_names,
-        &outer_module_inputs,
-        outer_module_input_valid_signal,
-    );
-
-    (net_bundle, outer_module_outputs)
+    let output = &config.layout.output.ports[0];
+    let vast_type = file.make_bit_vector_type(output.bits.len() as i64, false);
+    let output_port = file.add_output(outer_module, &output.name, &vast_type);
+    (
+        NetBundle {
+            name_to_ref,
+            valid_signal: outer_module_input_valid_signal,
+        },
+        output_port,
+    )
 }
 
+/// Emits the pipeline wrapper and its stage instances from the resolved layout.
 pub fn build_pipeline(
     file: &mut VastFile,
     config: &PipelineConfig,
@@ -283,30 +205,27 @@ pub fn build_pipeline(
     let bit_type = file.make_bit_vector_type(1, false);
     let clk_port = file.add_input(outer_module, &config.clk_port_name, &bit_type);
     // Optional synchronous reset input comes immediately after clk.
-    let _reset_port = if let Some(ref rst_name) = config.reset_signal {
+    let reset_port = if let Some(ref rst_name) = config.reset_signal {
         Some(file.add_input(outer_module, rst_name, &bit_type))
     } else {
         None
     };
     let posedge_clk = file.make_pos_edge(&clk_port.to_expr());
 
-    let (mut current_inputs, outer_module_outputs) =
-        create_outer_io_ports(file, outer_module, config);
+    let (mut current_inputs, output_port) = create_outer_io_ports(file, outer_module, config);
     log::debug!("starting with current_inputs: {:?}", current_inputs);
 
-    let mut next_pipe_stage_number = 0;
-    if config.flop_inputs {
+    if let Some(layer) = config.layout.stage_inputs[0].register_layer {
         current_inputs = make_flop_layer(
             file,
             outer_module,
             &posedge_clk,
             &bit_type,
             current_inputs,
-            next_pipe_stage_number,
-            _reset_port,
+            layer,
+            reset_port,
             config.reset_active_low,
         );
-        next_pipe_stage_number += 1;
     }
 
     for (i, stage_module) in config.stage_modules.iter().enumerate() {
@@ -317,95 +236,22 @@ pub fn build_pipeline(
             current_inputs
         );
 
-        let stage_output_ports = stage_module.output_ports().collect::<Vec<_>>();
-        assert_eq!(
-            stage_output_ports.len(),
-            1,
-            "Stage module must have exactly one output port"
-        );
-        let stage_output_port = stage_output_ports[0];
+        let destination = config.layout.after_stage(i);
         let stage_output_name = stage_output_wire_name(i);
-        let stage_output_width = stage_output_port.width;
-        let stage_output_type = file.make_bit_vector_type(stage_output_width, false);
+        let stage_output_type = file.make_bit_vector_type(destination.width() as i64, false);
         let stage_output_wire = file.add_wire(outer_module, &stage_output_name, &stage_output_type);
 
-        // -- "Smart" slicing: the stage has exactly one output port (because
-        // that's how XLS does combinational module generation today),
-        // but the next stage (or the final outer-module connection) may
-        // require multiple signals wired up to input ports: create
-        // slice wires for each required destination.
-
-        // Determine the required destinations to potentially slice the output
-        // wire into. This is a vector of (next_stage_name, start,
-        // limit)
-        let mut dest_ports: Vec<(String, i64, i64)> = Vec::new();
-        let mut dest_bit_index: i64 = 0;
-
-        let last_stage = i + 1 == config.stage_modules.len();
-        if !last_stage {
-            // Not the last stage – look at next stage's input ports.
-            for p in config.stage_modules[i + 1].input_ports() {
-                dest_ports.push((p.name.clone(), dest_bit_index, dest_bit_index + p.width));
-                dest_bit_index += p.width;
-            }
-        } else {
-            // Last stage – slice according to outer-module outputs.
-            for (logic_ref, dt) in &outer_module_outputs {
-                let width = file.type_width_as_int64(*dt).unwrap();
-                dest_ports.push((
-                    file.logic_ref_name(*logic_ref),
-                    dest_bit_index,
-                    dest_bit_index + width,
-                ));
-                dest_bit_index += width;
-            }
-        }
-
-        log::debug!(
-            "determined required destinations; dest_ports: {:?}",
-            dest_ports
-        );
-
         // Instantiate the stage module with the current inputs.
-        let mut stage_port_names: Vec<String> = Vec::new();
-        let mut stage_expressions: Vec<Option<Expr>> = Vec::new();
-        for port in &stage_module.ports {
-            match port.direction {
-                ModulePortDirection::Input => {
-                    stage_port_names.push(port.name.clone());
-                    let (input_logic_ref, _) = current_inputs
-                        .name_to_ref
-                        .get(&port.name)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "module {} input port {} not found in current_inputs",
-                                stage_module.name, port.name
-                            )
-                        });
-                    let input_expr = input_logic_ref.to_expr();
-                    stage_expressions.push(Some(input_expr));
-                }
-                ModulePortDirection::Output => {
-                    stage_port_names.push(port.name.clone());
-                    stage_expressions.push(Some(stage_output_wire.to_expr()));
-                }
-                ModulePortDirection::InOut => {
-                    panic!(
-                        "module {} has unsupported inout stage port {}",
-                        stage_module.name, port.name
-                    );
-                }
-            }
+        let mut stage_port_names = Vec::new();
+        let mut stage_expressions = Vec::new();
+        for port in &config.layout.stage_inputs[i].ports {
+            stage_port_names.push(port.name.as_str());
+            let (input, _) = current_inputs.name_to_ref[&port.name];
+            stage_expressions.push(input.to_expr());
         }
-
-        let stage_port_name_refs = stage_port_names
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>();
-        let stage_expressions = stage_expressions
-            .iter()
-            .map(|expr| expr.as_ref())
-            .collect::<Vec<_>>();
+        stage_port_names.push(&stage_module.output_port);
+        stage_expressions.push(stage_output_wire.to_expr());
+        let stage_expression_refs = stage_expressions.iter().map(Some).collect::<Vec<_>>();
 
         // Instantiate the combinational stage module.
         let instantiation = file.make_instantiation(
@@ -413,103 +259,60 @@ pub fn build_pipeline(
             &stage_instance_name(i),
             &[],
             &[],
-            &stage_port_name_refs,
-            &stage_expressions,
+            &stage_port_names,
+            &stage_expression_refs,
         );
         file.add_member_instantiation(outer_module, instantiation);
 
         // If the next stage wants more than one signal (i.e. it has arity > 1),
         // we break out the signals by slicing here.
-        current_inputs = if dest_ports.len() > 1 {
-            let total_bits: i64 = dest_bit_index;
-            assert_eq!(
-                stage_output_width, total_bits,
-                "Bit width mismatch between sole output ({stage_output_width}) and concatenated destination ports ({}).",
-                total_bits
-            );
-
+        current_inputs.name_to_ref = if destination.ports.len() > 1 {
+            let layer = destination
+                .register_layer
+                .expect("interstage register layer");
             let mut name_to_ref = HashMap::new();
-            for (dest_name, start, limit) in dest_ports {
-                let vast_type = file.make_bit_vector_type(limit - start, false);
-                let wire_name = slice_wire_name(next_pipe_stage_number, &dest_name);
+            for port in &destination.ports {
+                let vast_type = file.make_bit_vector_type(port.bits.len() as i64, false);
+                let wire_name = slice_wire_name(layer, &port.name);
                 let wire = file.add_wire(outer_module, &wire_name, &vast_type);
                 let slice_expr = file
-                    .make_slice(&stage_output_wire.to_indexable_expr(), limit - 1, start)
+                    .make_slice(
+                        &stage_output_wire.to_indexable_expr(),
+                        (port.bits.end - 1) as i64,
+                        port.bits.start as i64,
+                    )
                     .to_expr();
                 let assign = file.make_continuous_assignment(&wire.to_expr(), &slice_expr);
                 file.add_member_continuous_assignment(outer_module, assign);
-                name_to_ref.insert(dest_name.clone(), (wire, vast_type));
+                name_to_ref.insert(port.name.clone(), (wire, vast_type));
             }
-
-            NetBundle {
-                name_to_ref,
-                valid_signal: current_inputs.valid_signal,
-            }
+            name_to_ref
         } else {
-            let name_to_ref = HashMap::from([(
-                dest_ports[0].0.clone(),
+            HashMap::from([(
+                destination.ports[0].name.clone(),
                 (stage_output_wire, stage_output_type),
-            )]);
-            NetBundle {
-                name_to_ref,
-                valid_signal: current_inputs.valid_signal,
-            }
+            )])
         };
 
         log::debug!("current_inputs now: {:?}", current_inputs);
 
-        // If this is not the last stage, then we need to make a intra-pipeline
-        // flop layer.
-        if !last_stage {
+        if let Some(layer) = destination.register_layer {
             current_inputs = make_flop_layer(
                 file,
                 outer_module,
                 &posedge_clk,
                 &bit_type,
                 current_inputs,
-                next_pipe_stage_number,
-                _reset_port,
+                layer,
+                reset_port,
                 config.reset_active_low,
             );
-            next_pipe_stage_number += 1;
         }
     }
 
-    if config.flop_outputs {
-        current_inputs = make_flop_layer(
-            file,
-            outer_module,
-            &posedge_clk,
-            &bit_type,
-            current_inputs,
-            next_pipe_stage_number,
-            _reset_port,
-            config.reset_active_low,
-        );
-        next_pipe_stage_number += 1;
-    }
-
-    assert_eq!(
-        next_pipe_stage_number as usize,
-        (config.stage_modules.len() - 1)
-            + config.flop_inputs as usize
-            + config.flop_outputs as usize
-    );
-
-    // Now we need to wire up the output ports for the outer module using the
-    // `current_inputs` bundle.
-    for (logic_ref, _data_type) in outer_module_outputs.iter() {
-        // Make an assignment to this output from the corresponding
-        // `current_inputs` value.
-        let current_input = &current_inputs
-            .name_to_ref
-            .get(&file.logic_ref_name(*logic_ref))
-            .unwrap()
-            .0;
-        let assignment =
-            file.make_continuous_assignment(&logic_ref.to_expr(), &current_input.to_expr());
-        file.add_member_continuous_assignment(outer_module, assignment);
-    }
+    let (result, _) = current_inputs.name_to_ref[&config.layout.output.ports[0].name];
+    let assignment = file.make_continuous_assignment(&output_port.to_expr(), &result.to_expr());
+    file.add_member_continuous_assignment(outer_module, assignment);
 
     // Wire up the output valid signal if one is present on the module.
     if let Some(ref output_valid_signal_name) = config.output_valid_signal {
@@ -534,8 +337,14 @@ mod tests {
 
     use super::*;
 
-    /// Adds a reference stage and snapshots its file-owned interface metadata.
-    fn add_add32_module(file: &mut VastFile) -> StageModuleInterface {
+    /// Builds the single-stage adder used by the wrapper emission goldens.
+    fn build_add32_pipeline(
+        flop_inputs: bool,
+        flop_outputs: bool,
+        has_valid: bool,
+    ) -> Result<String, xlsynth::XlsynthError> {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut file = VastFile::new(VastFileType::Verilog);
         let module = file.add_module("add32");
         let u32 = file.make_bit_vector_type(32, false);
         let a = file.add_input(module, "a", &u32);
@@ -545,38 +354,34 @@ mod tests {
         let assignment = file.make_continuous_assignment(&c.to_expr(), &add);
         file.add_member_continuous_assignment(module, assignment);
 
-        StageModuleInterface {
+        let stage = StageModuleInterface {
             name: file.module_name(module),
-            ports: file
-                .module_ports(module)
-                .into_iter()
-                .map(|port| StagePortInterface {
-                    name: file.port_name(port),
-                    direction: file.port_direction(port),
-                    width: file.port_width(port),
-                })
-                .collect(),
-        }
+            output_port: "c".into(),
+        };
+        let layout = PipelineLayout::new(
+            vec![vec![("a".into(), 32), ("b".into(), 32)]],
+            ("c".into(), 32),
+            flop_inputs,
+            flop_outputs,
+            has_valid,
+        )?;
+        let config = PipelineConfig {
+            top_module_name: "top".to_string(),
+            clk_port_name: "clk".to_string(),
+            stage_modules: vec![stage],
+            layout: &layout,
+            input_valid_signal: has_valid.then_some("in_valid"),
+            output_valid_signal: has_valid.then_some("out_valid"),
+            reset_signal: has_valid.then_some("rst"),
+            reset_active_low: false,
+        };
+        build_pipeline(&mut file, &config)
     }
 
     /// Builds a pipeline that is one stage with input/output IO flops.
     #[test]
     fn test_build_pipeline() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut file = VastFile::new(VastFileType::Verilog);
-        let add32 = add_add32_module(&mut file);
-        let config = PipelineConfig {
-            top_module_name: "top".to_string(),
-            clk_port_name: "clk".to_string(),
-            stage_modules: vec![add32],
-            flop_inputs: true,
-            flop_outputs: true,
-            input_valid_signal: None,
-            output_valid_signal: None,
-            reset_signal: None,
-            reset_active_low: false,
-        };
-        let pipeline = build_pipeline(&mut file, &config).unwrap();
+        let pipeline = build_add32_pipeline(true, true, false).unwrap();
 
         compare_golden_sv(&pipeline, "tests/goldens/build_pipeline_simple.golden.v");
     }
@@ -585,21 +390,7 @@ mod tests {
     /// input/output valid signals.
     #[test]
     fn test_build_pipeline_with_valid_signals() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut file = VastFile::new(VastFileType::Verilog);
-        let add32 = add_add32_module(&mut file);
-        let config = PipelineConfig {
-            top_module_name: "top".to_string(),
-            clk_port_name: "clk".to_string(),
-            stage_modules: vec![add32],
-            flop_inputs: true,
-            flop_outputs: true,
-            input_valid_signal: Some("in_valid"),
-            output_valid_signal: Some("out_valid"),
-            reset_signal: Some("rst"),
-            reset_active_low: false,
-        };
-        let pipeline = build_pipeline(&mut file, &config).unwrap();
+        let pipeline = build_add32_pipeline(true, true, true).unwrap();
 
         compare_golden_sv(
             &pipeline,
@@ -607,25 +398,11 @@ mod tests {
         );
     }
 
-    /// Builds a pipline that has only input flops no output flops and input /
+    /// Builds a pipeline that has only input flops and input /
     /// output valid signals.
     #[test]
     fn test_build_pipeline_with_valid_signals_and_no_output_flops() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut file = VastFile::new(VastFileType::Verilog);
-        let add32 = add_add32_module(&mut file);
-        let config = PipelineConfig {
-            top_module_name: "top".to_string(),
-            clk_port_name: "clk".to_string(),
-            stage_modules: vec![add32],
-            flop_inputs: true,
-            flop_outputs: false,
-            input_valid_signal: Some("in_valid"),
-            output_valid_signal: Some("out_valid"),
-            reset_signal: Some("rst"),
-            reset_active_low: false,
-        };
-        let pipeline = build_pipeline(&mut file, &config).unwrap();
+        let pipeline = build_add32_pipeline(true, false, true).unwrap();
 
         compare_golden_sv(
             &pipeline,
@@ -637,21 +414,7 @@ mod tests {
     /// / output valid signals.
     #[test]
     fn test_build_pipeline_with_valid_signals_and_no_input_flops() {
-        let _ = env_logger::builder().is_test(true).try_init();
-        let mut file = VastFile::new(VastFileType::Verilog);
-        let add32 = add_add32_module(&mut file);
-        let config = PipelineConfig {
-            top_module_name: "top".to_string(),
-            clk_port_name: "clk".to_string(),
-            stage_modules: vec![add32],
-            flop_inputs: false,
-            flop_outputs: true,
-            input_valid_signal: Some("in_valid"),
-            output_valid_signal: Some("out_valid"),
-            reset_signal: Some("rst"),
-            reset_active_low: false,
-        };
-        let pipeline = build_pipeline(&mut file, &config).unwrap();
+        let pipeline = build_add32_pipeline(false, true, true).unwrap();
 
         compare_golden_sv(
             &pipeline,

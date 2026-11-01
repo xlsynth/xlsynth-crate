@@ -355,6 +355,44 @@ xlsynth-driver lib-query ~/asap7.lib \
   --max-matches 10 --path-only
 ```
 
+### `gv2pb` — encode a mapped netlist
+
+Packs all modules from a gate-level Verilog file (`.gv`, `.v`, or either with
+`.gz`) into a binary netlist protobuf. Instances with the same cell type and
+ordered pins share one interface, and connections refer to nets by index.
+Cell and pin names come from the netlist, so no Liberty library is needed.
+The GV reader accepts named-pin instances and wiring such as aliases, selects,
+concatenations, literal tieoffs, and `tran` connections. Logic must be mapped
+to cells. Non-ANSI module headers must list each declared port exactly once.
+Empty positional slots and repeated port names cannot be represented.
+
+```shell
+xlsynth-driver gv2pb design.gv.gz -o design.pb
+```
+
+- `-o, --output <PATH>` writes the binary protobuf to a file. The default is stdout.
+
+The protobuf captures the parsed netlist and omits comments and attributes.
+Unknown literals such as `4'bxxxx` retain their width and unfurl as `4'hx`.
+`gv2pb` rejects literals that mix known and unknown digits (such as
+`4'b10x1`), high-impedance digits (`z` and `?`), and named or arrayed
+`tran` instances. Use an explicit width for decimal tieoffs above
+2,147,483,647 so their extension into wider nets is unambiguous.
+Concatenations can nest up to 48 levels in the binary format.
+See the [netlist schema](../xlsynth-g8r/proto/netlist.proto).
+
+### `pb2gv` — emit a mapped netlist as Verilog
+
+Renders every module in a binary netlist protobuf as canonical gate-level
+Verilog, in module order. Whitespace, declaration layout, and literal spelling
+can differ from the input used by `gv2pb`.
+
+```shell
+xlsynth-driver pb2gv design.pb > restored.gv
+```
+
+- `-o, --output <PATH>` writes the Verilog to a file. The default is stdout.
+
 ### `gv2ir`: gate-level netlist to IR
 
 ```shell
@@ -414,10 +452,11 @@ xlsynth-driver block2fn \
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native
 Rust block emitter. Existing registers, resets, load enables, and hierarchy are
-preserved; the command does not schedule or repipeline its input. Each register
-must have exactly one write node; ambiguous multiple-write graphs are rejected.
-`invoke` and `counted_for` nodes are also rejected; inline calls and unroll loops
-before emission. Leading-zero counts, priority encoders, normalization, and
+preserved. Each register must have exactly one write node. The emitter inlines
+the function body at each `invoke` node, including nested calls. Use an
+explicit external instantiation for a function marked `#[ffi_proto]`. Lower
+`map` operations and unroll `counted_for` loops before emission.
+Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.
 Arrays retain descending packed dimensions on ports, signals, and registers;
@@ -501,15 +540,32 @@ Flags:
 - `--liberty_proto <PATH>` – required Liberty proto, optionally gzip-compressed.
 - `--aiger-out <PATH>` – required output; use `.aig` for binary AIGER or `.aag` for ASCII AIGER.
 - `--module_name <MODULE>` – select the module when the input contains multiple modules.
-- `--collapse_sequential <BOOL>` – if true (default), collapse reached flops by substituting their next-state formulas. If false, reaching a flop that is not a source boundary is an error.
-- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential true`.
+- `--collapse_sequential_cells <BOOL>` – if true, collapse reached flops by substituting their next-state formulas. Defaults to false; reaching a flop that is not a source boundary is then an error. The previous `--collapse_sequential` spelling remains accepted as an alias.
+- `--collapse_load_enable_feedback` – opt in to collapsing recognized load-enable feedback loops while assuming their prior Q values are zero. Disabled by default; this applies when `--collapse_sequential_cells true`.
 - `--cone_sources <SELECTOR>` – add a compact source selector; repeat the flag for multiple selectors.
 - `--cone_sinks <SELECTOR>` – add a compact sink selector; repeat the flag for multiple selectors.
 - `--cone_boundary_file <PATH>` – read compact source and sink selectors from a JSON file. This cannot be combined with `--cone_sources` or `--cone_sinks`.
 
-#### Source and sink boundaries
+### `gv2g8r`: GV plus Liberty to native g8r
 
-The extractor elaborates structural module hierarchy, walks backward from the selected module outputs, and stops at the selected module inputs or mapped cell output pins. With no cone flags, it selects all top-module input and output ports in declaration order. Use the cone flags to select particular datapaths through this same traversal.
+Converts a GV cell netlist into native g8r text on stdout. It uses the same
+conversion path and input, module, boundary, and collapsing flags as `gv2aig`.
+The generated native g8r design is combinational, with flops handled by those
+boundary and collapsing options.
+
+```shell
+xlsynth-driver gv2g8r \
+  --netlist my_design.gv \
+  --liberty_proto cells.proto \
+  --bin-out my_design.g8rbin > my_design.g8r
+```
+
+The optional `--bin-out <PATH>` flag also writes the native binary
+representation. Without it, the command only emits native text on stdout.
+
+### GV source and sink boundaries
+
+Both `gv2aig` and `gv2g8r` use this extractor. It elaborates structural module hierarchy, walks backward from the selected module outputs, and stops at the selected module inputs or mapped cell output pins. With no cone flags, it selects all top-module input and output ports in declaration order. Use the cone flags to select particular datapaths through this same traversal.
 
 For example, `boundaries.json` can contain:
 
@@ -531,7 +587,7 @@ xlsynth-driver gv2aig \
   --liberty_proto cells.proto \
   --module_name top \
   --cone_boundary_file boundaries.json \
-  --collapse_sequential true \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -545,6 +601,7 @@ xlsynth-driver gv2aig \
   --cone_sources 'input_port:data' \
   --cone_sources 'cell_output_regex:u_state_reg_[0-9]+:Q' \
   --cone_sinks 'output_port:result' \
+  --collapse_sequential_cells true \
   --aiger-out datapath.aig
 ```
 
@@ -566,9 +623,9 @@ Selectors use `[<aig-name>=]<kind>:<endpoint-or-regexp>`:
 - The file's `sources` and `sinks` arrays are both required. Sources accept input-port and cell-output selectors; sinks accept output-port selectors. Cone extraction requires at least one sink. Direct CLI selectors and `--cone_boundary_file` are mutually exclusive.
 - A module input source selects the entire port. A cell output source selects one connected scalar output pin of a mapped leaf cell, whether combinational or sequential. A sink selects an entire module output port. Sources cut the selected signal, including any `tran` aliases of it. Other outputs of the same cell are evaluated normally unless selected. Multiple selected outputs become independent AIG inputs, so relationships between those outputs are omitted from the extracted graph.
 - Selector order determines AIG interface order, with each regexp's matches sorted lexicographically by canonical endpoint text. Names must be unique within each list, and selected source net bits must not overlap. Vector bits are emitted least-significant bit first, with AIGER symbols such as `data_0`, `data_1`. Every declared source remains an input, including unused sources.
-- With `--collapse_sequential true` (the default), reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
+- With `--collapse_sequential_cells true`, reached flops that are not sources are replaced by their Liberty `next_state` expressions. Recognized load-enable feedback loops are rejected by default with an error describing `--collapse_load_enable_feedback`.
 - With `--collapse_load_enable_feedback`, a direct Q feedback connection implementing `(old_q & !enable) | (data & enable)` is collapsed with the prior Q value assumed zero. The enable signals may differ by one external inverter, and constant cell inputs such as disabled scan controls are folded when recognizing this pattern. This zero-prior-state assumption applies only to collapsed flops; explicitly selected `cell_output` sources retain their arbitrary input values. No implicit inputs are added. Asynchronous clear/preset, Liberty-internal state-dependent `next_state` formulas, and other feedback patterns remain unsupported. The result is a combinational AIG with no latches under the stated zero-prior-state assumption.
-- With `--collapse_sequential false`, reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
+- With `--collapse_sequential_cells false` (the default), reaching an unselected sequential cell is an error. Reaching an unselected top-module input, an undriven or multiply driven signal, an unknown value, or a dependency cycle is also an error. This requires the source list to cover every terminal signal needed by the selected sinks.
 - Without any cone flags, the source and sink lists contain all top-module inputs and outputs, preserving their names and declaration order. The same traversal and flop-collapsing logic handles default and explicit boundaries.
 
 ### `ugv2aig`: combinational UGV to AIGER
@@ -873,7 +930,7 @@ The structural mapping design is described in
 ```shell
 xlsynth-driver aig-tech-map my_design.aag \
   --liberty_proto cells.liberty.proto \
-  --netlist_out my_design.mapped.gv
+  -o my_design.mapped.gv
 ```
 
 The `area` strategy matches single-output combinational cells by function and area,
@@ -889,7 +946,7 @@ mapping, and all excluded cells are listed in the optional JSON summary.
 
 ```shell
 xlsynth-driver aig-tech-map my_design.aig --strategy area \
-  --liberty_proto cells.proto --netlist_out my_design.mapped.gv \
+  --liberty_proto cells.proto -o my_design.mapped.pb \
   --json_out mapping.json
 ```
 
@@ -903,6 +960,34 @@ both output edges; complementary rise/fall arcs are combined. Validate the emitt
 network with `gv-sta` and formal equivalence. Fanout optimization is off by default
 for delay mode; enable it explicitly with `--fanout-opt=true`.
 
+Delay mode follows covering (and optional fanout optimization) with bounded
+area recovery using the native resizer. It substitutes cheaper equivalent cells
+without increasing the boundary delay reached before recovery, and allows no
+area growth. It does not repeat the timing-search phase or change the cover.
+Use `--area-recovery=false` for the original raw delay cover, or combine it with
+`--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
+by default for area mode and unsupported for nand2.
+
+- `--area-recovery[=true|false]`: default true for delay, false otherwise.
+- `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
+- `--area-recovery-evaluation-budget <COUNT>`: propagation visits across all
+  recovery rounds; default `max(100000, 8 * N)` for N mapped instances after
+  fanout optimization. Zero permits no search work. A budget stop retains
+  completed, verified substitutions; it does not imply convergence.
+- `--wire-capacitance-constant-ff <VALUE>`,
+  `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. Both post-mapping
+  stages share these affine lumped wire-capacitance terms, the input slew and
+  output load. Output ports are not sink pins; output-only driven nets receive
+  the constant term, dangling nets neither. Primary inputs remain ideal sources.
+  These options require at least one post-mapping stage. They do not change the
+  delay cover's frozen reference load or model wire propagation delay.
+
+Recovery tuning flags require recovery to be enabled. The JSON summary keeps
+covering `stats` unchanged and adds `area_recovery` with final area/delay,
+accepted substitutions, resolved budgets and stopping reasons,
+`area_recovery_rounds`, and `post_mapping_timing` with the shared resolved
+model. Fanout results remain under `fanout_optimization`.
+
 Key flags:
 
 - `--strategy <nand2|area|delay>`: mapping strategy (default: `nand2`).
@@ -912,7 +997,14 @@ Key flags:
   timing data and an output load (library default or `--module-output-load`).
   `delay` requires usable timing data even with `--fanout-opt=false`.
   `nand2` and raw area mapping with `--fanout-opt=false` do not require timing.
-- `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
+- `-o, --output <PATH>` writes the mapped netlist to a file. Omit the option or
+  use `-o -` for stdout. `--netlist_out` is an alias for `--output`.
+- `--netlist-format <gv|pb>` overrides the format inferred from the output path.
+  The extensions `.pb` and `.proto` select binary netlist protobuf, ignoring
+  case. Other paths and stdout default to gate-level Verilog. For protobuf on a
+  pipe or with shell redirection, use `--netlist-format pb`. The mapper encodes
+  the final cells and wiring, including fanout optimization and area recovery.
+  Use `pb2gv` to render the protobuf as Verilog.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for `nand2` (default: `small-normal-vt`); specifying it with `area` or `delay` is an error.
   `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
@@ -924,7 +1016,8 @@ Key flags:
   sharing statistics, the AND duplication audit, and excluded library cells.
   With `delay`, it includes mapping statistics, the timing model and reference
   slew/load.
-  Netlist text stays on stdout when `--netlist_out -` is used; diagnostics go to stderr.
+  Diagnostics go to stderr. Keep stderr separate from the netlist when writing
+  protobuf, including when redirecting stdout to a file.
   The JSON destination must differ from the netlist output and stderr, including
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
@@ -933,7 +1026,7 @@ With `--strategy area`, fanout optimization is enabled by default: a bounded
 post-mapping pass tries equivalent
 cell upsizing, buffering, and replication. Each accepted edit improves modeled
 worst delay and the delay/area score. The pass requires timing-enabled Liberty;
-timing uses pin capacitances and excludes interconnect parasitics. Use
+timing uses pin capacitances plus optional affine wire capacitance. Use
 `--fanout-opt=false` for raw area mapping without timing requirements. Bare
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
 `nand2` and `delay` strategies leave it disabled. Enabling it requires
@@ -944,7 +1037,7 @@ pass is never silently skipped.
 
 ```shell
 xlsynth-driver aig-tech-map design.aig --strategy area \
-  --liberty_proto timed-cells.proto --netlist_out optimized.gv \
+  --liberty_proto timed-cells.proto -o optimized.gv \
   --module-output-load 1 --json_out mapping.json
 ```
 
@@ -1320,6 +1413,10 @@ timing conditions are skipped.
   default `0.01`. This is a fixed slew, not ABC's virtual driving-cell model.
 - `--module_output_load <VALUE>`: output capacitance in library units;
   defaults to the proto's `default_output_load`. Explicit `0` is supported.
+- `--wire-capacitance-constant-ff <VALUE>`,
+  `--wire-capacitance-per-sink-ff <VALUE>`: affine lumped wire capacitance,
+  default 0 each, with the same units and semantics as `gv-sta` and
+  `aig-tech-map`. Use identical timing/load settings across these tools.
 - `--max-area-growth <FRACTION>`: noncompounding growth relative to input area;
   default `0.02` (2%).
 - `--timing-evaluation-budget <COUNT>`: instance evaluation visits across all
@@ -1358,10 +1455,10 @@ xlsynth-driver gv-stats --netlist resized.gv \
   --liberty_proto /path/to/cells.timing.proto
 ```
 
-### `g8r2gv`: G8R to mapped gate-level Verilog
+### `g8r2gv`: G8R to mapped gate-level netlist
 
-Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level Verilog netlist
-on **stdout**, using standalone ABC for combinational logic and native physical
+Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level netlist
+using standalone ABC for combinational logic and native physical
 flip-flop mapping. Supports combinational and sequential designs, including
 explicit synchronous reset/enable controls (legalized before mapping). No Yosys
 is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
@@ -1403,18 +1500,26 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 - `--flop-inputs`, `--flop-outputs` – add boundary-register layers; require a
   stored clock or `--add-clk-port`.
 - `--module-name <NAME>` – override the emitted module name.
+- `-o, --output <PATH>` writes the mapped netlist to a file. Omit the option or
+  use `-o -` for stdout.
+- `--netlist-format <gv|pb>` overrides the format inferred from the output path.
+  The extensions `.pb` and `.proto` select binary netlist protobuf, ignoring
+  case. Other paths and stdout default to gate-level Verilog. For protobuf on a
+  pipe or with shell redirection, use `--netlist-format pb`. The protobuf
+  includes physical flip-flops and their connections. Keep stderr separate from
+  the protobuf destination.
 - `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
   including the executable/version, raw Liberty paths, resolved constraints, and
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.
 - `--abc-stdout-out <PATH>`, `--abc-stderr-out <PATH>` – optionally save ABC's
   raw stdout/stderr after successful mapping. Unlike the metadata, these logs
-  can contain nondeterministic timings and memory usage. They are never mixed
-  into the emitted netlist.
+  can contain nondeterministic timings and memory usage. The diagnostics and raw
+  logs must use destinations separate from the netlist, including redirected stdout.
 
 ABC uses global driver/load constraints, including at register Q/D boundaries;
 these are not per-register clock-to-Q/setup constraints or actual D-pin loads.
 Use `gv-stats` with a matching timing-enabled proto for final registered timing.
-Zero-width ports remain in the native design but are omitted from Verilog.
+The mapper omits zero-width ports from the flat netlist in both output formats.
 
 ```bash
 xlsynth-driver ir2g8r pipeline.ir --top main > pipeline.g8r
@@ -1422,7 +1527,8 @@ xlsynth-driver g8r2gv pipeline.g8r \
   --liberty /path/to/buffers.lib --liberty /path/to/logic.lib \
   --liberty /path/to/registers.lib \
   --liberty-proto /path/to/cells.proto \
-  --diagnostics-out mapping.json > mapped.gv
+  -o mapped.pb --diagnostics-out mapping.json
+xlsynth-driver pb2gv mapped.pb -o mapped.gv
 xlsynth-driver gv-stats --netlist mapped.gv \
   --liberty_proto /path/to/cells.timing.proto \
   --primary_input_transition 0.01 --module_output_load 4
@@ -2007,11 +2113,10 @@ function and prints the rewritten IR to **stdout**.
   - `--unroll=true|false` – also run loop unrolling so `counted_for` nodes are
     flattened into the top (default: `true`).
 
-With the default `--unroll=true`, the output is intended to be the most useful
-"desugared" form for downstream inspection: explicit `invoke` sites are inlined
-and `counted_for` loops are unrolled. When `--unroll=false`, explicit
-invocations are still inlined, but loop bodies referenced by `counted_for`
-remain as separate reachable helper functions in the emitted package.
+With `--unroll=true`, the pass expands `map`, inlines `invoke`, and unrolls
+`counted_for`. With `--unroll=false`, it still expands maps and inlines
+invocations. Counted loop bodies remain as separate reachable functions in
+the emitted package.
 
 Example:
 
@@ -3127,6 +3232,61 @@ On success the command prints timing and a success line to **stdout**. On
 inequivalence or prover failure it prints details to **stderr** and exits
 non-zero.
 
+### `g8r-lean-prepare`
+
+Emits canonical ASCII AIGER files for two combinational `.g8r` or `.g8rbin`
+designs and generates one Lean target that embeds both through the shared AAG
+loader. Ordered input and output port names and widths must match.
+
+```shell
+xlsynth-driver g8r-lean-prepare \
+  --lhs reference.g8r \
+  --rhs optimized.g8r \
+  --output-dir lean-target
+```
+
+The output directory contains the companion support files, `Lhs.aag`,
+`Rhs.aag`, `Target.lean`, and `Check.lean`. `Target.lean` defines both circuits
+and `Target.Equivalent`, which is equality of all output bits for every shared
+input vector. The command performs mechanical export in Rust and does not
+invoke Lean.
+
+### `g8r-lean-check`
+
+Runs a supplied Lean proof body against a directory from `g8r-lean-prepare`.
+
+```shell
+xlsynth-driver g8r-lean-check \
+  --target-dir lean-target \
+  --proof proof/Body.lean \
+  --proof-root proof \
+  --proof-source proof/Helpers/Partition.lean \
+  --lean /path/to/lean/bin/lean \
+  --output-json lean-result.json
+```
+
+Flags:
+
+- `--target-dir <DIR>` – required prepared target directory.
+- `--proof <PATH>` – required file containing a complete Lean term for `Target.Equivalent`, such as `by ...` or a helper theorem name.
+- `--proof-root <DIR>` – root for helper paths; defaults to the body's directory.
+- `--proof-source <PATH>` – Lean helper module under the proof root; every supplied module is imported by the generated wrapper. Repeat as needed.
+- `--lean <PATH>` – required explicit Lean executable.
+- `--work-dir <DIR>` – empty work directory; otherwise a temporary directory is used.
+- `--output-json <PATH>` – write status, version, timing, and diagnostics on success or proof failure. The version is null if its query did not succeed.
+
+The driver generates `UserProof.lean` with imports for `Target` and every helper,
+then wraps the body in `theorem UserProof.equivalent : Target.Equivalent := (...)`.
+Helpers retain their paths relative to the proof root and are compiled in
+dependency order using Lean's `--src-deps` mode. Lean is invoked directly
+without a Lake project.
+`bv_decide` uses Lean's default solver lookup, which finds the bundled CaDiCaL
+beside the Lean executable.
+
+A successful result has status `accepted_by_lean` and `audit_performed: false`.
+The command performs no axiom audit; Lean's ordinary acceptance of axioms and
+`sorry` applies.
+
 ### `g8r-ir-equiv`
 
 Checks a combinational **`.g8r` or `.g8rbin`** design against an **IR** function by
@@ -3265,18 +3425,19 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
   - `--assume-enum-in-bound=<BOOL>`
   - `--lhs_uf <func_name:uf_name>` (may be specified multiple times)
   - `--rhs_uf <func_name:uf_name>` (may be specified multiple times)
-  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). When present, the driver builds a tactic obligation tree and executes it instead of direct equivalence.
+  - `--tactic_json <PATH>` Provide a tactic script as a JSON array of `ScriptStep` (mutually exclusive with `--tactic_jsonl`). The prover executes the script on the requested equivalence property.
   - `--tactic_jsonl <PATH>` Provide a tactic script as JSONL (one `ScriptStep` per line; `#` comments and blank lines allowed).
   - `--output_json <PATH>`
 
 UF semantics:
 
 - Functions mapped to the same uf_name are treated as the same uninterpreted symbol and are assumed equivalent at call sites.
+- In `func_name:uf_name`, both names must be nonempty and have no leading or trailing whitespace. The first colon separates the DSLX function name from the UF symbol. Repeating a function on the same side is allowed only if its mappings agree.
 - Assertions inside uninterpreted functions are ignored during proving.
 
 #### Tactic Scripts
 
-When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver turns that plan into an obligation tree and discharges the leaves with SMT.
+When two DSLX top functions are equivalent but a direct whole-design proof is too heavy or times out, **tactic scripts** let you describe a structured proof plan. The driver invokes the [xlsynth-prover tactic engine](../xlsynth-prover/README.md), which owns the obligation tree and discharges the leaves with SMT.
 
 ##### Workflow
 
@@ -3284,6 +3445,34 @@ When two DSLX top functions are equivalent but a direct whole-design proof is to
 1. Apply a tactic – decompose the obligation into named child obligations. Tactics can also be further applied to the child obligations.
 1. Mark leaves with `Solve` – those leaves are proved directly.
 1. Succeed when all leaves succeed.
+
+Every leaf must be marked with `Solve` and proved before the command reports
+success. An empty script, an apply-only script, or a script that solves only
+some leaves exits with status 1 and lists the unresolved obligation paths.
+With `--output_json`, `report.unresolved` contains those paths as selector
+arrays, including obligations reopened by a failed tactic. `report.solved`
+records successful attempts; it does not establish whole-proof completion
+because a rollback may discard those children. These rules also apply to
+`prove-quickcheck` tactic scripts.
+
+Only definite counterexamples trigger decomposition rollback. Inconclusive
+results and execution errors leave obligations unresolved; they do not discard
+the decomposition.
+
+For `dslx-equiv`, a root-only `Solve` honors the same proof settings as direct
+equivalence, including `--assertion-semantics` (default `ignore`),
+`--assert-label-filter`, `--assume-enum-in-bound` (default `true`),
+`--drop_params`, `--flatten_aggregates`, fixed implicit activation, and
+parallelism. Original module names are retained for assertion-label matching.
+
+`Focus` and `Cosliced` require `--assertion-semantics=ignore`, empty parameter
+drops, `--flatten_aggregates=false`, both fixed-activation settings `false`, and
+`--parallelism-strategy=single-threaded` (the defaults). Other combinations are
+rejected because the current decomposition rules do not preserve their
+meaning. Child obligations always check all enum bit representations: an
+internal call may receive an invalid enum value even when the root assumes
+valid enum inputs. A decomposition can therefore fail where a direct proof
+restricted to valid root inputs succeeds.
 
 Provide the plan via `--tactic_json` for a JSON array, or `--tactic_jsonl` for JSONL (one JSON object per line).
 
@@ -3491,18 +3680,20 @@ xlsynth-driver dslx-fn-prove-assertions \
 - Backend: `--solver <...>` selects the SMT backend. The default is `bitwuzla`, which requires an in-process Bitwuzla build feature. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
 - Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
 - Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
-- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Assertions inside UF-mapped functions are ignored during proving.
+- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree. Assertions inside UF-mapped functions are ignored during proving.
 - Output: `--output_json <PATH>` writes a structured proof result.
 
 On success the command exits `0` and prints that all selected assertions were
-proved. On failure it exits nonzero and reports one solver-found counterexample,
+proved. On disproof it exits `1` and reports one solver-found counterexample,
 including concrete top inputs and the violated assertion label/message when
-available.
+available. Inconclusive results and execution errors also exit `1`, with their
+distinct status and diagnostic instead of a counterexample.
 
 JSON output has the form:
 
 ```json
 {
+  "status": "disproved",
   "success": false,
   "time_micros": 1234,
   "counterexample": {
@@ -3526,16 +3717,16 @@ For successful proofs, `counterexample` is `null`.
 Proves that DSLX `#[quickcheck]` functions always return true.
 
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
-- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) switches to the tactic/script-driven workflow so you can edit QuickCheck obligations before solving.
+- Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) selects the tactic workflow. A root `Solve` uses the same property selection, assertion semantics, label filter, and UF mappings as a direct proof.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
 - Backend: `--solver <...>` selects the solver/toolchain. The default is `bitwuzla`.
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
-- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
+- UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted. Both names must be nonempty and have no leading or trailing whitespace. Repeated mappings for a function must agree.
 - Output: `--output_json <PATH>` to write results as JSON.
-- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Each selected property is optimized with the XLS IR pipeline before solving. Use `--opt=false` to prove unoptimized IR. `--uf` requires explicit `--opt=false`: optimization would inline calls and erase UF abstraction boundaries. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
+- Optimization: `--opt <true|false>` defaults to `true` for direct in-process proofs. Use `--opt=false` for unoptimized IR. Direct proofs using `--uf` require explicit `--opt=false` because optimization can inline the calls. Tactic and proof-plan workers select unoptimized IR automatically when given UF mappings. External `toolchain` proofs always optimize and reject `--opt=false`. Explicit `--opt` cannot be combined with tactic scripts.
 - Progress: direct proofs write `[ RUN QUICKCHECK ... ]` before each property's optimization/solving and `[ OK ... ]` or `[ FAILED ... ]` immediately afterward to stderr. Failures use rustc-style diagnostics, highlighting the QuickCheck function name when it can be located reliably (otherwise showing just the filename). Notes include named counterexample inputs, the return value, and any violated assertion; implicit IR token/activation arguments are hidden. Diagnostics use color on terminals unless `NO_COLOR` is set; redirected output is plain text. Inconclusive results and execution errors are distinguished from counterexamples. Shared parsing/conversion precedes these boundaries; preparation failures are reported separately before any property starts; tactic-script reporting is unchanged.
-- JSON compatibility: the existing `--output_json` schema and counterexample string format are unchanged; the file is written after all selected properties finish.
+- JSON: `--output_json` includes a `status` alongside `success`, both overall and for each property. If preparation fails before proving starts, the file reports `execution-error` and includes the diagnostic. See the [proof subprocess result protocol](#proof-subprocess-result-protocol).
 
 UF semantics:
 
@@ -3557,13 +3748,51 @@ The command converts the DSLX module to unoptimized IR, injects Boolean guards f
 ### `prover`
 
 Runs a prover plan described by a JSON file with a process-based scheduler.
+Proof-plan and tactic workers inherit the parent command’s `--toolchain` file, including its tool directory and DSLX settings.
+If `prover` cannot load the toolchain, it exits with code `1` and writes an `execution-error` report to `--output_json` with `error.stage` set to `toolchain`.
 
 - Concurrency: `--cores <N>` controls maximum concurrent processes.
 - Plan: `--plan_json_file <PATH_OR_->` path to a ProverPlan JSON file, or `-` for stdin.
 - Output: `--output_json <PATH>` writes a full JSON report:
-  - Top-level `{ "success": <bool>, "plan": <tree> }`.
+  - Top-level `{ "status": <proof status>, "success": <bool>, "plan": <tree> }`.
   - Each task node includes `cmdline`, `outcome`, `stdout`, `stderr`, and `task_id` (when provided).
-  - `outcome` is one of `Success`, `Failed`, or an indefinite reason such as `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+  - `outcome` is `Success` (proved), `Failed` (disproved), or an indefinite reason: `Inconclusive`, `ExecutionError`, `ProtocolError`, `ProcessFailure`, `Timeout`, `IndefiniteChildren`, `GroupCriteriaAlreadyMet`, or `Cleanup`.
+
+#### Proof subprocess result protocol
+
+For timing fields in direct, tactic, and scheduled JSON reports, see
+[Reading proof timings](../xlsynth-prover/README.md#reading-proof-timings).
+
+The driver and its proof workers must be built from the same revision; see the
+[proof engine's revision compatibility policy](../xlsynth-prover/README.md#revision-compatibility).
+
+The scheduler requires child results from `ir-equiv`, `dslx-equiv`,
+`prove-quickcheck`, and `dslx-fn-prove-assertions` to contain both `status` and
+`success`. For example, a proved result includes
+`{ "status": "proved", "success": true }` and exits `0`. The statuses
+`disproved`, `inconclusive`, and `execution-error` require `success: false` and
+exit `1`. Results may also contain command-specific diagnostics.
+Once a proof command has parsed its arguments, errors such as conflicting tops
+or a malformed UF mapping also write an `execution-error` report.
+
+Proof workers reject a DSLX search directory containing `;`, the driver's
+path-list separator. External XLS tools likewise cannot represent a directory
+containing `:`. These cases report an error so a proof cannot silently import
+a different module. Direct native proofs accept literal directory names from
+the toolchain TOML array. Omitting the search path inherits the toolchain
+setting; `--dslx_path=` (or `"dslx_path": []` in a plan) explicitly clears it,
+including for tactic workers.
+
+Missing or malformed JSON, unknown statuses, and contradictory fields are
+`ProtocolError`. Abnormal termination or an unexpected exit code is
+`ProcessFailure`, even if successful JSON was written first. Legacy results
+containing only `success` are rejected. Captured output is retained for diagnosis,
+including when a task is canceled.
+
+Errors and inconclusive results cannot win a `first` group or cause tactic
+rollback. A native solver counterexample is `disproved`; an external-tool
+failure without structured counterexample evidence is conservatively
+`execution-error`, since a nonzero exit alone does not establish disproof.
 
 ### Equivalence/proving flags: meanings
 
@@ -3631,13 +3860,13 @@ Groups: all / any / first
 
 - `all`: overall success if and only if all children succeed.
 - `any`: overall success if at least one child succeeds.
-- `first`: the first finished children dominates the result.
+- `first`: the first child to produce a definite proof or disproof determines the result; inconclusive results and execution errors do not win the race.
 
 Timeouts
 
 - Any task may specify `"timeout_ms": <milliseconds>`.
 - When the deadline elapses, the scheduler cancels the task’s process group and marks the task outcome as `"Timeout"` (an indefinite outcome).
-- Group semantics with timeouts (indefinite outcomes):
+- Group semantics with indefinite outcomes (timeouts, inconclusive results, or execution errors):
   - `any`: resolves `Success` as soon as any child succeeds; if all children finish without a success and at least one is indefinite (e.g., `Timeout`), the group resolves to `IndefiniteChildren`.
   - `all`: resolves `Failed` if any child fails; if none failed but at least one is indefinite, resolves to `IndefiniteChildren`; otherwise `Success`.
   - `first`: only the first non-indefinite child determines the result; timeouts do not resolve the group. If all children finish and none produced a definite result, the group resolves to `IndefiniteChildren`.
@@ -3704,7 +3933,7 @@ Schema details
   - Optional:
     - `solver`: one of `toolchain`, `bitwuzla`, `boolector`, `z3-binary`, `bitwuzla-binary`, `boolector-binary` (availability gated by build features)
     - `flatten_aggregates`: bool
-    - `drop_params`: array of strings (joined with commas for the CLI)
+    - `drop_params`: array of individual parameter names, e.g. `["a", "b"]`. Empty names, commas, NULs, and surrounding whitespace are rejected.
     - `parallelism_strategy`: one of `single-threaded`, `output-bits`, `input-bit-split`
     - `assertion_semantics`: one of `ignore`, `never`, `same`, `assume`, `implies`
     - `lhs_fixed_implicit_activation`: bool
@@ -3722,7 +3951,7 @@ Schema details
   - Optional behavior flags:
     - `solver`: same values as above
     - `flatten_aggregates`: bool
-    - `drop_params`: array of strings
+    - `drop_params`: array of individual parameter names, with the same restrictions as `ir-equiv`
     - `parallelism_strategy`: `single-threaded` | `output-bits` | `input-bit-split`
     - `assertion_semantics`: `ignore` | `never` | `same` | `assume` | `implies`
     - `lhs_fixed_implicit_activation`: bool
@@ -3779,22 +4008,245 @@ Notes
 - Enum values are case-insensitive on the CLI but serialized in lowercase/kebab-case in JSON.
 - `dslx_path` is joined with `;` regardless of platform to match upstream tools.
 
+### Shared DSLX stitch specification
+
+`dslx-stitch-pipeline`, `dslx-stitch-g8r-pipeline`, `stitch-equiv`, and `stitch-check-vectors` accept
+the same TOML file via `--spec <PATH>`. The example manifest below selects
+`muladd_cycle0` and `muladd_cycle1`. The first stage multiplies `x` by `y` and carries `z` alongside the product. The second adds `z`. Both operations use `u8` arithmetic. [Two-cycle multiply-add source and manifest](examples/stitch-equiv)
+
+```toml
+dslx_input_file = "muladd.x"
+dslx_top = "muladd"
+flop_inputs = false
+flop_outputs = true
+```
+
+- Supply either `dslx_top` for implicit stage discovery or `stages = ["align", "finish"]` for an explicit order. `output_module_name` defaults to `dslx_top` and is required with `stages`.
+- Implicit stage indices start at zero, are contiguous, and have no leading zeros. Each selected stage needs a concrete data-only IR entry point. A private stage that lowers only to an implicit-token function is rejected by name.
+- `dslx_input_file` is required. `dslx_path` is an optional array of import directories, and `dslx_stdlib_path` optionally overrides the bundled stdlib. Relative paths in the manifest resolve against the spec's directory. These commands compile with the DSLX source directory as the working directory for libxls import lookup, including transitive imports. Command-line netlist, Liberty, and output paths resolve from the caller's directory.
+- `flop_inputs` and `flop_outputs` both default to true. Each pair of adjacent stages has a register layer. The multiply-add example above has two register layers, or three with both defaults. When the first stage has no parameters and the pipeline has no valid signal, there is nothing to register at the input and `flop_inputs` adds no latency.
+- A stage with one aggregate parameter receives the entire preceding result. Multiple parameters consume slices of the packed result from least-significant bits upward in parameter declaration order. The proof uses the same wiring as the generators.
+- `clock_name` defaults to `"clk"`. Optional `input_valid_signal`, `output_valid_signal`, `reset`, and `reset_active_low` configure the generated valid pipeline. Both `output_valid_signal` and `reset` require `input_valid_signal`. Reset is synchronous and active high by default. Setting `reset_active_low = true` requires a named `reset`.
+- The names `out` and `output_value` are reserved for the generated data output.
+- On the generator commands, `--spec` conflicts with command-line source, stage-selection, and pipeline-interface flags. RTL emission and g8r lowering options remain available.
+
+Library callers resolving a spec with DSLX imports in-process must run
+`StitchPipelineSpec::resolve` from the DSLX source directory. The resolver
+reports a directory mismatch. Once resolved, the same pipeline object can
+generate RTL, emit a block IR package, lower to g8r, or check a netlist.
+
+### `stitch-equiv`: Check a DSLX stitch specification against mapped gates
+
+Proves bit-exact output equivalence under the stitch specification. Bitwuzla
+compares the behavioral XLS IR of the selected DSLX stages
+against the mapped cells' Liberty functions and flip-flop semantics. CaDiCaL
+compares a gatified reference against the same mapped cells. Builds with
+in-process Bitwuzla use it by default. Other builds default to CaDiCaL.
+Bitwuzla supports call chains of up to 64 XLS functions, counting the stage
+itself and each nested `invoke` or `counted_for` body. Inline helpers to
+shorten a deeper chain.
+
+The behavioral translator reports the stage, helper and operation when it
+cannot encode a partial-product operation or a zero-width slice, reduction,
+select or array access. The diagnostic identifies the unsupported operand or
+result shape. For a gate-level comparison, use `--solver cadical` if g8r can
+lower the stage.
+
+For a free-running pipeline, the checker compares data on every cycle after
+fill. With `input_valid_signal`, it compares data only for valid transactions.
+A transaction appears at the output one pipeline latency after its valid
+input, provided every intervening rising edge sampled reset inactive. An
+asserted synchronous reset flushes all in-flight transactions. When
+`output_valid_signal` is present, the checker compares that port on every
+cycle whose validity is known, including bubbles and the first observation
+after a reset edge. Before fill, validity can be unknown because registers
+start with arbitrary contents. A pipeline with zero register layers uses
+the current input valid. Without an output-valid port, the same transaction
+timing determines which data to compare.
+
+The checker normally runs one proof per stage concurrently. Simulation proposes
+a one-to-one pairing of register bits, allowing renamed, reordered, and inverted
+flops. The solver checks every paired next-state bit for arbitrary current state
+and inputs. The last stage also checks the external outputs. This can establish
+equivalence even when the mapped data and valid flops have different names.
+
+If synthesis changes the state encoding, removes flops, or the proposed pairing
+fails a stage proof, the default mode checks the whole pipeline. Bitwuzla
+composes the behavioral stages on the first frame's inputs. It advances the
+mapped cells from arbitrary power-up state with fresh inputs on every frame
+and checks the defined outputs. CaDiCaL
+unrolls both gate graphs from independent arbitrary power-up states.
+
+Inputs and outputs must agree in name and packed bit width, with bit zero as
+the LSB. The native g8r result `output_value` and the stitched RTL result
+`out` identify the same data port. Internal register names, counts, and
+encodings can differ. Mapped FFs must share the spec's rising-edge clock.
+The importer rejects latches, derived clocks, and
+asynchronous clear/preset cells.
+
+Supply a valid structural Verilog netlist (`.gv`) with cell instances and wiring assignments.
+The checker uses the strict GV reader and reports the source location for
+unsupported syntax. Give decimal literals an explicit width inside a
+concatenation or when their sign bit is set. Escape identifiers that coincide
+with SystemVerilog keywords. Non-ANSI module headers must agree with their
+port declarations. Selects require a packed net (use
+`[0:0]` for a one-bit vector), and part-selects must follow its declared
+direction. Each plain `tran` terminal must be one bit. The Liberty proto
+must unambiguously describe the pins, functions, and FF clock edges of the
+instantiated cells.
+
+Run these commands from the example directory with a matching cell library and
+Liberty proto.
+
+```shell
+xlsynth-driver dslx-stitch-g8r-pipeline --spec muladd.stitch.toml \
+  --bin-out muladd.g8rbin > muladd.g8r
+xlsynth-driver g8r2gv muladd.g8rbin --liberty cells.lib \
+  --liberty-proto cells.proto > muladd.gv
+xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
+  --netlist muladd.gv --liberty-proto cells.proto
+```
+
+For split libraries such as ASAP7, repeat the mapper's `--liberty` flag and use
+a matching proto as described under `g8r2gv`. A netlist from synthesis of
+`dslx-stitch-pipeline --spec muladd.stitch.toml` can be checked the same way.
+
+- `--spec <PATH>` selects the DSLX stitch spec.
+- `--netlist <PATH>` supplies the mapped gate-level Verilog file.
+- `--liberty-proto <PATH>` supplies the matching Liberty proto.
+- `--module-name <NAME>` overrides the mapped module name. The default is the spec's wrapper name.
+- `--solver <bitwuzla|cadical>` selects the backend for stage proofs and whole-pipeline checks. `bitwuzla` requires a driver built with `with-bitwuzla-system` or `with-bitwuzla-built`.
+- `--proof-mode <MODE>` defaults to `auto`, which tries stage proofs and falls back to the whole-pipeline check if needed. `stages` requires a complete, proved correspondence and reports the unmatched bit or failing stage. `whole-pipeline` checks the external observations directly, including for an implementation that captures different data during bubbles.
+- `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
+- `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
+- `--show-proof-plan` prints the solver and reference used, along with the proved leaf count per stage or the whole-pipeline fallback reason, to stderr.
+- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
+
+For example, to split the multiply stage's obligations, save the following as
+`product-proof.json`. Stage scripts use the `xlsynth-prover` selector and
+`Apply`/`Solve` command format. The tactic `SplitOutputs` divides a
+stage's ordered mismatch bits in half. The bits follow reference register
+order, least-significant bit first, followed on the last stage by the external
+output bits. Each child can be split again if it has at least two bits. Every
+leaf must have a `Solve` step.
+
+```json
+[
+  {"selector": ["root"], "command": {"Apply": "SplitOutputs"}},
+  {"selector": ["root", "low"], "command": "Solve"},
+  {"selector": ["root", "high"], "command": "Solve"}
+]
+```
+
+```shell
+xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
+  --netlist muladd.gv --liberty-proto cells.proto \
+  --stage-script muladd_cycle0=product-proof.json --jobs 3 --show-proof-plan
+```
+
+The command exits zero on proof. A whole-pipeline counterexample exits nonzero
+and prints initial register values, cycle inputs, and the disagreeing outputs.
+An interrupted stage solve triggers fallback in `auto` mode. In `stages` mode
+an interrupted or failed obligation exits nonzero and identifies the stage and
+any selected split leaf. An inconclusive whole-pipeline check or an unsupported
+input also exits nonzero with a diagnostic.
+
+### `stitch-check-vectors` runs concrete inputs through DSLX and mapped gates
+
+Interprets the behavioral XLS stage functions and simulates the selected mapped
+module continuously, starting its registers at zero. Each input row occupies
+one clock cycle. For latency `L`, data from row `t` is compared at cycle
+`t + L` when its valid transaction survives the intervening synchronous reset
+edges. If the wrapper exposes output valid, every defined valid indication is
+compared, including bubbles and reset flushes. The checker appends `L` drain
+cycles with zero data, input valid low and reset inactive. An empty stream or
+a stream with no observable comparisons produces an error.
+
+Supply one of two input sources. `--input-irvals` reads one named record per
+line with every external input except the clock, including configured control
+ports. Use packed bit values with the port widths declared by the stitch
+interface. Entry order within a row is arbitrary. `--random-samples` generates
+a reproducible stream, including bubbles and occasional resets. Its last row
+has valid asserted and reset inactive so at least one transaction retires.
+
+- `--spec PATH` — Required stitch TOML specification.
+- `--netlist PATH` — Required mapped gate-level Verilog.
+- `--liberty-proto PATH` — Required Liberty proto for the mapped cells.
+- `--module-name NAME` — Mapped top module. Defaults to the stitch wrapper name.
+- `--input-irvals PATH` — Named input rows, one per cycle.
+- `--random-samples COUNT` — Generate a positive number of input rows.
+- `--seed SEED` — Random generator seed. Defaults to 0 in random mode.
+
+```text
+{x: bits[8]:42, vin: bits[1]:1, rst_n: bits[1]:1}
+{x: bits[8]:17, vin: bits[1]:0, rst_n: bits[1]:1}
+```
+
+```sh
+xlsynth-driver stitch-check-vectors --spec pipe.toml --netlist pipe.gv \
+  --liberty-proto cells.pb --random-samples 256 --seed 42
+xlsynth-driver stitch-check-vectors --spec pipe.toml --netlist pipe.gv \
+  --liberty-proto cells.pb --input-irvals inputs.irvals
+```
+
+Stages and their helpers must have deterministic output bits. The checker
+rejects `smulp` and `umulp` because XLS specifies only the sum of the partial
+products, while concrete implementations can return different component bits.
+A call chain may contain at most 64 functions, counting the stage itself.
+
+A successful run reports how many rows and outputs it checked. A disagreement
+reports the first failing cycle, the output's expected and actual values, and
+the input rows at the originating and observation cycles. Cycle and row indices
+start at zero. Use `stitch-equiv` for a proof covering all permitted traces.
+
 ### `dslx-stitch-pipeline`: Stitch DSLX pipeline stages
 
-Takes a collection of `*_cycleN` pipeline‐stage functions in a DSLX file (e.g. `foo_cycle0`, `foo_cycle1`, …) and:
+Stitches the selected DSLX stage functions into a pipeline. By default, the
+command emits a Verilog or SystemVerilog module for each stage and a wrapper
+that connects them. With `--output-format=block-ir`, it emits a textual XLS IR
+package whose top block invokes the stage functions and implements the register
+boundaries. The block has a packed input port named for each parameter of the
+first stage and drives the packed data output `out`. When a later stage takes
+multiple parameters, its first parameter receives the low bits of the preceding
+result and each successive parameter receives the next slice. Both formats use
+the same stage order, pipeline name, and valid/reset settings.
+The generated text goes to stdout and diagnostics go to stderr.
 
-1. Generates Verilog/SystemVerilog for **each** stage function.
-1. Emits a wrapper module named exactly `<output_module_name>` (or `<dslx_top>` when `--stages` is not used) that instantiates the stages and wires them together to form the complete pipeline.
+In four-state simulation, the two RTL paths can differ when reset is unknown
+at a rising edge. For example, with active-high reset at `X` and input valid
+at `1`, the direct RTL wrapper's conditional expression writes `X` to the
+first valid register. The default `block2sv` procedural `if (rst)` takes the
+else branch and writes `1`. XLS block IR represents reset as a single bit.
 
-The generated text is written to **stdout**; diagnostic messages appear on **stderr**.
+The block IR package retains the stage bodies and their helper functions.
+`block2sv` inlines calls to DSLX function bodies when generating SystemVerilog.
+Its existing operation restrictions also apply to stage bodies. Expand `map`,
+unroll `counted_for`, and lower calls to FFI functions to external instantiations
+before rendering stages that use them.
 
-Supported flags:
+Tokens occupy no bits in a packed data port or register. To pack an array
+with data bits, the wrapper uses `array_index`, whose result type must be
+token-free. A data tuple may include a zero-length array. The pinned XLS
+optimizer can reject that array during constant folding even though `block2sv`
+can render the package.
 
+Supported flags
+
+- `--spec=<PATH>` – read the shared DSLX stitch specification documented above.
+- `--output-format=rtl|block-ir` – select the output format for either a spec or command-line stage selection. Defaults to `rtl`.
 - `--use_system_verilog=<BOOL>` – emit SystemVerilog when `true` *(default)* or plain Verilog when `false`.
 - `--gate_format=<TEMPLATE>` – Verilog template for `gate!` operations in every selected stage. Overrides `[toolchain.codegen].gate_format`; when neither is set, uses the default XLS gate emission. An empty template restores the XLS default even when the toolchain sets a template.
 - `--stages=<CSV>` – comma-separated list of stage function names that determines the pipeline order (overrides the default discovery of `<dslx_top>_cycleN` functions).
-- `--output_module_name=<NAME>` – wrapper module name. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
-- `--validate-no-constant-flops[=<BOOL>]` – prove every registered stage-output bit can take both values; fail before emitting Verilog if any bit is always constant. Defaults to `false`; the bare flag enables validation. Interprets the composed stages with zero-valued pipeline inputs, then proves each bit can differ from its observed value for some pipeline input. This includes constants caused by correlations between preceding stage outputs. The final stage is excluded when `--flop_outputs=false`; input and valid-signal registers are not checked. Diagnostics identify the stage, flattened output-bit index, and constant value.
+- `--output_module_name=<NAME>` – name of the RTL wrapper or top IR block. Required when `--stages` is provided. When `--stages` is omitted, defaults to the value of `--dslx_top`.
+- `--array_index_bounds_checking=<BOOL>` – control array index bounds checking for RTL emission. Defaults to `true`, matching XLS IR array index semantics.
+- `--validate-no-constant-flops[=<BOOL>]` – prove every registered stage-output bit can take both values before emitting either format. Defaults to `false`. The bare flag enables validation. Interprets the composed stages with zero-valued pipeline inputs, then proves each bit can differ from its observed value for some pipeline input. This includes constants caused by correlations between preceding stage outputs. The final stage is excluded when `--flop_outputs=false`. The check skips input and valid-signal registers. Diagnostics identify the stage, flattened output-bit index, and constant value.
+
+Block IR uses XLS array index semantics. It accepts
+`--array_index_bounds_checking=true` and rejects `false`. The
+`--use_system_verilog` and `--gate_format` flags require RTL output.
+Block IR ignores toolchain codegen settings. The top block and port names
+must also be valid XLS IR identifiers. For example, use `clk` as the
+clock port name because `clock` is an IR keyword.
 
 The usual DSLX-related options (`--dslx_input_file`, `--dslx_path`, `--dslx_stdlib_path`, `--warnings_as_errors`) are accepted. Entry-point selection is via either `--dslx_top` (implicit discovery) or `--stages` (explicit list) — these are mutually exclusive.
 
@@ -3835,6 +4287,11 @@ xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
   --dslx_top foo > foo.sv
 
+# Emit XLS block IR from the shared stitch spec
+xlsynth-driver dslx-stitch-pipeline \
+  --spec muladd.stitch.toml --output-format=block-ir > muladd.ir
+xlsynth-driver block2sv muladd.ir > muladd.sv
+
 # Explicit stages (wrapper name required)
 xlsynth-driver dslx-stitch-pipeline \
   --dslx_input_file my_design.x \
@@ -3865,6 +4322,7 @@ discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use
 
 Pipeline flags:
 
+- `--spec=<PATH>` - read the shared DSLX stitch specification documented above.
 - `--clock_name=<NAME>` - inserted-register clock name, default `clk`.
 - `--flop_inputs=<BOOL>` and `--flop_outputs=<BOOL>` - add external register
   layers; both default to `true`.
@@ -3877,7 +4335,8 @@ Pipeline flags:
   according to valid rather than being reset.
 
 The standard DSLX path flags and the g8r lowering flags accepted by `ir2g8r`
-are also accepted.
+are also accepted. For this command, formal array alias analysis defaults to
+off when the driver is built without Bitwuzla.
 
 ```shell
 xlsynth-driver dslx-stitch-g8r-pipeline \
@@ -4069,28 +4528,20 @@ assert_format      = "`BR_ASSERT({label}, {condition})"
 use_system_verilog = true
 ```
 
-## Obsolete `type_inference_v2` inputs
+## Removed `type_inference_v2` inputs
 
-V2 type inference is always used. The driver no longer selects an algorithm or
-forwards `type_inference_v2` to external tools.
+V2 type inference is always used. The driver rejects `--type_inference_v2` as an
+unknown option on `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
+`dslx2pipeline-eco`, and `dslx-equiv`, regardless of its value. Remove the flag
+entirely from scripts.
 
-For existing scripts, `dslx2ir`, `dslx2pipeline`, `dslx-g8r-stats`,
-`dslx2pipeline-eco`, and `dslx-equiv` still accept `--type_inference_v2 true`
-(or `--type_inference_v2=true`) with a deprecation warning on stderr. Explicit
-`false` is rejected because it requests unsupported V1 behavior; malformed values
-are also rejected. The option is hidden from help. Supplying it adds no external-tools
-requirement. `dslx2pipeline-eco` still requires external tools for its normal operation.
+The `type_inference_v2` key is also rejected in `[toolchain.dslx]` TOML and
+`dslx-equiv` prover JSON, including nested plans. Any supplied value produces
+an error before conversion or proving; remove the key rather than setting it
+to `true`, `false`, or `null`. Serialized prover plans and child commands omit
+the option.
 
-Existing `[toolchain.dslx]` TOML and `dslx-equiv` prover JSON may also contain
-`type_inference_v2`. These readers accept boolean `true` with a warning, and reject
-`false` or non-boolean values. Every supplied value is validated: CLI `true` cannot
-override an invalid or `false` config value. New serialized prover plans and child
-commands omit the key. Remove the old input to silence the warning. An explicit
-`RUST_LOG` setting controls warning visibility.
-
-For example, adding `--type_inference_v2=true` to this command produces the same
-IR with a deprecation warning. Adding `--type_inference_v2=false` instead fails
-before conversion and explains that V1 is no longer supported:
+For example, use:
 
 ```shell
 xlsynth-driver dslx2ir --dslx_input_file my_module.x --dslx_top main

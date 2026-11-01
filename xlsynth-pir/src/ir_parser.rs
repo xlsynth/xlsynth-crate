@@ -4,13 +4,27 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::ffi_proto::parse_foreign_function_data;
 use crate::ir::{
     self, ArrayTypeData, Block, BlockPort, BlockReset, FileTable, MemberType, PackageMember,
     operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
+use crate::ir_utils::is_valid_package_name;
 use crate::ir_verify;
 use crate::math::ceil_log2;
+
+/// Parses a single complete outer attribute for programmatic IR construction.
+pub(crate) fn parse_outer_attribute(source: &str) -> Result<ir::OuterAttribute, ParseError> {
+    let mut parser = Parser::new(source);
+    let (kind, source) = parser.parse_attribute(AttributePosition::Outer)?;
+    if !parser.at_eof() {
+        return Err(ParseError::new(
+            "unexpected text after outer attribute".to_string(),
+        ));
+    }
+    Ok(ir::OuterAttribute::new(kind, source))
+}
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
@@ -100,16 +114,32 @@ pub struct Parser {
     options: ParseOptions,
 }
 
+/// Some XLS productions consume a quoted token verbatim, others C-unescape it.
+enum StringEscapes {
+    Verbatim,
+    Decode,
+    /// Ordinary PIR file path strings historically C-unescape with octal
+    /// values taken modulo 256. Triple-quoted paths use XLS's verbatim syntax.
+    FilePath,
+}
+
+/// Native dumps frame raw filenames with quotes and a newline, while PIR
+/// text uses quoted string tokens.
+#[derive(Clone, Copy)]
+enum FilePathSyntax {
+    XlsDump,
+    Pir,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ParseOptions {
     pub retain_pos_data: bool,
 }
 
-/// Reset attributes refer to names until the block's actual ports are parsed.
-struct ParsedBlockReset {
-    port_name: String,
-    asynchronous: bool,
-    active_low: bool,
+/// Inner attributes include a bang between the hash and the opening bracket.
+enum AttributePosition {
+    Inner,
+    Outer,
 }
 
 impl Default for ParseOptions {
@@ -153,19 +183,19 @@ enum WrappedExtensionSpec {
     },
 }
 
-fn parse_wrapped_extension_spec_from_attr(
-    attr: &str,
+fn parse_wrapped_extension_spec_from_template(
+    template: &str,
 ) -> Result<Option<WrappedExtensionSpec>, ParseError> {
-    let Some(marker_start) = attr.find("xlsynth_pir_ext=") else {
+    let Some(marker_start) = template.find("xlsynth_pir_ext=") else {
         return Ok(None);
     };
-    let metadata_end = attr[marker_start..]
+    let metadata_end = template[marker_start..]
         .find("*/")
         .map(|offset| marker_start + offset)
         .ok_or_else(|| {
             ParseError::new("unterminated xlsynth_pir_ext metadata comment".to_string())
         })?;
-    let metadata = &attr[marker_start..metadata_end];
+    let metadata = &template[marker_start..metadata_end];
 
     let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
     for part in metadata.split(';') {
@@ -175,8 +205,8 @@ fn parse_wrapped_extension_spec_from_attr(
         }
         let (key, value) = trimmed.split_once('=').ok_or_else(|| {
             ParseError::new(format!(
-                "malformed xlsynth_pir_ext metadata field {:?} in attr {:?}",
-                trimmed, attr
+                "malformed xlsynth_pir_ext metadata field {:?} in template {:?}",
+                trimmed, template
             ))
         })?;
         fields.insert(key.trim(), value.trim());
@@ -365,24 +395,24 @@ fn parse_wrapped_extension_usize_field(
     let base_and_digits = base_and_digits
         .strip_prefix(['s', 'S'])
         .unwrap_or(base_and_digits);
-    if base_and_digits.is_empty() {
+    let mut chars = base_and_digits.chars();
+    let Some(base_char) = chars.next() else {
         return Err(ParseError::new(format!(
             "invalid {op_name} {field_name}: {text:?}"
         )));
-    }
-    let (base_char, digits_text) = base_and_digits.split_at(1);
+    };
     let radix = match base_char {
-        "b" | "B" => 2,
-        "o" | "O" => 8,
-        "d" | "D" => 10,
-        "h" | "H" => 16,
+        'b' | 'B' => 2,
+        'o' | 'O' => 8,
+        'd' | 'D' => 10,
+        'h' | 'H' => 16,
         _ => {
             return Err(ParseError::new(format!(
                 "invalid {op_name} {field_name} literal base: {text:?}"
             )));
         }
     };
-    let normalized_digits = digits_text.replace('_', "");
+    let normalized_digits = chars.as_str().replace('_', "");
     usize::from_str_radix(&normalized_digits, radix)
         .map_err(|e| ParseError::new(format!("invalid {op_name} {field_name}: {e}")))
 }
@@ -396,23 +426,6 @@ fn parse_bool_list_field(value: &str, field_name: &str) -> Result<Vec<bool>, Par
         .map(Parser::parse_bool_literal)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ParseError::new(format!("invalid {} entry: {}", field_name, e.msg)))
-}
-
-fn wrapped_extension_spec_for_fn(f: &ir::Fn) -> Result<Option<WrappedExtensionSpec>, ParseError> {
-    let mut found: Option<WrappedExtensionSpec> = None;
-    for attr in &f.outer_attrs {
-        let Some(spec) = parse_wrapped_extension_spec_from_attr(attr)? else {
-            continue;
-        };
-        if found.is_some() {
-            return Err(ParseError::new(format!(
-                "multiple xlsynth_pir_ext wrapper attrs found on function '{}'",
-                f.name
-            )));
-        }
-        found = Some(spec);
-    }
-    Ok(found)
 }
 
 fn canonicalize_wrapped_extension_helper_spec(
@@ -802,22 +815,16 @@ fn convert_ffi_invokes_to_extension_ops_in_graph(
         }
     }
     for node in &f.nodes {
-        match &node.payload {
-            ir::NodePayload::CountedFor { body, .. } => {
-                if wrappers.contains_key(body) {
-                    let node_name = node
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
-                    return Err(ParseError::new(format!(
-                        "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in function '{}'; only invoke nodes may reference wrapped extension helpers",
-                        body, node_name, f.name
-                    )));
-                }
-            }
-            _ => {
-                // Wrapped extension helpers are only referenced via
-                // invoke/counted_for today.
+        if let ir::NodePayload::CountedFor { body, .. } = &node.payload {
+            if wrappers.contains_key(body) {
+                let node_name = node
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
+                return Err(ParseError::new(format!(
+                    "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in '{}'",
+                    body, node_name, f.name
+                )));
             }
         }
     }
@@ -830,7 +837,15 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         let PackageMember::Function(f) = member else {
             continue;
         };
-        let Some(spec) = wrapped_extension_spec_for_fn(f)? else {
+        let Some(template) = f.ffi_proto().and_then(|ffi| ffi.code_template.as_deref()) else {
+            continue;
+        };
+        let Ok(template) = std::str::from_utf8(template) else {
+            // PIR extension helpers have textual templates. Preserve a binary
+            // template and its invocations as an ordinary foreign function.
+            continue;
+        };
+        let Some(spec) = parse_wrapped_extension_spec_from_template(template)? else {
             continue;
         };
         let spec = canonicalize_wrapped_extension_helper_spec(f, spec)?;
@@ -840,20 +855,12 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         return Ok(());
     }
 
-    for member in pkg.members.iter_mut() {
-        match member {
-            PackageMember::Function(f) => {
-                convert_ffi_invokes_to_extension_ops_in_graph(&mut f.graph, &wrappers)?
-            }
-            PackageMember::Block(block) => {
-                convert_ffi_invokes_to_extension_ops_in_graph(&mut block.graph, &wrappers)?
-            }
-        }
+    for member in &mut pkg.members {
+        convert_ffi_invokes_to_extension_ops_in_graph(member.graph_mut(), &wrappers)?;
     }
 
-    let wrapper_names: BTreeSet<String> = wrappers.keys().cloned().collect();
     if let Some((top_name, MemberType::Function)) = &pkg.top {
-        if wrapper_names.contains(top_name) {
+        if wrappers.contains_key(top_name) {
             return Err(ParseError::new(format!(
                 "top function '{}' is a wrapped extension helper and cannot be lifted away",
                 top_name
@@ -861,11 +868,53 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         }
     }
 
+    remove_unreferenced_wrappers(pkg, &wrappers);
+    Ok(())
+}
+
+/// Drops lifted wrappers unless a surviving map or extern instance needs their
+/// declaration.
+fn remove_unreferenced_wrappers(
+    pkg: &mut ir::Package,
+    wrappers: &BTreeMap<String, WrappedExtensionSpec>,
+) {
+    let mut unreferenced = BTreeMap::new();
+    let mut worklist = Vec::new();
+    for (index, member) in pkg.members.iter().enumerate() {
+        match member {
+            PackageMember::Function(f) if wrappers.contains_key(&f.name) => {
+                unreferenced.insert(f.name.clone(), index);
+            }
+            _ => worklist.push(index),
+        }
+    }
+
+    // Maps and external instances still need the original declaration. A
+    // retained wrapper's fallback graph can in turn map another wrapper.
+    while let Some(index) = worklist.pop() {
+        let member = &pkg.members[index];
+        let mut retain_target = |name: &str| {
+            if let Some(target) = unreferenced.remove(name) {
+                worklist.push(target);
+            }
+        };
+        for node in &member.graph().nodes {
+            if let ir::NodePayload::Map { to_apply, .. } = &node.payload {
+                retain_target(to_apply);
+            }
+        }
+        if let PackageMember::Block(block) = member {
+            for inst in &block.instantiations {
+                if inst.kind == ir::InstantiationKind::Extern {
+                    retain_target(&inst.block);
+                }
+            }
+        }
+    }
     pkg.members.retain(|member| match member {
-        PackageMember::Function(f) => !wrapper_names.contains(&f.name),
+        PackageMember::Function(f) => !unreferenced.contains_key(&f.name),
         PackageMember::Block(_) => true,
     });
-    Ok(())
 }
 
 impl Parser {
@@ -1016,39 +1065,57 @@ impl Parser {
     }
 
     fn pop_string_or_error(&mut self) -> Result<String, ParseError> {
-        self.drop_whitespace_and_comments();
-        self.drop_or_error("\"")?;
-        let mut bytes = Vec::new();
-        let mut closed = false;
-        while let Some(c) = self.peekc() {
-            if c == '"' {
-                self.dropc()?;
-                closed = true;
-                break;
-            }
-            if c == '\n' || c == '\r' {
-                // Strings cannot span lines in XLS IR; treat newline before
-                // closing quote as unterminated.
-                return Err(ParseError::new("unterminated quoted string".to_string()));
-            }
-            if c == '\\' {
-                self.dropc()?;
-                bytes.extend(self.pop_c_escape_bytes_or_error()?);
-            } else {
-                let mut utf8 = [0; 4];
-                bytes.extend(c.encode_utf8(&mut utf8).as_bytes());
-                self.dropc()?;
-            }
-        }
-        if !closed {
-            return Err(ParseError::new("unterminated quoted string".to_string()));
-        }
-        String::from_utf8(bytes)
+        self.pop_quoted_string(StringEscapes::Decode)
+    }
+
+    fn pop_quoted_string(&mut self, escapes: StringEscapes) -> Result<String, ParseError> {
+        String::from_utf8(self.pop_quoted_bytes(escapes)?)
             .map_err(|_| ParseError::new("quoted string is not valid UTF-8".to_string()))
     }
 
-    /// Pops one C-style string escape and returns its UTF-8 bytes.
-    fn pop_c_escape_bytes_or_error(&mut self) -> Result<Vec<u8>, ParseError> {
+    /// Consumes one quoted token, including escaped delimiters and multiline
+    /// triple quotes.
+    fn pop_quoted_bytes(&mut self, escapes: StringEscapes) -> Result<Vec<u8>, ParseError> {
+        let delimiter = if self.try_drop("\"\"\"") {
+            "\"\"\""
+        } else {
+            self.drop_or_error("\"")?;
+            "\""
+        };
+        let mut bytes = Vec::new();
+        while !self.peek_is(delimiter) {
+            let c = self
+                .popc()
+                .ok_or_else(|| ParseError::new("unterminated quoted string".into()))?;
+            if delimiter == "\"" && c == '\n' {
+                return Err(ParseError::new("unterminated quoted string".to_string()));
+            }
+            let literal = if c == '\\' {
+                match escapes {
+                    StringEscapes::Decode | StringEscapes::FilePath => {
+                        let truncate_octal = matches!(escapes, StringEscapes::FilePath);
+                        bytes.extend(self.pop_c_escape_bytes_or_error(truncate_octal)?);
+                        continue;
+                    }
+                    StringEscapes::Verbatim => {
+                        bytes.push(b'\\');
+                        self.popc().ok_or_else(|| {
+                            ParseError::new("unterminated quoted string escape".into())
+                        })?
+                    }
+                }
+            } else {
+                c
+            };
+            let mut utf8 = [0; 4];
+            bytes.extend_from_slice(literal.encode_utf8(&mut utf8).as_bytes());
+        }
+        self.offset += delimiter.len();
+        Ok(bytes)
+    }
+
+    /// Decodes one C-style string escape into bytes.
+    fn pop_c_escape_bytes_or_error(&mut self, truncate_octal: bool) -> Result<Vec<u8>, ParseError> {
         let c = self
             .popc()
             .ok_or_else(|| ParseError::new("unterminated quoted string escape".to_string()))?;
@@ -1076,9 +1143,14 @@ impl Parser {
                     self.dropc()?;
                     value = value * 8 + digit;
                 }
+                if value > u8::MAX as u32 && !truncate_octal {
+                    return Err(ParseError::new(
+                        "octal quoted string escape exceeds one byte".into(),
+                    ));
+                }
                 vec![value as u8]
             }
-            'x' => vec![self.pop_hex_escape_byte_or_error()?],
+            'x' | 'X' => vec![self.pop_hex_escape_byte_or_error()?],
             'u' => self.pop_unicode_escape_bytes_or_error(4)?,
             'U' => self.pop_unicode_escape_bytes_or_error(8)?,
             _ => {
@@ -1140,167 +1212,80 @@ impl Parser {
         Ok(c.encode_utf8(&mut utf8).as_bytes().to_vec())
     }
 
-    /// Parses and preserves a raw `#[...]` or `#![...]` attribute.
-    fn parse_raw_attribute(&mut self, prefix: &str) -> Result<String, ParseError> {
+    /// Checks for the first token of an attribute after whitespace and
+    /// comments.
+    fn at_attribute(&mut self) -> bool {
         self.drop_whitespace_and_comments();
-        if !self.peek_is(prefix) {
-            return Err(ParseError::new(format!(
-                "expected attribute starting with {:?}; line: {:?}",
-                prefix,
-                self.current_line()
-            )));
-        }
-        self.offset += prefix.len();
-
-        let mut attr = prefix.to_string();
-        let mut bracket_depth = 1usize;
-        let mut in_string = false;
-        let mut in_triple_quoted_string = false;
-        let mut in_backticked_string = false;
-        let mut escaped = false;
-
-        while self.offset < self.chars.len() {
-            if in_triple_quoted_string {
-                if self.peek_is("\"\"\"") {
-                    attr.push_str("\"\"\"");
-                    self.offset += 3;
-                    in_triple_quoted_string = false;
-                    continue;
-                }
-                let c = self.popc().ok_or_else(|| {
-                    ParseError::new("unterminated triple-quoted attribute string".to_string())
-                })?;
-                attr.push(c);
-                continue;
-            }
-
-            if in_string {
-                let c = self.popc().ok_or_else(|| {
-                    ParseError::new("unterminated quoted attribute string".to_string())
-                })?;
-                attr.push(c);
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if c == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                if c == '"' {
-                    in_string = false;
-                }
-                continue;
-            }
-
-            if in_backticked_string {
-                let c = self.popc().ok_or_else(|| {
-                    ParseError::new("unterminated backticked attribute string".to_string())
-                })?;
-                attr.push(c);
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if c == '\\' {
-                    escaped = true;
-                    continue;
-                }
-                if c == '`' {
-                    in_backticked_string = false;
-                }
-                continue;
-            }
-
-            if self.peek_is("\"\"\"") {
-                attr.push_str("\"\"\"");
-                self.offset += 3;
-                in_triple_quoted_string = true;
-                continue;
-            }
-
-            let c = self.popc().ok_or_else(|| {
-                ParseError::new(format!("unterminated attribute starting with {:?}", prefix))
-            })?;
-            attr.push(c);
-
-            match c {
-                '"' => in_string = true,
-                '`' => in_backticked_string = true,
-                '[' => bracket_depth = bracket_depth.saturating_add(1),
-                ']' => {
-                    bracket_depth = bracket_depth.saturating_sub(1);
-                    if bracket_depth == 0 {
-                        Self::validate_raw_attribute_name(&attr, prefix)?;
-                        return Ok(attr);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Err(ParseError::new(format!(
-            "unterminated attribute starting with {:?}",
-            prefix
-        )))
+        self.peek_is("#")
     }
 
-    /// Validates the name of a preserved IR attribute against XLS's parser.
-    fn validate_raw_attribute_name(attr: &str, prefix: &str) -> Result<(), ParseError> {
-        let body = attr
-            .strip_prefix(prefix)
-            .and_then(|s| s.strip_suffix(']'))
-            .ok_or_else(|| ParseError::new(format!("malformed attribute: {:?}", attr)))?;
-        let mut parser = Parser::new(body);
-        let name = parser.pop_identifier_or_error("attribute name")?;
-        match name.as_str() {
-            "non_synth" => parser.expect_attribute_eof(&name),
+    /// Parses one attribute production, retaining its original spelling.
+    fn parse_attribute(
+        &mut self,
+        position: AttributePosition,
+    ) -> Result<(ir::OuterAttributeKind, String), ParseError> {
+        self.drop_whitespace_and_comments();
+        let start = self.offset;
+        self.drop_or_error("#")?;
+        if matches!(position, AttributePosition::Inner) {
+            self.drop_or_error("!")?;
+        }
+        self.drop_or_error("[")?;
+        let name = self.pop_identifier_or_error("attribute name")?;
+        let kind = match name.as_str() {
+            "non_synth" => ir::OuterAttributeKind::NonSynth,
             "initiation_interval" => {
-                parser.drop_or_error("(")?;
-                parser.pop_number_i64_or_error("initiation_interval")?;
-                parser.drop_or_error(")")?;
-                parser.expect_attribute_eof(&name)
+                self.drop_or_error("(")?;
+                let interval = self.pop_number_i64_or_error("initiation_interval")?;
+                self.drop_or_error(")")?;
+                ir::OuterAttributeKind::InitiationInterval(interval)
             }
             "ffi_proto" | "signature" => {
-                parser.drop_or_error("(")?;
-                parser.pop_attribute_quoted_string_or_error(&name)?;
-                parser.drop_or_error(")")?;
-                parser.expect_attribute_eof(&name)
+                self.drop_or_error("(")?;
+                let kind = if name == "ffi_proto" {
+                    // XLS passes this token directly to protobuf TextFormat.
+                    let text = self.pop_quoted_string(StringEscapes::Verbatim)?;
+                    let data = parse_foreign_function_data(&text)
+                        .map_err(|error| ParseError::new(format!("invalid ffi_proto: {error}")))?;
+                    ir::OuterAttributeKind::FfiProto(data)
+                } else {
+                    ir::OuterAttributeKind::Signature(self.pop_quoted_bytes(StringEscapes::Decode)?)
+                };
+                self.drop_or_error(")")?;
+                kind
             }
-            "fuzz_test" => parser.validate_fuzz_test_attribute(),
-            "channel_ports" => parser.validate_channel_ports_attribute(),
-            "reset" => parser.validate_reset_attribute(),
-            "provenance" => parser.validate_provenance_attribute(),
-            _ => Err(ParseError::new(format!("unknown attribute: {}", name))),
+            "fuzz_test" => {
+                self.validate_fuzz_test_attribute()?;
+                ir::OuterAttributeKind::FuzzTest
+            }
+            "channel_ports" => {
+                self.validate_channel_ports_attribute()?;
+                ir::OuterAttributeKind::ChannelPorts
+            }
+            "reset" => ir::OuterAttributeKind::Reset(self.parse_reset_attribute()?),
+            "provenance" => {
+                self.validate_provenance_attribute()?;
+                ir::OuterAttributeKind::Provenance
+            }
+            _ => return Err(ParseError::new(format!("unknown attribute: {name}"))),
+        };
+        if !self.try_drop("]") {
+            return Err(ParseError::new(format!(
+                "unexpected trailing text in {name} attribute: expected closing bracket, got {:?}",
+                self.rest_of_line()
+            )));
         }
+        Ok((kind, self.chars[start..self.offset].iter().collect()))
     }
 
-    /// Rejects trailing tokens after a recognized preserved attribute.
-    fn expect_attribute_eof(&mut self, attr_name: &str) -> Result<(), ParseError> {
-        if self.at_eof() {
-            Ok(())
-        } else {
-            Err(ParseError::new(format!(
-                "unexpected trailing text in {} attribute: {:?}",
-                attr_name,
-                self.rest()
-            )))
+    /// Parses adjacent outer attributes before a function or block.
+    fn parse_outer_attributes(&mut self) -> Result<Vec<ir::OuterAttribute>, ParseError> {
+        let mut attributes = Vec::new();
+        while self.at_attribute() {
+            let (kind, source) = self.parse_attribute(AttributePosition::Outer)?;
+            attributes.push(ir::OuterAttribute::new(kind, source));
         }
-    }
-
-    /// Pops an XLS IR attribute string, including the triple-quoted proto form.
-    fn pop_attribute_quoted_string_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
-        self.drop_whitespace_and_comments();
-        if !self.try_drop("\"\"\"") {
-            self.pop_string_or_error()?;
-            return Ok(());
-        }
-        while !self.peek_is("\"\"\"") {
-            self.popc().ok_or_else(|| {
-                ParseError::new(format!("unterminated triple-quoted string in {}", ctx))
-            })?;
-        }
-        self.drop_or_error("\"\"\"")
+        Ok(attributes)
     }
 
     /// Pops an XLS IR backticked attribute string without interpreting its
@@ -1371,12 +1356,13 @@ impl Parser {
                 )));
             }
         }
-        self.expect_attribute_eof(attr_name)
+        Ok(())
     }
 
     /// Validates a preserved `fuzz_test` attribute.
     fn validate_fuzz_test_attribute(&mut self) -> Result<(), ParseError> {
-        if self.at_eof() {
+        self.drop_whitespace_and_comments();
+        if self.peek_is("]") {
             return Ok(());
         }
         self.validate_attribute_keyword_args("fuzz_test", &[], |key, parser| match key {
@@ -1445,25 +1431,37 @@ impl Parser {
         )
     }
 
-    /// Validates a preserved `reset` attribute.
-    fn validate_reset_attribute(&mut self) -> Result<(), ParseError> {
+    /// Parses the reset port name and its behavior before block ports are
+    /// resolved.
+    fn parse_reset_attribute(&mut self) -> Result<ir::ResetAttribute, ParseError> {
+        let mut reset = ir::ResetAttribute {
+            port_name: String::new(),
+            asynchronous: false,
+            active_low: false,
+        };
         self.validate_attribute_keyword_args(
             "reset",
             &["port", "asynchronous", "active_low"],
-            |key, parser| match key {
-                "port" => {
-                    parser.pop_string_or_error()?;
-                    Ok(())
+            |key, parser| {
+                match key {
+                    "port" => reset.port_name = parser.pop_string_or_error()?,
+                    "asynchronous" => {
+                        reset.asynchronous =
+                            parser.pop_bool_literal_or_error("reset asynchronous")?
+                    }
+                    "active_low" => {
+                        reset.active_low = parser.pop_bool_literal_or_error("reset active_low")?
+                    }
+                    _ => {
+                        return Err(ParseError::new(format!(
+                            "unknown reset attribute key: {key}"
+                        )));
+                    }
                 }
-                "asynchronous" | "active_low" => {
-                    parser.pop_bool_literal_or_error(&format!("reset {}", key))
-                }
-                _ => Err(ParseError::new(format!(
-                    "unknown reset attribute key: {}",
-                    key
-                ))),
+                Ok(())
             },
-        )
+        )?;
+        Ok(reset)
     }
 
     /// Validates a preserved `provenance` attribute.
@@ -1608,10 +1606,11 @@ impl Parser {
         })
     }
 
-    fn pop_bool_literal_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+    fn pop_bool_literal_or_error(&mut self, ctx: &str) -> Result<bool, ParseError> {
         let value = self.pop_identifier_or_error(ctx)?;
         match value.as_str() {
-            "true" | "false" => Ok(()),
+            "true" => Ok(true),
+            "false" => Ok(false),
             _ => Err(ParseError::new(format!(
                 "expected boolean literal in {}, got {:?}",
                 ctx, value
@@ -1859,7 +1858,11 @@ impl Parser {
         }
     }
 
-    fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
+    fn parse_file_number(
+        &mut self,
+        file_table: &mut FileTable,
+        syntax: FilePathSyntax,
+    ) -> Result<(), ParseError> {
         self.drop_or_error("file_number")?;
         let id = self.pop_number_usize_or_error("file_number")?;
         if id > i32::MAX as usize {
@@ -1868,8 +1871,59 @@ impl Parser {
                 i32::MAX
             )));
         }
-        let path = self.pop_string_or_error()?;
+        self.drop_whitespace_and_comments();
+        let path = match syntax {
+            FilePathSyntax::XlsDump => self.pop_xls_dumped_file_path()?,
+            FilePathSyntax::Pir if self.peek_is("\"\"\"") => {
+                self.pop_quoted_string(StringEscapes::Verbatim)?
+            }
+            FilePathSyntax::Pir => self.pop_quoted_string(StringEscapes::FilePath)?,
+        };
         file_table.add(id, path)
+    }
+
+    /// Reads the filename that DumpIr prints directly between a quote and
+    /// the closing quote at the end of its declaration.
+    fn pop_xls_dumped_file_path(&mut self) -> Result<String, ParseError> {
+        self.drop_or_error("\"")?;
+        let start = self.offset;
+        while self.peekc().is_some() {
+            let end = self.offset;
+            if !self.peek_is("\"\n") {
+                self.offset += 1;
+                continue;
+            }
+            self.offset += 2;
+            // DumpIr writes consecutive file declarations, then a blank
+            // line before the first member. Other text still belongs to a
+            // filename containing a quote immediately before a newline.
+            if self.peekc().is_none() || self.peek_is("file_number ") {
+                return Ok(self.chars[start..end].iter().collect());
+            }
+            if self.peek_is("\n") {
+                self.offset += 1;
+                if self.peekc().is_none()
+                    || [
+                        "#[",
+                        "top ",
+                        "fn ",
+                        "proc ",
+                        "block ",
+                        "chan ",
+                        "scheduled_fn ",
+                        "scheduled_proc ",
+                        "scheduled_block ",
+                    ]
+                    .iter()
+                    .any(|prefix| self.peek_is(prefix))
+                {
+                    return Ok(self.chars[start..end].iter().collect());
+                }
+            }
+        }
+        Err(ParseError::new(
+            "unterminated file_number path in XLS dump".into(),
+        ))
     }
 
     fn parse_id_attribute(&mut self) -> Result<usize, ParseError> {
@@ -3170,23 +3224,22 @@ impl Parser {
                     )));
                 }                (ir::NodePayload::AfterAll(operands), maybe_id.unwrap())
             }
-            "invoke" => {
-                // This is a variadic operands that puts the variadic node refs at the top level
-                // instead of in an attribute.
+            "invoke" | "map" => {
+                // Both calls place their operands before the to_apply attribute.
                 let mut operands = Vec::new();
                 loop {
                     self.drop_whitespace_and_comments();
                     if self.peek_is(")") || self.peek_is("to_apply=") {
                         break;
                     }
-                    let operand = self.parse_node_ref(&node_env, "invoke arg")?;
+                    let operand = self.parse_node_ref(&node_env, "call operand")?;
                     operands.push(operand);
                     if !self.try_drop(",") {
                         break;
                     }
                 }
                 self.drop_or_error("to_apply=")?;
-                let to_apply = self.pop_identifier_or_error("invoke to_apply")?;
+                let to_apply = self.pop_identifier_or_error("call to_apply")?;
                 if self.peek_is(",") {
                     self.dropc()?;
                     let id_attr = self.parse_id_attribute()?;
@@ -3194,13 +3247,19 @@ impl Parser {
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
-                        "expected id for invoke; rest_of_line: {:?}",
+                        "expected id for {operator}; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }                (
-                    ir::NodePayload::Invoke { to_apply, operands },
-                    maybe_id.unwrap(),
-                )
+                }
+                let payload = if operator == "map" {
+                    let [array] = operands.as_slice() else {
+                        return Err(ParseError::new("map requires exactly one array operand".to_string()));
+                    };
+                    ir::NodePayload::Map { array: *array, to_apply }
+                } else {
+                    ir::NodePayload::Invoke { to_apply, operands }
+                };
+                (payload, maybe_id.unwrap())
             }
             "concat" => {
                 let operands =
@@ -3576,103 +3635,11 @@ impl Parser {
     /// Parses inner attributes at the current position (`#![...]`).
     pub fn parse_inner_attributes(&mut self) -> Result<Vec<String>, ParseError> {
         let mut attrs: Vec<String> = Vec::new();
-        loop {
-            self.drop_whitespace_and_comments();
-            if self.peek_is("#![") {
-                attrs.push(self.parse_raw_attribute("#![")?);
-                continue;
-            }
-            break;
+        while self.at_attribute() {
+            let (_, source) = self.parse_attribute(AttributePosition::Inner)?;
+            attrs.push(source);
         }
         Ok(attrs)
-    }
-
-    fn extract_block_reset_metadata(
-        &self,
-        attrs: Vec<String>,
-    ) -> Result<(Vec<String>, Option<ParsedBlockReset>), ParseError> {
-        let mut filtered: Vec<String> = Vec::new();
-        let mut reset_metadata: Option<ParsedBlockReset> = None;
-        for attr in attrs.into_iter() {
-            if let Some(parsed) = Self::parse_reset_attr(&attr)? {
-                if reset_metadata.is_some() {
-                    return Err(ParseError::new(
-                        "multiple reset attributes in block".to_string(),
-                    ));
-                }
-                reset_metadata = Some(parsed);
-            } else {
-                filtered.push(attr);
-            }
-        }
-        Ok((filtered, reset_metadata))
-    }
-
-    fn parse_reset_attr(attr: &str) -> Result<Option<ParsedBlockReset>, ParseError> {
-        let prefix = "#![reset(";
-        let suffix = ")]";
-        if !attr.starts_with(prefix) {
-            return Ok(None);
-        }
-        if !attr.ends_with(suffix) {
-            return Err(ParseError::new(format!(
-                "malformed reset attribute: {:?}",
-                attr
-            )));
-        }
-        let inner = &attr[prefix.len()..attr.len() - suffix.len()];
-        let mut port_name: Option<String> = None;
-        let mut asynchronous: Option<bool> = None;
-        let mut active_low: Option<bool> = None;
-        for part in inner.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let mut iter = part.splitn(2, '=');
-            let key = iter
-                .next()
-                .ok_or_else(|| ParseError::new("missing reset attribute key".to_string()))?
-                .trim();
-            let value = iter
-                .next()
-                .ok_or_else(|| ParseError::new("missing reset attribute value".to_string()))?
-                .trim();
-            match key {
-                "port" => {
-                    if !(value.starts_with('"') && value.ends_with('"')) {
-                        return Err(ParseError::new(format!(
-                            "reset port must be quoted, got {:?}",
-                            value
-                        )));
-                    }
-                    port_name = Some(value[1..value.len() - 1].to_string());
-                }
-                "asynchronous" => {
-                    asynchronous = Some(Self::parse_bool_literal(value)?);
-                }
-                "active_low" => {
-                    active_low = Some(Self::parse_bool_literal(value)?);
-                }
-                _ => {
-                    return Err(ParseError::new(format!(
-                        "unknown reset attribute '{}'",
-                        key
-                    )));
-                }
-            }
-        }
-        let port_name =
-            port_name.ok_or_else(|| ParseError::new("reset attribute missing port".to_string()))?;
-        let asynchronous = asynchronous
-            .ok_or_else(|| ParseError::new("reset attribute missing asynchronous".to_string()))?;
-        let active_low = active_low
-            .ok_or_else(|| ParseError::new("reset attribute missing active_low".to_string()))?;
-        Ok(Some(ParsedBlockReset {
-            port_name,
-            asynchronous,
-            active_low,
-        }))
     }
 
     fn parse_bool_literal(value: &str) -> Result<bool, ParseError> {
@@ -3688,7 +3655,18 @@ impl Parser {
 
     /// Like parse_fn but with pre-scanned outer attributes supplied by caller.
     pub fn parse_fn_with_outer(&mut self, outer_attrs: Vec<String>) -> Result<ir::Fn, ParseError> {
-        log::debug!("parse_fn_with_outer");
+        let attrs = outer_attrs
+            .iter()
+            .map(|attr| parse_outer_attribute(attr))
+            .collect::<Result<_, _>>()?;
+        self.parse_fn_with_attributes(attrs)
+    }
+
+    /// Parses a function body after the attributes preceding its declaration.
+    fn parse_fn_with_attributes(
+        &mut self,
+        outer_attrs: Vec<ir::OuterAttribute>,
+    ) -> Result<ir::Fn, ParseError> {
         self.drop_or_error("fn")?;
         let fn_name = self.pop_identifier_or_error("fn name")?;
 
@@ -3786,18 +3764,48 @@ impl Parser {
     }
 
     pub fn parse_fn(&mut self) -> Result<ir::Fn, ParseError> {
-        self.parse_fn_with_outer(Vec::new())
+        let attrs = self.parse_outer_attributes()?;
+        self.parse_fn_with_attributes(attrs)
+    }
+
+    /// Parses a complete XLS function declaration, preserving attributes,
+    /// invokes and the function body as printed by libxls.
+    pub fn parse_function_declaration(&mut self) -> Result<ir::Fn, ParseError> {
+        let attrs = self.parse_outer_attributes()?;
+        // The top marker belongs to the enclosing package.
+        self.try_drop_keyword("top");
+        let f = self.parse_fn_with_attributes(attrs)?;
+        if !self.at_eof() {
+            return Err(ParseError::new(format!(
+                "unexpected text after function '{}'",
+                f.name
+            )));
+        }
+        Ok(f)
     }
 
     /// Parses a block, retaining ports as ordinary graph nodes.
     pub fn parse_block(&mut self) -> Result<Block, ParseError> {
-        self.parse_block_with_outer(Vec::new())
+        let attrs = self.parse_outer_attributes()?;
+        self.parse_block_with_attributes(attrs)
     }
 
     /// Parses a block and attaches attributes preceding its declaration.
     pub fn parse_block_with_outer(
         &mut self,
         outer_attrs: Vec<String>,
+    ) -> Result<Block, ParseError> {
+        let attrs = outer_attrs
+            .iter()
+            .map(|attr| parse_outer_attribute(attr))
+            .collect::<Result<_, _>>()?;
+        self.parse_block_with_attributes(attrs)
+    }
+
+    /// Parses a block body after the attributes preceding its declaration.
+    fn parse_block_with_attributes(
+        &mut self,
+        outer_attrs: Vec<ir::OuterAttribute>,
     ) -> Result<Block, ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
@@ -3834,9 +3842,19 @@ impl Parser {
         self.drop_or_error("{")?;
         let mut block = Block::new(&block_name);
         block.outer_attrs = outer_attrs;
-        let inner_attrs = self.parse_inner_attributes()?;
-        let (inner_attrs, parsed_reset) = self.extract_block_reset_metadata(inner_attrs)?;
-        block.inner_attrs = inner_attrs;
+        let mut parsed_reset = None;
+        while self.at_attribute() {
+            let (kind, source) = self.parse_attribute(AttributePosition::Inner)?;
+            if let ir::OuterAttributeKind::Reset(reset) = kind {
+                if parsed_reset.replace(reset).is_some() {
+                    return Err(ParseError::new(
+                        "multiple reset attributes in block".to_string(),
+                    ));
+                }
+            } else {
+                block.inner_attrs.push(source);
+            }
+        }
         let mut node_env = IrNodeEnv::new();
         let mut port_nodes = BTreeMap::new();
         let mut register_names = std::collections::HashSet::new();
@@ -3950,41 +3968,78 @@ impl Parser {
         Ok(block)
     }
 
+    /// Parses a package, recovering native PIR extension ops from their FFI
+    /// wrappers.
     pub fn parse_package(&mut self) -> Result<ir::Package, ParseError> {
-        log::debug!("parse_package");
-        let mut members: Vec<PackageMember> = Vec::new();
-        let mut top: Option<(String, MemberType)> = None;
+        let mut pkg = self.parse_package_preserving_ffi_invokes()?;
+        convert_ffi_invokes_to_extension_ops(&mut pkg)?;
+        Ok(pkg)
+    }
 
+    /// Reads a libxls package dump's name and verbatim source paths, leaving
+    /// the parser at the first member. DumpIr writes filenames unescaped, so
+    /// a literal newline that mimics a declaration boundary in a filename is
+    /// indistinguishable from the boundary between separate declarations.
+    pub fn parse_xls_package_header(&mut self) -> Result<ir::Package, ParseError> {
+        self.parse_package_header_with_file_paths(FilePathSyntax::XlsDump)
+    }
+
+    fn parse_package_header_with_file_paths(
+        &mut self,
+        syntax: FilePathSyntax,
+    ) -> Result<ir::Package, ParseError> {
         self.drop_keyword_or_error("package", "package header")?;
-        let package_name = self.pop_identifier_or_error("package name")?;
-        log::debug!("package_name: {}", package_name);
-
-        let mut file_table = FileTable::new();
-
-        let mut pending_outer_attrs: Vec<String> = Vec::new();
-        while !self.at_eof() {
-            self.drop_whitespace_and_comments();
-            if self.peek_is("#[") {
-                pending_outer_attrs.push(self.parse_raw_attribute("#[")?);
-                // Continue scanning for the next member after the attribute.
-                self.drop_whitespace_and_comments();
+        self.drop_whitespace_and_comments();
+        let start = self.offset;
+        while let Some(c) = self.peekc() {
+            // Comments and member attributes can directly follow the name.
+            if matches!(c, ' ' | '\t' | '\n' | '\r' | '#') || self.peek_is("//") {
+                break;
             }
+            self.offset += 1;
+        }
+        let name: String = self.chars[start..self.offset].iter().collect();
+        if !is_valid_package_name(&name) {
+            return Err(ParseError::new(format!(
+                "expected identifier for package name, got {name:?}"
+            )));
+        }
+        let mut file_table = FileTable::new();
+        self.drop_whitespace_and_comments();
+        while self.peek_keyword_is("file_number") {
+            self.parse_file_number(&mut file_table, syntax)?;
+            self.drop_whitespace_and_comments();
+        }
+        Ok(ir::Package {
+            name,
+            file_table,
+            members: Vec::new(),
+            top: None,
+        })
+    }
+
+    /// Parses declarations and invokes as written so callers can inspect FFI
+    /// before lifting.
+    pub fn parse_package_preserving_ffi_invokes(&mut self) -> Result<ir::Package, ParseError> {
+        let mut package = self.parse_package_header_with_file_paths(FilePathSyntax::Pir)?;
+        log::debug!("parse_package: {}", package.name);
+        while !self.at_eof() {
+            let outer_attrs = self.parse_outer_attributes()?;
             if self.try_drop_keyword("top") {
-                if top.is_some() {
+                if package.top.is_some() {
                     return Err(ParseError::new("top declared more than once".to_string()));
                 }
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
-                    let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
-                    top = Some((f.name.clone(), MemberType::Function));
-                    members.push(PackageMember::Function(f));
+                    let f = self.parse_fn_with_attributes(outer_attrs)?;
+                    package.top = Some((f.name.clone(), MemberType::Function));
+                    package.members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
-                    let block =
-                        self.parse_block_with_outer(pending_outer_attrs.drain(..).collect())?;
-                    top = Some((block.name.clone(), MemberType::Block));
-                    members.push(PackageMember::Block(block));
+                    let block = self.parse_block_with_attributes(outer_attrs)?;
+                    package.top = Some((block.name.clone(), MemberType::Block));
+                    package.members.push(PackageMember::Block(block));
                 } else {
                     return Err(ParseError::new(format!(
                         "expected fn or block after top; rest: {:?}",
@@ -3992,11 +4047,11 @@ impl Parser {
                     )));
                 }
             } else if self.peek_keyword_is("fn") {
-                let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
-                members.push(PackageMember::Function(f));
+                let f = self.parse_fn_with_attributes(outer_attrs)?;
+                package.members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
-                let block = self.parse_block_with_outer(pending_outer_attrs.drain(..).collect())?;
-                members.push(PackageMember::Block(block));
+                let block = self.parse_block_with_attributes(outer_attrs)?;
+                package.members.push(PackageMember::Block(block));
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
@@ -4008,12 +4063,12 @@ impl Parser {
                     self.rest()
                 )));
             } else if self.peek_keyword_is("file_number") {
-                if !pending_outer_attrs.is_empty() {
+                if !outer_attrs.is_empty() {
                     return Err(ParseError::new(
                         "attributes are not supported on file_number declarations".to_string(),
                     ));
                 }
-                self.parse_file_number(&mut file_table)?;
+                self.parse_file_number(&mut package.file_table, FilePathSyntax::Pir)?;
             } else {
                 return Err(ParseError::new(format!(
                     "expected top, fn, block, or file_number, got {:?}; rest: {:?}",
@@ -4022,14 +4077,7 @@ impl Parser {
                 )));
             }
         }
-        let mut pkg = ir::Package {
-            name: package_name,
-            file_table,
-            members,
-            top,
-        };
-        convert_ffi_invokes_to_extension_ops(&mut pkg)?;
-        Ok(pkg)
+        Ok(package)
     }
 }
 
@@ -4089,7 +4137,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
     }
     let mut out = String::new();
     for attr in &block.outer_attrs {
-        out.push_str(attr);
+        out.push_str(attr.as_str());
         out.push('\n');
     }
     if is_top {
@@ -4178,14 +4226,18 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = "file_number 1 \"foo.x\"";
         let mut parser = Parser::new(input);
-        let file_table = parser.parse_file_number(&mut FileTable::new()).unwrap();
+        let file_table = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap();
         println!("{:?}", file_table);
     }
 
     #[test]
     fn test_parse_file_number_rejects_leading_zero_decimal() {
         let mut parser = Parser::new("file_number 00 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid leading-zero decimal number \"00\"")
@@ -4205,7 +4257,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_leading_underscore() {
         let mut parser = Parser::new("file_number ___2_ \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid underscore placement in decimal number")
@@ -4215,7 +4269,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_trailing_underscore() {
         let mut parser = Parser::new("file_number 2_ \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid trailing underscore in decimal number")
@@ -4225,7 +4281,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_repeated_underscores() {
         let mut parser = Parser::new("file_number 2__3 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid underscore placement in decimal number")
@@ -4235,7 +4293,9 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     #[test]
     fn test_parse_file_number_rejects_i32_overflow() {
         let mut parser = Parser::new("file_number 2147483648 \"foo.x\"");
-        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        let err = parser
+            .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("file number 2147483648 exceeds the XLS maximum of 2147483647")
@@ -4246,8 +4306,20 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     fn test_parse_file_number_decodes_c_escapes() {
         let mut parser = Parser::new(r#"file_number 2 "a\"b\\c\n\141\u03bb""#);
         let mut file_table = FileTable::new();
-        parser.parse_file_number(&mut file_table).unwrap();
+        parser
+            .parse_file_number(&mut file_table, FilePathSyntax::Pir)
+            .unwrap();
         assert_eq!(file_table.id_to_path[&2], "a\"b\\c\na\u{03bb}");
+    }
+
+    #[test]
+    fn file_number_decodes_the_low_byte_of_an_octal_escape() {
+        let source = r#"package p
+file_number 1 "source\501test.x"
+"#;
+        xlsynth::IrPackage::parse_ir(source, None).unwrap();
+        let pkg = Parser::new(source).parse_package().unwrap();
+        assert_eq!(pkg.file_table.id_to_path[&1], "sourceAtest.x");
     }
 
     #[test]
@@ -4295,8 +4367,97 @@ file_number 2 "a\"b\\c\n\141\u03bb"
         );
         let pkg = parser.parse_package().unwrap();
         let emitted = pkg.to_string();
-        assert!(emitted.contains(r#"file_number 2 "a\"b\\c\naλ""#));
-        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(
+            emitted,
+            r#"package p
+
+file_number 2 """a"b\c
+aλ"""
+
+"#
+        );
+        let reparsed = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(reparsed.file_table.id_to_path, pkg.file_table.id_to_path);
+        let xls = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(
+            xls.to_string(),
+            format!(
+                "package p\n\nfile_number 2 \"{}\"\n",
+                pkg.file_table.id_to_path[&2]
+            )
+        );
+    }
+
+    #[test]
+    fn libxls_header_paths_round_trip_verbatim_through_both_parsers() {
+        let source = r#"package p
+
+file_number 0 """a"b.x"""
+file_number 1 """a"
+
+more.x"""
+file_number 2 "C:\tmp\a\z\foo.x"
+
+fn f() -> bits[1] {
+  ret x: bits[1] = literal(value=0, id=1)
+}
+"#;
+        let dump = xlsynth::IrPackage::parse_ir(source, None)
+            .unwrap()
+            .to_string();
+        let mut parser = Parser::new(&dump);
+        let mut pkg = parser.parse_xls_package_header().unwrap();
+        assert_eq!(pkg.file_table.id_to_path[&0], "a\"b.x");
+        assert_eq!(pkg.file_table.id_to_path[&1], "a\"\n\nmore.x");
+        assert_eq!(pkg.file_table.id_to_path[&2], r"C:\tmp\a\z\foo.x");
+        let function = parser.parse_function_declaration().unwrap();
+        pkg.members.push(PackageMember::Function(function));
+        let emitted = pkg.to_string();
+        let pir = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(pir.file_table.id_to_path, pkg.file_table.id_to_path);
+        let reparsed = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+        assert_eq!(reparsed.to_string(), dump);
+    }
+
+    #[test]
+    fn native_header_rejects_a_truncated_file_declaration() {
+        let dump = "package p\n\nfile_number 0 \"a\"b.x\n\nfn f() -> bits[1] {}\n";
+        let err = Parser::new(dump).parse_xls_package_header().unwrap_err();
+        assert_eq!(err.msg, "unterminated file_number path in XLS dump");
+    }
+
+    #[test]
+    fn native_file_table_can_precede_channels_and_procs() {
+        let proc = "proc counter(state: bits[32], init={0}) { next (state) }";
+        let channel_and_proc = r#"chan c(bits[32], id=1, kind=streaming, flow_control=none, ops=receive_only)
+proc consume(t: token, init={token}) {
+  r: (token, bits[32]) = receive(t, channel=c)
+  next (t)
+}"#;
+        for (declarations, first_member) in [(proc, "proc"), (channel_and_proc, "chan")] {
+            let source = format!("package p\nfile_number 0 \"pipeline.x\"\n{declarations}");
+            let dump = xlsynth::IrPackage::parse_ir(&source, None)
+                .unwrap()
+                .to_string();
+            let mut parser = Parser::new(&dump);
+            let pkg = parser.parse_xls_package_header().unwrap();
+            assert_eq!(pkg.file_table.id_to_path[&0], "pipeline.x");
+            assert!(parser.peek_keyword_is(first_member));
+        }
+    }
+
+    #[test]
+    fn file_paths_without_a_verbatim_spelling_round_trip_through_pir() {
+        let mut pkg = Parser::new("package p").parse_package().unwrap();
+        for (id, path) in ["trailing\\", "trailing\"", "a\"\"\"b", "a\0b"]
+            .iter()
+            .enumerate()
+        {
+            pkg.file_table.add(id, path.to_string()).unwrap();
+        }
+        let emitted = pkg.to_string();
+        let reparsed = Parser::new(&emitted).parse_package().unwrap();
+        assert_eq!(reparsed.file_table.id_to_path, pkg.file_table.id_to_path);
     }
 
     #[test]
@@ -4405,17 +4566,189 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
         let package = parser.parse_package().unwrap();
         let f = package.get_fn("ffi_callee").expect("ffi_callee present");
         assert_eq!(f.outer_attrs.len(), 1);
-        assert!(
-            f.outer_attrs[0].contains("ffi_proto"),
-            "expected ffi_proto attribute, got {:?}",
-            f.outer_attrs
-        );
-        assert!(
-            f.outer_attrs[0].contains("keep [7:0]"),
-            "expected bracketed text to survive attribute parsing, got {:?}",
-            f.outer_attrs
+        assert_eq!(
+            f.outer_attrs[0].kind(),
+            &ir::OuterAttributeKind::FfiProto(ir::ForeignFunctionData {
+                code_template: Some(
+                    b"verilog_module {fn} (.a({x}), .out({return})); /* keep [7:0] */".to_vec()
+                ),
+                delay_ps: None,
+            })
         );
         assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn proto_attributes_match_xls_escaping_for_both_quote_styles() {
+        let ffi_text = r#"code_template: 'left\nright\"' delay_ps: 0"#;
+        let signature_token = r#"module_name: \X22m\""#;
+        for quotes in ["\"", "\"\"\""] {
+            let ffi_attr = format!("#[ffi_proto({quotes}{ffi_text}{quotes})]");
+            let signature_attr = format!("#[signature({quotes}{signature_token}{quotes})]");
+            let source = format!(
+                r#"package proto_escapes
+{ffi_attr}
+fn f(x: bits[1] id=1) -> bits[1] {{
+  ret identity.2: bits[1] = identity(x, id=2)
+}}
+{signature_attr}
+top block m() {{}}
+"#
+            );
+            xlsynth::IrPackage::parse_ir(&source, None).expect("stock XLS accepts the two protos");
+            let pkg = Parser::new(&source).parse_package().unwrap();
+            let ffi = &pkg.get_fn("f").unwrap().outer_attrs[0];
+            assert_eq!(
+                ffi.kind(),
+                &ir::OuterAttributeKind::FfiProto(ir::ForeignFunctionData {
+                    code_template: Some(b"left\nright\"".to_vec()),
+                    delay_ps: Some(0),
+                })
+            );
+            assert_eq!(ffi.as_str(), ffi_attr);
+            let signature = &pkg.get_block("m").unwrap().outer_attrs[0];
+            assert_eq!(
+                signature.kind(),
+                &ir::OuterAttributeKind::Signature(br#"module_name: "m""#.to_vec())
+            );
+            assert_eq!(signature.as_str(), signature_attr);
+        }
+    }
+
+    #[test]
+    fn ffi_templates_preserve_stock_escaped_bytes_and_ir_delimiters() {
+        let cases: &[(&str, &[u8])] = &[
+            (r"code_template: '\uD83D\uDE00\501'", "😀A".as_bytes()),
+            (
+                r"code_template: '\501' # \uD83D\uDE00 code_template: 'decoy'",
+                b"A",
+            ),
+            (r"code_template: '\U0000D83D\uDE00'", "😀".as_bytes()),
+            (
+                r"code_template: '\uD83D\U0000DE00'",
+                b"\xed\xa0\xbd\xed\xb8\x80",
+            ),
+            (
+                r"code_template: '\uD83D' '\uDE00'",
+                b"\xed\xa0\xbd\xed\xb8\x80",
+            ),
+            (
+                r"code_template: '\U00110000\U001FFFFF\400'",
+                b"\\U00110000\\U001fffff\0",
+            ),
+            (
+                r"code_template: '\\uD83D\\uDE00\\501\501'",
+                br"\uD83D\uDE00\501A",
+            ),
+            (
+                r#"code_template: '[(\"\"\")] #[ffi_proto(\"delay_ps: 7\")] \501'"#,
+                br#"[(""")] #[ffi_proto("delay_ps: 7")] A"#,
+            ),
+            (
+                r"code_template: '/* xlsynth_pir_ext=unknown */\777'",
+                b"/* xlsynth_pir_ext=unknown */\xff",
+            ),
+        ];
+        for (text, expected) in cases {
+            for quotes in ["\"", "\"\"\""] {
+                let attribute = format!("#[ffi_proto({quotes}{text}{quotes})]");
+                let source = format!(
+                    r#"package ffi_bytes
+
+{attribute}
+fn f(x: bits[1] id=1) -> bits[1] {{
+  ret x: bits[1] = param(name=x, id=1)
+}}
+
+top fn main(x: bits[1] id=2) -> bits[1] {{
+  ret result: bits[1] = invoke(x, to_apply=f, id=3)
+}}
+"#
+                );
+                xlsynth::IrPackage::parse_ir(&source, None).unwrap();
+                let pkg = Parser::new(&source).parse_package().unwrap();
+                assert_eq!(pkg.to_string(), source);
+                assert_eq!(
+                    pkg.get_fn("f")
+                        .unwrap()
+                        .ffi_proto()
+                        .unwrap()
+                        .code_template
+                        .as_deref(),
+                    Some(*expected)
+                );
+            }
+        }
+        assert!(parse_outer_attribute("#[ffi_proto(\"code_template: '\\501\0'\")]").is_err());
+    }
+
+    #[test]
+    fn xls_escape_compatibility_preserves_textproto_errors() {
+        for text in [
+            r"code_template: '\uD83D\uDE00\q'",
+            r"code_template: '\501\U00200000'",
+            r"code_template: '\501\u+abc'",
+            r"code_template: '\501' unknown_field: 1",
+            r"code_template: '\501' code_template: 'duplicate'",
+            r"delay_ps: \501",
+        ] {
+            let attr = format!("#[ffi_proto(\"{text}\")]");
+            assert!(parse_outer_attribute(&attr).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn malformed_ffi_proto_is_rejected_even_when_superseded() {
+        let source = r#"package bad_ffi
+#[ffi_proto("delay_ps: 'invalid'")]
+#[ffi_proto("code_template: 'assign {return} = {x};'")]
+fn f(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+"#;
+        assert!(xlsynth::IrPackage::parse_ir(source, None).is_err());
+        assert!(Parser::new(source).parse_package().is_err());
+        assert!(parse_outer_attribute(r#"#[ffi_proto("delay_ps: 'invalid'")]"#).is_err());
+    }
+
+    #[test]
+    fn signature_rejects_invalid_escapes_for_both_quote_styles() {
+        for quotes in ["\"", "\"\"\""] {
+            for invalid in [r"\q", r"\777"] {
+                let attr = format!("#[signature({quotes}module_name: '{invalid}'{quotes})]");
+                let source = format!("package p\n{attr}\ntop block m() {{}}\n");
+                assert!(xlsynth::IrPackage::parse_ir(&source, None).is_err());
+                assert!(parse_outer_attribute(&attr).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn signature_preserves_non_utf8_bytes_in_original_and_xls_emitted_ir() {
+        for quotes in ["\"", "\"\"\""] {
+            let source = format!(
+                r#"package p
+
+#[signature({quotes}module_name: '\377'{quotes})]
+top block m() {{
+}}
+"#
+            );
+            let canonical = xlsynth::IrPackage::parse_ir(&source, None)
+                .unwrap()
+                .to_string();
+            for (input, expected) in [
+                (&source, b"module_name: '\xff'".as_slice()),
+                (&canonical, b"module_name: \"\xff\" ".as_slice()),
+            ] {
+                let pkg = Parser::new(input).parse_package().unwrap();
+                assert_eq!(
+                    pkg.get_block("m").unwrap().outer_attrs[0].kind(),
+                    &ir::OuterAttributeKind::Signature(expected.to_vec())
+                );
+                assert_eq!(pkg.to_string(), *input);
+            }
+        }
     }
 
     #[test]
@@ -4437,14 +4770,84 @@ fn with_domains(x: bits[32] id=2) -> bits[32] {
         let mut parser = Parser::new(input);
         let package = parser.parse_package().expect("pir parse");
         assert_eq!(
-            package.get_fn("bare").unwrap().outer_attrs,
-            vec!["#[fuzz_test]"]
+            package.get_fn("bare").unwrap().outer_attrs[0].kind(),
+            &ir::OuterAttributeKind::FuzzTest
         );
         assert_eq!(
-            package.get_fn("with_domains").unwrap().outer_attrs,
-            vec!["#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]"]
+            package.get_fn("with_domains").unwrap().outer_attrs[0].kind(),
+            &ir::OuterAttributeKind::FuzzTest
         );
         assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn outer_attribute_delimiters_follow_the_argument_grammar() {
+        let input = r#"package attributes
+
+#[ // ] in a comment cannot close the attribute
+  signature("xlsynth_pir_ext=not_metadata;\nquoted \"value]\"") // [ " `
+]
+#[fuzz_test(domains=`brackets ] and escaped \` backtick`)]
+fn f() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=1, id=1)
+}
+"#;
+        let pkg = Parser::new(input).parse_package().unwrap();
+        let attrs = &pkg.get_fn("f").unwrap().outer_attrs;
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(
+            attrs[0].kind(),
+            &ir::OuterAttributeKind::Signature(
+                b"xlsynth_pir_ext=not_metadata;\nquoted \"value]\"".to_vec()
+            )
+        );
+        assert_eq!(attrs[1].kind(), &ir::OuterAttributeKind::FuzzTest);
+        assert_eq!(pkg.to_string(), input);
+    }
+
+    #[test]
+    fn standalone_outer_attribute_requires_exactly_one_complete_production() {
+        let attr = parse_outer_attribute("  #[ non_synth ] // trailing comment\n").unwrap();
+        assert_eq!(attr.kind(), &ir::OuterAttributeKind::NonSynth);
+        assert_eq!(attr.as_str(), "#[ non_synth ]");
+        for source in ["#[non_synth", "#[non_synth] #[non_synth]", "#![non_synth]"] {
+            assert!(parse_outer_attribute(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn attribute_opening_tokens_accept_comments_and_preserve_source() {
+        let input = r#"package trivia
+
+# // attribute follows
+[ffi_proto("""code_template: "module {fn} (.x({x}), .out({return}));" """)]
+fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+
+top block b() {
+  # // inner attribute
+  ! // opening bracket follows
+  [provenance(name="f", kind="function")]
+}
+"#;
+        xlsynth::IrPackage::parse_ir(input, None).unwrap();
+        let package = Parser::new(input).parse_package().unwrap();
+        assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn attribute_opening_tokens_reject_incomplete_or_misplaced_punctuation() {
+        for source in [
+            "package p\n# // no bracket",
+            "package p\n# [non_synth]",
+            "package p\n# ! [non_synth]\nblock b() {}",
+            "package p\nblock b() { # // no bang",
+            "package p\nblock b() { # ! // no bracket",
+            "package p\nblock b() { # [non_synth] }",
+        ] {
+            assert!(Parser::new(source).parse_package().is_err(), "{source}");
+        }
     }
 
     #[test]
@@ -5226,7 +5629,7 @@ fn f(x: bits[1] id=1) -> token {
 
     #[test]
     fn test_package_pos_retention() {
-        let ir = r#"package pos_pkg
+        let ir = r#"package alu.pipe// package source locations
 file_number 0 "a.x"
 file_number 1 "b.x"
 
@@ -5236,6 +5639,7 @@ top fn main() -> bits[32] {
 "#;
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
+        assert_eq!(pkg.name, "alu.pipe");
         let main_fn = pkg.get_top_fn().unwrap();
         let data = main_fn.nodes[1].pos.as_ref().unwrap();
         assert_eq!(data.len(), 2);
@@ -5247,6 +5651,20 @@ top fn main() -> bits[32] {
             data[1].to_human_string(&pkg.file_table).as_deref(),
             Some("b.x:2:2")
         );
+        let original = xlsynth::IrPackage::parse_ir(ir, None).unwrap();
+        let emitted = xlsynth::IrPackage::parse_ir(&pkg.to_string(), None).unwrap();
+        assert_eq!(emitted.to_string(), original.to_string());
+    }
+
+    #[test]
+    fn package_header_rejects_invalid_name_tokens() {
+        for name in [".a", "a$b", "a-b", "true", "false", "1a"] {
+            let input = format!("package {name}\nfile_number 0 \"a.x\"");
+            assert!(
+                Parser::new(&input).parse_xls_package_header().is_err(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -5284,6 +5702,43 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let mut parser = Parser::new(input);
         let block = parser.parse_block().unwrap();
         assert_eq!(block.to_string(), input);
+    }
+
+    #[test]
+    fn block_reset_uses_parsed_fields_across_comments() {
+        let canonical = r#"package reset_attr
+
+top block b(rst: bits[1]) {
+  #![reset(port="rst", asynchronous=true, active_low=true)]
+  rst: bits[1] = input_port(name=rst, id=1)
+}
+"#;
+        let input = canonical.replace(
+            r#"#![reset(port="rst", asynchronous=true, active_low=true)]"#,
+            r#"#![ // ] in a comment
+    reset(active_low=true, // commas, brackets ], and equals =
+          port="\x72st", asynchronous=true) ]"#,
+        );
+        let xls = xlsynth::IrPackage::parse_ir(&input, None).unwrap();
+        let package = Parser::new(&input).parse_package().unwrap();
+        let block = package.get_block("b").unwrap();
+        assert_eq!(
+            block.reset,
+            Some(BlockReset {
+                port: block.get_input_port("rst").unwrap(),
+                asynchronous: true,
+                active_low: true,
+            })
+        );
+        assert!(block.inner_attrs.is_empty());
+        let emitted = package.to_string();
+        assert_eq!(emitted, canonical);
+        assert_eq!(
+            xlsynth::IrPackage::parse_ir(&emitted, None)
+                .unwrap()
+                .to_string(),
+            xls.to_string()
+        );
     }
 
     // -- Test constants for round-trip

@@ -197,9 +197,7 @@ pub fn export_gate_fn(
     graph: &GateFn,
     options: &LeanExportOptions,
 ) -> Result<LeanCircuitBundle, LeanError> {
-    let interface = make_interface(graph)?;
-    let data = canonical_graph_data(graph, &interface)?;
-    let aag_source = emit_aag(&data)?;
+    let (interface, aag_source) = export_gate_fn_aag(graph)?;
     let aag_filename = options
         .module_name
         .source_path()
@@ -234,6 +232,14 @@ end {namespace}
         lean_source,
         aag_source,
     })
+}
+
+/// Exports the validated interface and canonical AAG used by Lean ingestion.
+pub(crate) fn export_gate_fn_aag(graph: &GateFn) -> Result<(CircuitInterface, String), LeanError> {
+    let interface = make_interface(graph)?;
+    let data = canonical_graph_data(graph, &interface)?;
+    let aag_source = emit_aag(&data)?;
+    Ok((interface, aag_source))
 }
 
 /// Builds the vector interface while checking total-width arithmetic.

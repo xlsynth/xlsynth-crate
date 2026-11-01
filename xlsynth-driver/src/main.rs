@@ -74,6 +74,7 @@ mod g8r_cli;
 mod g8r_equiv;
 mod g8r_eval;
 mod g8r_ir_equiv;
+mod g8r_lean;
 mod g8r_optimize;
 mod g8r_stitch_pipeline;
 mod g8r_table;
@@ -84,6 +85,7 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_eval;
 mod gv_instance_csv;
+mod gv_proto;
 mod gv_read_stats;
 mod gv_resize;
 mod gv_sta;
@@ -129,8 +131,8 @@ mod ir_toggle_hotspots;
 mod lib2proto;
 mod lib_query;
 mod liberty_proto_info;
+mod mapped_netlist_output;
 mod netlist2aig;
-mod obsolete_options;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -139,11 +141,12 @@ mod prover_config;
 mod report_cli_error;
 mod run_verilog_pipeline;
 mod sequential_eval_io;
+mod stitch_check_vectors;
+mod stitch_equiv;
 mod toolchain_config;
 mod tools;
 
 use crate::toolchain_config::ToolchainConfig;
-use anyhow::Context;
 use clap;
 use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
@@ -156,21 +159,6 @@ use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
-
-/// Accept deprecated V2 requests without advertising a typechecker choice.
-fn obsolete_type_inference_arg() -> Arg {
-    Arg::new("type_inference_v2")
-        .long("type_inference_v2")
-        .action(ArgAction::Set)
-        .num_args(1)
-        .value_parser(|value: &str| {
-            let value = value
-                .parse::<bool>()
-                .context("type_inference_v2 must be true or false")?;
-            obsolete_options::accept_type_inference_v2(value)
-        })
-        .hide(true)
-}
 
 /// Builds the shared tuning flags for commands that run aug-opt.
 fn aug_opt_tuning_args() -> [Arg; 2] {
@@ -219,10 +207,27 @@ struct XlsynthToolchain {
     toolchain: ToolchainConfig,
 }
 
+/// Loads an explicit toolchain or the optional default file in the working
+/// directory.
+fn read_toolchain_config(explicit_path: Option<&str>) -> Result<Option<ToolchainConfig>, String> {
+    let path = explicit_path.unwrap_or("xlsynth-toolchain.toml");
+    let source = match std::fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit_path.is_none() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("failed to read toolchain config {path}: {error}")),
+    };
+    let config: XlsynthToolchain = toml::from_str(&source)
+        .map_err(|error| format!("invalid toolchain config {path}: {error}"))?;
+    Ok(Some(config.toolchain))
+}
+
 trait AppExt {
     fn add_delay_model_arg(self) -> Self;
     fn add_pipeline_args(self) -> Self;
     fn add_dslx_input_args(self, include_top: bool) -> Self;
+    fn add_stitch_input_args(self, output_name_flag: &'static str) -> Self;
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
@@ -277,6 +282,82 @@ impl AppExt for clap::Command {
                     .action(ArgAction::Set),
             );
         command.add_bool_arg("warnings_as_errors", "Treat warnings as errors")
+    }
+
+    /// Accepts either a complete stitch specification or the legacy source and
+    /// boundary flags.
+    fn add_stitch_input_args(self, output_name_flag: &'static str) -> Self {
+        self.add_dslx_input_args(false)
+            .mut_arg("dslx_input_file", |arg| {
+                arg.required(false).required_unless_present("spec")
+            })
+            .arg(
+                Arg::new("spec")
+                    .long("spec")
+                    .value_name("PATH")
+                    .help("TOML stitch specification with paths relative to the specification file")
+                    .conflicts_with_all([
+                        "dslx_input_file",
+                        "dslx_top",
+                        "stages",
+                        output_name_flag,
+                        "dslx_path",
+                        "dslx_stdlib_path",
+                        "input_valid_signal",
+                        "output_valid_signal",
+                        "reset",
+                        "reset_active_low",
+                        "flop_inputs",
+                        "flop_outputs",
+                    ]),
+            )
+            .arg(
+                Arg::new("dslx_top")
+                    .long("dslx_top")
+                    .value_name("DSLX_TOP")
+                    .help("Pipeline prefix for implicit <top>_cycleN discovery")
+                    .conflicts_with("stages")
+                    .required_unless_present_any(["stages", "spec"]),
+            )
+            .arg(
+                Arg::new("stages")
+                    .long("stages")
+                    .value_name("CSV")
+                    .help("Comma-separated explicit stage names in pipeline order"),
+            )
+            .arg(
+                Arg::new(output_name_flag)
+                    .long(output_name_flag)
+                    .value_name("NAME")
+                    .help("Pipeline name; required with --stages, defaults to --dslx_top"),
+            )
+            .arg(
+                Arg::new("input_valid_signal")
+                    .long("input_valid_signal")
+                    .value_name("NAME")
+                    .help("Load enable signal for pipeline registers"),
+            )
+            .arg(
+                Arg::new("output_valid_signal")
+                    .long("output_valid_signal")
+                    .value_name("NAME")
+                    .help("Output port holding the pipelined valid signal"),
+            )
+            .arg(
+                Arg::new("reset")
+                    .long("reset")
+                    .value_name("NAME")
+                    .help("Synchronous reset signal for valid pipeline registers"),
+            )
+            .add_bool_arg("reset_active_low", "Reset is active low")
+            .add_bool_arg(
+                "flop_inputs",
+                "Whether to insert input pipeline flops (default true)",
+            )
+            .add_bool_arg(
+                "flop_outputs",
+                "Whether to insert output pipeline flops (default true)",
+            )
     }
 
     fn add_pipeline_args(self) -> Self {
@@ -557,14 +638,9 @@ impl AppExt for clap::Command {
 }
 
 fn main() {
-    // Keep other targets at their usual error-only default. An explicit
-    // RUST_LOG still controls all logging, including compatibility warnings.
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default()
-            .default_filter_or(format!("error,{}=warn", obsolete_options::LOG_TARGET)),
-    )
-    .format_timestamp(None)
-    .try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
+        .format_timestamp(None)
+        .try_init();
 
     log::info!(
         "xlsynth-driver starting; version: {}",
@@ -577,6 +653,7 @@ fn main() {
         .arg(
             Arg::new("toolchain")
                 .long("toolchain")
+                .global(true)
                 .value_name("TOOLCHAIN")
                 .help("Path to a xlsynth-toolchain.toml file")
                 .action(ArgAction::Set),
@@ -646,73 +723,29 @@ fn main() {
                     "allow_extern_verilog",
                     "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
                 )
-                .add_bool_arg("keep_temps", "Keep temporary files")
-                .arg(obsolete_type_inference_arg()),
+                .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
             clap::Command::new("dslx-stitch-pipeline")
                 .about("Stitches DSLX pipeline stages")
-                .add_dslx_input_args(false)
+                .add_stitch_input_args("output_module_name")
+                .arg(
+                    Arg::new("output-format")
+                        .long("output-format")
+                        .value_name("FORMAT")
+                        .value_parser(["rtl", "block-ir"])
+                        .default_value("rtl")
+                        .help("Emit stitched RTL or an XLS IR package with a top pipeline block"),
+                )
                 .arg(
                     Arg::new("gate_format")
                         .long("gate_format")
                         .value_name("TEMPLATE")
                         .help("Verilog template for gate! operations; overrides toolchain.codegen.gate_format"),
                 )
-                .arg(
-                    Arg::new("dslx_top")
-                        .long("dslx_top")
-                        .value_name("DSLX_TOP")
-                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
-                        .conflicts_with("stages")
-                        .required_unless_present("stages"),
-                )
                 .add_bool_arg(
                     "use_system_verilog",
                     "Whether to emit SystemVerilog (default true; set to false for plain Verilog)",
-                )
-                .arg(
-                    Arg::new("input_valid_signal")
-                        .long("input_valid_signal")
-                        .value_name("INPUT_VALID_SIGNAL")
-                        .help("Load enable signal for pipeline registers"),
-                )
-                .arg(
-                    Arg::new("output_valid_signal")
-                        .long("output_valid_signal")
-                        .value_name("OUTPUT_VALID_SIGNAL")
-                        .help("Output port holding pipelined valid signal"),
-                )
-                .arg(
-                    Arg::new("reset")
-                        .long("reset")
-                        .value_name("RESET")
-                        .help("Reset signal name"),
-                )
-                .add_bool_arg(
-                    "reset_active_low",
-                    "Reset is active low",
-                )
-                .arg(
-                    Arg::new("stages")
-                        .long("stages")
-                        .value_name("CSV")
-                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("output_module_name")
-                        .long("output_module_name")
-                        .value_name("NAME")
-                        .help("Wrapper module name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
-                )
-                .add_bool_arg(
-                    "flop_inputs",
-                    "Whether to insert input pipeline flops (default true)",
-                )
-                .add_bool_arg(
-                    "flop_outputs",
-                    "Whether to insert output pipeline flops (default true)",
                 )
                 .arg(
                     Arg::new("validate_no_constant_flops")
@@ -733,62 +766,12 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx-stitch-g8r-pipeline")
                 .about("Stitches DSLX pipeline stages into a native sequential .g8r design")
-                .add_dslx_input_args(false)
+                .add_stitch_input_args("output_design_name")
                 .arg(
-                    Arg::new("dslx_top")
-                        .long("dslx_top")
-                        .value_name("DSLX_TOP")
-                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
-                        .conflicts_with("stages")
-                        .required_unless_present("stages"),
-                )
-                .arg(
-                    Arg::new("stages")
-                        .long("stages")
-                        .value_name("CSV")
-                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("output_design_name")
-                        .long("output_design_name")
-                        .value_name("NAME")
-                        .help("Sequential g8r design name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
-                )
-                .arg(
-                    Arg::new("clock_name")
-                        .long("clock_name")
-                        .value_name("NAME")
+                    Arg::new("clock_name").long("clock_name").value_name("NAME")
                         .help("Clock port name for inserted registers (default clk)")
-                        .action(ArgAction::Set),
+                        .conflicts_with("spec"),
                 )
-                .add_bool_arg(
-                    "flop_inputs",
-                    "Whether to insert input pipeline flops (default true)",
-                )
-                .add_bool_arg(
-                    "flop_outputs",
-                    "Whether to insert output pipeline flops (default true)",
-                )
-                .arg(
-                    Arg::new("input_valid_signal")
-                        .long("input_valid_signal")
-                        .value_name("INPUT_VALID_SIGNAL")
-                        .help("Load enable signal for pipeline registers"),
-                )
-                .arg(
-                    Arg::new("output_valid_signal")
-                        .long("output_valid_signal")
-                        .value_name("OUTPUT_VALID_SIGNAL")
-                        .help("Output port holding pipelined valid signal"),
-                )
-                .arg(
-                    Arg::new("reset")
-                        .long("reset")
-                        .value_name("RESET")
-                        .help("Synchronous reset signal for valid pipeline registers"),
-                )
-                .add_bool_arg("reset_active_low", "Reset is active low")
                 .add_g8r_lowering_flags()
                 .arg(
                     Arg::new("bin_out")
@@ -798,6 +781,8 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommand(stitch_check_vectors::command())
+        .subcommand(stitch_equiv::command())
         .subcommand(
             clap::Command::new("g8r-stitch-pipeline")
                 .about("Stitches combinational .g8r stages into a native sequential .g8r design")
@@ -946,7 +931,6 @@ fn main() {
                         .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
                 )
                 .args(aug_opt_tuning_args())
-                .arg(obsolete_type_inference_arg())
                 .add_bool_arg(
                     "convert_tests",
                     "Convert test procs/functions to IR",
@@ -1059,8 +1043,7 @@ fn main() {
             clap::Command::new("dslx-g8r-stats")
                 .about("Emit gate-level summary stats for a DSLX entry point")
                 .add_dslx_input_args(true)
-                .add_g8r_lowering_flags()
-                .arg(obsolete_type_inference_arg()),
+                .add_g8r_lowering_flags(),
         )
         // ir2opt subcommand requires a top symbol
         .subcommand(
@@ -1944,7 +1927,6 @@ fn main() {
                 .add_pipeline_args()
                 .add_codegen_args()
                 .add_bool_arg("keep_temps", "Keep temporary files")
-                .arg(obsolete_type_inference_arg())
                 .arg(
                     clap::Arg::new("edits_debug_out")
                         .long("edits_debug_out")
@@ -2178,6 +2160,7 @@ fn main() {
                         .action(ArgAction::Set),
                 ),
         )
+        .subcommands(gv_proto::commands())
         .subcommand(
             clap::Command::new("gv2block")
                 .about("Converts a gate-level netlist and Liberty proto to block IR")
@@ -2236,79 +2219,8 @@ fn main() {
                         .action(ArgAction::Set),
                 )
         )
-        .subcommand(
-            clap::Command::new("gv2aig")
-                .about("Converts GV cells and wiring to AIGER using Liberty")
-                .arg(
-                    Arg::new("netlist")
-                        .long("netlist")
-                        .help("Input GV cell netlist (.gv, .v, or gzip-compressed)")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("liberty_proto")
-                        .long("liberty_proto")
-                        .help("Required Liberty proto (.proto, .textproto, or gzip-compressed); use ugv2aig for unmapped gate Verilog")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("aiger_out")
-                        .long("aiger-out")
-                        .value_name("PATH")
-                        .help("Path to write AIGER output; use .aag for ASCII or .aig for binary")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("module_name")
-                        .long("module_name")
-                        .value_name("MODULE")
-                        .help("Optional module name to select when netlist contains multiple modules")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("collapse_sequential")
-                        .long("collapse_sequential")
-                        .value_name("BOOL")
-                        .default_value("true")
-                        .value_parser(clap::value_parser!(bool))
-                        .help("If true, collapse sequential state variables by substituting next_state.")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("collapse_load_enable_feedback")
-                        .long("collapse_load_enable_feedback")
-                        .help("Collapse recognized load-enable feedback loops, assuming prior Q is zero (disabled by default)")
-                        .action(ArgAction::SetTrue),
-                )
-                .arg(
-                    Arg::new("cone_boundary_file")
-                        .long("cone_boundary_file")
-                        .value_name("PATH")
-                        .help("Extract cones using compact source/sink selectors from a JSON file")
-                        .conflicts_with_all(["cone_sources", "cone_sinks"])
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("cone_sources")
-                        .long("cone_sources")
-                        .value_name("SELECTOR")
-                        .help("Add a compact source selector; repeat for multiple selectors")
-                        .requires("cone_sinks")
-                        .conflicts_with("cone_boundary_file")
-                        .action(ArgAction::Append),
-                )
-                .arg(
-                    Arg::new("cone_sinks")
-                        .long("cone_sinks")
-                        .value_name("SELECTOR")
-                        .help("Add a compact sink selector; repeat for multiple selectors")
-                        .conflicts_with("cone_boundary_file")
-                        .action(ArgAction::Append),
-                ),
-        )
+        .subcommand(netlist2aig::gv2aig_command())
+        .subcommand(netlist2aig::gv2g8r_command())
         .subcommand(
             clap::Command::new("ugv2aig")
                 .about("Converts combinational unmapped gate Verilog to AIGER")
@@ -2475,7 +2387,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-tech-map")
-                .about("Maps an AIGER file to library cells using NAND2 lowering or area covering")
+                .about("Maps an AIGER file to library cells using NAND2, area, or delay mapping")
                 .arg(
                     clap::Arg::new("aig_input_file")
                         .help("Input AIGER file (.aag or .aig)")
@@ -2489,13 +2401,8 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
-                .arg(
-                    Arg::new("netlist_out")
-                        .long("netlist_out")
-                        .help("Path to write mapped netlist text (use '-' for stdout)")
-                        .required(true)
-                        .action(ArgAction::Set),
-                )
+                .arg(mapped_netlist_output::output_arg().visible_alias("netlist_out"))
+                .arg(mapped_netlist_output::format_arg())
                 .arg(
                     Arg::new("module_name")
                         .long("module_name")
@@ -2526,7 +2433,7 @@ fn main() {
                 .arg(
                     Arg::new("fanout_opt")
                         .long("fanout-opt")
-                        .help("Optimize fanout after area mapping (default: true for area, false for nand2); --fanout-opt=false disables it. Requires timing-enabled Liberty and output load")
+                        .help("Optimize fanout before area recovery (default: true for area, false for delay/nand2); --fanout-opt=false disables it. Requires timing-enabled Liberty and output load")
                         .num_args(0..=1)
                         .require_equals(true)
                         .default_missing_value("true")
@@ -2553,6 +2460,18 @@ fn main() {
                         .help("Maximum fractional area growth from fanout optimization (default: 0.05)")
                         .value_parser(clap::value_parser!(f64)),
                 )
+                .arg(Arg::new("area-recovery").long("area-recovery").num_args(0..=1)
+                    .require_equals(true).default_missing_value("true")
+                    .value_parser(clap::value_parser!(bool)).action(ArgAction::Set)
+                    .help("Recover cell area without worsening boundary delay after optional fanout repair (default: true for delay, false otherwise); false preserves raw delay mapping"))
+                .arg(Arg::new("area-recovery-rounds").long("area-recovery-rounds")
+                    .value_parser(clap::value_parser!(usize)).help("Area-recovery rounds (default: 2); zero disables search"))
+                .arg(Arg::new("area-recovery-evaluation-budget").long("area-recovery-evaluation-budget")
+                    .value_parser(clap::value_parser!(usize)).help("Propagation evaluations across all recovery rounds (default: max(100000, 8 * instance count)); zero allows no search work"))
+                .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff")
+                    .value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net for fanout repair and recovery, in fF (default: 0)"))
+                .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff")
+                    .value_parser(clap::value_parser!(f64)).help("Wire capacitance per sink pin for fanout repair and recovery, in fF (default: 0)"))
                 .arg(
                     Arg::new("json_out")
                         .long("json_out")
@@ -2777,6 +2696,8 @@ fn main() {
                 ),
         )
         .subcommand(g8r2gv::command())
+        .subcommand(g8r_lean::prepare_command())
+        .subcommand(g8r_lean::check_command())
         .subcommand(gv_resize::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
@@ -3988,7 +3909,6 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("DSLX_STDLIB_PATH")
                         .help("Path to the DSLX standard library"),
                 )
-                .arg(obsolete_type_inference_arg())
                 .arg(solver_arg(
                     "Use the specified solver for equivalence checking",
                 ))
@@ -4096,51 +4016,31 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
 
     let matches = cmd.get_matches();
 
-    let mut toml_path: Option<String> = matches
-        .get_one::<String>("toolchain")
-        .map(|s| s.to_string());
-
-    // If there is no toolchain flag specified, but there is a
-    // xlsynth-toolchain.toml in the current directory, use that.
-    if toml_path.is_none() {
-        let cwd = std::env::current_dir().unwrap();
-        let cwd_toml_path = cwd.join("xlsynth-toolchain.toml");
-        if cwd_toml_path.exists() {
-            log::info!(
-                "Using xlsynth-toolchain.toml in current directory: {}",
-                cwd_toml_path.display()
-            );
-            toml_path = Some(cwd_toml_path.to_str().unwrap().to_string());
-        }
-    }
-
-    let toml_value: Option<toml::Value> = toml_path.map(|path| {
-        // If we got a toolchain toml file, read/parse it.
-        if !std::path::Path::new(&path).exists() {
-            report_cli_error_and_exit(
-                "toolchain toml file does not exist",
-                None,
-                vec![
-                    ("path", &path),
-                    (
-                        "working directory",
-                        &std::env::current_dir().unwrap().display().to_string(),
-                    ),
-                ],
-            );
-        }
-        let toml_str =
-            std::fs::read_to_string(path).expect("read toolchain toml file should succeed");
-        toml::from_str(&toml_str).expect("parse toolchain toml file should succeed")
-    });
-    let config = toml_value.map(|v| match v.try_into::<XlsynthToolchain>() {
-        Ok(config) => config.toolchain,
-        Err(error) => report_cli_error_and_exit(
-            "invalid toolchain config",
-            None,
-            vec![("error", &error.to_string())],
-        ),
-    });
+    let start = std::time::Instant::now();
+    let config = read_toolchain_config(matches.get_one::<String>("toolchain").map(String::as_str))
+        .unwrap_or_else(|error| match matches.subcommand() {
+            Some(("prover", args)) => prover::fail_and_exit(
+                args.get_one::<String>("output_json").map(String::as_str),
+                "toolchain",
+                "Failed to load toolchain configuration",
+                &error,
+                &[],
+            ),
+            Some((command, args))
+                if matches!(
+                    command,
+                    "ir-equiv" | "dslx-equiv" | "prove-quickcheck" | "dslx-fn-prove-assertions"
+                ) =>
+            {
+                proofs::report_setup_error(
+                    start,
+                    args.get_one::<String>("output_json").map(String::as_str),
+                    command,
+                    &error,
+                )
+            }
+            _ => report_cli_error_and_exit(&error, None, vec![]),
+        });
 
     match matches.subcommand() {
         Some(("gv-instance-csv", subm)) => {
@@ -4157,6 +4057,20 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-stitch-g8r-pipeline", subm)) => {
             dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
+        }
+        Some(("stitch-check-vectors", subm)) => {
+            if let Err(error) = stitch_check_vectors::handle(subm) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("stitch-check-vectors"),
+                    vec![],
+                );
+            }
+        }
+        Some(("stitch-equiv", subm)) => {
+            if let Err(error) = stitch_equiv::handle(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("stitch-equiv"), vec![]);
+            }
         }
         Some(("g8r-stitch-pipeline", subm)) => {
             if let Err(e) = g8r_stitch_pipeline::handle_g8r_stitch_pipeline(subm) {
@@ -4307,11 +4221,26 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv2block", subm)) => {
             gv2block::handle_gv2block(subm);
         }
+        Some(("gv2pb", subm)) => {
+            if let Err(error) = gv_proto::handle_gv2pb(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("gv2pb"), vec![]);
+            }
+        }
+        Some(("pb2gv", subm)) => {
+            if let Err(error) = gv_proto::handle_pb2gv(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("pb2gv"), vec![]);
+            }
+        }
         Some(("gv2ir", subm)) => {
             gv2ir::handle_gv2ir(subm);
         }
         Some(("gv2aig", subm)) => {
             netlist2aig::handle_gv2aig(subm);
+        }
+        Some(("gv2g8r", subm)) => {
+            if let Err(error) = netlist2aig::handle_gv2g8r(subm) {
+                report_cli_error::report_cli_error_and_exit(&error, Some("gv2g8r"), vec![]);
+            }
         }
         Some(("ugv2aig", subm)) => {
             netlist2aig::handle_ugv2aig(subm);
@@ -4343,6 +4272,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("g8r2gv", subm)) => {
             if let Err(e) = g8r2gv::handle(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
+            }
+        }
+        Some(("g8r-lean-prepare", subm)) => {
+            if let Err(e) = g8r_lean::handle_prepare(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-prepare"), vec![]);
+            }
+        }
+        Some(("g8r-lean-check", subm)) => {
+            if let Err(e) = g8r_lean::handle_check(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-check"), vec![]);
             }
         }
         Some(("gv-resize", subm)) => {

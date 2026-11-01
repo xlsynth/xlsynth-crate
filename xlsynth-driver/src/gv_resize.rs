@@ -9,7 +9,7 @@ use xlsynth_g8r::liberty::load::load_library_with_timing_data_from_path;
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::{read_gv_from_path, select_module};
 use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
-use xlsynth_g8r::netlist::sta::StaOptions;
+use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
 
 /// Exposes bounded native resizing independently of the mapping frontend.
 pub fn command() -> Command {
@@ -21,6 +21,8 @@ pub fn command() -> Command {
         .arg(Arg::new("module_name").long("module_name"))
         .arg(Arg::new("primary_input_transition").long("primary_input_transition").help(format!("Primary-input transition [default: {}]", defaults.timing.primary_input_transition)).value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("module_output_load").long("module_output_load").value_parser(clap::value_parser!(f64)))
+        .arg(Arg::new("wire-capacitance-constant-ff").long("wire-capacitance-constant-ff").value_parser(clap::value_parser!(f64)).help("Fixed wire capacitance per used cell-driven net, in fF (default: 0)"))
+        .arg(Arg::new("wire-capacitance-per-sink-ff").long("wire-capacitance-per-sink-ff").value_parser(clap::value_parser!(f64)).help("Wire capacitance per sink pin, in fF (default: 0)"))
         .arg(Arg::new("max-area-growth").long("max-area-growth").help(format!("Fractional area allowance [default: {}]", defaults.max_area_growth)).value_parser(clap::value_parser!(f64)))
         .arg(Arg::new("timing-evaluation-budget").long("timing-evaluation-budget").help("Instance timing/coverage propagation evaluations across timing rounds [default: max(50000, 4 * instance count)]").value_parser(clap::value_parser!(usize)))
         .arg(Arg::new("recovery-evaluation-budget").long("recovery-evaluation-budget").help("Instance timing/coverage propagation evaluations across recovery rounds [default: max(100000, 8 * instance count)]").value_parser(clap::value_parser!(usize)))
@@ -78,7 +80,18 @@ fn resize_options(matches: &ArgMatches, library: &Library) -> Result<ResizeOptio
                 .copied()
                 .unwrap_or(defaults.timing.primary_input_transition),
             module_output_load: output_load,
-            wire_load: Default::default(),
+            wire_load: WireLoadModel::from_femtofarads(
+                matches
+                    .get_one::<f64>("wire-capacitance-constant-ff")
+                    .copied()
+                    .unwrap_or(0.0),
+                matches
+                    .get_one::<f64>("wire-capacitance-per-sink-ff")
+                    .copied()
+                    .unwrap_or(0.0),
+                library,
+            )
+            .map_err(|e| e.to_string())?,
         },
         max_area_growth: matches
             .get_one::<f64>("max-area-growth")

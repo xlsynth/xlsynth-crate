@@ -92,7 +92,8 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
                     check(*r, format_args!("node {} payload list", i))?;
                 }
             }
-            NodePayload::TupleIndex { tuple, .. }
+            NodePayload::Map { array: tuple, .. }
+            | NodePayload::TupleIndex { tuple, .. }
             | NodePayload::Unop(_, tuple)
             | NodePayload::Decode { arg: tuple, .. }
             | NodePayload::Encode { arg: tuple }
@@ -282,15 +283,6 @@ pub fn verify_graph_types_agree_with_deduction(f: &NodeGraph) -> Result<(), Stri
     Ok(())
 }
 
-fn type_contains_token(ty: &Type) -> bool {
-    match ty {
-        Type::Token => true,
-        Type::Bits(_) => false,
-        Type::Tuple(elements) => elements.iter().any(|element| type_contains_token(element)),
-        Type::Array(array) => type_contains_token(&array.element_type),
-    }
-}
-
 fn expect_bits_width(ty: &Type, context: &str) -> Result<usize, String> {
     match ty {
         Type::Bits(width) => Ok(*width),
@@ -404,6 +396,12 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
     let ty = |node_ref: ir::NodeRef| -> &Type { &f.get_node(node_ref).ty };
 
     match &node.payload {
+        NodePayload::Array(elements) if elements.is_empty() => match &node.ty {
+            Type::Array(a) if a.element_count == 0 => Ok(()),
+            ty => Err(format!(
+                "empty array constructor requires a zero-length array type, got {ty}"
+            )),
+        },
         NodePayload::Nil
         | NodePayload::Tuple(_)
         | NodePayload::Array(_)
@@ -415,6 +413,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         | NodePayload::RegisterRead { .. }
         | NodePayload::RegisterWrite { .. }
         | NodePayload::Invoke { .. }
+        | NodePayload::Map { .. }
         | NodePayload::CountedFor { .. } => Ok(()),
         NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
@@ -439,7 +438,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
             if *width == 0 {
                 return Err("array_slice requires a positive width".to_string());
             }
-            if type_contains_token(&node.ty) {
+            if node.ty.contains_token() {
                 return Err("array_slice result may not contain token values".to_string());
             }
             Ok(())
@@ -574,7 +573,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
                     }
                 }
             }
-            if type_contains_token(&node.ty) {
+            if node.ty.contains_token() {
                 return Err("array_index result may not contain token values".to_string());
             }
             expect_type(&node.ty, indexed_ty, "array_index result")
@@ -733,7 +732,7 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
                     cases.len()
                 ));
             }
-            if type_contains_token(&node.ty) {
+            if node.ty.contains_token() {
                 return Err("one_hot_sel result may not contain token values".to_string());
             }
             for case in cases {

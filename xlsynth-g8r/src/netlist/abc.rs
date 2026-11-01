@@ -290,6 +290,22 @@ impl AbcMappingContext {
         source: &SequentialGateFn,
         options: &AbcMappingOptions,
     ) -> Result<AbcMappedDesign, ToolError> {
+        let mut mapped = self.map_sequential_structural(source, options)?;
+        // Validate the emitted GV and attach source positions in that GV.
+        let text = mapped
+            .emit_verilog()
+            .map_err(|e| mapped.diagnostics.failure(e))?;
+        mapped.netlist = read_gv_from_str(&text).map_err(|e| mapped.diagnostics.failure(e))?;
+        Ok(mapped)
+    }
+
+    /// Returns the assembled netlist before rendering GV. Native FFs and
+    /// aliases have no source positions in this representation.
+    pub fn map_sequential_structural(
+        &self,
+        source: &SequentialGateFn,
+        options: &AbcMappingOptions,
+    ) -> Result<AbcMappedDesign, ToolError> {
         let mut design = source.legalize_register_controls()?;
         let cleanup_stats = if options.cleanup_registers {
             let result = cleanup_sequential_gate_fn(&design)?;
@@ -314,12 +330,6 @@ impl AbcMappingContext {
         validate_mapped_cells(&netlist, &self.library).map_err(|e| diagnostics.failure(e))?;
         assemble(&mut netlist, &design, &registers, &boundary)
             .map_err(|e| diagnostics.failure(e))?;
-        // Reparse emitted GV to exercise its syntax/form contract before
-        // return.
-        let text =
-            emit_module_as_netlist_text(&netlist.modules[0], &netlist.nets, &netlist.interner)
-                .map_err(|e| diagnostics.failure(e))?;
-        let netlist = read_gv_from_str(&text).map_err(|e| diagnostics.failure(e))?;
         Ok(AbcMappedDesign {
             netlist,
             design,

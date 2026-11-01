@@ -658,7 +658,7 @@ impl Bitwuzla {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BitwuzlaTerm {
     raw: bitwuzla_sys::BitwuzlaTerm,
 }

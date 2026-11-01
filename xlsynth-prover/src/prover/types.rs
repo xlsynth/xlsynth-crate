@@ -2,7 +2,7 @@
 
 use crate::solver::Uf;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, collections::HashMap, fmt, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, collections::HashMap, fmt, io, str::FromStr, time::Duration};
 use xlsynth_pir::IrValue;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -184,6 +184,50 @@ pub struct SmtFn<'a, R> {
     pub assertions: Vec<Assertion<'a, R>>,
 }
 
+/// Values and assertion outcome for one function in a satisfying model.
+pub(super) struct FnCounterexample {
+    pub inputs: Vec<FnInput>,
+    pub output: FnOutput,
+}
+
+impl<R> SmtFn<'_, R> {
+    /// Reads a complete counterexample, including the first failed assertion.
+    pub(super) fn read_counterexample<S: Solver<Term = R>>(
+        &self,
+        solver: &mut S,
+        assertions: &[&Assertion<'_, R>],
+    ) -> io::Result<FnCounterexample> {
+        let mut inputs = Vec::with_capacity(self.inputs.len());
+        for (param, input) in self.fn_ref.param_nodes().zip(&self.inputs) {
+            inputs.push(FnInput {
+                name: param.param_name().to_string(),
+                value: solver.get_value(&input.bitvec, input.ir_type)?,
+            });
+        }
+        let mut assertion_violation = None;
+        for assertion in assertions {
+            let active = solver.get_value(&assertion.active, &ir::Type::Bits(1))?;
+            if !active
+                .to_bool()
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            {
+                assertion_violation = Some(AssertionViolation {
+                    message: assertion.message.to_string(),
+                    label: assertion.label.to_string(),
+                });
+                break;
+            }
+        }
+        Ok(FnCounterexample {
+            inputs,
+            output: FnOutput {
+                value: solver.get_value(&self.output.bitvec, self.output.ir_type)?,
+                assertion_violation,
+            },
+        })
+    }
+}
+
 pub struct SmtFnWithNodeTerms<'a, R> {
     pub smt_fn: SmtFn<'a, R>,
     /// Deterministic mapping from `node.text_id` to the SMT term for that node.
@@ -282,18 +326,17 @@ pub struct UfRegistry<S: Solver> {
 }
 
 impl<S: Solver> UfRegistry<S> {
+    /// Declares all uninterpreted functions and propagates solver failures.
     pub fn from_uf_signatures(
         solver: &mut S,
         uf_signatures: &HashMap<String, UfSignature>,
-    ) -> Self {
+    ) -> io::Result<Self> {
         let mut ufs = HashMap::new();
         for (name, signature) in uf_signatures {
-            let uf = solver
-                .declare_fresh_uf(&name, &signature.arg_widths, signature.ret_width)
-                .unwrap();
+            let uf = solver.declare_fresh_uf(name, &signature.arg_widths, signature.ret_width)?;
             ufs.insert(name.clone(), uf);
         }
-        Self { ufs }
+        Ok(Self { ufs })
     }
 }
 
@@ -343,6 +386,9 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    /// Legacy external-tool failure without structured counterexample evidence.
+    /// The external adapter now returns `Error`; consumers must treat this
+    /// legacy variant as an execution error, not an established disproof.
     ToolchainDisproved(String),
     Error(String),
 }
@@ -350,6 +396,9 @@ pub enum EquivResult {
 #[derive(Debug, Clone)]
 pub struct EquivReport {
     pub duration: Duration,
+    /// Wall time for this request, including preparation before backend
+    /// dispatch.
+    pub timing: crate::proof_timing::ProofTiming,
     pub result: EquivResult,
 }
 
@@ -419,11 +468,9 @@ pub enum BoolPropertyResult {
         /// counter-example.
         output: FnOutput,
     },
-    /// External toolchain reported failure without a structured counterexample.
-    ///
-    /// This is used by the `ExternalProver` implementation where the
-    /// external tools (e.g. `check_ir_equivalence_main`) do not provide a
-    /// machine-readable counterexample for QuickCheck-style properties.
+    /// Legacy external-tool failure without structured counterexample evidence.
+    /// The external adapter now returns `Error`; consumers must treat this
+    /// legacy variant as an execution error, not an established disproof.
     ToolchainDisproved(String),
     /// Internal error encountered before invoking the prover (e.g. package
     /// instrumentation issues). Carries a human-readable explanation.

@@ -146,7 +146,7 @@ pub fn fn_node_count(f: &Fn) -> usize {
 }
 
 /// Returns a deterministically ordered set of function names referenced by
-/// `invoke` / `counted_for` nodes in `f`, excluding self-references.
+/// `invoke`, `map`, or `counted_for` nodes in `f`, excluding self-references.
 ///
 /// Scans all stored nodes, including unreachable ones, without traversing the
 /// referenced functions. Each referenced function name appears once.
@@ -154,7 +154,7 @@ pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
     let mut refs = BTreeSet::new();
     for node in f.nodes.iter() {
         match &node.payload {
-            NodePayload::Invoke { to_apply, .. } => {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
                 if to_apply != &f.name {
                     refs.insert(to_apply.clone());
                 }
@@ -173,7 +173,7 @@ pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
     refs
 }
 
-/// Returns true when `f` references another function via `invoke` or
+/// Returns true when `f` references another function via `invoke`, `map`, or
 /// `counted_for`.
 pub fn has_external_function_references(f: &Fn) -> bool {
     !external_function_references(f).is_empty()
@@ -326,6 +326,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         }
         AfterAll(elems) => elems.clone(),
         Nary(_, elems) => elems.clone(),
+        Map { array, .. } => vec![*array],
         Invoke {
             to_apply: _,
             operands,
@@ -391,6 +392,7 @@ pub fn is_observable_effect_root(payload: &NodePayload) -> bool {
             | NodePayload::Trace { .. }
             | NodePayload::Cover { .. }
             | NodePayload::Invoke { .. }
+            | NodePayload::Map { .. }
             | NodePayload::CountedFor { .. }
     )
 }
@@ -1335,6 +1337,10 @@ where
                 .map(|(i, r)| map((i, *r)))
                 .collect(),
         ),
+        NodePayload::Map { array, to_apply } => NodePayload::Map {
+            array: map((0, *array)),
+            to_apply: to_apply.clone(),
+        },
         NodePayload::Invoke { to_apply, operands } => NodePayload::Invoke {
             to_apply: to_apply.clone(),
             operands: operands
@@ -1426,6 +1432,17 @@ pub fn is_valid_identifier_name(s: &str) -> bool {
         }
     }
     true
+}
+
+/// XLS package names may contain dots after the first character and may be
+/// keywords. The bare boolean literals are separate tokens.
+pub(crate) fn is_valid_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c == '.' || c.is_ascii_alphanumeric())
+        && !matches!(name, "true" | "false")
 }
 
 /// Replaces dots in an IR text ID with underscores: `add.7` becomes `add_7`.

@@ -264,8 +264,9 @@ impl BlockEmitter<'_, '_> {
                 Some(Value::expression(expression, argument.depth + 1))
             }
             NodePayload::Invoke { .. } => {
-                unreachable!("invoke nodes are rejected before emission")
+                unreachable!("invoke nodes are inlined before emission")
             }
+            NodePayload::Map { .. } => unreachable!("map nodes are rejected before emission"),
             NodePayload::CountedFor { .. } => {
                 unreachable!("counted_for nodes are rejected before emission")
             }

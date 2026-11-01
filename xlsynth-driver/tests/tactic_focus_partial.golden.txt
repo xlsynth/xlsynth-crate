@@ -1,0 +1,2 @@
+[dslx-equiv] failure
+[dslx-equiv] unresolved obligation: root/pair_1

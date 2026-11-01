@@ -5,6 +5,18 @@
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 
+/// Ensures each name survives the worker's comma-separated argument unchanged.
+pub(crate) fn validate_drop_params(names: &[String]) -> Result<(), String> {
+    for name in names {
+        if name.is_empty() || name.trim() != name || name.contains([',', '\0']) {
+            return Err(format!(
+                "Invalid drop_params entry {name:?}: expected one nonempty parameter name without commas, NULs, or surrounding whitespace"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parses IR text into a package and fetches the requested top function with
 /// optional parameter drops.
 pub fn parse_package_and_drop_params(
@@ -12,6 +24,7 @@ pub fn parse_package_and_drop_params(
     top: Option<&str>,
     drop_params: &[String],
 ) -> Result<(ir::Package, ir::Fn), String> {
+    validate_drop_params(drop_params)?;
     let pkg = ir_parser::Parser::new(source)
         .parse_package()
         .map_err(|e| format!("Failed to parse IR package: {}", e))?;

@@ -624,6 +624,7 @@ pub(super) fn evaluate(
         | NodePayload::RegisterRead { .. }
         | NodePayload::InstantiationOutput { .. }
         | NodePayload::Invoke { .. }
+        | NodePayload::Map { .. }
         | NodePayload::CountedFor { .. } => KnownValue::unknown(&node.ty),
         NodePayload::ExtCarryOut { .. }
         | NodePayload::ExtPrioEncode { .. }

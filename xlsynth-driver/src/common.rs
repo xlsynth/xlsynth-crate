@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process;
 use std::process::Command;
-use xlsynth::mangle_dslx_name;
 use xlsynth_aug_opt::AugOptOptions;
 use xlsynth_pir::ir_parser;
 
@@ -62,7 +61,7 @@ pub fn enforce_extern_verilog_codegen_policy(
     }
 
     let mut parser = ir_parser::Parser::new(ir_text);
-    let package = parser.parse_package().map_err(|err| {
+    let package = parser.parse_package_preserving_ffi_invokes().map_err(|err| {
         format!(
             "could not inspect IR for extern Verilog declarations while --allow_extern_verilog=false: {err}"
         )
@@ -73,11 +72,7 @@ pub fn enforce_extern_verilog_codegen_policy(
         .iter()
         .filter_map(|member| {
             let graph = member.graph();
-            graph
-                .outer_attrs
-                .iter()
-                .any(|attr| attr.trim_start().starts_with("#[ffi_proto("))
-                .then(|| graph.name.clone())
+            graph.ffi_proto().map(|_| graph.name.as_str())
         })
         .collect::<Vec<_>>();
 
@@ -656,35 +651,13 @@ pub fn get_function_enum_param_domains(
     }
 }
 
-/// Parses uninterpreted-function mappings from CLI values into a map from
-/// mangled function name -> UF symbol.
-///
-/// Format per entry: "<func_name>:<uf_name>".
-/// Semantics: Functions that map to the same <uf_name> are treated as the same
-/// uninterpreted symbol during proving: they are assumed equivalent at the
-/// call-site interface, and any assertions within their bodies are ignored.
-pub fn parse_uf_spec(
-    module_name: &str,
+/// Parses UF mappings while retaining the DSLX names used by proof obligations.
+pub fn parse_dslx_uf_spec(
     matches: Option<clap::parser::ValuesRef<String>>,
-) -> HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
-    if let Some(vals) = matches {
-        for v in vals {
-            if let Some((fn_name, uf_name)) = v.split_once(':') {
-                m.insert(
-                    mangle_dslx_name(module_name, fn_name.trim()).unwrap(),
-                    uf_name.trim().to_string(),
-                );
-            } else {
-                eprintln!(
-                    "Error: invalid uninterpreted function specification '{}'; expected <function-name>:<uf-name>",
-                    v
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-    m
+) -> Result<HashMap<String, String>, String> {
+    xlsynth_prover::dslx_utils::parse_dslx_uf_specs(
+        matches.into_iter().flatten().map(String::as_str),
+    )
 }
 
 #[cfg(test)]
@@ -715,15 +688,45 @@ top fn main(x: bits[8] id=1) -> bits[8] {
     fn extern_verilog_codegen_policy_accepts_ordinary_ir() {
         enforce_extern_verilog_codegen_policy(IR_WITHOUT_VERILOG_FFI, false)
             .expect("ordinary IR should pass policy check");
+        let decoy = IR_WITHOUT_VERILOG_FFI.replace(
+            "top fn main",
+            "#[ // ffi_proto is mentioned only in this comment\nnon_synth]\ntop fn main",
+        );
+        enforce_extern_verilog_codegen_policy(&decoy, false)
+            .expect("ordinary functions may mention FFI in comments");
     }
 
     #[test]
     fn extern_verilog_codegen_policy_rejects_ffi_ir_when_disabled() {
-        let err = enforce_extern_verilog_codegen_policy(IR_WITH_VERILOG_FFI, false)
-            .expect_err("Verilog FFI IR should require explicit opt-in");
+        let commented = IR_WITH_VERILOG_FFI.replace(
+            "#[ffi_proto(",
+            "#[ // Verilog implementation follows\nffi_proto (",
+        );
+        for ir in [IR_WITH_VERILOG_FFI, &commented] {
+            let err = enforce_extern_verilog_codegen_policy(ir, false)
+                .expect_err("Verilog FFI IR should require explicit opt-in");
+            assert!(err.contains("verilog_passthrough"), "{err}");
+            assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+        }
+    }
 
-        assert!(err.contains("verilog_passthrough"), "{err}");
-        assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+    #[test]
+    fn extern_verilog_codegen_policy_checks_extension_wrappers_before_lifting() {
+        let ir = r#"package wrapped
+#[ffi_proto("""code_template: "assign {return} = 4'hf; /* xlsynth_pir_ext=ext_clz;width=8;out_width=4;offset=0 */"
+""")]
+fn wrapped(x: bits[8] id=1) -> bits[4] {
+  ret low: bits[4] = bit_slice(x, start=0, width=4, id=2)
+}
+top fn main(x: bits[8] id=3) -> bits[4] {
+  ret result: bits[4] = invoke(x, to_apply=wrapped, id=4)
+}
+"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        assert!(pkg.get_fn("wrapped").is_none());
+        let err = enforce_extern_verilog_codegen_policy(ir, false).unwrap_err();
+        assert!(err.contains("on: wrapped."), "{err}");
+        enforce_extern_verilog_codegen_policy(ir, true).unwrap();
     }
 
     #[test]
