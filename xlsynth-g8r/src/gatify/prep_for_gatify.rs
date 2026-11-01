@@ -24,6 +24,7 @@ mod lexicographic_comparisons;
 mod mixed_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
+mod widened_sum_threshold;
 
 use crate::aig::gate::PirNodeIds;
 use std::collections::HashMap;
@@ -2719,14 +2720,14 @@ pub fn prep_for_gatify(
     )
 }
 
-/// Records source operations for rewritten helpers and all observers for shared
-/// comparison helpers. Text IDs keep both associations valid across compaction.
+/// Records source operations for rewritten helpers and all observers for
+/// generated comparison helpers. Text IDs preserve both across compaction.
 pub(crate) fn prep_for_gatify_with_origins(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
     mut origins: Option<&mut HashMap<usize, usize>>,
-    comparison_origins: Option<&mut HashMap<usize, PirNodeIds>>,
+    mut comparison_origins: Option<&mut HashMap<usize, PirNodeIds>>,
     gate_cost: GateCostOptions,
 ) -> ir::Fn {
     let mut cloned = f.clone();
@@ -2853,9 +2854,12 @@ pub(crate) fn prep_for_gatify_with_origins(
     // slices must not trigger rewrites of the original predicate values, and
     // their checked helper reservation may consume the final text ID.
     diagnostics::run(&mut cloned, "mixed_comparisons", 0, |f| {
-        mixed_comparisons::rewrite(f, comparison_origins)
+        mixed_comparisons::rewrite(f, comparison_origins.as_deref_mut())
     });
     diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
+    diagnostics::run(&mut cloned, "widened_sum_threshold", 0, |f| {
+        widened_sum_threshold::rewrite(f, comparison_origins)
+    });
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
         ir_utils::compact_and_toposort_in_place(f)
