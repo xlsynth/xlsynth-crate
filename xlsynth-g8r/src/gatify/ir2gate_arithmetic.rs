@@ -189,7 +189,7 @@ fn aig_bits_equal(lhs: &AigBitVector, rhs: &AigBitVector) -> bool {
 }
 
 /// Resizes a dynamic arithmetic term without creating or tagging AIG nodes.
-fn resize_dynamic_term_for_match(
+pub(super) fn resize_dynamic_term_for_match(
     bits: &AigBitVector,
     output_width: usize,
     signed: bool,
