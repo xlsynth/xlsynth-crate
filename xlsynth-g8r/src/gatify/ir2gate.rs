@@ -41,7 +41,7 @@ mod arithmetic_cluster;
 mod bounded_affine_clamp;
 mod bounded_conjunction;
 mod conditional_select;
-mod demanded_bits;
+pub(super) mod demanded_bits;
 mod guarded_unit;
 pub(crate) mod observed_select_rails;
 pub(crate) mod priority_ordinal;
@@ -5494,6 +5494,8 @@ pub(crate) fn gatify_for_pipeline(
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
+        options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && !options.unsafe_gatify_gate_operation,
         options
             .track_pir_node_ids
             .then_some(&mut origins.rewrite_origins),

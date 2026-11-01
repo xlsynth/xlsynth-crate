@@ -24,6 +24,7 @@ mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
 mod mixed_comparisons;
+mod quantized_affine_read;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
 mod widened_sum_threshold;
@@ -2716,10 +2717,13 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
+    // Without a lowering policy, keep table operands available to node-only and
+    // forced strategies.
     prep_for_gatify_observing(
         f,
         range_info,
         options,
+        false,
         None,
         None,
         GateCostOptions {
@@ -2737,6 +2741,7 @@ pub(crate) fn prep_for_gatify_observing(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
     mut origins: Option<&mut HashMap<usize, usize>>,
     mut comparison_origins: Option<&mut HashMap<usize, PirNodeIds>>,
     gate_cost: GateCostOptions,
@@ -2880,6 +2885,7 @@ pub(crate) fn prep_for_gatify_observing(
         affine_equality::rewrite(
             prepared,
             origins
+                .as_deref()
                 .zip(comparison_origins)
                 .map(|(rewrites, comparisons)| affine_equality::Origins {
                     original: f,
@@ -2888,6 +2894,13 @@ pub(crate) fn prep_for_gatify_observing(
                 }),
         )
     });
+    // Lower surviving reads after the word-level rewrites. Their helpers can
+    // consume the last text ID and need only the final topological sort.
+    if synthesize_literal_reads {
+        diagnostics::run(&mut cloned, "quantized_affine_read", 0, |f| {
+            quantized_affine_read::rewrite(f, origins)
+        });
+    }
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
         ir_utils::compact_and_toposort_in_place(f)

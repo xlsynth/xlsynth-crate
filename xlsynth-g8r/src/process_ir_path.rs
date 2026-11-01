@@ -468,6 +468,7 @@ fn prepared_ir_text_from_package(
     top_fn_name: &str,
     range_info: &IrRangeInfo,
     prep_opts: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
     track_pir_node_ids: bool,
     gate_cost: GateCostOptions,
 ) -> Result<String, String> {
@@ -480,6 +481,7 @@ fn prepared_ir_text_from_package(
         ir_top,
         Some(range_info),
         prep_opts,
+        synthesize_literal_reads,
         track_pir_node_ids.then(HashMap::new).as_mut(),
         track_pir_node_ids.then(HashMap::new).as_mut(),
         gate_cost,
@@ -531,6 +533,7 @@ pub fn canonical_ir_text_to_prepared_gatify_ir(
         &prepared.top_fn_name,
         prepared.range_info.as_ref(),
         prep_opts,
+        !lowering_options.unsafe_gatify_gate_operation,
         lowering_options.track_pir_node_ids,
         GateCostOptions {
             hash: lowering_options.hash,
@@ -599,6 +602,7 @@ pub fn process_ir_text_with_gatefn(
             &top_fn_name,
             range_info.as_ref(),
             prep_opts,
+            !options.unsafe_gatify_gate_operation,
             options.track_pir_node_ids,
             GateCostOptions {
                 hash: options.hash,
