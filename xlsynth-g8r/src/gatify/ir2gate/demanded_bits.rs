@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use crate::gatify::wiring;
 use xlsynth_pir::{ir, ir_utils};
 
 /// Unions demanded flat bits across consumers. Only the supplied dependency-
@@ -41,11 +42,17 @@ pub(super) fn analyze(
                 *target |= needed;
             }
         };
-        match &node.payload {
-            ir::NodePayload::BitSlice { arg, start, .. } => propagate(*arg, *start, &mask),
-            ir::NodePayload::Unop(ir::Unop::Identity | ir::Unop::Not, arg) => {
-                propagate(*arg, 0, &mask);
+        if let Some((arg, start)) = wiring::slice_source(f, &node.payload) {
+            propagate(arg, start, &mask);
+            continue;
+        }
+        if let Some(parts) = wiring::concat_sources(f, &node.payload) {
+            for (arg, range) in parts {
+                propagate(arg, 0, &mask[range]);
             }
+            continue;
+        }
+        match &node.payload {
             ir::NodePayload::Unop(ir::Unop::Reverse, arg) => {
                 let reversed = mask.iter().rev().copied().collect::<Vec<_>>();
                 propagate(*arg, 0, &reversed);
@@ -58,21 +65,6 @@ pub(super) fn analyze(
                     && mask[width..].iter().any(|bit| *bit)
                 {
                     propagate(*arg, width - 1, &[true]);
-                }
-            }
-            ir::NodePayload::TupleIndex { tuple, index } => {
-                let slice = f
-                    .get_node_ty(*tuple)
-                    .tuple_get_flat_bit_slice_for_index(*index)
-                    .expect("validated tuple index");
-                propagate(*tuple, slice.start, &mask);
-            }
-            ir::NodePayload::Tuple(args) | ir::NodePayload::Nary(ir::NaryOp::Concat, args) => {
-                let mut offset = 0;
-                for &arg in args.iter().rev() {
-                    let width = f.get_node_ty(arg).bit_count();
-                    propagate(arg, 0, &mask[offset..offset + width]);
-                    offset += width;
                 }
             }
             ir::NodePayload::Array(args) | ir::NodePayload::ArrayConcat(args) => {
@@ -154,5 +146,38 @@ mod tests {
         );
         assert_eq!(masks[&f.params[0]], vec![false, false, true]);
         assert!(!masks.contains_key(&f.params[1]));
+    }
+
+    #[test]
+    fn nested_tuple_fields_and_repeated_operands_union_their_flat_bits() {
+        let f = Parser::new(
+            r#"fn f(x: bits[5] id=1, y: bits[3] id=2, empty: () id=3) -> bits[4] {
+  inner: (bits[3], (), bits[5]) = tuple(y, empty, x, id=4)
+  outer: (bits[5], (bits[3], (), bits[5]), (), bits[5]) = tuple(x, inner, empty, x, id=5)
+  head: bits[5] = tuple_index(outer, index=0, id=6)
+  middle: (bits[3], (), bits[5]) = tuple_index(outer, index=1, id=7)
+  tail: bits[5] = tuple_index(outer, index=3, id=8)
+  a: bits[3] = tuple_index(middle, index=0, id=9)
+  b: bits[5] = tuple_index(middle, index=2, id=10)
+  inverted: bits[5] = not(b, id=11)
+  copied: bits[5] = identity(tail, id=12)
+  p: bits[1] = bit_slice(head, start=4, width=1, id=13)
+  q: bits[1] = bit_slice(a, start=2, width=1, id=14)
+  r: bits[1] = bit_slice(inverted, start=2, width=1, id=15)
+  s: bits[1] = bit_slice(copied, start=0, width=1, id=16)
+  ret out: bits[4] = concat(p, q, r, s, id=17)
+}"#,
+        )
+        .parse_fn()
+        .unwrap();
+        let topo = ir_utils::get_topological(&f);
+        let masks = analyze(&f, &topo, &[f.ret_node_ref.unwrap()]);
+        assert_eq!(masks[&f.params[0]], [true, false, true, false, true]);
+        assert_eq!(masks[&f.params[1]], [false, false, true]);
+        assert!(masks[&f.params[2]].is_empty());
+
+        let outer = topo.iter().find(|r| f.get_node(**r).text_id == 5).unwrap();
+        let expected: Vec<_> = (0..18).map(|i| [0, 7, 12, 17].contains(&i)).collect();
+        assert_eq!(masks[outer], expected);
     }
 }
