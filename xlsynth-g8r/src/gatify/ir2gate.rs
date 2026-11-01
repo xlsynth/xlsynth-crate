@@ -34,6 +34,7 @@ use crate::ir2gate_utils::{
 use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
+mod bounded_affine_clamp;
 mod conditional_select;
 mod demanded_bits;
 mod priority_predicate;
@@ -264,11 +265,16 @@ impl GateEnv {
 
     /// Returns whether a node has exactly one use within the mapping boundary.
     pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
-        let count = match &self.use_counts {
+        self.use_count(ir_node_ref) == 1
+    }
+
+    /// Counts operand edges and externally retained values at this mapping
+    /// boundary.
+    pub(super) fn use_count(&self, ir_node_ref: ir::NodeRef) -> usize {
+        match &self.use_counts {
             UseCounts::Function(counts) => counts[ir_node_ref.index],
             UseCounts::Region(counts) => counts.get(&ir_node_ref).copied().unwrap_or(0),
-        };
-        count == 1
+        }
     }
 
     /// Returns whether this product is emitted as rows at its sole sum
@@ -3602,6 +3608,7 @@ fn gatify_node(
                         default_bits.is_some(),
                     )
                 })
+                .or_else(|| bounded_affine_clamp::lower(f, node_ref, env, g8_builder))
                 .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
             let gates = env
                 .priority_predicate_plan
