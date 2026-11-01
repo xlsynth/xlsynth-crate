@@ -18,6 +18,7 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
+mod affine_equality;
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
@@ -2756,6 +2757,7 @@ pub fn prep_for_gatify(
         0,
         widened_sum_threshold::rewrite,
     );
+    diagnostics::run(&mut cloned, "affine_equality", 0, affine_equality::rewrite);
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
         ir_utils::compact_and_toposort_in_place(f)
