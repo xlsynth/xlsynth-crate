@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::gatify::wiring;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_utils::{self, Users};
 use xlsynth_pir::{IrBits, IrValue};
@@ -390,38 +391,34 @@ fn input_support(
         } else {
             visited.insert(node, mask.clone());
         }
-        match &f.get_node(node).payload {
+        let payload = &f.get_node(node).payload;
+        if let Some((arg, start)) = wiring::slice_source(f, payload) {
+            let width = f.get_node_ty(arg).bit_count();
+            if mask.get_bit_count() != width {
+                mask = mask.width_slice(0, width as i64);
+            }
+            if start != 0 {
+                mask = mask.shll(start as i64);
+            }
+            pending.push((arg, mask));
+            continue;
+        }
+        if let Some(parts) = wiring::concat_sources(f, payload) {
+            for (arg, range) in parts {
+                pending.push((
+                    arg,
+                    mask.width_slice(range.start as i64, range.len() as i64),
+                ));
+            }
+            continue;
+        }
+        match payload {
             NodePayload::Literal(_) | NodePayload::Nil => {}
             NodePayload::Param | NodePayload::InputPort { .. } => {
                 support.insert(node, visited[&node].clone());
             }
-            NodePayload::Unop(Unop::Identity | Unop::Not, x) => pending.push((*x, mask)),
-            NodePayload::BitSlice { arg, start, .. } => {
-                let width = f.get_node(*arg).ty.bit_count() as i64;
-                pending.push((*arg, mask.width_slice(0, width).shll(*start as i64)));
-            }
-            NodePayload::TupleIndex { tuple, index } => {
-                let Type::Tuple(fields) = &f.get_node(*tuple).ty else {
-                    unreachable!("validated tuple index")
-                };
-                // XLS packs the last tuple field at the least significant end.
-                let low: usize = fields[index + 1..]
-                    .iter()
-                    .map(|field| field.bit_count())
-                    .sum();
-                let width = f.get_node(*tuple).ty.bit_count() as i64;
-                pending.push((*tuple, mask.width_slice(0, width).shll(low as i64)));
-            }
-            NodePayload::Tuple(parts) | NodePayload::Nary(NaryOp::Concat, parts) => {
-                let mut low = 0;
-                for &part in parts.iter().rev() {
-                    let width = f.get_node(part).ty.bit_count() as i64;
-                    pending.push((part, mask.width_slice(low, width)));
-                    low += width;
-                }
-            }
             _ => {
-                for arg in ir_utils::operands(&f.get_node(node).payload) {
+                for arg in ir_utils::operands(payload) {
                     pending.push((arg, IrBits::all_ones(f.get_node(arg).ty.bit_count())));
                 }
             }
