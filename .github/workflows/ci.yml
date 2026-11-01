@@ -1245,6 +1245,7 @@ jobs:
             xlsynth-aug-opt/fuzz
             xlsynth-codegen/fuzz
             xlsynth-driver/fuzz
+            xlsynth-dslx-fuzzer/fuzz
             xlsynth-g8r/fuzz
             xlsynth-mcmc-pir/fuzz
             xlsynth-pir/fuzz

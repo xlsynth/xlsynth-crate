@@ -77,6 +77,37 @@ default. CI retains its `-max_total_time=5` override and
 campaigns. Optional external-tool targets still require explicit selection and
 their runtime prerequisites.
 
+### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_dslx_semantics.rs
+
+Composes typed DSLX AST fragments into an acyclic, multi-module translation
+environment and independently constructs their expected PIR semantics bottom up.
+Width-parametric helpers support signed and unsigned instantiations, explicit or
+inferred parameters, and nested imported calls. Fragments include
+modular arithmetic (including multiplication and nonzero division/remainder),
+bitwise operations, shifts, all comparisons, conditionals,
+tuples, concatenation, both slice syntaxes, width-changing casts, and
+arbitrary-width literals through 129 bits. Module/local constants, computed
+dimensions, parametric defaults, and `const_assert!` exercise constexpr
+evaluation with independent PIR reference values. Compound fragments add builtin
+operations, arrays and dynamic indexing/updates, strings, exhaustive bits/tuple/
+enum matches, parametric structs and field updates, and bounded ordinary/const
+loops whose reference semantics are unrolled independently. Bounded nested tuple
+binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple
+rest while an independent ordered fold makes retained bindings observable.
+The formatted DSLX is converted by
+libxls and its top is proved equivalent to the composite reference with
+Bitwuzla. Unexpected generation, conversion, parsing, and prover errors fail
+the sample; counterexamples surface either an incorrect semantic hypothesis or
+a DSLX conversion bug. Solver queries use a ten-second and 1024-MiB limit.
+An optional isolated native checker adds C++ parser, typechecker, and constexpr
+interpreter counters to libFuzzer's feedback while retaining the formal check.
+Native rejections also fail the sample; the checker links no JIT or IR execution
+backend. See the [native setup](xlsynth-dslx-fuzzer/native/README.md).
+Select a matching top-of-tree libxls and standard library when testing the full
+tuple grammar; older released converters contain a sibling-rest crash.
+See the [crate guide](xlsynth-dslx-fuzzer/README.md) for running and reproducing
+the target.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including

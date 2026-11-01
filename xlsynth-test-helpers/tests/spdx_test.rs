@@ -29,7 +29,7 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         || filename == "requirements.txt"
     {
         "#"
-    } else if filename.ends_with(".lib") {
+    } else if filename.ends_with(".lib") || filename.ends_with(".lds") {
         "/*"
     } else if filename.ends_with(".vim") {
         "\""
@@ -241,14 +241,18 @@ fn test_accepts_textproto_spdx_comment() {
 }
 
 #[test]
-fn test_accepts_liberty_spdx_block_comment() {
+fn test_accepts_liberty_and_linker_script_spdx_block_comments() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let liberty_file = temp_dir.path().join("cells.lib");
-    fs::write(
-        liberty_file,
-        "/* SPDX-License-Identifier: Apache-2.0 */\nlibrary(cells) {}\n",
-    )
-    .unwrap();
+    for (name, contents) in [
+        ("cells.lib", "library(cells) {}"),
+        ("exports.lds", "{ global: check; local: *; };"),
+    ] {
+        fs::write(
+            temp_dir.path().join(name),
+            format!("/* SPDX-License-Identifier: Apache-2.0 */\n{contents}\n"),
+        )
+        .unwrap();
+    }
 
     let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
     assert!(

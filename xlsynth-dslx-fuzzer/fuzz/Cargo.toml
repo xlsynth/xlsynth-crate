@@ -1,0 +1,42 @@
+[package]
+name = "xlsynth-dslx-fuzzer-fuzz"
+version = "0.75.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xlsynth-dslx-fuzzer = { path = ".." }
+xlsynth-prover = { path = "../../xlsynth-prover" }
+tempfile = "3.20"
+
+[build-dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+rand = "0.8"
+xlsynth-pir = { path = "../../xlsynth-pir" }
+
+[features]
+default = []
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+with-bitwuzla-system = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-system"]
+with-bitwuzla-built = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-built"]
+
+[[bin]]
+name = "fuzz_dslx_semantics"
+path = "fuzz_targets/fuzz_dslx_semantics.rs"
+test = false
+doc = false
+required-features = ["has-bitwuzla"]
+
+[[example]]
+name = "native_feedback"
+path = "examples/native_feedback.rs"
+required-features = ["has-bitwuzla"]

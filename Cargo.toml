@@ -20,6 +20,7 @@ members = [
     "xlsynth-vast",
     "xlsynth-vastly",
     "xlsynth-dslx-routines",
+    "xlsynth-dslx-fuzzer",
     "sample-usage",
 ]
 resolver = "2"

@@ -1,0 +1,18 @@
+[package]
+name = "xlsynth-dslx-fuzzer"
+version = "0.75.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+description = "Compositional DSLX semantics samples with independently constructed XLS IR"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.75.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.75.0" }
+tempfile = "3.20"
+
+[dev-dependencies]
+rand = "0.8"
