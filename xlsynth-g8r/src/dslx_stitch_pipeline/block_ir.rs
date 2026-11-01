@@ -3,12 +3,15 @@
 //! Constructs the stitched wrapper as an XLS block invoking the stage
 //! functions.
 
+use std::ops::Range;
+
 use xlsynth_pir::ir::{self, Type};
 use xlsynth_pir::{
     BValue, BlockBuilder, BuilderError, IrValue, RegisterWriteOptions, ResetBehavior,
 };
 
-use super::build_pipeline::{flop_reg_name, stage_output_wire_name, valid_reg_name};
+use super::layout::{PipelineBoundary, PipelineLayout};
+use super::names::{flop_reg_name, stage_output_wire_name, valid_reg_name};
 use crate::aig::SequentialPipelineOptions;
 
 /// Appends the wrapper to its stage package and selects it as the package top.
@@ -16,6 +19,7 @@ pub(super) fn build_pipeline_block(
     package: &mut ir::Package,
     stages: &[(String, String)],
     boundary: &SequentialPipelineOptions,
+    layout: &PipelineLayout,
 ) -> Result<(), String> {
     let functions = stages
         .iter()
@@ -28,7 +32,7 @@ pub(super) fn build_pipeline_block(
     let (first, rest) = functions
         .split_first()
         .ok_or_else(|| "cannot build a block for an empty pipeline".to_string())?;
-    pipeline_builder(first, rest, boundary)
+    pipeline_builder(first, rest, boundary, layout)
         .and_then(|builder| builder.build_into_package(package))
         .map_err(|error| {
             format!(
@@ -44,6 +48,7 @@ fn pipeline_builder(
     first: &ir::Fn,
     rest: &[&ir::Fn],
     boundary: &SequentialPipelineOptions,
+    layout: &PipelineLayout,
 ) -> Result<BlockBuilder, BuilderError> {
     let mut builder = BlockBuilder::new(&boundary.name);
     builder.clock_port(&boundary.clock.name)?;
@@ -61,15 +66,16 @@ fn pipeline_builder(
         None
     };
 
-    let mut arguments = Vec::with_capacity(first.params.len());
-    for param in first.param_nodes() {
-        let port = builder.input_port(param.param_name(), Type::Bits(param.ty.bit_count()))?;
-        let mut offset = 0;
+    let inputs = &layout.stage_inputs[0];
+    let mut arguments = Vec::with_capacity(inputs.ports.len());
+    for (param, port) in first.param_nodes().zip(&inputs.ports) {
+        let width = port.bits.len();
+        let packed = builder.input_port(&port.name, Type::Bits(width))?;
         arguments.push(unpack_for_storage(
             &mut builder,
-            port,
+            packed,
             &param.ty,
-            &mut offset,
+            0..width,
         )?);
     }
     let valid = boundary
@@ -77,54 +83,40 @@ fn pipeline_builder(
         .as_ref()
         .map(|name| builder.input_port(name, Type::Bits(1)))
         .transpose()?;
-    let mut layers = RegisterLayers {
-        next: 0,
-        valid,
-        reset,
-    };
-    if boundary.flop_inputs {
-        layers.insert(
-            &mut builder,
-            first
-                .param_nodes()
-                .map(|p| p.param_name())
-                .zip(&mut arguments),
-        )?;
-    }
+    let mut control = PipelineControl { valid, reset };
+    control.register_boundary(&mut builder, inputs, &mut arguments)?;
 
     let mut result = invoke_stage(&mut builder, first, arguments, 0)?;
     for (i, stage) in rest.iter().enumerate() {
+        let inputs = layout.after_stage(i);
         // A token-free unary argument can cross the register layer whole.
         // Multiple arguments split the packed result starting at the LSB.
-        let mut arguments =
-            if stage.params.len() == 1 && !builder.get_type(result)?.contains_token() {
-                vec![result]
-            } else {
-                let ty = builder.get_type(result)?.clone();
-                let packed = pack_value(&mut builder, result, &ty)?;
-                let mut offset = 0;
-                stage
-                    .param_nodes()
-                    .map(|p| unpack_for_storage(&mut builder, packed, &p.ty, &mut offset))
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-        layers.insert(
-            &mut builder,
+        let mut arguments = if inputs.ports.len() == 1
+            && !builder.get_type(result)?.contains_token()
+        {
+            vec![result]
+        } else {
+            let ty = builder.get_type(result)?.clone();
+            let packed = pack_value(&mut builder, result, &ty)?;
             stage
                 .param_nodes()
-                .map(|p| p.param_name())
-                .zip(&mut arguments),
-        )?;
+                .zip(&inputs.ports)
+                .map(|(p, port)| unpack_for_storage(&mut builder, packed, &p.ty, port.bits.clone()))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        control.register_boundary(&mut builder, inputs, &mut arguments)?;
         result = invoke_stage(&mut builder, stage, arguments, i + 1)?;
     }
 
     let ty = builder.get_type(result)?.clone();
     let mut output = pack_value(&mut builder, result, &ty)?;
-    if boundary.flop_outputs {
-        layers.insert(&mut builder, [("out", &mut output)])?;
-    }
-    builder.output_port("out", output)?;
-    if let (Some(name), Some(valid)) = (&boundary.output_valid_signal, layers.valid) {
+    control.register_boundary(
+        &mut builder,
+        &layout.output,
+        std::slice::from_mut(&mut output),
+    )?;
+    builder.output_port(&layout.output.ports[0].name, output)?;
+    if let (Some(name), Some(valid)) = (&boundary.output_valid_signal, control.valid) {
         builder.output_port(name, valid)?;
     }
     Ok(builder)
@@ -136,12 +128,13 @@ fn unpack_for_storage(
     builder: &mut BlockBuilder,
     packed: BValue,
     ty: &Type,
-    offset: &mut usize,
+    bits: Range<usize>,
 ) -> Result<BValue, BuilderError> {
+    let mut offset = bits.start;
     if ty.contains_token() {
-        unpack_value(builder, packed, &Type::Bits(ty.bit_count()), offset)
+        unpack_value(builder, packed, &Type::Bits(bits.len()), &mut offset)
     } else {
-        unpack_value(builder, packed, ty, offset)
+        unpack_value(builder, packed, ty, &mut offset)
     }
 }
 
@@ -163,24 +156,26 @@ fn invoke_stage(
     Ok(result)
 }
 
-/// Tracks register numbering and the valid signal at the current pipeline
-/// boundary.
-struct RegisterLayers {
-    next: u32,
+/// Carries the block's reset port and the valid signal at the current boundary.
+struct PipelineControl {
     valid: Option<BValue>,
     reset: Option<BValue>,
 }
 
-impl RegisterLayers {
+impl PipelineControl {
     /// Registers data on valid cycles and advances valid on every clock edge.
-    fn insert<'a>(
+    fn register_boundary(
         &mut self,
         builder: &mut BlockBuilder,
-        data: impl IntoIterator<Item = (&'a str, &'a mut BValue)>,
+        boundary: &PipelineBoundary,
+        data: &mut [BValue],
     ) -> Result<(), BuilderError> {
-        for (name, value) in data {
+        let Some(layer) = boundary.register_layer else {
+            return Ok(());
+        };
+        for (port, value) in boundary.ports.iter().zip(data) {
             let register = builder.register(
-                &flop_reg_name(self.next, name),
+                &flop_reg_name(layer, &port.name),
                 builder.get_type(*value)?.clone(),
                 None,
             )?;
@@ -196,7 +191,7 @@ impl RegisterLayers {
         }
         if let Some(valid) = self.valid {
             let register = builder.register(
-                &valid_reg_name(self.next),
+                &valid_reg_name(layer),
                 Type::Bits(1),
                 self.reset.map(|_| IrValue::bool(false)),
             )?;
@@ -210,7 +205,6 @@ impl RegisterLayers {
             )?;
             self.valid = Some(builder.register_read(register)?);
         }
-        self.next += 1;
         Ok(())
     }
 }
