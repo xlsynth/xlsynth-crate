@@ -96,12 +96,19 @@ impl ObservationFixture {
                 state_signal: None,
             })
             .collect();
+        let state_aliases = vec![StateAlias {
+            name: "IQN".to_string(),
+            signal: PowerSignal::Clock,
+            complemented: true,
+        }];
+        let mut budget = CONDITION_TABLE_BUDGET;
         let bindings = Arc::new(prepare_instance_bindings(
             &library,
             &library.cells[0],
             &instances[0],
             &[0, 1, 2],
-            &[],
+            &state_aliases,
+            &mut budget,
         ));
         let topology = PowerTopology {
             signals: (0..6)
@@ -129,11 +136,7 @@ impl ObservationFixture {
                         .collect(),
                     output_signals: vec![None, None, Some(SignalId(index * 3 + 2))],
                     is_sequential: false,
-                    state_aliases: vec![StateAlias {
-                        name: "IQN".to_string(),
-                        signal: PowerSignal::Clock,
-                        complemented: true,
-                    }],
+                    state_aliases: state_aliases.clone(),
                 })
                 .collect(),
             instance_order: vec![0, 1],
@@ -257,6 +260,36 @@ fn cache_reuses_selectors_across_timing_and_power_but_not_instances_or_transitio
 }
 
 #[test]
+fn condition_tables_respect_slot_count_shape_and_shared_budget() {
+    let conditions = [PreparedCondition {
+        expression: Default::default(),
+        term: Ok(BoundConditionTerm::Input(Some(
+            ConditionValueSlot::StateAlias(0),
+        ))),
+    }];
+    let mut bytes = 1024;
+    assert!(ConditionTable::prepare(&conditions, 10, 1, &mut bytes).is_none());
+    let table = ConditionTable::prepare(&conditions, 9, 1, &mut bytes).unwrap();
+    assert_eq!(bytes, 0);
+    assert!(ConditionTable::prepare(&conditions, 0, 1, &mut bytes).is_none());
+    assert_eq!(
+        table.row(ConditionValues {
+            pins: &[false; 9],
+            state_aliases: &[true]
+        }),
+        Some([true].as_slice())
+    );
+    assert!(
+        table
+            .row(ConditionValues {
+                pins: &[false; 10],
+                state_aliases: &[]
+            })
+            .is_none()
+    );
+}
+
+#[test]
 fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
     let mut builder = LibraryBuilder::new();
     let expression = builder.intern_string("C & MISSING").unwrap();
@@ -278,6 +311,18 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
         },
     ];
     let mut cache = ConditionCache::new(2);
+    let mut budget = 1024;
+    assert!(ConditionTable::prepare(&conditions[..1], 0, 1, &mut budget).is_none());
+    assert!(ConditionTable::prepare(&conditions[1..], 0, 1, &mut budget).is_none());
+    let masked_unknown = PreparedCondition {
+        expression,
+        term: Ok(BoundConditionTerm::And(
+            Box::new(BoundConditionTerm::Constant(false)),
+            Box::new(BoundConditionTerm::Input(None)),
+        )),
+    };
+    assert!(ConditionTable::prepare(&[masked_unknown], 0, 0, &mut budget).is_none());
+    assert_eq!(budget, 1024);
     let mut diagnostics = GvDynamicPowerDiagnostics::default();
     let absent = ConditionValues {
         pins: &[],
@@ -288,8 +333,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
             &library,
             None,
             &conditions,
-            absent,
-            absent,
+            ConditionStates::Slots(absent, absent),
             &mut diagnostics,
             &mut cache
         )
@@ -310,8 +354,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
                 &library,
                 Some(0),
                 &conditions,
-                false_values,
-                false_values,
+                ConditionStates::Slots(false_values, false_values),
                 &mut diagnostics,
                 &mut cache
             )
@@ -324,8 +367,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
             &library,
             Some(0),
             &conditions,
-            false_values,
-            true_values,
+            ConditionStates::Slots(false_values, true_values),
             &mut diagnostics,
             &mut cache
         )
@@ -338,8 +380,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
             &library,
             Some(1),
             &conditions,
-            absent,
-            absent,
+            ConditionStates::Slots(absent, absent),
             &mut diagnostics,
             &mut cache
         )

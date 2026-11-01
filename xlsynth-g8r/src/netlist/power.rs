@@ -266,6 +266,7 @@ struct BindingLayout {
 #[derive(Debug)]
 struct PreparedInstanceBindings {
     conditions: Vec<PreparedCondition>,
+    table: Option<ConditionTable>,
     pins: Vec<PreparedPinBindings>,
 }
 
@@ -323,7 +324,101 @@ struct ConditionValues<'a> {
     state_aliases: &'a [bool],
 }
 
+const MAX_CONDITION_SLOTS: usize = 10;
+// Shared across all distinct binding layouts in one topology.
+const CONDITION_TABLE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// One row of condition results per assignment, with pins in the low bits.
+#[derive(Debug)]
+struct ConditionTable {
+    pin_count: usize,
+    alias_count: usize,
+    row_len: usize,
+    entries: Box<[bool]>,
+}
+
+impl ConditionTable {
+    /// Leaves the whole layout interpreted if any assignment is unresolved.
+    fn prepare(
+        conditions: &[PreparedCondition],
+        pin_count: usize,
+        alias_count: usize,
+        remaining_bytes: &mut usize,
+    ) -> Option<Self> {
+        let slot_count = pin_count + alias_count;
+        if conditions.is_empty() || slot_count > MAX_CONDITION_SLOTS {
+            return None;
+        }
+        let rows = 1usize << slot_count;
+        let bytes = rows.checked_mul(conditions.len())?;
+        if bytes > *remaining_bytes {
+            return None;
+        }
+        for condition in conditions {
+            if !condition.term.as_ref().ok()?.is_fully_bound() {
+                return None;
+            }
+        }
+        let mut entries = Vec::with_capacity(bytes);
+        let mut slots = [false; MAX_CONDITION_SLOTS];
+        for key in 0..rows {
+            for (i, slot) in slots[..slot_count].iter_mut().enumerate() {
+                *slot = key & (1 << i) != 0;
+            }
+            let (pins, state_aliases) = slots[..slot_count].split_at(pin_count);
+            for condition in conditions {
+                let term = condition.term.as_ref().ok()?;
+                entries.push(term.evaluate_partial(ConditionValues {
+                    pins,
+                    state_aliases,
+                })?);
+            }
+        }
+        *remaining_bytes -= bytes;
+        Some(Self {
+            pin_count,
+            alias_count,
+            row_len: conditions.len(),
+            entries: entries.into_boxed_slice(),
+        })
+    }
+
+    /// Packs this instance's already-complemented alias values after its pins.
+    fn row(&self, values: ConditionValues<'_>) -> Option<&[bool]> {
+        if values.pins.len() != self.pin_count || values.state_aliases.len() != self.alias_count {
+            return None;
+        }
+        let key = values
+            .state_aliases
+            .iter()
+            .rev()
+            .chain(values.pins.iter().rev())
+            .fold(0, |key, &bit| (key << 1) | usize::from(bit));
+        let start = key * self.row_len;
+        Some(&self.entries[start..start + self.row_len])
+    }
+}
+
+/// The two endpoints used by every selector for one changed instance.
+#[derive(Clone, Copy)]
+enum ConditionStates<'a> {
+    Rows(&'a [bool], &'a [bool]),
+    Slots(ConditionValues<'a>, ConditionValues<'a>),
+}
+
 impl BoundConditionTerm {
+    /// Even a short-circuited unbound leaf keeps its layout on the interpreter.
+    fn is_fully_bound(&self) -> bool {
+        match self {
+            Self::Input(slot) => slot.is_some(),
+            Self::And(a, b) | Self::Or(a, b) | Self::Xor(a, b) => {
+                a.is_fully_bound() && b.is_fully_bound()
+            }
+            Self::Negate(inner) => inner.is_fully_bound(),
+            Self::Constant(_) => true,
+        }
+    }
+
     /// Resolves names once, preserving unknown inputs for partial evaluation.
     fn bind(term: &Term, slots: &HashMap<&str, ConditionValueSlot>) -> Self {
         match term {
@@ -348,9 +443,9 @@ impl BoundConditionTerm {
     /// Evaluates with the same three-valued logic as `Term::evaluate_partial`.
     fn evaluate_partial(&self, values: ConditionValues<'_>) -> Option<bool> {
         match self {
-            Self::Input(Some(ConditionValueSlot::Pin(index))) => Some(values.pins[*index]),
+            Self::Input(Some(ConditionValueSlot::Pin(index))) => values.pins.get(*index).copied(),
             Self::Input(Some(ConditionValueSlot::StateAlias(index))) => {
-                Some(values.state_aliases[*index])
+                values.state_aliases.get(*index).copied()
             }
             Self::Input(None) => None,
             Self::And(lhs, rhs) => match lhs.evaluate_partial(values) {
@@ -1165,6 +1260,7 @@ fn build_topology(
 
     let mut instances = Vec::with_capacity(model.instances.len());
     let mut prepared_bindings = HashMap::new();
+    let mut table_budget = CONDITION_TABLE_BUDGET;
     for (instance_index, instance) in model.instances.iter().enumerate() {
         let cell = *cell_by_name
             .get(instance.cell_type.as_str())
@@ -1216,8 +1312,9 @@ fn build_topology(
             }
         }
         let state_aliases = state_aliases_for_instance(instance, &library.cells[cell])?;
-        // The library fixes the alias names and order; only their presence and
-        // the ordered bound pins vary across instances of the same cell.
+        // The cell fixes the alias names, order, and polarity; only their
+        // presence and the ordered bound pins vary across instances of
+        // the same cell.
         let layout = BindingLayout {
             cell,
             liberty_pins: liberty_pins.clone(),
@@ -1230,6 +1327,7 @@ fn build_topology(
                 instance,
                 &liberty_pins,
                 &state_aliases,
+                &mut table_budget,
             ))
         }));
         instances.push(InstanceTopology {
@@ -1325,6 +1423,7 @@ fn prepare_instance_bindings(
     instance: &PowerInstance,
     liberty_pins: &[usize],
     state_aliases: &[StateAlias],
+    table_budget: &mut usize,
 ) -> PreparedInstanceBindings {
     let pin_indices: HashMap<_, _> = instance
         .pins
@@ -1406,7 +1505,17 @@ fn prepare_instance_bindings(
             }
         })
         .collect();
-    PreparedInstanceBindings { conditions, pins }
+    let table = ConditionTable::prepare(
+        &conditions,
+        instance.pins.len(),
+        state_aliases.len(),
+        table_budget,
+    );
+    PreparedInstanceBindings {
+        conditions,
+        table,
+        pins,
+    }
 }
 
 /// Builds Liberty state-variable aliases backed by the mapped register Q.
@@ -1791,6 +1900,14 @@ fn observe_transition(
             state_aliases: current_state_alias_values,
         };
         let bindings = &topology_instance.bindings;
+        let states = if let Some(table) = &bindings.table
+            && let Some(previous) = table.row(previous_condition_values)
+            && let Some(current) = table.row(current_condition_values)
+        {
+            ConditionStates::Rows(previous, current)
+        } else {
+            ConditionStates::Slots(previous_condition_values, current_condition_values)
+        };
         // Values are valid across timing and power selection for this instance
         // only, even when another instance shares the same immutable bindings.
         scratch.conditions.reset(bindings.conditions.len());
@@ -1841,8 +1958,7 @@ fn observe_transition(
                         library,
                         prepared_arc.condition,
                         &bindings.conditions,
-                        previous_condition_values,
-                        current_condition_values,
+                        states,
                         &mut result.diagnostics,
                         &mut scratch.conditions,
                     )?
@@ -1911,8 +2027,7 @@ fn observe_transition(
                     library,
                     prepared_group.condition,
                     &bindings.conditions,
-                    previous_condition_values,
-                    current_condition_values,
+                    states,
                     &mut result.diagnostics,
                     &mut scratch.conditions,
                 )? {
@@ -1966,8 +2081,7 @@ fn when_is_true(
     library: &Library,
     condition: Option<usize>,
     conditions: &[PreparedCondition],
-    previous_values: ConditionValues<'_>,
-    current_values: ConditionValues<'_>,
+    states: ConditionStates<'_>,
     diagnostics: &mut GvDynamicPowerDiagnostics,
     cache: &mut ConditionCache,
 ) -> Result<bool, String> {
@@ -1981,22 +2095,25 @@ fn when_is_true(
         }
         outcome
     } else {
-        let condition = &conditions[index];
-        let term = condition.term.as_ref().map_err(Clone::clone)?;
-        let missing_values = || {
-            format!(
-                "Liberty when '{}' could not be evaluated from cell pin values",
-                library.resolve_string(&condition.expression)
-            )
+        let (previous, current) = match states {
+            ConditionStates::Rows(previous, current) => (previous[index], current[index]),
+            ConditionStates::Slots(previous, current) => {
+                let condition = &conditions[index];
+                let term = condition.term.as_ref().map_err(Clone::clone)?;
+                let missing_values = || {
+                    format!(
+                        "Liberty when '{}' could not be evaluated from cell pin values",
+                        library.resolve_string(&condition.expression)
+                    )
+                };
+                let previous = term.evaluate_partial(previous).ok_or_else(missing_values)?;
+                // A false predecessor still requires current-state validation.
+                // Errors leave the entry unevaluated and do not
+                // count as successful requests.
+                let current = term.evaluate_partial(current).ok_or_else(missing_values)?;
+                (previous, current)
+            }
         };
-        let previous = term
-            .evaluate_partial(previous_values)
-            .ok_or_else(missing_values)?;
-        // A false predecessor still requires current-state validation. Errors
-        // leave the entry unevaluated and do not count as successful requests.
-        let current = term
-            .evaluate_partial(current_values)
-            .ok_or_else(missing_values)?;
         let outcome = ConditionOutcome { previous, current };
         cache.outcomes[index] = Some(outcome);
         #[cfg(test)]
@@ -2620,7 +2737,10 @@ mod tests {
                 complemented: *name == "IQN",
             })
             .collect();
-        let prepared = prepare_instance_bindings(&library, &cell, &instance, &[0], &aliases);
+        let mut budget = 16;
+        let prepared =
+            prepare_instance_bindings(&library, &cell, &instance, &[0], &aliases, &mut budget);
+        assert_eq!(budget, 0);
         assert_eq!(prepared.conditions.len(), 1);
         assert_eq!(prepared.pins[0].timing_arcs[0].condition, Some(0));
         assert_eq!(prepared.pins[0].power_groups[0].condition, Some(0));
@@ -2647,14 +2767,15 @@ mod tests {
                     .map(|(alias, value)| (alias.name.clone(), value)),
             );
             assert_eq!(
-                prepared.conditions[0]
-                    .term
+                prepared
+                    .table
                     .as_ref()
                     .unwrap()
-                    .evaluate_partial(ConditionValues {
+                    .row(ConditionValues {
                         pins: &pins,
                         state_aliases: &values,
-                    }),
+                    })
+                    .map(|row| row[0]),
                 reference.evaluate_partial(&named_values)
             );
         }
@@ -2713,16 +2834,14 @@ mod tests {
             &topology.instances[2].bindings
         ));
         for (index, expected) in [(0, false), (2, true)] {
-            let condition = &topology.instances[index].bindings.conditions[0];
+            let table = topology.instances[index].bindings.table.as_ref().unwrap();
             assert_eq!(
-                condition
-                    .term
-                    .as_ref()
-                    .unwrap()
-                    .evaluate_partial(ConditionValues {
+                table
+                    .row(ConditionValues {
                         pins: &[false, true],
                         state_aliases: &[],
-                    }),
+                    })
+                    .map(|row| row[0]),
                 Some(expected)
             );
         }
