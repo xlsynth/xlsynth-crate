@@ -34,7 +34,7 @@ use crate::solver::{BitVec, Response, Solver};
     feature = "has-boolector",
     feature = "has-easy-smt"
 ))]
-use super::translate::{get_fn_inputs, ir_to_smt_with_node_terms};
+use super::translate::{get_fn_inputs, translate_with_node_terms};
 #[cfg(any(
     feature = "has-bitwuzla",
     feature = "has-boolector",
@@ -137,10 +137,16 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
         let empty_registry = UfRegistry {
             ufs: std::collections::HashMap::new(),
         };
-        let smt = ir_to_smt_with_node_terms(&mut solver, &fn_inputs, &empty_map, &empty_registry);
+        let smt = translate_with_node_terms(
+            &mut solver,
+            &fn_inputs,
+            &empty_map,
+            &empty_registry,
+            options.require_pass,
+        );
 
-        let pass_flag = mk_pass_flag(&mut solver, &smt.smt_fn.assertions);
         if options.require_pass {
+            let pass_flag = mk_pass_flag(&mut solver, &smt.smt_fn.assertions);
             solver.assert(&pass_flag).map_err(|e| e.to_string())?;
         }
 
@@ -380,6 +386,7 @@ impl<'a> CornerProver<'a> {
 #[cfg(all(test, feature = "has-bitwuzla"))]
 mod tests {
     use super::*;
+    use crate::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
     use xlsynth_pir::corners::CornerEvent;
     use xlsynth_pir::ir_eval::{EvalObserver, FnEvalResult, SelectEvent};
     use xlsynth_pir::ir_parser::Parser;
@@ -394,6 +401,44 @@ mod tests {
 
         fn on_corner_event(&mut self, ev: CornerEvent) {
             self.events.push((ev.node_text_id, ev.kind, ev.tag));
+        }
+    }
+
+    #[test]
+    fn loop_assertions_only_constrain_corners_when_required() {
+        let text = r#"package p
+fn body(i: bits[1] id=1, t: token id=2, ok: bits[1] id=3) -> token {
+  ret checked: token = assert(t, ok, message="invariant", label="check", id=4)
+}
+fn f(t: token id=5, ok: bits[1] id=6) -> (token, bits[1]) {
+  last: token = counted_for(t, trip_count=2, stride=1, body=body, invariant_args=[ok], id=7)
+  sum: bits[1] = add(ok, ok, id=8)
+  ret pair: (token, bits[1]) = tuple(last, sum, id=9)
+}"#;
+        let pkg = Parser::new(text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let query = CornerQuery {
+            node_text_id: 8,
+            kind: CornerKind::Add,
+            tag: AddCornerTag::LhsIsZero as u8,
+        };
+        for require_pass in [false, true] {
+            let mut session = CornerProverSession::<Bitwuzla>::new(
+                &BitwuzlaOptions::new(),
+                &pkg,
+                f,
+                CornerProverOptions { require_pass },
+            )
+            .unwrap();
+            assert_eq!(
+                session.smt.smt_fn.assertions.len(),
+                if require_pass { 2 } else { 0 }
+            );
+            let result = session.solve_any(&[query]).unwrap();
+            assert!(matches!(
+                (require_pass, result),
+                (false, CornerOrResult::Sat { .. }) | (true, CornerOrResult::Unsat)
+            ));
         }
     }
 

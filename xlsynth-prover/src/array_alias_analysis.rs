@@ -11,7 +11,7 @@ use xlsynth_pir::array_alias_rewrite::{
 };
 use xlsynth_pir::ir::{self, NodePayload, NodeRef, Type};
 
-use crate::prover::translate::{get_fn_inputs, ir_to_smt_with_node_terms};
+use crate::prover::translate::{get_fn_inputs, translate_with_node_terms};
 use crate::prover::types::{ProverFn, UfRegistry};
 use crate::solver::{BitVec, Response, Solver};
 
@@ -237,7 +237,9 @@ pub fn prove_array_index_update_aliases<S: Solver>(
         ufs: HashMap::new(),
     };
     let translation_start = Instant::now();
-    let smt = ir_to_smt_with_node_terms(&mut solver, &function_inputs, &uf_map, &uf_registry);
+    // Alias queries observe the index values even when a loop assertion fails.
+    let smt =
+        translate_with_node_terms(&mut solver, &function_inputs, &uf_map, &uf_registry, false);
 
     let mut stats = ArrayAliasAnalysisStats {
         translation_seconds: translation_start.elapsed().as_secs_f64(),
