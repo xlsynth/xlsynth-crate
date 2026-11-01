@@ -119,7 +119,7 @@ fn wrapping_narrow_values_and_overflowing_outer_sums_preserve_both_boundaries() 
     };
     // A 5-bit signed sum of 15 + 3 overflows to -14.
     assert_eq!(truncated.expected(15, 3), 0);
-    truncated.check_observer(false);
+    truncated.check_observer(true);
     truncated.check_all();
 
     let unsigned_wide = Case {
@@ -139,7 +139,7 @@ fn wrapping_narrow_values_and_overflowing_outer_sums_preserve_both_boundaries() 
         ..base
     };
     assert_eq!(modular_unsigned.expected(31, 7), 0);
-    modular_unsigned.check_observer(false);
+    modular_unsigned.check_observer(true);
     modular_unsigned.check_all();
 }
 
