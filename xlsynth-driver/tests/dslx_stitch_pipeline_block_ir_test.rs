@@ -327,6 +327,18 @@ fn zero_latency_valid_and_data_pass_through_during_reset() {
     let module = compile_combo_module(&rtl).unwrap();
     let plan = plan_combo_eval(&module).unwrap();
 
+    // Vastly ignores stimulus for undeclared inputs. Both control ports
+    // must still be present when there are no registers to drive.
+    for name in ["clk", "rst"] {
+        assert!(
+            module
+                .input_ports
+                .iter()
+                .any(|p| p.name == name && p.width == 1),
+            "missing one-bit input {name}"
+        );
+    }
+
     // The stage adds the two bytes in the packed partials port.
     for (rst, valid, partials, sum) in [
         (0, 0, 0x0302, 5),
