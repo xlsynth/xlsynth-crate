@@ -299,6 +299,44 @@ fn a_nullary_stage_without_valid_needs_no_input_register() {
 }
 
 #[test]
+fn block_output_rejects_xls_keywords_in_wrapper_and_control_names() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stitch-equiv");
+    for (flag, block, name) in [
+        (
+            "--output_module_name=scheduled_fn",
+            "scheduled_fn",
+            "scheduled_fn",
+        ),
+        (
+            "--input_valid_signal=active_inputs_valid",
+            "muladd",
+            "active_inputs_valid",
+        ),
+    ] {
+        let output = driver(
+            &example,
+            &[
+                "dslx-stitch-pipeline",
+                "--output-format=block-ir",
+                "--dslx_input_file=muladd.x",
+                "--dslx_top=muladd",
+                flag,
+            ],
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{flag}");
+        assert!(output.stdout.is_empty(), "{flag}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "xlsynth-driver: could not build pipeline block '{block}': invalid IR identifier: {name:?}: stitch error\n"
+            ),
+            "{flag}"
+        );
+    }
+}
+
+#[test]
 fn block_output_rejects_incompatible_rendering_options() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stitch-equiv");
     for (flag, diagnostic) in [

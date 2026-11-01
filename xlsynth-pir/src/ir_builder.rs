@@ -160,6 +160,7 @@ macro_rules! unary_op {
 /// Adapters importing external names can use this before applying their own
 /// legalization and collision-resolution policy.
 pub fn is_valid_identifier(name: &str) -> bool {
+    // XLS's IR scanner classifies these as keywords or boolean literals.
     let reserved = matches!(
         name,
         "fn" | "bits"
@@ -177,7 +178,14 @@ pub fn is_valid_identifier(name: &str) -> bool {
             | "top"
             | "file_number"
             | "proc_instantiation"
+            | "scheduled_proc"
+            | "scheduled_fn"
             | "stage"
+            | "scheduled_block"
+            | "source"
+            | "controlled_stage"
+            | "active_inputs_valid"
+            | "active_outputs_ready"
             | "true"
             | "false"
     );
@@ -1554,7 +1562,23 @@ mod tests {
 
     #[test]
     fn keyword_and_dotted_packages_roundtrip_and_accept_new_members() {
-        for name in ["stage", "alu.pipe", "a..b", "a.", "a.1", "true.a", "top.a"] {
+        for name in [
+            "stage",
+            "scheduled_fn",
+            "scheduled_proc",
+            "scheduled_block",
+            "source",
+            "controlled_stage",
+            "active_inputs_valid",
+            "active_outputs_ready",
+            "alu.pipe",
+            "a..b",
+            "a.",
+            "a.1",
+            "true.a",
+            "top.a",
+        ] {
+            assert!(!is_valid_identifier(name), "{name}");
             let mut function = FnBuilder::new("identity");
             let x = function.param("x", Type::Bits(1)).unwrap();
             let mut package = function.build_package(x, name).unwrap();
