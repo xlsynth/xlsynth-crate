@@ -21,6 +21,13 @@ pub enum Cell {
     Const(bool),
     Any(Vec<(R, usize, usize)>),
 }
+/// A word selector whose value is known for every row of the complete
+/// observation.
+#[derive(Debug)]
+pub struct SourceGuard {
+    pub selector: R,
+    pub values: Vec<bool>,
+}
 #[derive(Debug)]
 pub struct Plan {
     pub root: R,
@@ -30,6 +37,7 @@ pub struct Plan {
     pub retained_controls: Vec<R>,
     pub named: bool,
     pub cells: Vec<Cell>,
+    pub guard: Option<SourceGuard>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -617,8 +625,14 @@ fn attempt(
         .filter(|n| counts.contains_key(n) && !peeled.contains(n))
         .collect();
     retained_controls.sort_unstable_by_key(|n| n.index);
+    let guard = if !named && cells.len() > 2 {
+        source_guard(f, &inside, source[0], cells.len(), b)
+    } else {
+        None
+    };
     Ok((
         Plan {
+            guard,
             root,
             source,
             retained_controls,
@@ -628,6 +642,44 @@ fn attempt(
         },
         inside,
     ))
+}
+
+/// Reuse the fully evaluated source cone. A selector seen only on one nested
+/// path still needs a value for *every* original control assignment.
+fn source_guard(
+    f: &ir::Fn,
+    inside: &HashSet<R>,
+    source: R,
+    rows: usize,
+    b: &Budget,
+) -> Option<SourceGuard> {
+    let mut guard = None;
+    for &r in inside {
+        let (P::Sel { selector, .. } | P::PrioritySel { selector, .. }) = &f.get_node(r).payload
+        else {
+            continue;
+        };
+        if width(f, r)? <= 1 {
+            continue;
+        }
+        if width(f, *selector) != Some(1)
+            || guard
+                .replace(*selector)
+                .is_some_and(|prev| prev != *selector)
+        {
+            return None;
+        }
+    }
+    let selector = guard?;
+    let (leaf, values) = b.cache.get(&selector)?.as_ref().ok()?;
+    if *leaf != Some(source) || values.len() != rows || !values.contains(&0) || !values.contains(&1)
+    {
+        return None;
+    }
+    Some(SourceGuard {
+        selector,
+        values: values.iter().map(|&v| v != 0).collect(),
+    })
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 
 //! Reversible alternatives measured over the union of a bounded gate region.
 
+use smallvec::SmallVec;
 use std::collections::HashSet;
 
 use super::GateBuilder;
@@ -25,68 +26,106 @@ impl GateBuilder {
         boundaries: &[AigOperand],
         emit: impl FnOnce(&mut GateBuilder) -> AigBitVector,
     ) -> (AigBitVector, Option<GateRegionTrial>) {
+        self.try_region_alternatives(ordinary, prefix_end, boundaries, &[], emit)
+    }
+
+    /// Try each emitter from the same prefix. A later candidate must improve
+    /// on the incumbent. Preferred emitters must be repeatable for replay.
+    pub(crate) fn try_region_alternatives(
+        &mut self,
+        ordinary: AigBitVector,
+        prefix_end: usize,
+        boundaries: &[AigOperand],
+        preferred: &[&dyn Fn(&mut GateBuilder) -> AigBitVector],
+        emit: impl FnOnce(&mut GateBuilder) -> AigBitVector,
+    ) -> (AigBitVector, Option<GateRegionTrial>) {
         assert!(prefix_end <= self.gates.len());
-        let Some(before_depth) = ordinary.iter_lsb_to_msb().try_fold(0usize, |depth, bit| {
-            self.aig_depth(*bit).map(|bit_depth| depth.max(bit_depth))
-        }) else {
+        let arrivals = |gb: &Self, roots: &AigBitVector| {
+            roots
+                .iter_lsb_to_msb()
+                .map(|bit| gb.aig_depth(*bit))
+                .collect::<Option<SmallVec<[usize; 1]>>>()
+        };
+        let Some(mut best_depths) = arrivals(self, &ordinary) else {
             return (ordinary, None);
         };
         let boundaries: HashSet<_> = boundaries.iter().map(|bit| bit.node).collect();
-        let before = GateRegionCost {
+        let mut before = GateRegionCost {
             and_nodes: suffix_and_count(self, &ordinary, prefix_end, &boundaries),
-            depth: before_depth,
+            depth: best_depths.iter().copied().max().unwrap_or(0),
         };
         if before.and_nodes == 0 || before.depth == 0 {
             return (ordinary, None);
         }
+
         let stored_before = self.gates.len();
+        let mut compare = |gb: &Self, alternative: &AigBitVector| {
+            assert_eq!(alternative.get_bit_count(), best_depths.len());
+            let depths = arrivals(gb, alternative).expect("AIG depth remains available");
+            let after = GateRegionCost {
+                and_nodes: suffix_and_count(gb, alternative, prefix_end, &boundaries),
+                depth: depths.iter().copied().max().unwrap_or(0),
+            };
+            let delayed_outputs = depths
+                .iter()
+                .zip(&best_depths)
+                .filter(|(new, old)| new > old)
+                .count();
+            let accepted = after.and_nodes <= before.and_nodes
+                && delayed_outputs == 0
+                && (after.and_nodes < before.and_nodes || after.depth < before.depth);
+            let trial = GateRegionTrial {
+                before,
+                after,
+                appended: gb.gates.len() - stored_before,
+                delayed_outputs,
+                accepted,
+            };
+            log::debug!(
+                "gate_region_trial outputs={} frontier={} before_cut_ands={} before_depth={} after_cut_ands={} after_depth={} appended={} delayed_outputs={} accepted={}",
+                ordinary.get_bit_count(),
+                prefix_end,
+                trial.before.and_nodes,
+                trial.before.depth,
+                trial.after.and_nodes,
+                trial.after.depth,
+                trial.appended,
+                trial.delayed_outputs,
+                trial.accepted
+            );
+            if accepted {
+                before = after;
+                best_depths = depths;
+            }
+            trial
+        };
+
+        let mut incumbent = None;
+        for &emit_preferred in preferred {
+            let checkpoint = self.begin_append_checkpoint();
+            let candidate = emit_preferred(self);
+            let trial = compare(self, &candidate);
+            self.rollback_append_checkpoint(checkpoint);
+            if trial.accepted {
+                incumbent = Some((emit_preferred, trial));
+            }
+        }
         let checkpoint = self.begin_append_checkpoint();
         let alternative = emit(self);
-        assert_eq!(alternative.get_bit_count(), ordinary.get_bit_count());
-        let after = GateRegionCost {
-            and_nodes: suffix_and_count(self, &alternative, prefix_end, &boundaries),
-            depth: alternative.iter_lsb_to_msb().fold(0, |depth, bit| {
-                depth.max(self.aig_depth(*bit).expect("AIG depth remains available"))
-            }),
-        };
-        let delayed_outputs = alternative
-            .iter_lsb_to_msb()
-            .zip(ordinary.iter_lsb_to_msb())
-            .filter(|(new, old)| {
-                self.aig_depth(**new).expect("AIG depth remains available")
-                    > self
-                        .aig_depth(**old)
-                        .expect("ordinary AIG depth remains available")
-            })
-            .count();
-        let accepted = after.and_nodes <= before.and_nodes
-            && delayed_outputs == 0
-            && (after.and_nodes < before.and_nodes || after.depth < before.depth);
-        let trial = GateRegionTrial {
-            before,
-            after,
-            appended: self.gates.len() - stored_before,
-            delayed_outputs,
-            accepted,
-        };
-        log::debug!(
-            "gate_region_trial outputs={} frontier={} before_cut_ands={} before_depth={} after_cut_ands={} after_depth={} appended={} delayed_outputs={} accepted={}",
-            ordinary.get_bit_count(),
-            prefix_end,
-            trial.before.and_nodes,
-            trial.before.depth,
-            trial.after.and_nodes,
-            trial.after.depth,
-            trial.appended,
-            trial.delayed_outputs,
-            trial.accepted
-        );
+        let trial = compare(self, &alternative);
         if trial.accepted {
             self.commit_append_checkpoint(checkpoint);
             (alternative, Some(trial))
         } else {
             self.rollback_append_checkpoint(checkpoint);
-            (ordinary, Some(trial))
+            if let Some((emit_preferred, trial)) = incumbent {
+                let checkpoint = self.begin_append_checkpoint();
+                let result = emit_preferred(self);
+                self.commit_append_checkpoint(checkpoint);
+                (result, Some(trial))
+            } else {
+                (ordinary, Some(trial))
+            }
         }
     }
 }
@@ -172,6 +211,32 @@ mod tests {
         let rebuilt = gb.add_or_binary(a, c);
         assert_eq!(rebuilt.node.id, before.len());
         assert_eq!(gb.aig_depth(rebuilt), Some(1));
+    }
+
+    #[test]
+    fn tied_alternatives_keep_only_the_preferred_balanced_tree() {
+        let mut gb = GateBuilder::new("balance".into(), GateBuilderOptions::opt());
+        let inputs = gb.add_input("inputs".into(), 4);
+        let [a, b, c, d] = std::array::from_fn(|i| *inputs.get_lsb(i));
+        let frontier = gb.gates.len();
+        let ab = gb.add_and_binary(a, b);
+        let abc = gb.add_and_binary(ab, c);
+        let chain = gb.add_and_binary(abc, d);
+        let stored = gb.gates.len();
+        let preferred = |gb: &mut GateBuilder| {
+            let cd = gb.add_and_binary(c, d);
+            gb.add_and_binary(ab, cd).into()
+        };
+        let (result, _) =
+            gb.try_region_alternatives(chain.into(), frontier, &[], &[&preferred], |gb| {
+                assert_eq!(gb.gates.len(), stored);
+                let ac = gb.add_and_binary(a, c);
+                let bd = gb.add_and_binary(b, d);
+                gb.add_and_binary(ac, bd).into()
+            });
+        assert_eq!(gb.gates.len(), stored + 2);
+        assert_eq!(result.get_lsb(0), preferred(&mut gb).get_lsb(0));
+        assert_eq!(gb.gates.len(), stored + 2);
     }
 
     #[test]
