@@ -193,7 +193,7 @@ pub(crate) fn prove_with_solver<S: Solver>(
         .collect::<Result<Vec<_>, _>>()?;
     let run = || -> std::io::Result<IndependenceResult> {
         let mut solver = S::new(config)?;
-        let original = get_fn_inputs(&mut solver, function.clone(), Some("original"));
+        let original = get_fn_inputs(&mut solver, function.clone(), Some("original"))?;
         let mut replacement = original.clone();
         // Splice ranges instead of materializing a term for every shared bit.
         // Overlaps are harmless: the last fresh slice still varies exactly the
