@@ -14,7 +14,7 @@ use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
 };
 
-use crate::stages::{Stage, reconstruct_stages};
+use crate::stages::{ChildTimings, Stage, reconstruct_stages};
 use crate::{BlockCodegenError, BlockCodegenOptions, BlockCodegenOutput, Layout};
 
 /// Holds a packed SystemVerilog value and its expression-inlining information.
@@ -158,6 +158,7 @@ pub(crate) fn emit_package(
     }
 
     let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut child_timings = ChildTimings::new();
     for block in ordered {
         let module_name = if block.name == top {
             options.module_name.as_deref().unwrap_or(&block.name)
@@ -167,7 +168,7 @@ pub(crate) fn emit_package(
         validate_external_identifier(module_name, "module")?;
         let module = file.add_module(module_name);
         let mut emitter = BlockEmitter::new(package, &blocks, options, block, &mut file, module);
-        emitter.emit()?;
+        emitter.emit(&mut child_timings, block.name != top)?;
     }
 
     Ok(BlockCodegenOutput {
@@ -350,7 +351,11 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Emits ports, logic, state, output assignments, and child instances.
-    fn emit(&mut self) -> Result<(), BlockCodegenError> {
+    fn emit(
+        &mut self,
+        child_timings: &mut ChildTimings<'a>,
+        summarize_for_parent: bool,
+    ) -> Result<(), BlockCodegenError> {
         validate_supported_nodes(self.block)?;
         self.reserve_fixed_names()?;
         self.emit_ports()?;
@@ -359,7 +364,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         self.emit_priority_helpers(self.block)?;
         match self.options.layout {
             Layout::None => self.emit_flat()?,
-            Layout::Pipeline => self.emit_pipeline()?,
+            Layout::Pipeline => {
+                let stages = reconstruct_stages(self.block, child_timings, summarize_for_parent)?;
+                self.emit_pipeline(&stages)?;
+            }
         }
         self.emit_outputs()?;
         self.emit_instantiations()?;
@@ -504,10 +512,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     }
 
     /// Emits register-delimited comments without altering sequential behavior.
-    fn emit_pipeline(&mut self) -> Result<(), BlockCodegenError> {
-        let layout = reconstruct_stages(self.blocks, self.block)?;
+    fn emit_pipeline(&mut self, stages: &[Stage]) -> Result<(), BlockCodegenError> {
         let mut emitted_visible_stage = false;
-        for (stage_index, stage) in layout.stages.iter().enumerate() {
+        for (stage_index, stage) in stages.iter().enumerate() {
             self.current_stage = Some(stage_index);
             let visible =
                 !stage.combinational_nodes.is_empty() || !stage.register_writes.is_empty();

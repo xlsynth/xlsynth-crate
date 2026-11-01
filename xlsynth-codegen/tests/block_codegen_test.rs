@@ -10,7 +10,10 @@ use std::collections::BTreeSet;
 use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_vastly::{Signedness, Value4, compile_combo_module, eval_combo, plan_combo_eval};
+use xlsynth_vastly::{
+    FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
+    eval_combo, plan_combo_eval,
+};
 
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
@@ -837,15 +840,23 @@ fn registered_child_adds_its_latency_between_parent_register_stages() {
 
 #[test]
 fn heterogeneous_child_outputs_keep_their_individual_pipeline_latencies() {
+    // The parent's faststate and the child's delayed register capture the same
+    // cycle. Their sum must reach slowstate at stage 2 via either input.
     let ir = r#"package public_hierarchy
 
-block child(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
+fn sum(lhs: bits[8] id=18, rhs: bits[8] id=19) -> bits[8] {
+  ret total: bits[8] = add(lhs, rhs, id=20)
+}
+
+block child(clk: clock, value: bits[8], bias: bits[8], fast: bits[8], slow: bits[8]) {
   reg delayed(bits[8])
   value: bits[8] = input_port(name=value, id=1)
+  bias: bits[8] = input_port(name=bias, id=21)
   delayed_write: () = register_write(value, register=delayed, id=2)
   delayed_read: bits[8] = register_read(register=delayed, id=3)
   fast: () = output_port(value, name=fast, id=4)
-  slow: () = output_port(delayed_read, name=slow, id=5)
+  combined: bits[8] = invoke(delayed_read, bias, to_apply=sum, id=22)
+  slow: () = output_port(combined, name=slow, id=5)
 }
 
 top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
@@ -861,6 +872,7 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
   slow_value: bits[8] = instantiation_output(instantiation=component, port_name=slow, id=11)
   fast_write: () = register_write(fast_value, register=faststate, id=12)
   fast_read: bits[8] = register_read(register=faststate, id=13)
+  bias_input: () = instantiation_input(fast_read, instantiation=component, port_name=bias, id=23)
   slow_write: () = register_write(slow_value, register=slowstate, id=14)
   slow_read: bits[8] = register_read(register=slowstate, id=15)
   fast: () = output_port(fast_read, name=fast, id=16)
@@ -1031,6 +1043,98 @@ top block parent(value: bits[8], result: bits[8]) {
         Err(BlockCodegenError::InvalidBlock(message))
             if message.contains("block `parent` contains a combinational cycle")
     ));
+}
+
+#[test]
+fn registered_child_invokes_place_only_live_inputs_on_the_pipeline_path() {
+    let ir = r#"package registered_child
+
+fn compute(value: bits[8] id=1, feedback: bits[8] id=2) -> bits[8] {
+  ret computed: bits[8] = not(value, id=3)
+}
+
+block child(clk: clock, value: bits[8], feedback: bits[8], result: bits[8]) {
+  reg state(bits[8])
+  value: bits[8] = input_port(name=value, id=4)
+  feedback: bits[8] = input_port(name=feedback, id=5)
+  computed: bits[8] = invoke(value, feedback, to_apply=compute, id=6)
+  written: () = register_write(computed, register=state, id=7)
+  current: bits[8] = register_read(register=state, id=8)
+  result: () = output_port(current, name=result, id=9)
+}
+
+top block parent(clk: clock, value: bits[8], result: bits[8]) {
+  reg before_child(bits[8])
+  reg after_child(bits[8])
+  instantiation leaf(block=child, kind=block)
+  value: bits[8] = input_port(name=value, id=10)
+  before_write: () = register_write(value, register=before_child, id=11)
+  before_read: bits[8] = register_read(register=before_child, id=12)
+  connected: () = instantiation_input(before_read, instantiation=leaf, port_name=value, id=13)
+  received: bits[8] = instantiation_output(instantiation=leaf, port_name=result, id=14)
+  returned: () = instantiation_input(received, instantiation=leaf, port_name=feedback, id=15)
+  after_write: () = register_write(received, register=after_child, id=16)
+  after_read: bits[8] = register_read(register=after_child, id=17)
+  result: () = output_port(after_read, name=result, id=18)
+}
+"#;
+    let pipeline = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    for (expression, expected, capture_stage) in [
+        ("not(value, id=3)", [0x00, 0xcb], Some(2)),
+        ("literal(value=90, id=3)", [0x5a, 0x5a], Some(1)),
+        ("or(value, feedback, id=3)", [0xff, 0xff], None),
+    ] {
+        let source = ir.replace("not(value, id=3)", expression);
+        assert_stock_xls_accepts(&source);
+        let parsed = package(&source);
+        let flat = support::TestRtl::emit(&parsed, &BlockCodegenOptions::default());
+        // Vastly executes one module. Drive the emitted child's feedback port
+        // from its last registered output, as it is wired in the parent.
+        let child_rtl = flat.split_inclusive("endmodule").next().unwrap();
+        let child = compile_pipeline_module(child_rtl).unwrap();
+        let mut runner = FixtureRunner::new(&child).unwrap();
+        let ports = runner.port_bindings();
+        let value = ports.input_with_width("value", 8).unwrap();
+        let feedback = ports.input_with_width("feedback", 8).unwrap();
+        let mut previous = Value4::new(8, Signedness::Unsigned, vec![LogicBit::X; 8]);
+        for (input, expected) in [0xff, 0x34].into_iter().zip(expected) {
+            let cycle = runner
+                .step_cycle_with_drive(&mut [], |drive| {
+                    drive.set_u64(&value, input)?;
+                    drive.set(&feedback, previous.clone())
+                })
+                .unwrap();
+            assert_eq!(cycle.pre_outputs["result"], previous);
+            previous = cycle.outputs["result"].clone();
+            assert_eq!(previous.to_u64_if_known(), Some(expected), "{expression}");
+        }
+
+        let generated = emit_system_verilog(&parsed, &pipeline);
+        if let Some(capture_stage) = capture_stage {
+            let rtl = generated.unwrap().system_verilog;
+            let (_, parent) = rtl.split_once("module parent(").unwrap();
+            let register_stages: Vec<_> = parent
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("// Registers for pipe stage"))
+                .collect();
+            assert_eq!(
+                register_stages,
+                [
+                    "// Registers for pipe stage 0:",
+                    &format!("// Registers for pipe stage {capture_stage}:")
+                ],
+                "{expression}"
+            );
+        } else {
+            assert!(
+                matches!(generated, Err(BlockCodegenError::NotPipeline(message)) if message.contains("block `parent`"))
+            );
+        }
+    }
 }
 
 #[test]

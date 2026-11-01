@@ -2,7 +2,8 @@
 
 //! Register-delimited stage reconstruction for feed-forward block layouts.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
 use xlsynth_pir::ir::{Block, InstantiationKind, NodeGraph, NodePayload, NodeRef};
 use xlsynth_pir::ir_utils::{get_topological, operands};
@@ -17,30 +18,27 @@ pub(crate) struct Stage {
     pub(crate) register_writes: Vec<NodeRef>,
 }
 
-/// Assigns every representable node to its reconstructed pipeline stage.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StageLayout {
-    pub(crate) stages: Vec<Stage>,
-    pub(crate) node_stages: Vec<usize>,
+/// Describes a child output's earliest stage and the register depth from each
+/// input that reaches it.
+pub(crate) struct OutputTiming<'a> {
+    minimum_stage: isize,
+    input_delays: BTreeMap<&'a str, isize>,
 }
 
-/// Reconstructs feed-forward stages without changing the block's registers.
-pub(crate) fn reconstruct_stages(
-    blocks: &BTreeMap<&str, &Block>,
-    block: &Block,
-) -> Result<StageLayout, BlockCodegenError> {
-    if block.nodes.is_empty() {
-        return Ok(StageLayout {
-            stages: vec![Stage::default()],
-            node_stages: Vec::new(),
-        });
-    }
+/// Maps each previously emitted child block to the timing of its output ports.
+pub(crate) type ChildTimings<'a> = BTreeMap<&'a str, BTreeMap<&'a str, OutputTiming<'a>>>;
 
+/// Reconstructs one block's stages in child-before-parent order.
+pub(crate) fn reconstruct_stages<'a>(
+    block: &'a Block,
+    child_timings: &mut ChildTimings<'a>,
+    summarize_for_parent: bool,
+) -> Result<Vec<Stage>, BlockCodegenError> {
     let node_count = block.nodes.len();
-    let mut graph: Vec<Vec<(usize, isize)>> = vec![Vec::new(); node_count];
     let mut users: Vec<Vec<(usize, isize)>> = vec![Vec::new(); node_count];
+    let mut stages = vec![0isize; node_count];
     let mut register_reads: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut instantiation_inputs: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut instantiation_inputs: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
     let mut instantiation_outputs: BTreeMap<&str, Vec<(usize, &str)>> = BTreeMap::new();
 
     for (index, node) in block.nodes.iter().enumerate() {
@@ -48,11 +46,15 @@ pub(crate) fn reconstruct_stages(
             NodePayload::RegisterRead { register } => {
                 register_reads.insert(register.as_str(), index);
             }
-            NodePayload::InstantiationInput { instantiation, .. } => {
+            NodePayload::InstantiationInput {
+                instantiation,
+                port_name,
+                ..
+            } => {
                 instantiation_inputs
                     .entry(instantiation.as_str())
                     .or_default()
-                    .push(index);
+                    .insert(port_name.as_str(), index);
             }
             NodePayload::InstantiationOutput {
                 instantiation,
@@ -68,42 +70,35 @@ pub(crate) fn reconstruct_stages(
             }
         }
         for operand in operands(&node.payload) {
-            graph[operand.index].push((index, 0));
             users[operand.index].push((index, 0));
         }
     }
 
     for instance in &block.instantiations {
-        let Some(inputs) = instantiation_inputs.get(instance.name.as_str()) else {
-            continue;
-        };
         let Some(outputs) = instantiation_outputs.get(instance.name.as_str()) else {
             continue;
         };
-        let output_delays = if instance.kind == InstantiationKind::Block {
-            let child = blocks[instance.block.as_str()];
-            let child_layout = reconstruct_stages(blocks, child)?;
-            child
-                .output_ports()
-                .map(|port| {
-                    (
-                        child.port_name(port),
-                        child_layout.node_stages[child.output_value(port).index],
-                    )
-                })
-                .collect::<BTreeMap<_, _>>()
-        } else {
-            BTreeMap::new()
-        };
+        let inputs = instantiation_inputs.get(instance.name.as_str());
         for &(output, port_name) in outputs {
-            let delay = output_delays.get(port_name).copied().unwrap_or(0) as isize;
-            for &input in inputs {
-                graph[input].push((output, delay));
-                users[input].push((output, delay));
+            if instance.kind == InstantiationKind::Block {
+                let timing = &child_timings[instance.block.as_str()][port_name];
+                stages[output] = timing.minimum_stage;
+                for (&name, &delay) in &timing.input_delays {
+                    let input = inputs.expect("verified child inputs are connected")[name];
+                    users[input].push((output, delay));
+                }
+            } else if let Some(inputs) = inputs {
+                // The implementation of an external function is opaque.
+                for &input in inputs.values() {
+                    users[input].push((output, 0));
+                }
             }
         }
     }
 
+    // Registers impose exact stage differences in addition to the minimum
+    // stage differences imposed by consumers.
+    let mut graph = users.clone();
     for (index, node) in block.nodes.iter().enumerate() {
         if let NodePayload::RegisterWrite { register, .. } = &node.payload {
             let Some(&read_index) = register_reads.get(register.as_str()) else {
@@ -123,10 +118,9 @@ pub(crate) fn reconstruct_stages(
         .max()
         .unwrap_or(1)
         .max(1) as usize;
-    let maximum_valid_stage = node_count.saturating_mul(maximum_edge);
-    let mut stages = vec![0isize; node_count];
+    let mut max_stage = stages.iter().copied().max().unwrap_or(0) as usize;
+    let maximum_valid_stage = max_stage.saturating_add(node_count.saturating_mul(maximum_edge));
     let mut worklist: VecDeque<usize> = (0..node_count).collect();
-    let mut max_stage = 0usize;
     while let Some(source) = worklist.pop_front() {
         if stages[source] >= maximum_valid_stage as isize {
             return Err(BlockCodegenError::NotPipeline(format!(
@@ -145,6 +139,14 @@ pub(crate) fn reconstruct_stages(
         }
     }
 
+    // Summarize the earliest stages, before moving combinational operations
+    // towards their users for emission.
+    if summarize_for_parent {
+        child_timings.insert(
+            block.name.as_str(),
+            summarize_outputs(block, &graph, &stages),
+        );
+    }
     let topological = get_topological(block);
     let constant_only = constant_only_nodes(block, &topological);
     for node_ref in topological.iter().rev().copied() {
@@ -197,10 +199,59 @@ pub(crate) fn reconstruct_stages(
         }
     }
 
-    Ok(StageLayout {
-        stages: result,
-        node_stages,
-    })
+    Ok(result)
+}
+
+/// Finds the longest forward register path from each reachable input to each
+/// output, including paths through nested instances.
+fn summarize_outputs<'a>(
+    block: &'a Block,
+    graph: &[Vec<(usize, isize)>],
+    earliest: &[isize],
+) -> BTreeMap<&'a str, OutputTiming<'a>> {
+    let mut predecessors = vec![Vec::new(); graph.len()];
+    for (source, edges) in graph.iter().enumerate() {
+        for &(target, delay) in edges {
+            if delay >= 0 {
+                // Reverse register constraints align stages but carry no data.
+                let slack = earliest[target] - earliest[source] - delay;
+                predecessors[target].push((source, slack));
+            }
+        }
+    }
+
+    let mut outputs = BTreeMap::new();
+    let mut visited_from = vec![None; graph.len()];
+    let mut pending = BinaryHeap::new();
+    for port in block.output_ports() {
+        let output = block.output_value(port).index;
+        let minimum_stage = earliest[output];
+        let mut input_delays = BTreeMap::new();
+        // Across any path, latency is the difference in earliest stages minus
+        // the sum of its nonnegative edge slacks. Visiting least slack first
+        // gives the longest path to each input in one traversal of the cone.
+        pending.push(Reverse((0, output)));
+        while let Some(Reverse((slack, index))) = pending.pop() {
+            if visited_from[index] == Some(port) {
+                continue;
+            }
+            visited_from[index] = Some(port);
+            if let NodePayload::InputPort { name, .. } = &block.nodes[index].payload {
+                input_delays.insert(name.as_str(), minimum_stage - earliest[index] - slack);
+            }
+            for &(source, edge_slack) in &predecessors[index] {
+                pending.push(Reverse((slack + edge_slack, source)));
+            }
+        }
+        outputs.insert(
+            block.port_name(port),
+            OutputTiming {
+                minimum_stage,
+                input_delays,
+            },
+        );
+    }
+    outputs
 }
 
 /// Recognizes pure constant cones without evaluating or rewriting the graph.
