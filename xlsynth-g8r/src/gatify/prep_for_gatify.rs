@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod affine_equality;
+mod complement_partitions;
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
@@ -2633,6 +2634,12 @@ pub fn prep_for_gatify(
         "lexicographic_comparisons",
         0,
         lexicographic_comparisons::rewrite,
+    );
+    diagnostics::run(
+        &mut cloned,
+        "complement_partitions",
+        0,
+        complement_partitions::rewrite,
     );
     diagnostics::run(
         &mut cloned,
