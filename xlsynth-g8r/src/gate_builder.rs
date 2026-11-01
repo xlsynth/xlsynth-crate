@@ -518,8 +518,19 @@ impl GateBuilder {
         args: &[AigOperand],
         reduction_kind: ReductionKind,
     ) -> AigOperand {
-        if args.len() == 2 {
-            return self.add_and_binary(args[0], args[1]);
+        self.add_and_nary_with(args, reduction_kind, &Self::add_and_binary)
+    }
+
+    /// Applies the usual n-ary folds and topology with a caller-supplied
+    /// binary AND, so a caller can observe which pairs were materialized.
+    pub(crate) fn add_and_nary_with(
+        &mut self,
+        args: &[AigOperand],
+        reduction_kind: ReductionKind,
+        and: &impl Fn(&mut Self, AigOperand, AigOperand) -> AigOperand,
+    ) -> AigOperand {
+        if let &[lhs, rhs] = args {
+            return and(self, lhs, rhs);
         }
         if self.options.fold {
             if args.iter().any(|arg| self.is_known_false(*arg)) {
@@ -528,17 +539,8 @@ impl GateBuilder {
             if args.iter().all(|arg| self.is_known_true(*arg)) {
                 return self.union_current_pir_node_id_into_operand(self.get_true());
             }
-            if let &[lhs, rhs] = args {
-                if self.is_known_true(lhs) {
-                    return self.union_current_pir_node_id_into_operand(rhs);
-                }
-                if self.is_known_true(rhs) {
-                    return self.union_current_pir_node_id_into_operand(lhs);
-                }
-            }
         }
-        // Do a reduction of ands across the args.
-        self.reduce(args, &GateBuilder::add_and_binary, reduction_kind)
+        self.reduce(args, and, reduction_kind)
     }
 
     pub fn add_and_reduce(
