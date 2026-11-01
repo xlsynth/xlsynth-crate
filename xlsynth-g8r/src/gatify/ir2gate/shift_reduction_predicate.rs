@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Observe a logical shift's nonzero predicate without building every shifted
-//! bit.
+//! Lower bit-range observations of shifts and selected words to scalar gates.
+
+mod window;
+mod window_gate;
 
 use super::GateEnv;
 use crate::aig::gate::{AigBitVector, AigOperand};
@@ -11,10 +13,12 @@ use std::time::Instant;
 use xlsynth_pir::ir::{self, Binop, NodePayload, NodeRef, Unop};
 use xlsynth_pir::math::ceil_log2;
 
-/// Whole-function plans for predicates over single-use logical shifts.
+/// Whole-function plans for scalar observations with replaceable interior
+/// words.
 #[derive(Default)]
 pub(super) struct ShiftReductionPredicatePlan {
     predicates: HashMap<NodeRef, Predicate>,
+    windows: HashMap<NodeRef, window::Plan>,
 }
 
 /// A zero/nonzero observation and the word cone it can replace.
@@ -37,23 +41,12 @@ impl ShiftReductionPredicatePlan {
     /// Plans only predicates whose intermediate words have no other consumers.
     pub(super) fn extract(f: &ir::Fn, env: &GateEnv) -> Self {
         let mut result = Self::default();
-        for (index, node) in f.nodes.iter().enumerate() {
-            let (value, inverted) = match &node.payload {
-                NodePayload::Unop(Unop::OrReduce, arg) => (*arg, false),
-                NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), a, b) => {
-                    let value = if constant_nonzero(f, *a) == Some(false) {
-                        *b
-                    } else if constant_nonzero(f, *b) == Some(false) {
-                        *a
-                    } else {
-                        continue;
-                    };
-                    (value, *op == Binop::Eq)
-                }
-                _ => continue,
-            };
-            if let Some(predicate) = match_shift(f, env, value, inverted) {
-                result.predicates.insert(NodeRef { index }, predicate);
+        for index in 0..f.nodes.len() {
+            let node = NodeRef { index };
+            if let Some((word, inverted)) = observed(f, node)
+                && let Some(predicate) = match_shift(f, env, word, inverted)
+            {
+                result.predicates.insert(node, predicate);
             }
         }
         log::debug!(
@@ -61,7 +54,34 @@ impl ShiftReductionPredicatePlan {
             f.name,
             result.predicates.len()
         );
+        let observed = window::analyze(f, true);
+        log::debug!(
+            "shift_window scan function={} visits={} valuations={} reasons={:?}",
+            f.name,
+            observed.visits,
+            observed.valuations,
+            observed.reasons
+        );
+        result.windows = observed.plans.into_iter().map(|p| (p.root, p)).collect();
+        log::debug!(
+            "shift_window summary function={} planned={}",
+            f.name,
+            result.windows.len()
+        );
         result
+    }
+
+    /// Keep source bits and both controls on the region boundary; either
+    /// control can be computed after some of the ordinary shift gates.
+    pub(super) fn lower_window(
+        &self,
+        node: NodeRef,
+        env: &GateEnv,
+        gb: &mut GateBuilder,
+    ) -> Option<AigOperand> {
+        let plan = self.windows.get(&node)?;
+        let ordinary = *env.get_bit_vector(node).ok()?.get_lsb(0);
+        window_gate::lower(plan, ordinary, env, gb)
     }
 
     /// Tries a direct shifted-word predicate. A rejected region trial restores
@@ -190,6 +210,24 @@ fn match_shift(f: &ir::Fn, env: &GateEnv, value: NodeRef, inverted: bool) -> Opt
 }
 
 /// Classifies a literal word without converting its width to a host integer.
+/// Return the observed word and whether its nonzero result is inverted.
+fn observed(f: &ir::Fn, node: NodeRef) -> Option<(NodeRef, bool)> {
+    match f.get_node(node).payload {
+        NodePayload::Unop(Unop::OrReduce, word) => Some((word, false)),
+        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
+            let word = if constant_nonzero(f, lhs) == Some(false) {
+                rhs
+            } else if constant_nonzero(f, rhs) == Some(false) {
+                lhs
+            } else {
+                return None;
+            };
+            Some((word, op == Binop::Eq))
+        }
+        _ => None,
+    }
+}
+
 fn constant_nonzero(f: &ir::Fn, value: NodeRef) -> Option<bool> {
     if !matches!(f.get_node_ty(value), ir::Type::Bits(_)) {
         return None;

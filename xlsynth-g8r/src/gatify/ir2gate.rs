@@ -4704,6 +4704,20 @@ fn gatify_node(
             return Err(msg);
         }
     }
+    if node.ty == ir::Type::Bits(1)
+        && let Some(value) = env
+            .shift_reduction_predicate_plan
+            .lower_window(node_ref, env, g8_builder)
+    {
+        let entry = env
+            .ir_to_g8
+            .get_mut(&node_ref)
+            .expect("ordinary result is present");
+        match entry {
+            GateOrVec::Gate(gate) => *gate = value,
+            GateOrVec::BitVector(bits) => *bits = value.into(),
+        }
+    }
     env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
     Ok(())
 }
