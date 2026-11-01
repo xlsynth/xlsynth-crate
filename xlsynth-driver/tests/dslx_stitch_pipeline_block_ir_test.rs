@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
@@ -61,9 +62,7 @@ fn emitted_source_locations_refer_to_the_original_dslx_file() {
         ],
     )
     .unwrap();
-    let package = xlsynth_pir::ir_parser::Parser::new(&ir)
-        .parse_package()
-        .unwrap();
+    let package = Parser::new(&ir).parse_package().unwrap();
     assert_eq!(package.name, "alu.pipe");
     assert_eq!(package.file_table.id_to_path[&0], source.to_str().unwrap());
     // Native XLS prints the stored filename verbatim. Check both consumers
@@ -104,9 +103,15 @@ fn muladd_spec_and_flags_emit_the_same_block_and_take_two_edges() {
     )
     .unwrap();
     assert_eq!(ir, from_flags);
-    // The source table retains the caller's checkout path for diagnostics.
-    let portable_ir = ir.replace(&format!("\"{}\"", source.display()), "\"muladd.x\"");
-    compare_golden_text(&portable_ir, "tests/dslx_stitch_pipeline_muladd.golden.ir");
+    // Compare the checkout-independent source name in the golden.
+    let mut package = Parser::new(&ir).parse_package().unwrap();
+    let filename = package.file_table.id_to_path.get_mut(&0).unwrap();
+    assert_eq!(Path::new(filename), source);
+    *filename = "muladd.x".into();
+    compare_golden_text(
+        &package.to_string(),
+        "tests/dslx_stitch_pipeline_muladd.golden.ir",
+    );
 
     let rtl = render_block(&ir).unwrap();
     let module = compile_pipeline_module(&rtl).unwrap();
