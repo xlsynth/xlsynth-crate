@@ -24,6 +24,7 @@ mod lexicographic_comparisons;
 mod mixed_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
+mod widened_sum_threshold;
 
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -2749,6 +2750,12 @@ pub fn prep_for_gatify(
         rewrite_projected_positive_mask_to_sign_test,
     );
     diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
+    diagnostics::run(
+        &mut cloned,
+        "widened_sum_threshold",
+        0,
+        widened_sum_threshold::rewrite,
+    );
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
         ir_utils::compact_and_toposort_in_place(f)
