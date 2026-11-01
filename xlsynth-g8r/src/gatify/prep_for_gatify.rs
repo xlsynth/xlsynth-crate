@@ -2618,6 +2618,15 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
+    prep_for_gatify_observing(f, range_info, options, |_| {})
+}
+
+pub(super) fn prep_for_gatify_observing(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+    observe_ordinary_adds: impl FnOnce(&ir::Fn),
+) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
     diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
@@ -2647,6 +2656,7 @@ pub fn prep_for_gatify(
         0,
         redundant_nonzero_mask::rewrite,
     );
+    observe_ordinary_adds(&cloned);
     diagnostics::run(&mut cloned, "shifted_nonzero", 0, shifted_nonzero::rewrite);
     diagnostics::run(&mut cloned, "combine_or_reduces", 0, combine_or_reduces);
     diagnostics::run(

@@ -10,7 +10,10 @@ use crate::gatify::ir2gate_arithmetic::{
     gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
 };
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{
+    PrepForGatifyOptions, prep_for_gatify, prep_for_gatify_observing,
+};
+use crate::gatify::terminal_wrap::{TerminalWrapCapture, TerminalWrapPermit};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
@@ -5041,6 +5044,17 @@ pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOu
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+    gatify_with_terminal_wrap(orig_fn, options, false).map(|(output, _)| output)
+}
+
+pub(crate) fn gatify_with_terminal_wrap(
+    orig_fn: &ir::Fn,
+    options: GatifyOptions,
+    observe_wrap: bool,
+) -> Result<(GatifyOutput, Option<TerminalWrapCapture>), String> {
+    let observe_wrap = observe_wrap
+        && !options.unsafe_gatify_gate_operation
+        && options.adder_mapping == Default::default();
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
 
@@ -5055,7 +5069,8 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
     }
 
-    let prepared_fn = prep_for_gatify(
+    let mut permit = None;
+    let prepared_fn = prep_for_gatify_observing(
         orig_fn,
         options.range_info.as_deref(),
         PrepForGatifyOptions {
@@ -5066,10 +5081,23 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
+        |f| {
+            if observe_wrap {
+                permit = TerminalWrapPermit::at_source(f);
+            }
+        },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)
+    let out =
+        gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)?;
+    let capture = permit.and_then(|p| {
+        p.capture(&prepared_fn, &out.gate_fn, |n| {
+            let original = orig_ref_by_text_id.get(&prepared_fn.get_node(n).text_id)?;
+            out.lowering_map.get(original)
+        })
+    });
+    Ok((out, capture))
 }
 
 pub fn gatify_node_as_fn(

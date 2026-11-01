@@ -41,6 +41,15 @@ pub struct AigConeStats {
     pub root_depths: Vec<usize>,
 }
 
+pub(crate) fn get_output_cone_stats(gate_fn: &gate::GateFn) -> AigConeStats {
+    let roots = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb().copied())
+        .collect::<Vec<_>>();
+    get_aig_cone_stats(&gate_fn.gates, &roots)
+}
+
 /// Computes exact structural statistics for the combined cone rooted at
 /// `roots`.
 pub fn get_aig_cone_stats(nodes: &[AigNode], roots: &[AigOperand]) -> AigConeStats {
