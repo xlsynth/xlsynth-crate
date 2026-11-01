@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use xlsynth::vast_helpers_options::CodegenOptions;
+use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 // Share test support as source, without adding a crate dependency back-edge.
 #[allow(dead_code)]
 #[path = "../../xlsynth-codegen/tests/support/golden_fixture.rs"]
@@ -29,11 +30,11 @@ fn invoke(directory: &Path, arguments: &[String]) -> Output {
         .unwrap()
 }
 
-#[test]
-fn defaults_match_the_library_and_stdout_has_a_final_newline() {
-    let fixture = fixture("arrays/dynamic_index_checked.golden.ir");
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("input.ir"), &fixture.source).unwrap();
+/// Checks the CLI's default output against the fixture and returns the RTL.
+fn checked_default_rtl(relative: &str) -> anyhow::Result<String> {
+    let fixture = fixture(relative);
+    let directory = tempfile::tempdir()?;
+    std::fs::write(directory.path().join("input.ir"), &fixture.source)?;
     let output = invoke(directory.path(), &["input.ir".into()]);
     assert!(
         output.status.success(),
@@ -41,10 +42,37 @@ fn defaults_match_the_library_and_stdout_has_a_final_newline() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stderr.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        fixture.expected_output()
-    );
+    let rtl = String::from_utf8(output.stdout)?;
+    assert_eq!(rtl, fixture.expected_output());
+    Ok(rtl)
+}
+
+#[test]
+fn defaults_match_the_library_and_stdout_has_a_final_newline() {
+    checked_default_rtl("arrays/dynamic_index_checked.golden.ir").unwrap();
+}
+
+#[test]
+fn nested_invokes_update_the_registered_output_at_each_clock_edge() {
+    let rtl = checked_default_rtl("registers/invoked_stage.golden.ir").unwrap();
+    let module = compile_pipeline_module(&rtl).unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let ports = runner.port_bindings();
+    let sample = ports.input_with_width("sample", 8).unwrap();
+    let offset = ports.input_with_width("offset", 8).unwrap();
+    let mut previous = None;
+    for (sample_value, offset_value) in [(25u8, 4u8), (1, 4)] {
+        let cycle = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_u64(&sample, u64::from(sample_value))?;
+                drive.set_u64(&offset, u64::from(offset_value))
+            })
+            .unwrap();
+        let expected = u64::from(!sample_value.wrapping_sub(offset_value));
+        assert_eq!(cycle.pre_outputs["out"].to_u64_if_known(), previous);
+        assert_eq!(cycle.outputs["out"].to_u64_if_known(), Some(expected));
+        previous = Some(expected);
+    }
 }
 
 #[test]

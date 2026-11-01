@@ -452,10 +452,11 @@ xlsynth-driver block2fn \
 
 Emits an XLS block IR package as synthesizable SystemVerilog using the native
 Rust block emitter. Existing registers, resets, load enables, and hierarchy are
-preserved; the command does not schedule or repipeline its input. Each register
-must have exactly one write node; ambiguous multiple-write graphs are rejected.
-`invoke` and `counted_for` nodes are also rejected; inline calls and unroll loops
-before emission. Leading-zero counts, priority encoders, normalization, and
+preserved. Each register must have exactly one write node. The emitter inlines
+the function body at each `invoke` node, including nested calls. Use an
+explicit external instantiation for a function marked `#[ffi_proto]`. Lower
+`map` operations and unroll `counted_for` loops before emission.
+Leading-zero counts, priority encoders, normalization, and
 priority selects use explicit `casez` helper functions. Arithmetic helpers retain
 the original operand widths, and name collisions use `__1`, `__2`, etc.
 Arrays retain descending packed dimensions on ports, signals, and registers;
