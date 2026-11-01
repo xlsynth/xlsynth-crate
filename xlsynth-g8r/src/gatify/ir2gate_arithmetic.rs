@@ -5,8 +5,9 @@
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gatify::ir2gate::{
-    GateEnv, gatify_add_with_mapping, gatify_arithmetic_cluster, gatify_fused_product_rows,
-    gatify_sext_or_truncate, gatify_zext_or_truncate, get_pow2_minus1_k, literal_bits_if_bits_node,
+    GateEnv, GatifyOptions, gatify_add_with_mapping, gatify_arithmetic_cluster,
+    gatify_fused_product_rows, gatify_sext_or_truncate, gatify_zext_or_truncate, get_pow2_minus1_k,
+    literal_bits_if_bits_node,
 };
 use crate::ir2gate_utils::AdderMapping;
 use std::ops::Range;
@@ -935,8 +936,7 @@ pub(super) fn gatify_ext_nary_add(
     terms: &[ir::ExtNaryAddTerm],
     arch: Option<ir::ExtNaryAddArchitecture>,
     output_width: usize,
-    default_adder_mapping: AdderMapping,
-    enable_rewrite_nary_add: bool,
+    options: &GatifyOptions,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
     if output_width == 0 {
@@ -946,7 +946,7 @@ pub(super) fn gatify_ext_nary_add(
         return AigBitVector::zeros(output_width);
     }
 
-    if enable_rewrite_nary_add
+    if options.enable_rewrite_nary_add
         && arch.is_none()
         && output_width == 2
         && terms.len() == 3
@@ -958,7 +958,7 @@ pub(super) fn gatify_ext_nary_add(
 
     // Three unsigned scalar terms form one full-adder. Keep their arrival-aware
     // placement and share propagate/generate logic across sum and carry.
-    if enable_rewrite_nary_add
+    if options.enable_rewrite_nary_add
         && g8_builder.options.hash
         && arch.is_none()
         && output_width >= 2
@@ -1009,7 +1009,7 @@ pub(super) fn gatify_ext_nary_add(
     }
 
     let false_bit = g8_builder.get_false();
-    let selected_negates: Vec<Option<SelectedNegateMatch>> = if enable_rewrite_nary_add {
+    let selected_negates: Vec<Option<SelectedNegateMatch>> = if options.enable_rewrite_nary_add {
         terms
             .iter()
             .map(|term| match_selected_negate_term(f, env, term, output_width, false_bit))
@@ -1060,7 +1060,8 @@ pub(super) fn gatify_ext_nary_add(
     let mut carry_in: Option<AigOperand> = None;
     for (term, selected_negate) in terms.iter().zip(selected_negates) {
         if env.product_is_deferred(term.operand) {
-            let rows = gatify_fused_product_rows(f, env, term.operand, output_width, g8_builder);
+            let rows =
+                gatify_fused_product_rows(f, env, term.operand, output_width, options, g8_builder);
             let mut correction = xlsynth_pir::IrBits::zero(output_width);
             for row in rows {
                 if term.negated {
@@ -1170,7 +1171,7 @@ pub(super) fn gatify_ext_nary_add(
 
     let selected_adder_mapping = arch
         .map(AdderMapping::from)
-        .unwrap_or(default_adder_mapping);
+        .unwrap_or(options.adder_mapping);
     let selected_adder_mapping_name = match selected_adder_mapping {
         AdderMapping::RippleCarry => "ripple_carry",
         AdderMapping::BrentKung => "brent_kung",

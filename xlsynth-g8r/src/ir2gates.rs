@@ -215,8 +215,9 @@ pub fn prepare_ir_for_gatify_from_ir_text(
         .create_ir_analysis()
         .map_err(|e| format!("xlsynth create_ir_analysis failed: {e}"))?;
 
-    let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn)
-        .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
+    let range_info =
+        IrRangeInfo::build_for_gatify(&analysis, pir_fn, options.mul_adder_mapping.is_none())
+            .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
 
     Ok(PreparedIrForGatify {
         pir_package,

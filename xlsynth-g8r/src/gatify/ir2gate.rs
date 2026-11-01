@@ -1027,7 +1027,14 @@ fn gatify_array_slice_bit_shift(
     } else {
         e_const
     };
-    let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, mul_adder_mapping, gb);
+    let start_scaled = gatify_umul(
+        &start_ext,
+        &e_ext,
+        start_scaled_w,
+        mul_adder_mapping,
+        None,
+        gb,
+    );
 
     // 4) Shift right by start_scaled and take low (width * e_bits) bits.
     let out_width_bits = width * e_bits;
@@ -1280,30 +1287,28 @@ fn gatify_sel(
     }
 }
 
-fn gatify_mul(
+fn gatify_smul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
-    signedness: Signedness,
     mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
-    match signedness {
-        Signedness::Unsigned => {
-            gatify_umul(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
-        }
-        Signedness::Signed => {
-            if let Some(result) =
-                gatify_smul_widening(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
-            {
-                return result;
-            }
-
-            let lhs_ext = sign_extend_mul_operand_if_needed(lhs_bits, output_bit_count, gb);
-            let rhs_ext = sign_extend_mul_operand_if_needed(rhs_bits, output_bit_count, gb);
-            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, mul_adder_mapping, gb)
-        }
+    if let Some(result) =
+        gatify_smul_widening(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
+    {
+        return result;
     }
+    let lhs_ext = sign_extend_mul_operand_if_needed(lhs_bits, output_bit_count, gb);
+    let rhs_ext = sign_extend_mul_operand_if_needed(rhs_bits, output_bit_count, gb);
+    gatify_umul(
+        &lhs_ext,
+        &rhs_ext,
+        output_bit_count,
+        mul_adder_mapping,
+        None,
+        gb,
+    )
 }
 
 /// Preserves nonnegative operand widths for unsigned partial-product lowering.
@@ -1463,6 +1468,7 @@ fn gatify_umul(
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
     mul_adder_mapping: AdderMapping,
+    sparse_product: Option<(usize, &[bool])>,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     let lhs_bit_count = lhs_bits.get_bit_count();
@@ -1488,9 +1494,64 @@ fn gatify_umul(
 
     let partial_products =
         gatify_umul_partial_products(multiplicand_bits, multiplier_bits, output_bit_count, gb);
+    if let Some(sum) = reduce_sparse_rows(gb, &partial_products, sparse_product) {
+        return sum;
+    }
 
     // Sum all partial products using the requested adder mapping.
     array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
+}
+
+/// A function-wide relation may depend on signals exposed independently at a
+/// region or node boundary. Respect explicit multiplier implementation choices.
+fn sparse_product_demands<'a>(
+    f: &ir::Fn,
+    env: &'a GateEnv,
+    product: ir::NodeRef,
+    options: &GatifyOptions,
+) -> Option<(usize, &'a [bool])> {
+    let node = f.get_node(product);
+    let ir::NodePayload::Binop(ir::Binop::Umul, lhs, rhs) = node.payload else {
+        return None;
+    };
+    if options.mul_adder_mapping.is_some() || !matches!(env.use_counts, UseCounts::Function(_)) {
+        return None;
+    }
+    let demanded = env.demanded_bits.as_ref()?.get(&product)?;
+    let facts = options.range_info.as_ref()?;
+    [lhs, rhs]
+        .iter()
+        .any(|&operand| {
+            let operand = f.get_node(operand);
+            facts.is_sparse_product_factor(operand.text_id, operand.ty.bit_count())
+        })
+        .then_some((node.text_id, demanded))
+}
+
+/// Collapses mutually exclusive terms before ordinary or fused accumulation.
+fn reduce_sparse_rows(
+    gb: &mut GateBuilder,
+    partial_products: &[AigBitVector],
+    sparse_product: Option<(usize, &[bool])>,
+) -> Option<AigBitVector> {
+    let (product_id, demanded) = sparse_product?;
+    let output_bit_count = partial_products.first()?.get_bit_count();
+    // Every column contains distinct bits of the sparse operand. At most
+    // one term can be set, regardless of which operand supplied the rows.
+    let mut carry_bound = 0;
+    for (column, &observed) in demanded.iter().take(output_bit_count).enumerate() {
+        if observed && carry_bound != 0 {
+            log::debug!("sparse_product product_id={product_id} observed_carry_column={column}");
+            return Some(gb.add_or_vec_nary(partial_products, ReductionKind::Tree));
+        }
+        let live_terms = partial_products
+            .iter()
+            .filter(|row| !gb.is_known_false(*row.get_lsb(column)))
+            .count();
+        carry_bound = (live_terms + carry_bound) / 2;
+    }
+    log::debug!("sparse_product product_id={product_id} no_observable_carry");
+    None
 }
 
 /// Builds shifted partial-product rows for unsigned multiplication.
@@ -1713,6 +1774,7 @@ pub(super) fn gatify_fused_product_rows(
     env: &GateEnv,
     product: ir::NodeRef,
     output_width: usize,
+    options: &GatifyOptions,
     gb: &mut GateBuilder,
 ) -> Vec<AigBitVector> {
     let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
@@ -1754,7 +1816,14 @@ pub(super) fn gatify_fused_product_rows(
     } else {
         (&rhs, &lhs)
     };
-    gatify_umul_partial_products(multiplicand, multiplier, output_width, gb)
+    let rows = gatify_umul_partial_products(multiplicand, multiplier, output_width, gb);
+    if let Some(sum) =
+        reduce_sparse_rows(gb, &rows, sparse_product_demands(f, env, product, options))
+    {
+        vec![sum]
+    } else {
+        rows
+    }
 }
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
@@ -3941,8 +4010,7 @@ fn gatify_node(
                 terms,
                 *arch,
                 output_width,
-                options.adder_mapping,
-                options.enable_rewrite_nary_add,
+                options,
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -4448,23 +4516,22 @@ fn gatify_node(
                 } else {
                     let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
                     let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                    gatify_mul(
+                    gatify_umul(
                         &lhs_bits,
                         &rhs_bits,
                         output_bit_count,
-                        signedness,
                         mul_adder_mapping,
+                        sparse_product_demands(f, env, node_ref, options),
                         g8_builder,
                     )
                 }
             } else {
                 let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
                 let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                gatify_mul(
+                gatify_smul(
                     &lhs_bits,
                     &rhs_bits,
                     output_bit_count,
-                    signedness,
                     mul_adder_mapping,
                     g8_builder,
                 )
