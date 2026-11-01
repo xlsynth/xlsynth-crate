@@ -35,3 +35,5 @@ pub use crate::aig::sequential_pipeline::{
     stitch_gate_fns_into_pipeline_with_controls,
 };
 pub use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+
+pub(crate) mod retained_rails;

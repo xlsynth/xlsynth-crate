@@ -553,7 +553,7 @@ pub fn process_ir_text_with_gatefn(
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
-    let (ir2gates_output, capture) = ir2gates::ir2gates_with_terminal_observations(
+    let (ir2gates_output, mut capture) = ir2gates::ir2gates_with_terminal_observations(
         ir_text,
         options.ir_top.as_deref(),
         ir2gates_options,
@@ -719,7 +719,10 @@ pub fn process_ir_text_with_gatefn(
         }
         None => optimize_outcome.gate_fn,
     };
-    gate_fn = ir2gate::priority_ordinal::apply(gate_fn, &capture.ordinals);
+    gate_fn =
+        ir2gate::priority_ordinal::apply(gate_fn, &capture.ordinals, &mut capture.rail_budget);
+    gate_fn =
+        ir2gate::observed_select_rails::apply(gate_fn, &capture.words, &mut capture.rail_budget);
     let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());

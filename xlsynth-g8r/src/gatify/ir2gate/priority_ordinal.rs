@@ -6,6 +6,7 @@
 use super::GateEnv;
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::aig::get_summary_stats::get_output_cone_stats;
+use crate::aig::retained_rails::{RailBudget, RailResolver, SignedCone};
 use crate::gate_builder::GateBuilder;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{Binop, Fn, NaryOp, NodePayload, NodeRef, Unop};
@@ -110,15 +111,26 @@ impl Pin {
     }
 }
 
+enum MaskBit {
+    Pin(Pin),
+    Cone(SignedCone),
+}
+
 pub(crate) struct ReturnBit {
     bit: usize,
     width: usize,
     inverted: bool,
     lhs: Pin,
-    mask: Option<(NaryOp, Pin)>,
+    mask: Option<(NaryOp, MaskBit)>,
 }
 
-pub(super) fn capture(f: &Fn, env: &GateEnv, graph: &GateFn, plans: &mut Vec<ReturnBit>) {
+pub(super) fn capture(
+    f: &Fn,
+    env: &GateEnv,
+    graph: &GateFn,
+    plans: &mut Vec<ReturnBit>,
+    budget: &mut RailBudget,
+) {
     let (Some(root), [output]) = (f.ret_node_ref, graph.outputs.as_slice()) else {
         return;
     };
@@ -136,7 +148,7 @@ pub(super) fn capture(f: &Fn, env: &GateEnv, graph: &GateFn, plans: &mut Vec<Ret
                 }
             }
             payload @ NodePayload::BitSlice { width: 1, .. } => {
-                if let Some((lhs, mask)) = return_expression(f, payload, env, graph) {
+                if let Some((lhs, mask)) = return_expression(f, payload, env, graph, budget) {
                     if env.get_bit_vector(node).ok().is_some_and(|v| {
                         let mapped = *v.get_lsb(0);
                         let signed = if inverted { mapped.negate() } else { mapped };
@@ -157,7 +169,7 @@ pub(super) fn capture(f: &Fn, env: &GateEnv, graph: &GateFn, plans: &mut Vec<Ret
     }
 }
 
-pub(crate) fn apply(stock: GateFn, plans: &[ReturnBit]) -> GateFn {
+pub(crate) fn apply(stock: GateFn, plans: &[ReturnBit], budget: &mut RailBudget) -> GateFn {
     let Some(first) = plans.first() else {
         return stock;
     };
@@ -169,6 +181,7 @@ pub(crate) fn apply(stock: GateFn, plans: &[ReturnBit]) -> GateFn {
     }
     let mut trial = GateBuilder::append_to(stock.clone());
     let mut changed = false;
+    let mut resolver = RailResolver::new(&stock);
     for plan in plans {
         let Some(lhs) = plan.lhs.resolve(&stock) else {
             return stock;
@@ -176,8 +189,12 @@ pub(crate) fn apply(stock: GateFn, plans: &[ReturnBit]) -> GateFn {
         let replacement = match &plan.mask {
             None => lhs,
             Some((op, rhs)) => {
-                let Some(rhs) = rhs.resolve(&stock) else {
-                    return stock;
+                let resolved = match rhs {
+                    MaskBit::Pin(pin) => pin.resolve(&stock),
+                    MaskBit::Cone(cone) => resolver.find(cone, budget),
+                };
+                let Some(rhs) = resolved else {
+                    continue;
                 };
                 match op {
                     NaryOp::And => trial.add_and_binary(lhs, rhs),
@@ -232,7 +249,8 @@ fn return_expression(
     node: &NodePayload,
     env: &GateEnv,
     graph: &GateFn,
-) -> Option<(Pin, Option<(NaryOp, Pin)>)> {
+    budget: &mut RailBudget,
+) -> Option<(Pin, Option<(NaryOp, MaskBit)>)> {
     let NodePayload::BitSlice {
         arg,
         start,
@@ -263,7 +281,13 @@ fn return_expression(
     let other = *env.get_bit_vector(other).ok()?.get_lsb(start);
     Some((
         Pin::from_operand(graph, wire)?,
-        Some((*op, Pin::from_operand(graph, other)?)),
+        Some((
+            *op,
+            match Pin::from_operand(graph, other) {
+                Some(pin) => MaskBit::Pin(pin),
+                None => MaskBit::Cone(SignedCone::capture(graph, other, budget)?),
+            },
+        )),
     ))
 }
 

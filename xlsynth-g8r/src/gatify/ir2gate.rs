@@ -45,8 +45,10 @@ mod guarded_unit;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
 
+pub(crate) mod observed_select_rails;
 mod read_predicates;
 mod shift_reduction_predicate;
+mod word_observations;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 use priority_predicate::PriorityPredicatePlan;
@@ -58,6 +60,8 @@ pub use region::{IrRegion, gatify_region};
 pub(crate) struct TerminalObservations {
     pub(crate) wrap: Option<TerminalWrapCapture>,
     pub(crate) ordinals: Vec<priority_ordinal::ReturnBit>,
+    pub(crate) words: Vec<observed_select_rails::WordObservation>,
+    pub(crate) rail_budget: crate::aig::retained_rails::RailBudget,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4967,7 +4971,7 @@ fn gatify_lower_prepared_fn(
     options: &GatifyOptions,
     orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
     equiv_fn: &ir::Fn,
-    ordinal_outputs: Option<&mut Vec<priority_ordinal::ReturnBit>>,
+    observations: Option<&mut TerminalObservations>,
 ) -> Result<GatifyOutput, String> {
     let mut g8_builder = GateBuilder::new(
         f.name.clone(),
@@ -4994,8 +4998,16 @@ fn gatify_lower_prepared_fn(
         &topological,
     )?;
     let gate_fn = g8_builder.build();
-    if let Some(outputs) = ordinal_outputs {
-        priority_ordinal::capture(f, &env, &gate_fn, outputs);
+    if let Some(captures) = observations {
+        priority_ordinal::capture(
+            f,
+            &env,
+            &gate_fn,
+            &mut captures.ordinals,
+            &mut captures.rail_budget,
+        );
+        captures.words =
+            observed_select_rails::capture(f, &env, &gate_fn, &mut captures.rail_budget);
     }
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -5102,14 +5114,13 @@ pub(crate) fn gatify_with_terminal_observations(
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
     let mut captures = TerminalObservations::default();
-    let ordinal_outputs =
-        (observe && options.fold && options.hash).then_some(&mut captures.ordinals);
+    let outputs = (observe && options.fold && options.hash).then_some(&mut captures);
     let out = gatify_lower_prepared_fn(
         &prepared_fn,
         &options,
         Some(&orig_ref_by_text_id),
         orig_fn,
-        ordinal_outputs,
+        outputs,
     )?;
     captures.wrap = permit.and_then(|p| {
         p.capture(&prepared_fn, &out.gate_fn, |n| {
