@@ -4241,20 +4241,22 @@ fn gatify_node(
                 .priority_predicate_plan
                 .fold_implied_operand(f, *op, args, env) =>
         {
-            let gate = g8_builder.union_current_pir_node_id_into_operand(gate);
-            env.add(node_ref, GateOrVec::Gate(gate));
+            let result = g8_builder.union_current_pir_node_id_into_operand(gate);
+            env.add(node_ref, GateOrVec::BitVector(result.into()));
         }
-        ir::NodePayload::Nary(op @ (ir::NaryOp::And | ir::NaryOp::Nand), args)
+        ir::NodePayload::Nary(op @ (ir::NaryOp::And | ir::NaryOp::Nand), _)
             if env
                 .priority_predicate_plan
-                .contradicts_selected_bit(f, args) =>
+                .zero_conjunctions
+                .contains(&node_ref) =>
         {
-            let gate = if *op == ir::NaryOp::Nand {
+            let constant = if *op == ir::NaryOp::Nand {
                 g8_builder.get_true()
             } else {
                 g8_builder.get_false()
             };
-            env.add(node_ref, GateOrVec::Gate(gate));
+            let result = g8_builder.union_current_pir_node_id_into_operand(constant);
+            env.add(node_ref, GateOrVec::BitVector(result.into()));
         }
         ir::NodePayload::Nary(ir::NaryOp::And, args) => {
             let arg_gates: Vec<AigBitVector> = args
@@ -5071,7 +5073,7 @@ fn gatify_lower_prepared_fn(
     if options.enable_rewrite_nary_add {
         env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, &env);
     }
-    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, &env);
+    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, &env, options);
     let plan = options
         .hash
         .then(|| ShiftReductionPredicatePlan::extract(f, &env));
