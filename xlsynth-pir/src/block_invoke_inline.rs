@@ -116,24 +116,19 @@ fn copy_callee(
     names: &mut HashSet<String>,
     last_id: &mut usize,
 ) -> Result<NodeRef, String> {
-    // Assign destinations before copying payloads. A verified function need not
-    // store its nodes in topological order, and a parameter can itself be
-    // the return value.
+    // Bind parameters first, including when the callee returns one directly.
     let mut mapping = vec![NodeRef { index: 0 }; function.nodes.len()];
     for (&parameter, &actual) in function.params.iter().zip(operands) {
         mapping[parameter.index] = actual;
     }
-    let body = function
+    // Verification guarantees that each operand already has a destination.
+    for (index, source) in function
         .nodes
         .iter()
         .enumerate()
-        .filter(|(_, node)| !matches!(node.payload, NodePayload::Nil | NodePayload::Param));
-    for (offset, (index, _)) in body.clone().enumerate() {
-        mapping[index] = NodeRef {
-            index: nodes.len() + offset,
-        };
-    }
-    for (_, source) in body {
+        .filter(|(_, node)| !matches!(node.payload, NodePayload::Nil | NodePayload::Param))
+    {
+        mapping[index] = NodeRef { index: nodes.len() };
         *last_id = last_id
             .checked_add(1)
             .ok_or("node IDs overflow while inlining invoke")?;
