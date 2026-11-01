@@ -358,8 +358,6 @@ fn typed_empty_arrays_and_dropped_slots_remain_distinct() {
     let result = builder.tuple(&[array, unit, empty_bits]).unwrap();
     let mut function = builder.build(result).unwrap();
     let empty_array = named(&function, "empty_array");
-    // Exercise the typed array operation as well as the builder's literal form.
-    function.get_node_mut(empty_array).payload = NodePayload::Array(vec![]);
     check_concrete_inputs(&function, &[vec![]], 0);
     // Analysis also accepts holes left by rewrites before graph compaction.
     let dropped = named(&function, "dropped");

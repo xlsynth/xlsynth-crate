@@ -1434,6 +1434,17 @@ pub fn is_valid_identifier_name(s: &str) -> bool {
     true
 }
 
+/// XLS package names may contain dots after the first character and may be
+/// keywords. The bare boolean literals are separate tokens.
+pub(crate) fn is_valid_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c == '.' || c.is_ascii_alphanumeric())
+        && !matches!(name, "true" | "false")
+}
+
 /// Replaces dots in an IR text ID with underscores: `add.7` becomes `add_7`.
 ///
 /// Accepts only ASCII letters, digits, `_`, and `.`; panics otherwise.

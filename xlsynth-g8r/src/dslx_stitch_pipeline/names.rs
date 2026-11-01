@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Name validation for DSLX stitch-pipeline wrapper generation.
+//! Generated names and namespace validation for DSLX pipeline wrappers.
 
 use std::collections::BTreeMap;
 
 use xlsynth::XlsynthError;
 use xlsynth_vast::is_system_verilog_keyword;
 
-use super::build_pipeline::{
-    flop_reg_name, slice_wire_name, stage_instance_name, stage_output_wire_name, valid_reg_name,
-};
+use super::layout::{BoundaryPort, PipelineLayout};
 use crate::aig::SequentialPipelineOptions;
 
 const NAME_VALIDATION_PREFIX: &str = "name validation failed";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StageNameInfo {
-    pub(crate) stage_name: String,
-    pub(crate) params: Vec<String>,
+pub(super) fn stage_instance_name(stage_index: usize) -> String {
+    format!("stage_{stage_index}")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StageSignature {
-    pub(crate) output_port_name: String,
+pub(super) fn stage_output_wire_name(stage_index: usize) -> String {
+    format!("stage_{stage_index}_out_comb")
+}
+
+pub(super) fn flop_reg_name(pipe_stage_number: usize, name: &str) -> String {
+    format!("p{pipe_stage_number}_{name}")
+}
+
+pub(super) fn slice_wire_name(pipe_stage_number: usize, dest_name: &str) -> String {
+    format!("p{pipe_stage_number}_{dest_name}_comb")
+}
+
+pub(super) fn valid_reg_name(pipe_stage_number: usize) -> String {
+    format!("p{pipe_stage_number}_valid")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,42 +70,19 @@ pub(crate) fn validate_simple_verilog_identifier(
     Ok(())
 }
 
-pub(crate) fn collect_stage_name_infos(
-    ir: &xlsynth::ir_package::IrPackage,
-    stages: &[(String, String)],
-) -> Result<(Vec<StageNameInfo>, Vec<StageSignature>), XlsynthError> {
-    let mut infos = Vec::with_capacity(stages.len());
-    let mut signatures = Vec::with_capacity(stages.len());
-    for (stage_name, stage_mangled) in stages {
-        let func = ir.get_function(stage_mangled)?;
-        let fty = func.get_type()?;
-        let mut params = Vec::with_capacity(fty.param_count() as usize);
-        for i in 0..fty.param_count() {
-            params.push(func.param_name(i)?);
-        }
-        infos.push(StageNameInfo {
-            stage_name: stage_name.clone(),
-            params,
-        });
-        signatures.push(StageSignature {
-            output_port_name: "out".to_string(),
-        });
-    }
-    Ok((infos, signatures))
-}
-
+/// Checks module, port and generated names for the resolved wrapper layout.
 pub(crate) fn validate_stitch_pipeline_names(
-    stages: &[StageNameInfo],
-    signatures: &[StageSignature],
+    stages: &[(String, String)],
+    layout: &PipelineLayout,
     opts: &SequentialPipelineOptions,
 ) -> Result<(), XlsynthError> {
     if stages.is_empty() {
         return name_error("no pipeline stages found during name validation");
     }
-    if signatures.len() != stages.len() {
+    if layout.stage_inputs.len() != stages.len() {
         return name_error(format!(
             "internal error: name validation saw {} stage signatures for {} stages",
-            signatures.len(),
+            layout.stage_inputs.len(),
             stages.len()
         ));
     }
@@ -112,17 +96,15 @@ pub(crate) fn validate_stitch_pipeline_names(
         format!("wrapper module `{}`", opts.name),
     )?;
 
-    for stage in stages {
+    for (stage_name, _) in stages {
         validate_simple_verilog_identifier(
-            &stage.stage_name,
-            NameRole::StageModule {
-                stage: &stage.stage_name,
-            },
+            stage_name,
+            NameRole::StageModule { stage: stage_name },
         )?;
         record_emitted_name(
             &mut module_namespace,
-            &stage.stage_name,
-            format!("stage module `{}`", stage.stage_name),
+            stage_name,
+            format!("stage module `{stage_name}`"),
         )?;
     }
 
@@ -157,10 +139,7 @@ pub(crate) fn validate_stitch_pipeline_names(
         )?;
     }
 
-    let final_output_name = signatures
-        .last()
-        .map(|signature| signature.output_port_name.as_str())
-        .unwrap_or("out");
+    let final_output_name = layout.output.ports[0].name.as_str();
     validate_simple_verilog_identifier(final_output_name, NameRole::WrapperOutputPort)?;
 
     let mut reserved = BTreeMap::new();
@@ -196,20 +175,20 @@ pub(crate) fn validate_stitch_pipeline_names(
         format!("reserved wrapper/output port `{final_output_name}`"),
     );
 
-    for (stage_index, stage) in stages.iter().enumerate() {
-        for param in &stage.params {
+    for (stage_index, (stage_name, _)) in stages.iter().enumerate() {
+        for port in &layout.stage_inputs[stage_index].ports {
+            let param = port.name.as_str();
             validate_simple_verilog_identifier(
                 param,
                 NameRole::StageParameter {
-                    stage: &stage.stage_name,
+                    stage: stage_name,
                     parameter: param,
                 },
             )?;
             if stage_index == 0 {
                 if let Some(reserved_owner) = reserved.get(param) {
                     return name_error(format!(
-                        "stage parameter `{}.{param}` cannot be emitted as-is: it collides with {reserved_owner}",
-                        stage.stage_name
+                        "stage parameter `{stage_name}.{param}` cannot be emitted as-is: it collides with {reserved_owner}"
                     ));
                 }
             }
@@ -243,13 +222,13 @@ pub(crate) fn validate_stitch_pipeline_names(
             format!("wrapper/control port `{output_valid_signal}` (output valid)"),
         )?;
     }
-    for param in &stages[0].params {
+    for port in &layout.stage_inputs[0].ports {
         record_emitted_name(
             &mut wrapper_namespace,
-            param,
+            &port.name,
             format!(
-                "first-stage data input port `{}.{param}`",
-                stages[0].stage_name
+                "first-stage data input port `{}.{}`",
+                stages[0].0, port.name
             ),
         )?;
     }
@@ -259,80 +238,55 @@ pub(crate) fn validate_stitch_pipeline_names(
         format!("wrapper output port `{final_output_name}`"),
     )?;
 
-    validate_generated_wrapper_names(stages, final_output_name, opts, &mut wrapper_namespace)
+    validate_generated_wrapper_names(
+        stages,
+        layout,
+        opts.input_valid_signal.is_some(),
+        &mut wrapper_namespace,
+    )
 }
 
+/// Records each instance, wire and register in the order the wrapper emits
+/// them.
 fn validate_generated_wrapper_names(
-    stages: &[StageNameInfo],
-    final_output_name: &str,
-    opts: &SequentialPipelineOptions,
+    stages: &[(String, String)],
+    layout: &PipelineLayout,
+    has_valid_signal: bool,
     wrapper_namespace: &mut BTreeMap<String, String>,
 ) -> Result<(), XlsynthError> {
-    let mut next_pipe_stage_number = 0;
-    let mut current_names = stages[0].params.clone();
-    let has_valid_signal = opts.input_valid_signal.is_some();
-
-    if opts.flop_inputs {
-        record_flop_layer_names(
-            wrapper_namespace,
-            next_pipe_stage_number,
-            &current_names,
-            has_valid_signal,
-        )?;
-        next_pipe_stage_number += 1;
+    let input = &layout.stage_inputs[0];
+    if let Some(layer) = input.register_layer {
+        record_flop_layer_names(wrapper_namespace, layer, &input.ports, has_valid_signal)?;
     }
 
-    for (stage_index, stage) in stages.iter().enumerate() {
+    for (stage_index, (stage_name, _)) in stages.iter().enumerate() {
         record_emitted_name(
             wrapper_namespace,
             &stage_output_wire_name(stage_index),
-            format!("generated stage output wire for `{}`", stage.stage_name),
+            format!("generated stage output wire for `{stage_name}`"),
         )?;
         record_emitted_name(
             wrapper_namespace,
             &stage_instance_name(stage_index),
-            format!("generated instance name for `{}`", stage.stage_name),
+            format!("generated instance name for `{stage_name}`"),
         )?;
 
-        let last_stage = stage_index + 1 == stages.len();
-        let dest_names = if last_stage {
-            vec![final_output_name.to_string()]
-        } else {
-            stages[stage_index + 1].params.clone()
+        let boundary = layout.after_stage(stage_index);
+        let Some(layer) = boundary.register_layer else {
+            // The unregistered wrapper output needs no slices or registers.
+            continue;
         };
-
-        if dest_names.len() > 1 {
-            for dest_name in &dest_names {
+        if boundary.ports.len() > 1 {
+            for port in &boundary.ports {
+                let dest_name = &port.name;
                 record_emitted_name(
                     wrapper_namespace,
-                    &slice_wire_name(next_pipe_stage_number, dest_name),
-                    format!(
-                        "generated slice wire for `{dest_name}` at pipeline boundary {next_pipe_stage_number}"
-                    ),
+                    &slice_wire_name(layer, dest_name),
+                    format!("generated slice wire for `{dest_name}` at pipeline boundary {layer}"),
                 )?;
             }
         }
-
-        current_names = dest_names;
-
-        if !last_stage {
-            record_flop_layer_names(
-                wrapper_namespace,
-                next_pipe_stage_number,
-                &current_names,
-                has_valid_signal,
-            )?;
-            next_pipe_stage_number += 1;
-        }
-    }
-
-    if opts.flop_outputs {
-        record_flop_layer_names(
-            wrapper_namespace,
-            next_pipe_stage_number,
-            &current_names,
-            has_valid_signal,
-        )?;
+        record_flop_layer_names(wrapper_namespace, layer, &boundary.ports, has_valid_signal)?;
     }
 
     Ok(())
@@ -340,13 +294,13 @@ fn validate_generated_wrapper_names(
 
 fn record_flop_layer_names(
     namespace: &mut BTreeMap<String, String>,
-    pipe_stage_number: u32,
-    names: &[String],
+    pipe_stage_number: usize,
+    ports: &[BoundaryPort],
     has_valid_signal: bool,
 ) -> Result<(), XlsynthError> {
-    let mut sorted_names = names.to_vec();
-    sorted_names.sort();
-    for name in &sorted_names {
+    let mut sorted_names: Vec<&str> = ports.iter().map(|port| port.name.as_str()).collect();
+    sorted_names.sort_unstable();
+    for name in sorted_names {
         record_emitted_name(
             namespace,
             &flop_reg_name(pipe_stage_number, name),

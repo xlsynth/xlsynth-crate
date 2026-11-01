@@ -1,0 +1,29 @@
+package muladd
+
+file_number 0 "muladd.x"
+
+fn __muladd__muladd_cycle0(x: bits[8] id=1, y: bits[8] id=2, z: bits[8] id=3) -> (bits[8], bits[8]) {
+  umul.4: bits[8] = umul(x, y, id=4, pos=[(0,2,57)])
+  ret tuple.5: (bits[8], bits[8]) = tuple(umul.4, z, id=5, pos=[(0,2,56)])
+}
+
+fn __muladd__muladd_cycle1(partials: (bits[8], bits[8]) id=6) -> bits[8] {
+  product: bits[8] = tuple_index(partials, index=0, id=7, pos=[(0,5,9)])
+  z: bits[8] = tuple_index(partials, index=1, id=8, pos=[(0,5,18)])
+  ret add.9: bits[8] = add(product, z, id=9, pos=[(0,6,4)])
+}
+
+top block muladd(clk: clock, x: bits[8], y: bits[8], z: bits[8], out: bits[8]) {
+  reg p0_partials((bits[8], bits[8]))
+  reg p1_out(bits[8])
+  x: bits[8] = input_port(name=x, id=10)
+  y: bits[8] = input_port(name=y, id=11)
+  z: bits[8] = input_port(name=z, id=12)
+  stage_0_out_comb: (bits[8], bits[8]) = invoke(x, y, z, to_apply=__muladd__muladd_cycle0, id=13)
+  register_write.14: () = register_write(stage_0_out_comb, register=p0_partials, id=14)
+  register_read.15: (bits[8], bits[8]) = register_read(register=p0_partials, id=15)
+  stage_1_out_comb: bits[8] = invoke(register_read.15, to_apply=__muladd__muladd_cycle1, id=16)
+  register_write.17: () = register_write(stage_1_out_comb, register=p1_out, id=17)
+  register_read.18: bits[8] = register_read(register=p1_out, id=18)
+  out: () = output_port(register_read.18, name=out, id=19)
+}

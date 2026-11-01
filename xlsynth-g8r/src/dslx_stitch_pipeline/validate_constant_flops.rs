@@ -15,7 +15,8 @@ use xlsynth_pir::ir_value_utils::{
 };
 use xlsynth_pir::{IrBits, IrValue};
 
-use super::{verify_stage_port_widths, verify_stage_signatures};
+use super::layout::verify_stage_port_widths;
+use super::verify_stage_signatures;
 use crate::aig::import::import_gate_fn;
 use crate::aig::topo::extract_cone;
 use crate::aig::{AigBitVector, AigOperand, GateFn};

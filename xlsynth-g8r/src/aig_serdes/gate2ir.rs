@@ -26,17 +26,8 @@ pub struct GateFnInterfaceSchema {
     pub return_type: ir::Type,
 }
 
-fn type_contains_token(ty: &ir::Type) -> bool {
-    match ty {
-        ir::Type::Token => true,
-        ir::Type::Bits(_) => false,
-        ir::Type::Tuple(members) => members.iter().any(|member| type_contains_token(member)),
-        ir::Type::Array(ArrayTypeData { element_type, .. }) => type_contains_token(element_type),
-    }
-}
-
 fn validate_schema_port(kind: &str, port: &GateFnInterfacePort) -> Result<(), String> {
-    if type_contains_token(&port.ty) {
+    if port.ty.contains_token() {
         return Err(format!(
             "{kind} port `{}` uses token-typed schema, which is unsupported for AIGER regrouping",
             port.name
@@ -47,7 +38,7 @@ fn validate_schema_port(kind: &str, port: &GateFnInterfacePort) -> Result<(), St
 
 impl GateFnInterfaceSchema {
     fn validate(&self) -> Result<(), String> {
-        if type_contains_token(&self.return_type) {
+        if self.return_type.contains_token() {
             return Err(
                 "return type uses token-typed schema, which is unsupported for AIGER regrouping"
                     .to_string(),

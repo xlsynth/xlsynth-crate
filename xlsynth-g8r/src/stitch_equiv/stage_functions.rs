@@ -2,14 +2,11 @@
 
 //! Stage IR, packed ABI and concrete interpretation shared by stitch checks.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
-use xlsynth::ir_package::IrPackage;
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir::{self, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
-use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
@@ -82,46 +79,6 @@ fn check_call_depths(package: &ir::Package, names: &[(String, String)]) -> Resul
         call_height(&functions, function, MAX_CALL_DEPTH, &mut heights)?;
     }
     Ok(())
-}
-
-/// Loads the original XLS declarations of the selected stages and their
-/// callees.
-pub(super) fn load_stage_package(
-    source: &IrPackage,
-    names: &[(String, String)],
-) -> Result<ir::Package, String> {
-    let mut members = Vec::new();
-    let mut visited = HashSet::new();
-    for (stage, root) in names {
-        let mut pending = vec![root.clone()];
-        while let Some(name) = pending.pop() {
-            if !visited.insert(name.clone()) {
-                continue;
-            }
-            let declaration = source
-                .get_function(&name)
-                .and_then(|f| f.to_ir_string())
-                .map_err(|e| {
-                    format!("stage '{stage}': could not read XLS function '{name}': {e}")
-                })?;
-            // Read the behavioral body even for FFI helpers. Extension
-            // metadata describes an implementation that may disagree
-            // with the XLS function being specified.
-            let function = Parser::new(&declaration)
-                .parse_function_declaration()
-                .map_err(|e| {
-                    format!("stage '{stage}': could not read XLS function '{name}': {e}")
-                })?;
-            pending.extend(external_function_references(&function));
-            members.push(ir::PackageMember::Function(function));
-        }
-    }
-    Ok(ir::Package {
-        name: "behavioral_stages".into(),
-        members,
-        file_table: ir::FileTable::new(),
-        top: None,
-    })
 }
 
 /// Verifies the reachable IR before interpreting it or translating solver
@@ -267,6 +224,7 @@ pub(super) fn named_inputs<T: Clone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth_pir::ir_parser::Parser;
 
     #[test]
     fn map_callee_counts_toward_stage_call_depth() {

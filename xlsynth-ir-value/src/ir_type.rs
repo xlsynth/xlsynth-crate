@@ -39,6 +39,16 @@ impl Type {
         matches!(self, Type::Tuple(types) if types.is_empty())
     }
 
+    /// Returns whether this type or any of its component types is a token.
+    pub fn contains_token(&self) -> bool {
+        match self {
+            Type::Token => true,
+            Type::Bits(_) => false,
+            Type::Tuple(fields) => fields.iter().any(|field| field.contains_token()),
+            Type::Array(array) => array.element_type.contains_token(),
+        }
+    }
+
     pub fn bit_count(&self) -> usize {
         match self {
             Type::Token => 0,

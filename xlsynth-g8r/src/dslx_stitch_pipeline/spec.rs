@@ -9,10 +9,9 @@ use serde::{Deserialize, Serialize};
 use xlsynth::ir_package::IrPackage;
 use xlsynth::{DslxConvertOptions, XlsynthError, convert_dslx_to_ir, dslx};
 
-use super::names::{collect_stage_name_infos, validate_stitch_pipeline_names};
-use super::{
-    resolve_stage_ir_names, select_stage_names, verify_stage_port_widths, verify_stage_signatures,
-};
+use super::layout::PipelineLayout;
+use super::names::validate_stitch_pipeline_names;
+use super::{resolve_stage_ir_names, select_stage_names, verify_stage_signatures};
 use crate::aig::{ClockPort, SequentialPipelineOptions};
 
 /// Source selection, register boundaries and external control ports shared by
@@ -161,8 +160,7 @@ impl StitchPipelineSpec {
                 reset_active_low: self.reset_active_low,
             },
         )?;
-        let (stage_names, signatures) = collect_stage_name_infos(&resolved.ir, &resolved.stages)?;
-        validate_stitch_pipeline_names(&stage_names, &signatures, &resolved.boundary)?;
+        resolved.validate_wrapper_names()?;
 
         // Native g8r calls the data output output_value. Only the first
         // stage's parameters and the control ports share its external
@@ -174,10 +172,10 @@ impl StitchPipelineSpec {
             self.output_valid_signal.as_deref(),
         ];
         if controls.contains(&Some("output_value"))
-            || stage_names[0]
-                .params
+            || resolved.layout.stage_inputs[0]
+                .ports
                 .iter()
-                .any(|name| name == "output_value")
+                .any(|port| port.name == "output_value")
         {
             return Err(XlsynthError(
                 "stitch specification port `output_value` collides with the native g8r data output"
@@ -194,7 +192,7 @@ pub struct ResolvedStitchPipeline {
     pub(super) ir: IrPackage,
     pub(super) stages: Vec<(String, String)>,
     pub(super) boundary: SequentialPipelineOptions,
-    latency: usize,
+    pub(super) layout: PipelineLayout,
 }
 
 impl ResolvedStitchPipeline {
@@ -205,7 +203,7 @@ impl ResolvedStitchPipeline {
     /// Returns the number of nonempty register layers between the external
     /// interface and the final output.
     pub fn latency(&self) -> usize {
-        self.latency
+        self.layout.latency()
     }
 
     /// Returns whether the stitch interface qualifies data with input valid.
@@ -214,8 +212,7 @@ impl ResolvedStitchPipeline {
     }
 
     pub(super) fn validate_wrapper_names(&self) -> Result<(), XlsynthError> {
-        let (names, signatures) = collect_stage_name_infos(&self.ir, &self.stages)?;
-        validate_stitch_pipeline_names(&names, &signatures, &self.boundary)
+        validate_stitch_pipeline_names(&self.stages, &self.layout, &self.boundary)
     }
 }
 
@@ -305,19 +302,12 @@ pub(super) fn resolve_stages(
     let ir = convert_dslx_to_ir(text, path, &convert)?.ir;
     let stages = resolve_stage_ir_names(&ir, module_name, names)?;
     verify_stage_signatures(&ir, &stages)?;
-    verify_stage_port_widths(&ir, &stages)?;
-    // Both emitters skip input registers when a nullary stage has no valid
-    // signal. Every inter-stage and output boundary carries nonzero-width data.
-    let first_stage = ir.get_function(&stages[0].1)?;
-    let has_input_layer = boundary.flop_inputs
-        && (boundary.input_valid_signal.is_some() || first_stage.get_type()?.param_count() > 0);
-    let latency =
-        stages.len() - 1 + usize::from(has_input_layer) + usize::from(boundary.flop_outputs);
+    let layout = PipelineLayout::from_ir(&ir, &stages, &boundary)?;
     Ok(ResolvedStitchPipeline {
         ir,
         stages,
         boundary,
-        latency,
+        layout,
     })
 }
 

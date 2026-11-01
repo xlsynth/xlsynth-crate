@@ -9,23 +9,22 @@ use xlsynth::{
     DslxCallingConvention, mangle_dslx_name, mangle_dslx_name_with_calling_convention, optimize_ir,
     schedule_and_codegen,
 };
-use xlsynth_vast::{ModulePortDirection, VastFile, VastFileType};
+use xlsynth_vast::{VastFile, VastFileType};
 
-mod common;
-use common::{PipelineCfg, Port, StageInfo};
-
+mod block_ir;
 mod build_pipeline;
 use build_pipeline::{
-    PipelineConfig as BuildPipelineConfig, StageModuleInterface, StagePortInterface,
-    build_pipeline as build_wrapper,
+    PipelineConfig as BuildPipelineConfig, StageModuleInterface, build_pipeline as build_wrapper,
 };
 
 pub mod g8r_pipeline;
 pub mod validate_constant_flops;
 
 mod equiv;
+mod layout;
 mod names;
 mod spec;
+pub(crate) mod stage_package;
 mod vectors;
 pub use spec::{ResolvedStitchPipeline, StitchPipelineSpec};
 
@@ -93,50 +92,6 @@ impl StitchPipelineOptions<'_> {
             reset_active_low: self.reset_active_low,
         }
     }
-}
-
-fn build_ports_from_ir(
-    func: &xlsynth::ir_package::IrFunction,
-    fty: &xlsynth::ir_package::IrFunctionType,
-) -> Result<(Vec<Port>, u32), xlsynth::XlsynthError> {
-    let mut ports = Vec::new();
-
-    // Formal parameters (flattened widths). Combinational stage modules do not
-    // have synthetic clock ports, so every input here comes directly from the
-    // selected DSLX function.
-    for i in 0..fty.param_count() {
-        let name = func.param_name(i)?;
-        let ty = fty.param_type(i)?;
-        let width = ty.get_flat_bit_count() as u32;
-        if width == 0 {
-            return Err(xlsynth::XlsynthError(format!(
-                "stage parameter `{}` has zero-width type `{}`; stitch-pipeline cannot emit it as a Verilog port",
-                name, ty
-            )));
-        }
-        ports.push(Port {
-            name,
-            is_input: true,
-            width,
-        });
-    }
-
-    // Return value -> `out` port.
-    let ret_ty = fty.return_type();
-    let ret_width = ret_ty.get_flat_bit_count() as u32;
-    if ret_width == 0 {
-        return Err(xlsynth::XlsynthError(format!(
-            "stage return type `{}` is zero-width; stitch-pipeline cannot emit it as Verilog output port `out`",
-            ret_ty
-        )));
-    }
-    ports.push(Port {
-        name: "out".into(),
-        is_input: false,
-        width: ret_width,
-    });
-
-    Ok((ports, ret_width))
 }
 
 /// Resolves every selected DSLX stage to an IR function with a data interface.
@@ -208,44 +163,15 @@ fn verify_stage_signatures(
     Ok(())
 }
 
-/// Reject stage interfaces that cannot be represented as Verilog ports.
-fn verify_stage_port_widths(
-    ir: &xlsynth::ir_package::IrPackage,
-    stages: &[(String, String)],
-) -> Result<(), xlsynth::XlsynthError> {
-    for (stage_name, stage_mangled) in stages {
-        let func = ir.get_function(stage_mangled)?;
-        let fty = func.get_type()?;
-        for i in 0..fty.param_count() {
-            let param_name = func.param_name(i)?;
-            let param_ty = fty.param_type(i)?;
-            if param_ty.get_flat_bit_count() == 0 {
-                return Err(xlsynth::XlsynthError(format!(
-                    "stage parameter `{}.{}` has zero-width type `{}`; stitch-pipeline cannot emit it as a Verilog port",
-                    stage_name, param_name, param_ty
-                )));
-            }
-        }
-        let ret_ty = fty.return_type();
-        if ret_ty.get_flat_bit_count() == 0 {
-            return Err(xlsynth::XlsynthError(format!(
-                "stage `{}` has zero-width return type `{}`; stitch-pipeline cannot emit it as Verilog output port `out`",
-                stage_name, ret_ty
-            )));
-        }
-    }
-    Ok(())
-}
-
 /// Optimizes and emits a combinational stage with the requested codegen
 /// options.
-fn make_stage_info_comb(
-    cfg: &PipelineCfg,
+fn emit_stage_rtl(
+    ir: &xlsynth::ir_package::IrPackage,
     stage_name_unmangled: &str,
     stage_mangled: &str,
-    _is_last: bool,
-) -> Result<StageInfo, xlsynth::XlsynthError> {
-    let opt = optimize_ir(cfg.ir, stage_mangled)?;
+    opts: &StitchRtlOptions<'_>,
+) -> Result<String, xlsynth::XlsynthError> {
+    let opt = optimize_ir(ir, stage_mangled)?;
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
     // Use the XLS "combinational" generator so the resulting module has *no*
     // clock.
@@ -255,38 +181,27 @@ generator: GENERATOR_KIND_COMBINATIONAL
 module_name: "{stage}"
 use_system_verilog: {sv}"#,
         stage = stage_name_unmangled,
-        sv = cfg.verilog_version.is_system_verilog(),
+        sv = opts.verilog_version.is_system_verilog(),
     );
     // Explicitly set the invariant-assertion option regardless of the
     // requested value so that the behaviour is *deterministic* – we do not
     // rely on the generator’s implicit default. When
-    // `cfg.add_invariant_assertions` is `false` we now emit
+    // `opts.add_invariant_assertions` is `false` we now emit
     // `add_invariant_assertions: false`, preventing unexpected assertions
     // from being injected (see xlsynth-driver/tests/invoke_test.rs).
     codegen.push_str(&format!(
         "\nadd_invariant_assertions: {}",
-        cfg.add_invariant_assertions
+        opts.add_invariant_assertions
     ));
     // Emit array-index bounds checking option explicitly for determinism.
     codegen.push_str(&format!(
         "\narray_index_bounds_checking: {}",
-        cfg.array_index_bounds_checking
+        opts.array_index_bounds_checking
     ));
-    if let Some(gate_format) = cfg.gate_format {
+    if let Some(gate_format) = opts.gate_format {
         codegen.push_str(&format!("\ngate_format: {gate_format:?}"));
     }
-    let result = schedule_and_codegen(&opt, sched, &codegen)?;
-    let sv_text = result.get_verilog_text()?;
-
-    let func = cfg.ir.get_function(stage_mangled)?;
-    let fty = func.get_type()?;
-    let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
-
-    Ok(StageInfo {
-        sv_text,
-        ports,
-        output_width,
-    })
+    schedule_and_codegen(&opt, sched, &codegen)?.get_verilog_text()
 }
 
 /// Selects every numbered DSLX stage, requiring contiguous canonical indices.
@@ -392,6 +307,22 @@ pub fn stitch_pipeline<'a>(
     top: &str,
     opts: &StitchPipelineOptions<'a>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    resolve_pipeline(dslx, path, top, opts)?.emit_rtl(&StitchRtlOptions {
+        verilog_version: opts.verilog_version,
+        validate_no_constant_flops: opts.validate_no_constant_flops,
+        add_invariant_assertions: opts.add_invariant_assertions,
+        array_index_bounds_checking: opts.array_index_bounds_checking,
+        gate_format: opts.gate_format,
+    })
+}
+
+/// Resolves source, stages and pipeline boundaries for either output format.
+pub fn resolve_pipeline(
+    dslx: &str,
+    path: &Path,
+    top: &str,
+    opts: &StitchPipelineOptions<'_>,
+) -> Result<ResolvedStitchPipeline, xlsynth::XlsynthError> {
     if opts.output_valid_signal.is_some() && opts.input_valid_signal.is_none() {
         return Err(xlsynth::XlsynthError(
             "output_valid_signal requires input_valid_signal in dslx-stitch-pipeline".to_string(),
@@ -410,16 +341,50 @@ pub fn stitch_pipeline<'a>(
         opts.boundary_options(),
     )?;
     resolved.validate_wrapper_names()?;
-    resolved.emit_rtl(&StitchRtlOptions {
-        verilog_version: opts.verilog_version,
-        validate_no_constant_flops: opts.validate_no_constant_flops,
-        add_invariant_assertions: opts.add_invariant_assertions,
-        array_index_bounds_checking: opts.array_index_bounds_checking,
-        gate_format: opts.gate_format,
-    })
+    Ok(resolved)
 }
 
 impl ResolvedStitchPipeline {
+    /// Emits the selected stage functions and a top block that invokes them.
+    pub fn emit_block_ir(&self) -> Result<xlsynth_pir::ir::Package, xlsynth::XlsynthError> {
+        let mut package = stage_package::load_stage_package(&self.ir, &self.stages)
+            .map_err(xlsynth::XlsynthError)?;
+        block_ir::build_pipeline_block(&mut package, &self.stages, &self.boundary, &self.layout)
+            .map_err(xlsynth::XlsynthError)?;
+        Ok(package)
+    }
+
+    /// Rejects registered stage-output bits that are constant for all inputs.
+    pub fn validate_no_constant_flops(&self) -> Result<(), xlsynth::XlsynthError> {
+        let constant_flops = validate_constant_flops::find_constant_flops(
+            &self.ir,
+            &self.stages,
+            self.boundary.flop_outputs,
+        )
+        .map_err(|error| {
+            xlsynth::XlsynthError(format!("constant-flop validation failed: {error}"))
+        })?;
+        if !constant_flops.is_empty() {
+            let details = constant_flops
+                .iter()
+                .map(|flop| {
+                    format!(
+                        "  stage '{}' (index {}), output bit {} is always {}",
+                        flop.stage_name,
+                        flop.stage_index,
+                        flop.output_bit_index,
+                        u8::from(flop.value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(xlsynth::XlsynthError(format!(
+                "constant-flop validation failed:\n{details}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Emits combinational stage modules and the clocked wrapper for the
     /// resolved specification.
     pub fn emit_rtl(&self, opts: &StitchRtlOptions<'_>) -> Result<String, xlsynth::XlsynthError> {
@@ -428,76 +393,18 @@ impl ResolvedStitchPipeline {
                 "constant-flop validation requires array_index_bounds_checking=true".to_string(),
             ));
         }
-        let cfg = PipelineCfg {
-            ir: &self.ir,
-            verilog_version: opts.verilog_version,
-            add_invariant_assertions: opts.add_invariant_assertions,
-            array_index_bounds_checking: opts.array_index_bounds_checking,
-            gate_format: opts.gate_format,
-        };
-        let stages = &self.stages;
         if opts.validate_no_constant_flops {
-            let constant_flops = validate_constant_flops::find_constant_flops(
-                &self.ir,
-                stages,
-                self.boundary.flop_outputs,
-            )
-            .map_err(|error| {
-                xlsynth::XlsynthError(format!("constant-flop validation failed: {error}"))
-            })?;
-            if !constant_flops.is_empty() {
-                let details = constant_flops
-                    .iter()
-                    .map(|flop| {
-                        format!(
-                            "  stage '{}' (index {}), output bit {} is always {}",
-                            flop.stage_name,
-                            flop.stage_index,
-                            flop.output_bit_index,
-                            u8::from(flop.value)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Err(xlsynth::XlsynthError(format!(
-                    "constant-flop validation failed:\n{details}"
-                )));
-            }
+            self.validate_no_constant_flops()?;
         }
-
-        // For each stage run codegen immediately so we can parse its port list.
-        let mut stage_infos = Vec::with_capacity(stages.len());
-        for (stage_unmangled, stage_mangled) in stages {
-            stage_infos.push(make_stage_info_comb(
-                &cfg,
-                stage_unmangled,
-                stage_mangled,
-                false,
-            )?);
+        let mut stage_text = Vec::with_capacity(self.stages.len());
+        let mut stage_modules = Vec::with_capacity(self.stages.len());
+        for (name, mangled) in &self.stages {
+            stage_text.push(emit_stage_rtl(&self.ir, name, mangled, opts)?);
+            stage_modules.push(StageModuleInterface {
+                name: name.clone(),
+                output_port: "out".into(),
+            });
         }
-
-        // The wrapper needs only stage interface metadata, not a second VAST
-        // file.
-        let stage_modules = stage_infos
-            .iter()
-            .zip(stages)
-            .map(|(stage_info, (module_name, _))| StageModuleInterface {
-                name: module_name.clone(),
-                ports: stage_info
-                    .ports
-                    .iter()
-                    .map(|port| StagePortInterface {
-                        name: port.name.clone(),
-                        direction: if port.is_input {
-                            ModulePortDirection::Input
-                        } else {
-                            ModulePortDirection::Output
-                        },
-                        width: i64::from(port.width),
-                    })
-                    .collect(),
-            })
-            .collect();
 
         // Generate wrapper using shared implementation.
         let mut wrapper_file = VastFile::new(match opts.verilog_version {
@@ -508,8 +415,7 @@ impl ResolvedStitchPipeline {
             top_module_name: self.boundary.name.clone(),
             clk_port_name: self.boundary.clock.name.clone(),
             stage_modules,
-            flop_inputs: self.boundary.flop_inputs,
-            flop_outputs: self.boundary.flop_outputs,
+            layout: &self.layout,
             input_valid_signal: self.boundary.input_valid_signal.as_deref(),
             output_valid_signal: self.boundary.output_valid_signal.as_deref(),
             reset_signal: self.boundary.reset_signal.as_deref(),
@@ -517,11 +423,7 @@ impl ResolvedStitchPipeline {
         };
         let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
 
-        let mut text = stage_infos
-            .iter()
-            .map(|s| s.sv_text.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut text = stage_text.join("\n");
         text.push_str(&wrapper_sv);
         Ok(text)
     }
@@ -943,29 +845,21 @@ fn foo_cycle1() -> u32 { u32:1 }"#;
 
     #[test]
     fn test_stitch_pipeline_rejects_out_name_param() {
-        let stages = vec![
-            names::StageNameInfo {
-                stage_name: "foo_cycle0".to_string(),
-                params: vec!["out".to_string()],
-            },
-            names::StageNameInfo {
-                stage_name: "foo_cycle1".to_string(),
-                params: vec!["x".to_string()],
-            },
-        ];
-        let signatures = vec![
-            names::StageSignature {
-                output_port_name: "out".to_string(),
-            },
-            names::StageSignature {
-                output_port_name: "out".to_string(),
-            },
-        ];
-        let opts = default_test_options("foo");
-        let err =
-            names::validate_stitch_pipeline_names(&stages, &signatures, &opts.boundary_options())
-                .unwrap_err()
-                .0;
+        // DSLX reserves `out`, so exercise the name validator with a resolved
+        // port.
+        let stages = vec![("foo_cycle0".to_string(), "__test__foo_cycle0".to_string())];
+        let opts = default_test_options("foo").boundary_options();
+        let layout = layout::PipelineLayout::new(
+            vec![vec![("out".to_string(), 32)]],
+            ("out".to_string(), 32),
+            opts.flop_inputs,
+            opts.flop_outputs,
+            opts.input_valid_signal.is_some(),
+        )
+        .unwrap();
+        let err = names::validate_stitch_pipeline_names(&stages, &layout, &opts)
+            .unwrap_err()
+            .0;
         assert!(
             err.contains("stage parameter `foo_cycle0.out`")
                 && err.contains("reserved wrapper/output port `out`"),
