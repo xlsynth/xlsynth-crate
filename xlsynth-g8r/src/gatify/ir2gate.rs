@@ -35,8 +35,10 @@ use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
 mod bounded_affine_clamp;
+mod bounded_conjunction;
 mod conditional_select;
 mod demanded_bits;
+mod guarded_unit;
 mod priority_predicate;
 mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
@@ -199,6 +201,7 @@ pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
     select_proof_visits: usize,
+    guarded_unit_facts: bounded_conjunction::Facts,
     /// Absent for standalone node lowering, where every target bit is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
@@ -221,6 +224,7 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -244,6 +248,7 @@ impl GateEnv {
         Self {
             ir_to_g8: HashMap::new(),
             select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -4003,6 +4008,22 @@ fn gatify_node(
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
+            if arch.is_none()
+                && options.fold
+                && options.enable_rewrite_nary_add
+                && let Some(gates) = guarded_unit::try_lower(
+                    f,
+                    env,
+                    terms,
+                    output_width,
+                    options,
+                    g8_builder,
+                    node.text_id,
+                )
+            {
+                env.add(node_ref, GateOrVec::BitVector(gates));
+                return Ok(());
+            }
             let gates = gatify_ext_nary_add(
                 f,
                 &env,
