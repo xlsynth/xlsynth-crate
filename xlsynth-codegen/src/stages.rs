@@ -3,7 +3,7 @@
 //! Register-delimited stage reconstruction for feed-forward block layouts.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 
 use xlsynth_pir::ir::{Block, InstantiationKind, NodeGraph, NodePayload, NodeRef};
 use xlsynth_pir::ir_utils::{get_topological, operands};
@@ -20,13 +20,19 @@ pub(crate) struct Stage {
 
 /// Describes a child output's earliest stage and the register depth from each
 /// input that reaches it.
-pub(crate) struct OutputTiming<'a> {
+struct OutputTiming<'a> {
     minimum_stage: isize,
     input_delays: BTreeMap<&'a str, isize>,
 }
 
+/// Shares one timing summary among output ports driven by the same value.
+pub(crate) struct BlockTiming<'a> {
+    ports: BTreeMap<&'a str, NodeRef>,
+    values: HashMap<NodeRef, OutputTiming<'a>>,
+}
+
 /// Maps each previously emitted child block to the timing of its output ports.
-pub(crate) type ChildTimings<'a> = BTreeMap<&'a str, BTreeMap<&'a str, OutputTiming<'a>>>;
+pub(crate) type ChildTimings<'a> = BTreeMap<&'a str, BlockTiming<'a>>;
 
 /// Reconstructs one block's stages in child-before-parent order.
 pub(crate) fn reconstruct_stages<'a>(
@@ -81,7 +87,8 @@ pub(crate) fn reconstruct_stages<'a>(
         let inputs = instantiation_inputs.get(instance.name.as_str());
         for &(output, port_name) in outputs {
             if instance.kind == InstantiationKind::Block {
-                let timing = &child_timings[instance.block.as_str()][port_name];
+                let child = &child_timings[instance.block.as_str()];
+                let timing = &child.values[&child.ports[port_name]];
                 stages[output] = timing.minimum_stage;
                 for (&name, &delay) in &timing.input_delays {
                     let input = inputs.expect("verified child inputs are connected")[name];
@@ -208,7 +215,7 @@ fn summarize_outputs<'a>(
     block: &'a Block,
     graph: &[Vec<(usize, isize)>],
     earliest: &[isize],
-) -> BTreeMap<&'a str, OutputTiming<'a>> {
+) -> BlockTiming<'a> {
     let mut predecessors = vec![Vec::new(); graph.len()];
     for (source, edges) in graph.iter().enumerate() {
         for &(target, delay) in edges {
@@ -220,38 +227,93 @@ fn summarize_outputs<'a>(
         }
     }
 
-    let mut outputs = BTreeMap::new();
-    let mut visited_from = vec![None; graph.len()];
-    let mut pending = BinaryHeap::new();
-    for port in block.output_ports() {
-        let output = block.output_value(port).index;
-        let minimum_stage = earliest[output];
-        let mut input_delays = BTreeMap::new();
-        // Across any path, latency is the difference in earliest stages minus
-        // the sum of its nonnegative edge slacks. Visiting least slack first
-        // gives the longest path to each input in one traversal of the cone.
-        pending.push(Reverse((0, output)));
-        while let Some(Reverse((slack, index))) = pending.pop() {
-            if visited_from[index] == Some(port) {
-                continue;
-            }
-            visited_from[index] = Some(port);
-            if let NodePayload::InputPort { name, .. } = &block.nodes[index].payload {
-                input_delays.insert(name.as_str(), minimum_stage - earliest[index] - slack);
-            }
-            for &(source, edge_slack) in &predecessors[index] {
-                pending.push(Reverse((slack + edge_slack, source)));
+    let ports: BTreeMap<_, _> = block
+        .output_ports()
+        .map(|port| (block.port_name(port), block.output_value(port)))
+        .collect();
+    let mut timings: HashMap<_, _> = ports
+        .values()
+        .map(|&value| {
+            let timing = OutputTiming {
+                minimum_stage: earliest[value.index],
+                input_delays: BTreeMap::new(),
+            };
+            (value, timing)
+        })
+        .collect();
+    let output_values: Vec<_> = timings.keys().copied().collect();
+
+    // Restrict forward traversals to the union of output cones, including when
+    // an input has many unrelated users. Only inputs in these cones matter.
+    let mut reaches_output = vec![false; graph.len()];
+    let mut pending: Vec<_> = output_values.iter().map(|value| value.index).collect();
+    while let Some(node) = pending.pop() {
+        if reaches_output[node] {
+            continue;
+        }
+        reaches_output[node] = true;
+        pending.extend(predecessors[node].iter().map(|&(source, _)| source));
+    }
+    let inputs: Vec<_> = block
+        .input_ports()
+        .filter(|input| reaches_output[input.index])
+        .collect();
+
+    // Across any path, latency equals the difference in earliest stages minus
+    // the sum of its edge slacks. Minimize slack from the smaller set of roots.
+    let record = |timing: &mut OutputTiming<'a>, input: NodeRef, slack: isize| {
+        let delay = timing.minimum_stage - earliest[input.index] - slack;
+        timing.input_delays.insert(block.port_name(input), delay);
+    };
+    if inputs.len() < output_values.len() {
+        let mut successors = vec![Vec::new(); graph.len()];
+        for (target, edges) in predecessors.into_iter().enumerate() {
+            if reaches_output[target] {
+                for (source, slack) in edges {
+                    successors[source].push((target, slack));
+                }
             }
         }
-        outputs.insert(
-            block.port_name(port),
-            OutputTiming {
-                minimum_stage,
-                input_delays,
-            },
-        );
+        visit_least_slack_paths(&successors, &inputs, |input, node, slack| {
+            if let Some(timing) = timings.get_mut(&node) {
+                record(timing, input, slack);
+            }
+        });
+    } else {
+        visit_least_slack_paths(&predecessors, &output_values, |output, node, slack| {
+            if matches!(block.get_node(node).payload, NodePayload::InputPort { .. }) {
+                record(timings.get_mut(&output).expect("output root"), node, slack);
+            }
+        });
     }
-    outputs
+
+    BlockTiming {
+        ports,
+        values: timings,
+    }
+}
+
+/// Visits each reachable node once per root, in order of minimum total slack.
+fn visit_least_slack_paths(
+    edges: &[Vec<(usize, isize)>],
+    roots: &[NodeRef],
+    mut visit: impl FnMut(NodeRef, NodeRef, isize),
+) {
+    let mut visited_from = vec![None; edges.len()];
+    let mut pending = BinaryHeap::new();
+    for &root in roots {
+        pending.push(Reverse((0, root.index)));
+        while let Some(Reverse((slack, index))) = pending.pop() {
+            if visited_from[index] == Some(root) {
+                continue;
+            }
+            visited_from[index] = Some(root);
+            visit(root, NodeRef { index }, slack);
+            for &(neighbor, edge_slack) in &edges[index] {
+                pending.push(Reverse((slack + edge_slack, neighbor)));
+            }
+        }
+    }
 }
 
 /// Recognizes pure constant cones without evaluating or rewriting the graph.

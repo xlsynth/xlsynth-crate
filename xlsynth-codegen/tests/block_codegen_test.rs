@@ -841,7 +841,7 @@ fn registered_child_adds_its_latency_between_parent_register_stages() {
 #[test]
 fn heterogeneous_child_outputs_keep_their_individual_pipeline_latencies() {
     // The parent's faststate and the child's delayed register capture the same
-    // cycle. Their sum must reach slowstate at stage 2 via either input.
+    // cycle. Both reach slowstate at stage 2 when the callee uses both inputs.
     let ir = r#"package public_hierarchy
 
 fn sum(lhs: bits[8] id=18, rhs: bits[8] id=19) -> bits[8] {
@@ -879,60 +879,75 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
   slow: () = output_port(slow_read, name=slow, id=17)
 }
 "#;
-    assert_stock_xls_accepts(ir);
-    let generated = emit(
-        ir,
-        &BlockCodegenOptions {
-            layout: Layout::Pipeline,
-            ..BlockCodegenOptions::default()
-        },
-    );
-    assert_eq!(
-        pipeline_stage_comments(&generated, "parent"),
-        [
-            "  // ===== Pipe stage 0:",
-            "  // ===== Pipe stage 1:",
-            "  // ===== Pipe stage 2:",
-        ],
-        "generated heterogeneous hierarchy:\n{generated}"
-    );
-    let parent = generated
-        .split("module parent(")
-        .nth(1)
-        .expect("parent module must be emitted");
-    let fast_stage = parent.find("// ===== Pipe stage 1:").unwrap();
-    let fast_register = parent.find("logic [7:0] faststate;").unwrap();
-    let slow_stage = parent.find("// ===== Pipe stage 2:").unwrap();
-    let slow_register = parent.find("logic [7:0] slowstate;").unwrap();
-    assert!(fast_stage < fast_register);
-    assert!(fast_register < slow_stage);
-    assert!(slow_stage < slow_register);
+    // Ignoring bias leaves one live input for two distinct output values.
+    for expression in ["add(lhs, rhs, id=20)", "identity(lhs, id=20)"] {
+        let source = ir.replace("add(lhs, rhs, id=20)", expression);
+        assert_stock_xls_accepts(&source);
+        let generated = emit(
+            &source,
+            &BlockCodegenOptions {
+                layout: Layout::Pipeline,
+                ..BlockCodegenOptions::default()
+            },
+        );
+        let (_, parent) = generated.split_once("module parent(").unwrap();
+        let register_layout: Vec<_> = parent
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.starts_with("// ===== Pipe stage")
+                    || matches!(*line, "logic [7:0] faststate;" | "logic [7:0] slowstate;")
+            })
+            .collect();
+        assert_eq!(
+            register_layout,
+            [
+                "// ===== Pipe stage 0:",
+                "// ===== Pipe stage 1:",
+                "logic [7:0] faststate;",
+                "// ===== Pipe stage 2:",
+                "logic [7:0] slowstate;",
+            ],
+            "{expression}"
+        );
+    }
 }
 
 #[test]
-fn external_function_remains_between_parent_register_stages() {
+fn opaque_child_feedback_remains_between_parent_register_stages() {
     let ir = r#"package public_external
 
-#[ffi_proto("""code_template: "external_cell {fn} (.value({value}), .result({return}));"
+#[ffi_proto("""code_template: "external_cell {fn} (.value({value}), .feedback({feedback}), .result({return}));"
 """)]
-fn external_identity(value: bits[8] id=1) -> bits[8] {
+fn external_identity(value: bits[8] id=1, feedback: bits[8] id=10) -> bits[8] {
   ret value: bits[8] = param(name=value, id=1)
+}
+
+block child(value: bits[8], result: bits[8]) {
+  instantiation foreign_cell(foreign_function=external_identity, kind=extern)
+  value: bits[8] = input_port(name=value, id=11)
+  driven: () = instantiation_input(value, instantiation=foreign_cell, port_name=value, id=12)
+  returned: bits[8] = instantiation_output(instantiation=foreign_cell, port_name=return, id=13)
+  feedback: () = instantiation_input(returned, instantiation=foreign_cell, port_name=feedback, id=14)
+  result: () = output_port(returned, name=result, id=15)
 }
 
 top block parent(clk: clock, value: bits[8], result: bits[8]) {
   reg before(bits[8])
   reg after(bits[8])
-  instantiation component(foreign_function=external_identity, kind=extern)
+  instantiation component(block=child, kind=block)
   value: bits[8] = input_port(name=value, id=2)
   before_write: () = register_write(value, register=before, id=3)
   before_read: bits[8] = register_read(register=before, id=4)
   connected: () = instantiation_input(before_read, instantiation=component, port_name=value, id=5)
-  received: bits[8] = instantiation_output(instantiation=component, port_name=return, id=6)
+  received: bits[8] = instantiation_output(instantiation=component, port_name=result, id=6)
   after_write: () = register_write(received, register=after, id=7)
   after_read: bits[8] = register_read(register=after, id=8)
   result: () = output_port(after_read, name=result, id=9)
 }
 "#;
+    // A foreign output may feed one of its own inputs. Its zero-delay cycle
+    // must still propagate the child input's stage to the parent capture.
     let generated = emit(
         ir,
         &BlockCodegenOptions {
@@ -950,7 +965,7 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
         .collect::<Vec<_>>();
     assert_eq!(
         instances,
-        ["  external_cell component (.value(before_), .result(received));"]
+        ["  external_cell foreign_cell (.value(value), .feedback(returned), .result(returned));"]
     );
 }
 
