@@ -413,3 +413,53 @@ mod solver_status {
         );
     }
 }
+
+#[test]
+fn assertions_do_not_constrain_inputs_and_tokens_are_zero_width() {
+    let f = function(
+        r#"package test
+top fn main(tok: token id=1, x: bits[8] id=2) -> (token, bits[8]) {
+  never: bits[1] = literal(value=0, id=3)
+  failed: token = assert(tok, never, message="ignored", label="function", id=4)
+  ret result: (token, bits[8]) = tuple(failed, x, id=5)
+}"#,
+    )
+    .unwrap();
+    let guard = function(
+        r#"package test
+top fn guard(tok: token id=1, x: bits[8] id=2) -> bits[1] {
+  never: bits[1] = literal(value=0, id=3)
+  failed: token = assert(tok, never, message="ignored", label="guard", id=4)
+  always: bits[1] = literal(value=1, id=5)
+  pair: (token, bits[1]) = tuple(failed, always, id=6)
+  ret result: bits[1] = tuple_index(pair, index=1, id=7)
+}"#,
+    )
+    .unwrap();
+    let proof = prove(&f, &guard, &[vary(1, &[], 0..8)], &[bits(&[1], 0..8)]).unwrap();
+    assert_eq!(proof.guard_reachability, PredicateReachability::Reachable);
+    let EquivResult::Disproved {
+        lhs_inputs,
+        rhs_inputs,
+        lhs_output,
+        rhs_output,
+    } = proof.result
+    else {
+        panic!("failing assertions must not turn this into a vacuous proof");
+    };
+    assert_eq!(lhs_inputs[0].value, IrValue::make_token());
+    assert_eq!(rhs_inputs[0].value, IrValue::make_token());
+    assert_eq!(
+        lhs_output.value.get_element(1).unwrap(),
+        lhs_inputs[1].value
+    );
+    assert_eq!(
+        rhs_output.value.get_element(1).unwrap(),
+        rhs_inputs[1].value
+    );
+    assert_ne!(lhs_output.value, rhs_output.value);
+    assert!(lhs_output.assertion_violation.is_none());
+    assert!(rhs_output.assertion_violation.is_none());
+    assert!(prove(&f, &guard, &[vary(0, &[], 0..0)], &[]).is_err());
+    assert!(prove(&f, &guard, &[], &[bits(&[0], 0..0)]).is_err());
+}

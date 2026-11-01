@@ -49,6 +49,14 @@ pub struct IndependenceResult {
 /// context is required for calls. Domains, UFs, and fixed implicit activation
 /// are rejected rather than silently adding assumptions.
 ///
+/// Assertions in either function (including callees) do not constrain the
+/// quantified input domain, and assertion failures are not observed. Token
+/// parameters and results are supported as zero-width values, but cannot be
+/// selected as bits leaves. Explicit activation bits remain ordinary inputs.
+/// Trace, cover, and token-ordering effects are not observed either: a proof
+/// establishes only the selected return-bit property, not effect equivalence.
+/// Block ports and state/register operations are outside this function API.
+///
 /// Empty vary or observe proves equality, but guard reachability is still
 /// checked. Empty ranges, including 0..0 in bits[0], select no bits.
 /// Overlapping selections mean their union. Tuple/array indices must be in
