@@ -193,13 +193,7 @@ fn all_required_dso_xls_symbols_are_bound_in_sys() {
 
     // Load the sys bindings file and extract all pub extern fn xls_* names.
     let sys_lib_rs_source: &str = include_str!("../src/lib.rs");
-    let mut binding_names = parse_rust_sys_binding_names(sys_lib_rs_source);
-    // The optional concrete-tuple ABI is bound at runtime for compatibility
-    // with v0.61.0. Count these bindings when the selected DSO exports them.
-    let optional = xlsynth_sys::concrete_tuple::SYMBOLS.map(|name| name.to_str().unwrap());
-    if optional.iter().any(|name| dso_symbols.contains(*name)) {
-        binding_names.extend(optional.into_iter().map(str::to_owned));
-    }
+    let binding_names: BTreeSet<String> = parse_rust_sys_binding_names(sys_lib_rs_source);
     assert!(
         !binding_names.is_empty(),
         "No xls_* pub fn bindings found in xlsynth-sys/src/lib.rs"

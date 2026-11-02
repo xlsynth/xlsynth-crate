@@ -360,10 +360,8 @@ impl BankVisitor<'_> {
                 for i in (0..ty.get_struct_member_count()).rev() {
                     let field = ty.get_struct_member_type(i);
                     let member = def.get_member(i);
-                    // The definition of a generic field can describe a
-                    // different type than its concrete
-                    // instantiation. Use concrete accessors
-                    // for tuples in that case.
+                    // A generic field's written type can differ from its
+                    // instantiation.
                     let written =
                         (def.get_parametric_binding_count() == 0).then(|| member.get_type());
                     self.visit(
@@ -396,34 +394,27 @@ impl BankVisitor<'_> {
             }
             let missing = || {
                 XlsynthError(format!(
-                    "cannot inspect the concrete aggregate at {path}; opaque tuples require libxls concrete tuple-member accessors, and DSLX semantic sums are unsupported"
+                    "cannot inspect the concrete aggregate at {path} (opaque tuples and DSLX semantic sums are unsupported)"
                 ))
             };
             let mut start = offset;
-            if let Some(members) = ty.concrete_tuple_members() {
-                for (i, member) in members.iter().enumerate().rev() {
-                    self.visit(member, None, &format!("{path}.{i}"), depth + 1, start)?;
-                    start += member.get_total_bit_count()?;
-                }
-            } else {
-                let members = annotation
-                    .map(unalias)
-                    .and_then(|a| a.tuple_members())
+            let members = annotation
+                .map(unalias)
+                .and_then(|a| a.tuple_members())
+                .ok_or_else(missing)?;
+            for (i, written) in members.into_iter().enumerate().rev() {
+                let member = self
+                    .info
+                    .get_type_for_type_annotation(&written)
                     .ok_or_else(missing)?;
-                for (i, written) in members.into_iter().enumerate().rev() {
-                    let member = self
-                        .info
-                        .get_type_for_type_annotation(&written)
-                        .ok_or_else(missing)?;
-                    self.visit(
-                        &member,
-                        Some(written),
-                        &format!("{path}.{i}"),
-                        depth + 1,
-                        start,
-                    )?;
-                    start += member.get_total_bit_count()?;
-                }
+                self.visit(
+                    &member,
+                    Some(written),
+                    &format!("{path}.{i}"),
+                    depth + 1,
+                    start,
+                )?;
+                start += member.get_total_bit_count()?;
             }
             if start - offset != ty.get_total_bit_count()? {
                 return Err(XlsynthError(format!(

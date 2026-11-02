@@ -681,7 +681,7 @@ fn pipe_cycle1(x: R) -> bool { x.bank.data }
     }
 
     #[test]
-    fn enabled_banks_check_an_opaque_tuple_payload() {
+    fn enabled_banks_reject_an_opaque_tuple_payload() {
         let source = r#"import stitch;
 type Inner = stitch::Enable<u4>;
 type Outer = stitch::Enable<(bool, Inner)>;
@@ -690,30 +690,18 @@ fn pipe_cycle1(b: Outer) -> u4 { b.data.1.data }
 "#;
         let opts = default_test_options("pipe");
         let path = Path::new("nested.x");
-        let nested = resolve_pipeline(source, path, "pipe", &opts).err().unwrap();
         let ordinary = source
             .replace("type Inner = stitch::Enable<u4>;", "type Inner = u4;")
             .replace("Inner { enabled: true, data: x }", "x")
             .replace("b.data.1.data", "b.data.1");
-        match resolve_pipeline(&ordinary, path, "pipe", &opts) {
-            Ok(pipeline) => {
-                assert_eq!(pipeline.layout.stage_inputs[1].banks[0].data, 0..5);
-                assert!(
-                    nested
-                        .0
-                        .contains("nested stitch::Enable at pipe_cycle0.out.data.1"),
-                    "{nested}"
-                );
-            }
-            Err(error) => {
-                assert!(
-                    error
-                        .0
-                        .contains("cannot inspect the concrete aggregate at pipe_cycle0.out.data"),
-                    "{error}"
-                );
-                assert_eq!(nested.0, error.0);
-            }
+        for program in [source, ordinary.as_str()] {
+            let error = resolve_pipeline(program, path, "pipe", &opts)
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.0,
+                "cannot inspect the concrete aggregate at pipe_cycle0.out.data (opaque tuples and DSLX semantic sums are unsupported)"
+            );
         }
     }
 

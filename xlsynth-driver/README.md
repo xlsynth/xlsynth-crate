@@ -4249,10 +4249,9 @@ this proof. Constant-flop validation currently requires unconditional
 data registers and rejects pipelines with enabled banks.
 
 The pinned v0.61.0 DSO supports the example above, tuple returns with written
-member types, and local aliases for those returns. Tuples hidden behind an
-imported alias or generic parameter (including a tuple used as the bank
-payload) require a libxls build with the concrete tuple-member accessors.
-Stitch reports the field it could not inspect when those accessors are absent.
+member types, and local aliases for those returns. If an imported alias or
+generic parameter hides a tuple's members (including a tuple used as the bank
+payload), stitch rejects the pipeline and reports the field it could not inspect.
 Pipelines that use the marker also reject stage results containing DSLX semantic
 sums because stitch cannot inspect their concrete variant payloads.
 

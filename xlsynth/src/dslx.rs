@@ -2597,21 +2597,6 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
-    /// Returns concrete tuple members when the DSO exposes them. These are
-    /// needed when generic instantiation or imports hide the written tuple.
-    pub fn concrete_tuple_members(&self) -> Option<Vec<Type>> {
-        let api = sys::concrete_tuple::api()?;
-        let count = unsafe { (api.tuple_count)(self.ptr) };
-        (count >= 0).then(|| {
-            (0..count)
-                .map(|i| Type {
-                    parent: self.parent.clone(),
-                    ptr: unsafe { (api.tuple_member)(self.ptr, i) },
-                })
-                .collect()
-        })
-    }
-
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();
