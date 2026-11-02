@@ -790,6 +790,12 @@ fn process_ir_text_with_optional_word_choices(
         ir2gate::observed_select_rails::apply(graph, &capture.words, &mut budget)
     };
     gate_fn = apply_terminal_rails(gate_fn);
+    if options.fold && options.hash {
+        if let Some(trial) = crate::sparse_decode::rewrite(ir_top, &gate_fn) {
+            log::info!("accepted decoder bank");
+            gate_fn = trial;
+        }
+    }
     if let Some((sink, offers)) = word_alternatives {
         for mut offer in offers {
             let optimized = optimize_gate_fn(offer.graph, &native_options)?;
