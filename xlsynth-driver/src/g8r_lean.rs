@@ -6,7 +6,10 @@ use std::time::Instant;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
-use xlsynth_lean::{LeanProofSources, prepare_equivalence_target, run_equivalence_proof};
+use xlsynth_lean::{
+    LeanProofSources, prepare_equivalence_target, run_equivalence_proof,
+    run_ir_function_equivalence_proof,
+};
 
 use crate::common::write_stdout;
 
@@ -38,10 +41,10 @@ pub fn prepare_command() -> Command {
 }
 
 /// Defines the command that runs a user proof against a prepared target.
-pub fn check_command() -> Command {
-    Command::new("g8r-lean-check")
-        .about("Runs a supplied Lean proof against a prepared g8r equivalence target; no proof audit is performed")
-        .arg(Arg::new("target-dir").long("target-dir").required(true).value_name("DIR").help("Target bundle written by g8r-lean-prepare"))
+pub fn check_command(name: &'static str) -> Command {
+    Command::new(name)
+        .about("Runs a supplied Lean proof against a prepared equivalence target")
+        .arg(Arg::new("target-dir").long("target-dir").required(true).value_name("DIR").help("Target bundle written by the corresponding prepare command"))
         .arg(Arg::new("proof").long("proof").required(true).value_name("PATH").help("File containing a complete Lean proof term for Target.Equivalent, such as by ..."))
         .arg(Arg::new("proof-root").long("proof-root").value_name("DIR").help("Root used for helper paths; defaults to the proof body's directory"))
         .arg(Arg::new("proof-source").long("proof-source").value_name("PATH").action(ArgAction::Append).help("Lean helper module imported by the generated proof wrapper; repeat for multiple modules"))
@@ -74,7 +77,7 @@ struct CheckReport {
 
 /// Stages proof inputs, invokes Lean, and emits optional JSON on either
 /// outcome.
-pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
+pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String> {
     let proof = PathBuf::from(matches.get_one::<String>("proof").unwrap());
     let proof_root = matches
         .get_one::<String>("proof-root")
@@ -110,7 +113,12 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| temporary.as_ref().unwrap().path().to_path_buf());
     let started = Instant::now();
-    let outcome = run_equivalence_proof(
+    let run = if word_level {
+        run_ir_function_equivalence_proof
+    } else {
+        run_equivalence_proof
+    };
+    let outcome = run(
         Path::new(matches.get_one::<String>("lean").unwrap()),
         Path::new(matches.get_one::<String>("target-dir").unwrap()),
         &sources,
@@ -119,7 +127,7 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
     let report = match outcome {
         Ok(output) => CheckReport {
             status: "accepted_by_lean",
-            audit_performed: false,
+            audit_performed: word_level,
             lean_version: Some(output.lean_version),
             elapsed_ms: started.elapsed().as_millis(),
             stdout: output.stdout,

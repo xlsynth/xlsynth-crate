@@ -3255,6 +3255,36 @@ LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean
 See the [word-level exporter](../xlsynth-lean/README.md#word-level-ir-functions)
 for type mappings, supported operations, and evaluation.
 
+### `ir-fn-lean-prepare`
+
+Exports two pure XLS IR functions, their reachable callees and their typed,
+pointwise Lean equivalence proposition. The sides must have identical positional
+argument and return types. Each side uses the package top or sole function by default.
+
+```bash
+xlsynth-driver ir-fn-lean-prepare --lhs lhs.ir --rhs rhs.ir --output-dir target-lean
+```
+
+- `--lhs <IR>`, `--rhs <IR>` select the package files.
+- `--lhs-top <FUNCTION>`, `--rhs-top <FUNCTION>` override each side's default entrypoint.
+- `--output-dir <DIR>` receives both generated modules, the target, checker and Lean support.
+
+### `ir-fn-lean-check`
+
+Checks a proof body of `Target.Equivalent` against a bundle from `ir-fn-lean-prepare`.
+The checker rejects unproved assumptions and replays native Boolean checks used by tactics.
+
+```bash
+xlsynth-driver ir-fn-lean-check --target-dir target-lean --lean /path/to/lean \
+  --proof proofs/Body.lean --proof-source proofs/Lemmas.lean
+```
+
+- `--target-dir <DIR>`, `--lean <PATH>` and `--proof <PATH>` are required.
+- `--proof-root <DIR>` resolves helper module names. It defaults to the proof body's directory.
+- Repeat `--proof-source <PATH>` for additional Lean modules.
+- `--work-dir <DIR>` keeps the staged proof and compiled modules in an empty directory. The default is temporary.
+- `--output-json <PATH>` records the result, diagnostics and audit status.
+
 ### `g8r-lean-prepare`
 
 Emits canonical ASCII AIGER files for two combinational `.g8r` or `.g8rbin`
