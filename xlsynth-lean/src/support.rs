@@ -5,49 +5,68 @@ use std::path::Path;
 
 use crate::LeanError;
 
-/// Companion Lean support files embedded in the Rust crate. Module entries are
-/// listed in dependency order.
-const LEAN_SUPPORT_FILES: &[(&str, &str)] = &[
-    (
-        "XlsynthLean/Aig.lean",
-        include_str!("../lean/XlsynthLean/Aig.lean"),
-    ),
-    (
-        "XlsynthLean/Aag.lean",
-        include_str!("../lean/XlsynthLean/Aag.lean"),
-    ),
-    ("XlsynthLean.lean", include_str!("../lean/XlsynthLean.lean")),
-    ("EvalMain.lean", include_str!("../lean/EvalMain.lean")),
-    ("lean-toolchain", include_str!("../lean/lean-toolchain")),
-];
+type Module = (&'static str, &'static [u8]);
 
-/// Returns support module paths in dependency order.
-pub(crate) fn lean_support_module_paths() -> impl Iterator<Item = &'static str> {
-    lean_support_paths().filter(|relative_path| relative_path.ends_with(".lean"))
-}
+const AIG: Module = (
+    "XlsynthLean/Aig.lean",
+    include_bytes!("../lean/XlsynthLean/Aig.lean"),
+);
+const AAG: Module = (
+    "XlsynthLean/Aag.lean",
+    include_bytes!("../lean/XlsynthLean/Aag.lean"),
+);
+const XLSYNTH_LEAN: Module = (
+    "XlsynthLean.lean",
+    include_bytes!("../lean/XlsynthLean.lean"),
+);
+const EVAL_MAIN: Module = ("EvalMain.lean", include_bytes!("../lean/EvalMain.lean"));
+const IR: Module = (
+    "XlsynthLean/IR.lean",
+    include_bytes!("../lean/XlsynthLean/IR.lean"),
+);
+const TOOLCHAIN_PATH: &str = "lean-toolchain";
 
-/// Returns every embedded support artifact path.
-pub(crate) fn lean_support_paths() -> impl Iterator<Item = &'static str> {
-    LEAN_SUPPORT_FILES
-        .iter()
-        .map(|(relative_path, _)| *relative_path)
-}
+/// The modules a consumer needs, in Lean compilation order, plus the common
+/// toolchain pin.
+pub(crate) struct LeanSupport(&'static [Module]);
 
-/// Writes the companion Lean support files into `root` using portable relative
-/// paths.
-pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
-    for (relative_path, contents) in LEAN_SUPPORT_FILES {
-        write_file(root, Path::new(relative_path), contents.as_bytes())?;
+// This is also the on-disk contract for previously prepared AIG proof targets.
+pub(crate) const AIG_PROOF_SUPPORT: LeanSupport = LeanSupport(&[AIG, AAG, XLSYNTH_LEAN, EVAL_MAIN]);
+pub(crate) const IR_FUNCTION_SUPPORT: LeanSupport = LeanSupport(&[IR]);
+pub(crate) const EVALUATOR_SUPPORT: LeanSupport = LeanSupport(&[IR, AIG, AAG, EVAL_MAIN]);
+
+impl LeanSupport {
+    pub(crate) fn module_paths(&self) -> impl Iterator<Item = &'static str> {
+        self.0.iter().map(|&(path, _)| path)
     }
-    write_ir_module(root)
+
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &'static str> {
+        self.module_paths().chain([TOOLCHAIN_PATH])
+    }
+
+    pub(crate) fn write_to(&self, root: &Path) -> Result<(), LeanError> {
+        write_support(root, self.0.iter().copied())
+    }
 }
 
-/// Writes the companion module for evaluating word-level IR definitions.
-pub(crate) fn write_ir_module(root: &Path) -> Result<(), LeanError> {
+/// Writes all companion Lean sources and their toolchain pin.
+pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
+    let modules = AIG_PROOF_SUPPORT.0.iter().chain(IR_FUNCTION_SUPPORT.0);
+    write_support(root, modules.copied())
+}
+
+fn write_support(root: &Path, modules: impl Iterator<Item = Module>) -> Result<(), LeanError> {
+    for (path, source) in modules {
+        write_file(root, Path::new(path), source)?;
+    }
+    write_toolchain(root)
+}
+
+pub(crate) fn write_toolchain(root: &Path) -> Result<(), LeanError> {
     write_file(
         root,
-        Path::new("XlsynthLean/IR.lean"),
-        include_bytes!("../lean/XlsynthLean/IR.lean"),
+        Path::new(TOOLCHAIN_PATH),
+        include_bytes!("../lean/lean-toolchain"),
     )
 }
 

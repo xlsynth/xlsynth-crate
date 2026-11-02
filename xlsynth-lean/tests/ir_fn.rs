@@ -31,6 +31,15 @@ fn emits_typed_lean_for_array_map() {
     let module = LeanModuleName::new("Generated.Function").unwrap();
     let f = export_ir_function(&pkg, None, &module).unwrap();
     assert_eq!(f.lean_source(), include_str!("goldens/word_map.lean"));
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    assert_eq!(
+        f.write_to(root).unwrap(),
+        root.join("Generated/Function.lean")
+    );
+    assert!(root.join("XlsynthLean/IR.lean").is_file());
+    assert!(root.join("lean-toolchain").is_file());
+    assert!(!root.join("XlsynthLean/Aig.lean").exists());
 }
 
 #[test]

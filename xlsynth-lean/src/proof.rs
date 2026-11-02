@@ -9,9 +9,7 @@ use xlsynth_g8r::aig::GateFn;
 
 use crate::gate_fn::export_gate_fn_aag;
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{
-    lean_support_module_paths, lean_support_paths, write_file, write_lean_support,
-};
+use crate::support::{AIG_PROOF_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
 const CHECK_SOURCE: &str = r#"-- SPDX-License-Identifier: Apache-2.0
@@ -37,7 +35,7 @@ pub struct LeanEquivalenceTarget {
 impl LeanEquivalenceTarget {
     /// Writes the complete prepared target using a fixed portable layout.
     pub fn write_to(&self, root: &Path) -> Result<(), LeanError> {
-        write_lean_support(root)?;
+        AIG_PROOF_SUPPORT.write_to(root)?;
         write_file(root, Path::new("Lhs.aag"), self.lhs_aag.as_bytes())?;
         write_file(root, Path::new("Rhs.aag"), self.rhs_aag.as_bytes())?;
         let target_source = target_source(self.input_count, self.output_count);
@@ -209,7 +207,8 @@ pub fn run_equivalence_proof(
         stderr: String::new(),
     };
 
-    let generated_modules = lean_support_module_paths()
+    let generated_modules = AIG_PROOF_SUPPORT
+        .module_paths()
         .map(PathBuf::from)
         .chain([PathBuf::from("Target.lean")])
         .collect::<Vec<_>>();
@@ -316,7 +315,10 @@ fn prepare_empty_work_directory(root: &Path) -> Result<(), LeanError> {
 /// Copies only the fixed artifacts emitted by
 /// `LeanEquivalenceTarget::write_to`.
 fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), LeanError> {
-    for relative in lean_support_paths().chain(TARGET_ARTIFACTS.iter().copied()) {
+    for relative in AIG_PROOF_SUPPORT
+        .paths()
+        .chain(TARGET_ARTIFACTS.iter().copied())
+    {
         let source_path = source_root.join(relative);
         let contents = fs::read(&source_path).map_err(|source| LeanError::Io {
             operation: "reading prepared Lean target",
@@ -347,7 +349,8 @@ fn stage_proof_sources(
     let mut staged = BTreeMap::<PathBuf, PathBuf>::new();
     let mut modules = vec![PathBuf::from("UserProof.lean")];
     let mut imports = Vec::with_capacity(sources.modules.len());
-    let reserved = lean_support_paths()
+    let reserved = AIG_PROOF_SUPPORT
+        .paths()
         .chain(TARGET_ARTIFACTS.iter().copied())
         .chain(["UserProof.lean"])
         .map(PathBuf::from)
