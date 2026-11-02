@@ -65,6 +65,7 @@ pub enum FunctionBody {
     },
     Assign {
         value: VExpr,
+        value_spanned: SpannedExpr,
         value_span: Span,
     },
     Procedure {
@@ -111,8 +112,22 @@ pub struct AlwaysFf {
     pub body: Stmt,
 }
 
+/// An explicit named port connection, expressed in the enclosing module's
+/// scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortConnection {
+    pub expr: VExpr,
+    pub spanned: SpannedExpr,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleItem {
+    Instance {
+        module: String,
+        name: String,
+        connections: BTreeMap<String, PortConnection>,
+        span: Span,
+    },
     Decl {
         decl: Decl,
         span: Span,

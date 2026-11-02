@@ -137,6 +137,12 @@ Run a clocked SV module with a standard clock toggle stimulus. Inputs are
 scheduled vectors applied on a given cycle index; unspecified cycles drive
 zeros on all non-clock inputs.
 
+Use `--top pipe` to select a clocked top from a file that also defines its
+combinational stage modules. Each direct child instance connects all of its
+ports by name. Inputs accept expressions and outputs connect to declared
+signals. The library entry point is `compile_pipeline_module_with_top(src, "pipe")`.
+Child wires appear under their instance names in the VCD.
+
 ### Usage
 
 ```bash

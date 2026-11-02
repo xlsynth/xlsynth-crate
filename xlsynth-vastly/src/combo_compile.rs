@@ -16,7 +16,6 @@ use crate::sv_ast::ModuleItem;
 use crate::sv_ast::ParsedModule;
 
 pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
-    let parse_src = src;
     let parsed: ParsedModule = crate::sv_parser::parse_combo_module(src)?;
     let items =
         crate::generate_constructs::elaborate_combo_items(src, &parsed.params, &parsed.items)?;
@@ -52,12 +51,17 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
             ModuleItem::Function { func: f, .. } => {
                 functions.insert(
                     f.name.clone(),
-                    crate::compiled_module::lower_function(parse_src, f, &decls, true)?,
+                    crate::compiled_module::lower_function(f, &decls, true)?,
                 );
             }
             ModuleItem::AlwaysFf { .. } => {
                 return Err(crate::Error::Parse(
                     "always_ff is not supported in combo modules".to_string(),
+                ));
+            }
+            ModuleItem::Instance { .. } => {
+                return Err(crate::Error::Parse(
+                    "instances require a selected pipeline top".into(),
                 ));
             }
             ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
