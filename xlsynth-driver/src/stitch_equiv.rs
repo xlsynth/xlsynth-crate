@@ -71,18 +71,19 @@ pub fn command() -> Command {
 /// Loads the reference and reports the proof result or a replayable
 /// counterexample.
 pub fn handle(matches: &ArgMatches) -> Result<()> {
-    let reference = resolve_stitch_spec(matches.get_one::<PathBuf>("spec").unwrap())?;
     let timeout = matches
         .get_one::<u64>("timeout-seconds")
         .copied()
         .map(Duration::from_secs);
+    let gate_proof = GateFormalOptions {
+        cadical_timeout: timeout,
+        ..GateFormalOptions::default()
+    };
+    let reference = resolve_stitch_spec(matches.get_one::<PathBuf>("spec").unwrap(), gate_proof)?;
     let mut options = StitchProofOptions {
         solver: match matches.get_one::<String>("solver").unwrap().as_str() {
             "bitwuzla" => StitchProofSolver::Bitwuzla { timeout },
-            "cadical" => StitchProofSolver::Cadical(GateFormalOptions {
-                cadical_timeout: timeout,
-                ..GateFormalOptions::default()
-            }),
+            "cadical" => StitchProofSolver::Cadical(gate_proof),
             _ => unreachable!("clap validates the stitch solver"),
         },
         mode: match matches.get_one::<String>("proof-mode").map(String::as_str) {

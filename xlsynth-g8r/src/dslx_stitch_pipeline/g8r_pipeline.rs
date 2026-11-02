@@ -58,6 +58,7 @@ pub fn stitch_g8r_pipeline(
             reset_signal: options.reset_signal.map(str::to_string),
             reset_active_low: options.reset_active_low,
         },
+        Default::default(),
     )?;
     resolved.lower_to_g8r(lowering_options)
 }

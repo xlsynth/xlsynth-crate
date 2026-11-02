@@ -64,7 +64,10 @@ pub fn handle(matches: &ArgMatches) -> Result<()> {
         }
     };
     let seed_note = random_count.map_or_else(String::new, |_| format!(" Random seed {seed}."));
-    let reference = resolve_stitch_spec(matches.get_one::<PathBuf>("spec").unwrap())?;
+    let reference = resolve_stitch_spec(
+        matches.get_one::<PathBuf>("spec").unwrap(),
+        Default::default(),
+    )?;
     match reference.check_vectors_against_gv(
         matches.get_one::<PathBuf>("netlist").unwrap(),
         matches.get_one::<PathBuf>("liberty-proto").unwrap(),

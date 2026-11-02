@@ -13,6 +13,7 @@ use super::layout::PipelineLayout;
 use super::names::validate_stitch_pipeline_names;
 use super::{resolve_stage_ir_names, select_stage_names, verify_stage_signatures};
 use crate::aig::{ClockPort, SequentialPipelineOptions};
+use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
 
 /// Source selection, register boundaries and external control ports shared by
 /// both emitters.
@@ -129,6 +130,15 @@ impl StitchPipelineSpec {
     /// proof-model generation. If the source imports another module, run
     /// resolution in a process whose working directory is `source_directory()`.
     pub fn resolve(&self) -> Result<ResolvedStitchPipeline, XlsynthError> {
+        self.resolve_with_bank_proof_options(GateFormalOptions::default())
+    }
+
+    /// Resolves the stages with the supplied solver limits for enabled-bank
+    /// validation.
+    pub fn resolve_with_bank_proof_options(
+        &self,
+        bank_proof: GateFormalOptions,
+    ) -> Result<ResolvedStitchPipeline, XlsynthError> {
         let name = self.validate()?;
         let text = fs::read_to_string(&self.dslx_input_file).map_err(|error| {
             XlsynthError(format!(
@@ -159,6 +169,7 @@ impl StitchPipelineSpec {
                 reset_signal: self.reset.clone(),
                 reset_active_low: self.reset_active_low,
             },
+            bank_proof,
         )?;
         resolved.validate_wrapper_names()?;
 
@@ -245,6 +256,7 @@ pub(super) fn resolve_stages(
     explicit_stages: Option<&[String]>,
     paths: StitchImportPaths<'_>,
     boundary: SequentialPipelineOptions,
+    bank_proof: GateFormalOptions,
 ) -> Result<ResolvedStitchPipeline, XlsynthError> {
     let module_name = path
         .file_stem()
@@ -323,7 +335,7 @@ pub(super) fn resolve_stages(
     if let Some(builtin) = builtin {
         let marker = builtin.get_module().get_type_definition_as_struct_def(0)?;
         super::enable::collect_banks(&module, &marker, &stages, &mut layout)?;
-        super::enable::validate_banks(&ir, &stages, &mut layout)?;
+        super::enable::validate_banks(&ir, &stages, &mut layout, bank_proof)?;
     }
     Ok(ResolvedStitchPipeline {
         ir,
@@ -339,6 +351,32 @@ mod tests {
     use crate::dslx_stitch_pipeline::StitchRtlOptions;
     use crate::process_ir_path::CanonicalG8rOptions;
     use tempfile::tempdir;
+
+    #[test]
+    fn spec_applies_the_timeout_to_enabled_bank_validation() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pipe.x"),
+            r#"import stitch;
+type Bank = stitch::Enable<bool>;
+fn pipe_cycle0(x: bool) -> Bank { Bank { enabled: false, data: x } }
+fn pipe_cycle1(bank: Bank) -> bool { bank.data }
+"#,
+        )
+        .unwrap();
+        let path = dir.path().join("pipe.toml");
+        fs::write(
+            &path,
+            r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+"#,
+        )
+        .unwrap();
+        let spec = StitchPipelineSpec::load(&path).unwrap();
+        let limits = GateFormalOptions::default().with_cadical_timeout(std::time::Duration::ZERO);
+        let err = spec.resolve_with_bank_proof_options(limits).err().unwrap();
+        assert_eq!(err.0, "enable insensitivity proof: CadicalSolveInterrupted");
+    }
 
     #[test]
     fn spec_requires_the_source_directory_for_import_and_use() {

@@ -27,7 +27,7 @@ pub fn handle_dslx_stitch_g8r_pipeline(matches: &ArgMatches, config: &Option<Too
         lowering.enable_formal_array_alias_analysis = false;
     }
     let design = match matches.get_one::<String>("spec") {
-        Some(path) => resolve_stitch_spec(Path::new(path))
+        Some(path) => resolve_stitch_spec(Path::new(path), Default::default())
             .and_then(|resolved| resolved.lower_to_g8r(&lowering)),
         None => stitch_from_flags(matches, config, &lowering),
     }

@@ -4124,7 +4124,7 @@ a matching proto as described under `g8r2gv`. A netlist from synthesis of
 - `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
 - `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
 - `--show-proof-plan` prints the solver and reference used, along with the proved leaf count per stage or the whole-pipeline fallback reason, to stderr.
-- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
+- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including enabled-bank validation and any whole-pipeline fallback. The default is unlimited.
 
 For example, to split the multiply stage's obligations, save the following as
 `product-proof.json`. Stage scripts use the `xlsynth-prover` selector and

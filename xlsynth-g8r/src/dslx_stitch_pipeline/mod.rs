@@ -340,6 +340,7 @@ pub fn resolve_pipeline(
             required_directory: None,
         },
         opts.boundary_options(),
+        Default::default(),
     )?;
     resolved.validate_wrapper_names()?;
     Ok(resolved)
@@ -609,8 +610,13 @@ fn pipe_cycle1(a: ((bool, bool), (bool, bool))) -> bool { a.0.1 & a.1.1 }
                 carry_enable: true,
             })
             .into();
-        let error = enable::validate_banks(&resolved.ir, &resolved.stages, &mut resolved.layout)
-            .unwrap_err();
+        let error = enable::validate_banks(
+            &resolved.ir,
+            &resolved.stages,
+            &mut resolved.layout,
+            Default::default(),
+        )
+        .unwrap_err();
         assert!(error.0.contains("changes the final output"), "{error}");
     }
 

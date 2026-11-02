@@ -78,6 +78,7 @@ pub(super) fn validate_banks(
     ir: &IrPackage,
     stages: &[(String, String)],
     layout: &mut PipelineLayout,
+    options: GateFormalOptions,
 ) -> Result<(), XlsynthError> {
     if layout.stage_inputs.iter().all(|b| b.banks.is_empty()) {
         return Ok(());
@@ -128,7 +129,7 @@ pub(super) fn validate_banks(
         });
     }
     mark_live_enables(&graphs, layout);
-    prove_insensitivity(&graphs, layout)
+    prove_insensitivity(&graphs, layout, options)
 }
 
 /// Propagates packed-bit demand from the output and every bank write predicate.
@@ -182,7 +183,11 @@ fn evaluate(
 }
 
 /// Proves the final packed outputs equal, or decodes and replays a SAT witness.
-fn prove_insensitivity(stages: &[ProofStage], layout: &PipelineLayout) -> Result<(), XlsynthError> {
+fn prove_insensitivity(
+    stages: &[ProofStage],
+    layout: &PipelineLayout,
+    options: GateFormalOptions,
+) -> Result<(), XlsynthError> {
     let mut builder = GateBuilder::new("enable_insensitivity".into(), GateBuilderOptions::opt());
     let mut bits = Vec::new();
     for port in &stages[0].graph.inputs {
@@ -222,7 +227,7 @@ fn prove_insensitivity(stages: &[ProofStage], layout: &PipelineLayout) -> Result
     builder.add_output("reference.out".into(), reference);
     builder.add_output("candidate.out".into(), candidate);
     let graph = builder.build();
-    let Some(witness) = find_cone_witness(&graph, differs, GateFormalOptions::default())
+    let Some(witness) = find_cone_witness(&graph, differs, options)
         .map_err(|error| XlsynthError(format!("enable insensitivity proof: {error}")))?
     else {
         return Ok(());
