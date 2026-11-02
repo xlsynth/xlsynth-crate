@@ -121,8 +121,8 @@ fn match_selected_negate_term(
     None
 }
 
-/// Resizes a literal term to the `ExtNaryAdd` output width.
-fn resize_literal_bits_for_ext_nary_add(
+/// Resizes an arithmetic literal modulo the requested width.
+pub(super) fn resize_literal_bits(
     bits: &xlsynth_pir::IrBits,
     output_width: usize,
     signed: bool,
@@ -153,7 +153,7 @@ fn accumulate_ext_nary_add_literal(
     signed: bool,
     negated: bool,
 ) {
-    let resized = resize_literal_bits_for_ext_nary_add(term_bits, output_width, signed);
+    let resized = resize_literal_bits(term_bits, output_width, signed);
     let contribution = if negated { resized.negate() } else { resized };
     *literal_sum = literal_sum.add(&contribution);
 }
