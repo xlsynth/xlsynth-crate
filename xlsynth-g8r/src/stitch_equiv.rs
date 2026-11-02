@@ -151,10 +151,15 @@ impl Default for StitchProofSolver {
 /// A prepared reference for the selected proof backend.
 #[derive(Clone, Copy)]
 pub(crate) enum ProofReference<'a> {
-    Gates(&'a GateFormalOptions),
+    Gates {
+        formal: &'a GateFormalOptions,
+        /// Builds ordinary DSLX capture for post-fill if the stage layout is
+        /// banked.
+        post_fill: Option<&'a dyn Fn() -> Result<StitchedGatePipeline, String>>,
+    },
     #[cfg(feature = "has-bitwuzla")]
     Behavioral {
-        stages: &'a BehavioralPipeline,
+        stages: &'a BehavioralPipeline<'a>,
         timeout: Option<Duration>,
         /// Simulates candidate pairs. The proof uses the behavioral functions.
         lower_for_pairing: &'a dyn Fn() -> Result<StitchedGatePipeline, String>,
@@ -511,7 +516,7 @@ fn prove_stages(
             // A combinational design has an empty state relation.
             Ok(Vec::new())
         }
-        ProofReference::Gates(_) => {
+        ProofReference::Gates { .. } => {
             correspondence::direct_register_pairs(reference, implementation, latency, observation)
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -540,7 +545,7 @@ fn prove_stages(
         }
     };
     let (outcome, solver_name) = match model {
-        ProofReference::Gates(formal) => {
+        ProofReference::Gates { formal, .. } => {
             let miters = stage_graph::build_stage_miters(
                 reference,
                 implementation,
@@ -677,14 +682,19 @@ pub(crate) fn prove_with_stage_options(
         }
     };
     let result = match model {
-        ProofReference::Gates(formal) => prove_post_fill(
-            reference,
-            implementation,
-            &expected,
-            latency,
-            observation,
-            *formal,
-        ),
+        ProofReference::Gates { formal, post_fill } => {
+            let ordinary = post_fill.map(|build| build()).transpose()?;
+            prove_post_fill(
+                ordinary
+                    .as_ref()
+                    .map_or(reference, |pipeline| &pipeline.design),
+                implementation,
+                &expected,
+                latency,
+                observation,
+                *formal,
+            )
+        }
         #[cfg(feature = "has-bitwuzla")]
         ProofReference::Behavioral {
             stages: behavior,
@@ -996,6 +1006,7 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 reset_signal: None,
                 reset_active_low: false,
             },
+            &[],
         )
         .unwrap();
         let lower = || {
@@ -1019,7 +1030,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
             StitchObservation::default(),
             &stages,
             &options,
-            ProofReference::Gates(&formal),
+            ProofReference::Gates {
+                formal: &formal,
+                post_fill: None,
+            },
         )
         .unwrap();
         assert_eq!(gate_report.result, StitchEquivResult::Proved);
@@ -1128,7 +1142,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 StitchObservation::default(),
                 &stage_names,
                 &options,
-                ProofReference::Gates(&formal)
+                ProofReference::Gates {
+                    formal: &formal,
+                    post_fill: None
+                }
             )
             .unwrap_err(),
             format!(
@@ -1144,7 +1161,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 StitchObservation::default(),
                 &stage_names,
                 &options,
-                ProofReference::Gates(&formal)
+                ProofReference::Gates {
+                    formal: &formal,
+                    post_fill: None
+                }
             )
             .unwrap_err(),
             format!(

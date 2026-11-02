@@ -4069,6 +4069,10 @@ a one-to-one pairing of register bits, allowing renamed, reordered, and inverted
 flops. The solver checks every paired next-state bit for arbitrary current state
 and inputs. The last stage also checks the external outputs. This can establish
 equivalence even when the mapped data and valid flops have different names.
+For `stitch::Enable<T>`, the stage proof checks that a disabled payload holds
+its previous value and pairs the enable bit only when the consumer needs it.
+The whole-pipeline proof compares the final outputs against ordinary DSLX
+capture, including when the checker falls back from a stage proof.
 
 If synthesis changes the state encoding, removes flops, or the proposed pairing
 fails a stage proof, the default mode checks the whole pipeline. Bitwuzla

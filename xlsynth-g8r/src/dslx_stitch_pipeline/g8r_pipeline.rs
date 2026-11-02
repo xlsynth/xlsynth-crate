@@ -8,9 +8,7 @@ use xlsynth::optimize_ir;
 
 use super::ResolvedStitchPipeline;
 use super::spec::{StitchImportPaths, resolve_stages};
-use crate::aig::sequential_pipeline::{
-    StitchedGatePipeline, stitch_gate_fns_with_layout, stitch_with_banks,
-};
+use crate::aig::sequential_pipeline::stitch_with_banks;
 use crate::aig::{ClockPort, SequentialGateFn, SequentialPipelineOptions};
 use crate::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts};
 
@@ -72,35 +70,14 @@ impl ResolvedStitchPipeline {
         lowering_options: &CanonicalG8rOptions,
     ) -> Result<SequentialGateFn, xlsynth::XlsynthError> {
         let stages = self.lower_stages(lowering_options)?;
-        let banks = self
-            .layout
-            .stage_inputs
-            .iter()
-            .skip(1)
-            .map(|b| {
-                if b.banks.is_empty() {
-                    Vec::new()
-                } else {
-                    b.bank_segments()
-                }
-            })
-            .collect::<Vec<_>>();
+        let banks = self.layout.interstage_banks();
         Ok(stitch_with_banks(&stages, &self.boundary, &banks)
             .map_err(xlsynth::XlsynthError)?
             .design)
     }
 
-    /// Lowers the stages once and retains the register boundaries for proof.
-    pub(super) fn lower_to_g8r_with_layout(
-        &self,
-        lowering_options: &CanonicalG8rOptions,
-    ) -> Result<StitchedGatePipeline, xlsynth::XlsynthError> {
-        // The proof reference retains the ordinary DSLX capture semantics.
-        let stages = self.lower_stages(lowering_options)?;
-        stitch_gate_fns_with_layout(&stages, &self.boundary).map_err(xlsynth::XlsynthError)
-    }
-
-    fn lower_stages(
+    /// Gatifies each combinational stage independently of its register layout.
+    pub(super) fn lower_stages(
         &self,
         lowering_options: &CanonicalG8rOptions,
     ) -> Result<Vec<crate::aig::GateFn>, xlsynth::XlsynthError> {

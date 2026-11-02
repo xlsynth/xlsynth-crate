@@ -110,6 +110,22 @@ pub(super) struct PipelineLayout {
 }
 
 impl PipelineLayout {
+    /// Returns the bank segments after each producing stage. An empty entry
+    /// keeps the ordinary register grouping by destination parameter.
+    pub(super) fn interstage_banks(&self) -> Vec<Vec<BankSegment>> {
+        self.stage_inputs
+            .iter()
+            .skip(1)
+            .map(|boundary| {
+                if boundary.banks.is_empty() {
+                    Vec::new()
+                } else {
+                    boundary.bank_segments()
+                }
+            })
+            .collect()
+    }
+
     /// Resolves the port widths from the same function signatures used to
     /// typecheck the pipeline.
     pub(super) fn from_ir(

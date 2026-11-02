@@ -404,6 +404,123 @@ fn pipe_cycle0(x: bool) -> bool { spec(x) }
 }
 
 #[test]
+fn stitch_equiv_proves_enabled_bank_state_and_falls_back_on_different_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let gv = r#"module pipe(input clk, input en, input x, input vin, input rst, output out, output vout);
+  wire load, hold, sample, held, d, q, bubble, old_op, op_d, op, running, next_valid;
+  AND2 load_bank (.A(vin), .B(en), .Y(load));
+  INV invert_load (.A(load), .Y(hold));
+  AND2 sample_bank (.A(load), .B(x), .Y(sample));
+  AND2 hold_bank (.A(hold), .B(q), .Y(held));
+  OR2 data_mux (.A(sample), .B(held), .Y(d));
+  DFF bank_ff (.D(d), .CLK(clk), .Q(q));
+  INV invert_vin (.A(vin), .Y(bubble));
+  AND2 hold_op (.A(bubble), .B(op), .Y(old_op));
+  OR2 op_mux (.A(load), .B(old_op), .Y(op_d));
+  DFF op_ff (.D(op_d), .CLK(clk), .Q(op));
+  INV invert_rst (.A(rst), .Y(running));
+  AND2 flush (.A(vin), .B(running), .Y(next_valid));
+  DFF valid_ff (.D(next_valid), .CLK(clk), .Q(vout));
+  AND2 select_out (.A(op), .B(q), .Y(out));
+endmodule"#;
+    fs::write(dir.path().join("pipe.gv"), gv).unwrap();
+    fs::write(dir.path().join("cells.textproto"), LIBERTY).unwrap();
+    fs::write(
+        dir.path().join("pipe.toml"),
+        r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+flop_inputs = false
+flop_outputs = false
+input_valid_signal = "vin"
+output_valid_signal = "vout"
+reset = "rst""#,
+    )
+    .unwrap();
+    fs::write(dir.path().join("split.json"), SPLIT).unwrap();
+    // Both DSLX forms map to the same flops. The first drops the unused bank
+    // predicate and carries an opcode. The second stores the predicate itself.
+    for dslx in [
+        r#"import stitch;
+type Bank = stitch::Enable<bool>;
+fn pipe_cycle0(en: bool, x: bool) -> (bool, Bank) {
+    (en, Bank { enabled: en, data: x })
+}
+fn pipe_cycle1(r: (bool, Bank)) -> bool { r.0 && r.1.data }"#,
+        r#"import stitch;
+type Bank = stitch::Enable<bool>;
+fn pipe_cycle0(en: bool, x: bool) -> Bank { Bank { enabled: en, data: x } }
+fn pipe_cycle1(bank: Bank) -> bool { bank.enabled && bank.data }"#,
+    ] {
+        fs::write(dir.path().join("pipe.x"), dslx).unwrap();
+        for &(solver, plan) in STITCH_SOLVERS {
+            for (args, leaves) in [
+                (&["--proof-mode", "stages"][..], "1 proved leaf"),
+                (
+                    &["--stage-script", "pipe_cycle0=split.json"][..],
+                    "2 proved leaves",
+                ),
+            ] {
+                let proof = stage_command(dir.path(), &["--solver", solver])
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    proof.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&proof.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8(proof.stderr).unwrap(),
+                    format!(
+                        "stage pipe_cycle0: {leaves}\nstage pipe_cycle1: 1 proved leaf\n{plan}"
+                    )
+                );
+            }
+        }
+    }
+
+    // Capturing x unconditionally changes the internal state when disabled.
+    // It still implements the original transaction at the qualified output.
+    fs::write(
+        dir.path().join("pipe.gv"),
+        gv.replace("bank_ff (.D(d)", "bank_ff (.D(x)"),
+    )
+    .unwrap();
+    let reason = "no direct register correspondence: no direct mapped partner for reference boundary register 'p0_bank_at_0[0]' (3 reference bits, 3 mapped bits)";
+    for &(solver, plan) in STITCH_SOLVERS {
+        let strict = stage_command(dir.path(), &["--solver", solver, "--proof-mode", "stages"])
+            .output()
+            .unwrap();
+        assert_eq!(strict.status.code(), Some(1));
+        assert_eq!(
+            String::from_utf8(strict.stderr).unwrap(),
+            format!(
+                "xlsynth-driver: stitch-equiv: {reason}. Use whole-pipeline mode to check the external outputs after fill\n"
+            )
+        );
+        for (mode, method) in [
+            ("auto", format!("whole-pipeline fallback: {reason}")),
+            ("whole-pipeline", "whole-pipeline proof".into()),
+        ] {
+            let proof = stage_command(dir.path(), &["--solver", solver, "--proof-mode", mode])
+                .output()
+                .unwrap();
+            assert_eq!(
+                proof.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&proof.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(proof.stderr).unwrap(),
+                format!("{method}\n{plan}")
+            );
+        }
+    }
+}
+
+#[test]
 fn stitch_equiv_selects_the_solver_for_stages_and_whole_pipeline() {
     let dir = tempfile::tempdir().unwrap();
     // The physical flop captures !x. Invert its Q to recover the DSLX stage
