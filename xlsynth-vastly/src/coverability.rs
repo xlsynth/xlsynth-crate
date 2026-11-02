@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::SourceText;
+use std::collections::BTreeSet;
+
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Span;
+use crate::{CoverageCounters, Error, SourceText};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LineCoverability {
@@ -43,6 +45,22 @@ pub fn compute_coverability_with_defines(
     src: &SourceText,
     defines: &std::collections::BTreeSet<String>,
 ) -> crate::Result<CoverabilityMap> {
+    compute_coverability_with_options(src, defines, None)
+}
+
+impl CoverageCounters {
+    /// Classifies source lines for the pipeline whose coverage was collected.
+    pub fn coverability(&self, src: &SourceText) -> CoverabilityMap {
+        compute_coverability_with_options(src, &self.defines, self.top.as_deref())
+            .unwrap_or_else(|_| baseline_coverability(src))
+    }
+}
+
+fn compute_coverability_with_options(
+    src: &SourceText,
+    defines: &BTreeSet<String>,
+    top: Option<&str>,
+) -> crate::Result<CoverabilityMap> {
     // Baseline: nonblank/non-comment => unknown coverable.
     let mut per_line: Vec<LineCoverability> = Vec::with_capacity(src.line_count() as usize);
     for line in src.text.lines() {
@@ -57,20 +75,59 @@ pub fn compute_coverability_with_defines(
         }
     }
 
-    let pm = crate::sv_parser::parse_pipeline_module_with_defines(&src.text, defines)?;
+    let modules = crate::sv_parser::parse_pipeline_modules(&src.text, defines)?;
+    let mut selected = BTreeSet::new();
+    if let Some(name) = top {
+        let module = modules
+            .get(name)
+            .ok_or_else(|| Error::Parse(format!("unknown top module `{name}`")))?;
+        selected.insert(module.name.as_str());
+        // The pipeline compiler supports direct instances of combinational leaf
+        // modules.
+        for item in &module.items {
+            if let ModuleItem::Instance { module, .. } = item {
+                selected.insert(module.as_str());
+            }
+        }
+    }
+    for (name, module) in &modules {
+        if top.is_none() || selected.contains(name.as_str()) {
+            mark_module(src, &mut per_line, module)?;
+        } else {
+            let span = Span {
+                start: module.header_span.start,
+                end: module.endmodule_span.end,
+            };
+            mark_span(
+                src,
+                &mut per_line,
+                span,
+                LineCoverability::NonCoverableStructural,
+            );
+        }
+    }
+    Ok(CoverabilityMap { per_line })
+}
+
+/// Classifies each module using spans in the original multi-module source.
+fn mark_module(
+    src: &SourceText,
+    per_line: &mut [LineCoverability],
+    pm: &crate::sv_ast::ParsedModule,
+) -> crate::Result<()> {
     let items =
         crate::generate_constructs::elaborate_pipeline_items(&src.text, &pm.params, &pm.items)?;
 
     // Structural: module header.
     mark_span(
         src,
-        &mut per_line,
+        per_line,
         pm.header_span,
         LineCoverability::NonCoverableStructural,
     );
     mark_span(
         src,
-        &mut per_line,
+        per_line,
         pm.endmodule_span,
         LineCoverability::NonCoverableStructural,
     );
@@ -78,29 +135,35 @@ pub fn compute_coverability_with_defines(
     // Structural and executable spans from items.
     for it in items {
         match it {
+            ModuleItem::Instance {
+                span, connections, ..
+            } => {
+                let expression_lines: BTreeSet<_> = connections
+                    .values()
+                    .flat_map(|connection| src.lines_for_span(connection.spanned.span))
+                    .collect();
+                for line in src.lines_for_span(span) {
+                    let class = if expression_lines.contains(&line) {
+                        LineCoverability::CoverableExecutable
+                    } else {
+                        LineCoverability::NonCoverableStructural
+                    };
+                    mark_lines(per_line, line, line, class);
+                }
+            }
             ModuleItem::Decl { span, .. } => {
                 mark_span(
                     src,
-                    &mut per_line,
+                    per_line,
                     span,
                     LineCoverability::NonCoverableStructural,
                 );
             }
             ModuleItem::Assign { span, .. } => {
-                mark_span(
-                    src,
-                    &mut per_line,
-                    span,
-                    LineCoverability::CoverableExecutable,
-                );
+                mark_span(src, per_line, span, LineCoverability::CoverableExecutable);
             }
             ModuleItem::AlwaysFf { span, .. } => {
-                mark_span(
-                    src,
-                    &mut per_line,
-                    span,
-                    LineCoverability::CoverableExecutable,
-                );
+                mark_span(src, per_line, span, LineCoverability::CoverableExecutable);
             }
             ModuleItem::Function {
                 span, body_span, ..
@@ -118,19 +181,19 @@ pub fn compute_coverability_with_defines(
                 let body_end_line = src.line_of_offset(body_span.end.saturating_sub(1));
 
                 mark_lines(
-                    &mut per_line,
+                    per_line,
                     def_start_line,
                     body_start_line.saturating_sub(1),
                     LineCoverability::NonCoverableStructural,
                 );
                 mark_lines(
-                    &mut per_line,
+                    per_line,
                     body_start_line,
                     body_end_line,
                     LineCoverability::CoverableExecutable,
                 );
                 mark_lines(
-                    &mut per_line,
+                    per_line,
                     body_end_line + 1,
                     def_end_line,
                     LineCoverability::NonCoverableStructural,
@@ -142,7 +205,7 @@ pub fn compute_coverability_with_defines(
         }
     }
 
-    Ok(CoverabilityMap { per_line })
+    Ok(())
 }
 
 pub fn compute_coverability_or_fallback(src: &SourceText) -> CoverabilityMap {

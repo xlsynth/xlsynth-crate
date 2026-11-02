@@ -155,6 +155,7 @@ pub fn run_pipeline_and_collect_coverage(
     }
     let plan = plan_combo_eval(&m.combo)?;
     let skip_toggle_names = literal_assigned_names(m)?;
+    cov.top = Some(m.module_name.clone());
     let mut state = initial_state.clone();
     let mut last_values: BTreeMap<String, Value4> = BTreeMap::new();
 

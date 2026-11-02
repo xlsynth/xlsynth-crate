@@ -2,6 +2,7 @@
 
 use xlsynth_vastly::LineCoverability;
 use xlsynth_vastly::SourceText;
+use xlsynth_vastly::compute_coverability;
 use xlsynth_vastly::compute_coverability_or_fallback;
 
 #[test]
@@ -69,4 +70,25 @@ fn generated_items_are_marked_coverable() {
     assert_eq!(c.line(8), LineCoverability::CoverableExecutable);
     assert_eq!(c.line(9), LineCoverability::CoverableExecutable);
     assert_eq!(c.line(10), LineCoverability::CoverableExecutable);
+}
+
+#[test]
+fn named_connection_expression_lines_are_coverable() {
+    let src = r#"module top(input wire clk, input wire sel, input wire a, output wire y);
+  child inst (
+    .x(sel ?
+       a : 1'b0),
+    .out(y)
+  );
+endmodule
+module child(input wire x, output wire out);
+  assign out = x;
+endmodule
+"#;
+    let cover = compute_coverability(&SourceText::new(src.to_owned())).unwrap();
+    assert_eq!(cover.line(2), LineCoverability::NonCoverableStructural);
+    for line in 3..=5 {
+        assert_eq!(cover.line(line), LineCoverability::CoverableExecutable);
+    }
+    assert_eq!(cover.line(6), LineCoverability::NonCoverableStructural);
 }

@@ -35,7 +35,7 @@ struct Segment {
 }
 
 pub fn render_annotated_source(src: &SourceText, cov: &CoverageCounters, ansi: bool) -> String {
-    let cover = crate::compute_coverability_or_fallback_with_defines(src, &cov.defines);
+    let cover = cov.coverability(src);
     let fn_line_ann = build_function_line_annotations(src, cov);
     let zero_toggle_by_line = if ansi {
         build_zero_toggle_token_spans(src, cov)
