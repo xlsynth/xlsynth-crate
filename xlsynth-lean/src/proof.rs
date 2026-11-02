@@ -8,8 +8,9 @@ use std::path::{Component, Path, PathBuf};
 use xlsynth_g8r::aig::GateFn;
 
 use crate::gate_fn::export_gate_fn_aag;
+use crate::ir_proof::FIXED_IR_PROOF_FILES;
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{AIG_PROOF_SUPPORT, write_file};
+use crate::support::{AIG_PROOF_SUPPORT, IR_FUNCTION_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
 const CHECK_SOURCE: &str = r#"-- SPDX-License-Identifier: Apache-2.0
@@ -188,11 +189,75 @@ pub fn run_equivalence_proof(
     proof_sources: &LeanProofSources,
     work_root: &Path,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
+    let artifacts = AIG_PROOF_SUPPORT
+        .paths()
+        .chain(TARGET_ARTIFACTS.iter().copied())
+        .collect::<Vec<_>>();
+    let modules = AIG_PROOF_SUPPORT
+        .module_paths()
+        .chain(["Target.lean"])
+        .collect::<Vec<_>>();
+    run_prepared_proof(
+        lean_executable,
+        target_root,
+        proof_sources,
+        work_root,
+        &artifacts,
+        &modules,
+        &[],
+    )
+}
+
+/// Checks a proof of the pointwise equality emitted by a word-level IR target.
+pub fn run_ir_function_equivalence_proof(
+    lean_executable: &Path,
+    target_root: &Path,
+    proof_sources: &LeanProofSources,
+    work_root: &Path,
+) -> Result<LeanProofOutput, LeanProofFailure> {
+    let proof_modules = [
+        "XlsynthLean/IRProof.lean",
+        "XlsynthLean/IRDecompose.lean",
+        "Generated/Lhs.lean",
+        "Generated/Rhs.lean",
+        "Target.lean",
+    ];
+    let modules = IR_FUNCTION_SUPPORT
+        .module_paths()
+        .chain(proof_modules)
+        .collect::<Vec<_>>();
+    let artifacts = IR_FUNCTION_SUPPORT
+        .paths()
+        .chain(proof_modules)
+        .chain(["Check.lean"])
+        .collect::<Vec<_>>();
+    run_prepared_proof(
+        lean_executable,
+        target_root,
+        proof_sources,
+        work_root,
+        &artifacts,
+        &modules,
+        FIXED_IR_PROOF_FILES,
+    )
+}
+
+/// Stages the fixed target before any user modules and checks the generated
+/// root theorem.
+fn run_prepared_proof(
+    lean_executable: &Path,
+    target_root: &Path,
+    proof_sources: &LeanProofSources,
+    work_root: &Path,
+    artifacts: &[&str],
+    modules: &[&str],
+    fixed_files: &[(&str, &[u8])],
+) -> Result<LeanProofOutput, LeanProofFailure> {
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
-    copy_prepared_target(target_root, &work_root)?;
-    let proof_modules = stage_proof_sources(proof_sources, &work_root)?;
+    copy_prepared_target(target_root, &work_root, artifacts, fixed_files)?;
+    let proof_modules = stage_proof_sources(proof_sources, &work_root, artifacts)?;
     let module_roots = [work_root.as_path()];
     let version_output = run_lean_process(
         &lean_executable,
@@ -207,11 +272,7 @@ pub fn run_equivalence_proof(
         stderr: String::new(),
     };
 
-    let generated_modules = AIG_PROOF_SUPPORT
-        .module_paths()
-        .map(PathBuf::from)
-        .chain([PathBuf::from("Target.lean")])
-        .collect::<Vec<_>>();
+    let generated_modules = modules.iter().map(PathBuf::from).collect::<Vec<_>>();
     for relative in &generated_modules {
         compile_module(
             &lean_executable,
@@ -312,13 +373,18 @@ fn prepare_empty_work_directory(root: &Path) -> Result<(), LeanError> {
     Ok(())
 }
 
-/// Copies only the fixed artifacts emitted by
-/// `LeanEquivalenceTarget::write_to`.
-fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), LeanError> {
-    for relative in AIG_PROOF_SUPPORT
-        .paths()
-        .chain(TARGET_ARTIFACTS.iter().copied())
-    {
+/// Copies only the fixed artifacts for the selected target kind.
+fn copy_prepared_target(
+    source_root: &Path,
+    work_root: &Path,
+    artifacts: &[&str],
+    fixed_files: &[(&str, &[u8])],
+) -> Result<(), LeanError> {
+    for relative in artifacts {
+        if let Some((_, contents)) = fixed_files.iter().find(|(path, _)| path == relative) {
+            write_file(work_root, Path::new(relative), contents)?;
+            continue;
+        }
         let source_path = source_root.join(relative);
         let contents = fs::read(&source_path).map_err(|source| LeanError::Io {
             operation: "reading prepared Lean target",
@@ -334,6 +400,7 @@ fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), Lean
 fn stage_proof_sources(
     sources: &LeanProofSources,
     work_root: &Path,
+    artifacts: &[&str],
 ) -> Result<Vec<PathBuf>, LeanError> {
     let root = absolute_path(&sources.root)?;
     let body = absolute_path(&sources.body)?;
@@ -349,9 +416,9 @@ fn stage_proof_sources(
     let mut staged = BTreeMap::<PathBuf, PathBuf>::new();
     let mut modules = vec![PathBuf::from("UserProof.lean")];
     let mut imports = Vec::with_capacity(sources.modules.len());
-    let reserved = AIG_PROOF_SUPPORT
-        .paths()
-        .chain(TARGET_ARTIFACTS.iter().copied())
+    let reserved = artifacts
+        .iter()
+        .copied()
         .chain(["UserProof.lean"])
         .map(PathBuf::from)
         .collect::<BTreeSet<_>>();

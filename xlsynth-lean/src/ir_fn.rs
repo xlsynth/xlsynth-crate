@@ -67,6 +67,24 @@ pub fn export_ir_function(
     top: Option<&str>,
     module_name: &LeanModuleName,
 ) -> Result<LeanFunction, LeanError> {
+    export_with_bindings(package, top, module_name, Bindings::LocalLets)
+}
+
+/// Named nodes give proof authors a stable, independently unfoldable
+/// declaration per SSA binding. Local lets share intermediate values during
+/// execution.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bindings {
+    LocalLets,
+    NamedNodes,
+}
+
+pub(crate) fn export_with_bindings(
+    package: &Package,
+    top: Option<&str>,
+    module_name: &LeanModuleName,
+    bindings: Bindings,
+) -> Result<LeanFunction, LeanError> {
     let entry = match top {
         Some(name) => package.get_named_or_top_or_sole_fn(name),
         None => package.get_top_or_sole_fn(),
@@ -144,7 +162,7 @@ pub fn export_ir_function(
         }
         let f = functions[name.as_str()];
         if ready {
-            emit_function(&mut source, f)?;
+            emit_function(&mut source, f, bindings)?;
             emitted.insert(name);
         } else {
             work.push((name, true));
@@ -367,14 +385,37 @@ fn binary(op: Binop, a: &str, b: &str, w: usize) -> String {
 }
 
 /// Emits one typed binding per IR node, retaining shared operands and calls.
-fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
-    let name = |r: NodeRef| format!("n{}", f.get_node(r).text_id);
+fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), LeanError> {
+    let function = function_name(&f.name);
+    let parameters: Vec<_> = f.param_nodes().collect();
+    let signature = parameters
+        .iter()
+        .map(|p| format!(" (n{} : {})", p.text_id, lean_type(&p.ty)))
+        .collect::<String>();
+    let arguments = parameters
+        .iter()
+        .map(|p| format!(" n{}", p.text_id))
+        .collect::<String>();
+    let result_type = lean_type(&f.ret_ty);
+    let name = |r: NodeRef| {
+        let node = f.get_node(r);
+        let local = format!("n{}", node.text_id);
+        if bindings == Bindings::NamedNodes
+            && !matches!(node.payload, P::Param)
+            && !arguments.is_empty()
+        {
+            format!("({local}{arguments})")
+        } else {
+            local
+        }
+    };
     let names = |rs: &[NodeRef]| rs.iter().copied().map(name).collect::<Vec<_>>();
-    write!(out, "def {}", function_name(&f.name)).unwrap();
-    for p in f.param_nodes() {
-        write!(out, " (n{} : {})", p.text_id, lean_type(&p.ty)).unwrap();
+    match bindings {
+        Bindings::LocalLets => {
+            writeln!(out, "def {function}{signature} : {result_type} :=").unwrap()
+        }
+        Bindings::NamedNodes => writeln!(out, "namespace {function}").unwrap(),
     }
-    writeln!(out, " : {} :=", lean_type(&f.ret_ty)).unwrap();
     for n in &f.nodes {
         let e = match &n.payload {
             P::Nil | P::Param => continue,
@@ -535,13 +576,30 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                 });
             }
         };
-        writeln!(out, "  let n{} : {} := {e}", n.text_id, lean_type(&n.ty)).unwrap();
+        let ty = lean_type(&n.ty);
+        match bindings {
+            Bindings::LocalLets => writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap(),
+            Bindings::NamedNodes => {
+                writeln!(out, "def n{}{signature} : {ty} :=\n  {e}", n.text_id).unwrap();
+            }
+        }
     }
-    writeln!(
-        out,
-        "  {}\n",
-        name(f.ret_node_ref.expect("verified return"))
-    )
-    .unwrap();
+    let result = f.ret_node_ref.expect("verified return");
+    match bindings {
+        Bindings::LocalLets => writeln!(out, "  {}\n", name(result)).unwrap(),
+        Bindings::NamedNodes => {
+            let node = f.get_node(result);
+            let value = if matches!(node.payload, P::Param) {
+                format!("n{}", node.text_id)
+            } else {
+                format!("{function}.n{}{arguments}", node.text_id)
+            };
+            writeln!(
+                out,
+                "end {function}\n\ndef {function}{signature} : {result_type} :=\n  {value}\n"
+            )
+            .unwrap();
+        }
+    }
     Ok(())
 }

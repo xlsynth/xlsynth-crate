@@ -265,6 +265,77 @@ one typed `IrValue` per case. `LeanEvaluator::eval_ir_functions` accepts a slice
 Lean invocation. Each function has its own namespace and may have a different
 signature. Results follow function order, then input order.
 
+## Word-level equivalence proofs
+
+`prepare_ir_function_equivalence_target` takes two PIR packages and their optional entrypoint
+names. Its bundle contains independently generated `Generated.Lhs.eval` and
+`Generated.Rhs.eval` definitions. `Target.Equivalent` quantifies over their
+positional XLS arguments and equates the complete return values. Both parameter
+and result types must match, including array lengths, tuple nesting and bit widths.
+Parameter names may differ. For nullary functions the target is equality of the results.
+
+Each proof export gives every SSA node its own declaration under the generated
+function's namespace. Its name is the XLS node ID prefixed with `n`. A proof
+can unfold one operation, use `congrArg` on an operand equality, or use a
+callee's previously proved contract. The ordinary executable exporter uses
+local lets to share intermediates during evaluation. Both layouts use the same
+operation translations.
+
+Supply a Lean term and any helper modules using `LeanProofSources`, then call
+`run_ir_function_equivalence_proof`. Helpers can import `Target` to reason about either
+export. For example, when the left graph computes a four-bit sum through a
+callee and the right graph adds its operands in reverse order, the proof body can use commutativity directly.
+
+```lean
+by
+  intro a b
+  change a + b = b + a
+  exact BitVec.add_comm a b
+```
+
+Import `XlsynthLean.IRProof` for selector and shift lemmas and the
+`ir_bv_normalize` tactic. For bit-vector obligations,
+`ir_bv_normalize <;> bv_decide` introduces hypotheses, rewrites common XLS
+operations, and submits remaining goals to Lean's bit-vector solver.
+
+### Factoring a proof at helper calls
+
+Import `XlsynthLean.IRDecompose` to prove a contract for a helper once and
+use it throughout an exported function. In this example the left implementation
+calls a conditional tuple swap twice.
+
+```lean
+xls_cut (Generated.Lhs.eval p x y) at exchange using exchange_spec as routed expect 2
+```
+
+The tactic introduces `routed0` and `routed1` for the two tuple results.
+`routed0_spec` specializes the theorem at the first call's actual arguments.
+`routed1_spec` describes the second call with `routed0` as its incoming pair.
+All uses of a shared result refer to the same variable. A premise in the
+original theorem remains a premise in the specialized fact. The caller can
+finish the resulting goal with ordinary Lean tactics or cut the other side
+using a different helper and contract.
+
+The stage must be fully applied. The contract takes the helper's operands in
+order and states a proposition about its result, which can be a bit vector,
+tuple, or array. The optional `expect` checks the number of reachable direct
+calls. Without `as`, result names start with `cut`. To compose multiple levels
+of the call graph, prove a stage contract
+and use it in its caller. `xls_unfold helper` expands the helper's own
+reachable SSA nodes while preserving calls to other functions.
+
+Lean metaprograms can use `XlsynthLean.IR.sliceCalls` to inspect the actual
+typed call applications, shared result nodes, and downstream definitions.
+The routing example applies distinct contracts on the two sides of an
+equivalence. [Routing proof](tests/fixtures/decomposition/RouteProof.lean)
+
+The checker inspects the theorem's transitive axiom dependencies. It permits
+Lean's `propext`, `Classical.choice` and `Quot.sound`, and replays closed Boolean
+checks from native tactics with Lean's compiler, including the LRAT checks
+used by `bv_decide`. Unproved assumptions and `sorry` fail the audit. The
+supplied IR, the translator, the Lean sources and the Lean toolchain are part
+of the trust boundary.
+
 ## Validation
 
 Rust export tests run normally:

@@ -2707,7 +2707,9 @@ fn main() {
         .subcommand(g8r2gv::command())
         .subcommand(g8r_lean::prepare_command())
         .subcommand(ir_fn_to_lean::command())
-        .subcommand(g8r_lean::check_command())
+        .subcommand(g8r_lean::check_command("g8r-lean-check"))
+        .subcommand(ir_fn_to_lean::prepare_command())
+        .subcommand(g8r_lean::check_command("ir-fn-lean-check"))
         .subcommand(gv_resize::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
@@ -4309,9 +4311,14 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-prepare"), vec![]);
             }
         }
-        Some(("g8r-lean-check", subm)) => {
-            if let Err(e) = g8r_lean::handle_check(subm) {
-                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-check"), vec![]);
+        Some(("ir-fn-lean-prepare", subm)) => {
+            if let Err(e) = ir_fn_to_lean::handle_prepare(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("ir-fn-lean-prepare"), vec![]);
+            }
+        }
+        Some((name @ ("g8r-lean-check" | "ir-fn-lean-check"), subm)) => {
+            if let Err(e) = g8r_lean::handle_check(subm, name == "ir-fn-lean-check") {
+                report_cli_error::report_cli_error_and_exit(&e, Some(name), vec![]);
             }
         }
         Some(("gv-resize", subm)) => {
