@@ -7,14 +7,16 @@ use crate::aig::gate::{AigBitVector, AigNode, AigOperand, GateFn, PirNodeIds, Sp
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::ir2gate_arithmetic::{
-    gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
+    gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, resize_literal_bits,
+    try_gatify_selected_unit_delta,
 };
-use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
+use crate::gatify::mul_by_const_csd::{
+    SignedDigitSign, SignedDigitTerm, decompose_modular_const_terms, decompose_umul_const_terms,
+};
 use crate::gatify::prep_for_gatify::{
     GateCostOptions, PrepForGatifyOptions, prep_for_gatify_observing,
 };
 use crate::gatify::terminal_wrap::{TerminalWrapCapture, TerminalWrapPermit};
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
@@ -1454,6 +1456,11 @@ fn resize_signed_row_operand(
     }
 }
 
+/// Selects the widening products supported by the Baugh-Wooley row builder.
+fn uses_baugh_wooley_rows(lhs_width: usize, rhs_width: usize, output_width: usize) -> bool {
+    lhs_width == rhs_width && output_width > lhs_width && output_width - lhs_width <= lhs_width
+}
+
 /// Lowers same-width widening signed multiply without materializing sign
 /// extension.
 fn gatify_smul_widening(
@@ -1463,7 +1470,7 @@ fn gatify_smul_widening(
     mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
 ) -> Option<AigBitVector> {
-    if !use_baugh_wooley(
+    if !uses_baugh_wooley_rows(
         lhs_bits.get_bit_count(),
         rhs_bits.get_bit_count(),
         output_bit_count,
@@ -1474,14 +1481,6 @@ fn gatify_smul_widening(
     let operands =
         gatify_smul_baugh_wooley_partial_products(lhs_bits, rhs_bits, output_bit_count, gb);
     Some(array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum)
-}
-
-/// Selects the widening products supported by the Baugh-Wooley row builder.
-fn use_baugh_wooley(lhs_width: usize, rhs_width: usize, output_width: usize) -> bool {
-    lhs_width > 0
-        && lhs_width == rhs_width
-        && lhs_width < output_width
-        && output_width <= 2 * lhs_width
 }
 
 /// Adds `2^bit_index` to a little-endian bit vector modulo its width.
@@ -1750,24 +1749,17 @@ fn gatify_umul_partial_products(
     partial_products
 }
 
-fn shll_const_and_resize(
-    arg_bits: &AigBitVector,
+/// Shifts into a fixed-width row, reading only bits that fit after the shift.
+fn shll_const_and_resize<'a>(
+    bits_lsb_first: impl Iterator<Item = &'a AigOperand>,
     shift: usize,
     output_bit_count: usize,
-    gb: &mut GateBuilder,
 ) -> AigBitVector {
-    if output_bit_count == 0 || shift >= output_bit_count {
-        return AigBitVector::zeros(output_bit_count);
+    let mut shifted = AigBitVector::zeros(output_bit_count);
+    for (i, bit) in (shift..output_bit_count).zip(bits_lsb_first) {
+        shifted.set_lsb(i, *bit);
     }
-    let mut shifted = vec![gb.get_false(); shift];
-    shifted.extend(arg_bits.iter_lsb_to_msb().cloned());
-    if shifted.len() > output_bit_count {
-        shifted.truncate(output_bit_count);
-    }
-    while shifted.len() < output_bit_count {
-        shifted.push(gb.get_false());
-    }
-    AigBitVector::from_lsb_is_index_0(&shifted)
+    shifted
 }
 
 fn gatify_clz_value_bits_from_one_hot(
@@ -1824,7 +1816,7 @@ fn gatify_ext_normalize_left_staged(
     while shift > 0 {
         let upper_bits = normalized.get_msbs(shift);
         let should_shift = g8_builder.add_ez(&upper_bits, ReductionKind::Tree);
-        let shifted = shll_const_and_resize(&normalized, shift, input_bit_count, g8_builder);
+        let shifted = shll_const_and_resize(normalized.iter_lsb_to_msb(), shift, input_bit_count);
         normalized = g8_builder.add_mux2_vec(&should_shift, &shifted, &normalized);
 
         if let Some(clz_bits) = clz_nonzero_bits.as_mut() {
@@ -1836,8 +1828,11 @@ fn gatify_ext_normalize_left_staged(
         shift >>= 1;
     }
 
-    let normalized =
-        shll_const_and_resize(&normalized, shift_offset, normalized_bit_count, g8_builder);
+    let normalized = shll_const_and_resize(
+        normalized.iter_lsb_to_msb(),
+        shift_offset,
+        normalized_bit_count,
+    );
 
     let clz_bits = match clz_nonzero_bits {
         Some(clz_nonzero_bits) => {
@@ -1912,71 +1907,117 @@ fn disjoint_const_product(
     Some(product)
 }
 
-/// Builds rows for a constant product after signed operands have been resized.
-fn gatify_mul_const_partial_products(
-    op: ir::Binop,
-    multiplicand_bits: &AigBitVector,
-    constant_bits: &IrBits,
-    output_bit_count: usize,
+/// Emits signed-digit rows for literal factors and for narrow nonnegative
+/// factors that lower to constants in signed products.
+fn gatify_literal_product_rows(
+    f: &ir::Fn,
+    env: &GateEnv,
+    product: &ir::Node,
+    output_width: usize,
+    resolved: bool,
     gb: &mut GateBuilder,
-) -> Vec<AigBitVector> {
-    if output_bit_count == 0 {
-        return Vec::new();
+) -> Option<Vec<AigBitVector>> {
+    let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
+        product.payload
+    else {
+        unreachable!("expected a multiplication node")
+    };
+    let lhs_width = f.get_node_ty(lhs).bit_count();
+    let rhs_width = f.get_node_ty(rhs).bit_count();
+    if output_width == 0 || lhs_width == 0 || rhs_width == 0 {
+        return Some(Vec::new());
     }
-    let terms = decompose_umul_const_terms(constant_bits, output_bit_count);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-
-    // For a narrow nonnegative signed factor, a subtractive digit can introduce
-    // carries where ordinary unsigned partial products fold entirely to wires.
-    if op == ir::Binop::Smul
-        && gb.options.fold
-        && terms.iter().any(|term| term.sign == SignedDigitSign::Minus)
-        && let Some(product) =
-            disjoint_const_product(multiplicand_bits, constant_bits, output_bit_count, gb)
-    {
-        return vec![product];
-    }
-
-    let mut operands: Vec<AigBitVector> = Vec::with_capacity(terms.len() + 1);
-    let mut neg_term_count = 0usize;
-    for term in terms {
-        let shifted = shll_const_and_resize(multiplicand_bits, term.shift, output_bit_count, gb);
-        match term.sign {
-            SignedDigitSign::Plus => operands.push(shifted),
-            SignedDigitSign::Minus => {
-                operands.push(gb.add_not_vec(&shifted));
-                neg_term_count = neg_term_count.saturating_add(1);
+    // A region can expose a PIR literal as a free input.
+    let (multiplicand, coefficient) = match (
+        matches!(f.get_node(lhs).payload, ir::NodePayload::Literal(_)),
+        matches!(f.get_node(rhs).payload, ir::NodePayload::Literal(_)),
+    ) {
+        (false, true) => (lhs, env.constant_bits(rhs)?),
+        (true, false) => (rhs, env.constant_bits(lhs)?),
+        // A zero extension can produce the same constant gates as a literal.
+        (false, false)
+            if op == ir::Binop::Smul
+                && !uses_baugh_wooley_rows(lhs_width, rhs_width, output_width) =>
+        {
+            [(lhs, rhs, lhs_width), (rhs, lhs, rhs_width)]
+                .into_iter()
+                .filter(|(_, _, width)| *width < output_width)
+                .find_map(|(factor, multiplicand, _)| {
+                    let bits = env.constant_bits(factor)?;
+                    (!bits.is_negative()).then_some((multiplicand, bits))
+                })?
+        }
+        _ => return None,
+    };
+    let mut bits = env
+        .get_bit_vector(multiplicand)
+        .expect("product input present");
+    let terms = if op == ir::Binop::Smul {
+        let input_width = bits.get_bit_count();
+        bits = resize_signed_row_operand(bits, output_width, gb);
+        let residue = resize_literal_bits(&coefficient, output_width, /* signed= */ true);
+        let mut terms = if resolved {
+            decompose_modular_const_terms(&residue)
+        } else {
+            decompose_umul_const_terms(&residue, output_width)
+        };
+        let baugh_wooley =
+            uses_baugh_wooley_rows(input_width, coefficient.get_bit_count(), output_width);
+        let narrow_nonnegative_fallback = !baugh_wooley
+            && coefficient.get_bit_count() < output_width
+            && !coefficient.is_negative();
+        // Disjoint shifts need only one wiring row, even if the subtractive
+        // representation would exceed the row budget.
+        if narrow_nonnegative_fallback
+            && gb.options.fold
+            && terms.iter().any(|term| term.sign == SignedDigitSign::Minus)
+            && let Some(product) = disjoint_const_product(&bits, &coefficient, output_width, gb)
+        {
+            return Some(vec![product]);
+        }
+        // The ordinary multiplier can use a narrow, zero-extended input as
+        // the row selector. Even in a fused sum each digit and its shared
+        // correction would initially occupy a full-width row.
+        let bounded_row_count = |terms: &[SignedDigitTerm]| {
+            let correction_row = terms.iter().any(|t| t.sign == SignedDigitSign::Minus);
+            let count = terms.len() + usize::from(correction_row);
+            (count <= bits.get_bit_count()).then_some(count)
+        };
+        let row_count = bounded_row_count(&terms)?;
+        if resolved && !terms.is_empty() {
+            let natural = if baugh_wooley { &coefficient } else { &residue };
+            let bit_rows = (0..natural.get_bit_count())
+                .filter(|&i| natural.get_bit(i).expect("index within the literal"))
+                .count();
+            if row_count >= bit_rows {
+                if !narrow_nonnegative_fallback {
+                    return None;
+                }
+                // Keep the unsigned constant rows for a narrow nonnegative
+                // coefficient, subject to the same multiplicand row budget.
+                terms = decompose_umul_const_terms(&coefficient, output_width);
+                bounded_row_count(&terms)?;
             }
+        }
+        terms
+    } else {
+        decompose_umul_const_terms(&coefficient, output_width)
+    };
+    let mut rows = Vec::with_capacity(terms.len() + 1);
+    let mut neg_term_count = 0;
+    for term in terms {
+        let shifted = shll_const_and_resize(bits.iter_lsb_to_msb(), term.shift, output_width);
+        if term.sign == SignedDigitSign::Minus {
+            rows.push(gb.add_not_vec(&shifted));
+            neg_term_count += 1;
+        } else {
+            rows.push(shifted);
         }
     }
     if neg_term_count != 0 {
-        operands.push(usize_as_aig_bits(neg_term_count, output_bit_count, gb));
+        rows.push(usize_as_aig_bits(neg_term_count, output_width, gb));
     }
-    operands
-}
-
-/// Sums the rows of a standalone constant product with the selected adder.
-fn gatify_mul_const(
-    op: ir::Binop,
-    multiplicand_bits: &AigBitVector,
-    constant_bits: &IrBits,
-    output_bit_count: usize,
-    mul_adder_mapping: AdderMapping,
-    gb: &mut GateBuilder,
-) -> AigBitVector {
-    let rows = gatify_mul_const_partial_products(
-        op,
-        multiplicand_bits,
-        constant_bits,
-        output_bit_count,
-        gb,
-    );
-    if rows.is_empty() {
-        return AigBitVector::zeros(output_bit_count);
-    }
-    array_add_with_carry_out(gb, &rows, None, mul_adder_mapping).sum
+    Some(rows)
 }
 
 /// Emits one product's existing partial rows without its final adder.
@@ -1988,19 +2029,21 @@ pub(super) fn gatify_fused_product_rows(
     options: &GatifyOptions,
     gb: &mut GateBuilder,
 ) -> Vec<AigBitVector> {
-    let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
-        f.get_node(product).payload
+    let node = f.get_node(product);
+    let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) = node.payload
     else {
         unreachable!("fusion plan contains only multiplication nodes")
     };
-    assert!(f.get_node(product).ty.bit_count() >= output_width);
-    if let Some((bits, constant)) = mul_const_operands(f, env, op, lhs, rhs, output_width, gb) {
-        return gatify_mul_const_partial_products(op, &bits, &constant, output_width, gb);
+    assert!(node.ty.bit_count() >= output_width);
+    if let Some(rows) =
+        gatify_literal_product_rows(f, env, node, output_width, /* resolved= */ false, gb)
+    {
+        return rows;
     }
     let mut lhs = env.get_bit_vector(lhs).expect("product lhs present");
     let mut rhs = env.get_bit_vector(rhs).expect("product rhs present");
     if op == ir::Binop::Smul {
-        if use_baugh_wooley(lhs.get_bit_count(), rhs.get_bit_count(), output_width) {
+        if uses_baugh_wooley_rows(lhs.get_bit_count(), rhs.get_bit_count(), output_width) {
             return gatify_smul_baugh_wooley_partial_products(&lhs, &rhs, output_width, gb);
         }
         lhs = resize_signed_row_operand(lhs, output_width, gb);
@@ -2445,60 +2488,6 @@ pub(super) fn get_pow2_minus1_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
         }
     }
     Some(k)
-}
-
-/// Supplies operands for unsigned constant-multiply rows, including signed
-/// fallback products whose narrow constant already represents its unsigned
-/// value.
-fn mul_const_operands<'f>(
-    f: &'f ir::Fn,
-    env: &GateEnv,
-    op: ir::Binop,
-    a: ir::NodeRef,
-    b: ir::NodeRef,
-    output_width: usize,
-    gb: &mut GateBuilder,
-) -> Option<(AigBitVector, Cow<'f, IrBits>)> {
-    let signed = op == ir::Binop::Smul;
-    if signed
-        && use_baugh_wooley(
-            f.get_node_ty(a).bit_count(),
-            f.get_node_ty(b).bit_count(),
-            output_width,
-        )
-    {
-        return None;
-    }
-    let literal_bits = |operand| match &f.get_node(operand).payload {
-        ir::NodePayload::Literal(value) => value.as_bits().ok(),
-        _ => None,
-    };
-    let (multiplicand, constant) = match (literal_bits(a), literal_bits(b)) {
-        (None, Some(bits)) => (a, Cow::Borrowed(bits)),
-        (Some(bits), None) => (b, Cow::Borrowed(bits)),
-        // Operations such as zero_ext can produce the same constant gates as a
-        // literal. Use the same rows when preserving a narrow signed factor.
-        (None, None) if signed => [(a, b), (b, a)]
-            .into_iter()
-            .filter(|(factor, _)| f.get_node_ty(*factor).bit_count() < output_width)
-            .find_map(|(factor, multiplicand)| {
-                let bits = env.constant_bits(factor)?;
-                Some((multiplicand, Cow::Owned(bits)))
-            })?,
-        _ => return None,
-    };
-    if signed && (constant.is_negative() || constant.get_bit_count() >= output_width) {
-        return None;
-    }
-    let mut bits = env
-        .get_bit_vector(multiplicand)
-        .expect("mul multiplicand should be present");
-    if signed {
-        // Shift/add rows zero-extend, so preserve the other factor's signed
-        // value modulo the product (or fused sum) width.
-        bits = resize_signed_row_operand(bits, output_width, gb);
-    }
-    Some((bits, constant))
 }
 
 fn get_neg_pow2_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
@@ -4818,37 +4807,28 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(bit_vector));
         }
         ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) => {
-            let output_bit_count = node.ty.bit_count();
-            let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
-            let gates = if let Some((multiplicand_bits, constant_bits)) =
-                mul_const_operands(f, env, *op, *lhs, *rhs, output_bit_count, g8_builder)
-            {
-                gatify_mul_const(
-                    *op,
-                    &multiplicand_bits,
-                    &constant_bits,
-                    output_bit_count,
-                    mul_adder_mapping,
-                    g8_builder,
-                )
+            let width = node.ty.bit_count();
+            let mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
+            let gates = if let Some(rows) = gatify_literal_product_rows(
+                f, env, node, width, /* resolved= */ true, g8_builder,
+            ) {
+                if rows.is_empty() {
+                    AigBitVector::zeros(width)
+                } else {
+                    array_add_with_carry_out(g8_builder, &rows, None, mapping).sum
+                }
             } else {
                 let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
                 let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                if *op == ir::Binop::Umul {
+                if *op == ir::Binop::Smul {
+                    gatify_smul(lhs_bits, rhs_bits, width, mapping, g8_builder)
+                } else {
                     gatify_umul(
                         &lhs_bits,
                         &rhs_bits,
-                        output_bit_count,
-                        mul_adder_mapping,
+                        width,
+                        mapping,
                         sparse_product_demands(f, env, node_ref, options),
-                        g8_builder,
-                    )
-                } else {
-                    gatify_smul(
-                        lhs_bits,
-                        rhs_bits,
-                        output_bit_count,
-                        mul_adder_mapping,
                         g8_builder,
                     )
                 }
@@ -5753,6 +5733,7 @@ mod tests {
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
+    use xlsynth_pir::ir_utils;
     use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
     thread_local! {
@@ -5771,6 +5752,119 @@ mod tests {
         FUNCTION_MAPPINGS.set(0);
         super::gatify_prepared_fn(&f, GatifyOptions::all_opts_enabled()).unwrap();
         assert_eq!(FUNCTION_MAPPINGS.get(), 1);
+    }
+
+    #[test]
+    fn narrow_positive_literal_keeps_unsigned_rows_on_a_tie() {
+        let lower = |op| {
+            let text = format!(
+                r#"fn f(x: bits[8] id=1) -> bits[8] {{
+  k: bits[4] = literal(value=5, id=2)
+  ret p: bits[8] = {op}(x, k, id=3)
+}}"#
+            );
+            let f = ir_parser::Parser::new(&text).parse_fn().unwrap();
+            let options = GatifyOptions {
+                fold: false,
+                ..GatifyOptions::all_opts_disabled()
+            };
+            let mapped = super::gatify_prepared_fn(&f, options).unwrap();
+            let stats = get_aig_stats(&mapped.gate_fn);
+            (stats.and_nodes, stats.max_depth)
+        };
+        assert_eq!(lower("smul"), lower("umul"));
+    }
+
+    #[test]
+    fn narrow_nonnegative_multiplier_bounds_signed_literal_rows() {
+        let ir_text = r#"fn f(x: bits[1] id=1) -> bits[128] {
+  narrow: bits[2] = zero_ext(x, new_bit_count=2, id=2)
+  k: bits[128] = literal(value=0x77777777777777777777777777777777, id=3)
+  ret p: bits[128] = smul(narrow, k, id=4)
+}"#;
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let product = f.ret_node_ref.unwrap();
+        let node = f.get_node(product);
+        let options = GatifyOptions::all_opts_disabled();
+        let mut env = super::GateEnv::new(&f);
+        let mut gb = GateBuilder::new(f.name.clone(), GateBuilderOptions::opt());
+        env.add(
+            f.params[0],
+            super::GateOrVec::BitVector(gb.add_input("x".into(), 1)),
+        );
+        for n in ir_utils::operands(&node.payload) {
+            super::gatify_node(
+                &f,
+                n,
+                f.get_node(n),
+                &mut gb,
+                &mut env,
+                &options,
+                super::LoweringScope::WholeFunction,
+            )
+            .unwrap();
+        }
+        // Inspect materialized rows before folding: even rows that ultimately
+        // disappear occupy the full product width during construction.
+        let resolved = super::gatify_literal_product_rows(&f, &env, node, 128, true, &mut gb);
+        assert!(resolved.is_none_or(|rows| rows.len() <= 2));
+        let fused = super::gatify_fused_product_rows(&f, &env, product, 128, &options, &mut gb);
+        assert_eq!(fused.len(), 2);
+    }
+
+    #[test]
+    fn zero_width_multiplicand_emits_no_literal_product_rows() {
+        let text = r#"fn f(x: bits[0] id=1) -> bits[16] {
+  k: bits[16] = literal(value=0x7777, id=2)
+  ret p: bits[16] = smul(x, k, id=3)
+}"#;
+        let f = ir_parser::Parser::new(text).parse_fn().unwrap();
+        let product = f.get_node(f.ret_node_ref.unwrap());
+        let ir::NodePayload::Binop(_, x, k) = product.payload else {
+            unreachable!()
+        };
+        let mut env = super::GateEnv::new(&f);
+        let mut gb = GateBuilder::new(f.name.clone(), GateBuilderOptions::opt());
+        env.add(x, super::GateOrVec::BitVector(gb.add_input("x".into(), 0)));
+        let literal = super::literal_bits_if_bits_node(&f, k).unwrap();
+        env.add(k, super::GateOrVec::BitVector(gb.add_literal(&literal)));
+        for resolved in [false, true] {
+            let rows = super::gatify_literal_product_rows(&f, &env, product, 16, resolved, &mut gb);
+            assert!(rows.unwrap().is_empty(), "resolved={resolved}");
+        }
+    }
+
+    #[test]
+    fn zero_width_product_result_needs_no_coefficient_binding() {
+        let text = r#"fn f(x: bits[1] id=1) -> bits[0] {
+  k: bits[16] = literal(value=0x7777, id=2)
+  ret p: bits[0] = umul(x, k, id=3)
+}"#;
+        let f = ir_parser::Parser::new(text).parse_fn().unwrap();
+        let product = f.get_node(f.ret_node_ref.unwrap());
+        // Decoding an unbound coefficient would return None.
+        let env = super::GateEnv::new(&f);
+        let mut gb = GateBuilder::new(f.name.clone(), GateBuilderOptions::opt());
+        let rows = super::gatify_literal_product_rows(&f, &env, product, 0, true, &mut gb);
+        assert!(rows.unwrap().is_empty());
+    }
+
+    #[test]
+    fn wide_literal_product_shifts_read_only_surviving_bits() {
+        let gb = GateBuilder::new("shift".into(), GateBuilderOptions::opt());
+        let one = gb.get_true();
+        // The 128 positive rows of a 256-bit coefficient of repeated hex 5s.
+        // Count visits directly so the regression is independent of timing.
+        for shift in (0..256).step_by(2) {
+            let mut visits = 0;
+            let wide = std::iter::repeat_n(&one, 65_536).inspect(|_| visits += 1);
+            let row = super::shll_const_and_resize(wide, shift, 256);
+            assert_eq!(visits, 256 - shift);
+            assert_eq!(row.get_bit_count(), 256);
+            for (i, bit) in row.iter_lsb_to_msb().enumerate() {
+                assert_eq!(*bit, if i >= shift { one } else { gb.get_false() });
+            }
+        }
     }
 
     #[test]

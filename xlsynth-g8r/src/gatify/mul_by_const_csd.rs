@@ -92,36 +92,90 @@ pub fn decompose_umul_const_terms(
     terms
 }
 
+/// A minimum-weight signed-digit expansion modulo the width of the residue.
+pub fn decompose_modular_const_terms(residue: &IrBits) -> Vec<SignedDigitTerm> {
+    let width = residue.get_bit_count();
+    let mut carry = false;
+    let mut terms = Vec::new();
+    for i in 0..width {
+        let bit = residue.get_bit(i).expect("index within the residue");
+        if bit == carry {
+            carry = bit;
+            continue;
+        }
+        // The odd suffix has two signed choices. Leave its next digit zero
+        // whenever possible, discarding a carry past the output width.
+        carry = i + 1 < width && residue.get_bit(i + 1).expect("index within the residue");
+        let sign = if carry {
+            SignedDigitSign::Minus
+        } else {
+            SignedDigitSign::Plus
+        };
+        terms.push(SignedDigitTerm { sign, shift: i });
+    }
+    terms
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SignedDigitSign, decompose_umul_const_terms};
+    use super::{
+        IrBits, SignedDigitSign, decompose_modular_const_terms, decompose_umul_const_terms,
+    };
 
     fn eval_terms_mod_width(constant_width: usize, terms: &[super::SignedDigitTerm]) -> u128 {
         assert!(constant_width <= 128);
-        let modulus = if constant_width == 128 {
-            u128::MAX
-        } else {
-            (1u128 << constant_width) - 1
-        };
-        let mut acc: i128 = 0;
+        let mut acc = 0u128;
         for term in terms {
-            let val = 1i128 << term.shift;
-            match term.sign {
-                SignedDigitSign::Plus => {
-                    acc += val;
-                }
-                SignedDigitSign::Minus => {
-                    acc -= val;
+            assert!(term.shift < constant_width);
+            let bit = 1u128 << term.shift;
+            acc = match term.sign {
+                SignedDigitSign::Plus => acc.wrapping_add(bit),
+                SignedDigitSign::Minus => acc.wrapping_sub(bit),
+            };
+        }
+        if constant_width == 128 {
+            acc
+        } else {
+            acc & ((1u128 << constant_width) - 1)
+        }
+    }
+
+    #[test]
+    fn modular_digits_use_minimum_weight() {
+        for width in 0..=8 {
+            let modulus = 1usize << width;
+            let mut minimum = vec![width + 1; modulus];
+            minimum[0] = 0;
+            // Try all three digit values at each position, independently of the
+            // recoder.
+            for shift in 0..width {
+                let bit = 1usize << shift;
+                let previous = minimum.clone();
+                for (value, weight) in previous.into_iter().enumerate() {
+                    for next in [(value + bit) % modulus, (value + modulus - bit) % modulus] {
+                        minimum[next] = minimum[next].min(weight + 1);
+                    }
                 }
             }
+            for (value, weight) in minimum.into_iter().enumerate() {
+                let literal = IrBits::make_ubits(width, value as u64).unwrap();
+                let terms = decompose_modular_const_terms(&literal);
+                assert_eq!(eval_terms_mod_width(width, &terms), value as u128);
+                assert_eq!(terms.len(), weight, "coefficient {value} at width {width}");
+            }
         }
-        let m = if constant_width == 128 {
-            i128::MAX
-        } else {
-            1i128 << constant_width
-        };
-        let acc_mod = ((acc % m) + m) % m;
-        (acc_mod as u128) & modulus
+    }
+
+    #[test]
+    fn modular_digits_preserve_top_bit_and_wraparound() {
+        for width in [64usize, 127, 128] {
+            let top = 1u128 << (width - 1);
+            for value in [top - 1, top, top | 1, top | (top - 1)] {
+                let literal = IrBits::from_lsb_fn(width, |i| value & (1u128 << i) != 0);
+                let terms = decompose_modular_const_terms(&literal);
+                assert_eq!(eval_terms_mod_width(width, &terms), value);
+            }
+        }
     }
 
     fn decompose_u64(width: usize, value: u64) -> Vec<super::SignedDigitTerm> {
