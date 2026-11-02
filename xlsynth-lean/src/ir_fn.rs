@@ -95,9 +95,8 @@ pub fn export_ir_function(
     let mut work = vec![(entry.name.clone(), false)];
     let mut emitted = HashSet::new();
     let ns = module_name.lean_identifier();
-    let mut source = format!(
-        "{MODULE_HEADER}namespace {ns}\nopen XlsynthLean.IR\nset_option linter.unusedVariables false\n\n"
-    );
+    let mut source =
+        format!("{MODULE_HEADER}namespace {ns}\nset_option linter.unusedVariables false\n\n");
     let functions: HashMap<_, _> = reachable
         .members
         .iter()
@@ -161,14 +160,18 @@ pub fn export_ir_function(
     let mut input_width = 0usize;
     let mut call = "eval".to_owned();
     for ty in &signature.param_types {
-        write!(call, " (Packed.unpack (inputs.toNat >>> {input_width}))").unwrap();
+        write!(
+            call,
+            " (_root_.XlsynthLean.IR.Packed.unpack (inputs.toNat >>> {input_width}))"
+        )
+        .unwrap();
         input_width = input_width
             .checked_add(width(ty)?)
             .ok_or_else(|| LeanError::InvalidIr("combined input width overflow".into()))?;
     }
     let result_width = width(&signature.return_type)?;
     writeln!(source, "abbrev eval := {}\n", function_name(&entry.name)).unwrap();
-    writeln!(source, "def evalPacked (inputs : BitVec {input_width}) : BitVec {result_width} :=\n  BitVec.ofNat _ (Packed.pack ({call}))\n\nend {ns}").unwrap();
+    writeln!(source, "def evalPacked (inputs : BitVec {input_width}) : BitVec {result_width} :=\n  BitVec.ofNat _ (_root_.XlsynthLean.IR.Packed.pack ({call}))\n\nend {ns}").unwrap();
     Ok(LeanFunction {
         module_name: module_name.clone(),
         signature,
@@ -299,7 +302,7 @@ fn binary(op: Binop, a: &str, b: &str, w: usize) -> String {
         Binop::Umul => format!("{a}.setWidth {w} * {b}.setWidth {w}"),
         Binop::Smul => format!("{a}.signExtend {w} * {b}.signExtend {w}"),
         Binop::Udiv => format!("BitVec.smtUDiv {a} {b}"),
-        Binop::Sdiv => format!("sdiv {a} {b}"),
+        Binop::Sdiv => format!("_root_.XlsynthLean.IR.sdiv {a} {b}"),
         Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
         Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
         Binop::Shll => format!("{a} <<< (min {b}.toNat {w})"),
@@ -338,7 +341,10 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
             P::ArrayConcat(rs) => names(rs).join(" ++ "),
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple), ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => indices.iter().fold(name(*array), |base, i| {
-                format!("(arrayIndex {base} {}.toNat)", name(*i))
+                format!(
+                    "(_root_.XlsynthLean.IR.arrayIndex {base} {}.toNat)",
+                    name(*i)
+                )
             }),
             P::ArrayUpdate {
                 array,
@@ -359,7 +365,7 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                         format!("v{depth}")
                     };
                     expr = format!(
-                        "arrayModify {base} {}.toNat (fun {binder} => {expr})",
+                        "_root_.XlsynthLean.IR.arrayModify {base} {}.toNat (fun {binder} => {expr})",
                         name(*idx)
                     );
                 }
@@ -369,7 +375,11 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                 array,
                 start,
                 width,
-            } => format!("arraySlice {width} {} {}.toNat", name(*array), name(*start)),
+            } => format!(
+                "_root_.XlsynthLean.IR.arraySlice {width} {} {}.toNat",
+                name(*array),
+                name(*start)
+            ),
             P::Binop(op, a, b) => binary(*op, &name(*a), &name(*b), width(&n.ty)?),
             P::Unop(op, a) => {
                 let a = name(*a);
@@ -420,7 +430,7 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                 start,
                 update_value,
             } => format!(
-                "bitSliceUpdate {} {} {}",
+                "_root_.XlsynthLean.IR.bitSliceUpdate {} {} {}",
                 name(*arg),
                 name(*start),
                 name(*update_value)
@@ -428,10 +438,16 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
             P::Decode { arg, width } => {
                 format!("BitVec.twoPow {width} (min {}.toNat {width})", name(*arg))
             }
-            P::Encode { arg } => format!("encode {} {}", width(&n.ty)?, name(*arg)),
-            P::OneHot { arg, lsb_prio } => format!("oneHot {lsb_prio} {}", name(*arg)),
+            P::Encode { arg } => format!(
+                "_root_.XlsynthLean.IR.encode {} {}",
+                width(&n.ty)?,
+                name(*arg)
+            ),
+            P::OneHot { arg, lsb_prio } => {
+                format!("_root_.XlsynthLean.IR.oneHot {lsb_prio} {}", name(*arg))
+            }
             P::OneHotSel { selector, cases } => format!(
-                "oneHotSel {} #[{}]",
+                "_root_.XlsynthLean.IR.oneHotSel {} #[{}]",
                 name(*selector),
                 names(cases).join(", ")
             ),
@@ -440,7 +456,7 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                 cases,
                 default,
             } => format!(
-                "prioritySel {} #[{}] {}",
+                "_root_.XlsynthLean.IR.prioritySel {} #[{}] {}",
                 name(*selector),
                 names(cases).join(", "),
                 name(default.expect("verified priority default"))

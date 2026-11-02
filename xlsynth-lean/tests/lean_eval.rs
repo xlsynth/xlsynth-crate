@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -11,8 +11,10 @@ use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_ir_value::IrBits;
 use xlsynth_lean::{
-    LeanError, LeanEvaluator, LeanExportOptions, LeanModuleName, export_gate_fn, write_lean_support,
+    LeanError, LeanEvaluator, LeanExportOptions, LeanModuleName, export_gate_fn,
+    export_ir_function, write_lean_support,
 };
+use xlsynth_pir::ir_parser::Parser;
 
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
 
@@ -141,20 +143,49 @@ fn exported_module_and_lean_regressions_compile() {
     let written = bundle.write_to(directory.path()).unwrap();
     let regression_source = directory.path().join("Tests.lean");
     std::fs::write(&regression_source, include_str!("../lean/Tests.lean")).unwrap();
-    for source in [
-        directory.path().join("XlsynthLean/Aig.lean"),
-        directory.path().join("XlsynthLean/Aag.lean"),
-        directory.path().join("XlsynthLean/IR.lean"),
-        directory.path().join("XlsynthLean.lean"),
-        written.source,
-        regression_source,
-    ] {
+    compile_modules(
+        directory.path(),
+        [
+            directory.path().join("XlsynthLean/Aig.lean"),
+            directory.path().join("XlsynthLean/Aag.lean"),
+            directory.path().join("XlsynthLean/IR.lean"),
+            directory.path().join("XlsynthLean.lean"),
+            written.source,
+            regression_source,
+        ],
+    );
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_bitvec_module_uses_xls_signed_division() {
+    let ir = "package division
+top fn divide(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret result: bits[8] = sdiv(x, y, id=3)
+}";
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let module = LeanModuleName::new("BitVec").unwrap();
+    let function = export_ir_function(&package, None, &module).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let exported = function.write_to(root).unwrap();
+    let check = root.join("Check.lean");
+    std::fs::write(
+        &check,
+        "import BitVec\n#guard (BitVec.eval 1 0).toNat == 127\n",
+    )
+    .unwrap();
+    compile_modules(root, [root.join("XlsynthLean/IR.lean"), exported, check]);
+}
+
+fn compile_modules(root: &Path, sources: impl IntoIterator<Item = PathBuf>) {
+    for source in sources {
         let output = Command::new(evaluator().lean_executable())
             .arg("-o")
             .arg(source.with_extension("olean"))
             .arg(&source)
-            .current_dir(directory.path())
-            .env("LEAN_PATH", directory.path())
+            .current_dir(root)
+            .env("LEAN_PATH", root)
             .env_remove("LEAN_SYSROOT")
             .output()
             .unwrap();
