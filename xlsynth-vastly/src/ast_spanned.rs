@@ -64,61 +64,63 @@ pub enum SpannedExprKind {
 }
 
 impl SpannedExpr {
-    pub fn shift_spans(&mut self, delta: usize) {
-        self.span.start += delta;
-        self.span.end += delta;
+    /// Visits every expression node so elaboration can rewrite names in place.
+    pub(crate) fn visit_mut(&mut self, visit: &mut impl FnMut(&mut Self)) {
+        visit(self);
         match &mut self.kind {
-            SpannedExprKind::Ident(_) => {}
-            SpannedExprKind::Literal(_) => {}
-            SpannedExprKind::UnsizedNumber(_) => {}
-            SpannedExprKind::UnbasedUnsized(_) => {}
-            SpannedExprKind::Call { args, .. } => {
-                for a in args {
-                    a.shift_spans(delta);
-                }
+            SpannedExprKind::Ident(_)
+            | SpannedExprKind::Literal(_)
+            | SpannedExprKind::UnsizedNumber(_)
+            | SpannedExprKind::UnbasedUnsized(_) => {
+                // Leaf expressions have no children.
             }
-            SpannedExprKind::Concat(ps) => {
-                for p in ps {
-                    p.shift_spans(delta);
+            SpannedExprKind::Call { args, .. } | SpannedExprKind::Concat(args) => {
+                for arg in args {
+                    arg.visit_mut(visit);
                 }
             }
             SpannedExprKind::Replicate { count, expr } => {
-                count.shift_spans(delta);
-                expr.shift_spans(delta);
+                count.visit_mut(visit);
+                expr.visit_mut(visit);
             }
             SpannedExprKind::Cast { width, expr } => {
-                width.shift_spans(delta);
-                expr.shift_spans(delta);
+                width.visit_mut(visit);
+                expr.visit_mut(visit);
             }
             SpannedExprKind::Index { expr, index } => {
-                expr.shift_spans(delta);
-                index.shift_spans(delta);
+                expr.visit_mut(visit);
+                index.visit_mut(visit);
             }
             SpannedExprKind::Slice { expr, msb, lsb } => {
-                expr.shift_spans(delta);
-                msb.shift_spans(delta);
-                lsb.shift_spans(delta);
+                expr.visit_mut(visit);
+                msb.visit_mut(visit);
+                lsb.visit_mut(visit);
             }
             SpannedExprKind::IndexedSlice {
                 expr, base, width, ..
             } => {
-                expr.shift_spans(delta);
-                base.shift_spans(delta);
-                width.shift_spans(delta);
-            }
-            SpannedExprKind::Unary { expr, .. } => {
-                expr.shift_spans(delta);
+                expr.visit_mut(visit);
+                base.visit_mut(visit);
+                width.visit_mut(visit);
             }
             SpannedExprKind::Binary { lhs, rhs, .. } => {
-                lhs.shift_spans(delta);
-                rhs.shift_spans(delta);
+                lhs.visit_mut(visit);
+                rhs.visit_mut(visit);
             }
             SpannedExprKind::Ternary { cond, t, f } => {
-                cond.shift_spans(delta);
-                t.shift_spans(delta);
-                f.shift_spans(delta);
+                cond.visit_mut(visit);
+                t.visit_mut(visit);
+                f.visit_mut(visit);
             }
+            SpannedExprKind::Unary { expr, .. } => expr.visit_mut(visit),
         }
+    }
+
+    pub fn shift_spans(&mut self, delta: usize) {
+        self.visit_mut(&mut |node| {
+            node.span.start += delta;
+            node.span.end += delta;
+        });
     }
 }
 

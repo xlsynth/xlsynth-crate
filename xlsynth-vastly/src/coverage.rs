@@ -107,6 +107,9 @@ pub struct CoverageCounters {
     pub selected_arm_spans: BTreeMap<SpanKey, u64>,
     pub functions: BTreeMap<String, FunctionMeta>,
     pub defines: BTreeSet<String>,
+    /// Pipeline top used for line coverage in a source with multiple
+    /// definitions.
+    pub top: Option<String>,
 }
 
 impl CoverageCounters {

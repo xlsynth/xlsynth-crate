@@ -19,6 +19,7 @@ use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::ParsedModule;
+use crate::sv_ast::PortConnection;
 use crate::sv_ast::PortDecl;
 use crate::sv_ast::PortDir;
 use crate::sv_ast::PortTy;
@@ -30,46 +31,37 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub fn parse_combo_module(src: &str) -> Result<ParsedModule> {
-    let toks = crate::sv_lexer::lex_all(src)?;
-    let mut p = Parser {
-        src,
-        toks,
-        idx: 0,
-        params: BTreeMap::new(),
-        defines: BTreeSet::new(),
-        ifdef_stack: Vec::new(),
-    };
-    p.parse_combo_module()
+    Parser::new(src, &BTreeSet::new())?.parse_combo_module()
 }
 
 #[allow(dead_code)]
 pub fn parse_pipeline_module(src: &str) -> Result<ParsedModule> {
-    let toks = crate::sv_lexer::lex_all(src)?;
-    let mut p = Parser {
-        src,
-        toks,
-        idx: 0,
-        params: BTreeMap::new(),
-        defines: BTreeSet::new(),
-        ifdef_stack: Vec::new(),
-    };
-    p.parse_pipeline_module()
+    parse_pipeline_module_with_defines(src, &BTreeSet::new())
 }
 
 pub fn parse_pipeline_module_with_defines(
     src: &str,
     defines: &BTreeSet<String>,
 ) -> Result<ParsedModule> {
-    let toks = crate::sv_lexer::lex_all(src)?;
-    let mut p = Parser {
-        src,
-        toks,
-        idx: 0,
-        params: BTreeMap::new(),
-        defines: defines.clone(),
-        ifdef_stack: Vec::new(),
-    };
-    p.parse_pipeline_module()
+    Parser::new(src, defines)?.parse_pipeline_module()
+}
+
+/// Parses all module definitions while keeping spans relative to the whole
+/// source.
+pub(crate) fn parse_pipeline_modules(
+    src: &str,
+    defines: &BTreeSet<String>,
+) -> Result<BTreeMap<String, ParsedModule>> {
+    let mut parser = Parser::new(src, defines)?;
+    let mut modules = BTreeMap::new();
+    while *parser.cur() != TokKind::End {
+        let module = parser.parse_pipeline_module()?;
+        let name = module.name.clone();
+        if modules.insert(name.clone(), module).is_some() {
+            return Err(Error::Parse(format!("duplicate module `{name}`")));
+        }
+    }
+    Ok(modules)
 }
 
 struct Parser<'a> {
@@ -90,6 +82,28 @@ struct IfdefFrame {
 }
 
 impl<'a> Parser<'a> {
+    fn new(src: &'a str, defines: &BTreeSet<String>) -> Result<Self> {
+        Ok(Self {
+            src,
+            toks: crate::sv_lexer::lex_all(src)?,
+            idx: 0,
+            params: BTreeMap::new(),
+            defines: defines.clone(),
+            ifdef_stack: Vec::new(),
+        })
+    }
+
+    fn take_ident(&mut self) -> Result<String> {
+        let TokKind::Ident(name) = self.cur().clone() else {
+            return Err(Error::Parse(format!(
+                "expected identifier, got {:?}",
+                self.cur()
+            )));
+        };
+        self.bump();
+        Ok(name)
+    }
+
     fn cur(&self) -> &TokKind {
         &self.toks[self.idx].kind
     }
@@ -578,7 +592,9 @@ impl<'a> Parser<'a> {
                     TokKind::Other('`') => {
                         self.handle_preprocessor_directive()?;
                     }
-                    TokKind::KwEndmodule | TokKind::End => {}
+                    TokKind::KwEndmodule | TokKind::End => {
+                        return Err(Error::Parse("unterminated preprocessor conditional".into()));
+                    }
                     _ => self.bump(),
                 }
                 continue;
@@ -605,9 +621,12 @@ impl<'a> Parser<'a> {
             }
         };
 
+        if !self.ifdef_stack.is_empty() {
+            return Err(Error::Parse("unterminated preprocessor conditional".into()));
+        }
         Ok(ParsedModule {
             name,
-            params: self.params.clone(),
+            params: std::mem::take(&mut self.params),
             ports,
             header_span,
             endmodule_span,
@@ -617,6 +636,7 @@ impl<'a> Parser<'a> {
 
     fn parse_pipeline_item(&mut self) -> Result<Vec<ModuleItem>> {
         let item = match self.cur().clone() {
+            TokKind::Ident(_) => self.parse_instance(),
             TokKind::KwWire => {
                 return self.parse_wire_decl_with_span();
             }
@@ -677,6 +697,48 @@ impl<'a> Parser<'a> {
             ))),
         }?;
         Ok(vec![item])
+    }
+
+    /// Parses a module instance with explicit `.port(expression)` connections.
+    fn parse_instance(&mut self) -> Result<ModuleItem> {
+        let start = self.toks[self.idx].start;
+        let module = self.take_ident()?;
+        let name = self.take_ident()?;
+        self.expect(TokKind::LParen)?;
+        let mut connections = BTreeMap::new();
+        if *self.cur() != TokKind::RParen {
+            loop {
+                self.expect(TokKind::Other('.'))?;
+                let port = self.take_ident()?;
+                self.expect(TokKind::LParen)?;
+                let (expr, spanned, _) =
+                    self.parse_expr_and_spanned_with_span_until(&[TokKind::RParen])?;
+                self.expect(TokKind::RParen)?;
+                if connections
+                    .insert(port.clone(), PortConnection { expr, spanned })
+                    .is_some()
+                {
+                    return Err(Error::Parse(format!(
+                        "duplicate port connection `{name}.{port}`"
+                    )));
+                }
+                if *self.cur() == TokKind::RParen {
+                    break;
+                }
+                self.expect(TokKind::Comma)?;
+            }
+        }
+        self.expect(TokKind::RParen)?;
+        self.expect(TokKind::Semi)?;
+        Ok(ModuleItem::Instance {
+            module,
+            name,
+            connections,
+            span: Span {
+                start,
+                end: self.toks[self.idx - 1].end,
+            },
+        })
     }
 
     fn parse_generate_for_item(&mut self) -> Result<ModuleItem> {
@@ -1132,9 +1194,14 @@ impl<'a> Parser<'a> {
                 }
                 let assigns = self.parse_procedural_function_body()?;
                 if assigns.len() == 1 && assigns[0].lhs == name {
+                    let value_span = assigns[0].value_span;
+                    let mut value_spanned =
+                        parse_expr_spanned(self.src[value_span.start..value_span.end].trim())?;
+                    value_spanned.shift_spans(value_span.start);
                     FunctionBody::Assign {
                         value: assigns[0].value.clone(),
-                        value_span: assigns[0].value_span,
+                        value_spanned,
+                        value_span,
                     }
                 } else {
                     FunctionBody::Procedure { assigns }
@@ -1664,6 +1731,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             match &k {
+                TokKind::End => return Err(Error::Parse("unexpected EOF in expression".into())),
                 TokKind::LParen => depth_paren += 1,
                 TokKind::RParen => depth_paren -= 1,
                 TokKind::LBracket => depth_bracket += 1,

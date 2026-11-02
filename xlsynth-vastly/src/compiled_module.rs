@@ -13,7 +13,6 @@ use crate::ast_spanned::SpannedExpr;
 use crate::packed::rewrite_packed_expr;
 use crate::packed::rewrite_packed_lhs;
 use crate::packed::rewrite_packed_spanned_expr;
-use crate::parser_spanned::parse_expr_spanned;
 use crate::sv_ast::Decl;
 use crate::sv_ast::FunctionBody;
 use crate::sv_ast::FunctionDecl;
@@ -233,7 +232,6 @@ pub(crate) fn lower_assign(
 
 /// Lowers a function declaration into compiled function form.
 pub(crate) fn lower_function(
-    parse_src: &str,
     f: &FunctionDecl,
     decls: &BTreeMap<String, DeclInfo>,
     preserve_spans: bool,
@@ -270,11 +268,15 @@ pub(crate) fn lower_function(
                 arms: out_arms,
             }
         }
-        FunctionBody::Assign { value, value_span } => {
+        FunctionBody::Assign {
+            value,
+            value_spanned,
+            ..
+        } => {
             let expr = rewrite_packed_expr(value.clone(), &fn_decls)?;
             let expr_spanned = if preserve_spans {
                 Some(rewrite_packed_spanned_expr(
-                    parse_expr_spanned_in_span(parse_src, *value_span)?,
+                    value_spanned.clone(),
                     &fn_decls,
                 )?)
             } else {
@@ -309,13 +311,6 @@ pub(crate) fn lower_function(
         locals,
         body,
     })
-}
-
-fn parse_expr_spanned_in_span(parse_src: &str, span: Span) -> Result<SpannedExpr> {
-    let expr_src = parse_src[span.start..span.end].trim();
-    let mut spanned = parse_expr_spanned(expr_src)?;
-    spanned.shift_spans(span.start);
-    Ok(spanned)
 }
 
 fn decl_info_from_decl(d: &Decl) -> DeclInfo {
