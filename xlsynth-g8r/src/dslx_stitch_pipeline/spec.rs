@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xlsynth::ir_package::IrPackage;
-use xlsynth::{DslxConvertOptions, XlsynthError, convert_dslx_to_ir, dslx};
+use xlsynth::{XlsynthError, dslx};
 
 use super::layout::PipelineLayout;
 use super::names::validate_stitch_pipeline_names;
 use super::{resolve_stage_ir_names, select_stage_names, verify_stage_signatures};
 use crate::aig::{ClockPort, SequentialPipelineOptions};
+use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
 
 /// Source selection, register boundaries and external control ports shared by
 /// both emitters.
@@ -129,6 +130,15 @@ impl StitchPipelineSpec {
     /// proof-model generation. If the source imports another module, run
     /// resolution in a process whose working directory is `source_directory()`.
     pub fn resolve(&self) -> Result<ResolvedStitchPipeline, XlsynthError> {
+        self.resolve_with_bank_proof_options(GateFormalOptions::default())
+    }
+
+    /// Resolves the stages with the supplied solver limits for enabled-bank
+    /// validation.
+    pub fn resolve_with_bank_proof_options(
+        &self,
+        bank_proof: GateFormalOptions,
+    ) -> Result<ResolvedStitchPipeline, XlsynthError> {
         let name = self.validate()?;
         let text = fs::read_to_string(&self.dslx_input_file).map_err(|error| {
             XlsynthError(format!(
@@ -159,6 +169,7 @@ impl StitchPipelineSpec {
                 reset_signal: self.reset.clone(),
                 reset_active_low: self.reset_active_low,
             },
+            bank_proof,
         )?;
         resolved.validate_wrapper_names()?;
 
@@ -245,6 +256,7 @@ pub(super) fn resolve_stages(
     explicit_stages: Option<&[String]>,
     paths: StitchImportPaths<'_>,
     boundary: SequentialPipelineOptions,
+    bank_proof: GateFormalOptions,
 ) -> Result<ResolvedStitchPipeline, XlsynthError> {
     let module_name = path
         .file_stem()
@@ -257,8 +269,31 @@ pub(super) fn resolve_stages(
     for path in paths.search {
         dslx_path_str(path, "dslx_path")?;
     }
-    let mut imports = dslx::ImportData::new(paths.stdlib, paths.search);
-    let typecheck = dslx::parse_and_typecheck(text, path_str, module_name, &mut imports);
+    // Typecheck ordinary pipelines against an empty reserved module. A
+    // successful check proves there is no marker, including through imports.
+    // Only pipelines that use the annotation need nominal boundary analysis.
+    let typecheck_with = |stitch_source| -> Result<_, XlsynthError> {
+        let mut imports = dslx::ImportData::new(paths.stdlib, paths.search);
+        let builtin = if module_name == "stitch" {
+            None
+        } else {
+            Some(dslx::parse_and_typecheck(
+                stitch_source,
+                "<builtin>/stitch.x",
+                "stitch",
+                &mut imports,
+            )?)
+        };
+        Ok((
+            dslx::parse_and_typecheck(text, path_str, module_name, &mut imports)?,
+            builtin,
+        ))
+    };
+    let typecheck = match typecheck_with("") {
+        Ok((module, _)) => Ok((module, None)),
+        Err(first) if module_name == "stitch" => Err(first),
+        Err(_) => typecheck_with(super::enable::STITCH_MODULE),
+    };
     if let Some(required_dir) = paths.required_directory {
         // libxls tries its process working directory before additional search
         // paths. Every transitive import begins at an import/use in this
@@ -273,13 +308,14 @@ pub(super) fn resolve_stages(
                 current_dir.display()
             );
             match &typecheck {
-                Ok(typechecked) => {
+                Ok((typechecked, _)) => {
                     let module = typechecked.get_module();
                     if (0..module.get_member_count()).any(|i| {
-                        matches!(
-                            module.get_member(i).kind(),
-                            dslx::ModuleMemberKind::Import | dslx::ModuleMemberKind::Use
-                        )
+                        let member = module.get_member(i);
+                        member
+                            .to_import()
+                            .is_some_and(|import| import.get_subject() != ["stitch"])
+                            || member.kind() == dslx::ModuleMemberKind::Use
                     }) {
                         return Err(XlsynthError(guidance));
                     }
@@ -290,19 +326,17 @@ pub(super) fn resolve_stages(
             }
         }
     }
-    let module = typecheck?;
+    let (module, builtin) = typecheck?;
     let names = select_stage_names(&module, top, explicit_stages)?;
-    let convert = DslxConvertOptions {
-        dslx_stdlib_path: paths.stdlib,
-        additional_search_paths: paths.search.to_vec(),
-        enable_warnings: None,
-        disable_warnings: None,
-        force_implicit_token_calling_convention: false,
-    };
-    let ir = convert_dslx_to_ir(text, path, &convert)?.ir;
+    let ir = IrPackage::parse_ir(&module.to_ir_text()?, None)?;
     let stages = resolve_stage_ir_names(&ir, module_name, names)?;
     verify_stage_signatures(&ir, &stages)?;
-    let layout = PipelineLayout::from_ir(&ir, &stages, &boundary)?;
+    let mut layout = PipelineLayout::from_ir(&ir, &stages, &boundary)?;
+    if let Some(builtin) = builtin {
+        let marker = builtin.get_module().get_type_definition_as_struct_def(0)?;
+        super::enable::collect_banks(&module, &marker, &stages, &mut layout)?;
+        super::enable::validate_banks(&ir, &stages, &mut layout, bank_proof)?;
+    }
     Ok(ResolvedStitchPipeline {
         ir,
         stages,
@@ -317,6 +351,32 @@ mod tests {
     use crate::dslx_stitch_pipeline::StitchRtlOptions;
     use crate::process_ir_path::CanonicalG8rOptions;
     use tempfile::tempdir;
+
+    #[test]
+    fn spec_applies_the_timeout_to_enabled_bank_validation() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("pipe.x"),
+            r#"import stitch;
+type Bank = stitch::Enable<bool>;
+fn pipe_cycle0(x: bool) -> Bank { Bank { enabled: false, data: x } }
+fn pipe_cycle1(bank: Bank) -> bool { bank.data }
+"#,
+        )
+        .unwrap();
+        let path = dir.path().join("pipe.toml");
+        fs::write(
+            &path,
+            r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+"#,
+        )
+        .unwrap();
+        let spec = StitchPipelineSpec::load(&path).unwrap();
+        let limits = GateFormalOptions::default().with_cadical_timeout(std::time::Duration::ZERO);
+        let err = spec.resolve_with_bank_proof_options(limits).err().unwrap();
+        assert_eq!(err.0, "enable insensitivity proof: CadicalSolveInterrupted");
+    }
 
     #[test]
     fn spec_requires_the_source_directory_for_import_and_use() {

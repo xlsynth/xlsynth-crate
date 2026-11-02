@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use super::ResolvedStitchPipeline;
+use crate::aig::sequential_pipeline::stitch_with_banks;
 use crate::netlist::gv_eval::{LabeledSequentialNetlistAig, project_sequential_module};
 use crate::netlist::io::{load_liberty_from_path, read_gv_for_proof_from_path, select_module};
 use crate::process_ir_path::CanonicalG8rOptions;
@@ -12,8 +13,8 @@ use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
 #[cfg(feature = "has-bitwuzla")]
 use crate::stitch_equiv::BehavioralPipeline;
 use crate::stitch_equiv::{
-    ProofReference, StitchEquivResult, StitchObservation, StitchProofOptions, StitchProofReport,
-    StitchProofSolver, prove_with_stage_options,
+    ProofReference, StitchEquivResult, StitchObservation, StitchProofMode, StitchProofOptions,
+    StitchProofReport, StitchProofSolver, prove_with_stage_options,
 };
 
 impl ResolvedStitchPipeline {
@@ -84,7 +85,7 @@ impl ResolvedStitchPipeline {
         // out of the reference so a native implementation using them is
         // checked against a separately lowered graph.
         let lower_gates = || {
-            self.lower_to_g8r_with_layout(&CanonicalG8rOptions {
+            self.lower_stages(&CanonicalG8rOptions {
                 unsafe_gatify_gate_operation: true,
                 enable_formal_array_alias_analysis: false,
                 enable_rewrite_carry_out: false,
@@ -116,20 +117,38 @@ impl ResolvedStitchPipeline {
             )
             .map_err(anyhow::Error::msg)
         };
+        // Stage obligations compare physical state. The post-fill proof
+        // compares the original DSLX transaction at the external output.
+        let banks = if options.mode == StitchProofMode::WholePipeline {
+            Vec::new()
+        } else {
+            self.layout.interstage_banks()
+        };
         match &options.solver {
             StitchProofSolver::Cadical(formal) => {
-                let reference = lower_gates()?;
-                check(&reference, ProofReference::Gates(formal))
+                let stages = lower_gates()?;
+                let reference = stitch_with_banks(&stages, &self.boundary, &banks)
+                    .map_err(anyhow::Error::msg)?;
+                let ordinary = || stitch_with_banks(&stages, &self.boundary, &[]);
+                check(
+                    &reference,
+                    ProofReference::Gates {
+                        formal,
+                        post_fill: banks.iter().any(|b| !b.is_empty()).then_some(&ordinary),
+                    },
+                )
             }
             #[cfg(feature = "has-bitwuzla")]
             StitchProofSolver::Bitwuzla { timeout } => {
-                let stages = BehavioralPipeline::from_xls(&self.ir, &self.stages, &self.boundary)
-                    .map_err(anyhow::Error::msg)?;
+                let stages =
+                    BehavioralPipeline::from_xls(&self.ir, &self.stages, &self.boundary, &banks)
+                        .map_err(anyhow::Error::msg)?;
                 let layout = stages.interface_layout().map_err(anyhow::Error::msg)?;
                 let lower_for_pairing = || {
-                    lower_gates().map_err(|e| {
+                    let stages = lower_gates().map_err(|e| {
                         format!("could not gatify reference for register pairing: {e}")
-                    })
+                    })?;
+                    stitch_with_banks(&stages, &self.boundary, &banks)
                 };
                 check(
                     &layout,

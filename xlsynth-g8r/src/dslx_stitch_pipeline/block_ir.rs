@@ -11,7 +11,7 @@ use xlsynth_pir::{
 };
 
 use super::layout::{PipelineBoundary, PipelineLayout};
-use super::names::{flop_reg_name, stage_output_wire_name, valid_reg_name};
+use super::names::{bank_reg_name, flop_reg_name, stage_output_wire_name, valid_reg_name};
 use crate::aig::SequentialPipelineOptions;
 
 /// Appends the wrapper to its stage package and selects it as the package top.
@@ -91,9 +91,18 @@ fn pipeline_builder(
         let inputs = layout.after_stage(i);
         // A token-free unary argument can cross the register layer whole.
         // Multiple arguments split the packed result starting at the LSB.
-        let mut arguments = if inputs.ports.len() == 1
-            && !builder.get_type(result)?.contains_token()
-        {
+        let mut arguments = if !inputs.banks.is_empty() {
+            let ty = builder.get_type(result)?.clone();
+            let packed = pack_value(&mut builder, result, &ty)?;
+            let registered = control.register_banks(&mut builder, inputs, packed)?;
+            stage
+                .param_nodes()
+                .zip(&inputs.ports)
+                .map(|(p, port)| {
+                    unpack_for_storage(&mut builder, registered, &p.ty, port.bits.clone())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else if inputs.ports.len() == 1 && !builder.get_type(result)?.contains_token() {
             vec![result]
         } else {
             let ty = builder.get_type(result)?.clone();
@@ -104,7 +113,9 @@ fn pipeline_builder(
                 .map(|(p, port)| unpack_for_storage(&mut builder, packed, &p.ty, port.bits.clone()))
                 .collect::<Result<Vec<_>, _>>()?
         };
-        control.register_boundary(&mut builder, inputs, &mut arguments)?;
+        if inputs.banks.is_empty() {
+            control.register_boundary(&mut builder, inputs, &mut arguments)?;
+        }
         result = invoke_stage(&mut builder, stage, arguments, i + 1)?;
     }
 
@@ -163,6 +174,52 @@ struct PipelineControl {
 }
 
 impl PipelineControl {
+    /// Registers packed fields under their producer's predicates, then restores
+    /// the packed value for the next stage's normal port slicing.
+    fn register_banks(
+        &mut self,
+        builder: &mut BlockBuilder,
+        boundary: &PipelineBoundary,
+        packed: BValue,
+    ) -> Result<BValue, BuilderError> {
+        let layer = boundary
+            .register_layer
+            .expect("banks have a register layer");
+        let mut parts = Vec::new();
+        for segment in boundary.bank_segments().into_iter().rev() {
+            if !segment.store {
+                parts.push(builder.literal(IrValue::bool(false))?);
+                continue;
+            }
+            let width = segment.bits.len();
+            let data = builder.bit_slice(packed, segment.bits.start, width)?;
+            let mut load = self.valid;
+            if let Some(bit) = segment.enable {
+                let enabled = builder.bit_slice(packed, bit, 1)?;
+                load = Some(match load {
+                    Some(valid) => builder.and(valid, enabled)?,
+                    None => enabled,
+                });
+            }
+            let reg = builder.register(
+                &bank_reg_name(layer, segment.bits.start),
+                Type::Bits(width),
+                None,
+            )?;
+            builder.register_write(
+                reg,
+                data,
+                RegisterWriteOptions {
+                    load_enable: load,
+                    reset: None,
+                },
+            )?;
+            parts.push(builder.register_read(reg)?);
+        }
+        self.register_valid(builder, layer)?;
+        builder.concat(&parts)
+    }
+
     /// Registers data on valid cycles and advances valid on every clock edge.
     fn register_boundary(
         &mut self,
@@ -189,6 +246,15 @@ impl PipelineControl {
             )?;
             *value = builder.register_read(register)?;
         }
+        self.register_valid(builder, layer)
+    }
+
+    /// Advances the transaction-valid bit alongside the data at this boundary.
+    fn register_valid(
+        &mut self,
+        builder: &mut BlockBuilder,
+        layer: usize,
+    ) -> Result<(), BuilderError> {
         if let Some(valid) = self.valid {
             let register = builder.register(
                 &valid_reg_name(layer),

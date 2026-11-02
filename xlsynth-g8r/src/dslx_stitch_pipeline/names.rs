@@ -32,6 +32,14 @@ pub(super) fn valid_reg_name(pipe_stage_number: usize) -> String {
     format!("p{pipe_stage_number}_valid")
 }
 
+pub(super) fn bank_reg_name(layer: usize, lsb: usize) -> String {
+    format!("p{layer}_bank_at_{lsb}")
+}
+
+pub(super) fn bank_result_name(layer: usize) -> String {
+    format!("p{layer}_bank_result")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NameRole<'a> {
     WrapperModule,
@@ -286,7 +294,30 @@ fn validate_generated_wrapper_names(
                 )?;
             }
         }
-        record_flop_layer_names(wrapper_namespace, layer, &boundary.ports, has_valid_signal)?;
+        if boundary.banks.is_empty() {
+            record_flop_layer_names(wrapper_namespace, layer, &boundary.ports, has_valid_signal)?;
+        } else {
+            for segment in boundary
+                .bank_segments()
+                .iter()
+                .filter(|segment| segment.store)
+            {
+                record_emitted_name(
+                    wrapper_namespace,
+                    &bank_reg_name(layer, segment.bits.start),
+                    format!(
+                        "register for stage '{stage_name}' output bits {:?}",
+                        segment.bits
+                    ),
+                )?;
+            }
+            record_emitted_name(
+                wrapper_namespace,
+                &bank_result_name(layer),
+                format!("registered result for stage '{stage_name}'"),
+            )?;
+            record_flop_layer_names(wrapper_namespace, layer, &[], has_valid_signal)?;
+        }
     }
 
     Ok(())

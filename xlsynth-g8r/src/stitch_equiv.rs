@@ -11,17 +11,13 @@ use xlsynth_pir::IrBits;
 
 use crate::aig::import::import_gate_fn;
 use crate::aig::sequential_pipeline::StitchedGatePipeline;
-use crate::aig::topo::extract_cone;
 use crate::aig::{AigBitVector, SequentialGateFn, SequentialPipelineOptions};
 use crate::aig_sim::sequential::{SequentialState, simulate};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
 use crate::netlist::gv_eval::{
     LabeledSequentialNetlistAig, SequentialAigSignal, SequentialClockEdge,
 };
-use crate::prove_gate_fn_equiv_sat::{
-    CadicalSat, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult, ValidationError,
-    build_sat_clauses,
-};
+use crate::prove_gate_fn_equiv_sat::{GateFormalOptions, ValidationError, find_cone_witness};
 
 mod correspondence;
 mod stage_functions;
@@ -155,10 +151,15 @@ impl Default for StitchProofSolver {
 /// A prepared reference for the selected proof backend.
 #[derive(Clone, Copy)]
 pub(crate) enum ProofReference<'a> {
-    Gates(&'a GateFormalOptions),
+    Gates {
+        formal: &'a GateFormalOptions,
+        /// Builds ordinary DSLX capture for post-fill if the stage layout is
+        /// banked.
+        post_fill: Option<&'a dyn Fn() -> Result<StitchedGatePipeline, String>>,
+    },
     #[cfg(feature = "has-bitwuzla")]
     Behavioral {
-        stages: &'a BehavioralPipeline,
+        stages: &'a BehavioralPipeline<'a>,
         timeout: Option<Duration>,
         /// Simulates candidate pairs. The proof uses the behavioral functions.
         lower_for_pairing: &'a dyn Fn() -> Result<StitchedGatePipeline, String>,
@@ -515,7 +516,7 @@ fn prove_stages(
             // A combinational design has an empty state relation.
             Ok(Vec::new())
         }
-        ProofReference::Gates(_) => {
+        ProofReference::Gates { .. } => {
             correspondence::direct_register_pairs(reference, implementation, latency, observation)
         }
         #[cfg(feature = "has-bitwuzla")]
@@ -544,7 +545,7 @@ fn prove_stages(
         }
     };
     let (outcome, solver_name) = match model {
-        ProofReference::Gates(formal) => {
+        ProofReference::Gates { formal, .. } => {
             let miters = stage_graph::build_stage_miters(
                 reference,
                 implementation,
@@ -681,14 +682,19 @@ pub(crate) fn prove_with_stage_options(
         }
     };
     let result = match model {
-        ProofReference::Gates(formal) => prove_post_fill(
-            reference,
-            implementation,
-            &expected,
-            latency,
-            observation,
-            *formal,
-        ),
+        ProofReference::Gates { formal, post_fill } => {
+            let ordinary = post_fill.map(|build| build()).transpose()?;
+            prove_post_fill(
+                ordinary
+                    .as_ref()
+                    .map_or(reference, |pipeline| &pipeline.design),
+                implementation,
+                &expected,
+                latency,
+                observation,
+                *formal,
+            )
+        }
         #[cfg(feature = "has-bitwuzla")]
         ProofReference::Behavioral {
             stages: behavior,
@@ -780,39 +786,15 @@ fn prove_post_fill(
     }
     builder.add_output("mismatch".to_string(), mismatch.into());
     let graph = builder.build();
-    let mut solver = CadicalSat::new_with_options(options).map_err(|e| e.to_string())?;
-    let (cone, cone_inputs) = extract_cone(&[mismatch.node], &graph.gates);
-    let literals = build_sat_clauses(&mut solver, &cone, &cone_inputs, &graph.gates);
-    let lit = literals[&mismatch.node];
-    let differs = if mismatch.negated { !lit } else { lit };
-    if solver
-        .sat_solve_assuming(&[differs])
-        .map_err(|error| match error {
-            ValidationError::CadicalSolveInterrupted => {
-                "stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit".to_owned()
-            }
-            other => other.to_string(),
-        })?
-        == SatSolveResult::Unsat
-    {
+    let Some(witness) = find_cone_witness(&graph, mismatch, options).map_err(|error| match error {
+        ValidationError::CadicalSolveInterrupted => {
+            "stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit".to_owned()
+        }
+        other => other.to_string(),
+    })? else {
         return Ok(StitchEquivResult::Proved);
-    }
-
-    let model = solver.sat_model().map_err(|e| e.to_string())?;
-    // All symbols here are positive primary inputs. Inputs outside the
-    // mismatch cone are unconstrained and may be set to zero for replay.
-    let decode = |value: &AigBitVector| {
-        IrBits::from_lsb_is_0(
-            &value
-                .iter_lsb_to_msb()
-                .map(|bit| {
-                    literals
-                        .get(&bit.node)
-                        .is_some_and(|lit| model.lit_value(*lit))
-                })
-                .collect::<Vec<_>>(),
-        )
     };
+    let decode = |value: &AigBitVector| witness.decode_inputs(value);
     let decode_state = |design: &SequentialGateFn, values: &[AigBitVector]| {
         design
             .registers
@@ -1024,6 +1006,7 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 reset_signal: None,
                 reset_active_low: false,
             },
+            &[],
         )
         .unwrap();
         let lower = || {
@@ -1047,7 +1030,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
             StitchObservation::default(),
             &stages,
             &options,
-            ProofReference::Gates(&formal),
+            ProofReference::Gates {
+                formal: &formal,
+                post_fill: None,
+            },
         )
         .unwrap();
         assert_eq!(gate_report.result, StitchEquivResult::Proved);
@@ -1156,7 +1142,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 StitchObservation::default(),
                 &stage_names,
                 &options,
-                ProofReference::Gates(&formal)
+                ProofReference::Gates {
+                    formal: &formal,
+                    post_fill: None
+                }
             )
             .unwrap_err(),
             format!(
@@ -1172,7 +1161,10 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
                 StitchObservation::default(),
                 &stage_names,
                 &options,
-                ProofReference::Gates(&formal)
+                ProofReference::Gates {
+                    formal: &formal,
+                    post_fill: None
+                }
             )
             .unwrap_err(),
             format!(

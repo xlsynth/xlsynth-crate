@@ -376,6 +376,47 @@ enum VirtualExpression {
     },
 }
 
+/// Satisfying assignment to the primary inputs in one output cone.
+pub(crate) struct ConeWitness {
+    high_inputs: HashSet<AigRef>,
+}
+
+impl ConeWitness {
+    /// Decodes a vector of primary inputs, choosing zero outside the cone.
+    pub(crate) fn decode_inputs(&self, inputs: &AigBitVector) -> IrBits {
+        IrBits::from_lsb_is_0(
+            &inputs
+                .iter_lsb_to_msb()
+                .map(|bit| self.high_inputs.contains(&bit.node) ^ bit.negated)
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+/// Finds inputs that make the given output true, or proves it is always false.
+pub(crate) fn find_cone_witness(
+    graph: &GateFn,
+    output: AigOperand,
+    options: GateFormalOptions,
+) -> Result<Option<ConeWitness>, ValidationError> {
+    let mut solver = CadicalSat::new_with_options(options)?;
+    let (cone, inputs) = extract_cone(&[output.node], &graph.gates);
+    let literals = build_sat_clauses(&mut solver, &cone, &inputs, &graph.gates);
+    let lit = literals[&output.node];
+    if solver.sat_solve_assuming(&[if output.negated { !lit } else { lit }])?
+        == SatSolveResult::Unsat
+    {
+        return Ok(None);
+    }
+    let model = solver.sat_model()?;
+    Ok(Some(ConeWitness {
+        high_inputs: inputs
+            .into_iter()
+            .filter(|r| model.lit_value(literals[r]))
+            .collect(),
+    }))
+}
+
 /// Tracks proven relationships and recognizes downstream structural congruence.
 struct VirtualEquivalence {
     parent: Vec<usize>,

@@ -8,7 +8,7 @@ use xlsynth::optimize_ir;
 
 use super::ResolvedStitchPipeline;
 use super::spec::{StitchImportPaths, resolve_stages};
-use crate::aig::sequential_pipeline::{StitchedGatePipeline, stitch_gate_fns_with_layout};
+use crate::aig::sequential_pipeline::stitch_with_banks;
 use crate::aig::{ClockPort, SequentialGateFn, SequentialPipelineOptions};
 use crate::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts};
 
@@ -58,6 +58,7 @@ pub fn stitch_g8r_pipeline(
             reset_signal: options.reset_signal.map(str::to_string),
             reset_active_low: options.reset_active_low,
         },
+        Default::default(),
     )?;
     resolved.lower_to_g8r(lowering_options)
 }
@@ -69,14 +70,18 @@ impl ResolvedStitchPipeline {
         &self,
         lowering_options: &CanonicalG8rOptions,
     ) -> Result<SequentialGateFn, xlsynth::XlsynthError> {
-        Ok(self.lower_to_g8r_with_layout(lowering_options)?.design)
+        let stages = self.lower_stages(lowering_options)?;
+        let banks = self.layout.interstage_banks();
+        Ok(stitch_with_banks(&stages, &self.boundary, &banks)
+            .map_err(xlsynth::XlsynthError)?
+            .design)
     }
 
-    /// Lowers the stages once and retains the register boundaries for proof.
-    pub(super) fn lower_to_g8r_with_layout(
+    /// Gatifies each combinational stage independently of its register layout.
+    pub(super) fn lower_stages(
         &self,
         lowering_options: &CanonicalG8rOptions,
-    ) -> Result<StitchedGatePipeline, xlsynth::XlsynthError> {
+    ) -> Result<Vec<crate::aig::GateFn>, xlsynth::XlsynthError> {
         let mut stage_gate_fns = Vec::with_capacity(self.stages.len());
         for (stage_name, stage_mangled) in &self.stages {
             let optimized_ir = optimize_ir(&self.ir, stage_mangled)?;
@@ -93,6 +98,6 @@ impl ResolvedStitchPipeline {
             stage_gate_fns.push(lowering.gate_fn);
         }
 
-        stitch_gate_fns_with_layout(&stage_gate_fns, &self.boundary).map_err(xlsynth::XlsynthError)
+        Ok(stage_gate_fns)
     }
 }

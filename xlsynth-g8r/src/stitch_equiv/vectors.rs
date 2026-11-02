@@ -216,7 +216,7 @@ pub(crate) fn check_stitch_vectors(
             .iter()
             .map(|(name, ir_name)| (name.as_str(), ir_name.as_str())),
     )?;
-    let layout = interface_layout(&functions, boundary)?;
+    let layout = interface_layout(&functions, boundary, &[])?;
     let widths = validate_interfaces(&layout.design, mapped)?.inputs;
     let controls = StitchObservation::from(boundary);
     let mut rows = vectors.into_frames(&widths, controls, latency);

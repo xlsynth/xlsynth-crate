@@ -12,7 +12,7 @@ use xlsynth_pir::ir_value_utils::{
 };
 use xlsynth_pir::ir_verify::verify_package;
 
-use crate::aig::sequential_pipeline::{StitchedGatePipeline, stitch_gate_fns_with_layout};
+use crate::aig::sequential_pipeline::{BankSegment, StitchedGatePipeline, stitch_with_banks};
 use crate::aig::{AigBitVector, GateBuilder, GateBuilderOptions, SequentialPipelineOptions};
 
 // Both translation and concrete evaluation descend into called functions.
@@ -120,6 +120,7 @@ pub(super) fn resolve_functions<'a>(
 pub(super) fn interface_layout(
     stages: &[StageFunction<'_>],
     boundary: &SequentialPipelineOptions,
+    banks: &[Vec<BankSegment>],
 ) -> Result<StitchedGatePipeline, String> {
     let mut interfaces = Vec::new();
     for &StageFunction {
@@ -137,7 +138,7 @@ pub(super) fn interface_layout(
         );
         interfaces.push(builder.build());
     }
-    stitch_gate_fns_with_layout(&interfaces, boundary)
+    stitch_with_banks(&interfaces, boundary, banks)
 }
 
 /// Interprets one transaction through all DSLX stages using the wrapper's

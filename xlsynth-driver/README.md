@@ -4069,6 +4069,10 @@ a one-to-one pairing of register bits, allowing renamed, reordered, and inverted
 flops. The solver checks every paired next-state bit for arbitrary current state
 and inputs. The last stage also checks the external outputs. This can establish
 equivalence even when the mapped data and valid flops have different names.
+For `stitch::Enable<T>`, the stage proof checks that a disabled payload holds
+its previous value and pairs the enable bit only when the consumer needs it.
+The whole-pipeline proof compares the final outputs against ordinary DSLX
+capture, including when the checker falls back from a stage proof.
 
 If synthesis changes the state encoding, removes flops, or the proposed pairing
 fails a stage proof, the default mode checks the whole pipeline. Bitwuzla
@@ -4120,7 +4124,7 @@ a matching proto as described under `g8r2gv`. A netlist from synthesis of
 - `--jobs <N>` limits the number of stage proofs or scripted leaves solving at once. The default is the available CPU count. Use `--jobs 1` to run serially.
 - `--stage-script <STAGE=PATH>` selects a JSON proof script for one named DSLX stage. Repeat for other stages. Each unspecified stage runs a single `Solve`. Scripts require a direct register correspondence and are incompatible with `whole-pipeline` mode.
 - `--show-proof-plan` prints the solver and reference used, along with the proved leaf count per stage or the whole-pipeline fallback reason, to stderr.
-- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including any whole-pipeline fallback. The default is unlimited.
+- `--timeout-seconds <N>` limits each solver check to a positive number of seconds, including enabled-bank validation and any whole-pipeline fallback. The default is unlimited.
 
 For example, to split the multiply stage's obligations, save the following as
 `product-proof.json`. Stage scripts use the `xlsynth-prover` selector and
@@ -4211,6 +4215,56 @@ multiple parameters, its first parameter receives the low bits of the preceding
 result and each successive parameter receives the next slice. Both formats use
 the same stage order, pipeline name, and valid/reset settings.
 The generated text goes to stdout and diagnostics go to stderr.
+
+To gate individual interstage register banks, import the built-in DSLX module
+`stitch`. A bank can be the whole stage result or a direct member of its
+outer struct or tuple. The payload can have an aggregate type. A bank inside
+an array, another bank, or a deeper struct or tuple is rejected.
+
+```dslx
+import stitch;
+type Bank = stitch::Enable<u32>;
+struct Decoded { is_mul: bool, add: Bank, mul: Bank }
+
+fn ops_cycle0(is_mul: bool, x: u32, y: u32) -> Decoded {
+    Decoded {
+        is_mul,
+        add: Bank { enabled: !is_mul, data: x + y },
+        mul: Bank { enabled: is_mul, data: x * y },
+    }
+}
+fn ops_cycle1(d: Decoded) -> u32 {
+    if d.is_mul { d.mul.data } else { d.add.data }
+}
+```
+
+The payload loads on `enabled`, additionally gated by the current stage valid
+when present. The next stage receives the same DSLX type. Stitch carries the
+enable bit when downstream logic needs it, including when a stage forwards
+the bank to another register layer. In this example both enable flops can be
+omitted because the final stage selects by opcode. External inputs and outputs
+retain their ordinary packed DSLX values.
+
+Stitch proves that substituting independent arbitrary values into all disabled
+payloads preserves the final data output for every transaction. Assertions
+and traces see the values held in the physical registers. For example, a
+producer writing `{enabled: x, data: x}` always makes the two fields equal
+on a fresh write. When `x` goes from 1 to 0, the consumer sees
+`{enabled: false, data: true}`, so `assert!(b.data == b.enabled, "fresh")`
+can fire even though the final output proof passes. Guard an assertion that
+requires fresh data with the bank predicate, for example
+`assert!(!b.enabled || b.data, "fresh")` for this producer.
+
+A counterexample reports the input values, bank predicates, and disagreeing
+outputs. RTL emission requires XLS array bounds semantics for this proof. Constant-flop validation currently requires unconditional
+data registers and rejects pipelines with enabled banks.
+
+The pinned v0.61.0 DSO supports the example above, tuple returns with written
+member types, and local aliases for those returns. If an imported alias or
+generic parameter hides a tuple's members (including a tuple used as the bank
+payload), stitch rejects the pipeline and reports the field it could not inspect.
+Pipelines that use the marker also reject stage results containing DSLX semantic
+sums because stitch cannot inspect their concrete variant payloads.
 
 In four-state simulation, the two RTL paths can differ when reset is unknown
 at a rising edge. For example, with active-high reset at `X` and input valid
@@ -4315,6 +4369,9 @@ Lowers selected DSLX stage functions to combinational g8r logic and connects
 each adjacent stage through a register layer in one `SequentialGateFn`. Text
 `.g8r` output is written to stdout; use `--bin-out=<PATH>` to also write the
 binary `.g8rbin` encoding.
+
+The native pipeline honors the same proved `stitch::Enable<T>` interstage
+register banks as the RTL and block-IR outputs.
 
 Stage selection follows `dslx-stitch-pipeline`: use `--dslx_top=<NAME>` to
 discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use

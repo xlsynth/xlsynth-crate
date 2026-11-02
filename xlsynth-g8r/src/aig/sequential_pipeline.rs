@@ -3,6 +3,7 @@
 //! Construction of a sequential pipeline from combinational gate functions.
 
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use xlsynth_pir::IrBits;
 
@@ -34,6 +35,13 @@ pub(crate) struct StitchedGatePipeline {
     pub register_stages: Vec<usize>,
 }
 
+/// One contiguous packed register or an omitted enable bit at a stage boundary.
+pub(crate) struct BankSegment {
+    pub bits: Range<usize>,
+    pub enable: Option<usize>,
+    pub store: bool,
+}
+
 /// Stitches combinational gate functions into one sequential pipeline design.
 ///
 /// Every adjacent pair of stages receives one register layer. Stage output bits
@@ -51,7 +59,16 @@ pub(crate) fn stitch_gate_fns_with_layout(
     stages: &[GateFn],
     options: &SequentialPipelineOptions,
 ) -> Result<StitchedGatePipeline, String> {
-    let mut stitched = assemble_pipeline(stages, options)?;
+    stitch_with_banks(stages, options, &[])
+}
+
+/// Stitches the proved interstage bank segments and lowers their controls to D.
+pub(crate) fn stitch_with_banks(
+    stages: &[GateFn],
+    options: &SequentialPipelineOptions,
+    banks: &[Vec<BankSegment>],
+) -> Result<StitchedGatePipeline, String> {
+    let mut stitched = assemble_pipeline(stages, options, banks)?;
     stitched.design = stitched.design.legalize_register_controls()?;
     Ok(stitched)
 }
@@ -64,13 +81,14 @@ pub fn stitch_gate_fns_into_pipeline_with_controls(
     stages: &[GateFn],
     options: &SequentialPipelineOptions,
 ) -> Result<SequentialGateFn, String> {
-    Ok(assemble_pipeline(stages, options)?.design)
+    Ok(assemble_pipeline(stages, options, &[])?.design)
 }
 
 /// Builds register bindings in stage order, including optional wrapper flops.
 fn assemble_pipeline(
     stages: &[GateFn],
     options: &SequentialPipelineOptions,
+    banks: &[Vec<BankSegment>],
 ) -> Result<StitchedGatePipeline, String> {
     if stages.is_empty() {
         return Err("cannot stitch an empty stage list into a pipeline".to_string());
@@ -234,6 +252,71 @@ fn assemble_pipeline(
         let flat_output = flatten_bit_vectors(&imported_outputs);
         let next_stage = &stages[stage_index + 1];
         let register_layer = stage_index + usize::from(options.flop_inputs);
+        if let Some(segments) = banks.get(stage_index).filter(|s| !s.is_empty()) {
+            let mut bits = Vec::with_capacity(flat_output.get_bit_count());
+            for segment in segments {
+                if !segment.store {
+                    bits.push(builder.get_false());
+                    continue;
+                }
+                let source = flat_output.get_lsb_slice(segment.bits.start, segment.bits.len());
+                let load = segment
+                    .enable
+                    .map(|i| {
+                        let en = *flat_output.get_lsb(i);
+                        current_valid.map_or(en, |v| builder.add_and_binary(v, en))
+                    })
+                    .or(current_valid);
+                let enable = load.map(|en| {
+                    add_control_endpoint(
+                        &mut builder,
+                        &mut transition_output_names,
+                        &format!("p{register_layer}_bank_at_{}__enable", segment.bits.start),
+                        en,
+                        false,
+                    )
+                });
+                let q = add_data_register(
+                    register_layer,
+                    &format!("bank_at_{}", segment.bits.start),
+                    &source,
+                    enable,
+                    &mut builder,
+                    &mut register_names,
+                    &mut transition_input_names,
+                    &mut transition_output_names,
+                    &mut registers,
+                );
+                bits.extend(q.iter_lsb_to_msb().copied());
+            }
+            let registered = AigBitVector::from_lsb_is_index_0(&bits);
+            let mut start = 0;
+            input_bindings = next_stage
+                .inputs
+                .iter()
+                .map(|port| {
+                    let slice = registered.get_lsb_slice(start, port.get_bit_count());
+                    start += port.get_bit_count();
+                    slice
+                })
+                .collect();
+            current_valid = add_register_layer(
+                register_layer,
+                &[],
+                &[],
+                current_valid,
+                reset,
+                options,
+                &mut builder,
+                &mut register_names,
+                &mut transition_input_names,
+                &mut transition_output_names,
+                &mut registers,
+            )
+            .valid;
+            register_stages.resize(registers.len(), stage_index);
+            continue;
+        }
         let mut offset = 0usize;
         let mut boundary_values = Vec::with_capacity(next_stage.inputs.len());
         for next_input in &next_stage.inputs {
@@ -314,32 +397,23 @@ fn add_register_layer(
                 false,
             )
         });
-    let mut data_values = Vec::with_capacity(source_values.len());
-    for (data_name, source_value) in data_names.iter().zip(source_values) {
-        let register_name =
-            uniquify_register_name(&format!("p{layer_number}_{data_name}"), register_names);
-        let q_name = uniquify_transition_port_name(
-            &canonical_register_q_name(&register_name),
-            transition_input_names,
-        );
-        let q_value = builder.add_input(q_name, source_value.get_bit_count());
-        let q = TransitionInputId::new(builder.inputs.len() - 1);
-        let d_value = source_value.clone();
-        let d_name = uniquify_transition_port_name(
-            &canonical_register_d_name(&register_name),
-            transition_output_names,
-        );
-        builder.add_output(d_name, d_value);
-        let d = TransitionOutputId::new(builder.outputs.len() - 1);
-        registers.push(RegisterBinding {
-            name: register_name,
-            q,
-            d,
-            enable,
-            reset: None,
-        });
-        data_values.push(q_value);
-    }
+    let data_values = data_names
+        .iter()
+        .zip(source_values)
+        .map(|(name, source)| {
+            add_data_register(
+                layer_number,
+                name,
+                source,
+                enable,
+                builder,
+                register_names,
+                transition_input_names,
+                transition_output_names,
+                registers,
+            )
+        })
+        .collect();
 
     let valid = current_valid.map(|valid| {
         let input_valid_signal = options
@@ -387,6 +461,36 @@ fn add_register_layer(
 }
 
 /// Names a shared scalar control as part of the combinational interface.
+/// Binds one data register to its source and optional load-enable endpoint.
+#[allow(clippy::too_many_arguments)]
+fn add_data_register(
+    layer: usize,
+    name: &str,
+    source: &AigBitVector,
+    enable: Option<RegisterControl>,
+    builder: &mut GateBuilder,
+    register_names: &mut BTreeSet<String>,
+    input_names: &mut BTreeSet<String>,
+    output_names: &mut BTreeSet<String>,
+    registers: &mut Vec<RegisterBinding>,
+) -> AigBitVector {
+    let name = uniquify_register_name(&format!("p{layer}_{name}"), register_names);
+    let q_name = uniquify_transition_port_name(&canonical_register_q_name(&name), input_names);
+    let q_value = builder.add_input(q_name, source.get_bit_count());
+    let q = TransitionInputId::new(builder.inputs.len() - 1);
+    let d_name = uniquify_transition_port_name(&canonical_register_d_name(&name), output_names);
+    let d = TransitionOutputId::new(builder.outputs.len());
+    builder.add_output(d_name, source.clone());
+    registers.push(RegisterBinding {
+        name,
+        q,
+        d,
+        enable,
+        reset: None,
+    });
+    q_value
+}
+
 fn add_control_endpoint(
     builder: &mut GateBuilder,
     names: &mut BTreeSet<String>,

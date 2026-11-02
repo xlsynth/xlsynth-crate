@@ -8,6 +8,7 @@ use xlsynth::XlsynthError;
 use xlsynth::ir_package::IrPackage;
 
 use crate::aig::SequentialPipelineOptions;
+use crate::aig::sequential_pipeline::BankSegment;
 
 /// One destination port and its LSB-first slice of a packed stage result.
 pub(super) struct BoundaryPort {
@@ -19,6 +20,15 @@ pub(super) struct BoundaryPort {
 pub(super) struct PipelineBoundary {
     pub(super) ports: Vec<BoundaryPort>,
     pub(super) register_layer: Option<usize>,
+    pub(super) banks: Vec<EnabledBank>,
+}
+
+/// One nominal Enable field in a packed producer result. Its enable bit
+/// immediately follows its payload, counting from the LSB.
+pub(super) struct EnabledBank {
+    pub(super) path: String,
+    pub(super) data: Range<usize>,
+    pub(super) carry_enable: bool,
 }
 
 impl PipelineBoundary {
@@ -47,11 +57,49 @@ impl PipelineBoundary {
         Ok(Self {
             ports: packed,
             register_layer,
+            banks: Vec::new(),
         })
     }
 
     pub(super) fn width(&self) -> usize {
         self.ports.last().map_or(0, |port| port.bits.end)
+    }
+
+    /// Partitions the entire packed result independently of destination ports.
+    pub(super) fn bank_segments(&self) -> Vec<BankSegment> {
+        let mut segments = Vec::new();
+        let mut offset = 0;
+        for bank in &self.banks {
+            let enable = bank.data.end;
+            if offset < bank.data.start {
+                segments.push(BankSegment {
+                    bits: offset..bank.data.start,
+                    enable: None,
+                    store: true,
+                });
+            }
+            if !bank.data.is_empty() {
+                segments.push(BankSegment {
+                    bits: bank.data.clone(),
+                    enable: Some(enable),
+                    store: true,
+                });
+            }
+            segments.push(BankSegment {
+                bits: enable..enable + 1,
+                enable: None,
+                store: bank.carry_enable,
+            });
+            offset = enable + 1;
+        }
+        if offset < self.width() {
+            segments.push(BankSegment {
+                bits: offset..self.width(),
+                enable: None,
+                store: true,
+            });
+        }
+        segments
     }
 }
 
@@ -62,6 +110,22 @@ pub(super) struct PipelineLayout {
 }
 
 impl PipelineLayout {
+    /// Returns the bank segments after each producing stage. An empty entry
+    /// keeps the ordinary register grouping by destination parameter.
+    pub(super) fn interstage_banks(&self) -> Vec<Vec<BankSegment>> {
+        self.stage_inputs
+            .iter()
+            .skip(1)
+            .map(|boundary| {
+                if boundary.banks.is_empty() {
+                    Vec::new()
+                } else {
+                    boundary.bank_segments()
+                }
+            })
+            .collect()
+    }
+
     /// Resolves the port widths from the same function signatures used to
     /// typecheck the pipeline.
     pub(super) fn from_ir(

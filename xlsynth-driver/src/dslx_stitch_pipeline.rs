@@ -10,6 +10,7 @@ use xlsynth_g8r::dslx_stitch_pipeline::{
     ResolvedStitchPipeline, StitchPipelineOptions, StitchPipelineSpec, StitchRtlOptions,
     resolve_pipeline,
 };
+use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
 use xlsynth_g8r::verilog_version::VerilogVersion;
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
@@ -76,7 +77,7 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
             .or_else(|| codegen?.gate_format.as_deref()),
     };
     let resolved = match matches.get_one::<String>("spec") {
-        Some(path) => resolve_stitch_spec(Path::new(path)),
+        Some(path) => resolve_stitch_spec(Path::new(path), Default::default()),
         None => resolve_from_flags(matches, config, &rtl_options),
     };
     let output = resolved.and_then(|pipeline| {
@@ -98,7 +99,10 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
 
 /// Anchors libxls's implicit import root while this single-command CLI compiles
 /// the spec.
-pub(crate) fn resolve_stitch_spec(path: &Path) -> Result<ResolvedStitchPipeline, XlsynthError> {
+pub(crate) fn resolve_stitch_spec(
+    path: &Path,
+    bank_proof: GateFormalOptions,
+) -> Result<ResolvedStitchPipeline, XlsynthError> {
     // Loading first makes every manifest path absolute. Change directory only
     // for DSLX compilation, before gate lowering or caller-relative file I/O.
     let spec = StitchPipelineSpec::load(path)?;
@@ -111,7 +115,7 @@ pub(crate) fn resolve_stitch_spec(path: &Path) -> Result<ResolvedStitchPipeline,
             source_dir.display()
         ))
     })?;
-    let result = spec.resolve();
+    let result = spec.resolve_with_bank_proof_options(bank_proof);
     std::env::set_current_dir(&caller_dir).map_err(|error| {
         XlsynthError(format!(
             "could not restore working directory {}: {error}",
