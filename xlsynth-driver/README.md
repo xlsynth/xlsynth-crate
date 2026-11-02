@@ -4246,10 +4246,17 @@ omitted because the final stage selects by opcode. External inputs and outputs
 retain their ordinary packed DSLX values.
 
 Stitch proves that substituting independent arbitrary values into all disabled
-payloads preserves the final output for every transaction. Intermediate data
-may differ. A counterexample reports the input values, bank predicates, and
-disagreeing outputs. RTL emission requires XLS array bounds semantics for
-this proof. Constant-flop validation currently requires unconditional
+payloads preserves the final data output for every transaction. Assertions
+and traces see the values held in the physical registers. For example, a
+producer writing `{enabled: x, data: x}` always makes the two fields equal
+on a fresh write. When `x` goes from 1 to 0, the consumer sees
+`{enabled: false, data: true}`, so `assert!(b.data == b.enabled, "fresh")`
+can fire even though the final output proof passes. Guard an assertion that
+requires fresh data with the bank predicate, for example
+`assert!(!b.enabled || b.data, "fresh")` for this producer.
+
+A counterexample reports the input values, bank predicates, and disagreeing
+outputs. RTL emission requires XLS array bounds semantics for this proof. Constant-flop validation currently requires unconditional
 data registers and rejects pipelines with enabled banks.
 
 The pinned v0.61.0 DSO supports the example above, tuple returns with written
