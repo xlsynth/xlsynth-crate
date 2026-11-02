@@ -55,6 +55,7 @@ fn prepared_target_uses_aag_files_and_the_fixed_root_contract() {
     );
     assert!(target_root.join("Rhs.aag").is_file());
     assert!(!target_root.join("Generated").exists());
+    assert!(!target_root.join("XlsynthLean/IR.lean").exists());
 }
 
 #[test]

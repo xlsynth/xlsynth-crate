@@ -15,7 +15,7 @@ use xlsynth_pir::ir_value_utils::{
 };
 
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{write_file, write_lean_support};
+use crate::support::{EVALUATOR_SUPPORT, write_file, write_toolchain};
 use crate::{LeanCircuitBundle, LeanError, LeanExportOptions, LeanFunction, export_gate_fn};
 
 /// Reusable evaluator that compiles the companion Lean support modules once.
@@ -63,7 +63,7 @@ impl LeanEvaluator {
             .prefix("xlsynth-lean-support-")
             .tempdir()
             .map_err(LeanError::TemporaryDirectory)?;
-        write_lean_support(support_root.path())?;
+        EVALUATOR_SUPPORT.write_to(support_root.path())?;
         let version_output = run_lean_process(
             &lean_executable,
             support_root.path(),
@@ -72,12 +72,7 @@ impl LeanEvaluator {
             &[OsString::from("--version")],
         )?;
         let lean_version = version_output.stdout.trim().to_string();
-        for relative in [
-            "XlsynthLean/IR.lean",
-            "XlsynthLean/Aig.lean",
-            "XlsynthLean/Aag.lean",
-            "EvalMain.lean",
-        ] {
+        for relative in EVALUATOR_SUPPORT.module_paths() {
             let source = support_root.path().join(relative);
             let output = source.with_extension("olean");
             run_lean_process(
@@ -297,11 +292,7 @@ fn evaluation_directory() -> Result<TempDir, LeanError> {
         .prefix("xlsynth-lean-eval-")
         .tempdir()
         .map_err(LeanError::TemporaryDirectory)?;
-    write_file(
-        work.path(),
-        Path::new("lean-toolchain"),
-        include_bytes!("../lean/lean-toolchain"),
-    )?;
+    write_toolchain(work.path())?;
     Ok(work)
 }
 

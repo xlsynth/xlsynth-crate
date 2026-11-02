@@ -14,7 +14,7 @@ use xlsynth_pir::ir_utils::{compact_and_toposort_in_place, external_function_ref
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
-use crate::support::{write_file, write_ir_module};
+use crate::support::{IR_FUNCTION_SUPPORT, write_file};
 use crate::{LeanError, LeanModuleName};
 
 const MODULE_HEADER: &str = "-- SPDX-License-Identifier: Apache-2.0\nimport XlsynthLean.IR\n\n";
@@ -49,12 +49,7 @@ impl LeanFunction {
     /// Writes the importable module, its Lean support source, and the toolchain
     /// pin.
     pub fn write_to(&self, root: &Path) -> Result<PathBuf, LeanError> {
-        write_ir_module(root)?;
-        write_file(
-            root,
-            Path::new("lean-toolchain"),
-            include_bytes!("../lean/lean-toolchain"),
-        )?;
+        IR_FUNCTION_SUPPORT.write_to(root)?;
         self.write_module(root)
     }
 
