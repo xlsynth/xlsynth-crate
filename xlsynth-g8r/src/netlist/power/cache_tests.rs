@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::aig::AigRef;
+use crate::aig::{AigRef, Input};
 use crate::liberty_model::{InternalPower, LibraryBuilder, TimingArc};
 
 /// Two buffers with opposite sample values and shared condition bindings for
@@ -17,12 +17,12 @@ struct ObservationFixture {
 
 impl ObservationFixture {
     /// Builds timing and power selectors that share a condition expression.
-    fn new(power_groups: usize) -> anyhow::Result<Self> {
+    fn new(power_groups: usize, when: &str) -> anyhow::Result<Self> {
         let mut builder = LibraryBuilder::new();
         let a = builder.intern_string("A")?;
         let c = builder.intern_string("C")?;
         let y = builder.intern_string("Y")?;
-        let condition = builder.intern_string("!C")?;
+        let condition = builder.intern_string(when)?;
         let mut groups = Vec::new();
         for _ in 0..power_groups {
             groups.push(InternalPower {
@@ -167,7 +167,7 @@ impl ObservationFixture {
 
 #[test]
 fn cache_reuses_selectors_across_timing_and_power_but_not_instances_or_transitions() {
-    let mut fixture = ObservationFixture::new(2).unwrap();
+    let mut fixture = ObservationFixture::new(2, "!C").unwrap();
     let model = PowerModelView {
         module_name: "test",
         gate_fn: &fixture.gate_fn,
@@ -401,7 +401,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
 
 #[test]
 fn sample_fill_overwrites_values_and_reuses_nested_storage() {
-    let fixture = ObservationFixture::new(1).unwrap();
+    let fixture = ObservationFixture::new(1, "!C").unwrap();
     let model = PowerModelView {
         module_name: "test",
         gate_fn: &fixture.gate_fn,
@@ -438,8 +438,84 @@ fn sample_fill_overwrites_values_and_reuses_nested_storage() {
 }
 
 #[test]
+fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
+    let mut fixture = ObservationFixture::new(3, "(Y ^ IQN) | (!C & A)").unwrap();
+    let data: AigOperand = AigRef { id: 0 }.into();
+    fixture.gate_fn.inputs.push(Input {
+        name: "data".to_string(),
+        bit_vector: data.into(),
+    });
+    fixture.gate_fn.gates.push(AigNode::Input {
+        name: "data".to_string(),
+        lsb_index: 0,
+        pir_node_ids: Default::default(),
+    });
+    for (index, instance) in fixture.instances.iter_mut().enumerate() {
+        let source = PowerSignal::Operand(AigOperand {
+            negated: index == 1,
+            ..data
+        });
+        for pin in [0, 2] {
+            instance.pins[pin].signal = source;
+            fixture.topology.signals[3 * index + pin].source = source;
+        }
+    }
+    let model = PowerModelView {
+        module_name: "test",
+        gate_fn: &fixture.gate_fn,
+        module_ports: Vec::new(),
+        instances: fixture.instances,
+    };
+    for len in [63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257] {
+        for sparse in [false, true] {
+            // Sparse traces start high and only change at the final sample.
+            // Busy traces exercise fractional thirds and both alias polarities.
+            let inputs: Vec<_> = (0..len)
+                .map(|i| vec![IrBits::bool(if sparse { i != len - 1 } else { i % 2 == 0 })])
+                .collect();
+            let clocks: Vec<_> = (0..len).map(|i| Some(i % 3 == 0)).collect();
+            let kinds = vec![PowerTransitionKind::Combinational; len - 1];
+            let mut scalar_topology = PowerTopology {
+                signals: fixture.topology.signals.clone(),
+                instances: fixture.topology.instances.clone(),
+                instance_order: fixture.topology.instance_order.clone(),
+            };
+            let scalar = observe_scalar_activity(
+                &model,
+                &fixture.library,
+                &inputs,
+                &clocks,
+                &kinds,
+                &mut scalar_topology,
+            )
+            .unwrap();
+            let packed = packed::observe(
+                &model,
+                &fixture.library,
+                &inputs,
+                &clocks,
+                &kinds,
+                &mut fixture.topology,
+            )
+            .unwrap();
+            assert_eq!(scalar.diagnostics, packed.diagnostics);
+            assert_eq!(scalar.internal_events, packed.internal_events);
+            assert_eq!(scalar.timing_causes, packed.timing_causes);
+            assert_eq!(scalar.unattributed, packed.unattributed);
+            for (a, b) in scalar_topology
+                .signals
+                .iter()
+                .zip(&fixture.topology.signals)
+            {
+                assert_eq!((a.edges.rise, a.edges.fall), (b.edges.rise, b.edges.fall));
+            }
+        }
+    }
+}
+
+#[test]
 fn failed_sample_fill_stops_before_transition_accounting() {
-    let mut fixture = ObservationFixture::new(1).unwrap();
+    let mut fixture = ObservationFixture::new(1, "!C").unwrap();
     fixture.gate_fn.gates.push(AigNode::Literal {
         value: false,
         pir_node_ids: Default::default(),

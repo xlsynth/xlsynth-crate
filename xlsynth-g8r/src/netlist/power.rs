@@ -2,6 +2,8 @@
 
 //! Sample-driven dynamic-power estimation for labeled gate-level netlists.
 
+mod packed;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -1764,6 +1766,50 @@ fn observe_ordered_activity(
             batch_inputs.len()
         ));
     }
+    if let Some(activity) = packed::observe(
+        model,
+        library,
+        batch_inputs,
+        clock_values,
+        transition_kinds,
+        topology,
+    ) {
+        return Ok(activity);
+    }
+    // A requested partial formula or malformed binding needs scalar lazy
+    // evaluation. It also preserves the first error in sample/instance order.
+    observe_scalar_activity(
+        model,
+        library,
+        batch_inputs,
+        clock_values,
+        transition_kinds,
+        topology,
+    )
+}
+
+/// Packs and simulates one chunk for either Liberty replay implementation.
+fn simulate_chunk(
+    gate_fn: &GateFn,
+    inputs: &[Vec<IrBits>],
+    start: usize,
+    len: usize,
+    live: &[bool],
+    nodes: &mut Vec<gate_simd::Vec256>,
+) {
+    let packed = gate_simd::pack_ordered_input_chunk(gate_fn, inputs, start, len);
+    gate_simd::eval_live_node_values_dense_into(gate_fn, &packed, live, nodes);
+}
+
+/// Observes a trace in chronological order, including partial Liberty formulas.
+fn observe_scalar_activity(
+    model: &PowerModelView<'_>,
+    library: &Library,
+    batch_inputs: &[Vec<IrBits>],
+    clock_values: &[Option<bool>],
+    transition_kinds: &[PowerTransitionKind],
+    topology: &mut PowerTopology,
+) -> Result<ObservedActivity, String> {
     let mut result = ObservedActivity::default();
     let mut previous = SampleState::new(model, topology);
     let mut current = SampleState::new(model, topology);
@@ -1773,15 +1819,11 @@ fn observe_ordered_activity(
     let mut nodes = Vec::new();
     for chunk_start in (0..batch_inputs.len()).step_by(256) {
         let chunk_len = (batch_inputs.len() - chunk_start).min(256);
-        let packed = gate_simd::pack_ordered_input_chunk(
-            &model.gate_fn,
+        simulate_chunk(
+            model.gate_fn,
             batch_inputs,
             chunk_start,
             chunk_len,
-        );
-        gate_simd::eval_live_node_values_dense_into(
-            &model.gate_fn,
-            &packed,
             &live_nodes,
             &mut nodes,
         );
@@ -1992,15 +2034,13 @@ fn observe_transition(
                     .or_default() += 1;
                 result.diagnostics.unattributed_output_transition_count += 1;
             } else {
-                if candidates.len() > 1 {
-                    result
+                attribute_candidates(
+                    candidates,
+                    &mut result.timing_causes,
+                    &mut result
                         .diagnostics
-                        .multiply_attributed_output_transition_count += 1;
-                }
-                let weight = 1.0 / candidates.len() as f64;
-                for candidate in candidates.iter().copied() {
-                    *result.timing_causes.entry(candidate).or_default() += weight;
-                }
+                        .multiply_attributed_output_transition_count,
+                );
             }
         }
         for owner_pin_index in 0..instance.pins.len() {
@@ -2061,18 +2101,29 @@ fn observe_transition(
                     },
                 ));
             }
-            if candidates.len() > 1 {
-                result.diagnostics.multiply_attributed_internal_event_count += 1;
-            }
             if !candidates.is_empty() {
-                let weight = 1.0 / candidates.len() as f64;
-                for candidate in candidates.iter().copied() {
-                    *result.internal_events.entry(candidate).or_default() += weight;
-                }
+                attribute_candidates(
+                    candidates,
+                    &mut result.internal_events,
+                    &mut result.diagnostics.multiply_attributed_internal_event_count,
+                );
             }
         }
     }
     Ok(())
+}
+
+/// Splits one owner's event among its eligible selectors in Liberty order.
+fn attribute_candidates<K: Copy + Ord>(
+    candidates: &[K],
+    totals: &mut BTreeMap<K, f64>,
+    multiply_attributed: &mut usize,
+) {
+    *multiply_attributed += usize::from(candidates.len() > 1);
+    let weight = 1.0 / candidates.len() as f64;
+    for &candidate in candidates {
+        *totals.entry(candidate).or_default() += weight;
+    }
 }
 
 /// Lazily evaluates both states, counting every successful request even on
