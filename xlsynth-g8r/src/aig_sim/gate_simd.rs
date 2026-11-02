@@ -11,7 +11,7 @@
 
 use crate::aig::gate::{AigNode, AigRef, GateFn};
 use core::simd::u64x4;
-use std::ops::{BitAnd, Not};
+use std::ops::{BitAnd, BitOr, BitOrAssign, BitXor, Not};
 use xlsynth_pir::IrBits;
 
 /// A fixed-width boolean vector with 256 lanes.
@@ -78,6 +78,23 @@ impl Vec256 {
             .map(|word| word.count_ones() as usize)
             .sum()
     }
+
+    /// Visits just the set lanes in sample order, starting with the earliest.
+    pub(crate) fn set_lanes(self) -> impl Iterator<Item = usize> {
+        self.to_array()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, mut word)| {
+                std::iter::from_fn(move || {
+                    if word == 0 {
+                        return None;
+                    }
+                    let lane = index * 64 + word.trailing_zeros() as usize;
+                    word &= word - 1;
+                    Some(lane)
+                })
+            })
+    }
 }
 
 impl Not for Vec256 {
@@ -93,6 +110,26 @@ impl BitAnd for Vec256 {
     #[inline]
     fn bitand(self, rhs: Self) -> Self::Output {
         Self(self.0 & rhs.0)
+    }
+}
+
+impl BitOr for Vec256 {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl BitOrAssign for Vec256 {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitXor for Vec256 {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self {
+        Self(self.0 ^ rhs.0)
     }
 }
 

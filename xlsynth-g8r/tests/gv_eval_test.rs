@@ -864,7 +864,7 @@ fn dynamic_power_defers_invalid_groups_until_reached() {
         IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
         IrValue::parse_typed("(bits[1]:1, bits[1]:0)").unwrap(),
     ];
-    for (condition, related_pin) in [("A &", "A"), ("1", "MISSING")] {
+    for (condition, related_pin) in [("A &", "A"), ("MISSING", "A"), ("1", "MISSING")] {
         let (_directory, netlist_path, liberty_path) = write_fixture(
             CONDITIONED_POWER_NETLIST,
             &conditioned_power_liberty(condition, related_pin),
@@ -915,6 +915,18 @@ fn dynamic_power_checks_current_condition_even_when_previous_is_false() {
     let model =
         load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
     let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    // With C false at both endpoints the partial expression is resolved, so
+    // scalar retry succeeds and counts this request and output edge once.
+    let masked = [
+        IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        IrValue::parse_typed("(bits[1]:1, bits[1]:0)").unwrap(),
+    ];
+    let report = model
+        .analyze_dynamic_power(&library, &masked, GvDynamicPowerOptions::default())
+        .unwrap();
+    assert_eq!(report.instances[0].outputs[0].rise_count, 1);
+    assert_eq!(report.diagnostics.when_evaluation_count, 1);
+    assert_eq!(report.cell_internal_energy, 0.0);
     let samples = [
         IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
         IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
@@ -924,6 +936,60 @@ fn dynamic_power_checks_current_condition_even_when_previous_is_false() {
             .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
             .unwrap_err(),
         "Liberty when 'C & MISSING' could not be evaluated from cell pin values"
+    );
+}
+
+#[test]
+fn dynamic_power_counts_input_group_requests_even_with_a_stable_related_pin() {
+    let (_directory, netlist_path, liberty_path) = write_fixture(
+        CONDITIONED_POWER_NETLIST,
+        &conditioned_power_liberty("C", "A"),
+    );
+    let mut library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    let pins = &mut library.cells[0].pins;
+    pins[0].internal_power = std::mem::take(&mut pins[2].internal_power);
+    let model =
+        load_labeled_netlist_aig_with_liberty(&netlist_path, &library, &GvEvalOptions::default())
+            .unwrap();
+    let samples = [
+        "(bits[1]:0, bits[1]:1)",
+        "(bits[1]:0, bits[1]:0)",
+        "(bits[1]:0, bits[1]:1)",
+    ]
+    .map(|text| IrValue::parse_typed(text).unwrap());
+    let report = model
+        .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
+        .unwrap();
+    assert_eq!(report.diagnostics.when_evaluation_count, 2);
+    assert_eq!(report.diagnostics.when_changed_during_transition_count, 2);
+    assert_eq!(report.cell_internal_energy, 0.0);
+}
+
+#[test]
+fn dynamic_power_scalar_retry_reports_the_earliest_requested_error() {
+    let netlist = r#"module top(a, b, c, x, y);
+      input a, b, c;
+      output x, y;
+      BUF first_instance (.A(a), .C(c), .Y(x));
+      BUF second_instance (.A(b), .C(c), .Y(y));
+    endmodule"#;
+    let (_directory, netlist_path, liberty_path) =
+        write_fixture(netlist, &conditioned_power_liberty("1", "MISSING"));
+    let model =
+        load_labeled_netlist_aig(&netlist_path, &liberty_path, &GvEvalOptions::default()).unwrap();
+    assert_eq!(model.instances[0].instance_name, "first_instance");
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    let samples = [
+        "(bits[1]:0, bits[1]:0, bits[1]:0)",
+        "(bits[1]:0, bits[1]:1, bits[1]:0)",
+        "(bits[1]:1, bits[1]:1, bits[1]:0)",
+    ]
+    .map(|text| IrValue::parse_typed(text).unwrap());
+    assert_eq!(
+        model
+            .analyze_dynamic_power(&library, &samples, GvDynamicPowerOptions::default())
+            .unwrap_err(),
+        "instance 'second_instance' internal_power on 'Y' names unknown related pin 'MISSING'"
     );
 }
 
