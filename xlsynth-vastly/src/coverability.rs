@@ -61,52 +61,47 @@ fn compute_coverability_with_options(
     defines: &BTreeSet<String>,
     top: Option<&str>,
 ) -> crate::Result<CoverabilityMap> {
-    // Baseline: nonblank/non-comment => unknown coverable.
-    let mut per_line: Vec<LineCoverability> = Vec::with_capacity(src.line_count() as usize);
-    for line in src.text.lines() {
-        let t = line.trim_start();
-        if t.is_empty() || t.starts_with("//") {
-            per_line.push(LineCoverability::BlankOrComment);
-        } else if t.starts_with('`') {
-            // Preprocessor directives are structural, not executable.
-            per_line.push(LineCoverability::NonCoverableStructural);
-        } else {
-            per_line.push(LineCoverability::CoverableUnknown);
-        }
-    }
-
-    let modules = crate::sv_parser::parse_pipeline_modules(&src.text, defines)?;
-    let mut selected = BTreeSet::new();
-    if let Some(name) = top {
+    let mut cover = baseline_coverability(src);
+    if let Some(name) = top
+        && let Ok(modules) = crate::sv_parser::parse_pipeline_modules(&src.text, defines)
+    {
         let module = modules
             .get(name)
             .ok_or_else(|| Error::Parse(format!("unknown top module `{name}`")))?;
-        selected.insert(module.name.as_str());
-        // The pipeline compiler supports direct instances of combinational leaf
-        // modules.
+        let mut selected = BTreeSet::from([name]);
         for item in &module.items {
             if let ModuleItem::Instance { module, .. } = item {
                 selected.insert(module.as_str());
             }
         }
-    }
-    for (name, module) in &modules {
-        if top.is_none() || selected.contains(name.as_str()) {
-            mark_module(src, &mut per_line, module)?;
-        } else {
-            let span = Span {
-                start: module.header_span.start,
-                end: module.endmodule_span.end,
-            };
-            mark_span(
-                src,
-                &mut per_line,
-                span,
-                LineCoverability::NonCoverableStructural,
-            );
+        for (name, module) in &modules {
+            if selected.contains(name.as_str()) {
+                mark_module(src, &mut cover.per_line, module)?;
+            } else {
+                let span = Span {
+                    start: module.header_span.start,
+                    end: module.endmodule_span.end,
+                };
+                mark_span(
+                    src,
+                    &mut cover.per_line,
+                    span,
+                    LineCoverability::NonCoverableStructural,
+                );
+            }
         }
+    } else {
+        // Single-module compilation accepts the first definition even when a
+        // trailing testbench uses syntax outside Vastly's subset.
+        let first = crate::sv_parser::parse_pipeline_module_with_defines(&src.text, defines)?;
+        if let Some(name) = top
+            && name != first.name
+        {
+            return Err(Error::Parse(format!("cannot classify top module `{name}`")));
+        }
+        mark_module(src, &mut cover.per_line, &first)?;
     }
-    Ok(CoverabilityMap { per_line })
+    Ok(cover)
 }
 
 /// Classifies each module using spans in the original multi-module source.

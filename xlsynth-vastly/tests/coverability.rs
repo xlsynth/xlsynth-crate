@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::LineCoverability;
 use xlsynth_vastly::SourceText;
 use xlsynth_vastly::compute_coverability;
@@ -91,4 +92,42 @@ endmodule
         assert_eq!(cover.line(line), LineCoverability::CoverableExecutable);
     }
     assert_eq!(cover.line(6), LineCoverability::NonCoverableStructural);
+}
+
+#[test]
+fn first_module_keeps_coverage_with_an_unsupported_trailing_testbench() {
+    let src = SourceText::new(
+        r#"module top(input wire clk, input wire a, output wire y);
+  wire t;
+  assign t = a;
+  assign y = t;
+endmodule
+module tb;
+  initial begin $display("ignored"); end
+endmodule
+"#
+        .to_owned(),
+    );
+    let counters = CoverageCounters {
+        top: Some("top".into()),
+        ..Default::default()
+    };
+    for cover in [
+        compute_coverability(&src).unwrap(),
+        counters.coverability(&src),
+    ] {
+        assert_eq!(
+            (1..=8).map(|line| cover.line(line)).collect::<Vec<_>>(),
+            [
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::CoverableExecutable,
+                LineCoverability::CoverableExecutable,
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::CoverableUnknown,
+                LineCoverability::CoverableUnknown,
+                LineCoverability::CoverableUnknown,
+            ],
+        );
+    }
 }

@@ -375,17 +375,21 @@ fn pick_segment_marker(
     })
 }
 
+/// Annotates a shared source definition with calls from every instance.
 fn build_function_line_annotations(
     src: &SourceText,
     cov: &CoverageCounters,
 ) -> std::collections::BTreeMap<u32, String> {
-    let mut m: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut counts: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     for (name, meta) in &cov.functions {
         let l = src.line_of_offset(meta.def_span.start);
         let calls = cov.function_calls.get(name).copied().unwrap_or(0);
-        m.insert(l, format!(" // calls={}", calls));
+        *counts.entry(l).or_default() += calls;
     }
-    m
+    counts
+        .into_iter()
+        .map(|(line, calls)| (line, format!(" // calls={calls}")))
+        .collect()
 }
 
 fn build_zero_toggle_token_spans(

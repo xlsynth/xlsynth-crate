@@ -74,12 +74,10 @@ pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
             }
         }
         for name in calls {
-            collect_function_reads(
-                &name,
-                &m.functions,
-                &mut function_reads,
-                &mut BTreeSet::new(),
-            )?;
+            if !function_reads.contains_key(&name) {
+                let reachable = collect_function_reads(&name, &m.functions, &function_reads)?;
+                function_reads.insert(name.clone(), reachable);
+            }
             reads.extend(function_reads[&name].iter().cloned());
         }
         assign_reads.push(reads);
@@ -1067,53 +1065,55 @@ fn exec_function_procedure(
     Ok(coerce_to_declinfo(&ret, &function_return_decl(f)))
 }
 
-/// Records module signals read by a helper or its callees for assign
-/// scheduling.
+/// Collects free module signals across all helpers reachable from a call.
 fn collect_function_reads(
-    name: &str,
+    root: &str,
     functions: &BTreeMap<String, CompiledFunction>,
-    cache: &mut BTreeMap<String, BTreeSet<String>>,
-    visiting: &mut BTreeSet<String>,
-) -> Result<()> {
-    if cache.contains_key(name) {
-        return Ok(());
-    }
-    if !visiting.insert(name.to_owned()) {
-        return Err(Error::Parse(format!("recursive helper function `{name}`")));
-    }
-    let func = functions
-        .get(name)
-        .ok_or_else(|| Error::Parse(format!("unknown function `{name}`")))?;
-    let mut reads = BTreeSet::new();
-    let mut calls = BTreeSet::new();
-    match &func.body {
-        CompiledFunctionBody::Expr { expr, .. } => expr.collect_refs(&mut reads, &mut calls),
-        CompiledFunctionBody::Casez { selector, arms } => {
-            selector.collect_refs(&mut reads, &mut calls);
-            for arm in arms {
-                arm.value.collect_refs(&mut reads, &mut calls);
+    cache: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<BTreeSet<String>> {
+    let mut result = BTreeSet::new();
+    let mut pending = vec![root.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        // Recursive helpers share dependencies. Visit each body once and cache
+        // only the complete set for the root after traversal.
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        if let Some(reads) = cache.get(&name) {
+            result.extend(reads.iter().cloned());
+            continue;
+        }
+        let func = functions
+            .get(&name)
+            .ok_or_else(|| Error::Parse(format!("unknown function `{name}`")))?;
+        let mut reads = BTreeSet::new();
+        let mut calls = BTreeSet::new();
+        match &func.body {
+            CompiledFunctionBody::Expr { expr, .. } => expr.collect_refs(&mut reads, &mut calls),
+            CompiledFunctionBody::Casez { selector, arms } => {
+                selector.collect_refs(&mut reads, &mut calls);
+                for arm in arms {
+                    arm.value.collect_refs(&mut reads, &mut calls);
+                }
+            }
+            CompiledFunctionBody::Procedure { assigns } => {
+                for assign in assigns {
+                    assign.expr.collect_refs(&mut reads, &mut calls);
+                }
             }
         }
-        CompiledFunctionBody::Procedure { assigns } => {
-            for assign in assigns {
-                assign.expr.collect_refs(&mut reads, &mut calls);
-            }
+        reads.remove(&name);
+        for arg in &func.args {
+            reads.remove(&arg.name);
         }
+        for local in func.locals.keys() {
+            reads.remove(local);
+        }
+        result.extend(reads);
+        pending.extend(calls);
     }
-    reads.remove(name);
-    for arg in &func.args {
-        reads.remove(&arg.name);
-    }
-    for local in func.locals.keys() {
-        reads.remove(local);
-    }
-    for callee in calls {
-        collect_function_reads(&callee, functions, cache, visiting)?;
-        reads.extend(cache[&callee].iter().cloned());
-    }
-    visiting.remove(name);
-    cache.insert(name.to_owned(), reads);
-    Ok(())
+    Ok(result)
 }
 
 struct ComboResolver<'a> {

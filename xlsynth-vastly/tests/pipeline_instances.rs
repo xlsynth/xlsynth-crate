@@ -2,7 +2,8 @@
 
 use xlsynth_vastly::{
     CoverageCounters, Error, FixtureRunner, LogicBit, PipelineCycle, PipelineStimulus, Signedness,
-    SourceText, Value4, compile_pipeline_module_with_top, run_pipeline_and_collect_coverage,
+    SourceText, Value4, compile_pipeline_module_with_top, render_annotated_source,
+    run_pipeline_and_collect_coverage,
 };
 
 // The helper's formal shadows the child wire. Its callee must still read the
@@ -71,6 +72,7 @@ fn repeated_child_has_independent_wires_and_helpers() {
 
     // Coverage uses the spanned expression tree and the original file offsets.
     let mut cov = CoverageCounters::default();
+    cov.register_functions(&module.fn_meta);
     let src = SourceText::new(TWO_INSTANCES.to_owned());
     run_pipeline_and_collect_coverage(
         &module,
@@ -85,8 +87,12 @@ fn repeated_child_has_independent_wires_and_helpers() {
         &mut cov,
     )
     .unwrap();
-    assert!(cov.function_calls["left.combine"] > 0);
-    assert!(cov.function_calls["right.combine"] > 0);
+    assert_eq!(cov.function_calls["left.combine"], 4);
+    assert_eq!(cov.function_calls["right.combine"], 4);
+    assert_eq!(
+        render_annotated_source(&src, &cov, false).lines().nth(17),
+        Some("SKP   18 |   function automatic [3:0] combine(input reg [3:0] inner); // calls=8")
+    );
     let assign_line = TWO_INSTANCES
         .lines()
         .position(|l| l.trim() == "assign inner = sample;")
