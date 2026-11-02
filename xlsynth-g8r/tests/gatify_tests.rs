@@ -735,6 +735,28 @@ fn do_umod(x: bits[{bit_count}], y: bits[{bit_count}]) -> bits[{bit_count}] {{
     );
 }
 
+#[test]
+fn test_divmod_pair_shares_remainder_stages() {
+    let pair = do_test_ir_conversion(
+        r#"package sample
+top fn main(x: bits[8], y: bits[8]) -> (bits[8], bits[8]) {
+    q: bits[8] = udiv(x, y, id=3)
+    r: bits[8] = umod(x, y, id=4)
+    ret pair: (bits[8], bits[8]) = tuple(q, r, id=5)
+}"#,
+        Opt::Yes,
+    );
+    let remainder = do_test_ir_conversion_no_equiv_with_stats(
+        r#"package sample
+top fn main(x: bits[8], y: bits[8]) -> bits[8] {
+    ret r: bits[8] = umod(x, y, id=3)
+}"#,
+        Opt::Yes,
+    );
+    // Each quotient bit already selects a partial remainder.
+    assert_eq!(pair.live_nodes, remainder.live_nodes);
+}
+
 #[test_matrix(["udiv", "umod", "sdiv", "smod"], [3, 4, 5, 8], [Opt::Yes, Opt::No])]
 fn test_divmod_wider_ir_to_gates(op: &str, bit_count: u32, opt: Opt) {
     do_test_ir_conversion(
