@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exports combinational XLSynth gate graphs to Lean, evaluates them there, and
-//! checks user-supplied equivalence proofs.
+//! Exports pure XLS IR functions and combinational gate graphs to executable
+//! Lean.
 //!
-//! The Rust exporter and native g8r reader are part of the conversion trust
-//! boundary. The companion Lean library checks the exported graph structure and
-//! evaluates it using a function proved equivalent to Lean's stock AIG
-//! semantics.
+//! The word-level exporter preserves the XLS function signature and is checked
+//! against the PIR evaluator. The gate exporter supports user-supplied proofs
+//! and uses an evaluator proved equivalent to Lean's stock AIG semantics.
 
 mod error;
 mod evaluate;
 mod gate_fn;
+mod ir_fn;
 mod process;
 mod proof;
 mod support;
 
 pub use error::{InterfaceDirection, LeanError};
-pub use evaluate::LeanEvaluator;
+pub use evaluate::{LeanEvaluator, LeanFunctionInputs};
 pub use gate_fn::{
     CircuitInterface, CircuitPort, LeanCircuitBundle, LeanExportOptions, LeanModuleName,
     WrittenLeanCircuit, export_gate_fn,
 };
+pub use ir_fn::{LeanFunction, export_ir_function};
 pub use proof::{
     LeanEquivalenceTarget, LeanProofFailure, LeanProofOutput, LeanProofSources,
     check_equivalence_proof, prepare_equivalence_target, run_equivalence_proof,

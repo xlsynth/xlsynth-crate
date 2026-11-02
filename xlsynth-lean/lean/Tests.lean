@@ -2,6 +2,7 @@
 
 import XlsynthLean.Aig
 import XlsynthLean.Aag
+import XlsynthLean.IR
 
 open Std.Sat
 open XlsynthLean.Aig
@@ -112,3 +113,7 @@ example : [
     "aag 1 1 0 1 0\n2\n2\ni0 input\n",
     "aag 1 1 0 1 0\n2\n2\nc\ncomment\n"
   ].all (aagRejected 1 1) = true := by native_decide
+
+-- Tuple field zero is most significant; array element zero is least significant.
+example : XlsynthLean.IR.Packed.pack ((1 : BitVec 4), (2 : BitVec 4), ()) = 0x12 := by decide
+example : XlsynthLean.IR.Packed.pack (#v[1, 2] : Vector (BitVec 4) 2) = 0x21 := by native_decide
