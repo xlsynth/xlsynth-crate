@@ -69,7 +69,32 @@ impl WordObservations {
         f: &ir::Fn,
         root: NodeRef,
         users: &Users,
+        take_pins: impl FnMut(usize) -> bool,
+    ) -> Option<Self> {
+        Self::collect(f, root, users, take_pins, |_| false)
+    }
+
+    /// Returns boundary predicates and remaining word escapes after the caller
+    /// claims direct root uses outside the cube region.
+    pub(super) fn find_with_direct_observer(
+        f: &ir::Fn,
+        root: NodeRef,
+        users: &Users,
+        claim: impl FnMut(NodeRef) -> bool,
+    ) -> Option<Self> {
+        let mut observations = Self::collect(f, root, users, |_| true, claim)?;
+        observations.scalars.retain(|s| s.escapes);
+        Some(observations)
+    }
+
+    /// Collects the observation region using the caller's pin budget and
+    /// direct-use policy.
+    fn collect(
+        f: &ir::Fn,
+        root: NodeRef,
+        users: &Users,
         mut take_pins: impl FnMut(usize) -> bool,
+        mut claim: impl FnMut(NodeRef) -> bool,
     ) -> Option<Self> {
         // Each comparison can describe up to a whole record. Bound the number
         // visited so unsuccessful searches in long Boolean chains stay local.
@@ -109,7 +134,7 @@ impl WordObservations {
                     .get(&n)
                     .unwrap_or_default()
                     .iter()
-                    .any(|u| !exprs.contains_key(u));
+                    .any(|u| !exprs.contains_key(u) && (n != root || !claim(*u)));
             if f.get_node_ty(n) == &Type::Bits(1) {
                 scalars.push(ScalarObservation {
                     value: n,

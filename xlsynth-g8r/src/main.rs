@@ -36,6 +36,10 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     track_pir_node_ids: bool,
 
+    /// Lower monotone predicates on exclusively observed min/max words.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_ordered_observations: bool,
+
     /// Whether to run "fraiging" optimization.
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
@@ -140,6 +144,7 @@ fn main() {
         fold: args.fold,
         hash: args.hash,
         track_pir_node_ids: args.track_pir_node_ids,
+        enable_ordered_observations: args.enable_ordered_observations,
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
         enable_rewrite_nary_add: false,

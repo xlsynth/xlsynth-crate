@@ -47,6 +47,7 @@ pub(super) mod demanded_bits;
 mod guarded_unit;
 pub(crate) mod joint_word;
 pub(crate) mod observed_select_rails;
+mod ordered_observations;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
 mod priority_word_update;
@@ -85,7 +86,7 @@ impl Default for ArrayIndexLoweringStrategy {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum GateOrVec {
     Gate(AigOperand),
     BitVector(AigBitVector),
@@ -5047,6 +5048,8 @@ fn gatify_internal(
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
+    let ordered = (options.hash && options.fold && options.enable_ordered_observations)
+        .then(|| ordered_observations::OrderedObservations::analyze(f, topological));
     for &node_ref in topological {
         if env.product_is_deferred(node_ref) {
             // Its only consumer takes partial rows, so do not emit a product
@@ -5068,11 +5071,16 @@ fn gatify_internal(
         {
             read_predicates.consider(f, node_ref, g8_builder, env, options);
         }
-        if let Some(rail) = read_predicates.take(node_ref) {
+        let rail = read_predicates.take(node_ref).or_else(|| {
+            let offer = ordered.as_ref()?.receivers.get(&node_ref)?;
+            offer.lower(f, node_ref, g8_builder, env)
+        });
+        if let Some(rail) = rail {
             let value = g8_builder.union_current_pir_node_id_into_operand(rail);
+            // The binary ops claimed by the observers are comparisons.
             if matches!(
                 node.payload,
-                ir::NodePayload::Binop(ir::Binop::Eq | ir::Binop::Ne, ..)
+                ir::NodePayload::Binop(..)
                     | ir::NodePayload::Unop(ir::Unop::OrReduce | ir::Unop::AndReduce, _)
             ) {
                 g8_builder.add_tag(
@@ -5167,6 +5175,7 @@ pub struct GatifyOptions {
     pub hash: bool,
     /// Whether lowered AIG nodes retain their originating PIR node IDs.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
@@ -5191,6 +5200,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -5213,6 +5223,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),

@@ -223,6 +223,38 @@ fn test_ir_mcmc_opt_verify_origin_alignment_matches_canonical_flow() {
 }
 
 #[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_with_ordered_observations_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("maximum.ir");
+    std::fs::write(
+        &input,
+        r#"package maximum
+top fn main(a: bits[4] id=1, b: bits[4] id=2) -> bits[1] {
+  cmp: bits[1] = uge(a, b, id=3)
+  w: bits[4] = sel(cmp, cases=[b, a], id=4)
+  k: bits[4] = literal(value=5, id=5)
+  ret high: bits[1] = ugt(w, k, id=6)
+}"#,
+    )
+    .unwrap();
+    run_driver_success(&[
+        "ir-mcmc-opt",
+        input.to_str().unwrap(),
+        "--iters=0",
+        "--metric=g8r-nodes",
+        "--threads=1",
+        "--formal-oracle=false",
+        "--enable-formal-array-alias-analysis=false",
+        // Cut rewriting also simplifies the ordinary maximum on this input.
+        "--cut-db-rewrite=false",
+        "--enable-ordered-observations=false",
+        "--verify-origin-alignment",
+        "--output",
+        dir.path().to_str().unwrap(),
+    ]);
+}
+
+#[test]
 fn test_ir_mcmc_opt_verify_origin_alignment_populates_non_metric_fields() {
     run_ir_mcmc_opt_verify_origin_alignment("nodes", &[]);
 }

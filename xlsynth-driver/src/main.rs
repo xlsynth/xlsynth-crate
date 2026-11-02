@@ -546,6 +546,7 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .add_bool_arg("enable-ordered-observations", "Lower monotone predicates on exclusively observed min/max words")
             .add_bool_arg(
                 "track-pir-node-ids",
                 "Track and propagate PIR node provenance on AIG nodes",

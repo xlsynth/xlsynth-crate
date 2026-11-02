@@ -157,6 +157,7 @@ pub struct Options {
     pub hash: bool,
     /// Whether gatification and later rewrites retain PIR node provenance.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -232,6 +233,9 @@ pub struct CanonicalG8rOptions {
     /// Whether gatification records and propagates PIR node provenance.
     #[serde(default)]
     pub track_pir_node_ids: bool,
+    /// Older artifacts omitted this switch and scored the ordinary lowering.
+    #[serde(default)]
+    pub enable_ordered_observations: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -269,6 +273,7 @@ impl Default for CanonicalG8rOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
@@ -331,6 +336,7 @@ impl CanonicalG8rOptions {
             fold: self.fold,
             hash: self.hash,
             track_pir_node_ids: self.track_pir_node_ids,
+            enable_ordered_observations: self.enable_ordered_observations,
             enable_rewrite_carry_out: self.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: self.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: self.enable_rewrite_nary_add,
@@ -403,6 +409,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             track_pir_node_ids: options.track_pir_node_ids,
+            enable_ordered_observations: options.enable_ordered_observations,
             check_equivalence: false, // check is done below if requested
             equivalence_solver: options.equivalence_solver,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -425,6 +432,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             track_pir_node_ids: options.track_pir_node_ids,
+            enable_ordered_observations: options.enable_ordered_observations,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -554,6 +562,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             fold: input.options.fold,
             hash: input.options.hash,
             track_pir_node_ids: input.options.track_pir_node_ids,
+            enable_ordered_observations: input.options.enable_ordered_observations,
             adder_mapping: input.options.adder_mapping,
             mul_adder_mapping: input.options.mul_adder_mapping,
             range_info: Some(input.range_info),

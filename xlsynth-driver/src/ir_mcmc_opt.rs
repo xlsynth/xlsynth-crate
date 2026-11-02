@@ -80,6 +80,8 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         bool_arg(options.fold),
         "--hash".to_string(),
         bool_arg(options.hash),
+        "--enable-ordered-observations".to_string(),
+        bool_arg(options.enable_ordered_observations),
         "--enable-rewrite-carry-out".to_string(),
         bool_arg(options.enable_rewrite_carry_out),
         "--enable-rewrite-prio-encode".to_string(),

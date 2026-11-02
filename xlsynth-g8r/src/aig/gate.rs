@@ -247,7 +247,7 @@ impl AigNode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AigBitVector {
     /// In this representation index 0 is the LSb, the last index is the MSb.
     operands: Vec<AigOperand>,

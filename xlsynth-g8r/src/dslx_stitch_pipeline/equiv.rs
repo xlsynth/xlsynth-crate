@@ -17,6 +17,26 @@ use crate::stitch_equiv::{
     StitchProofReport, StitchProofSolver, prove_with_stage_options,
 };
 
+/// Give gate! its DSLX value semantics and keep optional mapping rewrites out
+/// of the reference so native implementations are checked independently.
+fn reference_gate_options() -> CanonicalG8rOptions {
+    CanonicalG8rOptions {
+        unsafe_gatify_gate_operation: true,
+        enable_ordered_observations: false,
+        enable_formal_array_alias_analysis: false,
+        enable_rewrite_carry_out: false,
+        enable_rewrite_prio_encode: false,
+        enable_rewrite_nary_add: false,
+        enable_rewrite_mask_low: false,
+        enable_rewrite_normalize_left: false,
+        fraig: false,
+        reassociation: false,
+        cut_db_rewrite: false,
+        compute_graph_logical_effort: false,
+        ..CanonicalG8rOptions::default()
+    }
+}
+
 impl ResolvedStitchPipeline {
     /// Checks the pipeline's defined valid and data outputs against a
     /// Liberty-backed netlist.
@@ -81,25 +101,7 @@ impl ResolvedStitchPipeline {
         options: &StitchProofOptions,
     ) -> Result<StitchProofReport> {
         let mapped = self.load_mapped_for_check(netlist_path, liberty_path, module_name)?;
-        // Give gate! its DSLX value semantics. Keep optional mapping rewrites
-        // out of the reference so a native implementation using them is
-        // checked against a separately lowered graph.
-        let lower_gates = || {
-            self.lower_stages(&CanonicalG8rOptions {
-                unsafe_gatify_gate_operation: true,
-                enable_formal_array_alias_analysis: false,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                enable_rewrite_normalize_left: false,
-                fraig: false,
-                reassociation: false,
-                cut_db_rewrite: false,
-                compute_graph_logical_effort: false,
-                ..CanonicalG8rOptions::default()
-            })
-        };
+        let lower_gates = || self.lower_stages(&reference_gate_options());
         let stage_names = self
             .stages
             .iter()
@@ -169,9 +171,40 @@ impl ResolvedStitchPipeline {
 
 #[cfg(test)]
 mod tests {
+    use super::reference_gate_options;
+    use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
     use crate::dslx_stitch_pipeline::StitchPipelineSpec;
     use crate::prove_gate_fn_equiv_sat::GateFormalOptions;
     use std::fs;
+
+    #[test]
+    fn reference_lowers_a_maximum_threshold_independently_of_distribution() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("pipe.toml");
+        fs::write(
+            &manifest,
+            r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe""#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("pipe.x"),
+            "fn pipe_cycle0(a: u4, b: u4) -> bool { (if a >= b { a } else { b }) > u4:5 }",
+        )
+        .unwrap();
+        let pipe = StitchPipelineSpec::load(&manifest)
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let mut options = reference_gate_options();
+        let reference = pipe.lower_stages(&options).unwrap();
+        options.enable_ordered_observations = true;
+        let distributed = pipe.lower_stages(&options).unwrap();
+        assert_ne!(
+            emit_aiger_binary(&reference[0], false).unwrap(),
+            emit_aiger_binary(&distributed[0], false).unwrap()
+        );
+    }
 
     #[test]
     fn proof_frontend_rejects_mismatched_modules_clocks_and_lossy_gv() {
