@@ -34,3 +34,10 @@ path = "fuzz_targets/fuzz_gate_fn_lean_eval.rs"
 test = false
 doc = false
 required-features = ["external-lean"]
+
+[[bin]]
+name = "fuzz_ir_fn_lean_eval"
+path = "fuzz_targets/fuzz_ir_fn_lean_eval.rs"
+test = false
+doc = false
+required-features = ["external-lean"]

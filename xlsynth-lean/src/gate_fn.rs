@@ -49,7 +49,7 @@ impl LeanModuleName {
     }
 
     /// Returns the module's portable source path.
-    fn source_path(&self) -> PathBuf {
+    pub(crate) fn source_path(&self) -> PathBuf {
         let mut path = self.0.split('.').collect::<PathBuf>();
         path.set_extension("lean");
         path

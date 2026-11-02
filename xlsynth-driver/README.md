@@ -3292,6 +3292,29 @@ On success the command prints timing and a success line to **stdout**. On
 inequivalence or prover failure it prints details to **stderr** and exits
 non-zero.
 
+### `ir-fn-to-lean`
+
+Exports a pure XLS IR function and its reachable callees as executable,
+word-level Lean definitions. The generated module exposes a typed `eval`
+and a single-bitvector adapter `evalPacked`. Export runs entirely in Rust.
+
+- `<IR>` is a package-form IR file.
+- `--output-dir <DIR>` is required. It receives the generated module,
+  `XlsynthLean/IR.lean`, and the Lean toolchain pin.
+- `--top <FUNCTION>` overrides the package top. A package without a top
+  uses its sole function or requires an explicit selection.
+- `--module <NAME>` sets the dotted Lean module name (default `Generated.Function`).
+
+```bash
+xlsynth-driver ir-fn-to-lean design.ir --top main --output-dir lean-out
+cd lean-out
+LEAN_PATH=. lean -o XlsynthLean/IR.olean XlsynthLean/IR.lean
+LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean
+```
+
+See the [word-level exporter](../xlsynth-lean/README.md#word-level-ir-functions)
+for type mappings, supported operations, and evaluation.
+
 ### `g8r-lean-prepare`
 
 Emits canonical ASCII AIGER files for two combinational `.g8r` or `.g8rbin`

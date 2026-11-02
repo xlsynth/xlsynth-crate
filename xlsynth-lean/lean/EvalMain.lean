@@ -26,9 +26,9 @@ private def parseBits (width : Nat) (text : String) : Except String (BitVec widt
 private def formatBits (value : BitVec width) : String :=
   String.ofList ((List.range width).map fun index => if value.getLsbD index then '1' else '0')
 
-private def evaluate (circuit : Circuit inputCount outputCount) (requestText : String) :
-    Except String String := do
-  let request ← Json.parse requestText
+/-- Evaluate one function's packed input vectors from a JSON request. -/
+def evaluate (eval : BitVec inputCount → BitVec outputCount) (request : Json) :
+    Except String Json := do
   let object ← request.getObj?
   unless object.size == 1 do throw "request must contain exactly the cases field"
   let cases ← (← request.getObjVal? "cases").getArr?
@@ -38,25 +38,36 @@ private def evaluate (circuit : Circuit inputCount outputCount) (requestText : S
     let inputs ← match parseBits inputCount text with
       | .ok inputs => pure inputs
       | .error error => throw s!"case {index}: {error}"
-    outputs := outputs.push (.str (formatBits (circuit.eval inputs)))
-  return (Json.mkObj [("outputs", .arr outputs)]).compress
+    outputs := outputs.push (.str (formatBits (eval inputs)))
+  return Json.mkObj [("outputs", .arr outputs)]
 
-private def runFiles (circuit : Circuit inputCount outputCount) (args : List String) : IO Unit := do
-  let [requestPath, responsePath] := args
-    | throw (IO.userError "usage: REQUEST_JSON RESPONSE_JSON")
-  let requestText ← IO.FS.readFile requestPath
-  let response ← match evaluate circuit requestText with
-    | .ok response => pure response
-    | .error error => throw (IO.userError error)
-  IO.FS.writeFile responsePath response
-
-/-- Evaluate the request JSON batch with a supplied circuit and write response JSON. -/
-def run (circuit : Circuit inputCount outputCount) (args : List String) : IO UInt32 := do
+private def runFiles (process : Json → Except String Json) (args : List String) : IO UInt32 := do
   try
-    runFiles circuit args
+    let [requestPath, responsePath] := args
+      | throw (IO.userError "usage: REQUEST_JSON RESPONSE_JSON")
+    let request ← IO.ofExcept (Json.parse (← IO.FS.readFile requestPath))
+    let response ← IO.ofExcept (process request)
+    IO.FS.writeFile responsePath response.compress
     return 0
   catch error =>
     (← IO.getStderr).putStrLn s!"{error}"
     return 1
+
+/-- Evaluate a batch with a packed function and write the outputs as JSON. -/
+def runFunction (eval : BitVec inputCount → BitVec outputCount) := runFiles (evaluate eval)
+
+/-- Run a separate request for each function in the driver, in order. -/
+def runFunctions (functions : Array (Json → Except String Json)) := runFiles fun request => do
+  let requests ← request.getArr?
+  unless requests.size == functions.size do
+    throw s!"expected {functions.size} function requests, got {requests.size}"
+  let mut responses := #[]
+  for i in [:functions.size] do
+    let response ← (functions[i]! requests[i]!).mapError fun e => s!"function {i}: {e}"
+    responses := responses.push response
+  return .arr responses
+
+/-- Evaluate a batch with an AIG circuit. -/
+def run (circuit : Circuit inputCount outputCount) := runFunction circuit.eval
 
 end XlsynthLean.EvalMain

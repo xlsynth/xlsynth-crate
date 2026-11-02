@@ -144,6 +144,7 @@ fn exported_module_and_lean_regressions_compile() {
     for source in [
         directory.path().join("XlsynthLean/Aig.lean"),
         directory.path().join("XlsynthLean/Aag.lean"),
+        directory.path().join("XlsynthLean/IR.lean"),
         directory.path().join("XlsynthLean.lean"),
         written.source,
         regression_source,

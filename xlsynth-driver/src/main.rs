@@ -113,6 +113,7 @@ mod ir_fn_structural_hash;
 mod ir_fn_to_block;
 mod ir_fn_to_dslx;
 mod ir_fn_to_json;
+mod ir_fn_to_lean;
 mod ir_fn_to_z3_smtlib;
 mod ir_ged;
 mod ir_inline;
@@ -2697,6 +2698,7 @@ fn main() {
         )
         .subcommand(g8r2gv::command())
         .subcommand(g8r_lean::prepare_command())
+        .subcommand(ir_fn_to_lean::command())
         .subcommand(g8r_lean::check_command())
         .subcommand(gv_resize::command())
         .subcommand(
@@ -4272,6 +4274,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("g8r2gv", subm)) => {
             if let Err(e) = g8r2gv::handle(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r2gv"), vec![]);
+            }
+        }
+        Some(("ir-fn-to-lean", subm)) => {
+            if let Err(e) = ir_fn_to_lean::handle(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("ir-fn-to-lean"), vec![]);
             }
         }
         Some(("g8r-lean-prepare", subm)) => {

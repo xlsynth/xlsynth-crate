@@ -39,7 +39,16 @@ pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
     for (relative_path, contents) in LEAN_SUPPORT_FILES {
         write_file(root, Path::new(relative_path), contents.as_bytes())?;
     }
-    Ok(())
+    write_ir_module(root)
+}
+
+/// Writes the companion module for evaluating word-level IR definitions.
+pub(crate) fn write_ir_module(root: &Path) -> Result<(), LeanError> {
+    write_file(
+        root,
+        Path::new("XlsynthLean/IR.lean"),
+        include_bytes!("../lean/XlsynthLean/IR.lean"),
+    )
 }
 
 /// Writes one generated artifact, creating its parent directories.
