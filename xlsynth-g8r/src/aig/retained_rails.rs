@@ -151,6 +151,9 @@ impl<'a> Formals<'a> {
 pub(crate) struct RailResolver<'a> {
     graph: &'a GateFn,
     structure: Option<Structure>,
+    // Keep optional regrouping from exhausting existing structural and truth
+    // lookups.
+    conjunction_budget: RailBudget,
     cuts: HashMap<Vec<CutBit>, CutIndex>,
 }
 
@@ -159,12 +162,13 @@ impl<'a> RailResolver<'a> {
         Self {
             graph,
             structure: None,
+            conjunction_budget: RailBudget::default(),
             cuts: HashMap::new(),
         }
     }
 
-    /// Look up a compact Boolean function by value, or use exact structural
-    /// identity when there are more independent coordinates than fit in a word.
+    /// Resolve by truth table, exact structure, or regrouping of signed input
+    /// literals.
     pub(crate) fn find(
         &mut self,
         cone: &SignedCone,
@@ -190,7 +194,10 @@ impl<'a> RailResolver<'a> {
         if self.structure.is_none() {
             self.structure = Some(Structure::build(self.graph, budget)?);
         }
-        self.structure.as_ref()?.find(cone)
+        let structure = self.structure.as_ref()?;
+        structure
+            .find(cone)
+            .or_else(|| structure.find_conjunction(self.graph, cone, &mut self.conjunction_budget))
     }
 }
 
@@ -246,6 +253,86 @@ impl Structure {
         }
         Some(AigOperand {
             node: self.representatives[found[cone.root.class]],
+            negated: cone.root.inverted,
+        })
+    }
+    /// Match an AND of signed primary inputs even if reassociation changed its
+    /// internal gates. An inverted internal AND is a boundary. Repeated inputs
+    /// are idempotent. No candidate graph is constructed here.
+    fn find_conjunction(
+        &self,
+        graph: &GateFn,
+        cone: &SignedCone,
+        budget: &mut RailBudget,
+    ) -> Option<AigOperand> {
+        use smallvec::SmallVec;
+
+        if !budget.take(cone.nodes.len()) {
+            return None;
+        }
+        let mut pins = HashMap::new();
+        for node in &cone.nodes {
+            let Key::And(children) = node else { continue };
+            for child in children {
+                match &cone.nodes[child.class] {
+                    Key::And(_) if !child.inverted => {}
+                    input @ Key::Input(_) => {
+                        let pin = AigOperand {
+                            node: self.representatives[*self.classes.get(input)?],
+                            negated: child.inverted,
+                        };
+                        if pins.contains_key(&pin.negate()) {
+                            return None;
+                        }
+                        let next = pins.len();
+                        pins.entry(pin).or_insert(next);
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        if pins.is_empty() || !budget.take_graph(graph) {
+            return None;
+        }
+        let words = pins.len().div_ceil(u64::BITS as usize);
+        if !budget.take(words.checked_mul(pins.len())?) {
+            return None;
+        }
+        type Coverage = SmallVec<[u64; 1]>;
+        let mut full = Coverage::from_elem(0, words);
+        let mut coverage = HashMap::new();
+        for (pin, index) in pins {
+            let mut singleton = Coverage::from_elem(0, words);
+            let bit = 1u64 << (index % 64);
+            singleton[index / 64] = bit;
+            full[index / 64] |= bit;
+            coverage.insert(pin, singleton);
+        }
+        let mut first: Option<AigRef> = None;
+        for node in graph.post_order_refs() {
+            let AigNode::And2 { a, b, .. } = &graph.gates[node.id] else {
+                continue;
+            };
+            let (Some(left), Some(right)) = (coverage.get(a), coverage.get(b)) else {
+                continue;
+            };
+            if !budget.take(words) {
+                return None;
+            }
+            let merged: Coverage = left.iter().zip(right).map(|(x, y)| x | y).collect();
+            if merged == full {
+                first = Some(first.map_or(node, |old| old.min(node)));
+            }
+            coverage.insert(
+                AigOperand {
+                    node,
+                    negated: false,
+                },
+                merged,
+            );
+        }
+        first.map(|node| AigOperand {
+            node,
             negated: cone.root.inverted,
         })
     }

@@ -70,11 +70,10 @@ fn constant_and_high_support_structural_fallback() {
         resolver.find(&true_cone, &mut budget),
         Some(constant.negate())
     );
-    let (unrelated, _, _) = grouped(true, true, 7, true);
-    assert!(
-        RailResolver::new(&unrelated)
-            .find(&cone, &mut budget)
-            .is_none()
+    let (regrouped, regrouped_wire, _) = grouped(true, true, 7, true);
+    assert_eq!(
+        RailResolver::new(&regrouped).find(&cone, &mut budget),
+        Some(regrouped_wire)
     );
     assert!(resolver.find(&cone, &mut RailBudget(0)).is_none());
     assert!(SignedCone::capture(&old, wire, &mut RailBudget(2)).is_none());
@@ -86,6 +85,54 @@ fn constant_and_high_support_structural_fallback() {
         })
         .collect();
     assert!(CutIndex::build(&new, &bits, &mut budget).is_none());
+}
+
+#[test]
+fn wide_signed_conjunction_keeps_coordinates_and_reconvergent_uses() {
+    let width = 70;
+    let (old, wire, _) = grouped(false, true, width, false);
+    let mut budget = RailBudget::default();
+    let witness = SignedCone::capture(&old, wire.negate(), &mut budget).unwrap();
+    let mut b = GateBuilder::new("test".into(), GateBuilderOptions::no_opt());
+    let data = b.add_input("data".into(), width);
+    let other = *b.add_input("other".into(), 1).get_lsb(0);
+    let bits: Vec<_> = data.iter_lsb_to_msb().copied().collect();
+    let mut partial = bits[1];
+    for bit in &bits[2..] {
+        partial = b.add_and_binary(partial, *bit);
+    }
+    let mut repeated = partial;
+    for _ in 0..16 {
+        repeated = b.add_and_binary(repeated, repeated);
+    }
+    let wrong_port = b.add_and_binary(repeated, other.negate());
+    let wrong_sign = b.add_and_binary(repeated, bits[0]);
+    let wrong_index = b.add_and_binary(repeated, bits[1].negate());
+    let wrong_phase = b.add_and_binary(repeated.negate(), bits[0].negate());
+    for (name, value) in [
+        ("port", wrong_port),
+        ("sign", wrong_sign),
+        ("index", wrong_index),
+        ("phase", wrong_phase),
+    ] {
+        b.add_output(name.into(), value.into());
+    }
+    let negatives = b.clone().build();
+    assert!(
+        RailResolver::new(&negatives)
+            .find(&witness, &mut budget)
+            .is_none()
+    );
+    let wire = b.add_and_binary(repeated, bits[0].negate());
+    b.add_output("wire".into(), wire.into());
+    let new = b.build();
+    let mut resolver = RailResolver::new(&new);
+    assert_eq!(resolver.find(&witness, &mut budget), Some(wire.negate()));
+    // Each computed output was already live; resolving a witness is read-only.
+    assert_eq!(new.outputs.len(), 5);
+    let mut cut_off = RailResolver::new(&new);
+    cut_off.conjunction_budget = RailBudget(0);
+    assert!(cut_off.find(&witness, &mut RailBudget::default()).is_none());
 }
 
 fn grouped(
