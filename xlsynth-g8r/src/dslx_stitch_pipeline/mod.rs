@@ -447,6 +447,7 @@ mod tests {
     use crate::process_ir_path::CanonicalG8rOptions;
     use env_logger;
     use xlsynth_pir::IrBits;
+    use xlsynth_pir::ir::{NaryOp, NodePayload};
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
     fn default_test_options(output_module_name: &str) -> StitchPipelineOptions<'_> {
@@ -502,9 +503,10 @@ fn pipe_cycle2(a: Operands) -> u4 { if a.mul_op { a.mul.data } else { a.add.data
         let rtl = resolved.emit_rtl(&StitchRtlOptions::default()).unwrap();
         compare_golden_sv(&rtl, "tests/goldens/stitch_enable_add_mul.golden.sv");
         let package = resolved.emit_block_ir().unwrap();
-        let registers = &package.get_top_block().unwrap().registers;
+        let block = package.get_top_block().unwrap();
         assert_eq!(
-            registers
+            block
+                .registers
                 .iter()
                 .map(|r| (r.name.as_str(), r.ty.bit_count()))
                 .collect::<Vec<_>>(),
@@ -519,6 +521,37 @@ fn pipe_cycle2(a: Operands) -> u4 { if a.mul_op { a.mul.data } else { a.add.data
                 ("p1_bank_at_5", 4),
                 ("p1_bank_at_0", 4),
                 ("p1_valid", 1)
+            ]
+        );
+        // Only the payload writes combine stage valid with the bank predicate.
+        // A feedback mux on the data input would hold correctly in simulation
+        // but would lose the explicit block IR load_enable operand.
+        let gated_writes: Vec<_> = block
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let NodePayload::RegisterWrite {
+                    register,
+                    load_enable: Some(enable),
+                    ..
+                } = &node.payload
+                else {
+                    return None;
+                };
+                matches!(
+                    block.get_node(*enable).payload,
+                    NodePayload::Nary(NaryOp::And, _)
+                )
+                .then_some(register.as_str())
+            })
+            .collect();
+        assert_eq!(
+            gated_writes,
+            [
+                "p0_bank_at_5",
+                "p0_bank_at_0",
+                "p1_bank_at_5",
+                "p1_bank_at_0"
             ]
         );
         xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
