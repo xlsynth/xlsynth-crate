@@ -51,6 +51,7 @@ mod priority_predicate;
 mod priority_word_update;
 
 pub(crate) mod observed_select_rails;
+mod ordered_observations;
 mod read_predicates;
 mod shift_reduction_predicate;
 mod word_observations;
@@ -4778,6 +4779,8 @@ fn gatify_internal(
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
+    let ordered = (options.hash && options.fold && options.enable_ordered_observations)
+        .then(|| ordered_observations::OrderedObservations::analyze(f, topological));
     let mut read_predicates = read_predicates::ReadPredicates::default();
     for &node_ref in topological {
         if env.product_is_deferred(node_ref) {
@@ -4808,7 +4811,11 @@ fn gatify_internal(
         {
             read_predicates.consider(f, node_ref, g8_builder, env, options);
         }
-        if let Some(rail) = read_predicates.take(node_ref) {
+        let rail = read_predicates.take(node_ref).or_else(|| {
+            let offer = ordered.as_ref()?.receivers.get(&node_ref)?;
+            Some(offer.lower(f, node_ref, g8_builder, env))
+        });
+        if let Some(rail) = rail {
             let value = g8_builder.union_current_pir_node_id_into_operand(rail);
             env.add(node_ref, GateOrVec::Gate(value));
             env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
@@ -4873,6 +4880,7 @@ pub struct GatifyOptions {
     pub hash: bool,
     /// Whether lowered AIG nodes retain their originating PIR node IDs.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
@@ -4897,6 +4905,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -4919,6 +4928,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
