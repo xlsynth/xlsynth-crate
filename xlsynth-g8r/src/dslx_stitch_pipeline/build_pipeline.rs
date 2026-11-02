@@ -4,9 +4,10 @@ use std::collections::HashMap;
 
 use xlsynth_vast::{Expr, LiteralFormat, LogicRef, VastDataType, VastFile, VastModule};
 
-use super::layout::PipelineLayout;
+use super::layout::{PipelineBoundary, PipelineLayout};
 use super::names::{
-    flop_reg_name, slice_wire_name, stage_instance_name, stage_output_wire_name, valid_reg_name,
+    bank_reg_name, bank_result_name, flop_reg_name, slice_wire_name, stage_instance_name,
+    stage_output_wire_name, valid_reg_name,
 };
 
 /// Identifies the combinational module and result port for a pipeline stage.
@@ -150,6 +151,67 @@ fn make_flop_layer(
     }
 }
 
+/// Registers packed payload slices and reassembles the consumer's ordinary
+/// input.
+fn register_banks(
+    file: &mut VastFile,
+    module: VastModule,
+    clock: &Expr,
+    valid: Option<LogicRef>,
+    layer: usize,
+    boundary: &PipelineBoundary,
+    source: LogicRef,
+) -> LogicRef {
+    let mut parts = Vec::new();
+    let mut writes = Vec::new();
+    for segment in boundary.bank_segments().into_iter().rev() {
+        if !segment.store {
+            parts.push(
+                file.make_literal("bits[1]:0", &LiteralFormat::Binary)
+                    .unwrap(),
+            );
+            continue;
+        }
+        let ty = file.make_bit_vector_type(segment.bits.len() as i64, false);
+        let reg = file
+            .add_reg(module, &bank_reg_name(layer, segment.bits.start), &ty)
+            .unwrap();
+        let data = if segment.bits.len() == boundary.width() {
+            source.to_expr()
+        } else {
+            file.make_slice(
+                &source.to_indexable_expr(),
+                (segment.bits.end - 1) as i64,
+                segment.bits.start as i64,
+            )
+            .to_expr()
+        };
+        let mut load = valid.map(|v| v.to_expr());
+        if let Some(bit) = segment.enable {
+            let en = file
+                .make_index(&source.to_indexable_expr(), bit as i64)
+                .to_expr();
+            load = Some(load.map_or(en, |v| file.make_bitwise_and(&v, &en)));
+        }
+        let rhs = load.map_or(data, |en| file.make_ternary(&en, &data, &reg.to_expr()));
+        writes.push((reg, rhs));
+        parts.push(reg.to_expr());
+    }
+    if !writes.is_empty() {
+        let always = file.add_always_at(module, &[clock]).unwrap();
+        let block = file.statement_block(always);
+        for (reg, rhs) in writes {
+            file.block_add_nonblocking_assignment(block, &reg.to_expr(), &rhs);
+        }
+    }
+    let ty = file.make_bit_vector_type(boundary.width() as i64, false);
+    let result = file.add_wire(module, &bank_result_name(layer), &ty);
+    let packed = file.make_concat(&parts.iter().collect::<Vec<_>>());
+    let assign = file.make_continuous_assignment(&result.to_expr(), &packed);
+    file.add_member_continuous_assignment(module, assign);
+    result
+}
+
 /// Creates I/O ports on the outer (encapsulating) module.
 fn create_outer_io_ports(
     file: &mut VastFile,
@@ -264,6 +326,35 @@ pub fn build_pipeline(
         );
         file.add_member_instantiation(outer_module, instantiation);
 
+        let stage_output_wire = if destination.banks.is_empty() {
+            stage_output_wire
+        } else {
+            let layer = destination
+                .register_layer
+                .expect("banks have a register layer");
+            let registered = register_banks(
+                file,
+                outer_module,
+                &posedge_clk,
+                current_inputs.valid_signal,
+                layer,
+                destination,
+                stage_output_wire,
+            );
+            current_inputs.name_to_ref.clear();
+            current_inputs = make_flop_layer(
+                file,
+                outer_module,
+                &posedge_clk,
+                &bit_type,
+                current_inputs,
+                layer,
+                reset_port,
+                config.reset_active_low,
+            );
+            registered
+        };
+
         // If the next stage wants more than one signal (i.e. it has arity > 1),
         // we break out the signals by slicing here.
         current_inputs.name_to_ref = if destination.ports.len() > 1 {
@@ -296,7 +387,9 @@ pub fn build_pipeline(
 
         log::debug!("current_inputs now: {:?}", current_inputs);
 
-        if let Some(layer) = destination.register_layer {
+        if let Some(layer) = destination.register_layer
+            && destination.banks.is_empty()
+        {
             current_inputs = make_flop_layer(
                 file,
                 outer_module,

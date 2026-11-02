@@ -9,6 +9,8 @@ include!(concat!(env!("OUT_DIR"), "/xlsynth_runtime_link_arg.rs"));
 
 extern crate libc;
 
+pub mod concrete_tuple;
+
 #[repr(C)]
 pub struct CIrValue {
     _private: [u8; 0], // Ensures the struct cannot be instantiated

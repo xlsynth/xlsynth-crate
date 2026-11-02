@@ -4212,6 +4212,50 @@ result and each successive parameter receives the next slice. Both formats use
 the same stage order, pipeline name, and valid/reset settings.
 The generated text goes to stdout and diagnostics go to stderr.
 
+To gate individual interstage register banks, import the built-in DSLX module
+`stitch`. A bank can be the whole stage result or a direct member of its
+outer struct or tuple. The payload can have an aggregate type. A bank inside
+an array, another bank, or a deeper struct or tuple is rejected.
+
+```dslx
+import stitch;
+type Bank = stitch::Enable<u32>;
+struct Decoded { is_mul: bool, add: Bank, mul: Bank }
+
+fn ops_cycle0(is_mul: bool, x: u32, y: u32) -> Decoded {
+    Decoded {
+        is_mul,
+        add: Bank { enabled: !is_mul, data: x + y },
+        mul: Bank { enabled: is_mul, data: x * y },
+    }
+}
+fn ops_cycle1(d: Decoded) -> u32 {
+    if d.is_mul { d.mul.data } else { d.add.data }
+}
+```
+
+The payload loads on `enabled`, additionally gated by the current stage valid
+when present. The next stage receives the same DSLX type. Stitch carries the
+enable bit when downstream logic needs it, including when a stage forwards
+the bank to another register layer. In this example both enable flops can be
+omitted because the final stage selects by opcode. External inputs and outputs
+retain their ordinary packed DSLX values.
+
+Stitch proves that substituting independent arbitrary values into all disabled
+payloads preserves the final output for every transaction. Intermediate data
+may differ. A counterexample reports the input values, bank predicates, and
+disagreeing outputs. RTL emission requires XLS array bounds semantics for
+this proof. Constant-flop validation currently requires unconditional
+data registers and rejects pipelines with enabled banks.
+
+The pinned v0.61.0 DSO supports the example above, tuple returns with written
+member types, and local aliases for those returns. Tuples hidden behind an
+imported alias or generic parameter (including a tuple used as the bank
+payload) require a libxls build with the concrete tuple-member accessors.
+Stitch reports the field it could not inspect when those accessors are absent.
+Pipelines that use the marker also reject stage results containing DSLX semantic
+sums because stitch cannot inspect their concrete variant payloads.
+
 In four-state simulation, the two RTL paths can differ when reset is unknown
 at a rising edge. For example, with active-high reset at `X` and input valid
 at `1`, the direct RTL wrapper's conditional expression writes `X` to the
@@ -4315,6 +4359,9 @@ Lowers selected DSLX stage functions to combinational g8r logic and connects
 each adjacent stage through a register layer in one `SequentialGateFn`. Text
 `.g8r` output is written to stdout; use `--bin-out=<PATH>` to also write the
 binary `.g8rbin` encoding.
+
+The native pipeline honors the same proved `stitch::Enable<T>` interstage
+register banks as the RTL and block-IR outputs.
 
 Stage selection follows `dslx-stitch-pipeline`: use `--dslx_top=<NAME>` to
 discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use

@@ -389,6 +389,25 @@ pub struct InvocationRewriteRule<'a> {
 }
 
 impl TypecheckedModule {
+    /// Converts this module using its original in-memory import graph.
+    pub fn to_ir_text(&self) -> Result<String, XlsynthError> {
+        let mut error = std::ptr::null_mut();
+        let mut ir = std::ptr::null_mut();
+        unsafe {
+            if sys::xls_dslx_typechecked_module_to_ir(
+                self.ptr.ptr,
+                self.ptr.parent.ptr,
+                false,
+                &mut error,
+                &mut ir,
+            ) {
+                Ok(c_str_to_rust(ir))
+            } else {
+                Err(XlsynthError(c_str_to_rust(error)))
+            }
+        }
+    }
+
     pub fn get_module(&self) -> Module {
         Module {
             parent: self.ptr.clone(),
@@ -1090,6 +1109,21 @@ pub struct TypeAnnotation {
 }
 
 impl TypeAnnotation {
+    /// Returns the members of a written tuple annotation in declaration order.
+    pub fn tuple_members(&self) -> Option<Vec<TypeAnnotation>> {
+        let mut count = 0;
+        unsafe {
+            sys::xls_dslx_type_annotation_get_tuple_member_count(self.ptr, &mut count).then(|| {
+                (0..count)
+                    .map(|i| TypeAnnotation {
+                        parent: self.parent.clone(),
+                        ptr: sys::xls_dslx_type_annotation_get_tuple_member(self.ptr, i),
+                    })
+                    .collect()
+            })
+        }
+    }
+
     pub fn to_type_ref_type_annotation(&self) -> Option<TypeRefTypeAnnotation> {
         let casted =
             unsafe { sys::xls_dslx_type_annotation_get_type_ref_type_annotation(self.ptr) };
@@ -2563,6 +2597,21 @@ impl std::fmt::Display for Type {
 }
 
 impl Type {
+    /// Returns concrete tuple members when the DSO exposes them. These are
+    /// needed when generic instantiation or imports hide the written tuple.
+    pub fn concrete_tuple_members(&self) -> Option<Vec<Type>> {
+        let api = sys::concrete_tuple::api()?;
+        let count = unsafe { (api.tuple_count)(self.ptr) };
+        (count >= 0).then(|| {
+            (0..count)
+                .map(|i| Type {
+                    parent: self.parent.clone(),
+                    ptr: unsafe { (api.tuple_member)(self.ptr, i) },
+                })
+                .collect()
+        })
+    }
+
     pub fn to_string(&self) -> Result<String, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();

@@ -11,17 +11,13 @@ use xlsynth_pir::IrBits;
 
 use crate::aig::import::import_gate_fn;
 use crate::aig::sequential_pipeline::StitchedGatePipeline;
-use crate::aig::topo::extract_cone;
 use crate::aig::{AigBitVector, SequentialGateFn, SequentialPipelineOptions};
 use crate::aig_sim::sequential::{SequentialState, simulate};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
 use crate::netlist::gv_eval::{
     LabeledSequentialNetlistAig, SequentialAigSignal, SequentialClockEdge,
 };
-use crate::prove_gate_fn_equiv_sat::{
-    CadicalSat, GateFormalOptions, IncrementalSat, SatModel, SatSolveResult, ValidationError,
-    build_sat_clauses,
-};
+use crate::prove_gate_fn_equiv_sat::{GateFormalOptions, ValidationError, find_cone_witness};
 
 mod correspondence;
 mod stage_functions;
@@ -780,39 +776,15 @@ fn prove_post_fill(
     }
     builder.add_output("mismatch".to_string(), mismatch.into());
     let graph = builder.build();
-    let mut solver = CadicalSat::new_with_options(options).map_err(|e| e.to_string())?;
-    let (cone, cone_inputs) = extract_cone(&[mismatch.node], &graph.gates);
-    let literals = build_sat_clauses(&mut solver, &cone, &cone_inputs, &graph.gates);
-    let lit = literals[&mismatch.node];
-    let differs = if mismatch.negated { !lit } else { lit };
-    if solver
-        .sat_solve_assuming(&[differs])
-        .map_err(|error| match error {
-            ValidationError::CadicalSolveInterrupted => {
-                "stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit".to_owned()
-            }
-            other => other.to_string(),
-        })?
-        == SatSolveResult::Unsat
-    {
+    let Some(witness) = find_cone_witness(&graph, mismatch, options).map_err(|error| match error {
+        ValidationError::CadicalSolveInterrupted => {
+            "stitch equivalence inconclusive: CaDiCaL interrupted by a timeout or resource limit".to_owned()
+        }
+        other => other.to_string(),
+    })? else {
         return Ok(StitchEquivResult::Proved);
-    }
-
-    let model = solver.sat_model().map_err(|e| e.to_string())?;
-    // All symbols here are positive primary inputs. Inputs outside the
-    // mismatch cone are unconstrained and may be set to zero for replay.
-    let decode = |value: &AigBitVector| {
-        IrBits::from_lsb_is_0(
-            &value
-                .iter_lsb_to_msb()
-                .map(|bit| {
-                    literals
-                        .get(&bit.node)
-                        .is_some_and(|lit| model.lit_value(*lit))
-                })
-                .collect::<Vec<_>>(),
-        )
     };
+    let decode = |value: &AigBitVector| witness.decode_inputs(value);
     let decode_state = |design: &SequentialGateFn, values: &[AigBitVector]| {
         design
             .registers

@@ -58,8 +58,8 @@ fn type_inference_v2_cli_is_rejected(command: &str) {
 }
 
 /// Present TOML keys fail even when their values have an unexpected type.
-#[test_case("true"; "true")]
-#[test_case("false"; "false")]
+#[test_case("true"; "boolean_true")]
+#[test_case("false"; "boolean_false")]
 #[test_case("'obsolete-value'"; "string")]
 #[test_case("0"; "integer")]
 #[test_case("1.5"; "float")]
@@ -177,8 +177,8 @@ fn type_inference_v2_absent_config_still_rejects_other_errors() {
 }
 
 /// Every present JSON value fails in direct and nested plans before proving.
-#[test_case("true"; "true")]
-#[test_case("false"; "false")]
+#[test_case("true"; "boolean_true")]
+#[test_case("false"; "boolean_false")]
 #[test_case(r#""obsolete-value""#; "string")]
 #[test_case("null"; "null")]
 #[test_case("0"; "number")]

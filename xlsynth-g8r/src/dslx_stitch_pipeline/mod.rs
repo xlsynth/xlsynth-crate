@@ -13,6 +13,7 @@ use xlsynth_vast::{VastFile, VastFileType};
 
 mod block_ir;
 mod build_pipeline;
+mod enable;
 use build_pipeline::{
     PipelineConfig as BuildPipelineConfig, StageModuleInterface, build_pipeline as build_wrapper,
 };
@@ -356,6 +357,9 @@ impl ResolvedStitchPipeline {
 
     /// Rejects registered stage-output bits that are constant for all inputs.
     pub fn validate_no_constant_flops(&self) -> Result<(), xlsynth::XlsynthError> {
+        if self.layout.stage_inputs.iter().any(|b| !b.banks.is_empty()) {
+            return Err(xlsynth::XlsynthError("constant-flop validation for stitch::Enable requires analysis of load-enabled writes".into()));
+        }
         let constant_flops = validate_constant_flops::find_constant_flops(
             &self.ir,
             &self.stages,
@@ -388,6 +392,13 @@ impl ResolvedStitchPipeline {
     /// Emits combinational stage modules and the clocked wrapper for the
     /// resolved specification.
     pub fn emit_rtl(&self, opts: &StitchRtlOptions<'_>) -> Result<String, xlsynth::XlsynthError> {
+        if !opts.array_index_bounds_checking
+            && self.layout.stage_inputs.iter().any(|b| !b.banks.is_empty())
+        {
+            return Err(xlsynth::XlsynthError(
+                "stitch::Enable proofs require array_index_bounds_checking=true".into(),
+            ));
+        }
         if opts.validate_no_constant_flops && !opts.array_index_bounds_checking {
             return Err(xlsynth::XlsynthError(
                 "constant-flop validation requires array_index_bounds_checking=true".to_string(),
@@ -432,8 +443,9 @@ impl ResolvedStitchPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig_sim::sequential::{SequentialState, simulate};
+    use crate::process_ir_path::CanonicalG8rOptions;
     use env_logger;
-    #[cfg(feature = "iverilog-tests")]
     use xlsynth_pir::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
 
@@ -455,6 +467,325 @@ mod tests {
             gate_format: None,
             output_module_name,
         }
+    }
+
+    const ADD_MUL: &str = r#"import stitch;
+type Bank = stitch::Enable<u4>;
+struct Operands { mul_op: bool, add: Bank, mul: Bank }
+fn pipe_cycle0(mul_op: bool, x: u4, y: u4) -> Operands {
+    Operands { mul_op, add: Bank { enabled: !mul_op, data: x + y },
+               mul: Bank { enabled: mul_op, data: x * y } }
+}
+fn pipe_cycle1(a: Operands) -> Operands { a }
+fn pipe_cycle2(a: Operands) -> u4 { if a.mul_op { a.mul.data } else { a.add.data } }
+"#;
+
+    #[test]
+    fn enabled_banks_forward_and_drop_unobserved_predicates() {
+        let mut opts = default_test_options("pipe");
+        opts.flop_inputs = false;
+        opts.flop_outputs = false;
+        opts.input_valid_signal = Some("in_valid");
+        opts.output_valid_signal = Some("out_valid");
+        opts.reset_signal = Some("rst");
+        let result = resolve_pipeline(ADD_MUL, Path::new("ops.x"), "pipe", &opts);
+        let resolved = result.unwrap();
+        let banks = |i: usize| {
+            resolved.layout.stage_inputs[i]
+                .banks
+                .iter()
+                .map(|b| (b.data.clone(), b.carry_enable))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(banks(1), [(0..4, true), (5..9, true)]);
+        assert_eq!(banks(2), [(0..4, false), (5..9, false)]);
+        let rtl = resolved.emit_rtl(&StitchRtlOptions::default()).unwrap();
+        compare_golden_sv(&rtl, "tests/goldens/stitch_enable_add_mul.golden.sv");
+        let package = resolved.emit_block_ir().unwrap();
+        let registers = &package.get_top_block().unwrap().registers;
+        assert_eq!(
+            registers
+                .iter()
+                .map(|r| (r.name.as_str(), r.ty.bit_count()))
+                .collect::<Vec<_>>(),
+            [
+                ("p0_bank_at_10", 1),
+                ("p0_bank_at_9", 1),
+                ("p0_bank_at_5", 4),
+                ("p0_bank_at_4", 1),
+                ("p0_bank_at_0", 4),
+                ("p0_valid", 1),
+                ("p1_bank_at_10", 1),
+                ("p1_bank_at_5", 4),
+                ("p1_bank_at_0", 4),
+                ("p1_valid", 1)
+            ]
+        );
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+        let design = resolved
+            .lower_to_g8r(&CanonicalG8rOptions {
+                enable_formal_array_alias_analysis: false,
+                ..CanonicalG8rOptions::default()
+            })
+            .unwrap();
+        let rows = [
+            (1, 2, 3, 1, 0),
+            (0, 7, 3, 1, 0),
+            (1, 9, 1, 0, 0),
+            (0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0),
+        ];
+        let inputs = rows.map(|(op, x, y, valid, rst)| {
+            [(1, op), (4, x), (4, y), (1, valid), (1, rst)]
+                .map(|(w, v)| IrBits::make_ubits(w, v).unwrap())
+                .to_vec()
+        });
+        let trace = simulate(&design, &inputs, SequentialState::all_zeros(&design)).unwrap();
+        assert_eq!(
+            trace.external_outputs()[2],
+            [
+                IrBits::make_ubits(4, 6).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap()
+            ]
+        );
+        assert_eq!(
+            trace.external_outputs()[3],
+            [
+                IrBits::make_ubits(4, 10).unwrap(),
+                IrBits::make_ubits(1, 1).unwrap()
+            ]
+        );
+        assert_eq!(trace.external_outputs()[4][1], IrBits::zero(1));
+    }
+
+    #[test]
+    fn enabled_banks_proof_checks_joint_replacements_on_all_dsos() {
+        // Two individually invisible substitutions can leak jointly through
+        // AND.
+        let source = r#"fn pipe_cycle0(x: bool) -> ((bool, bool), (bool, bool)) {
+    ((x, x), (x, x))
+}
+fn pipe_cycle1(a: ((bool, bool), (bool, bool))) -> bool { a.0.1 & a.1.1 }
+"#;
+        let opts = default_test_options("pipe");
+        let mut resolved = resolve_pipeline(source, Path::new("joint.x"), "pipe", &opts).unwrap();
+        resolved.layout.stage_inputs[1].banks = [0, 2]
+            .map(|lsb| layout::EnabledBank {
+                path: format!("bank{lsb}"),
+                data: lsb..lsb + 1,
+                carry_enable: true,
+            })
+            .into();
+        let error = enable::validate_banks(&resolved.ir, &resolved.stages, &mut resolved.layout)
+            .unwrap_err();
+        assert!(error.0.contains("changes the final output"), "{error}");
+    }
+
+    #[test]
+    fn enabled_banks_at_repeated_stage_occurrences_have_independent_payloads() {
+        let source = r#"import stitch;
+type Bank = stitch::Enable<bool>;
+struct W { keep: bool, carry: bool, bank: Bank }
+fn step(w: W) -> W {
+    W { keep: w.keep, carry: w.keep & w.bank.data, bank: Bank { enabled: false, data: false } }
+}
+fn finish(w: W) -> bool { w.carry ^ (w.keep & w.bank.data) }
+"#;
+        let mut opts = default_test_options("pipe");
+        opts.explicit_stages = Some(["step", "step", "finish"].map(str::to_owned).to_vec());
+        let error = resolve_pipeline(source, Path::new("repeat.x"), "pipe", &opts)
+            .err()
+            .unwrap();
+        assert!(error.0.contains("changes the final output"), "{error}");
+        for index in [0, 1] {
+            assert!(
+                error
+                    .0
+                    .contains(&format!("stage[{index}].step.out.bank.disabled_data=")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_banks_reject_ungated_constant_flop_analysis() {
+        let source = r#"import stitch;
+type Bank = stitch::Enable<bool>;
+fn pipe_cycle0(x: bool) -> Bank { Bank { enabled: x, data: x } }
+fn pipe_cycle1(b: Bank) -> bool { b.enabled && b.data }
+"#;
+        let resolved = resolve_pipeline(
+            source,
+            Path::new("constant.x"),
+            "pipe",
+            &default_test_options("pipe"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.validate_no_constant_flops().unwrap_err().0,
+            "constant-flop validation for stitch::Enable requires analysis of load-enabled writes"
+        );
+    }
+
+    #[test]
+    fn enabled_banks_allow_token_fields_alongside_the_bank() {
+        let source = r#"import stitch;
+type Bank = stitch::Enable<bool>;
+struct R { t: token, bank: Bank }
+fn pipe_cycle0(x: (token, bool)) -> R { R { t: x.0, bank: Bank { enabled: true, data: x.1 } } }
+fn pipe_cycle1(x: R) -> bool { x.bank.data }
+"#;
+        let resolved = resolve_pipeline(
+            source,
+            Path::new("tokens.x"),
+            "pipe",
+            &default_test_options("pipe"),
+        )
+        .unwrap();
+        assert_eq!(resolved.layout.stage_inputs[1].banks[0].data, 0..1);
+        let block = resolved.emit_block_ir().unwrap();
+        xlsynth::IrPackage::parse_ir(&block.to_string(), None).unwrap();
+    }
+
+    #[test]
+    fn enabled_banks_check_an_opaque_tuple_payload() {
+        let source = r#"import stitch;
+type Inner = stitch::Enable<u4>;
+type Outer = stitch::Enable<(bool, Inner)>;
+fn pipe_cycle0(x: u4) -> Outer { Outer { enabled: true, data: (false, Inner { enabled: true, data: x }) } }
+fn pipe_cycle1(b: Outer) -> u4 { b.data.1.data }
+"#;
+        let opts = default_test_options("pipe");
+        let path = Path::new("nested.x");
+        let nested = resolve_pipeline(source, path, "pipe", &opts).err().unwrap();
+        let ordinary = source
+            .replace("type Inner = stitch::Enable<u4>;", "type Inner = u4;")
+            .replace("Inner { enabled: true, data: x }", "x")
+            .replace("b.data.1.data", "b.data.1");
+        match resolve_pipeline(&ordinary, path, "pipe", &opts) {
+            Ok(pipeline) => {
+                assert_eq!(pipeline.layout.stage_inputs[1].banks[0].data, 0..5);
+                assert!(
+                    nested
+                        .0
+                        .contains("nested stitch::Enable at pipe_cycle0.out.data.1"),
+                    "{nested}"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    error
+                        .0
+                        .contains("cannot inspect the concrete aggregate at pipe_cycle0.out.data"),
+                    "{error}"
+                );
+                assert_eq!(nested.0, error.0);
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_banks_check_final_output_and_nominal_placement() {
+        let opts = default_test_options("pipe");
+        let path = Path::new("ops.x");
+        let leak = ADD_MUL.replace(
+            "else { a.add.data }",
+            "else { a.add.data ^ (a.mul.data & u4:1) }",
+        );
+        let error = resolve_pipeline(&leak, path, "pipe", &opts)
+            .err()
+            .unwrap()
+            .0;
+        assert!(
+            error.contains("changes the final output") && error.contains("pipe_cycle1.out.mul")
+        );
+        let read = ADD_MUL.replace("if a.mul_op", "if a.mul.enabled");
+        let resolved = resolve_pipeline(&read, path, "pipe", &opts).unwrap();
+        assert!(resolved.layout.stage_inputs[2].banks[0].carry_enable);
+        assert!(!resolved.layout.stage_inputs[2].banks[1].carry_enable);
+        let diagnostic = ADD_MUL.replace(
+            "fn pipe_cycle2(a: Operands) -> u4 {",
+            r#"pub fn pipe_cycle2(a: Operands) -> u4 {
+    assert!(a.add.enabled == !a.mul_op, "expected_add");"#,
+        );
+        let resolved = resolve_pipeline(&diagnostic, path, "pipe", &opts).unwrap();
+        assert!(!resolved.layout.stage_inputs[2].banks[0].carry_enable);
+        assert!(resolved.layout.stage_inputs[2].banks[1].carry_enable);
+        let tuple = r#"import stitch;
+type Bank = stitch::Enable<u4>;
+struct Enable { enabled: bool, data: u4 }
+fn pipe_cycle0(x: u4) -> (Enable, Bank) {
+    (Enable { enabled: false, data: x }, Bank { enabled: false, data: x })
+}
+fn pipe_cycle1(a: (Enable, Bank)) -> u4 { a.0.data }
+"#;
+        let resolved = resolve_pipeline(tuple, path, "pipe", &opts).unwrap();
+        assert_eq!(resolved.layout.stage_inputs[1].banks.len(), 1);
+        assert_eq!(
+            resolved.layout.stage_inputs[1].banks[0].path,
+            "pipe_cycle0.out.1"
+        );
+        let nested = tuple
+            .replace("(Enable, Bank)", "(Enable, Bank[1])")
+            .replace(
+                ", Bank { enabled: false, data: x }",
+                ", [Bank { enabled: false, data: x }]",
+            );
+        let error = resolve_pipeline(&nested, path, "pipe", &opts)
+            .err()
+            .unwrap()
+            .0;
+        assert!(
+            error.contains("nested stitch::Enable at pipe_cycle0.out.1[]"),
+            "{error}"
+        );
+        let external = r#"import stitch;
+type Bank = stitch::Enable<u4>;
+fn pipe_cycle0(x: u4) -> Bank { Bank { enabled: false, data: x } }
+"#;
+        let resolved = resolve_pipeline(external, path, "pipe", &opts).unwrap();
+        assert!(resolved.layout.output.banks.is_empty());
+        let nested_output = external.replace(
+            "-> Bank { Bank { enabled: false, data: x } }",
+            "-> Bank[1] { [Bank { enabled: false, data: x }] }",
+        );
+        let error = resolve_pipeline(&nested_output, path, "pipe", &opts)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .0
+                .contains("nested stitch::Enable at pipe_cycle0.out[]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn enabled_banks_support_aggregate_payloads_and_follow_packed_ports() {
+        let opts = default_test_options("pipe");
+        let path = Path::new("banks.x");
+        let aggregate = r#"import stitch;
+struct Payload { tag: u3, lanes: u5[2] }
+type Bank = stitch::Enable<Payload>;
+fn pipe_cycle0(load: bool, x: Payload) -> Bank { Bank { enabled: load, data: x } }
+fn pipe_cycle1(b: Bank) -> u5 { if b.enabled { b.data.lanes[u32:1] } else { u5:0 } }
+"#;
+        let resolved = resolve_pipeline(aggregate, path, "pipe", &opts).unwrap();
+        let bank = &resolved.layout.stage_inputs[1].banks[0];
+        assert_eq!(bank.data, 0..13);
+        assert!(bank.carry_enable);
+        let block = resolved.emit_block_ir().unwrap();
+        xlsynth::IrPackage::parse_ir(&block.to_string(), None).unwrap();
+
+        // The first destination port takes the *low* bit of the packed
+        // result. Its name and type do not identify the producer's bank.
+        let split = r#"import stitch;
+type Bank = stitch::Enable<u3>;
+fn pipe_cycle0(x: u3) -> (bool, Bank) { (false, Bank { enabled: false, data: x }) }
+fn pipe_cycle1(low: bool, b: Bank) -> bool { low }
+"#;
+        let error = resolve_pipeline(split, path, "pipe", &opts).err().unwrap();
+        assert!(error.0.contains("changes the final output"), "{error}");
     }
 
     fn expect_stitch_name_error(

@@ -142,6 +142,90 @@ fn muladd_spec_and_flags_emit_the_same_block_and_take_two_edges() {
     }
 }
 
+#[test]
+fn forwarded_enable_banks_hold_through_opcode_changes_bubbles_and_reset() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("ops.x"),
+        r#"import stitch;
+type Bank = stitch::Enable<u4>;
+type Decoded = (bool, Bank, Bank);
+fn pipe_cycle0(mul_op: bool, x: u4, y: u4) -> Decoded {
+    (mul_op, Bank { enabled: !mul_op, data: x + y },
+             Bank { enabled: mul_op, data: x * y })
+}
+fn pipe_cycle1(d: Decoded) -> Decoded { d }
+fn pipe_cycle2(d: Decoded) -> u4 { if d.0 { d.2.data } else { d.1.data } }
+"#,
+    )?;
+    let ir = stdout(
+        directory.path(),
+        &[
+            "dslx-stitch-pipeline",
+            "--output-format=block-ir",
+            "--dslx_input_file=ops.x",
+            "--dslx_top=pipe",
+            "--flop_inputs=false",
+            "--flop_outputs=false",
+            "--input_valid_signal=in_valid",
+            "--output_valid_signal=out_valid",
+            "--reset=rst",
+        ],
+    )?;
+    let module = compile_pipeline_module(&render_block(&ir)?).unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let ports = runner.port_bindings();
+    let rst = ports.input_with_width("rst", 1).unwrap();
+    let in_valid = ports.input_with_width("in_valid", 1).unwrap();
+    let mul_op = ports.input_with_width("mul_op", 1).unwrap();
+    let x = ports.input_with_width("x", 4).unwrap();
+    let y = ports.input_with_width("y", 4).unwrap();
+    let mut previous = (false, false);
+    for (reset, valid, mul, a, b, expected_valid, expected_data) in [
+        (true, false, false, 0, 0, 0, None),
+        (false, true, true, 2, 3, 0, None),
+        (false, true, false, 7, 3, 1, Some(6)),
+        (false, false, true, 9, 1, 1, Some(10)),
+        (false, true, true, 4, 2, 0, Some(10)),
+        (true, true, false, 2, 3, 0, None),
+    ] {
+        let edge = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_bool(&rst, reset)?;
+                drive.set_bool(&in_valid, valid)?;
+                drive.set_bool(&mul_op, mul)?;
+                drive.set_u64(&x, a)?;
+                drive.set_u64(&y, b)
+            })
+            .unwrap();
+        // The disabled payload is unobservable at "out". Inspect each bank
+        // across the edge to catch an unconditional write in either layer.
+        for (bank, load) in [
+            ("p0_bank_at_0", valid && mul),
+            ("p0_bank_at_5", valid && !mul),
+            ("p1_bank_at_0", previous.0 && previous.1),
+            ("p1_bank_at_5", previous.0 && !previous.1),
+        ] {
+            if !load {
+                assert_eq!(
+                    edge.outputs[bank], edge.pre_outputs[bank],
+                    "{bank} changed on cycle {}",
+                    edge.cycle
+                );
+            }
+        }
+        previous = (valid && !reset, mul);
+        assert_eq!(
+            edge.outputs["out_valid"].to_u64_if_known(),
+            Some(expected_valid)
+        );
+        if let Some(expected) = expected_data {
+            assert_eq!(edge.outputs["out"].to_u64_if_known(), Some(expected));
+        }
+    }
+    Ok(())
+}
+
 #[test_case(false; "active_high")]
 #[test_case(true; "active_low")]
 fn packed_stage_arguments_bubbles_and_synchronous_reset(reset_active_low: bool) {

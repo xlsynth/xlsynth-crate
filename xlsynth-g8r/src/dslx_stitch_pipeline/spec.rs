@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use xlsynth::ir_package::IrPackage;
-use xlsynth::{DslxConvertOptions, XlsynthError, convert_dslx_to_ir, dslx};
+use xlsynth::{XlsynthError, dslx};
 
 use super::layout::PipelineLayout;
 use super::names::validate_stitch_pipeline_names;
@@ -257,8 +257,31 @@ pub(super) fn resolve_stages(
     for path in paths.search {
         dslx_path_str(path, "dslx_path")?;
     }
-    let mut imports = dslx::ImportData::new(paths.stdlib, paths.search);
-    let typecheck = dslx::parse_and_typecheck(text, path_str, module_name, &mut imports);
+    // Typecheck ordinary pipelines against an empty reserved module. A
+    // successful check proves there is no marker, including through imports.
+    // Only pipelines that use the annotation need nominal boundary analysis.
+    let typecheck_with = |stitch_source| -> Result<_, XlsynthError> {
+        let mut imports = dslx::ImportData::new(paths.stdlib, paths.search);
+        let builtin = if module_name == "stitch" {
+            None
+        } else {
+            Some(dslx::parse_and_typecheck(
+                stitch_source,
+                "<builtin>/stitch.x",
+                "stitch",
+                &mut imports,
+            )?)
+        };
+        Ok((
+            dslx::parse_and_typecheck(text, path_str, module_name, &mut imports)?,
+            builtin,
+        ))
+    };
+    let typecheck = match typecheck_with("") {
+        Ok((module, _)) => Ok((module, None)),
+        Err(first) if module_name == "stitch" => Err(first),
+        Err(_) => typecheck_with(super::enable::STITCH_MODULE),
+    };
     if let Some(required_dir) = paths.required_directory {
         // libxls tries its process working directory before additional search
         // paths. Every transitive import begins at an import/use in this
@@ -273,13 +296,14 @@ pub(super) fn resolve_stages(
                 current_dir.display()
             );
             match &typecheck {
-                Ok(typechecked) => {
+                Ok((typechecked, _)) => {
                     let module = typechecked.get_module();
                     if (0..module.get_member_count()).any(|i| {
-                        matches!(
-                            module.get_member(i).kind(),
-                            dslx::ModuleMemberKind::Import | dslx::ModuleMemberKind::Use
-                        )
+                        let member = module.get_member(i);
+                        member
+                            .to_import()
+                            .is_some_and(|import| import.get_subject() != ["stitch"])
+                            || member.kind() == dslx::ModuleMemberKind::Use
                     }) {
                         return Err(XlsynthError(guidance));
                     }
@@ -290,19 +314,17 @@ pub(super) fn resolve_stages(
             }
         }
     }
-    let module = typecheck?;
+    let (module, builtin) = typecheck?;
     let names = select_stage_names(&module, top, explicit_stages)?;
-    let convert = DslxConvertOptions {
-        dslx_stdlib_path: paths.stdlib,
-        additional_search_paths: paths.search.to_vec(),
-        enable_warnings: None,
-        disable_warnings: None,
-        force_implicit_token_calling_convention: false,
-    };
-    let ir = convert_dslx_to_ir(text, path, &convert)?.ir;
+    let ir = IrPackage::parse_ir(&module.to_ir_text()?, None)?;
     let stages = resolve_stage_ir_names(&ir, module_name, names)?;
     verify_stage_signatures(&ir, &stages)?;
-    let layout = PipelineLayout::from_ir(&ir, &stages, &boundary)?;
+    let mut layout = PipelineLayout::from_ir(&ir, &stages, &boundary)?;
+    if let Some(builtin) = builtin {
+        let marker = builtin.get_module().get_type_definition_as_struct_def(0)?;
+        super::enable::collect_banks(&module, &marker, &stages, &mut layout)?;
+        super::enable::validate_banks(&ir, &stages, &mut layout)?;
+    }
     Ok(ResolvedStitchPipeline {
         ir,
         stages,
