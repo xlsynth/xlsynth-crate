@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::LineCoverability;
 use xlsynth_vastly::SourceText;
+use xlsynth_vastly::compute_coverability;
 use xlsynth_vastly::compute_coverability_or_fallback;
 
 #[test]
@@ -69,4 +71,63 @@ fn generated_items_are_marked_coverable() {
     assert_eq!(c.line(8), LineCoverability::CoverableExecutable);
     assert_eq!(c.line(9), LineCoverability::CoverableExecutable);
     assert_eq!(c.line(10), LineCoverability::CoverableExecutable);
+}
+
+#[test]
+fn named_connection_expression_lines_are_coverable() {
+    let src = r#"module top(input wire clk, input wire sel, input wire a, output wire y);
+  child inst (
+    .x(sel ?
+       a : 1'b0),
+    .out(y)
+  );
+endmodule
+module child(input wire x, output wire out);
+  assign out = x;
+endmodule
+"#;
+    let cover = compute_coverability(&SourceText::new(src.to_owned())).unwrap();
+    assert_eq!(cover.line(2), LineCoverability::NonCoverableStructural);
+    for line in 3..=5 {
+        assert_eq!(cover.line(line), LineCoverability::CoverableExecutable);
+    }
+    assert_eq!(cover.line(6), LineCoverability::NonCoverableStructural);
+}
+
+#[test]
+fn first_module_keeps_coverage_with_an_unsupported_trailing_testbench() {
+    let src = SourceText::new(
+        r#"module top(input wire clk, input wire a, output wire y);
+  wire t;
+  assign t = a;
+  assign y = t;
+endmodule
+module tb;
+  initial begin $display("ignored"); end
+endmodule
+"#
+        .to_owned(),
+    );
+    let counters = CoverageCounters {
+        top: Some("top".into()),
+        ..Default::default()
+    };
+    for cover in [
+        compute_coverability(&src).unwrap(),
+        counters.coverability(&src),
+    ] {
+        assert_eq!(
+            (1..=8).map(|line| cover.line(line)).collect::<Vec<_>>(),
+            [
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::CoverableExecutable,
+                LineCoverability::CoverableExecutable,
+                LineCoverability::NonCoverableStructural,
+                LineCoverability::CoverableUnknown,
+                LineCoverability::CoverableUnknown,
+                LineCoverability::CoverableUnknown,
+            ],
+        );
+    }
 }

@@ -54,6 +54,35 @@ pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
         const_env.insert(name.clone(), value.clone());
     }
 
+    let mut function_reads = BTreeMap::new();
+    let mut assign_reads = Vec::with_capacity(m.assigns.len());
+    for assign in &m.assigns {
+        let mut reads = BTreeSet::new();
+        let mut calls = BTreeSet::new();
+        assign.rhs.collect_refs(&mut reads, &mut calls);
+        match &assign.lhs {
+            Lhs::Ident(_) => { /* Writing a whole signal does not read its value. */ }
+            Lhs::Index { index, .. } => index.collect_refs(&mut reads, &mut calls),
+            Lhs::PackedIndex { indices, .. } => {
+                for index in indices {
+                    index.collect_refs(&mut reads, &mut calls);
+                }
+            }
+            Lhs::Slice { msb, lsb, .. } => {
+                msb.collect_refs(&mut reads, &mut calls);
+                lsb.collect_refs(&mut reads, &mut calls);
+            }
+        }
+        for name in calls {
+            if !function_reads.contains_key(&name) {
+                let reachable = collect_function_reads(&name, &m.functions, &function_reads)?;
+                function_reads.insert(name.clone(), reachable);
+            }
+            reads.extend(function_reads[&name].iter().cloned());
+        }
+        assign_reads.push(reads);
+    }
+
     for (lhs, writer_indices) in &lhs_to_idxs {
         if writer_indices.len() <= 1 {
             continue;
@@ -65,9 +94,7 @@ pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
         let mut seen_writers_by_bit: Vec<Option<usize>> = vec![None; info.width as usize];
         for &writer in writer_indices {
             let assign = &m.assigns[writer];
-            let mut deps: BTreeSet<String> = BTreeSet::new();
-            collect_idents(&assign.rhs, &mut deps);
-            if deps.contains(lhs) {
+            if assign_reads[writer].contains(lhs) {
                 return Err(Error::Parse(format!(
                     "multiple assigns to `{lhs}` with RHS dependency on `{lhs}` are not supported"
                 )));
@@ -94,9 +121,7 @@ pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
     let mut indeg: Vec<u32> = vec![0; m.assigns.len()];
     let mut succ: Vec<Vec<usize>> = vec![Vec::new(); m.assigns.len()];
 
-    for (i, a) in m.assigns.iter().enumerate() {
-        let mut deps: BTreeSet<String> = BTreeSet::new();
-        collect_idents(&a.rhs, &mut deps);
+    for (i, deps) in assign_reads.into_iter().enumerate() {
         for d in deps {
             if let Some(writers) = lhs_to_idxs.get(&d) {
                 for &j in writers {
@@ -1040,61 +1065,55 @@ fn exec_function_procedure(
     Ok(coerce_to_declinfo(&ret, &function_return_decl(f)))
 }
 
-fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
-    match e {
-        Expr::Ident(s) => {
-            out.insert(s.clone());
+/// Collects free module signals across all helpers reachable from a call.
+fn collect_function_reads(
+    root: &str,
+    functions: &BTreeMap<String, CompiledFunction>,
+    cache: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<BTreeSet<String>> {
+    let mut result = BTreeSet::new();
+    let mut pending = vec![root.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        // Recursive helpers share dependencies. Visit each body once and cache
+        // only the complete set for the root after traversal.
+        if !visited.insert(name.clone()) {
+            continue;
         }
-        Expr::Literal(_) => {}
-        Expr::UnsizedNumber(_) => {}
-        Expr::UnbasedUnsized(_) => {}
-        Expr::Call { args, .. } => {
-            for a in args {
-                collect_idents(a, out);
+        if let Some(reads) = cache.get(&name) {
+            result.extend(reads.iter().cloned());
+            continue;
+        }
+        let func = functions
+            .get(&name)
+            .ok_or_else(|| Error::Parse(format!("unknown function `{name}`")))?;
+        let mut reads = BTreeSet::new();
+        let mut calls = BTreeSet::new();
+        match &func.body {
+            CompiledFunctionBody::Expr { expr, .. } => expr.collect_refs(&mut reads, &mut calls),
+            CompiledFunctionBody::Casez { selector, arms } => {
+                selector.collect_refs(&mut reads, &mut calls);
+                for arm in arms {
+                    arm.value.collect_refs(&mut reads, &mut calls);
+                }
+            }
+            CompiledFunctionBody::Procedure { assigns } => {
+                for assign in assigns {
+                    assign.expr.collect_refs(&mut reads, &mut calls);
+                }
             }
         }
-        Expr::Concat(ps) => {
-            for p in ps {
-                collect_idents(p, out);
-            }
+        reads.remove(&name);
+        for arg in &func.args {
+            reads.remove(&arg.name);
         }
-        Expr::Replicate { count, expr } => {
-            collect_idents(count, out);
-            collect_idents(expr, out);
+        for local in func.locals.keys() {
+            reads.remove(local);
         }
-        Expr::Cast { width, expr } => {
-            collect_idents(width, out);
-            collect_idents(expr, out);
-        }
-        Expr::Index { expr, index } => {
-            collect_idents(expr, out);
-            collect_idents(index, out);
-        }
-        Expr::Slice { expr, msb, lsb } => {
-            collect_idents(expr, out);
-            collect_idents(msb, out);
-            collect_idents(lsb, out);
-        }
-        Expr::IndexedSlice {
-            expr, base, width, ..
-        } => {
-            collect_idents(expr, out);
-            collect_idents(base, out);
-            collect_idents(width, out);
-        }
-        Expr::Unary { expr, .. } => {
-            collect_idents(expr, out);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_idents(lhs, out);
-            collect_idents(rhs, out);
-        }
-        Expr::Ternary { cond, t, f } => {
-            collect_idents(cond, out);
-            collect_idents(t, out);
-            collect_idents(f, out);
-        }
+        result.extend(reads);
+        pending.extend(calls);
     }
+    Ok(result)
 }
 
 struct ComboResolver<'a> {

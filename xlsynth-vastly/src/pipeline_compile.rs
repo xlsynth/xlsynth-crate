@@ -66,28 +66,57 @@ impl CompiledPipelineModule {
 }
 
 pub fn compile_pipeline_module(src: &str) -> Result<CompiledPipelineModule> {
-    compile_pipeline_module_with_options(src, &BTreeSet::new(), true)
+    compile_pipeline_module_with_options(src, None, &BTreeSet::new(), true)
 }
 
 pub fn compile_pipeline_module_without_spans(src: &str) -> Result<CompiledPipelineModule> {
-    compile_pipeline_module_with_options(src, &BTreeSet::new(), false)
+    compile_pipeline_module_with_options(src, None, &BTreeSet::new(), false)
 }
 
 pub fn compile_pipeline_module_with_defines(
     src: &str,
     defines: &BTreeSet<String>,
 ) -> Result<CompiledPipelineModule> {
-    compile_pipeline_module_with_options(src, defines, true)
+    compile_pipeline_module_with_options(src, None, defines, true)
+}
+
+/// Compiles a named clocked top and its directly instantiated combinational
+/// modules.
+pub fn compile_pipeline_module_with_top(src: &str, top: &str) -> Result<CompiledPipelineModule> {
+    compile_pipeline_module_with_top_and_defines(src, top, &BTreeSet::new())
+}
+
+/// Compiles a named pipeline top with the given preprocessor symbols enabled.
+pub fn compile_pipeline_module_with_top_and_defines(
+    src: &str,
+    top: &str,
+    defines: &BTreeSet<String>,
+) -> Result<CompiledPipelineModule> {
+    compile_pipeline_module_with_options(src, Some(top), defines, true)
 }
 
 fn compile_pipeline_module_with_options(
     src: &str,
+    top: Option<&str>,
     defines: &BTreeSet<String>,
     preserve_spans: bool,
 ) -> Result<CompiledPipelineModule> {
-    let parsed: ParsedModule = crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
-    let items =
-        crate::generate_constructs::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
+    let parsed: ParsedModule = if let Some(name) = top {
+        let mut modules = crate::sv_parser::parse_pipeline_modules(src, defines)?;
+        let top = modules
+            .remove(name)
+            .ok_or_else(|| Error::Parse(format!("unknown top module `{name}`")))?;
+        crate::hierarchy::elaborate_top(src, top, &modules)?
+    } else {
+        let mut module = crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
+        module.items = crate::generate_constructs::elaborate_pipeline_items(
+            src,
+            &module.params,
+            &module.items,
+        )?;
+        module
+    };
+    let items = &parsed.items;
 
     let module_name = parsed.name.clone();
 
@@ -102,10 +131,10 @@ fn compile_pipeline_module_with_options(
     let mut observer_spans: Vec<Span> = Vec::new();
 
     crate::compiled_module::extend_decls_from_items(
-        &items, &mut decls, /* reject_duplicates= */ true,
+        items, &mut decls, /* reject_duplicates= */ true,
     )?;
 
-    for it in &items {
+    for it in items {
         match it {
             ModuleItem::Decl { .. } => {}
             ModuleItem::Assign {
@@ -142,7 +171,7 @@ fn compile_pipeline_module_with_options(
                 }
                 functions.insert(
                     f.name.clone(),
-                    crate::compiled_module::lower_function(src, f, &decls, preserve_spans)?,
+                    crate::compiled_module::lower_function(f, &decls, preserve_spans)?,
                 );
 
                 let mut arms_meta: Vec<FunctionArmMeta> = Vec::new();
@@ -201,6 +230,11 @@ fn compile_pipeline_module_with_options(
             }
             ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("pipeline items should be elaborated")
+            }
+            ModuleItem::Instance { .. } => {
+                return Err(Error::Parse(
+                    "module instances require compile_pipeline_module_with_top".into(),
+                ));
             }
         }
     }

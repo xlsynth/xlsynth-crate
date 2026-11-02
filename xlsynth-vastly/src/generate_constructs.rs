@@ -70,6 +70,14 @@ fn elaborate_item(
     out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
     match item {
+        ModuleItem::Instance { .. } => {
+            if in_generate {
+                return Err(Error::Parse(
+                    "instances inside generate blocks are not supported".into(),
+                ));
+            }
+            out.push(item.clone());
+        }
         ModuleItem::Decl { .. } => {
             if in_generate {
                 return Err(Error::Parse(
@@ -205,141 +213,27 @@ fn unsized_decimal_value(value: u32) -> Value4 {
 }
 
 fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, u32>) -> Expr {
-    match expr {
-        Expr::Ident(name) => substs
-            .get(name)
-            .map(|value| Expr::UnsizedNumber(unsized_decimal_value(*value)))
-            .unwrap_or_else(|| Expr::Ident(name.clone())),
-        Expr::Literal(v) => Expr::Literal(v.clone()),
-        Expr::UnsizedNumber(v) => Expr::UnsizedNumber(v.clone()),
-        Expr::UnbasedUnsized(bit) => Expr::UnbasedUnsized(*bit),
-        Expr::Call { name, args } => Expr::Call {
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|arg| substitute_expr(arg, substs))
-                .collect(),
-        },
-        Expr::Concat(parts) => Expr::Concat(
-            parts
-                .iter()
-                .map(|part| substitute_expr(part, substs))
-                .collect(),
-        ),
-        Expr::Replicate { count, expr } => Expr::Replicate {
-            count: Box::new(substitute_expr(count, substs)),
-            expr: Box::new(substitute_expr(expr, substs)),
-        },
-        Expr::Cast { width, expr } => Expr::Cast {
-            width: Box::new(substitute_expr(width, substs)),
-            expr: Box::new(substitute_expr(expr, substs)),
-        },
-        Expr::Index { expr, index } => Expr::Index {
-            expr: Box::new(substitute_expr(expr, substs)),
-            index: Box::new(substitute_expr(index, substs)),
-        },
-        Expr::Slice { expr, msb, lsb } => Expr::Slice {
-            expr: Box::new(substitute_expr(expr, substs)),
-            msb: Box::new(substitute_expr(msb, substs)),
-            lsb: Box::new(substitute_expr(lsb, substs)),
-        },
-        Expr::IndexedSlice {
-            expr,
-            base,
-            width,
-            upward,
-        } => Expr::IndexedSlice {
-            expr: Box::new(substitute_expr(expr, substs)),
-            base: Box::new(substitute_expr(base, substs)),
-            width: Box::new(substitute_expr(width, substs)),
-            upward: *upward,
-        },
-        Expr::Unary { op, expr } => Expr::Unary {
-            op: *op,
-            expr: Box::new(substitute_expr(expr, substs)),
-        },
-        Expr::Binary { op, lhs, rhs } => Expr::Binary {
-            op: *op,
-            lhs: Box::new(substitute_expr(lhs, substs)),
-            rhs: Box::new(substitute_expr(rhs, substs)),
-        },
-        Expr::Ternary { cond, t, f } => Expr::Ternary {
-            cond: Box::new(substitute_expr(cond, substs)),
-            t: Box::new(substitute_expr(t, substs)),
-            f: Box::new(substitute_expr(f, substs)),
-        },
-    }
+    let mut result = expr.clone();
+    result.visit_mut(&mut |node| {
+        if let Expr::Ident(name) = &*node
+            && let Some(value) = substs.get(name)
+        {
+            *node = Expr::UnsizedNumber(unsized_decimal_value(*value));
+        }
+    });
+    result
 }
 
 fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, u32>) -> SpannedExpr {
-    let kind = match &expr.kind {
-        SpannedExprKind::Ident(name) => substs
-            .get(name)
-            .map(|value| SpannedExprKind::UnsizedNumber(unsized_decimal_value(*value)))
-            .unwrap_or_else(|| SpannedExprKind::Ident(name.clone())),
-        SpannedExprKind::Literal(v) => SpannedExprKind::Literal(v.clone()),
-        SpannedExprKind::UnsizedNumber(v) => SpannedExprKind::UnsizedNumber(v.clone()),
-        SpannedExprKind::UnbasedUnsized(bit) => SpannedExprKind::UnbasedUnsized(*bit),
-        SpannedExprKind::Call { name, args } => SpannedExprKind::Call {
-            name: name.clone(),
-            args: args
-                .iter()
-                .map(|arg| substitute_spanned_expr(arg, substs))
-                .collect(),
-        },
-        SpannedExprKind::Concat(parts) => SpannedExprKind::Concat(
-            parts
-                .iter()
-                .map(|part| substitute_spanned_expr(part, substs))
-                .collect(),
-        ),
-        SpannedExprKind::Replicate { count, expr } => SpannedExprKind::Replicate {
-            count: Box::new(substitute_spanned_expr(count, substs)),
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-        },
-        SpannedExprKind::Cast { width, expr } => SpannedExprKind::Cast {
-            width: Box::new(substitute_spanned_expr(width, substs)),
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-        },
-        SpannedExprKind::Index { expr, index } => SpannedExprKind::Index {
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-            index: Box::new(substitute_spanned_expr(index, substs)),
-        },
-        SpannedExprKind::Slice { expr, msb, lsb } => SpannedExprKind::Slice {
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-            msb: Box::new(substitute_spanned_expr(msb, substs)),
-            lsb: Box::new(substitute_spanned_expr(lsb, substs)),
-        },
-        SpannedExprKind::IndexedSlice {
-            expr,
-            base,
-            width,
-            upward,
-        } => SpannedExprKind::IndexedSlice {
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-            base: Box::new(substitute_spanned_expr(base, substs)),
-            width: Box::new(substitute_spanned_expr(width, substs)),
-            upward: *upward,
-        },
-        SpannedExprKind::Unary { op, expr } => SpannedExprKind::Unary {
-            op: *op,
-            expr: Box::new(substitute_spanned_expr(expr, substs)),
-        },
-        SpannedExprKind::Binary { op, lhs, rhs } => SpannedExprKind::Binary {
-            op: *op,
-            lhs: Box::new(substitute_spanned_expr(lhs, substs)),
-            rhs: Box::new(substitute_spanned_expr(rhs, substs)),
-        },
-        SpannedExprKind::Ternary { cond, t, f } => SpannedExprKind::Ternary {
-            cond: Box::new(substitute_spanned_expr(cond, substs)),
-            t: Box::new(substitute_spanned_expr(t, substs)),
-            f: Box::new(substitute_spanned_expr(f, substs)),
-        },
-    };
-    SpannedExpr {
-        span: expr.span,
-        kind,
-    }
+    let mut result = expr.clone();
+    result.visit_mut(&mut |node| {
+        if let SpannedExprKind::Ident(name) = &node.kind
+            && let Some(value) = substs.get(name)
+        {
+            node.kind = SpannedExprKind::UnsizedNumber(unsized_decimal_value(*value));
+        }
+    });
+    result
 }
 
 fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, u32>) -> Lhs {

@@ -11,7 +11,7 @@ use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{
     FixtureRunner, LogicBit, Signedness, Value4, compile_combo_module, compile_pipeline_module,
-    eval_combo, plan_combo_eval,
+    compile_pipeline_module_with_top, eval_combo, plan_combo_eval,
 };
 
 fn driver(directory: &Path, arguments: &[&str]) -> std::io::Result<Output> {
@@ -142,8 +142,11 @@ fn muladd_spec_and_flags_emit_the_same_block_and_take_two_edges() {
     }
 }
 
-#[test]
-fn forwarded_enable_banks_hold_through_opcode_changes_bubbles_and_reset() -> anyhow::Result<()> {
+#[test_case("block-ir"; "block_ir")]
+#[test_case("rtl"; "stitched_rtl")]
+fn forwarded_enable_banks_hold_through_opcode_changes_bubbles_and_reset(
+    output_format: &str,
+) -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(
         directory.path().join("ops.x"),
@@ -158,11 +161,12 @@ fn pipe_cycle1(d: Decoded) -> Decoded { d }
 fn pipe_cycle2(d: Decoded) -> u4 { if d.0 { d.2.data } else { d.1.data } }
 "#,
     )?;
-    let ir = stdout(
+    let emitted = stdout(
         directory.path(),
         &[
             "dslx-stitch-pipeline",
-            "--output-format=block-ir",
+            "--output-format",
+            output_format,
             "--dslx_input_file=ops.x",
             "--dslx_top=pipe",
             "--flop_inputs=false",
@@ -172,7 +176,12 @@ fn pipe_cycle2(d: Decoded) -> u4 { if d.0 { d.2.data } else { d.1.data } }
             "--reset=rst",
         ],
     )?;
-    let module = compile_pipeline_module(&render_block(&ir)?).unwrap();
+    let module = if output_format == "block-ir" {
+        compile_pipeline_module(&render_block(&emitted)?)
+    } else {
+        compile_pipeline_module_with_top(&emitted, "pipe")
+    }
+    .unwrap();
     let mut runner = FixtureRunner::new(&module).unwrap();
     let ports = runner.port_bindings();
     let rst = ports.input_with_width("rst", 1).unwrap();
@@ -187,7 +196,14 @@ fn pipe_cycle2(d: Decoded) -> u4 { if d.0 { d.2.data } else { d.1.data } }
         (false, true, false, 7, 3, 1, Some(6)),
         (false, false, true, 9, 1, 1, Some(10)),
         (false, true, true, 4, 2, 0, Some(10)),
-        (true, true, false, 2, 3, 0, None),
+        (true, true, false, 2, 3, 0, Some(8)),
+        (false, false, false, 0, 0, 0, Some(8)),
+        (false, true, false, 6, 5, 0, Some(8)),
+        (false, false, true, 1, 1, 1, Some(11)),
+        // Reset can change a stage-0 payload while clearing its valid bit.
+        // The following bubble must keep that payload out of stage 1.
+        (true, true, true, 3, 5, 0, Some(11)),
+        (false, false, true, 0, 0, 0, Some(11)),
     ] {
         let edge = runner
             .step_cycle_with_drive(&mut [], |drive| {

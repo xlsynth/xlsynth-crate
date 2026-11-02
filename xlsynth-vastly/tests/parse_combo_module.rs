@@ -137,6 +137,37 @@ endmodule
 }
 
 #[test]
+fn mutually_recursive_helpers_schedule_both_captured_wires() {
+    let dut = r#"module m(input wire [3:0] x, output wire [3:0] a, output wire [3:0] b);
+  wire [3:0] left_seed;
+  wire [3:0] right_seed;
+  function automatic [3:0] left(input reg [3:0] n);
+    casez (n)
+      4'b0000: left = left_seed;
+      default: left = right(n - 4'd1);
+    endcase
+  endfunction
+  function automatic [3:0] right(input reg [3:0] n);
+    casez (n)
+      4'b0000: right = right_seed;
+      default: right = left(n - 4'd1);
+    endcase
+  endfunction
+  assign a = left(4'd1);
+  assign b = right(4'd1);
+  assign left_seed = x;
+  assign right_seed = ~x;
+endmodule
+"#;
+    let module = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+    let x = Value4::from_u64(4, Signedness::Unsigned, 3);
+    let outputs = eval_combo(&module, &plan, &BTreeMap::from([("x".into(), x)])).unwrap();
+    assert_eq!(outputs["a"].to_u64_if_known(), Some(12));
+    assert_eq!(outputs["b"].to_u64_if_known(), Some(3));
+}
+
+#[test]
 fn casez_functions_evaluate_with_optional_body_and_arm_wrappers() {
     for wrap_function in [false, true] {
         for wrap_arms in [false, true] {

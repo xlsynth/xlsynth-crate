@@ -15,7 +15,7 @@ use xlsynth_vastly::Signedness;
 use xlsynth_vastly::SourceText;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_pipeline_module_with_defines;
-use xlsynth_vastly::compute_coverability_or_fallback_with_defines;
+use xlsynth_vastly::compile_pipeline_module_with_top_and_defines;
 use xlsynth_vastly::cycles_from_irvals_file;
 use xlsynth_vastly::eval_combo_seeded;
 use xlsynth_vastly::plan_combo_eval;
@@ -30,6 +30,10 @@ use xlsynth_vastly::step_pipeline_state_with_env;
 struct Args {
     /// Path to the .sv file.
     sv: PathBuf,
+
+    /// Clocked top to elaborate from a source containing multiple modules.
+    #[arg(long)]
+    top: Option<String>,
 
     /// Scheduled input vectors: `<vals>@<cycle>`, semicolon-separated entries.
     /// Example: "0xf00,0xba5@2;0x0000,0xf800@3"
@@ -94,7 +98,10 @@ fn main_inner() -> xlsynth_vastly::Result<()> {
     if args.simulation {
         defines.insert("SIMULATION".to_string());
     }
-    let m = compile_pipeline_module_with_defines(&src, &defines)?;
+    let m = match &args.top {
+        Some(top) => compile_pipeline_module_with_top_and_defines(&src, top, &defines)?,
+        None => compile_pipeline_module_with_defines(&src, &defines)?,
+    };
     let src_text = SourceText::new(src.clone());
 
     let vectors = match (&args.inputs, &args.input_irvals) {
@@ -177,9 +184,8 @@ fn main_inner() -> xlsynth_vastly::Result<()> {
             );
         }
         cov.register_functions(&m.fn_meta);
-        let cover = compute_coverability_or_fallback_with_defines(&src_text, &defines);
         run_pipeline_and_collect_coverage(&m, &stimulus, &init, &src_text, &mut cov)?;
-        print_coverage_report(&cover, &src_text, &cov);
+        print_coverage_report(&cov.coverability(&src_text), &src_text, &cov);
         if args.coverage_annotate {
             let ansi = std::env::var_os("NO_COLOR").is_none();
             println!("annotated_source:");
