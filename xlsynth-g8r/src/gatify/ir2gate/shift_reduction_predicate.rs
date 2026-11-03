@@ -205,9 +205,9 @@ impl ShiftReductionPredicatePlan {
 }
 
 /// Counts uses by live AIG fanins and primary outputs in the ordinary mapping.
-struct LiveUses {
+pub(super) struct LiveUses {
     counts: Vec<usize>,
-    and_nodes: usize,
+    pub(super) and_nodes: usize,
 }
 
 /// ANDs released by a probe and newly reachable ANDs counted before rejection.
@@ -271,7 +271,7 @@ impl LiveUses {
 
     /// Seed every output edge, then propagate uses through live gates in
     /// reverse builder order, where every fanout precedes its fanins.
-    fn from_outputs(gb: &GateBuilder) -> Self {
+    pub(super) fn from_outputs(gb: &GateBuilder) -> Self {
         let mut counts = vec![0; gb.gates.len()];
         for bit in output_bits(gb) {
             counts[bit.node.id] += 1;
@@ -287,6 +287,53 @@ impl LiveUses {
             }
         }
         Self { counts, and_nodes }
+    }
+
+    /// Tests whether the released ANDs pay for both the replacement roots and
+    /// their downstream predicates. Detach users before fanins for nested
+    /// roots, then restore the original counts for the next read.
+    pub(super) fn replacing_saves_ands(
+        &mut self,
+        gb: &GateBuilder,
+        roots_descending: &[AigRef],
+        replacements: impl Iterator<Item = AigRef>,
+        predicate_ands: usize,
+    ) -> bool {
+        let mut removed = 0;
+        let mut uses = Vec::with_capacity(roots_descending.len());
+        for &root in roots_descending {
+            let count = self.counts[root.id] as isize;
+            uses.push(count);
+            removed += self.adjust(gb, root, -count);
+        }
+        let budget = removed.saturating_sub(predicate_ands);
+        let profitable = self.new_ands_up_to(gb, replacements, budget) < budget;
+        for (&root, count) in roots_descending.iter().zip(uses).rev() {
+            self.adjust(gb, root, count);
+        }
+        profitable
+    }
+
+    /// Counts ANDs that cross the live boundary after changing a root's use
+    /// count. Each live AND contributes one reference to each of its fanins.
+    fn adjust(&mut self, gb: &GateBuilder, root: AigRef, delta: isize) -> usize {
+        let mut pending = vec![(root, delta)];
+        let mut changed = 0;
+        while let Some((node, delta)) = pending.pop() {
+            let uses = &mut self.counts[node.id];
+            let was_live = *uses > 0;
+            *uses = uses
+                .checked_add_signed(delta)
+                .expect("invalid gate use count");
+            if was_live != (*uses > 0)
+                && let AigNode::And2 { a, b, .. } = gb.gates[node.id]
+            {
+                changed += 1;
+                let fanin_delta = delta.signum();
+                pending.extend([(a.node, fanin_delta), (b.node, fanin_delta)]);
+            }
+        }
+        changed
     }
 
     /// Measures the area available after detaching the redirected root edges.
@@ -317,19 +364,26 @@ impl LiveUses {
         }
         // The first excess AND rules out the candidate, even if a newly
         // reachable source has a much larger dead cone below it.
-        let added = self.new_ands_up_to(gb, alternative, removed + 1);
+        let added = self.new_ands_up_to(gb, [alternative], removed + 1);
         for (node, uses) in detached {
             self.counts[node.id] += uses;
         }
         ReplacementCost { removed, added }
     }
 
-    /// Counts distinct ANDs the alternative must activate, up to `limit`.
-    fn new_ands_up_to(&self, gb: &GateBuilder, root: AigRef, limit: usize) -> usize {
+    /// Counts dead ANDs once across all replacement roots. Stop as soon as
+    /// the cost rules out the trial, even partway through a single dead cone.
+    fn new_ands_up_to(
+        &self,
+        gb: &GateBuilder,
+        roots: impl IntoIterator<Item = AigRef>,
+        limit: usize,
+    ) -> usize {
+        let mut roots = roots.into_iter();
         let mut added = HashSet::new();
-        let mut pending = vec![root];
+        let mut pending = Vec::new();
         while added.len() < limit
-            && let Some(node) = pending.pop()
+            && let Some(node) = pending.pop().or_else(|| roots.next())
         {
             if self.counts.get(node.id).copied().unwrap_or(0) == 0
                 && let AigNode::And2 { a, b, .. } = gb.gates[node.id]
@@ -648,6 +702,33 @@ top fn main(x: bits[1], k: bits[65536]) -> bits[1] {
             assert_eq!(cost.added, cost.removed + 1);
             gb.rollback_append_checkpoint(checkpoint);
         }
+        assert_eq!(live.counts, initial);
+    }
+
+    #[test]
+    fn read_retry_only_inspects_columns_within_the_released_area() {
+        let mut gb = GateBuilder::new("columns".into(), GateBuilderOptions::opt());
+        let data = gb.add_input("data".into(), 4096);
+        let dead_column = gb.add_and_reduce(&data, ReductionKind::Tree);
+        let pair = gb.add_and_binary(*data.get_lsb(0), *data.get_lsb(1));
+        let pred_bits = gb.add_input("predicate".into(), 4);
+        let predicate = gb.add_and_reduce(&pred_bits, ReductionKind::Tree);
+        let zero = gb.get_false();
+        gb.add_output("folded".into(), zero.into());
+        gb.add_output("predicate".into(), predicate.into());
+        let mut live = LiveUses::from_outputs(&gb);
+        let initial = live.counts.clone();
+        let mut columns = [dead_column.node; 2].into_iter();
+
+        // Folded predicates release no ANDs. Three released ANDs minus one
+        // downstream AND let us inspect at most two dead ANDs.
+        assert!(!live.replacing_saves_ands(&gb, &[zero.node], columns.by_ref(), 2));
+        assert_eq!(columns.len(), 2);
+        assert!(!live.replacing_saves_ands(&gb, &[predicate.node], columns.by_ref(), 1));
+        assert_eq!(columns.len(), 1);
+        assert_eq!(live.new_ands_up_to(&gb, columns, 2), 2);
+        // Two columns sharing a single dead AND still fit that budget.
+        assert!(live.replacing_saves_ands(&gb, &[predicate.node], [pair.node; 2].into_iter(), 1));
         assert_eq!(live.counts, initial);
     }
 

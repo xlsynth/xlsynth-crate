@@ -43,6 +43,7 @@ mod conditional_select;
 mod demanded_bits;
 mod guarded_unit;
 mod priority_predicate;
+mod read_predicates;
 mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
@@ -629,6 +630,19 @@ fn attach_current_provenance_to_bits(gb: &mut GateBuilder, bits: &AigBitVector) 
     AigBitVector::from_lsb_is_index_0(&operands)
 }
 
+/// Resolves a literal array address, with `None` denoting an exact zero fill.
+fn literal_array_position(
+    element_count: usize,
+    literal_index: &IrBits,
+    assumed_in_bounds: bool,
+) -> Option<usize> {
+    match bits_to_usize_if_representable(literal_index) {
+        Some(index) if index < element_count => Some(index),
+        _ if assumed_in_bounds || element_count == 0 => None,
+        _ => Some(element_count - 1),
+    }
+}
+
 /// Selects a literal array index without constructing a decode/mask network.
 fn gatify_literal_array_index(
     gb: &mut GateBuilder,
@@ -638,18 +652,11 @@ fn gatify_literal_array_index(
     assumed_in_bounds: bool,
 ) -> AigBitVector {
     let element_bit_count = array_ty.element_type.bit_count();
-    let selected = match bits_to_usize_if_representable(literal_index) {
-        Some(index) if index < array_ty.element_count => {
-            array_bits.get_lsb_slice(index * element_bit_count, element_bit_count)
-        }
-        _ if assumed_in_bounds || array_ty.element_count == 0 => {
-            AigBitVector::zeros(element_bit_count)
-        }
-        _ => array_bits.get_lsb_slice(
-            (array_ty.element_count - 1) * element_bit_count,
-            element_bit_count,
-        ),
-    };
+    let selected =
+        match literal_array_position(array_ty.element_count, literal_index, assumed_in_bounds) {
+            Some(index) => array_bits.get_lsb_slice(index * element_bit_count, element_bit_count),
+            None => AigBitVector::zeros(element_bit_count),
+        };
     attach_current_provenance_to_bits(gb, &selected)
 }
 
@@ -4989,6 +4996,7 @@ fn gatify_internal(
     provenance_by_node: Option<&[PirNodeIds]>,
     topological: &[ir::NodeRef],
     observe: Option<&ShiftReductionPredicatePlan>,
+    read_predicates: &mut read_predicates::ReadPredicates,
 ) -> Result<(), String> {
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
@@ -5032,18 +5040,41 @@ fn gatify_internal(
             node.payload
         );
         set_provenance(g8_builder, node_ref);
-        let first_gate = g8_builder.gates.len();
-        gatify_node(
-            f,
-            node_ref,
-            node,
-            g8_builder,
-            env,
-            options,
-            LoweringScope::WholeFunction,
-        )?;
-        if let Some(plan) = observe {
-            plan.observe_ordinary(node_ref, first_gate, env, g8_builder);
+        if options.hash
+            && options.fold
+            && options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && matches!(node.payload, ir::NodePayload::ArrayIndex { .. })
+        {
+            read_predicates.consider(f, node_ref, g8_builder, env, options);
+        }
+        if let Some(rail) = read_predicates.take(node_ref) {
+            let value = g8_builder.union_current_pir_node_id_into_operand(rail);
+            if matches!(
+                node.payload,
+                ir::NodePayload::Binop(ir::Binop::Eq | ir::Binop::Ne, ..)
+                    | ir::NodePayload::Unop(ir::Unop::OrReduce | ir::Unop::AndReduce, _)
+            ) {
+                g8_builder.add_tag(
+                    value.node,
+                    format!("{}_{}", node.payload.get_operator(), node.text_id),
+                );
+            }
+            env.add(node_ref, GateOrVec::Gate(value));
+            env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
+        } else {
+            let first_gate = g8_builder.gates.len();
+            gatify_node(
+                f,
+                node_ref,
+                node,
+                g8_builder,
+                env,
+                options,
+                LoweringScope::WholeFunction,
+            )?;
+            if let Some(plan) = observe {
+                plan.observe_ordinary(node_ref, first_gate, env, g8_builder);
+            }
         }
     }
     g8_builder.set_current_pir_node_id(None);
@@ -5220,8 +5251,9 @@ fn gatify_lower_prepared_fn(
         None
     };
 
-    let lower = |env: &mut GateEnv,
-                 observe: Option<&ShiftReductionPredicatePlan>|
+    let emit = |env: &mut GateEnv,
+                observe: Option<&ShiftReductionPredicatePlan>,
+                reads: &mut read_predicates::ReadPredicates|
      -> Result<GateBuilder, String> {
         let mut gb = GateBuilder::new(
             f.name.clone(),
@@ -5238,8 +5270,33 @@ fn gatify_lower_prepared_fn(
             provenance_by_node.as_deref(),
             &topological,
             observe,
+            reads,
         )?;
         Ok(gb)
+    };
+    let lower = |env: &mut GateEnv,
+                 observe: Option<&ShiftReductionPredicatePlan>|
+     -> Result<GateBuilder, String> {
+        let mut reads = read_predicates::ReadPredicates::default();
+        let visits_before = env.select_proof_visits;
+        let factored = emit(env, observe, &mut reads)?;
+        let Some(area) = reads.prepare_retry(env, &factored) else {
+            return Ok(factored);
+        };
+        // Row folding and table reuse can still make a read profitable. Retry
+        // only the suspect reads, and compare the two complete output cones.
+        let factored_map = std::mem::take(&mut env.ir_to_g8);
+        let factored_visits = std::mem::replace(&mut env.select_proof_visits, visits_before);
+        let factored_facts = std::mem::take(&mut env.guarded_unit_facts);
+        let trial = emit(env, observe, &mut reads)?;
+        if shift_reduction_predicate::outputs_no_worse(&factored, area, &trial) {
+            Ok(trial)
+        } else {
+            env.ir_to_g8 = factored_map;
+            env.select_proof_visits = factored_visits;
+            env.guarded_unit_facts = factored_facts;
+            Ok(factored)
+        }
     };
     let mut env = GateEnv::new(f);
     env.shared_carries = potentially_shared_carries(f, &topological, &demanded_bits);
