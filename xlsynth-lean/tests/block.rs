@@ -27,6 +27,53 @@ fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertion
     pretty_assertions::assert_eq!(source, golden);
 }
 
+// A port named mk must remain distinct from the constructor and from ports
+// with trailing underscores when proofs construct and observe an input.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn qualified_constructors_preserve_port_projections() {
+    let package = package(
+        r#"package ports
+
+top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], result: bits[1]) {
+  mk: bits[1] = input_port(name=mk, id=1)
+  mk_: bits[1] = input_port(name=mk_, id=2)
+  mk__: bits[1] = input_port(name=mk__, id=3)
+  result: () = output_port(mk_, name=result, id=4)
+}"#,
+    );
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    source.push_str(
+        r#"
+open XlsBlock
+example (a b c : BitVec 1) :
+    let x := Input.Constructors.mk a b c
+    (x.mk, x.mk_, x.mk__) = (a, b, c) := rfl
+example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
+#check State.Constructors.mk
+#check Output.Constructors.mk
+#check Assertions.Constructors.mk
+#check Evaluation.Constructors.mk
+"#,
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("Ports.lean");
+    std::fs::write(&path, source).unwrap();
+    let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
+    let output = std::process::Command::new(lean)
+        .current_dir(directory.path())
+        .env_remove("LEAN_SYSROOT")
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Lean failed to check the emitted port projections:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // Verifies: Named, top, and sole-block selection, including invalid choices.
 #[test]
 fn selects_top_or_explicit_block_and_reports_ambiguity() {
