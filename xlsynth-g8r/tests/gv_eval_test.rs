@@ -2830,6 +2830,50 @@ fn icg_projection_preserves_distinct_root_and_gated_clock_labels() -> anyhow::Re
 }
 
 #[test]
+fn icg_projection_rejects_an_unresolved_driver_of_a_live_enable() -> anyhow::Result<()> {
+    let library = parse_liberty_files(&[
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/clock_gate.lib")
+    ])
+    .map_err(anyhow::Error::msg)?;
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("bank.gv");
+    let dead_cycle = CLOCK_GATE_WIRING
+        .replace(".ENA(en)", ".ENA(enable_alias)")
+        .replace(
+            "  ICG gate",
+            r#"  wire capture, enable_alias, a, b;
+  assign capture = en;
+  tran (capture, enable_alias);
+  assign a = b;
+  assign b = a;
+  ICG gate"#,
+        );
+    std::fs::write(&path, &dead_cycle)?;
+    load_labeled_sequential_netlist_aig_with_liberty(&path, &library, &GvEvalOptions::default())?;
+
+    // The first driver supplies a Boolean value, but the second driver of
+    // the same enable is cyclic and has no unique value to use in a proof.
+    std::fs::write(
+        &path,
+        dead_cycle.replace("assign b = a;", "assign b = a; assign capture = a;"),
+    )?;
+    let parsed = read_gv_for_proof_from_path(&path)?;
+    let error = project_labeled_sequential_netlist_aig(
+        &parsed.modules[0],
+        &parsed.nets,
+        &parsed.interner,
+        &library,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Could not resolve sequential netlist combinational dependencies: 0 instances and 3 required continuous assign bits remain"
+    );
+    Ok(())
+}
+
+#[test]
 fn icg_projection_rejects_unmodeled_test_and_clock_wiring() -> anyhow::Result<()> {
     let library = parse_liberty_files(&[
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/clock_gate.lib")
@@ -2838,6 +2882,11 @@ fn icg_projection_rejects_unmodeled_test_and_clock_wiring() -> anyhow::Result<()
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("bank.gv");
     for (from, to, expected) in [
+        (
+            "output q);",
+            "output q, input extra_clock); tran (clk, extra_clock);",
+            "clock net has multiple top-level input drivers 'clk' and 'extra_clock'",
+        ),
         (
             ".SE(1'b0)",
             ".SE(en)",
@@ -2864,8 +2913,8 @@ fn icg_projection_rejects_unmodeled_test_and_clock_wiring() -> anyhow::Result<()
             "clock-gate instance 'gate' output feeds data logic or a module output",
         ),
         (
-            "output q",
-            "output q, output gclk",
+            "output q);\n  wire root_alias, gclk, gated_alias;",
+            "output q, output gclk);\n  wire root_alias, gated_alias;",
             "clock-gate instance 'gate' output feeds data logic or a module output",
         ),
         (

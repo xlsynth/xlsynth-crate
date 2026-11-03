@@ -404,6 +404,62 @@ fn pipe_cycle0(x: bool) -> bool { spec(x) }
 }
 
 #[test]
+fn stitch_equiv_proves_a_bank_on_an_integrated_clock_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let gv = r#"module pipe(input clk, input [1:0] x, input vin, output [1:0] out, output vout);
+  wire gclk;
+  ICG gate (.CLK(clk), .ENA(vin), .SE(1'b0), .GCLK(gclk));
+  DFF bit0 (.CLK(gclk), .D(x[0]), .Q(out[0]));
+  DFF bit1 (.CLK(gclk), .D(x[1]), .Q(out[1]));
+  DFF valid_ff (.CLK(clk), .D(vin), .Q(vout));
+endmodule"#;
+    fs::write(dir.path().join("pipe.gv"), gv).unwrap();
+    fs::write(
+        dir.path().join("pipe.x"),
+        r#"fn pipe_cycle0(x: u2) -> u2 { x }
+fn pipe_cycle1(x: u2) -> u2 { x }"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("pipe.toml"),
+        r#"dslx_input_file = "pipe.x"
+dslx_top = "pipe"
+flop_inputs = false
+flop_outputs = false
+input_valid_signal = "vin"
+output_valid_signal = "vout""#,
+    )
+    .unwrap();
+    let raw_liberty =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../xlsynth-g8r/tests/data/clock_gate.lib");
+    let import = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .current_dir(dir.path())
+        .args(["lib2proto", "--output", "cells.textproto"])
+        .arg(raw_liberty)
+        .output()
+        .unwrap();
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+    for &(solver, plan) in STITCH_SOLVERS {
+        let proof = stage_command(dir.path(), &["--solver", solver, "--proof-mode", "stages"])
+            .output()
+            .unwrap();
+        assert!(
+            proof.status.success(),
+            "{}",
+            String::from_utf8_lossy(&proof.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(proof.stderr).unwrap(),
+            format!("stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n{plan}")
+        );
+    }
+}
+
+#[test]
 fn stitch_equiv_proves_enabled_bank_state_and_falls_back_on_different_storage() {
     let dir = tempfile::tempdir().unwrap();
     let gv = r#"module pipe(input clk, input en, input x, input vin, input rst, output out, output vout);

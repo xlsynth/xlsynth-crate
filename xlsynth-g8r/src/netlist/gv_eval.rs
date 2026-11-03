@@ -242,12 +242,12 @@ pub fn load_labeled_netlist_aig_with_liberty(
     .map_err(|e| anyhow!(e))
 }
 
-/// Loads one FF-only gate-level module as a labeled sequential transition AIG.
+/// Loads a gate-level module as a labeled, single-clock transition AIG.
 ///
 /// One simulation cycle represents one active edge of the selected clock.
 /// Positive-edge and negative-edge FFs are each supported, but a module may
-/// not mix them. Latches, multiple clocks, derived clocks, and asynchronous
-/// clear/preset cells are rejected.
+/// not mix them. Rising-edge FFs may receive the root clock through a verified
+/// low-transparent ICG with its optional test input tied low.
 pub fn load_labeled_sequential_netlist_aig(
     netlist_path: &Path,
     liberty_proto_path: &Path,
@@ -257,7 +257,8 @@ pub fn load_labeled_sequential_netlist_aig(
     load_labeled_sequential_netlist_aig_with_liberty(netlist_path, &liberty, options)
 }
 
-/// Loads one FF-only gate-level module using an already parsed Liberty model.
+/// Loads a single-clock gate-level module using an already parsed Liberty
+/// model.
 ///
 /// The returned model preserves mapped instance and pin labels while its
 /// sequential gate function can be evaluated with the sequential simulator.
@@ -294,7 +295,7 @@ pub(crate) fn project_sequential_module(
     .map_err(|error| anyhow!(error))
 }
 
-/// Loads one FF-only gate-level module as a sequential transition function.
+/// Loads a single-clock gate-level module as a sequential transition function.
 pub fn load_sequential_netlist_gate_fn(
     netlist_path: &Path,
     liberty_proto_path: &Path,

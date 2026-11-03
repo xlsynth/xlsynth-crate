@@ -1027,26 +1027,22 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
                 index += 1;
             }
         }
-        if !processed_any && unprocessed.is_empty() && !pending_assigns.is_empty() {
-            // Clock-alias and dead wiring assigns do not affect visible
-            // outputs once the selected clock has been recorded as metadata.
-            if pending_assigns
-                .iter()
-                .all(|pending_bit| !module_output_bits.contains(&pending_bit.target))
-            {
-                break;
-            }
-        }
     }
-    let unresolved_output_assigns = pending_assigns
+    // Every driver of a required data bit must resolve, even if another
+    // driver already supplied its value. Dead wiring and clock-only aliases
+    // have no Boolean value to materialize here.
+    let unresolved_data_assigns = pending_assigns
         .iter()
-        .filter(|pending_bit| module_output_bits.contains(&pending_bit.target))
+        .filter(|pending_bit| {
+            used_as_input.contains(&pending_bit.target)
+                || module_output_bits.contains(&pending_bit.target)
+        })
         .count();
-    if !unprocessed.is_empty() || unresolved_output_assigns != 0 {
+    if !unprocessed.is_empty() || unresolved_data_assigns != 0 {
         return Err(format!(
-            "Could not resolve sequential netlist combinational dependencies: {} instances and {} output-relevant continuous assign bits remain",
+            "Could not resolve sequential netlist combinational dependencies: {} instances and {} required continuous assign bits remain",
             unprocessed.len(),
-            unresolved_output_assigns
+            unresolved_data_assigns
         ));
     }
 
@@ -1622,6 +1618,9 @@ fn select_sequential_clock(
                     clock_port_name_hint, inferred_name
                 ));
             }
+        } else {
+            // Even a hint-only clock must have a unique external driver.
+            top_input_clock_port(normalized, nets, interner, hinted_port.bits[0])?;
         }
         (clock_port_name_hint.to_string(), hinted_port.bits[0])
     } else if let Some(inferred) = inferred_port {
@@ -1666,19 +1665,25 @@ fn top_input_clock_port(
     interner: &StringInterner<StringBackend<SymbolU32>>,
     clock_bit: BitIndex,
 ) -> Result<(String, BitIndex), String> {
-    let port = normalized
+    let mut inputs = normalized
         .ports
         .iter()
-        .find(|port| port.direction == PortDirection::Input && port.bits.contains(&clock_bit))
-        .ok_or_else(|| {
-            format!(
-                "derived clock '{}' is not a top-level input port",
-                normalized.render_bit(clock_bit, nets, interner)
-            )
-        })?;
+        .filter(|port| port.direction == PortDirection::Input && port.bits.contains(&clock_bit));
+    let port = inputs.next().ok_or_else(|| {
+        format!(
+            "derived clock '{}' is not a top-level input port",
+            normalized.render_bit(clock_bit, nets, interner)
+        )
+    })?;
     let port_name = interner
         .resolve(port.name)
         .ok_or_else(|| "could not resolve clock port name".to_string())?;
+    if let Some(other) = inputs.next() {
+        return Err(format!(
+            "clock net has multiple top-level input drivers '{port_name}' and '{}'",
+            interner.resolve(other.name).unwrap_or("<unknown>")
+        ));
+    }
     if port.bits.len() != 1 {
         return Err(format!(
             "clock port '{}' has width {}; expected one bit",
