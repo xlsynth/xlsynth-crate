@@ -11,8 +11,9 @@ use crate::gatify::ir2gate_arithmetic::{
 };
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
 use crate::gatify::prep_for_gatify::{
-    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_with_origins,
+    GateCostOptions, PrepForGatifyOptions, prep_for_gatify_observing,
 };
+use crate::gatify::terminal_wrap::{TerminalWrapCapture, TerminalWrapPermit};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -5387,15 +5388,28 @@ pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOu
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
-    gatify_for_pipeline(orig_fn, options, false)
+    gatify_with_terminal_wrap(orig_fn, options, false).map(|(output, _)| output)
 }
 
-/// Prepare with the depth model for the caller's gate optimization pipeline.
+/// Uses the unreassociated depth model and optionally captures terminal wraps.
+pub(crate) fn gatify_with_terminal_wrap(
+    orig_fn: &ir::Fn,
+    options: GatifyOptions,
+    observe_wrap: bool,
+) -> Result<(GatifyOutput, Option<TerminalWrapCapture>), String> {
+    gatify_for_pipeline(orig_fn, options, false, observe_wrap)
+}
+
+/// Uses the pipeline's depth model and optionally captures terminal wraps.
 pub(crate) fn gatify_for_pipeline(
     orig_fn: &ir::Fn,
     options: GatifyOptions,
     reassociate_gates: bool,
-) -> Result<GatifyOutput, String> {
+    observe_wrap: bool,
+) -> Result<(GatifyOutput, Option<TerminalWrapCapture>), String> {
+    let observe_wrap = observe_wrap
+        && !options.unsafe_gatify_gate_operation
+        && options.adder_mapping == AdderMapping::Auto;
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
 
@@ -5416,7 +5430,8 @@ pub(crate) fn gatify_for_pipeline(
         comparison_origins: HashMap::new(),
     };
 
-    let prepared_fn = prep_for_gatify_with_origins(
+    let mut permit = None;
+    let prepared_fn = prep_for_gatify_observing(
         orig_fn,
         options.range_info.as_deref(),
         PrepForGatifyOptions {
@@ -5437,10 +5452,24 @@ pub(crate) fn gatify_for_pipeline(
             hash: options.hash,
             reassociation: reassociate_gates,
         },
+        |f| {
+            if observe_wrap {
+                permit = TerminalWrapPermit::at_source(f);
+            }
+        },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&origins), orig_fn)
+    let out = gatify_lower_prepared_fn(&prepared_fn, &options, Some(&origins), orig_fn)?;
+    let capture = permit.and_then(|p| {
+        p.capture(&prepared_fn, &out.gate_fn, |n| {
+            let original = origins
+                .original_refs
+                .get(&prepared_fn.get_node(n).text_id)?;
+            out.lowering_map.get(original)
+        })
+    });
+    Ok((out, capture))
 }
 
 /// Lowers the original operation with one input per distinct operand, in

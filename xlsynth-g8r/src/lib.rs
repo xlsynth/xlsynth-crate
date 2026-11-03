@@ -53,6 +53,7 @@ pub mod prove_gate_fn_equiv_sat;
 pub mod prove_gate_fn_equiv_z3;
 pub mod stitch_equiv;
 pub mod techmap;
+mod terminal_wrap_graft;
 pub mod test_utils;
 pub mod transforms;
 pub mod use_count;

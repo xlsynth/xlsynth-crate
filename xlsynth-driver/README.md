@@ -2881,6 +2881,8 @@ Supported flags include the common gate-optimization controls:
 - `--adder-mapping=<auto|ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology. The default, `auto`, uses Brent-Kung for carry propagation and
   permits shared-parity lowering for sums of three unsigned one-bit terms.
+  Only `auto` permits lowering a terminal modular increment zero test as an
+  equivalent endpoint test.
 - `--mul-adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – optional override
   for the adder topology used inside multipliers. If not set, inherits
   `--adder-mapping`.

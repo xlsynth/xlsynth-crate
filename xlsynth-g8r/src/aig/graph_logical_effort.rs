@@ -465,6 +465,16 @@ pub struct GraphLogicalEffortOptions {
     pub beta2: f64,
 }
 
+impl Default for GraphLogicalEffortOptions {
+    /// Each receiving gate contributes one unit of pin load.
+    fn default() -> Self {
+        Self {
+            beta1: 1.0,
+            beta2: 0.0,
+        }
+    }
+}
+
 /// Worst-case score and profiling counters, without path storage.
 pub struct LogicalEffortScore {
     pub delay: f64,
