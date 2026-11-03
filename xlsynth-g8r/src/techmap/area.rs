@@ -28,6 +28,7 @@ use crate::netlist::parse::{
 use anyhow::{Result, anyhow, ensure};
 use imbl::OrdSet;
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use string_interner::StringInterner;
 use xlsynth_pir::IrBits;
@@ -60,13 +61,38 @@ struct Binding {
     phases: usize,
 }
 
+/// Exact key for a finite fixed delay, treating both representations of zero
+/// alike.
+fn delay_bits(delay: f64) -> u64 {
+    if delay == 0.0 { 0 } else { delay.to_bits() }
+}
+
+impl Binding {
+    /// Orders fixed pin delays by logical leaf so equivalent bindings compare
+    /// alike.
+    fn leaf_delay_key(&self, cells: &[Cell]) -> [u64; MAX_INPUTS] {
+        let mut delays = [0; MAX_INPUTS];
+        for (&leaf, &delay) in self.perm.iter().zip(&cells[self.cell].pin_delays) {
+            delays[leaf] = delay_bits(delay);
+        }
+        delays
+    }
+}
+
+/// Ranks bindings by physical area, then by stable cell, permutation and phase.
+fn compare_bindings(a: &Binding, b: &Binding, cells: &[Cell]) -> Ordering {
+    cells[a.cell]
+        .area
+        .total_cmp(&cells[b.cell].area)
+        .then(a.cmp(b))
+}
+
 /// Reusable truth-table index for combinational single-output cells of up to
 /// six inputs. Cells with dont_use, use_for_size_only, unsupported semantics,
 /// clocks, or multiple outputs are excluded, as are cells with unparseable
 /// functions. Invalid areas or unknown function inputs are errors.
-/// Area construction prunes by area/stable index before expansion; the internal
-/// delay construction retains electrical and pin alternatives. Neither changes
-/// the original library or the eligible cell list.
+/// Equivalent functions and bindings keep the smallest-area representative.
+/// The delay index also distinguishes the fixed delays assigned to each leaf.
 #[derive(Debug)]
 pub struct AreaMappingLibrary {
     delay_first: bool,
@@ -95,8 +121,7 @@ fn variable(n: usize, pin: usize) -> u64 {
         .fold(0, |tt, a| tt | (1 << a))
 }
 
-/// Enumerates every input-pin permutation, including nonsymmetric cell
-/// functions.
+/// Enumerates every input-pin permutation in lexical order.
 fn permutations(n: usize) -> Vec<Vec<usize>> {
     /// Extends a permutation prefix with each unused input index.
     fn visit(prefix: &mut Vec<usize>, n: usize, out: &mut Vec<Vec<usize>>) {
@@ -117,6 +142,53 @@ fn permutations(n: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// Compiles small-cell bindings, merging interchangeable pin assignments before
+/// expanding phases. Each phase mask permutes the same unphased table's bits.
+fn eager_matches(
+    functions: Vec<(usize, u64)>,
+    cells: &[Cell],
+) -> BTreeMap<(usize, u64), Vec<Binding>> {
+    let mut unphased = BTreeMap::new();
+    // Functions arrive in area/index order and permutations in lexical order,
+    // so the first equivalent binding wins the same tie as compare_bindings.
+    for (cell, table) in functions {
+        let n = cells[cell].pins.len();
+        for perm in permutations(n) {
+            let mut permuted = 0;
+            for assignment in 0..1usize << n {
+                let physical = perm.iter().enumerate().fold(0, |bits, (pin, leaf)| {
+                    bits | (((assignment >> leaf) & 1) << pin)
+                });
+                permuted |= ((table >> physical) & 1) << assignment;
+            }
+            let binding = Binding {
+                cell,
+                perm,
+                phases: 0,
+            };
+            unphased
+                .entry((n, permuted, binding.leaf_delay_key(cells)))
+                .or_insert(binding);
+        }
+    }
+    let mut matches = BTreeMap::<_, Vec<Binding>>::new();
+    for ((n, table, _), binding) in unphased {
+        for phases in 0..1usize << n {
+            let transformed = (0..1usize << n).fold(0, |bits, assignment| {
+                bits | (((table >> (assignment ^ phases)) & 1) << assignment)
+            });
+            matches.entry((n, transformed)).or_default().push(Binding {
+                phases,
+                ..binding.clone()
+            });
+        }
+    }
+    for bindings in matches.values_mut() {
+        bindings.sort_by(|a, b| compare_bindings(a, b, cells));
+    }
+    matches
+}
+
 impl AreaMappingLibrary {
     /// Compiles small-cell bindings eagerly and six-input functions for
     /// bounded, on-demand exact matching.
@@ -132,10 +204,7 @@ impl AreaMappingLibrary {
             .map(|_| crate::netlist::sta::PreparedStaLibrary::new(lib))
             .transpose()?;
         let mut cells: Vec<Cell> = Vec::new();
-        let mut matches: BTreeMap<(usize, u64), Vec<Binding>> = BTreeMap::new();
-        let mut six_input_functions = Vec::new();
-        let mut eager_area_representatives = BTreeMap::<(usize, u64), usize>::new();
-        let mut eager_functions = Vec::new();
+        let mut functions = Vec::new();
         let mut excluded_cells = Vec::new();
         let mut missing_policy_coverage = None;
         let mut names = BTreeSet::new();
@@ -237,9 +306,6 @@ impl AreaMappingLibrary {
                 }
             }
             let index = cells.len();
-            if n == 1 && tt == 1 && inv.is_none_or(|i: usize| cell.area < cells[i].area) {
-                inv = Some(index);
-            }
             let pin_delays = if let Some(options) = timing {
                 let original = lib.cells.iter().position(|c| c.name == cell.name).unwrap();
                 let delays = crate::netlist::sta::fixed_pin_delays(
@@ -261,85 +327,38 @@ impl AreaMappingLibrary {
                 area: cell.area,
                 pin_delays,
             });
-            if n == 6 {
-                six_input_functions.push((index, tt));
-                continue;
-            }
-            if timing.is_none() {
-                // Area-only dominance: identical physical truth tables expand
-                // to the same bindings. Preserve the existing area/index tie.
-                // Delay mode must retain electrical and pin alternatives.
-                let best = eager_area_representatives.entry((n, tt)).or_insert(index);
-                if cells[index]
-                    .area
-                    .total_cmp(&cells[*best].area)
-                    .then(index.cmp(best))
-                    .is_lt()
-                {
-                    *best = index;
-                }
-            } else {
-                eager_functions.push(((n, tt), index));
-            }
-        }
-        eager_functions.extend(eager_area_representatives);
-        for ((n, tt), index) in eager_functions {
-            for perm in permutations(n) {
-                for phases in 0..1usize << n {
-                    let mut transformed = 0u64;
-                    for assignment in 0..1usize << n {
-                        let mut physical = 0;
-                        for (i, leaf) in perm.iter().enumerate() {
-                            physical |= (((assignment >> leaf) ^ (phases >> leaf)) & 1) << i;
-                        }
-                        transformed |= ((tt >> physical) & 1) << assignment;
-                    }
-                    matches.entry((n, transformed)).or_default().push(Binding {
-                        cell: index,
-                        perm: perm.clone(),
-                        phases,
-                    });
-                }
-            }
-        }
-        // Equivalent physical functions with the same leaf polarities have the
-        // same recursive cost. Retain the smallest cell and a stable
-        // permutation.
-        for bindings in matches.values_mut() {
-            bindings.sort_by(|a, b| {
-                cells[a.cell]
-                    .area
-                    .total_cmp(&cells[b.cell].area)
-                    .then(a.cmp(b))
-            });
-            let mut seen = BTreeSet::new();
-            if timing.is_none() {
-                bindings.retain(|b| seen.insert(b.phases));
-            }
-        }
-        let six_input = if timing.is_some() {
-            SixInputIndex::new_timing(six_input_functions, &cells)
-        } else {
-            SixInputIndex::new(six_input_functions, &cells)
-        };
-        if timing.is_some() {
-            inv = cells
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.pins.len() == 1)
-                .filter(|(i, _)| {
-                    matches
-                        .get(&(1, 1))
-                        .is_some_and(|bs| bs.iter().any(|b| b.cell == *i && b.phases == 0))
+            if n == 1
+                && tt == 1
+                && inv.is_none_or(|i: usize| {
+                    cells[index].pin_delays[0]
+                        .total_cmp(&cells[i].pin_delays[0])
+                        .then(cell.area.total_cmp(&cells[i].area))
+                        .is_lt()
                 })
-                .min_by(|(ai, a), (bi, b)| {
-                    a.pin_delays[0]
-                        .total_cmp(&b.pin_delays[0])
-                        .then(a.area.total_cmp(&b.area))
-                        .then(ai.cmp(bi))
-                })
-                .map(|(i, _)| i);
+            {
+                inv = Some(index);
+            }
+            functions.push((index, tt));
         }
+        functions
+            .sort_by(|(a, _), (b, _)| cells[*a].area.total_cmp(&cells[*b].area).then(a.cmp(b)));
+        // Equal physical tables with equal pin delays expand identically.
+        // The delay vector gives the arity and is all zeros in area mode.
+        let mut seen = BTreeSet::new();
+        let (wide, eager) = functions
+            .into_iter()
+            .filter(|(cell, table)| {
+                let delays = cells[*cell]
+                    .pin_delays
+                    .iter()
+                    .copied()
+                    .map(delay_bits)
+                    .collect::<Vec<_>>();
+                seen.insert((*table, delays))
+            })
+            .partition(|(cell, _)| cells[*cell].pins.len() == MAX_INPUTS);
+        let matches = eager_matches(eager, &cells);
+        let six_input = SixInputIndex::new(wide, &cells);
         Ok(Self {
             delay_first: timing.is_some(),
             cells,
@@ -1104,6 +1123,7 @@ mod tests {
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
     use crate::netlist::io::read_gv_from_str;
+    use crate::techmap::delay::{DelayMappingOptions, tests::timing_library};
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use rand::{Rng, SeedableRng};
@@ -1997,5 +2017,54 @@ mod tests {
                 assert!(!result.stats.cells_by_type.contains_key("A_EXPENSIVE"));
             }
         }
+    }
+
+    #[test]
+    fn eager_delay_pruning_keeps_one_binding_per_leaf_phase_and_delay_profile() {
+        let abc = &[("A", 1.0), ("B", 2.0), ("C", 3.0)];
+        let cab = &[("A", 2.0), ("B", 3.0), ("C", 1.0)];
+        let lib = timing_library(&[
+            ("C_TIED", "A*(B^C)", 1.0, abc),
+            ("A_EXPENSIVE", "C*(A^B)", 3.0, cab),
+            ("B_CHEAP", "C*(A^B)", 1.0, cab),
+            (
+                "D_BALANCED",
+                "A*(B^C)",
+                2.0,
+                &[("A", 1.0), ("B", 2.0), ("C", 2.0)],
+            ),
+        ])
+        .unwrap();
+        let index = AreaMappingLibrary::new_internal(
+            &lib,
+            Some(DelayMappingOptions {
+                reference_transition: 10.0,
+                reference_load: 1.0,
+            }),
+        )
+        .unwrap();
+        // x0 * (x1 ^ x2) also matches when both XOR leaves are complemented.
+        // Rotating physical pins gives B_CHEAP and C_TIED equal leaf delays.
+        let choices = index.matches[&(3, 0x28)]
+            .iter()
+            .map(|b| {
+                (
+                    index.cells[b.cell].name.as_str(),
+                    b.perm.as_slice(),
+                    b.phases,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            choices,
+            [
+                ("B_CHEAP", &[1, 2, 0][..], 0),
+                ("B_CHEAP", &[1, 2, 0], 6),
+                ("B_CHEAP", &[2, 1, 0], 0),
+                ("B_CHEAP", &[2, 1, 0], 6),
+                ("D_BALANCED", &[0, 1, 2], 0),
+                ("D_BALANCED", &[0, 1, 2], 6),
+            ],
+        );
     }
 }
