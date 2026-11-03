@@ -2,6 +2,7 @@
 
 //! DSLX programs assembled from AST fragments with independent PIR semantics.
 
+pub mod aggregate_flow;
 pub mod aggregate_match;
 pub mod array_fragment;
 pub mod ast;
@@ -21,6 +22,7 @@ pub use generate::{
     GenerateOptions, Grammar, generate, generate_with_grammar, generate_with_options,
 };
 
+use aggregate_flow::AggregateFlow;
 use ast::{Body, HelperModule, ValueRef, Width};
 use constexpr::metadata_bits;
 use std::path::Path;
@@ -40,6 +42,14 @@ pub struct Sample {
     lanes: Vec<Body>,
     // Mission generation selects one ordinary intermediate per lane.
     observations: Vec<ValueRef>,
+    aggregate: Option<AggregateOutput>,
+}
+
+/// The cross-helper flow and the lane bindings that supply its three words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AggregateOutput {
+    flow: AggregateFlow,
+    operands: [ValueRef; 3],
 }
 
 /// The two IR programs to compare, together with portable DSLX reproducers.
@@ -94,6 +104,7 @@ impl Sample {
             helpers,
             lanes,
             observations: vec![],
+            aggregate: None,
         })
     }
 
@@ -164,6 +175,9 @@ impl Sample {
                 };
                 text.push_str(&format!("    {result}\n}}\n"));
             }
+            if let Some(aggregate) = &self.aggregate {
+                text.push_str(&aggregate.flow.helper_declarations(index));
+            }
             modules.push(SourceModule {
                 name: format!("m{index}"),
                 text,
@@ -192,6 +206,9 @@ impl Sample {
                 results.push(lane.value_name(output, &prefix));
             }
         }
+        if let Some(aggregate) = &self.aggregate {
+            return_types.push(aggregate.flow.output_type());
+        }
         text.push_str(&format!(
             "\nfn main({}) -> ({},) {{\n",
             params.join(", "),
@@ -199,6 +216,18 @@ impl Sample {
         ));
         for (index, lane) in self.lanes.iter().enumerate() {
             text.push_str(&lane.render_bindings(&format!("a{index}_"), &self.helpers)?);
+        }
+        if let Some(aggregate) = &self.aggregate {
+            let index = aggregate.flow.lane();
+            let prefix = format!("a{index}_");
+            let args = aggregate
+                .operands
+                .map(|v| self.lanes[index].value_name(v, &prefix));
+            let expr = aggregate
+                .flow
+                .caller_expression(args.each_ref().map(String::as_str));
+            text.push_str(&format!("    let aggregate_output = {expr};\n"));
+            results.push("aggregate_output".to_string());
         }
         text.push_str(&format!("    ({},)\n}}\n", results.join(", ")));
         modules.push(SourceModule {
@@ -229,6 +258,7 @@ impl Sample {
                 .flat_map(|(index, lane)| self
                     .lane_outputs(index)
                     .map(|_| lane.bits_type().to_dslx()))
+                .chain(self.aggregate.iter().map(|a| a.flow.output_type()))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -282,6 +312,7 @@ impl Sample {
             args.push([x, y]);
         }
         let mut outputs = Vec::new();
+        let mut aggregate_output = None;
         for ((index, lane), args) in self.lanes.iter().enumerate().zip(args) {
             let Width::Concrete(width) = lane.bits_type().width else {
                 return Err("top-level lane has no concrete width".to_string());
@@ -290,7 +321,19 @@ impl Sample {
                 .emit_values(&mut builder, args, width, &self.helpers)
                 .map_err(|error| error.to_string())?;
             outputs.extend(self.lane_outputs(index).map(|output| values[output.0]));
+            if let Some(aggregate) = &self.aggregate
+                && aggregate.flow.lane() == index
+            {
+                let args = aggregate.operands.map(|v| values[v.0]);
+                aggregate_output = Some(
+                    aggregate
+                        .flow
+                        .emit_ir(&mut builder, args)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
         }
+        outputs.extend(aggregate_output);
         let result = builder.tuple(&outputs).map_err(|error| error.to_string())?;
         builder
             .build_package(result, "expected")

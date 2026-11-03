@@ -150,6 +150,17 @@ struct types that can be re-exported through a chain of aliases. The
 reference computes the match predicates and the updated fields with scalar
 operations.
 
+`mission-v7` and `mission-local-v7` add a runtime aggregate to every program.
+A producer builds a two-word array, struct, or payload enum, and an updater
+takes and returns that value through one to three calls. If the program has
+multiple helper modules, the producer and updater live in different modules.
+The caller returns either the complete value or a selected word. For enums,
+the complete observation is the tag and its payload words. The reference
+updates scalar words independently of the DSLX aggregate operations.
+The operands favor lane fragments outside the existing scalar outputs'
+dependency closures. Aggregate choices read mutation bytes from the end, so
+v6 and v7 decode the same scalar lanes and observations for a given input.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -218,7 +229,8 @@ cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/
 
 Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
-`--mission-v6`, `--mission-local-v6`, or `--experimental` before the input path for
+`--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`, or
+`--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before
 conversion. To repeat a standalone proof, set the original

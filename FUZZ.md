@@ -336,7 +336,9 @@ range values and loop indices, inclusive and exclusive endpoints, and enums with
 payloads. Each lane returns both its primary result and an independently selected
 runtime intermediate. The `mission-local` profile emits module-local named helpers
 for maps and enumeration. The `mission` profile exercises the real stdlib.
-Captured lambdas and `const match` belong to the experimental grammar.
+V7 adds a separately observed array, struct, or payload enum that flows through
+producer and updater functions. Its scalar reference checks both changed and
+preserved fields across those calls. Captured lambdas and `const match` belong to the experimental grammar.
 Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple
 rest while an independent ordered fold makes retained bindings observable.

@@ -854,6 +854,28 @@ fn interpreter_entry_preserves_every_argument_vector() {
     check_interpreter_entry(&generate(&[0, 1]).unwrap());
 }
 
+#[test]
+fn v7_preserves_scalar_lanes_and_interprets_the_aggregate_output() -> Result<(), String> {
+    // Keep the scalar decoder small, while exercising imported producer types
+    // and each aggregate return type through the nullary interpreter entry.
+    for (v6, v7) in [
+        (Grammar::MissionV6, Grammar::MissionV7),
+        (Grammar::MissionLocalV6, Grammar::MissionLocalV7),
+    ] {
+        for kind in 0..3 {
+            let mut bytes = vec![0; 256];
+            bytes[0] = 1; // two helper modules
+            bytes[252] = kind; // fourth draw from the end selects the aggregate type
+            let old = generate_with_grammar(&bytes, GenerateOptions::default(), v6)?;
+            let new = generate_with_grammar(&bytes, GenerateOptions::default(), v7)?;
+            assert_eq!(old.helpers(), new.helpers());
+            assert_eq!(old.lanes(), new.lanes());
+            check_interpreter_entry(&new);
+        }
+    }
+    Ok(())
+}
+
 /// Compares all tuple fields in the wrapper with independent PIR evaluations.
 fn check_interpreter_entry(sample: &Sample) {
     let reference = sample.expected_ir().unwrap();

@@ -644,19 +644,7 @@ impl Body {
             return Err("generated top lane has no ordinary runtime fragments".to_string());
         }
         if maximize {
-            // Value indices are topologically ordered. Parameters and constants
-            // contribute no runtime fragments to the dependency sets.
-            let mut dependencies = vec![BTreeSet::<usize>::new(); 2];
-            for (index, fragment) in self.fragments.iter().enumerate() {
-                let mut reachable = BTreeSet::new();
-                if !matches!(fragment, Fragment::Literal(_) | Fragment::Constant { .. }) {
-                    reachable.insert(index + 2);
-                    for operand in fragment.operands() {
-                        reachable.extend(&dependencies[operand.0]);
-                    }
-                }
-                dependencies.push(reachable);
-            }
+            let dependencies = self.runtime_dependencies();
             let additional = |value: &ValueRef| {
                 dependencies[value.0]
                     .difference(&dependencies[self.result.0])
@@ -666,6 +654,58 @@ impl Body {
             candidates.retain(|value| additional(value) == best);
         }
         Ok(candidates[usize::from(draw) % candidates.len()])
+    }
+
+    /// Collects ordinary runtime fragments reachable from each binding, in
+    /// value order.
+    fn runtime_dependencies(&self) -> Vec<BTreeSet<usize>> {
+        let mut dependencies = vec![BTreeSet::<usize>::new(); 2];
+        for (index, fragment) in self.fragments.iter().enumerate() {
+            let mut reachable = BTreeSet::new();
+            if !matches!(fragment, Fragment::Literal(_) | Fragment::Constant { .. }) {
+                reachable.insert(index + 2);
+                for operand in fragment.operands() {
+                    reachable.extend(&dependencies[operand.0]);
+                }
+            }
+            dependencies.push(reachable);
+        }
+        dependencies
+    }
+
+    /// Feeds two distinct runtime words into the aggregate, preferring
+    /// fragments outside the dependency closures of previously selected
+    /// outputs.
+    pub(crate) fn aggregate_operands(
+        &self,
+        observation: ValueRef,
+        draws: [usize; 2],
+    ) -> [ValueRef; 2] {
+        let dependencies = self.runtime_dependencies();
+        let mut observed = dependencies[self.result.0].clone();
+        observed.extend(&dependencies[observation.0]);
+        let mut candidates: Vec<_> = dependencies
+            .iter()
+            .enumerate()
+            .filter(|(_, reachable)| !reachable.is_empty())
+            .map(|(index, _)| ValueRef(index))
+            .collect();
+        draws.map(|draw| {
+            let score = |v: &ValueRef| dependencies[v.0].difference(&observed).count();
+            let best = candidates.iter().map(score).max().unwrap_or(0);
+            let tied: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|v| score(v) == best)
+                .collect();
+            if tied.is_empty() {
+                return [ValueRef::X, ValueRef::Y][draw % 2];
+            }
+            let selected = tied[draw % tied.len()];
+            observed.extend(&dependencies[selected.0]);
+            candidates.retain(|v| *v != selected);
+            selected
+        })
     }
 
     pub fn computed_width(&self) -> Option<&ComputedWidth> {
