@@ -2,6 +2,8 @@
 
 //! Contract a guarded source-bit observation in a reversible gate region.
 
+mod source_guard;
+
 use super::super::GateEnv;
 use super::window::{Cell, Plan};
 use crate::aig::gate::{AigBitVector, AigOperand, AigRef};
@@ -13,6 +15,14 @@ pub(super) struct WindowInputs {
     words: BTreeMap<usize, AigBitVector>,
     bounds: BTreeMap<usize, Vec<usize>>,
     controls: Vec<AigOperand>,
+    split: Option<GuardedSplit>,
+}
+
+/// Two projected data arms and equivalent ways to obtain their selector.
+struct GuardedSplit {
+    projection: source_guard::Split,
+    selector: AigOperand,
+    chain: Option<source_guard::GuardChain>,
 }
 
 impl WindowInputs {
@@ -48,11 +58,31 @@ impl WindowInputs {
         if partitions.checked_mul(plan.cells.len())? > 32_768 {
             return None;
         }
+        let split = plan.guard.as_ref().and_then(|guard| {
+            let bits = env.get_bit_vector(guard.selector).ok()?;
+            if bits.get_bit_count() != 1 {
+                return None;
+            }
+            let selector = *bits.get_lsb(0);
+            let projection = source_guard::Split::prepare(&plan.cells, &guard.values, &bounds)?;
+            let chain = source_guard::GuardChain::recognize(&guard.values);
+            Some(GuardedSplit {
+                projection,
+                selector,
+                chain,
+            })
+        });
         Some(Self {
+            split,
             words,
             bounds,
             controls,
         })
+    }
+
+    /// The ordinary selector gate reused by the projected split.
+    pub(super) fn mapped_selector(&self) -> Option<AigRef> {
+        self.split.as_ref().map(|split| split.selector.node)
     }
 
     /// Ordinary data and control gates at the cut of every window candidate.
@@ -65,8 +95,38 @@ impl WindowInputs {
             .collect()
     }
 
-    /// Emit the same candidate in the ordinary probe and the second mapping.
-    pub(super) fn emit(&self, plan: &Plan, gb: &mut GateBuilder) -> AigOperand {
+    /// Offer the same circuits to the live-area screen and the region trial.
+    /// Earlier emitters win ties. The mapped split and shared window compete
+    /// before a factored selector can displace their winner.
+    pub(super) fn with_candidates<T, R>(
+        &self,
+        plan: &Plan,
+        outputs: impl Fn(AigOperand) -> T,
+        choose: impl FnOnce(&[&dyn Fn(&mut GateBuilder) -> T], &dyn Fn(&mut GateBuilder) -> T) -> R,
+    ) -> R {
+        let shared = |gb: &mut GateBuilder| outputs(self.emit_unsplit(plan, gb));
+        let Some(split) = &self.split else {
+            return choose(&[], &shared);
+        };
+        let project = |gb: &mut GateBuilder, selector| {
+            let value = split
+                .projection
+                .emit(&self.words, &self.controls, selector, gb);
+            outputs(if plan.inverted { value.negate() } else { value })
+        };
+        let mapped = |gb: &mut GateBuilder| project(gb, split.selector);
+        if let Some(chain) = &split.chain {
+            choose(&[&mapped, &shared], &|gb| {
+                let selector = chain.emit(&self.controls, gb);
+                project(gb, selector)
+            })
+        } else {
+            choose(&[&mapped], &shared)
+        }
+    }
+
+    /// Emit the full control table without splitting on a selector.
+    fn emit_unsplit(&self, plan: &Plan, gb: &mut GateBuilder) -> AigOperand {
         if plan.named {
             let data = self
                 .words
@@ -105,15 +165,28 @@ pub(super) fn lower(
         .chain(inputs.controls.iter().copied())
         .collect();
     // Price the union with retained outputs so gates in their fanin (including
-    // partially shared selector trees) are counted once on each side.
+    // partially shared selector trees) are counted once in every alternative.
     let mut roots = vec![ordinary];
     for &r in &plan.retained_controls {
         roots.extend(env.get_bit_vector(r).ok()?.iter_lsb_to_msb().copied());
     }
-    let ordinary_outputs = AigBitVector::from_lsb_is_index_0(&roots);
-    let (result, trial) = gb.try_region_alternative(ordinary_outputs, 0, &boundary, |gb| {
-        roots[0] = inputs.emit(plan, gb);
-        AigBitVector::from_lsb_is_index_0(&roots)
+    let trial_outputs = |predicate| {
+        let mut outputs = AigBitVector::from_lsb_is_index_0(&roots);
+        outputs.set_lsb(0, predicate);
+        outputs
+    };
+    if let (Some(split), Some(guard)) = (&inputs.split, &plan.guard) {
+        log::debug!(
+            "shift_window source_guard root={:?} selector={:?} rail={:?} level={:?} residual={:?}",
+            plan.root,
+            guard.selector,
+            split.selector,
+            gb.aig_depth(split.selector),
+            split.projection.widths()
+        );
+    }
+    let (result, trial) = inputs.with_candidates(plan, trial_outputs, |preferred, last| {
+        gb.try_region_alternatives(trial_outputs(ordinary), 0, &boundary, preferred, last)
     });
     log::debug!(
         "shift_window trial node={:?} named={} cost={trial:?}",

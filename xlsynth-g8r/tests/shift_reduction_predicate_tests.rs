@@ -325,10 +325,10 @@ top fn f(k: bits[4], x: bits[2], y: bits[2], t: bits[1]) -> (bits[1], bits[1], b
     .gate_fn;
     check_equivalence::validate_same_fn_via_toolchain(package.get_top_fn().unwrap(), &gates)
         .unwrap();
-    // q retains p's balanced tree. The first predicate costs six ANDs with
-    // that tree, and the independent guarded reduction costs two.
+    // q retains p's three-AND balanced tree. Reuse that tree for pa; each
+    // guarded reduction then adds only an OR and an AND.
     let stats = get_aig_stats(&gates);
-    assert_eq!((stats.and_nodes, stats.max_depth), (8, 4));
+    assert_eq!((stats.and_nodes, stats.max_depth), (7, 3));
 }
 
 #[test_matrix([false, true])]
@@ -378,6 +378,74 @@ top fn f(s: bits[1], x: bits[2]) -> bits[1] {{
             );
         }
     }
+}
+
+#[test]
+fn guarded_window_reduces_unconditional_data_outside_the_selection() {
+    let ir = r#"package sample
+
+top fn main(y: bits[4] id=1, x: bits[1] id=2, z: bits[1] id=3, c: bits[2] id=4) -> bits[1] {
+  g: bits[1] = bit_slice(c, start=0, width=1, id=5)
+  off: bits[5] = concat(x, y, id=6)
+  on: bits[5] = concat(y, z, id=7)
+  chosen: bits[5] = sel(g, cases=[off, on], id=8)
+  ret result: bits[1] = or_reduce(chosen, id=9)
+}
+"#;
+    let gates = lower_and_prove(ir, true, true);
+    let stats = get_aig_stats(&gates);
+    // Three ANDs reduce y. The two guarded bits and final OR fit in four more.
+    assert!(stats.and_nodes <= 7 && stats.max_depth <= 3, "{stats:?}");
+}
+
+#[test]
+fn mapped_selector_can_pay_for_a_window_when_the_shared_table_is_too_deep() {
+    let ir = r#"package sample
+top fn main(k: bits[7], a: bits[5], b: bits[5]) -> bits[1] {
+  zero: bits[7] = literal(value=0, id=4)
+  enabled: bits[1] = sgt(k, zero, id=5)
+  word: bits[5] = sel(enabled, cases=[a, b], id=6)
+  ret any: bits[1] = or_reduce(word, id=7)
+}"#;
+    let stats = get_aig_stats(&lower_and_prove(ir, true, true));
+    // Two five-bit reductions and one scalar mux use the mapped signed guard.
+    assert!(stats.and_nodes <= 18 && stats.max_depth <= 6, "{stats:?}");
+}
+
+#[test]
+fn projected_window_charges_a_selector_retained_by_a_hashed_comparison() {
+    let ir = r#"package sample
+
+top fn main(k: bits[4], a: bits[5], b: bits[5], t: bits[1]) -> (bits[1], bits[1]) {
+  one: bits[4] = literal(value=1, id=5)
+  e: bits[1] = sgt(k, one, id=6)
+  f: bits[1] = sgt(k, one, id=7)
+  word: bits[5] = sel(e, cases=[a, b], id=8)
+  pred: bits[1] = or_reduce(word, id=9)
+  other: bits[1] = and(t, f, id=10)
+  ret result: (bits[1], bits[1]) = tuple(pred, other, id=11)
+}"#;
+    let stats = get_aig_stats(&lower_and_prove(ir, true, true));
+    // The other output keeps the three-AND comparison and adds one AND.
+    // The window can use the same comparison with two reductions and a mux.
+    assert!(stats.and_nodes <= 15 && stats.max_depth <= 5, "{stats:?}");
+}
+
+#[test]
+fn projected_window_can_factor_a_guard_on_its_original_source_bits() {
+    let ir = r#"package sample
+top fn main(k: bits[5], a: bits[6], b: bits[6]) -> bits[1] {
+  bias: bits[5] = literal(value=17, id=4)
+  code: bits[5] = add(k, bias, id=5)
+  zero: bits[5] = literal(value=0, id=6)
+  enabled: bits[1] = sgt(code, zero, id=7)
+  word: bits[6] = sel(enabled, cases=[a, b], id=8)
+  ret any: bits[1] = or_reduce(word, id=9)
+}"#;
+    let stats = get_aig_stats(&lower_and_prove(ir, true, true));
+    // The guard is k[4] & !and_reduce(k[0:4]). Its four gates, the two
+    // reductions and the scalar mux fit in seventeen ANDs.
+    assert!(stats.and_nodes <= 17 && stats.max_depth <= 6, "{stats:?}");
 }
 
 #[test]

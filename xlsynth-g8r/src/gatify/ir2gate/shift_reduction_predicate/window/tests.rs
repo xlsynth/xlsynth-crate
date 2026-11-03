@@ -218,3 +218,48 @@ top fn f(k: bits[1], x: bits[129]) -> bits[1] {{
         assert_eq!(plans[0].cells[1], Cell::Const((lo..hi).contains(&64)));
     }
 }
+
+#[test]
+fn source_guard_is_observed_on_the_entire_domain_and_may_escape_as_a_scalar() {
+    let ir = "package p
+      fn f(x: bits[5] id=1, y: bits[5] id=2, c: bits[3] id=3) -> (bits[1], bits[1]) {
+        zero: bits[3] = literal(value=0, id=4)
+        g: bits[1] = sgt(c, zero, id=5)
+        chosen: bits[5] = priority_sel(g, cases=[y], default=x, id=6)
+        z: bits[1] = or_reduce(chosen, id=7)
+        ret result: (bits[1], bits[1]) = tuple(z, g, id=8)
+      }";
+    let ps = plans(ir);
+    let [plan] = ps.as_slice() else {
+        panic!("missing or duplicated observation")
+    };
+    assert_eq!(
+        plan.guard.as_ref().unwrap().values,
+        [false, true, true, true, false, false, false, false]
+    );
+    let escaped = ir
+        .replace("-> (bits[1], bits[1])", "-> (bits[1], bits[5])")
+        .replace(
+            "result: (bits[1], bits[1]) = tuple(z, g",
+            "result: (bits[1], bits[5]) = tuple(z, chosen",
+        );
+    assert!(plans(&escaped).is_empty());
+}
+
+#[test]
+fn different_nested_word_guards_keep_the_complete_observation_plan() {
+    let ir = "package p
+      fn f(x: bits[5] id=1, y: bits[5] id=2, c: bits[3] id=3) -> bits[1] {
+        zero: bits[3] = literal(value=0, id=4)
+        g: bits[1] = sgt(c, zero, id=5)
+        h: bits[1] = bit_slice(c, start=0, width=1, id=6)
+        inner: bits[5] = sel(h, cases=[x,y], id=7)
+        outer: bits[5] = sel(g, cases=[inner,y], id=8)
+        ret observed: bits[1] = or_reduce(outer, id=9)
+      }";
+    let ps = plans(ir);
+    let [plan] = ps.as_slice() else {
+        panic!("ordinary finite-domain plan lost")
+    };
+    assert!(plan.guard.is_none());
+}

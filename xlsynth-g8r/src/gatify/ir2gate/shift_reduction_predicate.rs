@@ -129,9 +129,15 @@ impl ShiftReductionPredicatePlan {
             };
             let inputs = plan.operands(env);
             let sources = LazyCell::new(|| inputs.source_gates());
-            live.profitable(node, ordinary, gb, redirects_root, &sources, |gb| {
-                plan.emit(&inputs, gb)
-            })
+            live.profitable(
+                node,
+                ordinary,
+                gb,
+                redirects_root,
+                &sources,
+                |gb| plan.emit(&inputs, gb),
+                |_| {},
+            )
         });
         self.windows.retain(|&node, plan| {
             let Some(ordinary) = live.predicate_root(node, env, gb) else {
@@ -141,9 +147,40 @@ impl ShiftReductionPredicatePlan {
                 return false;
             };
             let sources = LazyCell::new(|| inputs.source_gates());
-            live.profitable(node, ordinary, gb, redirects_root, &sources, |gb| {
-                inputs.emit(plan, gb)
-            })
+            let mut selector_retained = false;
+            let mut observe_remaining = |remaining: &LiveUses| {
+                selector_retained = inputs
+                    .mapped_selector()
+                    .is_some_and(|gate| remaining.counts[gate.id] != 0 && !sources.contains(&gate));
+            };
+            let profitable = inputs.with_candidates(
+                plan,
+                |bit| bit,
+                |preferred, last| {
+                    preferred.iter().copied().chain([last]).any(|emit| {
+                        live.profitable(
+                            node,
+                            ordinary,
+                            gb,
+                            redirects_root,
+                            &sources,
+                            emit,
+                            &mut observe_remaining,
+                        )
+                    })
+                },
+            );
+            // A distinct IR value can hash to the same selector AND. Carry
+            // the IR reference across mappings so the region prices its fanin
+            // with the predicate, just as for a shared IR control.
+            if profitable
+                && selector_retained
+                && let Some(guard) = &plan.guard
+                && !plan.retained_controls.contains(&guard.selector)
+            {
+                plan.retained_controls.push(guard.selector);
+            }
+            profitable
         });
         (!self.predicates.is_empty() || !self.windows.is_empty()).then_some(live.and_nodes)
     }
@@ -237,6 +274,7 @@ impl LiveUses {
         redirects_root: impl FnOnce(NodeRef, AigRef) -> bool,
         source_gates: &LazyCell<HashSet<AigRef>, impl FnOnce() -> HashSet<AigRef>>,
         emit: impl FnOnce(&mut GateBuilder) -> AigOperand,
+        observe_remaining: impl FnOnce(&Self),
     ) -> bool {
         let ordinary_depth = gb.aig_depth(ordinary).expect("hashing enabled");
         let checkpoint = gb.begin_append_checkpoint();
@@ -259,6 +297,7 @@ impl LiveUses {
                 redirected,
                 alternative.node,
                 source_gates,
+                observe_remaining,
             );
             log::debug!(
                 "shift_reduction_predicate live trial node={node:?} cost={cost:?} ordinary_depth={ordinary_depth} alternative_depth={depth}"
@@ -336,7 +375,9 @@ impl LiveUses {
         changed
     }
 
-    /// Measures the area available after detaching the redirected root edges.
+    /// Measures replacement area and exposes remaining live uses while the
+    /// redirected edges are detached. The source cut stays live during the
+    /// probe.
     fn replacement_cost(
         &mut self,
         gb: &GateBuilder,
@@ -344,6 +385,7 @@ impl LiveUses {
         redirected: usize,
         alternative: AigRef,
         sources: &HashSet<AigRef>,
+        observe_remaining: impl FnOnce(&Self),
     ) -> ReplacementCost {
         // Only spend savings from the replaced region. Holding its
         // ordinary sources live bounds the removal walk to the lowering.
@@ -365,6 +407,7 @@ impl LiveUses {
         // The first excess AND rules out the candidate, even if a newly
         // reachable source has a much larger dead cone below it.
         let added = self.new_ands_up_to(gb, [alternative], removed + 1);
+        observe_remaining(self);
         for (node, uses) in detached {
             self.counts[node.id] += uses;
         }
@@ -696,7 +739,8 @@ top fn main(x: bits[1], k: bits[65536]) -> bits[1] {
             let data: Vec<_> = inputs.data.iter_lsb_to_msb().copied().collect();
             let alternative = shifted_nonzero(&data, &inputs.amount, &mut gb);
             let sources = inputs.source_gates();
-            let cost = live.replacement_cost(&gb, ordinary.node, 1, alternative.node, &sources);
+            let cost =
+                live.replacement_cost(&gb, ordinary.node, 1, alternative.node, &sources, |_| {});
             // Only the local four-bit shift and reduction can fund this probe.
             assert!(cost.removed <= 10, "{cost:?}");
             assert_eq!(cost.added, cost.removed + 1);
