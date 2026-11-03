@@ -393,16 +393,17 @@ def test_slang_callers_pin_digest_and_ci_uses_direct_download_on_cache_miss():
     install_text = (repo_root / "docker/install_tools.sh").read_text()
     dockerfile_text = (repo_root / "docker/Dockerfile").read_text()
 
-    assert workflow_text.count(direct_url) == 4
+    ci_callers = 3  # Icarus, the Ubuntu matrix, and Rocky 8.
+    assert workflow_text.count(direct_url) == ci_callers
     # Each caller reads the digest and uses it in the cache key.
-    assert workflow_text.count("scripts/slang_rocky8.sha256") == 8
-    assert workflow_text.count('--sha256 "${slang_sha256}"') == 4
-    assert workflow_text.count("--reuse-valid-existing") == 4
+    assert workflow_text.count("scripts/slang_rocky8.sha256") == 2 * ci_callers
+    assert workflow_text.count('--sha256 "${slang_sha256}"') == ci_callers
+    assert workflow_text.count("--reuse-valid-existing") == ci_callers
     assert (
         workflow_text.count(
             "-slang-rocky8-${{ hashFiles('scripts/slang_rocky8.sha256') }}"
         )
-        == 4
+        == ci_callers
     )
     assert asset_url in install_text
     assert "scripts/slang_rocky8.sha256" in install_text
