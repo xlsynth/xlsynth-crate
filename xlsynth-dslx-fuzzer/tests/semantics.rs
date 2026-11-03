@@ -374,14 +374,63 @@ fn generated_module_environments_match() {
     for _ in 0..48 {
         let mut data = vec![0; 768];
         rng.fill_bytes(&mut data);
+        // Preserve the checkpoint's end-to-end regression corpus. Mission
+        // generation now also exercises valid signed loops that abort the
+        // stock converter. Its range oracle is checked independently in
+        // ranges.rs.
+        let checkpoint =
+            generate_with_grammar(&data, GenerateOptions::default(), Grammar::MissionV1).unwrap();
+        check(&checkpoint, None);
         let sample = generate(&data).unwrap();
         assert_eq!(sample, generate(&data).unwrap());
-        check(&sample, None);
+        sample.sources().unwrap();
+        sample.expected_ir().unwrap();
     }
 }
 
 #[test]
-fn mission_and_experimental_grammars_select_their_map_and_match_forms() -> Result<(), String> {
+fn observation_draw_changes_only_the_returned_runtime_intermediate() -> Result<(), String> {
+    // One eight-bit lane computes x+y, (x+y)-y, and their xor. The
+    // final helper doubles the xor. Only the observation byte varies.
+    let mut bytes = vec![
+        0, 0, // one module and lane
+        0, 0, 0, 0, // unsigned helper: x+x
+        0, 0, 0, 0, // signed helper: x+x
+        0, // no parametric default
+    ];
+    let observation_slot = bytes.len();
+    bytes.extend_from_slice(&[
+        0, // observation draw
+        0, 0, 0, 3, // unsigned, literal width, boundary width eight
+        0, 2, // literal zero and three ordinary fragments
+        0, 0, 1, 0, // x+y
+        1, 3, 1, 0, // (x+y)-y
+        4, 3, 4, 0, // xor the preceding values
+        0, 0, 0, // forced call of module zero
+    ]);
+    let bits = |value: u8| IrValue::from_bits(&IrBits::from_lsb_fn(8, |i| value & (1 << i) != 0));
+    let inputs = vec![bits(7), bits(3)];
+    for grammar in [Grammar::Mission, Grammar::MissionLocal] {
+        for (draw, expected) in [10, 7, 13].into_iter().enumerate() {
+            bytes[observation_slot] = draw as u8;
+            let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+            let reference = sample.expected_ir()?;
+            let top = reference.get_top_fn().ok_or("reference has no top")?;
+            let FnEvalResult::Success(result) = eval_fn(top, &inputs) else {
+                return Err("reference evaluation failed".into());
+            };
+            assert_eq!(
+                result.value,
+                IrValue::make_tuple(&[bits(26), bits(expected)])
+            );
+            check(&sample, Some(vec![inputs.clone()]));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn historical_grammars_preserve_their_map_and_match_forms() -> Result<(), String> {
     // The first three bytes select one module, one lane, and one unsigned
     // helper fragment. The next bytes select its production, operands, and
     // body.
@@ -406,15 +455,11 @@ fn mission_and_experimental_grammars_select_their_map_and_match_forms() -> Resul
         ),
     ];
     for (bytes, mission, experimental) in cases {
-        let default = generate(&bytes)?;
         for (grammar, expected) in [
-            (Grammar::Mission, mission),
+            (Grammar::MissionV1, mission),
             (Grammar::Experimental, experimental),
         ] {
             let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
-            if grammar == Grammar::Mission {
-                assert_eq!(sample, default);
-            }
             let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
             else {
                 panic!("expected one compound fragment");
@@ -439,7 +484,14 @@ fn configurable_width_bounds_preserve_valid_composition() {
                 };
                 assert!((1..=max_width).contains(&width));
             }
-            check(&sample, None);
+            sample.sources().unwrap();
+            sample.expected_ir().unwrap();
+            // This native converter sweep uses its original mutation-byte
+            // decoder so signed-loop crashes are captured by the fuzz target.
+            let checkpoint =
+                generate_with_grammar(&data, GenerateOptions { max_width }, Grammar::MissionV1)
+                    .unwrap();
+            check(&checkpoint, None);
         }
     }
     for max_width in [0, 130] {
@@ -733,7 +785,12 @@ fn rejects_invalid_constant_contexts() {
 
 #[test]
 fn interpreter_entry_preserves_every_argument_vector() {
-    let sample = constexpr_sample().unwrap();
+    check_interpreter_entry(&constexpr_sample().unwrap());
+    check_interpreter_entry(&generate(&[0, 1]).unwrap());
+}
+
+/// Compares all tuple fields in the wrapper with independent PIR evaluations.
+fn check_interpreter_entry(sample: &Sample) {
     let reference = sample.expected_ir().unwrap();
     let top = reference.get_top_fn().unwrap();
     let mut rng = StdRng::from_seed([53; 32]);

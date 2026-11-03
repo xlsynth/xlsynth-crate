@@ -9,6 +9,10 @@ the matching tools on PATH and DSLX_STDLIB_PATH set to the release's stdlib.
   `signed_loop_narrow.x` makes the converter abort at width two.
 - `signed_range_length.x` indexes a two-element signed range. Both indices
   pass in the DSLX evaluator, but the converter rejects the range as empty.
+- `signed_one_bit_range.x` evaluates the signed inclusive singleton
+  `0..=0` at compile time. Both the typechecker and converter abort trying
+  to represent +1 as a signed one-bit value. The same singleton with two-bit
+  endpoints evaluates to zero.
 - `enumerate_width.x` typechecks and converts successfully. The specialized
   function name in the emitted IR contains a colon, and the C++ IR parser
   rejects it.
@@ -18,6 +22,7 @@ dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=dslx-in
 dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=ir-interpreter signed_loop_wide.x
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_loop_narrow.x
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_range_length.x
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_one_bit_range.x
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" enumerate_width.x > enumerate_width.ir
 opt_main --top=__enumerate_width__main enumerate_width.ir
 ```

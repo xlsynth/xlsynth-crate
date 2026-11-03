@@ -331,16 +331,22 @@ evaluation with independent PIR reference values. Compound fragments add builtin
 operations, arrays and dynamic indexing/updates, strings, exhaustive bits/tuple/
 enum matches, parametric structs and field updates, and bounded ordinary/const
 loops whose reference semantics are unrolled independently. The mission grammar
-also covers maps of builtins and named functions, range values, and enums with
-payloads. Captured lambdas and `const match` are opt-in in the generator library.
+also covers maps of builtins and named functions, bounded signed and unsigned
+range values and loop indices, inclusive and exclusive endpoints, and enums with
+payloads. Each lane returns both its primary result and an independently selected
+runtime intermediate. The `mission-local` profile emits module-local named helpers
+for maps and enumeration. The `mission` profile exercises the real stdlib.
+Captured lambdas and `const match` belong to the experimental grammar.
 Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple
 rest while an independent ordered fold makes retained bindings observable.
-The formatted DSLX is converted by
-libxls and its top is proved equivalent to the composite reference with
-Bitwuzla. Unexpected generation, conversion, parsing, and prover errors fail
-the sample; counterexamples surface either an incorrect semantic hypothesis or
-a DSLX conversion bug. Solver queries use a ten-second and 1024-MiB limit.
+Bitwuzla proves the top emitted by the converter equivalent to the composite
+reference. Set `DSLX_FUZZ_CONVERTER` to prove the actual standalone
+`ir_converter_main` output and use the matching DSO for in-process feedback.
+By default the proof uses the libxls API. Unexpected generation, conversion,
+parsing, and prover errors fail the sample. A counterexample can expose an
+incorrect semantic hypothesis or a DSLX conversion bug. Solver queries use a
+ten-second and 1024-MiB limit.
 An optional isolated native checker adds C++ parser, typechecker, and constexpr
 interpreter counters to libFuzzer's feedback while retaining the formal check.
 Native rejections also fail the sample; the checker links no JIT or IR execution

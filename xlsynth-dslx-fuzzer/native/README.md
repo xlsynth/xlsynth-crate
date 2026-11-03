@@ -102,8 +102,9 @@ DSLX_FUZZ_NATIVE_CONFIG=/tmp/dslx-native/native.json \
   --features with-bitwuzla-system --example native_feedback
 ```
 
-The probe checks multiple generic samples discover new native edges and proves
-every sample equivalent. It also checks native rejection of invalid DSLX and
+The probe uses the `MissionV1` decoder to preserve its validation corpus.
+It checks that multiple samples discover new native edges and proves each
+sample equivalent. It also checks native rejection of invalid DSLX and
 deliberately substitutes subtraction for addition in a 65-bit reference to
 verify that a wrong hypothesis is disproved. These directed checks run only in
 the probe and regression test, outside the generic fuzz input path.

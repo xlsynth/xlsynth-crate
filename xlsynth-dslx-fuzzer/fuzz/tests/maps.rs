@@ -4,7 +4,7 @@
 
 use xlsynth_dslx_fuzzer::Sample;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, HelperModule, ValueRef, Width};
-use xlsynth_dslx_fuzzer::compound::CompoundOp;
+use xlsynth_dslx_fuzzer::compound::{ArrayOp, CompoundOp};
 use xlsynth_dslx_fuzzer::constexpr::{ComputedWidth, ConstExpr, ConstInput};
 use xlsynth_dslx_fuzzer::map_fragment::{MapBody, MapFragment};
 use xlsynth_dslx_fuzzer_fuzz::prove;
@@ -33,6 +33,7 @@ fn map_helper(signed: bool, mapper: MapBody, length: usize) -> Result<Body, Stri
 fn specialized_maps_prove_against_elementwise_reference() -> Result<(), String> {
     let mappers = MapBody::BUILTINS.into_iter().chain([
         MapBody::IsEven,
+        MapBody::LocalIsEven,
         MapBody::Capture(BinaryOp::Sub),
         MapBody::TwoCaptures(BinaryOp::Add, BinaryOp::Xor),
     ]);
@@ -71,7 +72,7 @@ fn specialized_maps_prove_against_elementwise_reference() -> Result<(), String> 
 }
 
 #[test]
-fn computed_width_lambda_captures_round_trip() -> Result<(), String> {
+fn computed_width_lambda_and_local_enumerate_round_trip() -> Result<(), String> {
     let dimension = Body::new(BitsType {
         signed: false,
         width: Width::Concrete(32),
@@ -92,15 +93,22 @@ fn computed_width_lambda_captures_round_trip() -> Result<(), String> {
         expression: Box::new(expression),
         assert_value: true,
     })?;
-    lane.push(Fragment::Compound {
-        op: CompoundOp::Map(MapFragment::new(
+    let operators = [
+        CompoundOp::Map(MapFragment::new(
             MapBody::TwoCaptures(BinaryOp::Sub, BinaryOp::Xor),
             2,
         )?),
-        args: [ValueRef::X, ValueRef::X, ValueRef::Y],
-    })?;
-    let prepared = Sample::new(vec![], vec![lane])?.prepare()?;
-    let result = prove(&prepared)?;
-    assert!(matches!(result, EquivResult::Proved), "{result:?}");
+        CompoundOp::Array(ArrayOp::LocalEnumerate),
+    ];
+    for op in operators {
+        let mut lane = lane.clone();
+        lane.push(Fragment::Compound {
+            op,
+            args: [ValueRef::X, ValueRef::X, ValueRef::Y],
+        })?;
+        let prepared = Sample::new(vec![], vec![lane])?.prepare()?;
+        let result = prove(&prepared)?;
+        assert!(matches!(result, EquivResult::Proved), "{op:?}: {result:?}");
+    }
     Ok(())
 }

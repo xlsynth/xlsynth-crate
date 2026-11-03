@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod cli;
 pub mod native;
 
 // Keep the native coverage runtime linked for probes and integration tests as
@@ -24,4 +25,15 @@ pub fn prove(sample: &PreparedSample) -> Result<EquivResult, String> {
         memory_limit_mb: Some(1024),
     });
     Ok(run_ir_equiv(&request)?.result)
+}
+
+/// Returns proved or resource-limited outcomes and includes the full sample on
+/// failure.
+pub fn check_prepared(sample: &PreparedSample) -> Result<EquivResult, String> {
+    match prove(sample) {
+        Ok(result @ (EquivResult::Proved | EquivResult::Inconclusive(_))) => Ok(result),
+        failure => Err(format!(
+            "equivalence check failed: {failure:#?}\n{sample:#?}"
+        )),
+    }
 }

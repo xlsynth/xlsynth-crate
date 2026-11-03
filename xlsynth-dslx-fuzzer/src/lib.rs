@@ -15,7 +15,7 @@ pub use generate::{
     GenerateOptions, Grammar, generate, generate_with_grammar, generate_with_options,
 };
 
-use ast::{Body, HelperModule, Width};
+use ast::{Body, HelperModule, ValueRef, Width};
 use constexpr::metadata_bits;
 use std::path::Path;
 use xlsynth_pir::{FnBuilder, IrFormatPreference, IrValue, ir};
@@ -32,6 +32,8 @@ pub struct SourceModule {
 pub struct Sample {
     helpers: Vec<HelperModule>,
     lanes: Vec<Body>,
+    // Mission generation selects one ordinary intermediate per lane.
+    observations: Vec<ValueRef>,
 }
 
 /// The two IR programs to compare, together with portable DSLX reproducers.
@@ -68,7 +70,11 @@ impl Sample {
                 }
             }
         }
-        Ok(Self { helpers, lanes })
+        Ok(Self {
+            helpers,
+            lanes,
+            observations: vec![],
+        })
     }
 
     pub fn helpers(&self) -> &[HelperModule] {
@@ -77,6 +83,11 @@ impl Sample {
 
     pub fn lanes(&self) -> &[Body] {
         &self.lanes
+    }
+
+    /// Orders each lane's result and optional intermediate in the top tuple.
+    fn lane_outputs(&self, index: usize) -> impl Iterator<Item = ValueRef> {
+        std::iter::once(self.lanes[index].result()).chain(self.observations.get(index).copied())
     }
 
     /// Formats the AST as helper files followed by the importing entry module.
@@ -154,8 +165,10 @@ impl Sample {
             text.push_str(&lane.render_module_items(&prefix, &self.helpers)?);
             let ty = lane.render_type(&prefix);
             params.push(format!("a{index}_v0: {ty}, a{index}_v1: {ty}"));
-            return_types.push(ty);
-            results.push(lane.result_name(&format!("a{index}_")));
+            for output in self.lane_outputs(index) {
+                return_types.push(ty.clone());
+                results.push(lane.value_name(output, &prefix));
+            }
         }
         text.push_str(&format!(
             "\nfn main({}) -> ({},) {{\n",
@@ -190,7 +203,10 @@ impl Sample {
             "({},)",
             self.lanes
                 .iter()
-                .map(|lane| lane.bits_type().to_dslx())
+                .enumerate()
+                .flat_map(|(index, lane)| self
+                    .lane_outputs(index)
+                    .map(|_| lane.bits_type().to_dslx()))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -244,14 +260,14 @@ impl Sample {
             args.push([x, y]);
         }
         let mut outputs = Vec::new();
-        for (lane, args) in self.lanes.iter().zip(args) {
+        for ((index, lane), args) in self.lanes.iter().enumerate().zip(args) {
             let Width::Concrete(width) = lane.bits_type().width else {
                 return Err("top-level lane has no concrete width".to_string());
             };
-            outputs.push(
-                lane.emit_ir(&mut builder, args, width, &self.helpers)
-                    .map_err(|error| error.to_string())?,
-            );
+            let values = lane
+                .emit_values(&mut builder, args, width, &self.helpers)
+                .map_err(|error| error.to_string())?;
+            outputs.extend(self.lane_outputs(index).map(|output| values[output.0]));
         }
         let result = builder.tuple(&outputs).map_err(|error| error.to_string())?;
         builder
