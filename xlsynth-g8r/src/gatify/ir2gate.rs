@@ -47,12 +47,14 @@ pub(crate) mod joint_word;
 pub(crate) mod observed_select_rails;
 pub(crate) mod priority_ordinal;
 mod priority_predicate;
+mod priority_word_update;
 mod read_predicates;
 mod shift_reduction_predicate;
 mod word_observations;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
 use priority_predicate::PriorityPredicatePlan;
+use priority_word_update::Mode as WordUpdateMode;
 use shift_reduction_predicate::ShiftReductionPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
@@ -277,6 +279,7 @@ pub(super) struct GateEnv {
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
     priority_predicate_plan: PriorityPredicatePlan,
+    word_recipients: priority_word_update::Recipients,
     shift_reduction_predicate_plan: ShiftReductionPredicatePlan,
 }
 
@@ -302,6 +305,7 @@ impl GateEnv {
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
             shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
@@ -328,6 +332,7 @@ impl GateEnv {
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
             priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
             shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
@@ -4545,6 +4550,7 @@ fn gatify_node(
                 default_bits,
                 selector_facts,
             );
+            let gates = priority_word_update::lower(f, node_ref, env, g8_builder, gates);
             // Tag the result.
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
@@ -5031,6 +5037,8 @@ fn gatify_internal(
     observe: Option<&ShiftReductionPredicatePlan>,
     read_predicates: &mut read_predicates::ReadPredicates,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    tests::FUNCTION_MAPPINGS.set(tests::FUNCTION_MAPPINGS.get() + 1);
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
 
@@ -5269,6 +5277,40 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
     ir_verify::verify_package(&pkg).map_err(|e| e.to_string())
 }
 
+/// Retries suspect reads and returns the chosen builder with its mapping state.
+fn lower_with_read_retry<T>(
+    env: &mut GateEnv,
+    mut emit: impl FnMut(
+        &mut GateEnv,
+        &mut read_predicates::ReadPredicates,
+    ) -> Result<(GateBuilder, T), String>,
+    complete: impl Fn(&T) -> bool,
+) -> Result<(GateBuilder, T), String> {
+    let mut reads = read_predicates::ReadPredicates::default();
+    let visits_before = env.select_proof_visits;
+    let (factored, factored_state) = emit(env, &mut reads)?;
+    let Some(area) = reads.prepare_retry(env, &factored) else {
+        return Ok((factored, factored_state));
+    };
+    // Row folding and table reuse can still make a read profitable. Retry
+    // only the suspect reads, and compare the two complete output cones.
+    let factored_map = std::mem::take(&mut env.ir_to_g8);
+    let factored_visits = std::mem::replace(&mut env.select_proof_visits, visits_before);
+    let factored_facts = std::mem::take(&mut env.guarded_unit_facts);
+    let (trial, trial_state) = emit(env, &mut reads)?;
+    if complete(&trial_state)
+        && (!complete(&factored_state)
+            || shift_reduction_predicate::outputs_no_worse(&factored, area, &trial))
+    {
+        Ok((trial, trial_state))
+    } else {
+        env.ir_to_g8 = factored_map;
+        env.select_proof_visits = factored_visits;
+        env.guarded_unit_facts = factored_facts;
+        Ok((factored, factored_state))
+    }
+}
+
 fn gatify_lower_prepared_fn(
     f: &ir::Fn,
     options: &GatifyOptions,
@@ -5279,6 +5321,14 @@ fn gatify_lower_prepared_fn(
     let topological = ir_utils::get_topological(f);
     let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
     let demanded_bits = demanded_bits::analyze(f, &topological, &outputs);
+    let mut env = GateEnv::new(f);
+    env.shared_carries = potentially_shared_carries(f, &topological, &demanded_bits);
+    env.demanded_bits = Some(demanded_bits);
+    // All trials lower the same prepared IR with the same consumer counts.
+    if options.enable_rewrite_nary_add {
+        env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, &env);
+    }
+    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, &env, options);
     let provenance_by_node = if options.track_pir_node_ids {
         origins.map(|origins| build_prepared_provenance_map(f, &topological, origins))
     } else {
@@ -5309,49 +5359,38 @@ fn gatify_lower_prepared_fn(
         Ok(gb)
     };
     let lower = |env: &mut GateEnv,
-                 observe: Option<&ShiftReductionPredicatePlan>|
+                 observe: Option<&ShiftReductionPredicatePlan>,
+                 rewrite_words: bool|
      -> Result<GateBuilder, String> {
-        let mut reads = read_predicates::ReadPredicates::default();
-        let visits_before = env.select_proof_visits;
-        let factored = emit(env, observe, &mut reads)?;
-        let Some(area) = reads.prepare_retry(env, &factored) else {
-            return Ok(factored);
-        };
-        // Row folding and table reuse can still make a read profitable. Retry
-        // only the suspect reads, and compare the two complete output cones.
-        let factored_map = std::mem::take(&mut env.ir_to_g8);
-        let factored_visits = std::mem::replace(&mut env.select_proof_visits, visits_before);
-        let factored_facts = std::mem::take(&mut env.guarded_unit_facts);
-        let trial = emit(env, observe, &mut reads)?;
-        if shift_reduction_predicate::outputs_no_worse(&factored, area, &trial) {
-            Ok(trial)
-        } else {
-            env.ir_to_g8 = factored_map;
-            env.select_proof_visits = factored_visits;
-            env.guarded_unit_facts = factored_facts;
-            Ok(factored)
-        }
+        let (builder, recipients) = lower_with_read_retry(
+            env,
+            |env, reads| {
+                env.word_recipients.mode = if rewrite_words {
+                    WordUpdateMode::Rewrite
+                } else {
+                    WordUpdateMode::Discover
+                };
+                let builder = emit(env, observe, reads)?;
+                Ok((builder, std::mem::take(&mut env.word_recipients)))
+            },
+            |_| true,
+        )?;
+        env.word_recipients = recipients;
+        Ok(builder)
     };
-    let mut env = GateEnv::new(f);
-    env.shared_carries = potentially_shared_carries(f, &topological, &demanded_bits);
-    env.demanded_bits = Some(demanded_bits);
-    // Both mappings use the same prepared graph and consumer counts.
-    if options.enable_rewrite_nary_add {
-        env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, &env);
-    }
-    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, &env, options);
     let plan = options
         .hash
         .then(|| ShiftReductionPredicatePlan::extract(f, &env));
-    let mut g8_builder = lower(&mut env, plan.as_ref())?;
+    let mut g8_builder = lower(&mut env, plan.as_ref(), /* rewrite_words= */ false)?;
     if let Some(mut plan) = plan
         && let Some(ordinary_area) = plan.retain_profitable(f, &env, &mut g8_builder)
     {
         // Gate references belong to their builder. Reuse the prepared IR
         // analyses, but collect a separate lowering map for the trial.
         let ordinary_map = std::mem::take(&mut env.ir_to_g8);
+        let ordinary_word_mode = std::mem::take(&mut env.word_recipients.mode);
         env.shift_reduction_predicate_plan = plan;
-        let trial = lower(&mut env, None)?;
+        let trial = lower(&mut env, None, /* rewrite_words= */ false)?;
         // Two predicates may compete for the same savings. Downstream
         // folding and hashing can also differ once a predicate changes.
         // Check the realized outputs before publishing the map and gates.
@@ -5359,9 +5398,61 @@ fn gatify_lower_prepared_fn(
             g8_builder = trial;
         } else {
             env.ir_to_g8 = ordinary_map;
+            env.word_recipients.mode = ordinary_word_mode;
+            env.shift_reduction_predicate_plan = ShiftReductionPredicatePlan::default();
         }
     }
-    let gate_fn = g8_builder.build();
+    let mut gate_fn = g8_builder.build();
+    if env.word_recipients.mode == WordUpdateMode::Found {
+        // Price the word trials against the selected shift mapping. Keep the
+        // PIR plans and proof budgets, but give each builder its own gate map.
+        let mut best_map = std::mem::take(&mut env.ir_to_g8);
+        let first_map = {
+            let start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+            let isolated = lower(&mut env, None, /* rewrite_words= */ true)?.build();
+            let elapsed = start.map(|t| t.elapsed());
+            if env.word_recipients.applied_isolated
+                && priority_word_update::improves_mapping(&gate_fn, &isolated)
+            {
+                gate_fn = isolated;
+                best_map = std::mem::take(&mut env.ir_to_g8);
+            }
+            elapsed
+        };
+
+        if let Some(trial) = env.word_recipients.take_trial(env.demanded_bits.as_ref()) {
+            let mut first_trial = Some(trial);
+            env.ir_to_g8.clear();
+            let start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+            let alternative = lower_with_read_retry(
+                &mut env,
+                |env, reads| {
+                    // Keep the PIR members but rebuild their cached grant
+                    // operands when a read retry starts another builder.
+                    env.word_recipients = first_trial
+                        .take()
+                        .or_else(|| env.word_recipients.take_trial(env.demanded_bits.as_ref()))
+                        .ok_or("could not rebuild the joint priority grant trial")?;
+                    let builder = emit(env, None, reads)?;
+                    Ok((builder, env.word_recipients.complete()))
+                },
+                |complete| *complete,
+            )
+            .inspect_err(|error| log::debug!("joint priority grant mapping failed: {error}"));
+            if let Ok((builder, complete)) = alternative {
+                let graph = builder.build();
+                let alternative_map = start.map(|t| t.elapsed());
+                log::debug!(
+                    "joint priority grants: complete={complete} first_map={first_map:?} alternative_map={alternative_map:?}"
+                );
+                if complete && priority_word_update::improves_mapping(&gate_fn, &graph) {
+                    gate_fn = graph;
+                    best_map = std::mem::take(&mut env.ir_to_g8);
+                }
+            }
+        }
+        env.ir_to_g8 = best_map;
+    }
     if let Some(captures) = observations {
         priority_ordinal::capture(
             f,
@@ -5656,12 +5747,31 @@ mod tests {
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
     use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
+    use std::cell::Cell;
     use xlsynth_pir::IrBits;
     use xlsynth_pir::IrValue;
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
+
+    thread_local! {
+        pub(super) static FUNCTION_MAPPINGS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn ineligible_priority_word_skips_remapping_the_product() {
+        let f = ir_parser::Parser::new(r#"fn choose(s: bits[1] id=1, p: bits[1] id=2, a: bits[32] id=3, b: bits[32] id=4, c: bits[32] id=5) -> (bits[32], bits[32]) {
+            product: bits[32] = umul(a, b, id=6)
+            inner: bits[32] = sel(p, cases=[a, b], id=7)
+            word: bits[32] = priority_sel(s, cases=[inner], default=c, id=8)
+            ret out: (bits[32], bits[32]) = tuple(product, word, id=9)
+        }"#).parse_fn().unwrap();
+
+        FUNCTION_MAPPINGS.set(0);
+        super::gatify_prepared_fn(&f, GatifyOptions::all_opts_enabled()).unwrap();
+        assert_eq!(FUNCTION_MAPPINGS.get(), 1);
+    }
 
     #[test]
     fn shared_mask_mux_keeps_bit_provenance_separate() {
