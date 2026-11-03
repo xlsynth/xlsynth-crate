@@ -4818,6 +4818,29 @@ mod tests {
     }
 
     #[test]
+    fn persisted_run_options_preserve_pre_ordered_observation_lowering() -> Result<()> {
+        let options = test_run_options(Objective::G8rNodes);
+        let mut saved = serde_json::to_value(PersistedRunOptions::from_run_options(&options)?)?;
+        let field = "enable_ordered_observations";
+        let explicit = saved["canonical_g8r_options"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert_eq!(explicit, Some(serde_json::Value::Bool(true)));
+
+        // Schema-v4 manifests written before the switch existed lack the field.
+        let legacy = serde_json::from_value::<PersistedRunOptions>(saved)?.into_run_options()?;
+        assert_eq!(
+            legacy.canonical_g8r_options,
+            CanonicalG8rOptions {
+                enable_ordered_observations: false,
+                ..options.canonical_g8r_options
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn durable_artifact_round_trips_and_minimizes_identically() {
         let pkg = parse_pkg(
             r#"package sample

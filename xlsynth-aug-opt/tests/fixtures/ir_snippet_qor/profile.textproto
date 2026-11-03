@@ -6,6 +6,7 @@ canonical_options {
   fold: true
   hash: true
   track_pir_node_ids: false
+  enable_ordered_observations: true
   enable_rewrite_carry_out: true
   enable_rewrite_prio_encode: true
   enable_rewrite_nary_add: true

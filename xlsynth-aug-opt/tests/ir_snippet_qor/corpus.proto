@@ -96,4 +96,6 @@ message CanonicalG8rOptions {
   required string cut_db_rewrite_mode = 23;
   required uint64 toggle_sample_count = 24;
   required uint64 toggle_sample_seed = 25;
+  // Older profiles predate distribution of predicates over ordered selects.
+  optional bool enable_ordered_observations = 26;
 }

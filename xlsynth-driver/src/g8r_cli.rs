@@ -291,6 +291,11 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         fold,
         hash,
         track_pir_node_ids,
+        enable_ordered_observations: parse_bool(
+            matches,
+            "enable-ordered-observations",
+            defaults.enable_ordered_observations,
+        ),
         enable_rewrite_carry_out,
         enable_rewrite_prio_encode,
         enable_rewrite_nary_add,

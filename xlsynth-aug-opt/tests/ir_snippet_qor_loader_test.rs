@@ -324,12 +324,25 @@ fn preserves_profile_presence_and_integer_precision() -> Result<(), Box<dyn Erro
     write_case(directory.path(), "sample", INPUT, SHIFT)?;
     let corpus = ir_snippet_qor::load_from_dir(directory.path())?;
     assert_eq!(corpus.profile.canonical_options.mul_adder_mapping, None);
+    assert!(corpus.profile.canonical_options.enable_ordered_observations);
+
+    // Profiles written before this option existed use the ordinary lowering.
+    fs::write(
+        directory.path().join("profile.textproto"),
+        PROFILE.replace("  enable_ordered_observations: true\n", ""),
+    )?;
+    let legacy = ir_snippet_qor::load_from_dir(directory.path())?;
+    assert!(!legacy.profile.canonical_options.enable_ordered_observations);
 
     // False and zero must survive decoding even for options whose serde
     // defaults are true or nonzero. Large integer seeds must not pass
     // through an f64.
     let profile = PROFILE
         .replace("  fold: true", "  fold: false")
+        .replace(
+            "  enable_ordered_observations: true",
+            "  enable_ordered_observations: false",
+        )
         .replace(
             "  enable_formal_array_alias_analysis: true",
             "  enable_formal_array_alias_analysis: false",
@@ -351,6 +364,7 @@ fn preserves_profile_presence_and_integer_precision() -> Result<(), Box<dyn Erro
         .profile
         .canonical_options;
     assert!(!options.fold);
+    assert!(!options.enable_ordered_observations);
     assert!(!options.enable_formal_array_alias_analysis);
     assert_eq!(options.cadical_terminate_limit, 0);
     assert_eq!(options.toggle_sample_seed, u64::MAX);
