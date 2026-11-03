@@ -39,8 +39,7 @@ impl Backend {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("backend.sh");
         let mut script = String::from(
-            r#"#!/bin/sh
-set -eu
+            r#"set -eu
 mode="$2"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = --output_json ]; then
@@ -66,8 +65,13 @@ case "$mode" in
             script.push_str("\n;;\n");
         }
         script.push_str("esac\n");
-        fs::write(&path, script)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        // A sibling fork can inherit a writable script descriptor until it
+        // execs. Execute an immutable launcher and let the shell read the
+        // per-test script.
+        fs::write(directory.path().join("behavior.sh"), script)?;
+        let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/process_outcome_backend.sh");
+        std::os::unix::fs::symlink(launcher, &path)?;
         Ok(Self {
             _directory: directory,
             path,
