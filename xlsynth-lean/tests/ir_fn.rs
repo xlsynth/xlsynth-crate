@@ -182,6 +182,19 @@ fn evaluates_word_operations_and_aggregate_interfaces() {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn evaluates_a_wide_concat() {
+    let operands = (0..2048)
+        .map(|index| if index % 3 == 0 { "x" } else { "y" })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ir = format!(
+        "package wide\ntop fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[2048] {{\n  ret result: bits[2048] = concat({operands}, id=3)\n}}"
+    );
+    check_differential(&ir);
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_a_thousand_shared_additions() {
     let mut ir = String::from("package depth\ntop fn main(n1: bits[8] id=1) -> bits[8] {\n");
     for i in 2..=1025 {

@@ -393,19 +393,15 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                     Unop::XorReduce => format!("{a}.cpop.setWidth 1"),
                 }
             }
-            P::Nary(NaryOp::Concat, rs) if rs.is_empty() => "0".to_owned(),
             P::Nary(op, rs) => {
-                let sep = match op {
-                    NaryOp::And | NaryOp::Nand => " &&& ",
-                    NaryOp::Or | NaryOp::Nor => " ||| ",
-                    NaryOp::Xor => " ^^^ ",
-                    NaryOp::Concat => " ++ ",
-                };
-                let args = names(rs).join(sep);
-                if matches!(op, NaryOp::Nand | NaryOp::Nor) {
-                    format!("~~~({args})")
-                } else {
-                    args
+                let args = names(rs);
+                match op {
+                    NaryOp::And => args.join(" &&& "),
+                    NaryOp::Or => args.join(" ||| "),
+                    NaryOp::Xor => args.join(" ^^^ "),
+                    NaryOp::Nand => format!("~~~({})", args.join(" &&& ")),
+                    NaryOp::Nor => format!("~~~({})", args.join(" ||| ")),
+                    NaryOp::Concat => format!("concatBits![{}]", args.join(", ")),
                 }
             }
             P::SignExt { arg, new_bit_count } => {
