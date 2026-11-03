@@ -23,7 +23,7 @@ use xlsynth_g8r::liberty::parser::{
     LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
 use xlsynth_g8r::liberty::proto_info::liberty_proto_info_from_path;
-use xlsynth_g8r::liberty_model::{Library, Pin, PinDirection, SequentialKind};
+use xlsynth_g8r::liberty_model::{Cell, Library, Pin, PinDirection, SequentialKind};
 use xlsynth_g8r::liberty_proto::{
     ClockGate, ClockGateBehavior, Library as WireLibrary, UnsupportedFeature,
 };
@@ -149,6 +149,10 @@ fn scan_equations_and_explicit_clock_annotations_roundtrip() {
 
 const CLOCK_GATE_LIB: &str = include_str!("data/clock_gate.lib");
 
+fn clock_gate_cell(library: &Library) -> Option<&Cell> {
+    library.cells.iter().find(|cell| cell.name == "ICG")
+}
+
 #[test]
 fn clock_gate_certifies_low_latch_table_and_survives_proto_roundtrip() {
     // Use the same multiline continuation and commuted AND used by Liberty
@@ -157,11 +161,7 @@ fn clock_gate_certifies_low_latch_table_and_survives_proto_roundtrip() {
         .replace(", ", ", \\\n")
         .replace("CLK & IQ", "IQ * CLK");
     let library = roundtrip(parse(&source, LibertyPayloadOptions::all()).unwrap());
-    let cell = library
-        .cells
-        .iter()
-        .find(|cell| cell.name == "ICG")
-        .unwrap();
+    let cell = clock_gate_cell(&library).unwrap();
     let gate = cell.positive_edge_clock_gate(&library).unwrap().unwrap();
     assert_eq!(
         gate.behavior,
@@ -186,11 +186,7 @@ fn clock_gate_certifies_a_complete_two_input_table_without_test_control() {
             "",
         );
     let library = parse(&source, LibertyPayloadOptions::all()).unwrap();
-    let cell = library
-        .cells
-        .iter()
-        .find(|cell| cell.name == "ICG")
-        .unwrap();
+    let cell = clock_gate_cell(&library).unwrap();
     let gate = cell.positive_edge_clock_gate(&library).unwrap().unwrap();
     assert!(gate.test_pins.is_empty());
     assert_eq!(gate.enable_pins, ["ENA"]);
@@ -235,11 +231,7 @@ fn clock_gate_rejects_incomplete_and_conflicting_source_behavior() {
         let source = CLOCK_GATE_LIB.replace(old, new);
         assert_ne!(source, CLOCK_GATE_LIB, "{old}");
         let library = parse(&source, LibertyPayloadOptions::all()).unwrap();
-        let cell = library
-            .cells
-            .iter()
-            .find(|cell| cell.name == "ICG")
-            .unwrap();
+        let cell = clock_gate_cell(&library).unwrap();
         assert_eq!(
             cell.clock_gate.as_ref().unwrap().behavior,
             ClockGateBehavior::Unknown as i32,
@@ -253,11 +245,7 @@ fn clock_gate_rejects_incomplete_and_conflicting_source_behavior() {
 #[test]
 fn clock_gate_revalidates_legacy_and_malformed_wire_models() {
     let library = parse(CLOCK_GATE_LIB, LibertyPayloadOptions::all()).unwrap();
-    let original = library
-        .cells
-        .iter()
-        .find(|cell| cell.name == "ICG")
-        .unwrap();
+    let original = clock_gate_cell(&library).unwrap();
     let mut cell = original.clone();
     // Fields 1 through 4 as encoded before clock-gate behavior was recorded.
     cell.clock_gate =

@@ -579,7 +579,7 @@ impl Cell {
             ));
         }
         self.validate_functional_coverage()?;
-        if !self.sequential.is_empty() || gate.enable_pins.len() != 1 || gate.test_pins.len() > 1 {
+        if !self.sequential.is_empty() {
             return Err(format!(
                 "cell '{}' has incompatible clock-gate controls",
                 self.name

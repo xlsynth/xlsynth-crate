@@ -2,9 +2,6 @@
 
 //! Project a parsed netlist and Liberty proto into a GateFn.
 
-mod clock_gates;
-
-use self::clock_gates::GateInstance;
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::aig::sequential_gate::{canonical_register_d_name, canonical_register_q_name};
 use crate::aig::{
@@ -13,6 +10,7 @@ use crate::aig::{
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
+use crate::liberty_proto::ClockGate;
 use crate::netlist::bit_ref::select_bit_number;
 use crate::netlist::hierarchy::ElaboratedModuleBoundary;
 use crate::netlist::normalized::{
@@ -764,6 +762,53 @@ struct SelectedSequentialClock {
     active_edge: Option<SequentialClockEdge>,
 }
 
+/// One verified ICG's physical connections, before data signals are projected.
+struct GateInstance<'a> {
+    cell: &'a Cell,
+    spec: &'a ClockGate,
+    clock: BitSource,
+    output: BitIndex,
+}
+
+impl<'a> GateInstance<'a> {
+    /// Requires every functional clock-gate pin to have a scalar connection.
+    fn new(
+        cell: &'a Cell,
+        spec: &'a ClockGate,
+        inst: &NormalizedInstance,
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+    ) -> Result<Self, String> {
+        let instance_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+        let pin_source = |pin_name: &str| -> Result<BitSource, String> {
+            let bits = inst
+                .connections
+                .iter()
+                .find(|c| interner.resolve(c.port) == Some(pin_name))
+                .map(|c| c.bits.as_slice());
+            match bits {
+                Some([source]) if *source != BitSource::Unknown => Ok(*source),
+                _ => Err(format!(
+                    "clock-gate instance '{instance_name}' pin '{pin_name}' must connect exactly one known bit"
+                )),
+            }
+        };
+        let BitSource::Bit(output) = pin_source(&spec.output_pin)? else {
+            return Err(format!(
+                "clock-gate instance '{instance_name}' output must drive a net bit"
+            ));
+        };
+        for name in spec.enable_pins.iter().chain(&spec.test_pins) {
+            pin_source(name)?;
+        }
+        Ok(Self {
+            cell,
+            spec,
+            clock: pin_source(&spec.clock_pin)?,
+            output,
+        })
+    }
+}
+
 /// State and pin operands for an FF whose data cone is still being constructed.
 struct PendingSequentialInstance {
     normalized_index: usize,
@@ -833,13 +878,14 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
 
     // ICGs have an internal latch and use the separately verified clock-gate
     // contract. Only ordinary cell outputs enter the Boolean formula map.
-    let used_cell_names: HashSet<String> = normalized
+    let mut used_cell_names: HashSet<String> = module
         .instances
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !gates.contains_key(index))
-        .filter_map(|(_, inst)| interner.resolve(inst.type_name).map(str::to_string))
+        .filter_map(|inst| interner.resolve(inst.type_name).map(str::to_string))
         .collect();
+    for gate in gates.values() {
+        used_cell_names.remove(&gate.cell.name);
+    }
     let empty_dff_cells = HashSet::new();
     let cell_formula_map = build_cell_formula_map(
         liberty_lib,
@@ -1049,14 +1095,50 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
     let mut gate_enables = HashMap::new();
     for (&index, gate) in &gates {
         let inst = &normalized.instances[index];
-        let (enable, binding) = gate.bind(
+        let instance_name = interner.resolve(inst.instance_name).unwrap();
+        let (inputs, missing, _) = build_instance_input_map_skipping_pin(
             inst,
-            &normalized,
-            nets,
+            &build_pin_direction_map(gate.cell, liberty_lib),
             interner,
-            liberty_lib,
+            nets,
             &resolved,
             &mut gb,
+            &normalized,
+            Some(&gate.spec.clock_pin),
+        );
+        if !missing.is_empty() {
+            return Err(format!(
+                "clock-gate instance '{instance_name}' has an unresolved enable or test input"
+            ));
+        }
+        if let Some(test) = gate.spec.test_pins.first()
+            && inputs[test] != gb.get_false()
+        {
+            return Err(format!(
+                "clock-gate instance '{instance_name}' test pin '{test}' must be tied inactive"
+            ));
+        }
+        let enable = inputs[&gate.spec.enable_pins[0]];
+        let clocks = [
+            (gate.spec.clock_pin.as_str(), SequentialAigSignal::Clock),
+            (
+                gate.spec.output_pin.as_str(),
+                SequentialAigSignal::GatedClock(enable),
+            ),
+        ];
+        let binding = build_sequential_instance_aig_binding(
+            inst,
+            gate.cell,
+            liberty_lib,
+            &gate.cell.name,
+            instance_name,
+            interner,
+            nets,
+            &normalized,
+            &inputs,
+            &HashMap::new(),
+            &clocks,
+            None,
         )?;
         gate_enables.insert(gate.output, enable);
         labeled_instances[inst.raw_index.0] = Some(binding);

@@ -6,8 +6,18 @@ use super::cell_formula::{Term, parse_formula};
 use super::import::text;
 use super::liberty_parser::{Block, BlockMember};
 use crate::liberty_model::{Library, Pin};
-use crate::liberty_proto::{ClockGate, PinDirection, UnsupportedFeature, UnsupportedSemantics};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use crate::liberty_proto::{
+    ClockGate, ClockGateBehavior, PinDirection, UnsupportedFeature, UnsupportedSemantics,
+};
+use std::collections::{HashMap, HashSet};
+
+/// The clock, functional enable, and optional test input of a declared gate.
+fn input_pins(gate: &ClockGate) -> impl Iterator<Item = &str> {
+    std::iter::once(&gate.clock_pin)
+        .chain(&gate.enable_pins)
+        .chain(&gate.test_pins)
+        .map(String::as_str)
+}
 
 /// Requires one unambiguous role for each external pin in the stored gate.
 pub(super) fn validate_pin_roles(
@@ -16,22 +26,19 @@ pub(super) fn validate_pin_roles(
     library: &Library,
     gate: &ClockGate,
 ) -> Result<(), String> {
-    let mut roles = HashMap::new();
-    for (name, direction) in std::iter::once((&gate.clock_pin, PinDirection::Input))
-        .chain(std::iter::once((&gate.output_pin, PinDirection::Output)))
-        .chain(
-            gate.enable_pins
-                .iter()
-                .chain(&gate.test_pins)
-                .map(|name| (name, PinDirection::Input)),
-        )
-    {
-        if name.is_empty() || roles.insert(name.as_str(), direction).is_some() {
-            return Err(format!(
-                "cell '{}' has missing or duplicate clock-gate pin roles",
-                cell_name
-            ));
-        }
+    if gate.enable_pins.len() != 1 || gate.test_pins.len() > 1 {
+        return Err(format!(
+            "cell '{cell_name}' has incompatible clock-gate controls"
+        ));
+    }
+    let mut roles: HashMap<_, _> = input_pins(gate)
+        .map(|name| (name, PinDirection::Input))
+        .chain([(gate.output_pin.as_str(), PinDirection::Output)])
+        .collect();
+    if roles.contains_key("") || roles.len() != 2 + gate.enable_pins.len() + gate.test_pins.len() {
+        return Err(format!(
+            "cell '{cell_name}' has missing or duplicate clock-gate pin roles"
+        ));
     }
     let mut pin_names = HashSet::new();
     let mut internal_seen = false;
@@ -94,14 +101,12 @@ fn verifies_latch_table(table: &str, columns: &[&str], clock: &str) -> bool {
         let [inputs, current, next] = fields.as_slice() else {
             return false;
         };
-        let mut pattern: Vec<_> = inputs.split_ascii_whitespace().collect();
-        if pattern.len() != columns.len() || !matches!(*next, "L" | "H" | "N") {
-            return false;
-        }
-        pattern.push(*current);
-        if !pattern
-            .iter()
-            .all(|level| matches!(*level, "L" | "H" | "-"))
+        let pattern: Vec<_> = inputs.split_ascii_whitespace().chain([*current]).collect();
+        if pattern.len() != columns.len() + 1
+            || !matches!(*next, "L" | "H" | "N")
+            || !pattern
+                .iter()
+                .all(|level| matches!(*level, "L" | "H" | "-"))
         {
             return false;
         }
@@ -129,18 +134,13 @@ fn verifies_latch_table(table: &str, columns: &[&str], clock: &str) -> bool {
 
 /// Checks the latch table, internal state and output equation before treating
 /// exactly those source features as represented by the normalized gate model.
-pub(super) fn certifies_low_latch_gate(
+pub(super) fn source_gate_behavior(
     block: &Block,
     gate: &ClockGate,
     unsupported: &[UnsupportedSemantics],
-) -> bool {
-    if unique_attr(block, "clock_gating_integrated_cell") != Some("latch_posedge_precontrol")
-        || gate.clock_pin.is_empty()
-        || gate.output_pin.is_empty()
-        || gate.enable_pins.len() != 1
-        || gate.test_pins.len() > 1
-    {
-        return false;
+) -> Option<ClockGateBehavior> {
+    if unique_attr(block, "clock_gating_integrated_cell") != Some("latch_posedge_precontrol") {
+        return None;
     }
     let blocks = block.members.iter().filter_map(|member| match member {
         BlockMember::SubBlock(child) => Some(child.as_ref()),
@@ -149,39 +149,27 @@ pub(super) fn certifies_low_latch_gate(
     let mut tables = blocks
         .clone()
         .filter(|child| child.block_type == "statetable");
-    let Some(table) = tables.next() else {
-        return false;
-    };
+    let table = tables.next()?;
     if tables.next().is_some() || table.members.len() != 1 {
-        return false;
+        return None;
     }
     let [inputs, state] = table.qualifiers.as_slice() else {
-        return false;
+        return None;
     };
-    let (Ok(inputs), Ok(state)) = (text(inputs), text(state)) else {
-        return false;
-    };
+    let inputs = text(inputs).ok()?;
+    let state = text(state).ok()?;
     let columns: Vec<_> = inputs.split_ascii_whitespace().collect();
-    let expected: BTreeSet<_> = std::iter::once(gate.clock_pin.as_str())
-        .chain(
-            gate.enable_pins
-                .iter()
-                .chain(&gate.test_pins)
-                .map(String::as_str),
-        )
-        .collect();
-    if expected.len() != 2 + gate.test_pins.len()
-        || columns.len() != expected.len()
-        || columns.iter().copied().collect::<BTreeSet<_>>() != expected
-        || !unique_attr(table, "table")
-            .is_some_and(|value| verifies_latch_table(value, &columns, &gate.clock_pin))
+    // Pin-role validation has already established that the names are distinct.
+    if columns.len() != input_pins(gate).count()
+        || !input_pins(gate).all(|pin| columns.contains(&pin))
+        || !verifies_latch_table(unique_attr(table, "table")?, &columns, &gate.clock_pin)
     {
-        return false;
+        return None;
     }
-    let pins: Vec<_> = blocks.filter(|child| child.block_type == "pin").collect();
+    let pins = blocks.filter(|child| child.block_type == "pin");
     // Pin normalization uses the last value of several scalar attributes.
     // A contradictory or malformed role must not acquire a certified model.
-    for pin in &pins {
+    for pin in pins.clone() {
         let mut seen = HashSet::new();
         for member in &pin.members {
             let BlockMember::BlockAttr(attr) = member else {
@@ -189,11 +177,9 @@ pub(super) fn certifies_low_latch_gate(
             };
             let name = attr.attr_name.as_str();
             if name.starts_with("clock_gate_") || name == "clock" {
-                let Ok(value) = text(&attr.value) else {
-                    return false;
-                };
+                let value = text(&attr.value).ok()?;
                 if !(value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false")) {
-                    return false;
+                    return None;
                 }
             } else if !matches!(
                 name,
@@ -202,56 +188,48 @@ pub(super) fn certifies_low_latch_gate(
                 continue;
             }
             if !seen.insert(name) {
-                return false;
+                return None;
             }
         }
     }
     let find_pin = |name: &str| {
-        pins.iter()
-            .copied()
+        pins.clone()
             .find(|pin| matches!(pin.qualifiers.as_slice(), [value] if text(value) == Ok(name)))
     };
-    let Some(internal) = find_pin(state) else {
-        return false;
-    };
-    let Some(output) = find_pin(&gate.output_pin) else {
-        return false;
-    };
+    let internal = find_pin(state)?;
+    let output = find_pin(&gate.output_pin)?;
     if unique_attr(internal, "direction") != Some("internal")
         || unique_attr(internal, "internal_node") != Some(state)
         || unique_attr(output, "direction") != Some("output")
     {
-        return false;
+        return None;
     }
-    let Some(Term::And(lhs, rhs)) =
-        unique_attr(output, "state_function").and_then(|formula| parse_formula(formula).ok())
-    else {
-        return false;
+    let Term::And(lhs, rhs) = parse_formula(unique_attr(output, "state_function")?).ok()? else {
+        return None;
     };
     let (Term::Input(lhs), Term::Input(rhs)) = (*lhs, *rhs) else {
-        return false;
+        return None;
     };
     if !((lhs == gate.clock_pin && rhs == state) || (rhs == gate.clock_pin && lhs == state)) {
-        return false;
+        return None;
     }
-    let represented = [
-        (
+    let recorded = |feature: UnsupportedFeature, location: String| {
+        unsupported
+            .iter()
+            .any(|issue| issue.feature == feature as i32 && issue.location == location)
+    };
+    let covered = unsupported.len() == 3
+        && recorded(
             UnsupportedFeature::StateTable,
             format!("statetable({inputs},{state})"),
-        ),
-        (
+        )
+        && recorded(
             UnsupportedFeature::InternalState,
             format!("pin({state}).internal_node"),
-        ),
-        (
+        )
+        && recorded(
             UnsupportedFeature::InternalState,
             format!("pin({}).state_function", gate.output_pin),
-        ),
-    ];
-    unsupported.len() == represented.len()
-        && represented.iter().all(|(feature, location)| {
-            unsupported
-                .iter()
-                .any(|issue| issue.feature == *feature as i32 && issue.location == *location)
-        })
+        );
+    covered.then_some(ClockGateBehavior::LowLatchEnableOrTest)
 }

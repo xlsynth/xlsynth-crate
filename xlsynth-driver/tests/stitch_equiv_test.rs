@@ -404,8 +404,8 @@ fn pipe_cycle0(x: bool) -> bool { spec(x) }
 }
 
 #[test]
-fn stitch_equiv_proves_a_bank_on_an_integrated_clock_gate() {
-    let dir = tempfile::tempdir().unwrap();
+fn stitch_equiv_proves_a_bank_on_an_integrated_clock_gate() -> std::io::Result<()> {
+    let dir = tempfile::tempdir()?;
     let gv = r#"module pipe(input clk, input [1:0] x, input vin, output [1:0] out, output vout);
   wire gclk;
   ICG gate (.CLK(clk), .ENA(vin), .SE(1'b0), .GCLK(gclk));
@@ -413,13 +413,12 @@ fn stitch_equiv_proves_a_bank_on_an_integrated_clock_gate() {
   DFF bit1 (.CLK(gclk), .D(x[1]), .Q(out[1]));
   DFF valid_ff (.CLK(clk), .D(vin), .Q(vout));
 endmodule"#;
-    fs::write(dir.path().join("pipe.gv"), gv).unwrap();
+    fs::write(dir.path().join("pipe.gv"), gv)?;
     fs::write(
         dir.path().join("pipe.x"),
         r#"fn pipe_cycle0(x: u2) -> u2 { x }
 fn pipe_cycle1(x: u2) -> u2 { x }"#,
-    )
-    .unwrap();
+    )?;
     fs::write(
         dir.path().join("pipe.toml"),
         r#"dslx_input_file = "pipe.x"
@@ -428,25 +427,23 @@ flop_inputs = false
 flop_outputs = false
 input_valid_signal = "vin"
 output_valid_signal = "vout""#,
-    )
-    .unwrap();
-    let raw_liberty =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../xlsynth-g8r/tests/data/clock_gate.lib");
-    let import = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-        .current_dir(dir.path())
-        .args(["lib2proto", "--output", "cells.textproto"])
-        .arg(raw_liberty)
-        .output()
-        .unwrap();
+    )?;
+    let liberty = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../xlsynth-g8r/tests/data/clock_gate.lib"
+    );
+    let import = driver(
+        dir.path(),
+        &["lib2proto", "--output", "cells.textproto", liberty],
+    )?;
     assert!(
         import.status.success(),
         "{}",
         String::from_utf8_lossy(&import.stderr)
     );
     for &(solver, plan) in STITCH_SOLVERS {
-        let proof = stage_command(dir.path(), &["--solver", solver, "--proof-mode", "stages"])
-            .output()
-            .unwrap();
+        let proof =
+            stage_command(dir.path(), &["--solver", solver, "--proof-mode", "stages"]).output()?;
         assert!(
             proof.status.success(),
             "{}",
@@ -457,6 +454,7 @@ output_valid_signal = "vout""#,
             format!("stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n{plan}")
         );
     }
+    Ok(())
 }
 
 #[test]
