@@ -4001,6 +4001,14 @@ fn gatify_node(
         }
 
         // -- nary operations
+        ir::NodePayload::Nary(op, args)
+            if let Some(gate) = env
+                .priority_predicate_plan
+                .fold_implied_operand(f, *op, args, env) =>
+        {
+            let gate = g8_builder.union_current_pir_node_id_into_operand(gate);
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
         ir::NodePayload::Nary(op @ (ir::NaryOp::And | ir::NaryOp::Nand), args)
             if env
                 .priority_predicate_plan
