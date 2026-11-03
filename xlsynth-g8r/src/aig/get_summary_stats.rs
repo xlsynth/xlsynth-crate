@@ -41,6 +41,15 @@ pub struct AigConeStats {
     pub root_depths: Vec<usize>,
 }
 
+pub(crate) fn get_output_cone_stats(gate_fn: &gate::GateFn) -> AigConeStats {
+    let roots = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb().copied())
+        .collect::<Vec<_>>();
+    get_aig_cone_stats(&gate_fn.gates, &roots)
+}
+
 /// Computes exact structural statistics for the combined cone rooted at
 /// `roots`.
 pub fn get_aig_cone_stats(nodes: &[AigNode], roots: &[AigOperand]) -> AigConeStats {
@@ -346,6 +355,23 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
         max_depth,
         fanout_histogram,
     }
+}
+
+/// Logs complete graphs and live structural costs only when requested by the
+/// caller's module target. Graph observations do not alter optimization state.
+pub(crate) fn log_gate_snapshot(target: &'static str, stage: &str, gate_fn: &gate::GateFn) {
+    if log::log_enabled!(target: target, log::Level::Debug) {
+        let stats = get_aig_stats(gate_fn);
+        log::debug!(target: target,
+            "gate_pass function={} stage={} stored_nodes={} product={} live={:?}",
+            gate_fn.name, stage, gate_fn.gates.len(),
+            (stats.and_nodes as u128) * (stats.max_depth as u128), stats
+        );
+    }
+    log::trace!(target: target,
+        "gate_ir function={} stage={}\n{}",
+        gate_fn.name, stage, gate_fn.to_string_including_dead_nodes()
+    );
 }
 
 #[cfg(test)]

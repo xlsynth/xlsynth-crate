@@ -11,6 +11,17 @@ pub(crate) fn import_gate_fn(
     input_bindings: &[AigBitVector],
     builder: &mut GateBuilder,
 ) -> Result<Vec<AigBitVector>, String> {
+    import_gate_fn_with_observations(source, input_bindings, builder, &[])
+}
+
+/// Also returns requested internal rails reached while importing the ordinary
+/// outputs.
+pub(crate) fn import_gate_fn_with_observations(
+    source: &GateFn,
+    input_bindings: &[AigBitVector],
+    builder: &mut GateBuilder,
+    observations: &[AigBitVector],
+) -> Result<Vec<AigBitVector>, String> {
     if source.inputs.len() != input_bindings.len() {
         return Err(format!(
             "graph '{}' expects {} input port(s), but {} bindings were supplied",
@@ -85,9 +96,10 @@ pub(crate) fn import_gate_fn(
     source
         .outputs
         .iter()
-        .map(|output| {
-            let imported_bits = output
-                .bit_vector
+        .map(|output| &output.bit_vector)
+        .chain(observations)
+        .map(|bits| {
+            let imported_bits = bits
                 .iter_lsb_to_msb()
                 .map(|bit| mapped_operand(source, *bit, &imported_nodes))
                 .collect::<Result<Vec<AigOperand>, String>>()?;

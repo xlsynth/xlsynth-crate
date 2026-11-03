@@ -16,6 +16,7 @@ pub struct Ir2GatesOptions {
     pub hash: bool,
     /// Whether gatification records originating PIR node IDs on AIG nodes.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub enable_rewrite_carry_out: bool,
@@ -39,6 +40,7 @@ impl Ir2GatesOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
@@ -60,6 +62,7 @@ impl Ir2GatesOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
@@ -215,8 +218,9 @@ pub fn prepare_ir_for_gatify_from_ir_text(
         .create_ir_analysis()
         .map_err(|e| format!("xlsynth create_ir_analysis failed: {e}"))?;
 
-    let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn)
-        .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
+    let range_info =
+        IrRangeInfo::build_for_gatify(&analysis, pir_fn, options.mul_adder_mapping.is_none())
+            .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
 
     Ok(PreparedIrForGatify {
         pir_package,
@@ -230,6 +234,21 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
+    ir2gates_with_terminal_observations(
+        ir_text,
+        top,
+        options,
+        ir2gate::TerminalObservationMode::None,
+    )
+    .map(|(output, _)| output)
+}
+
+pub(crate) fn ir2gates_with_terminal_observations(
+    ir_text: &str,
+    top: Option<&str>,
+    options: Ir2GatesOptions,
+    observe: ir2gate::TerminalObservationMode,
+) -> Result<(Ir2GatesOutput, ir2gate::TerminalObservations), String> {
     let PreparedIrForGatify {
         pir_package,
         top_fn_name,
@@ -239,12 +258,13 @@ pub fn ir2gates_from_ir_text(
         .get_fn(&top_fn_name)
         .expect("top_fn_name should be present in pir_package");
 
-    let gatify_output = ir2gate::gatify(
+    let (gatify_output, capture) = ir2gate::gatify_with_terminal_observations(
         pir_fn,
         ir2gate::GatifyOptions {
             fold: options.fold,
             hash: options.hash,
             track_pir_node_ids: options.track_pir_node_ids,
+            enable_ordered_observations: options.enable_ordered_observations,
             check_equivalence: options.check_equivalence,
             equivalence_solver: options.equivalence_solver,
             adder_mapping: options.adder_mapping,
@@ -258,14 +278,16 @@ pub fn ir2gates_from_ir_text(
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
             ..ir2gate::GatifyOptions::all_opts_disabled()
         },
+        observe,
     )?;
 
-    Ok(Ir2GatesOutput {
+    let output = Ir2GatesOutput {
         pir_package,
         top_fn_name,
         gatify_output,
         range_info,
-    })
+    };
+    Ok((output, capture))
 }
 
 #[cfg(test)]

@@ -546,6 +546,7 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .add_bool_arg("enable-ordered-observations", "Lower monotone predicates on exclusively observed min/max words")
             .add_bool_arg(
                 "track-pir-node-ids",
                 "Track and propagate PIR node provenance on AIG nodes",
@@ -1830,6 +1831,13 @@ fn main() {
                         .long("aiger-out")
                         .value_name("PATH")
                         .help("Path to write a clockless, register-free result as AIGER; use .aag for ASCII or .aig for binary")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("word_choice_dir")
+                        .long("word-choice-dir")
+                        .value_name("NEW_DIR")
+                        .help("Write fully optimized conditional-word alternatives and a manifest to a new directory. Functions only. Ordinary outputs retain the incumbent.")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

@@ -7,9 +7,9 @@ use xlsynth_g8r::aig::graph_logical_effort::{
 use xlsynth_g8r::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_g8r::test_utils::prove_prepared_ir_equiv;
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_prover::prover::prove_ir_equiv;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
+use xlsynth_prover::prover::types::EquivResult;
 
 /// Builds symbolic affine shifts while varying width, threshold and spelling.
 fn case(
@@ -88,14 +88,7 @@ fn bounded_shift_windows_are_equivalent_for_symbolic_inputs() {
                     )),
                     "expected rewrite: {text}"
                 );
-                let result = prove_ir_equiv(
-                    &ProverFn::new(source, None),
-                    &ProverFn::new(&prepared, None),
-                    EquivParallelism::SingleThreaded,
-                    AssertionSemantics::Ignore,
-                    None,
-                    false,
-                );
+                let result = prove_prepared_ir_equiv(source, &prepared);
                 assert!(
                     matches!(result, EquivResult::Proved),
                     "base={base} data={data} low={low} offset={offset} start={start} width={width} spelling={spelling}: {result:?}"
@@ -134,4 +127,46 @@ fn bounded_shift_fixture_improves_native_aig_without_fraig() {
     .delay;
     assert_eq!((stats.and_nodes, stats.max_depth), (19, 6));
     assert!((le - 22.079368399158987).abs() < 1e-8, "graph LE: {le}");
+}
+
+#[test]
+fn guarded_shift_uses_modular_product() {
+    use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
+    use xlsynth_pir::IrBits;
+
+    let package = Parser::new(
+        "package p
+        top fn f(x: bits[17] id=1, k: bits[3] id=2) -> bits[1] {
+            zero: bits[3] = literal(value=0, id=3)
+            enabled: bits[1] = ne(k, zero, id=4)
+            three: bits[3] = literal(value=3, id=5)
+            amount: bits[3] = umul(k, three, id=6)
+            shifted: bits[17] = shrl(x, amount, id=7)
+            chosen: bits[17] = sel(enabled, cases=[x, shifted], id=8)
+            observed: bits[7] = bit_slice(chosen, start=2, width=7, id=9)
+            ret result: bits[1] = or_reduce(observed, id=10)
+        }",
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let gates = gatify(
+        package.get_top_fn().unwrap(),
+        GatifyOptions::all_opts_enabled(),
+    )
+    .unwrap();
+    for k in 0u64..8 {
+        for bit in 0..17 {
+            let x = 1u64 << bit;
+            let args = [
+                IrBits::make_ubits(17, x).unwrap(),
+                IrBits::make_ubits(3, k).unwrap(),
+            ];
+            let actual = gate_sim::eval(&gates.gate_fn, &args, Collect::None);
+            assert_eq!(
+                actual.outputs[0].get_bit(0).unwrap(),
+                ((x >> (3 * k % 8)) >> 2) & 127 != 0,
+                "x={x}, k={k}"
+            );
+        }
+    }
 }

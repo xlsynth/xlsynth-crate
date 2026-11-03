@@ -25,6 +25,7 @@ pub struct NodeRangeInfo {
 
 pub struct IrRangeInfo {
     by_text_id: BTreeMap<usize, NodeRangeInfo>,
+    sparse_product_factors: BTreeSet<(usize, usize)>,
 }
 
 /// Returns `(min, max)` unsigned bounds from an interval set, if any exist.
@@ -63,7 +64,10 @@ impl IrRangeInfo {
     /// this owned compatibility view does not retain an analysis's graph
     /// borrow.
     pub fn from_node_range_info(by_text_id: BTreeMap<usize, NodeRangeInfo>) -> Self {
-        Self { by_text_id }
+        Self {
+            by_text_id,
+            sparse_product_factors: BTreeSet::new(),
+        }
     }
 
     /// Copies scalar masks and population bounds from a forward analysis.
@@ -83,7 +87,17 @@ impl IrRangeInfo {
                 ))
             })
             .collect();
-        Self { by_text_id }
+        Self::from_node_range_info(by_text_id)
+    }
+
+    /// Returns an unconditional at-most-one proof for this product factor.
+    /// The original text ID and width survive preparation's node reindexing.
+    pub fn is_sparse_product_factor(&self, text_id: usize, width: usize) -> bool {
+        self.sparse_product_factors.contains(&(text_id, width))
+            || self
+                .get(text_id)
+                .and_then(|n| n.known_bits.as_ref())
+                .is_some_and(|k| k.bit_count() == width && k.max_ones() <= 1)
     }
 
     /// Looks up all recorded range information for a given IR `text_id`.
@@ -163,6 +177,17 @@ impl IrRangeInfo {
     /// Builds `IrRangeInfo` for a PIR function by querying libxls analysis for
     /// every node `text_id`.
     pub fn build_from_analysis(analysis: &IrAnalysis, f: &ir::Fn) -> Result<Arc<Self>, String> {
+        Self::build_for_gatify(analysis, f, false)
+    }
+
+    /// Optionally queries sparse unsigned multiply factors without
+    /// strengthening the range or population information exposed to other
+    /// consumers.
+    pub fn build_for_gatify(
+        analysis: &IrAnalysis,
+        f: &ir::Fn,
+        infer_sparse_products: bool,
+    ) -> Result<Arc<Self>, String> {
         let mut by_text_id: BTreeMap<usize, NodeRangeInfo> = BTreeMap::new();
         // These potentially relational queries remove priority logic from
         // selects and one-hot encoders. Do not query every datapath value.
@@ -251,6 +276,43 @@ impl IrRangeInfo {
             );
         }
 
-        Ok(Arc::new(Self { by_text_id }))
+        let mut result = Self::from_node_range_info(by_text_id);
+        if infer_sparse_products {
+            // Existing population consumers already have their relational
+            // result in KnownBits. Query each remaining eligible factor at most
+            // once.
+            let mut queried = population_operands;
+            for node in &f.nodes {
+                let ir::NodePayload::Binop(ir::Binop::Umul, lhs, rhs) = node.payload else {
+                    continue;
+                };
+                let operands = [f.get_node(lhs), f.get_node(rhs)];
+                if node.ty.bit_count() <= 2
+                    || operands.iter().any(|n| {
+                        n.ty.bit_count() <= 1 || matches!(n.payload, ir::NodePayload::Literal(_))
+                    })
+                {
+                    continue;
+                }
+                for factor in operands {
+                    let id = factor.text_id;
+                    let width = factor.ty.bit_count();
+                    if matches!(factor.payload, ir::NodePayload::Param)
+                        || !queried.insert(id)
+                        || result.is_sparse_product_factor(id, width)
+                    {
+                        continue;
+                    }
+                    let native_id = i64::try_from(id)
+                        .map_err(|_| format!("node text_id {id} does not fit in i64"))?;
+                    if analysis.at_most_one_bit_true(native_id).map_err(|e| {
+                        format!("at-most-one query failed for product factor {id}: {e}")
+                    })? {
+                        result.sparse_product_factors.insert((id, width));
+                    }
+                }
+            }
+        }
+        Ok(Arc::new(result))
     }
 }

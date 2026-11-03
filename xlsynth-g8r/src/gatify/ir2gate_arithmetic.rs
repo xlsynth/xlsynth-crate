@@ -5,8 +5,9 @@
 use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gatify::ir2gate::{
-    GateEnv, gatify_add_with_mapping, gatify_arithmetic_cluster, gatify_fused_product_rows,
-    gatify_sext_or_truncate, gatify_zext_or_truncate, get_pow2_minus1_k, literal_bits_if_bits_node,
+    GateEnv, GatifyOptions, gatify_add_with_mapping, gatify_arithmetic_cluster,
+    gatify_fused_product_rows, gatify_sext_or_truncate, gatify_zext_or_truncate, get_pow2_minus1_k,
+    literal_bits_if_bits_node,
 };
 use crate::ir2gate_utils::AdderMapping;
 use std::ops::Range;
@@ -120,8 +121,8 @@ fn match_selected_negate_term(
     None
 }
 
-/// Resizes a literal term to the `ExtNaryAdd` output width.
-fn resize_literal_bits_for_ext_nary_add(
+/// Resizes an arithmetic literal modulo the requested width.
+pub(super) fn resize_literal_bits(
     bits: &xlsynth_pir::IrBits,
     output_width: usize,
     signed: bool,
@@ -152,7 +153,7 @@ fn accumulate_ext_nary_add_literal(
     signed: bool,
     negated: bool,
 ) {
-    let resized = resize_literal_bits_for_ext_nary_add(term_bits, output_width, signed);
+    let resized = resize_literal_bits(term_bits, output_width, signed);
     let contribution = if negated { resized.negate() } else { resized };
     *literal_sum = literal_sum.add(&contribution);
 }
@@ -868,6 +869,65 @@ pub(super) fn gatify_sub_binop(
     gates
 }
 
+/// Lowers a two-bit sum with a late upper bit from a preceding sum.
+/// The upper result is the word's high bit XOR the majority of its low bit
+/// and the two scalars. Preparing both cofactors leaves a mux on the late path.
+fn gatify_cofactored_carry_column(
+    f: &ir::Fn,
+    env: &GateEnv,
+    terms: &[ir::ExtNaryAddTerm],
+    gb: &mut GateBuilder,
+) -> Option<AigBitVector> {
+    let mut word = None;
+    let mut scalar = None;
+    let mut late_bit = None;
+    for term in terms {
+        if term.signed || term.negated || env.product_is_deferred(term.operand) {
+            return None;
+        }
+        let node = f.get_node(term.operand);
+        let slot = match node.ty {
+            ir::Type::Bits(2) => &mut word,
+            ir::Type::Bits(1) => match node.payload {
+                ir::NodePayload::BitSlice {
+                    arg,
+                    start: 1,
+                    width: 1,
+                } if f.get_node_ty(arg) == &ir::Type::Bits(2)
+                    && matches!(f.get_node(arg).payload, ir::NodePayload::ExtNaryAdd { .. }) =>
+                {
+                    &mut late_bit
+                }
+                _ => &mut scalar,
+            },
+            _ => return None,
+        };
+        if slot.replace(term.operand).is_some() {
+            return None;
+        }
+    }
+    let word = env.get_bit_vector(word?).ok()?;
+    let low = *word.get_lsb(0);
+    let high = *word.get_lsb(1);
+    let scalar = *env.get_bit_vector(scalar?).ok()?.get_lsb(0);
+    let late_bit = *env.get_bit_vector(late_bit?).ok()?.get_lsb(0);
+    let early_depth = gb
+        .aig_depth(low)?
+        .max(gb.aig_depth(high)?)
+        .max(gb.aig_depth(scalar)?);
+    if gb.aig_depth(late_bit)? <= early_depth {
+        return None;
+    }
+    let propagate = gb.add_xor_binary(low, scalar);
+    let sum = gb.add_xor_binary(propagate, late_bit);
+    let generate = gb.add_and_binary(low, scalar);
+    let carry_when_zero = gb.add_xor_binary(high, generate);
+    let transmit = gb.add_or_binary(low, scalar);
+    let carry_when_one = gb.add_xor_binary(high, transmit);
+    let next = gb.add_mux2(late_bit, carry_when_one, carry_when_zero);
+    Some(AigBitVector::from_lsb_is_index_0(&[sum, next]))
+}
+
 /// Lowers an `ext_nary_add` node.
 pub(super) fn gatify_ext_nary_add(
     f: &ir::Fn,
@@ -876,8 +936,7 @@ pub(super) fn gatify_ext_nary_add(
     terms: &[ir::ExtNaryAddTerm],
     arch: Option<ir::ExtNaryAddArchitecture>,
     output_width: usize,
-    default_adder_mapping: AdderMapping,
-    enable_rewrite_nary_add: bool,
+    options: &GatifyOptions,
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
     if output_width == 0 {
@@ -887,8 +946,70 @@ pub(super) fn gatify_ext_nary_add(
         return AigBitVector::zeros(output_width);
     }
 
+    if options.enable_rewrite_nary_add
+        && arch.is_none()
+        && output_width == 2
+        && terms.len() == 3
+        && let Some(column) = gatify_cofactored_carry_column(f, env, terms, g8_builder)
+    {
+        log::debug!("cofactored carry column: node={text_id}");
+        return column;
+    }
+
+    // Three unsigned scalar terms form one full-adder. Keep their arrival-aware
+    // placement and share propagate/generate logic across sum and carry.
+    if options.enable_rewrite_nary_add
+        && g8_builder.options.hash
+        && arch.is_none()
+        && output_width >= 2
+        && terms.len() == 3
+        && terms.iter().all(|term| {
+            !term.signed
+                && !term.negated
+                && !env.product_is_deferred(term.operand)
+                && f.get_node_ty(term.operand) == &ir::Type::Bits(1)
+        })
+    {
+        let inputs: [AigOperand; 3] = std::array::from_fn(|i| {
+            *env.get_bit_vector(terms[i].operand)
+                .expect("scalar sum operand should be present")
+                .get_lsb(0)
+        });
+        let arrivals = inputs.map(|input| {
+            g8_builder
+                .aig_depth(input)
+                .expect("hashed builder has cached arrivals")
+        });
+        // Preserve the CPA when its carry-in is already the late input.
+        // Constant terms use the existing literal accumulation and folding
+        // path.
+        if arrivals[0] < arrivals[1].max(arrivals[2])
+            && inputs.iter().all(|input| {
+                !g8_builder.is_known_false(*input) && !g8_builder.is_known_true(*input)
+            })
+        {
+            let mut ordered = inputs;
+            let latest = (0..3).max_by_key(|&i| arrivals[i]).expect("three inputs");
+            ordered.swap(2, latest);
+            let full =
+                g8_builder.add_full_adder_using_shared_parity(ordered[0], ordered[1], ordered[2]);
+            log::debug!(
+                "scalar full-adder: node={} width={} arrivals={:?} sum_depth={:?} carry_depth={:?}",
+                text_id,
+                output_width,
+                arrivals,
+                g8_builder.aig_depth(full.sum),
+                g8_builder.aig_depth(full.carry)
+            );
+            let mut bits = vec![g8_builder.get_false(); output_width];
+            bits[0] = full.sum;
+            bits[1] = full.carry;
+            return AigBitVector::from_lsb_is_index_0(&bits);
+        }
+    }
+
     let false_bit = g8_builder.get_false();
-    let selected_negates: Vec<Option<SelectedNegateMatch>> = if enable_rewrite_nary_add {
+    let selected_negates: Vec<Option<SelectedNegateMatch>> = if options.enable_rewrite_nary_add {
         terms
             .iter()
             .map(|term| match_selected_negate_term(f, env, term, output_width, false_bit))
@@ -939,7 +1060,8 @@ pub(super) fn gatify_ext_nary_add(
     let mut carry_in: Option<AigOperand> = None;
     for (term, selected_negate) in terms.iter().zip(selected_negates) {
         if env.product_is_deferred(term.operand) {
-            let rows = gatify_fused_product_rows(f, env, term.operand, output_width, g8_builder);
+            let rows =
+                gatify_fused_product_rows(f, env, term.operand, output_width, options, g8_builder);
             let mut correction = xlsynth_pir::IrBits::zero(output_width);
             for row in rows {
                 if term.negated {
@@ -1049,7 +1171,7 @@ pub(super) fn gatify_ext_nary_add(
 
     let selected_adder_mapping = arch
         .map(AdderMapping::from)
-        .unwrap_or(default_adder_mapping);
+        .unwrap_or(options.adder_mapping);
     let selected_adder_mapping_name = match selected_adder_mapping {
         AdderMapping::RippleCarry => "ripple_carry",
         AdderMapping::BrentKung => "brent_kung",

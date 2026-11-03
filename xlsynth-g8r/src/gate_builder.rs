@@ -36,6 +36,7 @@ use crate::{
 };
 
 mod full_adder;
+mod region_trial;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionKind {
@@ -231,6 +232,24 @@ impl GateBuilder {
             .expect("append checkpoint should still be active")
             .original_prefix_nodes
             .insert(aig_ref.id, original);
+    }
+
+    /// Appends to a completed graph without rebuilding or renumbering its
+    /// nodes.
+    pub(crate) fn append_to(graph: GateFn) -> Self {
+        Self {
+            name: graph.name,
+            gates: graph.gates,
+            inputs: graph.inputs,
+            outputs: graph.outputs,
+            ..Self::new(
+                String::new(),
+                GateBuilderOptions {
+                    fold: true,
+                    hash: false,
+                },
+            )
+        }
     }
 
     pub fn build(self) -> GateFn {

@@ -7,10 +7,16 @@ use crate::aig::gate::{AigBitVector, AigNode, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::ir2gate_arithmetic::{
-    gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
+    gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, resize_literal_bits,
+    try_gatify_selected_unit_delta,
 };
-use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::mul_by_const_csd::{
+    SignedDigitSign, decompose_modular_const_terms, decompose_umul_const_terms,
+};
+use crate::gatify::prep_for_gatify::{
+    PrepForGatifyOptions, prep_for_gatify, prep_for_gatify_observing,
+};
+use crate::gatify::terminal_wrap::{TerminalWrapCapture, TerminalWrapPermit};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
@@ -34,11 +40,36 @@ use crate::ir2gate_utils::{
 use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
+mod bounded_affine_clamp;
+mod bounded_conjunction;
+mod conditional_select;
 mod demanded_bits;
+mod guarded_unit;
+pub(crate) mod joint_word;
+pub(crate) mod priority_ordinal;
+mod priority_predicate;
+mod priority_word_update;
+
+pub(crate) mod observed_select_rails;
+mod ordered_observations;
+mod read_predicates;
+mod shift_reduction_predicate;
+mod word_observations;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
+use priority_predicate::PriorityPredicatePlan;
+use shift_reduction_predicate::ShiftReductionPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
+
+#[derive(Default)]
+pub(crate) struct TerminalObservations {
+    pub(crate) wrap: Option<TerminalWrapCapture>,
+    pub(crate) word_groups: Option<Vec<joint_word::CapturedGroup>>,
+    pub(crate) ordinals: Vec<priority_ordinal::ReturnBit>,
+    pub(crate) words: Vec<observed_select_rails::WordObservation>,
+    pub(crate) rail_budget: crate::aig::retained_rails::RailBudget,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayIndexLoweringStrategy {
@@ -192,9 +223,14 @@ enum UseCounts {
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
+    select_proof_visits: usize,
+    guarded_unit_facts: bounded_conjunction::Facts,
     /// Absent for standalone node lowering, where every target bit is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
+    priority_predicate_plan: PriorityPredicatePlan,
+    word_recipients: priority_word_update::Recipients,
+    shift_reduction_predicate_plan: ShiftReductionPredicatePlan,
 }
 
 impl GateEnv {
@@ -211,9 +247,14 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
+            priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
+            shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
 
@@ -231,9 +272,14 @@ impl GateEnv {
         }
         Self {
             ir_to_g8: HashMap::new(),
+            select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
+            priority_predicate_plan: PriorityPredicatePlan::default(),
+            word_recipients: priority_word_update::Recipients::default(),
+            shift_reduction_predicate_plan: ShiftReductionPredicatePlan::default(),
         }
     }
 
@@ -250,11 +296,16 @@ impl GateEnv {
 
     /// Returns whether a node has exactly one use within the mapping boundary.
     pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
-        let count = match &self.use_counts {
+        self.use_count(ir_node_ref) == 1
+    }
+
+    /// Counts operand edges and externally retained values at this mapping
+    /// boundary.
+    pub(super) fn use_count(&self, ir_node_ref: ir::NodeRef) -> usize {
+        match &self.use_counts {
             UseCounts::Function(counts) => counts[ir_node_ref.index],
             UseCounts::Region(counts) => counts.get(&ir_node_ref).copied().unwrap_or(0),
-        };
-        count == 1
+        }
     }
 
     /// Returns whether this product is emitted as rows at its sole sum
@@ -1007,7 +1058,14 @@ fn gatify_array_slice_bit_shift(
     } else {
         e_const
     };
-    let start_scaled = gatify_umul(&start_ext, &e_ext, start_scaled_w, mul_adder_mapping, gb);
+    let start_scaled = gatify_umul(
+        &start_ext,
+        &e_ext,
+        start_scaled_w,
+        mul_adder_mapping,
+        None,
+        gb,
+    );
 
     // 4) Shift right by start_scaled and take low (width * e_bits) bits.
     let out_width_bits = width * e_bits;
@@ -1260,39 +1318,50 @@ fn gatify_sel(
     }
 }
 
-fn gatify_mul(
+fn gatify_smul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
-    signedness: Signedness,
     mul_adder_mapping: AdderMapping,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
-    match signedness {
-        Signedness::Unsigned => {
-            gatify_umul(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
-        }
-        Signedness::Signed => {
-            if let Some(result) =
-                gatify_smul_widening(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
-            {
-                return result;
-            }
-
-            // Pre-sign-extend operands to the final output width.
-            let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
-                gatify_sign_ext(gb, 0, output_bit_count, lhs_bits)
-            } else {
-                lhs_bits.clone()
-            };
-            let rhs_ext = if rhs_bits.get_bit_count() < output_bit_count {
-                gatify_sign_ext(gb, 0, output_bit_count, rhs_bits)
-            } else {
-                rhs_bits.clone()
-            };
-            gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, mul_adder_mapping, gb)
-        }
+    if let Some(result) =
+        gatify_smul_widening(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
+    {
+        return result;
     }
+    let lhs_ext = sign_extend_mul_operand_if_needed(lhs_bits, output_bit_count, gb);
+    let rhs_ext = sign_extend_mul_operand_if_needed(rhs_bits, output_bit_count, gb);
+    gatify_umul(
+        &lhs_ext,
+        &rhs_ext,
+        output_bit_count,
+        mul_adder_mapping,
+        None,
+        gb,
+    )
+}
+
+/// Preserves nonnegative operand widths for unsigned partial-product lowering.
+fn sign_extend_mul_operand_if_needed(
+    bits: &AigBitVector,
+    output_width: usize,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    // Unsigned multiplication already zero-extends its operands. Keeping their
+    // natural widths avoids padding a narrow multiplier with all-zero rows.
+    if bits.get_bit_count() > 0
+        && bits.get_bit_count() < output_width
+        && !gb.is_known_false(*bits.get_msb(0))
+    {
+        gatify_sign_ext(gb, 0, output_width, bits)
+    } else {
+        bits.clone()
+    }
+}
+
+fn uses_baugh_wooley_rows(lhs_width: usize, rhs_width: usize, output_width: usize) -> bool {
+    lhs_width == rhs_width && output_width > lhs_width && output_width - lhs_width <= lhs_width
 }
 
 /// Lowers same-width widening signed multiply without materializing sign
@@ -1305,11 +1374,7 @@ fn gatify_smul_widening(
     gb: &mut GateBuilder,
 ) -> Option<AigBitVector> {
     let input_bit_count = lhs_bits.get_bit_count();
-    if input_bit_count == 0
-        || rhs_bits.get_bit_count() != input_bit_count
-        || output_bit_count <= input_bit_count
-        || output_bit_count > 2 * input_bit_count
-    {
+    if !uses_baugh_wooley_rows(input_bit_count, rhs_bits.get_bit_count(), output_bit_count) {
         return None;
     }
 
@@ -1434,6 +1499,7 @@ fn gatify_umul(
     rhs_bits: &AigBitVector,
     output_bit_count: usize,
     mul_adder_mapping: AdderMapping,
+    sparse_product: Option<(usize, &[bool])>,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     let lhs_bit_count = lhs_bits.get_bit_count();
@@ -1459,9 +1525,64 @@ fn gatify_umul(
 
     let partial_products =
         gatify_umul_partial_products(multiplicand_bits, multiplier_bits, output_bit_count, gb);
+    if let Some(sum) = reduce_sparse_rows(gb, &partial_products, sparse_product) {
+        return sum;
+    }
 
     // Sum all partial products using the requested adder mapping.
     array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
+}
+
+/// A function-wide relation may depend on signals exposed independently at a
+/// region or node boundary. Respect explicit multiplier implementation choices.
+fn sparse_product_demands<'a>(
+    f: &ir::Fn,
+    env: &'a GateEnv,
+    product: ir::NodeRef,
+    options: &GatifyOptions,
+) -> Option<(usize, &'a [bool])> {
+    let node = f.get_node(product);
+    let ir::NodePayload::Binop(ir::Binop::Umul, lhs, rhs) = node.payload else {
+        return None;
+    };
+    if options.mul_adder_mapping.is_some() || !matches!(env.use_counts, UseCounts::Function(_)) {
+        return None;
+    }
+    let demanded = env.demanded_bits.as_ref()?.get(&product)?;
+    let facts = options.range_info.as_ref()?;
+    [lhs, rhs]
+        .iter()
+        .any(|&operand| {
+            let operand = f.get_node(operand);
+            facts.is_sparse_product_factor(operand.text_id, operand.ty.bit_count())
+        })
+        .then_some((node.text_id, demanded))
+}
+
+/// Collapses mutually exclusive terms before ordinary or fused accumulation.
+fn reduce_sparse_rows(
+    gb: &mut GateBuilder,
+    partial_products: &[AigBitVector],
+    sparse_product: Option<(usize, &[bool])>,
+) -> Option<AigBitVector> {
+    let (product_id, demanded) = sparse_product?;
+    let output_bit_count = partial_products.first()?.get_bit_count();
+    // Every column contains distinct bits of the sparse operand. At most
+    // one term can be set, regardless of which operand supplied the rows.
+    let mut carry_bound = 0;
+    for (column, &observed) in demanded.iter().take(output_bit_count).enumerate() {
+        if observed && carry_bound != 0 {
+            log::debug!("sparse_product product_id={product_id} observed_carry_column={column}");
+            return Some(gb.add_or_vec_nary(partial_products, ReductionKind::Tree));
+        }
+        let live_terms = partial_products
+            .iter()
+            .filter(|row| !gb.is_known_false(*row.get_lsb(column)))
+            .count();
+        carry_bound = (live_terms + carry_bound) / 2;
+    }
+    log::debug!("sparse_product product_id={product_id} no_observable_carry");
+    None
 }
 
 /// Builds shifted partial-product rows for unsigned multiplication.
@@ -1631,51 +1752,74 @@ fn usize_as_aig_bits(value: usize, bit_count: usize, gb: &mut GateBuilder) -> Ai
     AigBitVector::from_lsb_is_index_0(&bits)
 }
 
-fn gatify_umul_const_partial_products(
-    multiplicand_bits: &AigBitVector,
-    constant_bits: &IrBits,
-    output_bit_count: usize,
+/// Emits signed-digit rows for a product with one literal factor.
+fn gatify_literal_product_rows(
+    f: &ir::Fn,
+    env: &GateEnv,
+    product: ir::NodeRef,
+    output_width: usize,
+    resolved: bool,
     gb: &mut GateBuilder,
-) -> Vec<AigBitVector> {
-    if output_bit_count == 0 {
-        return Vec::new();
-    }
-    let terms = decompose_umul_const_terms(constant_bits, output_bit_count);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-
-    let mut operands: Vec<AigBitVector> = Vec::with_capacity(terms.len() + 1);
-    let mut neg_term_count = 0usize;
-    for term in terms {
-        let shifted = shll_const_and_resize(multiplicand_bits, term.shift, output_bit_count, gb);
-        match term.sign {
-            SignedDigitSign::Plus => operands.push(shifted),
-            SignedDigitSign::Minus => {
-                operands.push(gb.add_not_vec(&shifted));
-                neg_term_count = neg_term_count.saturating_add(1);
+) -> Option<Vec<AigBitVector>> {
+    let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
+        f.get_node(product).payload
+    else {
+        unreachable!("expected a multiplication node")
+    };
+    let (multiplicand, coefficient) = match (
+        literal_bits_if_bits_node(f, lhs),
+        literal_bits_if_bits_node(f, rhs),
+    ) {
+        (None, Some(k)) => (lhs, k),
+        (Some(k), None) => (rhs, k),
+        _ => return None,
+    };
+    let mut bits = env
+        .get_bit_vector(multiplicand)
+        .expect("product input present");
+    let terms = if op == ir::Binop::Smul {
+        let input_width = bits.get_bit_count();
+        bits = sign_extend_mul_operand_if_needed(&bits, output_width, gb);
+        let residue = resize_literal_bits(&coefficient, output_width, /* signed= */ true);
+        if resolved {
+            let terms = decompose_modular_const_terms(&residue);
+            let natural =
+                if uses_baugh_wooley_rows(input_width, coefficient.get_bit_count(), output_width) {
+                    &coefficient
+                } else {
+                    &residue
+                };
+            let bit_rows = (0..natural.get_bit_count())
+                .filter(|&i| natural.get_bit(i).expect("index within the literal"))
+                .count();
+            // Count the correction vector as a row at a resolved product. A
+            // fused compressor can share its constants with other terms.
+            let correction_row = terms.iter().any(|t| t.sign == SignedDigitSign::Minus);
+            if !terms.is_empty() && terms.len() + usize::from(correction_row) >= bit_rows {
+                return None;
             }
+            terms
+        } else {
+            decompose_umul_const_terms(&residue, output_width)
+        }
+    } else {
+        decompose_umul_const_terms(&coefficient, output_width)
+    };
+    let mut rows = Vec::with_capacity(terms.len() + 1);
+    let mut neg_term_count = 0;
+    for term in terms {
+        let shifted = shll_const_and_resize(&bits, term.shift, output_width, gb);
+        if term.sign == SignedDigitSign::Minus {
+            rows.push(gb.add_not_vec(&shifted));
+            neg_term_count += 1;
+        } else {
+            rows.push(shifted);
         }
     }
     if neg_term_count != 0 {
-        operands.push(usize_as_aig_bits(neg_term_count, output_bit_count, gb));
+        rows.push(usize_as_aig_bits(neg_term_count, output_width, gb));
     }
-    operands
-}
-
-fn gatify_umul_const_via_csd(
-    multiplicand_bits: &AigBitVector,
-    constant_bits: &IrBits,
-    output_bit_count: usize,
-    mul_adder_mapping: AdderMapping,
-    gb: &mut GateBuilder,
-) -> AigBitVector {
-    let rows =
-        gatify_umul_const_partial_products(multiplicand_bits, constant_bits, output_bit_count, gb);
-    if rows.is_empty() {
-        return AigBitVector::zeros(output_bit_count);
-    }
-    array_add_with_carry_out(gb, &rows, None, mul_adder_mapping).sum
+    Some(rows)
 }
 
 /// Emits one product's existing partial rows without its final adder.
@@ -1684,6 +1828,7 @@ pub(super) fn gatify_fused_product_rows(
     env: &GateEnv,
     product: ir::NodeRef,
     output_width: usize,
+    options: &GatifyOptions,
     gb: &mut GateBuilder,
 ) -> Vec<AigBitVector> {
     let ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) =
@@ -1692,34 +1837,45 @@ pub(super) fn gatify_fused_product_rows(
         unreachable!("fusion plan contains only multiplication nodes")
     };
     assert!(f.get_node(product).ty.bit_count() >= output_width);
-    if op == ir::Binop::Umul {
-        if let Some((multiplicand, constant)) = normalize_umul_literal_rhs(f, lhs, rhs) {
-            let bits = env
-                .get_bit_vector(multiplicand)
-                .expect("product input present");
-            return gatify_umul_const_partial_products(&bits, &constant, output_width, gb);
-        }
+    if let Some(rows) = gatify_literal_product_rows(
+        f,
+        env,
+        product,
+        output_width,
+        /* resolved= */ false,
+        gb,
+    ) {
+        return rows;
     }
     let mut lhs = env.get_bit_vector(lhs).expect("product lhs present");
     let mut rhs = env.get_bit_vector(rhs).expect("product rhs present");
     if op == ir::Binop::Smul {
         let width = lhs.get_bit_count();
-        if width > 0
-            && rhs.get_bit_count() == width
-            && output_width > width
-            && output_width <= 2 * width
-        {
+        if uses_baugh_wooley_rows(width, rhs.get_bit_count(), output_width) {
             return gatify_smul_baugh_wooley_partial_products(&lhs, &rhs, output_width, gb);
         }
-        lhs = gatify_sext_or_truncate(gb, 0, output_width, &lhs);
-        rhs = gatify_sext_or_truncate(gb, 0, output_width, &rhs);
+        lhs = sign_extend_mul_operand_if_needed(&lhs, output_width, gb);
+        rhs = sign_extend_mul_operand_if_needed(&rhs, output_width, gb);
+        if lhs.get_bit_count() > output_width {
+            lhs = lhs.get_lsb_slice(0, output_width);
+        }
+        if rhs.get_bit_count() > output_width {
+            rhs = rhs.get_lsb_slice(0, output_width);
+        }
     }
     let (multiplicand, multiplier) = if rhs.get_bit_count() <= lhs.get_bit_count() {
         (&lhs, &rhs)
     } else {
         (&rhs, &lhs)
     };
-    gatify_umul_partial_products(multiplicand, multiplier, output_width, gb)
+    let rows = gatify_umul_partial_products(multiplicand, multiplier, output_width, gb);
+    if let Some(sum) =
+        reduce_sparse_rows(gb, &rows, sparse_product_demands(f, env, product, options))
+    {
+        vec![sum]
+    } else {
+        rows
+    }
 }
 
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
@@ -2146,21 +2302,6 @@ pub(super) fn get_pow2_minus1_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
         }
     }
     Some(k)
-}
-
-fn normalize_umul_literal_rhs(
-    f: &ir::Fn,
-    a: ir::NodeRef,
-    b: ir::NodeRef,
-) -> Option<(ir::NodeRef, IrBits)> {
-    let a_lit = literal_bits_if_bits_node(f, a);
-    let b_lit = literal_bits_if_bits_node(f, b);
-    match (a_lit, b_lit) {
-        (None, Some(rhs_bits)) => Some((a, rhs_bits)),
-        (Some(rhs_bits), None) => Some((b, rhs_bits)),
-        (Some(_), Some(_)) => None,
-        (None, None) => None,
-    }
 }
 
 fn get_neg_pow2_k(bits: &xlsynth_pir::IrBits) -> Option<usize> {
@@ -3563,7 +3704,21 @@ fn gatify_node(
                 default.map(|d| env.get_bit_vector(d).expect("default should be present"));
 
             let gates = early_unit_delta
+                .or_else(|| {
+                    conditional_select::equivalent_general_arm(
+                        f,
+                        env,
+                        g8_builder,
+                        *selector,
+                        &cases,
+                        default_bits.is_some(),
+                    )
+                })
+                .or_else(|| bounded_affine_clamp::lower(f, node_ref, env, g8_builder))
                 .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
+            let gates = env
+                .priority_predicate_plan
+                .lower_selection(node_ref, gates, env, g8_builder);
 
             // Tag the result bits
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
@@ -3625,10 +3780,18 @@ fn gatify_node(
 
         // -- bitwise reductions
         ir::NodePayload::Unop(ir::Unop::OrReduce, arg) => {
-            let arg_gates = env
-                .get_bit_vector(*arg)
-                .expect("unop arg should be present");
-            let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree);
+            let gate = env
+                .priority_predicate_plan
+                .lower_reduction(node_ref, env, g8_builder)
+                .unwrap_or_else(|| {
+                    let arg_gates = env
+                        .get_bit_vector(*arg)
+                        .expect("unop arg should be present");
+                    g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree)
+                });
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3664,17 +3827,8 @@ fn gatify_node(
                 .try_into()
                 .expect("ExtCarryOut c_in should be bits[1]");
 
-            let w = lhs_bits.get_bit_count();
-            let mut carry: AigOperand = c_in_bit;
-            for i in 0..w {
-                let a_i = *lhs_bits.get_lsb(i);
-                let b_i = *rhs_bits.get_lsb(i);
-                let g_i = g8_builder.add_and_binary(a_i, b_i);
-                let p_i = g8_builder.add_or_binary(a_i, b_i);
-                let p_and_c = g8_builder.add_and_binary(p_i, carry);
-                carry = g8_builder.add_or_binary(g_i, p_and_c);
-            }
-
+            let carry =
+                crate::ir2gate_utils::gatify_carry_out(g8_builder, &lhs_bits, &rhs_bits, c_in_bit);
             env.add(node_ref, GateOrVec::Gate(carry));
         }
         ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
@@ -3886,6 +4040,22 @@ fn gatify_node(
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
+            if arch.is_none()
+                && options.fold
+                && options.enable_rewrite_nary_add
+                && let Some(gates) = guarded_unit::try_lower(
+                    f,
+                    env,
+                    terms,
+                    output_width,
+                    options,
+                    g8_builder,
+                    node.text_id,
+                )
+            {
+                env.add(node_ref, GateOrVec::BitVector(gates));
+                return Ok(());
+            }
             let gates = gatify_ext_nary_add(
                 f,
                 &env,
@@ -3893,8 +4063,7 @@ fn gatify_node(
                 terms,
                 *arch,
                 output_width,
-                options.adder_mapping,
-                options.enable_rewrite_nary_add,
+                options,
                 g8_builder,
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
@@ -3906,6 +4075,9 @@ fn gatify_node(
             let b_bits = env.get_bit_vector(*b).expect("eq rhs should be present");
             assert_eq!(a_bits.get_bit_count(), b_bits.get_bit_count());
             let gate: AigOperand = g8_builder.add_eq_vec(&a_bits, &b_bits, ReductionKind::Tree);
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3919,6 +4091,9 @@ fn gatify_node(
             );
             let gate: AigOperand =
                 g8_builder.add_ne_vec(&a_gate_refs, &b_gate_refs, ReductionKind::Tree);
+            let gate = env
+                .shift_reduction_predicate_plan
+                .lower(node_ref, gate, env, g8_builder);
             g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3988,6 +4163,20 @@ fn gatify_node(
         }
 
         // -- nary operations
+        ir::NodePayload::Nary(op @ (ir::NaryOp::And | ir::NaryOp::Nand), _)
+            if env
+                .priority_predicate_plan
+                .zero_conjunctions
+                .contains(&node_ref) =>
+        {
+            let constant = if *op == ir::NaryOp::Nand {
+                g8_builder.get_true()
+            } else {
+                g8_builder.get_false()
+            };
+            let result = g8_builder.union_current_pir_node_id_into_operand(constant);
+            env.add(node_ref, GateOrVec::BitVector(result.into()));
+        }
         ir::NodePayload::Nary(ir::NaryOp::And, args) => {
             let arg_gates: Vec<AigBitVector> = args
                 .iter()
@@ -4094,6 +4283,7 @@ fn gatify_node(
                 default_bits,
                 selector_facts,
             );
+            let gates = priority_word_update::lower(f, node_ref, env, g8_builder, gates);
             // Tag the result.
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
@@ -4354,52 +4544,32 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(bit_vector));
         }
-        ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
-            let output_bit_count = node.ty.bit_count();
-            let signedness = if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..))
-            {
-                Signedness::Signed
-            } else {
-                Signedness::Unsigned
-            };
-            let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
-            let gates = if matches!(signedness, Signedness::Unsigned) {
-                if let Some((multiplicand, constant_bits)) =
-                    normalize_umul_literal_rhs(f, *lhs, *rhs)
-                {
-                    let multiplicand_bits = env
-                        .get_bit_vector(multiplicand)
-                        .expect("mul multiplicand should be present");
-                    gatify_umul_const_via_csd(
-                        &multiplicand_bits,
-                        &constant_bits,
-                        output_bit_count,
-                        mul_adder_mapping,
-                        g8_builder,
-                    )
+        ir::NodePayload::Binop(op @ (ir::Binop::Umul | ir::Binop::Smul), lhs, rhs) => {
+            let width = node.ty.bit_count();
+            let mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
+            let gates = if let Some(rows) = gatify_literal_product_rows(
+                f, env, node_ref, width, /* resolved= */ true, g8_builder,
+            ) {
+                if rows.is_empty() {
+                    AigBitVector::zeros(width)
                 } else {
-                    let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
-                    let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                    gatify_mul(
-                        &lhs_bits,
-                        &rhs_bits,
-                        output_bit_count,
-                        signedness,
-                        mul_adder_mapping,
-                        g8_builder,
-                    )
+                    array_add_with_carry_out(g8_builder, &rows, None, mapping).sum
                 }
             } else {
                 let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
                 let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
-                gatify_mul(
-                    &lhs_bits,
-                    &rhs_bits,
-                    output_bit_count,
-                    signedness,
-                    mul_adder_mapping,
-                    g8_builder,
-                )
+                if *op == ir::Binop::Smul {
+                    gatify_smul(&lhs_bits, &rhs_bits, width, mapping, g8_builder)
+                } else {
+                    gatify_umul(
+                        &lhs_bits,
+                        &rhs_bits,
+                        width,
+                        mapping,
+                        sparse_product_demands(f, env, node_ref, options),
+                        g8_builder,
+                    )
+                }
             };
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
@@ -4548,6 +4718,20 @@ fn gatify_node(
             return Err(msg);
         }
     }
+    if node.ty == ir::Type::Bits(1)
+        && let Some(value) = env
+            .shift_reduction_predicate_plan
+            .lower_window(node_ref, env, g8_builder)
+    {
+        let entry = env
+            .ir_to_g8
+            .get_mut(&node_ref)
+            .expect("ordinary result is present");
+        match entry {
+            GateOrVec::Gate(gate) => *gate = value,
+            GateOrVec::BitVector(bits) => *bits = value.into(),
+        }
+    }
     env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
     Ok(())
 }
@@ -4570,6 +4754,10 @@ fn gatify_internal(
     if options.enable_rewrite_nary_add {
         env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, env);
     }
+    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, env, options.fold);
+    if options.hash {
+        env.shift_reduction_predicate_plan = ShiftReductionPredicatePlan::extract(f, env);
+    }
 
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {
@@ -4591,6 +4779,9 @@ fn gatify_internal(
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
     }
 
+    let ordered = (options.hash && options.fold && options.enable_ordered_observations)
+        .then(|| ordered_observations::OrderedObservations::analyze(f, topological));
+    let mut read_predicates = read_predicates::ReadPredicates::default();
     for &node_ref in topological {
         if env.product_is_deferred(node_ref) {
             // Its only consumer takes partial rows, so do not emit a product
@@ -4613,7 +4804,24 @@ fn gatify_internal(
             None
         };
         g8_builder.set_current_pir_node_id(provenance_id);
-        gatify_node(f, node_ref, node, g8_builder, env, options)?;
+        if options.hash
+            && options.fold
+            && options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && matches!(node.payload, ir::NodePayload::ArrayIndex { .. })
+        {
+            read_predicates.consider(f, node_ref, g8_builder, env, options);
+        }
+        let rail = read_predicates.take(node_ref).or_else(|| {
+            let offer = ordered.as_ref()?.receivers.get(&node_ref)?;
+            Some(offer.lower(f, node_ref, g8_builder, env))
+        });
+        if let Some(rail) = rail {
+            let value = g8_builder.union_current_pir_node_id_into_operand(rail);
+            env.add(node_ref, GateOrVec::Gate(value));
+            env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
+        } else {
+            gatify_node(f, node_ref, node, g8_builder, env, options)?;
+        }
         g8_builder.set_current_pir_node_id(None);
     }
     // Resolve the outputs and place them into the builder.
@@ -4672,6 +4880,7 @@ pub struct GatifyOptions {
     pub hash: bool,
     /// Whether lowered AIG nodes retain their originating PIR node IDs.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub check_equivalence: bool,
     pub equivalence_solver: SolverChoice,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
@@ -4696,6 +4905,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -4718,6 +4928,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: false,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
@@ -4767,32 +4978,86 @@ fn gatify_lower_prepared_fn(
     options: &GatifyOptions,
     orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
     equiv_fn: &ir::Fn,
+    observations: Option<&mut TerminalObservations>,
 ) -> Result<GatifyOutput, String> {
-    let mut g8_builder = GateBuilder::new(
-        f.name.clone(),
-        GateBuilderOptions {
-            fold: options.fold,
-            hash: options.hash,
-        },
-    );
-    let mut env = GateEnv::new(f);
     let topological = ir_utils::get_topological(f);
-    let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
-    env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
     let provenance_by_node = if options.track_pir_node_ids {
         orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
     } else {
         None
     };
-    gatify_internal(
-        f,
-        &mut g8_builder,
-        &mut env,
-        options,
-        provenance_by_node.as_ref(),
-        &topological,
-    )?;
-    let gate_fn = g8_builder.build();
+    let map = |env: &mut GateEnv| -> Result<(GateFn, Option<std::time::Duration>), String> {
+        let start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+        let mut builder = GateBuilder::new(
+            f.name.clone(),
+            GateBuilderOptions {
+                fold: options.fold,
+                hash: options.hash,
+            },
+        );
+        gatify_internal(
+            f,
+            &mut builder,
+            env,
+            options,
+            provenance_by_node.as_ref(),
+            &topological,
+        )?;
+        let graph = builder.build();
+        Ok((graph, start.map(|t| t.elapsed())))
+    };
+    let mut env = GateEnv::new(f);
+    let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
+    env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
+    let (mut gate_fn, ordinary_map) = map(&mut env)?;
+    if let Some(trial) = env.word_recipients.take_trial(env.demanded_bits.as_ref()) {
+        let mut other = GateEnv::new(f);
+        other.word_recipients = trial;
+        other.demanded_bits = env.demanded_bits.take();
+        // Keep each topological walk and its provenance together, including
+        // ordinary users of an early word and payloads derived from that word.
+        let alternative = map(&mut other)
+            .inspect_err(|error| log::debug!("joint priority grant mapping failed: {error}"));
+        let demanded = other.demanded_bits.take();
+        if let Ok((graph, alternative_map)) = alternative {
+            let complete = other.word_recipients.complete();
+            log::debug!(
+                "joint priority grants: complete={complete} ordinary_map={ordinary_map:?} alternative_map={alternative_map:?}"
+            );
+            if complete {
+                let cost_start = log::log_enabled!(log::Level::Debug).then(std::time::Instant::now);
+                use crate::aig::get_summary_stats::get_output_cone_stats;
+                let before = get_output_cone_stats(&gate_fn);
+                let after = get_output_cone_stats(&graph);
+                let take = priority_word_update::improves(&before, &after);
+                log::debug!(
+                    "joint priority grants: accepted={take} compare={:?} live ANDs {} -> {}",
+                    cost_start.map(|t| t.elapsed()),
+                    before.and_nodes,
+                    after.and_nodes
+                );
+                if take {
+                    gate_fn = graph;
+                    env = other;
+                }
+            }
+        }
+        env.demanded_bits = demanded;
+    }
+    if let Some(captures) = observations {
+        priority_ordinal::capture(
+            f,
+            &env,
+            &gate_fn,
+            &mut captures.ordinals,
+            &mut captures.rail_budget,
+        );
+        captures.words =
+            observed_select_rails::capture(f, &env, &gate_fn, &mut captures.rail_budget);
+        if let Some(groups) = &mut captures.word_groups {
+            *groups = joint_word::capture(f, &env, &gate_fn);
+        }
+    }
     log::debug!(
         "converted IR function to gate function:\n{}",
         gate_fn.to_string()
@@ -4848,10 +5113,29 @@ fn gatify_lower_prepared_fn(
 pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before gatify_prepared_fn: {e}"))?;
-    gatify_lower_prepared_fn(f, &options, None, f)
+    gatify_lower_prepared_fn(f, &options, None, f, None)
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+    gatify_with_terminal_observations(orig_fn, options, TerminalObservationMode::None)
+        .map(|(output, _)| output)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalObservationMode {
+    None,
+    Incumbent,
+    WordChoices,
+}
+
+pub(crate) fn gatify_with_terminal_observations(
+    orig_fn: &ir::Fn,
+    options: GatifyOptions,
+    mode: TerminalObservationMode,
+) -> Result<(GatifyOutput, TerminalObservations), String> {
+    let observe = mode != TerminalObservationMode::None
+        && !options.unsafe_gatify_gate_operation
+        && options.adder_mapping == Default::default();
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
 
@@ -4866,7 +5150,8 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
     }
 
-    let prepared_fn = prep_for_gatify(
+    let mut permit = None;
+    let prepared_fn = prep_for_gatify_observing(
         orig_fn,
         options.range_info.as_deref(),
         PrepForGatifyOptions {
@@ -4877,10 +5162,39 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
+        options.array_index_lowering_strategy == ArrayIndexLoweringStrategy::Auto
+            && !options.unsafe_gatify_gate_operation,
+        |f| {
+            if observe {
+                permit = TerminalWrapPermit::at_source(f);
+            }
+        },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)
+    let mut captures = TerminalObservations {
+        word_groups: (observe
+            && options.fold
+            && options.hash
+            && mode == TerminalObservationMode::WordChoices)
+            .then(Vec::new),
+        ..TerminalObservations::default()
+    };
+    let observations = (observe && options.fold && options.hash).then_some(&mut captures);
+    let out = gatify_lower_prepared_fn(
+        &prepared_fn,
+        &options,
+        Some(&orig_ref_by_text_id),
+        orig_fn,
+        observations,
+    )?;
+    captures.wrap = permit.and_then(|p| {
+        p.capture(&prepared_fn, &out.gate_fn, |n| {
+            let original = orig_ref_by_text_id.get(&prepared_fn.get_node(n).text_id)?;
+            out.lowering_map.get(original)
+        })
+    });
+    Ok((out, captures))
 }
 
 pub fn gatify_node_as_fn(

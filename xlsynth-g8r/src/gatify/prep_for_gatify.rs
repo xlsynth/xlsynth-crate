@@ -18,7 +18,16 @@
 //! that need analysis should project to the XLS basis ops separately (see
 //! `xlsynth_pir::desugar_extensions`).
 
+mod affine_equality;
+mod complement_partitions;
+mod diagnostics;
+mod grouped_priority;
+mod lexicographic_comparisons;
+mod mixed_comparisons;
+mod quantized_affine_read;
+mod redundant_nonzero_mask;
 mod shifted_nonzero;
+mod widened_sum_threshold;
 
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -105,8 +114,9 @@ fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
 /// Convert `or(or_reduce(a), or_reduce(b), ...)` into
 /// `or_reduce(concat(a, b, ...))` when each of the `or_reduce` nodes has a
 /// single use.
-fn combine_or_reduces(f: &mut ir::Fn) {
+fn combine_or_reduces(f: &mut ir::Fn) -> usize {
     let use_counts = get_use_counts(f);
+    let mut rewrites = 0;
     for node_index in 0..f.nodes.len() {
         let payload = f.nodes[node_index].payload.clone();
         let NodePayload::Nary(NaryOp::Or, operands) = payload else {
@@ -163,7 +173,9 @@ fn combine_or_reduces(f: &mut ir::Fn) {
             unused_node.payload = NodePayload::Nil;
             unused_node.ty = ir::Type::nil();
         }
+        rewrites += 1;
     }
+    rewrites
 }
 
 /// Rewrites `encode(one_hot(...))` idioms into extension ops when the
@@ -1277,15 +1289,27 @@ fn grow_ext_nary_adds(f: &mut ir::Fn) -> usize {
 /// point under always-equivalent term rewrites.
 fn rewrite_nary_adds_to_fixed_point(f: &mut ir::Fn) -> usize {
     let mut rewrites = 0usize;
+    let mut round = 0;
     loop {
-        let mut round_rewrites = rewrite_gated_inc_dec_to_ext_nary_add(f);
-        round_rewrites += rewrite_add_sub_to_ext_nary_add(f);
-        round_rewrites += grow_ext_nary_adds(f);
+        round += 1;
+        let mut round_rewrites = diagnostics::run(
+            f,
+            "nary_add.gated_inc_dec",
+            round,
+            rewrite_gated_inc_dec_to_ext_nary_add,
+        );
+        round_rewrites += diagnostics::run(
+            f,
+            "nary_add.add_sub",
+            round,
+            rewrite_add_sub_to_ext_nary_add,
+        );
+        round_rewrites += diagnostics::run(f, "nary_add.grow", round, grow_ext_nary_adds);
         if round_rewrites == 0 {
             break;
         }
         rewrites += round_rewrites;
-        mark_dead_nodes_as_nil(f);
+        diagnostics::run(f, "nary_add.dead_nodes", round, mark_dead_nodes_as_nil);
     }
     rewrites
 }
@@ -1841,12 +1865,12 @@ fn get_zero_extended_low_bits(
     None
 }
 
-fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
+fn mark_dead_nodes_as_nil(f: &mut ir::Fn) -> usize {
     if f.nodes.is_empty() {
-        return;
+        return 0;
     }
     let Some(ret) = f.ret_node_ref else {
-        return;
+        return 0;
     };
 
     let mut live: Vec<bool> = vec![false; f.nodes.len()];
@@ -1871,11 +1895,14 @@ fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
         live[param.index] = true;
     }
 
+    let mut removed = 0;
     for i in 0..f.nodes.len() {
         if !live[i] {
+            removed += usize::from(f.nodes[i].payload != NodePayload::Nil);
             nil_out_node(f, ir::NodeRef { index: i });
         }
     }
+    removed
 }
 
 /// Rewrites the canonical carry-out idiom:
@@ -2592,41 +2619,180 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
+    // Without a lowering policy, keep table operands available to node-only and
+    // forced strategies.
+    prep_for_gatify_observing(f, range_info, options, false, |_| {})
+}
+
+pub(crate) fn prep_for_gatify_observing(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
+    observe_ordinary_adds: impl FnOnce(&ir::Fn),
+) -> ir::Fn {
     let mut cloned = f.clone();
-    shifted_nonzero::rewrite(&mut cloned);
-    combine_or_reduces(&mut cloned);
-    let _rewrites = rewrite_add_xor_and_to_or(&mut cloned);
+    diagnostics::snapshot(&cloned, "input", 0);
+    if synthesize_literal_reads {
+        diagnostics::run(
+            &mut cloned,
+            "quantized_affine_read",
+            0,
+            quantized_affine_read::rewrite,
+        );
+    }
+    diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
+        grouped_priority::rewrite(f, range_info)
+    });
+    diagnostics::run(
+        &mut cloned,
+        "mixed_comparisons",
+        0,
+        mixed_comparisons::rewrite,
+    );
+    diagnostics::run(
+        &mut cloned,
+        "lexicographic_comparisons",
+        0,
+        lexicographic_comparisons::rewrite,
+    );
+    diagnostics::run(
+        &mut cloned,
+        "complement_partitions",
+        0,
+        complement_partitions::rewrite,
+    );
+    diagnostics::run(
+        &mut cloned,
+        "redundant_nonzero_mask",
+        0,
+        redundant_nonzero_mask::rewrite,
+    );
+    observe_ordinary_adds(&cloned);
+    diagnostics::run(&mut cloned, "shifted_nonzero", 0, shifted_nonzero::rewrite);
+    diagnostics::run(&mut cloned, "combine_or_reduces", 0, combine_or_reduces);
+    diagnostics::run(
+        &mut cloned,
+        "add_xor_and_to_or",
+        0,
+        rewrite_add_xor_and_to_or,
+    );
     if options.enable_rewrite_small_shift_choices {
-        let _rewrites = rewrite_small_shift_choice_bit_slices(&mut cloned);
-        let _rewrites = rewrite_small_shift_choices(&mut cloned);
+        diagnostics::run(
+            &mut cloned,
+            "small_shift_choice_bit_slices",
+            0,
+            rewrite_small_shift_choice_bit_slices,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "small_shift_choices",
+            0,
+            rewrite_small_shift_choices,
+        );
     }
     if options.enable_rewrite_carry_out {
-        let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+        diagnostics::run(&mut cloned, "carry_out", 0, |f| {
+            rewrite_add_slice_carry_out_to_ext_carry_out(f, range_info)
+        });
     }
     if options.enable_rewrite_mask_low {
-        let mut _rewrites = rewrite_not_shifted_all_ones_to_ext_mask_low(&mut cloned);
-        _rewrites += rewrite_shift_minus_one_idioms_to_ext_mask_low(&mut cloned);
-        _rewrites += rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(&mut cloned);
-        _rewrites += rewrite_shifted_all_ones_to_not_ext_mask_low(&mut cloned);
-        _rewrites += rewrite_zero_concat_mask_low_to_ext_mask_low(&mut cloned, range_info);
+        diagnostics::run(
+            &mut cloned,
+            "mask_low.not_shifted_ones",
+            0,
+            rewrite_not_shifted_all_ones_to_ext_mask_low,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "mask_low.shift_minus_one",
+            0,
+            rewrite_shift_minus_one_idioms_to_ext_mask_low,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "mask_low.shifted_shrl_ones",
+            0,
+            rewrite_shifted_shrl_all_ones_to_not_ext_mask_low,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "mask_low.shifted_ones",
+            0,
+            rewrite_shifted_all_ones_to_not_ext_mask_low,
+        );
+        diagnostics::run(&mut cloned, "mask_low.zero_concat", 0, |f| {
+            rewrite_zero_concat_mask_low_to_ext_mask_low(f, range_info)
+        });
     }
     if options.enable_rewrite_nary_add {
-        let _rewrites = rewrite_nary_adds_to_fixed_point(&mut cloned);
+        diagnostics::run(
+            &mut cloned,
+            "nary_add.fixed_point",
+            0,
+            rewrite_nary_adds_to_fixed_point,
+        );
     }
     if options.enable_rewrite_prio_encode {
-        let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
-        let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
-        let _rewrites = rewrite_zero_extended_clz_to_ext_clz(&mut cloned);
-        let _rewrites = rewrite_lossless_ext_clz_width_sharing(&mut cloned);
-        let _rewrites = rewrite_eq_ne_clz_literal_to_input_predicate(&mut cloned);
+        diagnostics::run(
+            &mut cloned,
+            "priority.encode_one_hot",
+            0,
+            rewrite_encode_one_hot_idioms_to_ext_ops,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "priority.clz_plus_constant",
+            0,
+            rewrite_clz_plus_constant_to_ext_clz,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "priority.zero_extended_clz",
+            0,
+            rewrite_zero_extended_clz_to_ext_clz,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "priority.clz_width_sharing",
+            0,
+            rewrite_lossless_ext_clz_width_sharing,
+        );
+        diagnostics::run(
+            &mut cloned,
+            "priority.clz_literal_predicate",
+            0,
+            rewrite_eq_ne_clz_literal_to_input_predicate,
+        );
     }
     if options.enable_rewrite_normalize_left {
-        let _rewrites = rewrite_left_normalize_shift_to_ext_normalize_left(&mut cloned);
+        diagnostics::run(
+            &mut cloned,
+            "normalize_left",
+            0,
+            rewrite_left_normalize_shift_to_ext_normalize_left,
+        );
     }
-    let _rewrites = rewrite_projected_positive_mask_to_sign_test(&mut cloned);
-    mark_dead_nodes_as_nil(&mut cloned);
-    ir_utils::compact_and_toposort_in_place(&mut cloned)
-        .expect("prep_for_gatify: compact/toposort failed");
+    diagnostics::run(
+        &mut cloned,
+        "projected_positive_mask",
+        0,
+        rewrite_projected_positive_mask_to_sign_test,
+    );
+    diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
+    diagnostics::run(
+        &mut cloned,
+        "widened_sum_threshold",
+        0,
+        widened_sum_threshold::rewrite,
+    );
+    diagnostics::run(&mut cloned, "affine_equality", 0, affine_equality::rewrite);
+    diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
+        let before = f.nodes.len();
+        ir_utils::compact_and_toposort_in_place(f)
+            .expect("prep_for_gatify: compact/toposort failed");
+        before.saturating_sub(f.nodes.len())
+    });
     cloned
 }
 

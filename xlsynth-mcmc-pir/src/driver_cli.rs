@@ -180,6 +180,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("enable_ordered_observations")
+                .long("enable-ordered-observations")
+                .value_name("BOOL")
+                .help("Lower monotone predicates on exclusively observed min/max words")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("track_pir_node_ids")
                 .long("track-pir-node-ids")
                 .value_name("BOOL")
@@ -518,6 +526,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
     CanonicalG8rOptions {
         fold: parse_cli_bool(matches, "fold", defaults.fold),
         hash: parse_cli_bool(matches, "hash", defaults.hash),
+        enable_ordered_observations: parse_cli_bool(
+            matches,
+            "enable_ordered_observations",
+            defaults.enable_ordered_observations,
+        ),
         track_pir_node_ids: parse_cli_bool(
             matches,
             "track_pir_node_ids",

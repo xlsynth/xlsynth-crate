@@ -528,3 +528,64 @@ fn arithmetic_rows_rng_corpus_regression() {
     )
     .unwrap();
 }
+
+#[test]
+fn signed_literal_product_rows_match_explicit_modular_rows() {
+    for fused in [false, true] {
+        let options = GatifyOptions {
+            fold: true,
+            hash: true,
+            enable_rewrite_nary_add: fused,
+            mul_adder_mapping: Some(AdderMapping::BrentKung),
+            ..GatifyOptions::all_opts_disabled()
+        };
+        let lower = |product: &str| {
+            let f = parse(&format!(
+                r#"package constant
+ top fn f(x: bits[13] id=1, y: bits[21] id=2) -> bits[21] {{
+  x_ext: bits[21] = sign_ext(x, new_bit_count=21, id=3)
+  signed_k: bits[4] = literal(value=13, id=4)
+  residue: bits[21] = literal(value=0x1ffffd, id=5)
+  p: bits[21] = {product}
+  ret sum: bits[21] = ext_nary_add(p, y, signed=[false, false], negated=[false, false], arch=kogge_stone, id=7)
+ }}"#
+            ));
+            let mapped = gatify_prepared_fn(&f, options.clone()).unwrap();
+            let p = NodeRef {
+                index: f.nodes.iter().position(|n| n.text_id == 6).unwrap(),
+            };
+            assert_eq!(mapped.lowering_map.contains_key(&p), !fused);
+            let stats = get_aig_stats(&dce(&mapped.gate_fn));
+            (stats.and_nodes, stats.max_depth)
+        };
+        let expected = lower("umul(x_ext, residue, id=6)");
+        for product in ["smul(x, signed_k, id=6)", "smul(signed_k, x, id=6)"] {
+            assert_eq!(lower(product), expected);
+        }
+    }
+}
+
+#[test]
+fn signed_literal_products_preserve_operand_and_result_widths() {
+    let mut rng = StdRng::seed_from_u64(0xc5d);
+    for (x, k, value, product, result) in [
+        (3, 1, "1", 6, 6),  // One-bit signed minus one.
+        (1, 5, "16", 7, 7), // Most-negative coefficient.
+        (4, 6, "0", 6, 4),
+        (4, 6, "5", 3, 7), // Extend the truncated product at its use.
+        (6, 5, "27", 8, 5),
+        (66, 67, "0x40000000000000003", 134, 130),
+    ] {
+        for operands in ["x, k", "k, x"] {
+            let f = parse(&format!(
+                r#"package constant
+ top fn f(x: bits[{x}] id=1, y: bits[{result}] id=2) -> bits[{result}] {{
+  k: bits[{k}] = literal(value={value}, id=3)
+  p: bits[{product}] = smul({operands}, id=4)
+  ret sum: bits[{result}] = ext_nary_add(y, p, signed=[false, true], negated=[false, true], id=5)
+ }}"#
+            ));
+            check_samples(&f, 64, &mut rng, true);
+        }
+    }
+}

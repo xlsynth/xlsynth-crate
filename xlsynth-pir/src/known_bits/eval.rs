@@ -8,19 +8,22 @@ use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_utils;
 
 /// Obtains an operand that has already been visited in topological order.
-fn value_at(values: &[Option<KnownValue>], node: NodeRef) -> Result<&KnownValue, AnalysisError> {
-    values
-        .get(node.index)
-        .and_then(Option::as_ref)
-        .ok_or_else(|| {
-            AnalysisError::new(format!(
-                "missing known-bits operand at index {}",
-                node.index
-            ))
-        })
+fn value_at<'a>(
+    values: &impl Fn(NodeRef) -> Option<&'a KnownValue>,
+    node: NodeRef,
+) -> Result<&'a KnownValue, AnalysisError> {
+    values(node).ok_or_else(|| {
+        AnalysisError::new(format!(
+            "missing known-bits operand at index {}",
+            node.index
+        ))
+    })
 }
 
-fn bits_at(values: &[Option<KnownValue>], node: NodeRef) -> Result<&KnownBits, AnalysisError> {
+fn bits_at<'a>(
+    values: &impl Fn(NodeRef) -> Option<&'a KnownValue>,
+    node: NodeRef,
+) -> Result<&'a KnownBits, AnalysisError> {
     value_at(values, node)?
         .as_bits()
         .ok_or_else(|| AnalysisError::new("known-bits operand is not bits-typed"))
@@ -270,6 +273,13 @@ fn array_update(
 pub(super) fn evaluate(
     node: &ir::Node,
     values: &[Option<KnownValue>],
+) -> Result<KnownValue, AnalysisError> {
+    evaluate_with(node, &|reference| values.get(reference.index)?.as_ref())
+}
+
+pub(super) fn evaluate_with<'a>(
+    node: &ir::Node,
+    values: &impl Fn(NodeRef) -> Option<&'a KnownValue>,
 ) -> Result<KnownValue, AnalysisError> {
     let output_width = node
         .ty

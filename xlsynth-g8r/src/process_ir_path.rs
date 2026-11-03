@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod source_positions;
+
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_observing};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
@@ -38,6 +40,10 @@ pub use crate::gate_fn_optimize::DEFAULT_MAX_FRAIG_SIM_SAMPLES;
 
 fn default_cadical_terminate_limit() -> u32 {
     DEFAULT_CADICAL_TERMINATE_LIMIT
+}
+
+fn default_enable_ordered_observations() -> bool {
+    true
 }
 
 fn default_cut_db_rewrite() -> bool {
@@ -153,6 +159,7 @@ pub struct Options {
     pub hash: bool,
     /// Whether gatification and later rewrites retain PIR node provenance.
     pub track_pir_node_ids: bool,
+    pub enable_ordered_observations: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -228,6 +235,8 @@ pub struct CanonicalG8rOptions {
     /// Whether gatification records and propagates PIR node provenance.
     #[serde(default)]
     pub track_pir_node_ids: bool,
+    #[serde(default = "default_enable_ordered_observations")]
+    pub enable_ordered_observations: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -265,6 +274,7 @@ impl Default for CanonicalG8rOptions {
             fold: true,
             hash: true,
             track_pir_node_ids: false,
+            enable_ordered_observations: true,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
@@ -327,6 +337,7 @@ impl CanonicalG8rOptions {
             fold: self.fold,
             hash: self.hash,
             track_pir_node_ids: self.track_pir_node_ids,
+            enable_ordered_observations: self.enable_ordered_observations,
             enable_rewrite_carry_out: self.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: self.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: self.enable_rewrite_nary_add,
@@ -399,6 +410,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             track_pir_node_ids: options.track_pir_node_ids,
+            enable_ordered_observations: options.enable_ordered_observations,
             check_equivalence: false, // check is done below if requested
             equivalence_solver: options.equivalence_solver,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -421,6 +433,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             track_pir_node_ids: options.track_pir_node_ids,
+            enable_ordered_observations: options.enable_ordered_observations,
             check_equivalence: false,
             equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
@@ -464,11 +477,18 @@ fn prepared_ir_text_from_package(
     top_fn_name: &str,
     range_info: &IrRangeInfo,
     prep_opts: PrepForGatifyOptions,
+    synthesize_literal_reads: bool,
 ) -> Result<String, String> {
     let ir_top = ir_package
         .get_fn(top_fn_name)
         .expect("top fn should exist in pir_package");
-    let prepared_fn = prep_for_gatify(ir_top, Some(range_info), prep_opts);
+    let prepared_fn = prep_for_gatify_observing(
+        ir_top,
+        Some(range_info),
+        prep_opts,
+        synthesize_literal_reads,
+        |_| {},
+    );
     let external_refs = ir_utils::external_function_references(&prepared_fn);
     if !external_refs.is_empty() {
         let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
@@ -515,6 +535,7 @@ pub fn canonical_ir_text_to_prepared_gatify_ir(
         &prepared.top_fn_name,
         prepared.range_info.as_ref(),
         prep_opts,
+        !lowering_options.unsafe_gatify_gate_operation,
     )
 }
 
@@ -530,6 +551,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             fold: input.options.fold,
             hash: input.options.hash,
             track_pir_node_ids: input.options.track_pir_node_ids,
+            enable_ordered_observations: input.options.enable_ordered_observations,
             adder_mapping: input.options.adder_mapping,
             mul_adder_mapping: input.options.mul_adder_mapping,
             range_info: Some(input.range_info),
@@ -544,15 +566,52 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
     }
 }
 
+/// One complete native implementation of a shared conditional-word choice.
+pub struct WordChoice {
+    pub graph: crate::aig::GateFn,
+    pub mode: &'static str,
+    pub scope: &'static str,
+    /// Pairs of prepared PIR text IDs identifying the variable word inputs.
+    pub source_pairs: Vec<[usize; 2]>,
+    /// Mapped output roots rewritten during construction, in AIGER symbol
+    /// order. Subsequent ordinary optimization can restructure other cones as
+    /// well.
+    pub output_bits: Vec<usize>,
+}
+
+/// Alternatives returned alongside the unchanged canonical lowering.
+pub struct WordChoices {
+    pub status: &'static str,
+    /// A search stopped at the per-group speculative AND budget.
+    pub construction_limited: bool,
+    pub candidates: Vec<WordChoice>,
+}
+
 /// Processes IR text through the canonical g8r lowering path.
 pub fn process_ir_text_with_gatefn(
     ir_text: &str,
     options: &Options,
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
+    process_ir_text_with_optional_word_choices(ir_text, options, None)
+}
+
+fn process_ir_text_with_optional_word_choices(
+    ir_text: &str,
+    options: &Options,
+    choices: Option<&mut WordChoices>,
+) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
-    let ir2gates_output =
-        ir2gates::ir2gates_from_ir_text(ir_text, options.ir_top.as_deref(), ir2gates_options)?;
+    let (ir2gates_output, capture) = ir2gates::ir2gates_with_terminal_observations(
+        ir_text,
+        options.ir_top.as_deref(),
+        ir2gates_options,
+        if choices.is_some() && !options.fraig {
+            ir2gate::TerminalObservationMode::WordChoices
+        } else {
+            ir2gate::TerminalObservationMode::Incumbent
+        },
+    )?;
 
     let ir2gates::Ir2GatesOutput {
         pir_package: ir_package,
@@ -573,6 +632,7 @@ pub fn process_ir_text_with_gatefn(
             &top_fn_name,
             range_info.as_ref(),
             prep_opts,
+            !options.unsafe_gatify_gate_operation,
         )?;
         std::fs::write(out_path, prepared_text.as_bytes()).map_err(|e| {
             format!(
@@ -589,6 +649,13 @@ pub fn process_ir_text_with_gatefn(
 
     let mut gate_fn = gatify_output.gate_fn;
     let lowering_map = gatify_output.lowering_map;
+    let terminal_wrap = if options.hash && options.fold {
+        capture
+            .wrap
+            .and_then(|obs| crate::terminal_wrap_graft::TerminalWrapPlan::new(&gate_fn, obs))
+    } else {
+        None
+    };
 
     let independent_op_stats = if options.emit_independent_op_stats {
         let gatify_options = ir2gate::GatifyOptions::from(GatifyOptionsInput {
@@ -682,25 +749,75 @@ pub fn process_ir_text_with_gatefn(
         None
     };
 
-    // Map each gate reference back to the IR node positions, if available.
-    let mut gate_to_sources: HashMap<usize, Vec<String>> = HashMap::new();
-    for (node_ref, bit_vec) in lowering_map.iter() {
-        if let Some(pos_data) = ir_top.get_node(*node_ref).pos.as_ref() {
-            let sources: Vec<String> = pos_data
-                .iter()
-                .filter_map(|p| p.to_human_string(&ir_package.file_table))
-                .collect();
-            for operand in bit_vec.iter_lsb_to_msb() {
-                gate_to_sources
-                    .entry(operand.node.id)
-                    .or_default()
-                    .extend(sources.clone());
+    let positions = if options.quiet {
+        None
+    } else {
+        source_positions::SourcePositions::capture(
+            ir_top,
+            &ir_package.file_table,
+            &gate_fn,
+            &lowering_map,
+        )
+    };
+
+    let native_options = GateFnOptimizeOptions::from(options);
+    let word_alternatives = choices.map(|sink| {
+        sink.status = if native_options.fraig {
+            "fraig-enabled"
+        } else if capture.word_groups.is_none() {
+            "ineligible-lowering"
+        } else if terminal_wrap.is_some() {
+            "terminal-wrap"
+        } else {
+            "no-offers"
+        };
+        // Terminal wrap proofs bind the mapped incumbent. A different graph
+        // needs its own proof before those replacements can be applied.
+        let offers = match (&capture.word_groups, &terminal_wrap) {
+            (Some(groups), None) => {
+                ir2gate::joint_word::offers(&gate_fn, groups, &mut sink.construction_limited)
             }
+            _ => Vec::new(),
+        };
+        (sink, offers)
+    });
+    let optimize_outcome = optimize_gate_fn(gate_fn, &native_options)?;
+    gate_fn = match terminal_wrap {
+        Some(plan) => {
+            let result = plan.apply(optimize_outcome.gate_fn)?;
+            crate::aig::get_summary_stats::log_gate_snapshot(
+                module_path!(),
+                "after_terminal_wrap",
+                &result,
+            );
+            result
+        }
+        None => optimize_outcome.gate_fn,
+    };
+    // Every graph starts the terminal rail passes with the allowance left by
+    // capture.
+    let apply_terminal_rails = |graph| {
+        let mut budget = capture.rail_budget.clone();
+        let graph = ir2gate::priority_ordinal::apply(graph, &capture.ordinals, &mut budget);
+        ir2gate::observed_select_rails::apply(graph, &capture.words, &mut budget)
+    };
+    gate_fn = apply_terminal_rails(gate_fn);
+    if options.fold && options.hash {
+        if let Some(trial) = crate::sparse_decode::rewrite(ir_top, &gate_fn) {
+            log::info!("accepted decoder bank");
+            gate_fn = trial;
         }
     }
-
-    let optimize_outcome = optimize_gate_fn(gate_fn, &GateFnOptimizeOptions::from(options))?;
-    gate_fn = optimize_outcome.gate_fn;
+    if let Some((sink, offers)) = word_alternatives {
+        for mut offer in offers {
+            let optimized = optimize_gate_fn(offer.graph, &native_options)?;
+            offer.graph = apply_terminal_rails(optimized.gate_fn);
+            sink.candidates.push(offer);
+        }
+        if !sink.candidates.is_empty() {
+            sink.status = "offered";
+        }
+    }
     let fraig_pass_stat = optimize_outcome.fraig_pass_stat;
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());
@@ -795,6 +912,7 @@ pub fn process_ir_text_with_gatefn(
         return Ok((gate_fn, summary_stats));
     }
 
+    let gate_to_sources = positions.map(|p| p.on_final(&gate_fn)).unwrap_or_default();
     println!("== Deepest path ({}):", depth_stats.deepest_path.len());
     for gate_ref in depth_stats.deepest_path.iter() {
         let gate: &gate::AigNode = &gate_fn.gates[gate_ref.id];
@@ -933,11 +1051,42 @@ pub fn canonical_ir_text_to_g8r_lowering_artifacts(
     ir_top: Option<&str>,
     lowering_options: &CanonicalG8rOptions,
 ) -> Result<CanonicalG8rLoweringArtifacts, String> {
+    canonical_lowering_with_optional_choices(ir_text, ir_top, lowering_options, None)
+}
+
+/// Runs canonical function lowering and returns native-terminal word
+/// alternatives. The primary design and its statistics always describe the
+/// ordinary compiler result, regardless of how many choices are available.
+pub fn canonical_ir_text_to_g8r_with_word_choices(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<(CanonicalG8rLoweringArtifacts, WordChoices), String> {
+    let mut choices = WordChoices {
+        status: "no-offers",
+        construction_limited: false,
+        candidates: Vec::new(),
+    };
+    let incumbent = canonical_lowering_with_optional_choices(
+        ir_text,
+        ir_top,
+        lowering_options,
+        Some(&mut choices),
+    )?;
+    Ok((incumbent, choices))
+}
+
+fn canonical_lowering_with_optional_choices(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+    choices: Option<&mut WordChoices>,
+) -> Result<CanonicalG8rLoweringArtifacts, String> {
     let options = lowering_options.to_process_ir_path_options(
         ir_top, /* quiet= */ true, /* emit_netlist= */ false,
         /* emit_independent_op_stats= */ false, /* prepared_ir_out= */ None,
     );
-    let (gate_fn, stats) = process_ir_text_with_gatefn(ir_text, &options)?;
+    let (gate_fn, stats) = process_ir_text_with_optional_word_choices(ir_text, &options, choices)?;
     Ok(CanonicalG8rLoweringArtifacts { gate_fn, stats })
 }
 

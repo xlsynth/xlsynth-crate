@@ -69,6 +69,24 @@ impl TrialStats {
 }
 
 impl GateBuilder {
+    /// Emits a seven-AND full-adder by sharing a parity term with the carry.
+    /// Put a late input in `c` to keep both output paths short.
+    pub fn add_full_adder_using_shared_parity(
+        &mut self,
+        a: AigOperand,
+        b: AigOperand,
+        c: AigOperand,
+    ) -> FullAdderOutput {
+        let generate = self.add_and_binary(a, b);
+        let neither = self.add_and_binary(a.negate(), b.negate());
+        let equal = self.add_or_binary(generate, neither);
+        let propagated = self.add_and_binary(equal.negate(), c);
+        let other = self.add_and_binary(equal, c.negate());
+        let sum = self.add_or_binary(propagated, other).negate();
+        let carry = self.add_or_binary(generate, propagated);
+        FullAdderOutput { sum, carry }
+    }
+
     /// Tries each final-XOR input from the same prefix and retains a local
     /// Pareto improvement. This does not guarantee post-cleanup or mapped QoR.
     pub(super) fn add_full_adder_with_input_placement(
@@ -148,6 +166,60 @@ mod tests {
             AigBitVector::from_lsb_is_index_0(&[output.sum, output.carry]),
         );
         gb.build()
+    }
+
+    #[test]
+    fn shared_full_adder_preserves_constants_aliases_and_polarities() {
+        for hash in [false, true] {
+            for fold in [false, true] {
+                let mut prefix = GateBuilder::new("fa".into(), GateBuilderOptions { fold, hash });
+                let [a, b, c] = inputs(&mut prefix, [0, 1, 3], 0);
+                let choices = [
+                    prefix.get_false(),
+                    prefix.get_true(),
+                    a,
+                    a.negate(),
+                    b,
+                    b.negate(),
+                    c,
+                ];
+                for x in choices {
+                    for y in choices {
+                        for z in choices {
+                            let mut reference = prefix.clone();
+                            let mut candidate = prefix.clone();
+                            let expected = reference.add_full_adder_in_order(x, y, z);
+                            let actual = candidate.add_full_adder_using_shared_parity(x, y, z);
+                            assert!(
+                                oracle_equiv_sat(
+                                    &finish(reference, expected),
+                                    &finish(candidate, actual)
+                                )
+                                .unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_full_adder_has_seven_ands_and_short_late_input_paths() {
+        for a_depth in 0..=8 {
+            for b_depth in 0..=8 {
+                for c_depth in 0..=8 {
+                    let delays = [a_depth, b_depth, c_depth];
+                    let mut gb = GateBuilder::new("fa".into(), GateBuilderOptions::opt());
+                    let [a, b, c] = inputs(&mut gb, delays, 0);
+                    let output = gb.add_full_adder_using_shared_parity(a, b, c);
+                    let stats = get_aig_cone_stats(&gb.gates, &[output.sum, output.carry]);
+                    assert_eq!(stats.and_nodes, delays.iter().sum::<usize>() + 7);
+                    let depth = (a_depth.max(b_depth) + 4).max(c_depth + 2);
+                    assert_eq!(stats.root_depths, vec![depth, depth]);
+                }
+            }
+        }
     }
 
     #[test]

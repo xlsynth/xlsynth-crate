@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use crate::aig::dce::dce;
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, PirNodeIds};
-use crate::aig::get_summary_stats::{AigConeStats, get_aig_cone_stats};
+use crate::aig::get_summary_stats::{AigConeStats, get_output_cone_stats};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::use_count::get_id_to_use_count;
 
@@ -91,15 +91,6 @@ fn reassociate_gatefn_selecting_reuse_with_outcome(orig_fn: &GateFn) -> FinalRea
         comparison_performed: true,
         reuse_candidate_selected: accept_candidate,
     }
-}
-
-fn get_output_cone_stats(gate_fn: &GateFn) -> AigConeStats {
-    let roots = gate_fn
-        .outputs
-        .iter()
-        .flat_map(|output| output.bit_vector.iter_lsb_to_msb().copied())
-        .collect::<Vec<_>>();
-    get_aig_cone_stats(&gate_fn.gates, &roots)
 }
 
 fn is_strict_non_regressing_pareto_improvement(
@@ -299,6 +290,29 @@ fn can_flatten_plain_and_operand(
     !operand.negated
         && matches!(g.gates[operand.node.id], AigNode::And2 { .. })
         && use_counts.get(&operand.node).copied().unwrap_or(0) == 1
+}
+
+/// Balance a cube on the signed operands already present in the gate builder.
+pub(crate) fn and_cube_with_arrivals(
+    builder: &mut GateBuilder,
+    depths: &mut Vec<usize>,
+    leaves: impl IntoIterator<Item = AigOperand>,
+) -> AigOperand {
+    match normalize_leaf_ops(builder, leaves) {
+        NormalizedLeaves::Constant(op) | NormalizedLeaves::Single(op) => op,
+        NormalizedLeaves::Many(ops) => {
+            sync_depths(builder, depths);
+            let mut reused_alternative = false;
+            build_balanced_and_tree(
+                builder,
+                depths,
+                &ops,
+                &[],
+                AndTreePairingPolicy::EarliestArrival,
+                &mut reused_alternative,
+            )
+        }
+    }
 }
 
 fn rebuild_plain_and_supergate(

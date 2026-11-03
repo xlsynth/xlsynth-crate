@@ -1266,7 +1266,6 @@ mod tests {
     use super::*;
     use crate::proof_plan::config::IrEquivConfig;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use test_case::test_case;
 
@@ -1281,8 +1280,12 @@ mod tests {
         fn new(script: &str, plan: ProverPlan) -> io::Result<Self> {
             let directory = tempfile::tempdir()?;
             let driver = directory.path().join("driver.sh");
-            fs::write(&driver, script)?;
-            fs::set_permissions(&driver, fs::Permissions::from_mode(0o755))?;
+            // A sibling fork can inherit a writer for the script, so only
+            // execute the tracked launcher.
+            fs::write(directory.path().join("behavior.sh"), script)?;
+            let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/process_outcome_backend.sh");
+            std::os::unix::fs::symlink(launcher, &driver)?;
             Ok(Self {
                 scheduler: Scheduler::new_with_driver(
                     plan,
@@ -1303,6 +1306,10 @@ mod tests {
 
     /// Selects the fixture behavior through the first positional input path.
     fn task(mode: &str) -> ProverPlan {
+        task_with_timeout(mode, None)
+    }
+
+    fn task_with_timeout(mode: &str, timeout_ms: Option<u64>) -> ProverPlan {
         ProverPlan::Task {
             task: ProverTask::IrEquiv {
                 config: IrEquivConfig {
@@ -1311,7 +1318,7 @@ mod tests {
                     ..Default::default()
                 },
             },
-            timeout_ms: None,
+            timeout_ms,
             task_id: Some(mode.to_string()),
         }
     }
@@ -1593,6 +1600,53 @@ printf '%s\n' '{"status":"proved","success":true,"timing":{"wall_micros":7}}' > 
             timing.worker_timing.as_ref().map(|t| t.wall_micros),
             Some(7)
         );
+    }
+
+    #[test]
+    fn timeout_preserves_captured_diagnostics() {
+        let timeout_ms = 1;
+        let mut fixture = TestScheduler::new(
+            r#"#!/bin/sh
+printf 'timeout stdout\n'
+printf 'timeout stderr\n' >&2
+kill -STOP "$$"
+"#,
+            task_with_timeout("timeout", Some(timeout_ms)),
+        )
+        .unwrap();
+        let scheduler = &mut fixture.scheduler;
+        scheduler.fill_slots().unwrap();
+        let pid = *scheduler.pid_to_node.keys().next().unwrap();
+        // The stop confirms both writes before the scheduler may kill the
+        // child.
+        assert!(libc::WIFSTOPPED(
+            wait_for_pid(pid, libc::WUNTRACED).unwrap()
+        ));
+
+        let report = scheduler.run().unwrap();
+        assert!(!report.plan.proof_status().is_proved());
+        let ProverReportNode::Task {
+            outcome,
+            stdout,
+            stderr,
+            timing,
+            ..
+        } = report.plan
+        else {
+            panic!("expected a task report");
+        };
+        assert_eq!(
+            outcome,
+            Some(TaskOutcome::Indefinite {
+                reason: IndefiniteReason::Timeout
+            })
+        );
+        assert_eq!(stdout.as_deref(), Some("timeout stdout\n"));
+        assert_eq!(stderr.as_deref(), Some("timeout stderr\n"));
+        let worker_wall = timing.worker_wall_micros.unwrap();
+        assert!(worker_wall >= timeout_ms * 1000);
+        assert!(timing.queued_micros.unwrap() + worker_wall <= report.wall_micros.unwrap());
+        assert!(timing.worker_timing.is_none());
     }
 
     #[test]
