@@ -143,6 +143,13 @@ base constant. Later helpers and the top can use the exports by qualified
 name. The reference computes the constant values at their definition width
 and constructs the mapped results from scalar operations.
 
+`mission-v6` and `mission-local-v6` add ordinary runtime match arms whose
+patterns name tuple or payload-enum constants. They also generate signed
+and unsigned `widening_cast` operations and field updates on imported
+struct types that can be re-exported through a chain of aliases. The
+reference computes the match predicates and the updated fields with scalar
+operations.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -211,7 +218,7 @@ cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/
 
 Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
-or `--experimental` before the input path for
+`--mission-v6`, `--mission-local-v6`, or `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before
 conversion. To repeat a standalone proof, set the original

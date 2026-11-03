@@ -7,7 +7,10 @@ use xlsynth_dslx_fuzzer::ast::{
 };
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
 use xlsynth_dslx_fuzzer::constexpr::{ConstExpr, ConstInput, ConstantScope};
-use xlsynth_dslx_fuzzer::mission_expr::{CheckedCast, LogicalPredicates, ReceiverMap};
+use xlsynth_dslx_fuzzer::mission_expr::{
+    CheckedCast, LogicalPredicates, NamedAggregateMatch, NamedPatternShape, ReceiverMap,
+    WideningCast,
+};
 use xlsynth_pir::IrBits;
 
 /// Supplies three lane values so the receiver, selector and comparisons can
@@ -64,6 +67,75 @@ fn runtime_receiver_and_predicates_select_expected_elements_and_branches() -> Re
 }
 
 #[test]
+fn named_runtime_patterns_and_widening_casts_agree_on_every_four_bit_input() -> Result<(), String> {
+    let ty = BitsType {
+        signed: false,
+        width: Width::Concrete(4),
+    };
+    let mut lanes = Vec::new();
+    for shape in NamedPatternShape::ALL {
+        let mut body = Body::new(ty)?;
+        let z = body.push(Fragment::Binary {
+            op: BinaryOp::ShiftRight,
+            lhs: ValueRef::X,
+            rhs: ValueRef::Y,
+        })?;
+        let pattern = NamedAggregateMatch::new(shape, [2, 2], [0xfd, 0xfe])?;
+        body.push(Fragment::Compound {
+            op: CompoundOp::NamedAggregateMatch(pattern),
+            args: [ValueRef::X, ValueRef::Y, z],
+        })?;
+        lanes.push(body);
+    }
+    for signed in [false, true] {
+        for extra in [0, 2, 64] {
+            lanes.push(fragment_body(
+                BitsType { signed, ..ty },
+                CompoundOp::WideningCast(WideningCast::new(extra)?),
+            )?);
+        }
+    }
+    let n = lanes.len();
+    let sample = Sample::new(vec![], lanes)?.prepare()?;
+    let reference = IrPackage::parse_ir(&sample.expected_ir, None).unwrap();
+    let converted = IrPackage::parse_ir(&sample.converted_ir, None).unwrap();
+    let reference = reference.get_function("main").unwrap();
+    let converted = converted.get_function(&sample.converted_top).unwrap();
+    for x in 0..16 {
+        for y in 0..16 {
+            let z = x >> y;
+            let fields_match = (x & 3) == 1 && (y & 3) == 2;
+            let tuple = if fields_match { z ^ 15 } else { z };
+            let packet = if fields_match && (z & 1) == 1 {
+                z ^ 15
+            } else {
+                z
+            };
+            let signed_x = if x & 8 == 0 { x as i32 } else { x as i32 - 16 };
+            let sign_fill = if signed_x < 0 { 15 } else { 0 };
+            let expected = [
+                tuple,
+                packet,
+                x ^ y,
+                (x >> 2) ^ y,
+                y,
+                x ^ y,
+                ((signed_x >> 2) as u64 & 15) ^ y,
+                sign_fill ^ y,
+            ]
+            .map(|n| XlsIrValue::make_ubits(4, n).unwrap());
+            let expected = XlsIrValue::make_tuple(&expected);
+            let args = (0..n)
+                .flat_map(|_| [x, y].map(|n| XlsIrValue::make_ubits(4, n).unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(reference.interpret(&args).unwrap(), expected);
+            assert_eq!(converted.interpret(&args).unwrap(), expected);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mission_expressions_specialize_at_multiple_widths_and_work_in_constants() -> Result<(), String> {
     for op in [
         CompoundOp::ReceiverMap(ReceiverMap::new(65, 3)?),
@@ -73,6 +145,18 @@ fn mission_expressions_specialize_at_multiple_widths_and_work_in_constants() -> 
         )),
         CompoundOp::CheckedCast(CheckedCast::new(0)?),
         CompoundOp::CheckedCast(CheckedCast::new(4)?),
+        CompoundOp::WideningCast(WideningCast::new(0)?),
+        CompoundOp::WideningCast(WideningCast::new(129)?),
+        CompoundOp::NamedAggregateMatch(NamedAggregateMatch::new(
+            NamedPatternShape::Tuple,
+            [1, 8],
+            [1, 255],
+        )?),
+        CompoundOp::NamedAggregateMatch(NamedAggregateMatch::new(
+            NamedPatternShape::PayloadEnum,
+            [8, 1],
+            [255, 1],
+        )?),
     ] {
         let helper_ty = |signed| BitsType {
             signed,

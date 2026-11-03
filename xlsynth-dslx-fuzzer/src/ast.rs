@@ -7,6 +7,7 @@ use crate::constexpr::{
     ComputedWidth, ConstExpr, ConstantScope, ParametricDefault, bits_literal, metadata_bits,
 };
 use crate::imported_const::{ExportedConstants, import_dslx};
+use crate::imported_struct::{self, StructExport, imported_widths};
 use crate::tuple_pattern::{BindingContext, TuplePattern};
 use std::collections::BTreeSet;
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue};
@@ -235,6 +236,12 @@ pub enum Fragment {
         arg: ValueRef,
         combine: [BinaryOp; 2],
     },
+    ImportedStructUpdate {
+        module: usize,
+        args: [ValueRef; 3],
+        update_hi: bool,
+        combine: BinaryOp,
+    },
     Constant {
         expression: Box<ConstExpr>,
         scope: ConstantScope,
@@ -285,7 +292,9 @@ impl Fragment {
             }
             Self::TupleIndex { elements, .. } => elements.to_vec(),
             Self::Call { args, .. } => args.to_vec(),
-            Self::Compound { args, .. } | Self::TuplePattern { args, .. } => args.to_vec(),
+            Self::Compound { args, .. }
+            | Self::TuplePattern { args, .. }
+            | Self::ImportedStructUpdate { args, .. } => args.to_vec(),
             Self::StringLookup { index, .. } => vec![*index],
         }
     }
@@ -364,6 +373,19 @@ impl Fragment {
                 arg,
                 combine,
             } => import_dslx(*module, &name(*arg), *combine, ty),
+            Self::ImportedStructUpdate {
+                module,
+                args,
+                update_hi,
+                combine,
+            } => imported_struct::update_dslx(
+                *module,
+                imported_widths(*module, modules)?,
+                ty,
+                args.map(|arg| names[arg.0].as_str()),
+                *update_hi,
+                *combine,
+            ),
             Self::ConcatSlice { lhs, rhs, kind } => {
                 let unsigned = BitsType {
                     signed: false,
@@ -500,6 +522,20 @@ impl Fragment {
                     })?;
                 exports.emit_import_ir(builder, value(*arg), *combine, width, signed)
             }
+            Self::ImportedStructUpdate {
+                module,
+                args,
+                update_hi,
+                combine,
+            } => imported_struct::emit_update_ir(
+                builder,
+                imported_widths(*module, modules).map_err(BuilderError::InvalidOperation)?,
+                args.map(value),
+                *update_hi,
+                *combine,
+                width,
+                signed,
+            ),
             Self::ConcatSlice { lhs, rhs, .. } => {
                 let concatenated = builder.concat(&[value(*lhs), value(*rhs)])?;
                 builder.bit_slice(concatenated, width / 2, width)
@@ -734,6 +770,9 @@ impl Body {
             }
             if let Fragment::Constant { expression, .. } = fragment {
                 expression.validate_imports(available_modules)?;
+            }
+            if let Fragment::ImportedStructUpdate { module, .. } = fragment {
+                imported_widths(*module, available_modules)?;
             }
         }
         Ok(())
@@ -979,6 +1018,7 @@ pub struct HelperModule {
     signed: Body,
     default: Option<ParametricDefault>,
     exports: Option<ExportedConstants>,
+    struct_export: Option<StructExport>,
 }
 
 impl HelperModule {
@@ -1010,6 +1050,7 @@ impl HelperModule {
             signed,
             default: None,
             exports: None,
+            struct_export: None,
         })
     }
 
@@ -1031,6 +1072,17 @@ impl HelperModule {
         self
     }
 
+    pub fn struct_export(&self) -> Option<StructExport> {
+        self.struct_export
+    }
+
+    /// Exposes a local struct or a type alias for field updates in later
+    /// modules.
+    pub fn with_struct_export(mut self, export: StructExport) -> Self {
+        self.struct_export = Some(export);
+        self
+    }
+
     /// Adds a u32 default parameter, whose cast participates in the result.
     pub fn with_default(mut self, default: ParametricDefault) -> Result<Self, String> {
         if default.expression.bits_type()
@@ -1046,6 +1098,9 @@ impl HelperModule {
     }
 
     pub(crate) fn validate_imports(&self, available: &[HelperModule]) -> Result<(), String> {
+        if let Some(export) = self.struct_export {
+            export.widths(available)?;
+        }
         self.unsigned.validate_imports(available)?;
         self.signed.validate_imports(available)?;
         if let Some(default) = &self.default {
