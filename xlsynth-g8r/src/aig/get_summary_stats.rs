@@ -195,7 +195,6 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
                 continue;
             }
             &AigNode::Literal { .. } => {
-                assert!(gate_ref.id < 2);
                 depths.insert(gate_ref, 0);
             }
             &AigNode::And2 { a, b, .. } => {
@@ -331,7 +330,7 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
 
     let mut fanout_histogram: BTreeMap<usize, usize> = BTreeMap::new();
     for node_ref in live_nodes.iter() {
-        // Skip literal nodes (AigRef 0/1).
+        // Literals do not contribute to the fanout histogram.
         if matches!(gate_fn.gates[node_ref.id], AigNode::Literal { .. }) {
             continue;
         }
@@ -345,6 +344,25 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
         and_nodes,
         max_depth,
         fanout_histogram,
+    }
+}
+
+/// Logs complete graphs and live structural costs only when requested by the
+/// caller's module target. Graph observations do not alter optimization state.
+pub(crate) fn log_gate_snapshot(target: &'static str, stage: &str, gate_fn: &gate::GateFn) {
+    if log::log_enabled!(target: target, log::Level::Debug) {
+        let stats = get_aig_stats(gate_fn);
+        log::debug!(target: target,
+            "gate_pass function={} stage={} stored_nodes={} product={} live={:?}",
+            gate_fn.name, stage, gate_fn.gates.len(),
+            (stats.and_nodes as u128) * (stats.max_depth as u128), stats
+        );
+    }
+    if log::log_enabled!(target: target, log::Level::Trace) {
+        log::trace!(target: target,
+            "gate_ir function={} stage={}\n{}",
+            gate_fn.name, stage, gate_fn.to_string_including_dead_nodes()
+        );
     }
 }
 

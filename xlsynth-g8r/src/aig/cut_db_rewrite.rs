@@ -25,7 +25,7 @@ use crate::aig::dce::dce;
 use crate::aig::dynamic_depth::DynamicDepthState;
 use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn, PirNodeIds};
-use crate::aig::get_summary_stats::get_aig_stats;
+use crate::aig::get_summary_stats::{get_aig_stats, log_gate_snapshot};
 use crate::cut_db::fragment::{GateFnFragment, Lit};
 use crate::cut_db::loader::CutDb;
 #[cfg(test)]
@@ -2555,22 +2555,38 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
 /// Performs iterative depth and area rewriting with small cuts before large
 /// cones.
 pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) -> GateFn {
+    log::debug!(
+        "cut_pipeline function={} mode={:?} large_cone={}",
+        g.name,
+        opts.mode,
+        opts.enable_large_cone_rewrite
+    );
     let cleaned_input = dce(g);
+    log_gate_snapshot(module_path!(), "cut_dead_code", &cleaned_input);
     let depth_rewritten = if opts.mode.enables_depth_rewrite() {
-        rewrite_gatefn_depth_with_cut_db(&cleaned_input, db, opts)
+        let rewritten = rewrite_gatefn_depth_with_cut_db(&cleaned_input, db, opts);
+        log_gate_snapshot(module_path!(), "cut_small_depth", &rewritten);
+        rewritten
     } else {
         cleaned_input
     };
     if !opts.enable_large_cone_rewrite {
-        return rewrite_gatefn_area_with_cut_db(&depth_rewritten, db, opts);
+        let rewritten = rewrite_gatefn_area_with_cut_db(&depth_rewritten, db, opts);
+        log_gate_snapshot(module_path!(), "cut_small_area", &rewritten);
+        return rewritten;
     }
     let large_depth_rewritten = if opts.mode.enables_depth_rewrite() {
-        rewrite_gatefn_large_cone_depth_refactor(&depth_rewritten, opts)
+        let rewritten = rewrite_gatefn_large_cone_depth_refactor(&depth_rewritten, opts);
+        log_gate_snapshot(module_path!(), "cut_large_depth", &rewritten);
+        rewritten
     } else {
         depth_rewritten
     };
     let area_rewritten = rewrite_gatefn_area_with_cut_db(&large_depth_rewritten, db, opts);
-    rewrite_gatefn_large_cone_refactor(&area_rewritten, opts)
+    log_gate_snapshot(module_path!(), "cut_small_area", &area_rewritten);
+    let large_area_rewritten = rewrite_gatefn_large_cone_refactor(&area_rewritten, opts);
+    log_gate_snapshot(module_path!(), "cut_large_area", &large_area_rewritten);
+    large_area_rewritten
 }
 
 #[cfg(test)]
