@@ -3,17 +3,11 @@
 use crate::aig::gate::{AigNode, AigOperand, AigRef};
 use crate::gate_builder::GateBuilder;
 
-// Extracts the operands for an effective "or" pattern, i.e.
-// a | b => ~((~a) & (~b))
-fn extract_or_pattern(a: AigOperand, g8_builder: &GateBuilder) -> Option<(AigOperand, AigOperand)> {
-    if !a.negated {
-        return None;
-    }
-    let gate = &g8_builder.gates[a.node.id];
-    match gate {
-        AigNode::And2 { a, b, .. } => Some((a.negate(), b.negate())),
-        _ => None,
-    }
+/// Tests whether an effective OR has `operand` as a direct input.
+pub(crate) fn or_contains_operand(gb: &GateBuilder, or: AigOperand, operand: AigOperand) -> bool {
+    or.negated
+        && matches!(gb.gates[or.node.id], AigNode::And2 { a, b, .. }
+            if a.negate() == operand || b.negate() == operand)
 }
 
 // If the gate is an and with one side being "true" and the other operand being
@@ -56,21 +50,11 @@ pub fn operand_simplify(aig_ref: AigRef, g8_builder: &mut GateBuilder) -> Option
     let gate = &g8_builder.gates[aig_ref.id];
     match gate {
         AigNode::And2 { a, b, .. } => {
-            if let Some((or_lhs, or_rhs)) = extract_or_pattern(*a, g8_builder) {
-                if or_lhs == *b {
-                    return Some(*b);
-                }
-                if or_rhs == *b {
-                    return Some(*b);
-                }
+            if or_contains_operand(g8_builder, *a, *b) {
+                return Some(*b);
             }
-            if let Some((or_lhs, or_rhs)) = extract_or_pattern(*b, g8_builder) {
-                if or_lhs == *a {
-                    return Some(*a);
-                }
-                if or_rhs == *a {
-                    return Some(*a);
-                }
+            if or_contains_operand(g8_builder, *b, *a) {
+                return Some(*a);
             }
 
             None
