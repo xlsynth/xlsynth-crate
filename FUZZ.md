@@ -330,7 +330,10 @@ dimensions, parametric defaults, and `const_assert!` exercise constexpr
 evaluation with independent PIR reference values. Compound fragments add builtin
 operations, arrays and dynamic indexing/updates, strings, exhaustive bits/tuple/
 enum matches, parametric structs and field updates, and bounded ordinary/const
-loops whose reference semantics are unrolled independently. Bounded nested tuple
+loops whose reference semantics are unrolled independently. The mission grammar
+also covers maps of builtins and named functions, range values, and enums with
+payloads. Captured lambdas and `const match` are opt-in in the generator library.
+Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple
 rest while an independent ordered fold makes retained bindings observable.
 The formatted DSLX is converted by

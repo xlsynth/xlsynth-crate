@@ -1,0 +1,23 @@
+# Reduced DSLX converter failures
+
+These programs reproduced on stock XLS v0.61.0. Run from this directory with
+the matching tools on PATH and DSLX_STDLIB_PATH set to the release's stdlib.
+
+- `signed_loop_wide.x` adds the sole induction value −1 to its argument. At
+  input zero the DSLX evaluator returns −1, but the emitted 65-bit IR has its
+  top bit clear and returns 2⁶⁴−1. The same signed start in
+  `signed_loop_narrow.x` makes the converter abort at width two.
+- `signed_range_length.x` indexes a two-element signed range. Both indices
+  pass in the DSLX evaluator, but the converter rejects the range as empty.
+- `enumerate_width.x` typechecks and converts successfully. The specialized
+  function name in the emitted IR contains a colon, and the C++ IR parser
+  rejects it.
+
+```sh
+dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=dslx-interpreter signed_loop_wide.x
+dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=ir-interpreter signed_loop_wide.x
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_loop_narrow.x
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_range_length.x
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" enumerate_width.x > enumerate_width.ir
+opt_main --top=__enumerate_width__main enumerate_width.ir
+```

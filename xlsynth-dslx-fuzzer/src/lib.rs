@@ -6,9 +6,14 @@ pub mod ast;
 pub mod compound;
 pub mod constexpr;
 mod generate;
+pub mod map_fragment;
+pub mod range_match;
+pub mod sum_pattern;
 pub mod tuple_pattern;
 
-pub use generate::{GenerateOptions, generate, generate_with_options};
+pub use generate::{
+    GenerateOptions, Grammar, generate, generate_with_grammar, generate_with_options,
+};
 
 use ast::{Body, HelperModule, Width};
 use constexpr::metadata_bits;

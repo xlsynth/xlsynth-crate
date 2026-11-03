@@ -678,7 +678,9 @@ impl Body {
                     },
                     ..
                 } | Fragment::Compound {
-                    op: CompoundOp::Pattern(PatternOp::Tuple),
+                    op: CompoundOp::Pattern(PatternOp::Tuple)
+                        | CompoundOp::Sum(_)
+                        | CompoundOp::Map(_),
                     ..
                 } | Fragment::TuplePattern { .. }
             )
