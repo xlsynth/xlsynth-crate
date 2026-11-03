@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod diagnostics;
+mod lexicographic_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
 
@@ -2692,6 +2693,9 @@ pub(super) fn prep_for_gatify_with_origins(
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    diagnostics::run(&mut cloned, "lexicographic_comparisons", 0, |f| {
+        lexicographic_comparisons::rewrite(f, origins.as_deref_mut())
+    });
     diagnostics::run(&mut cloned, "redundant_nonzero_mask", 0, |f| {
         redundant_nonzero_mask::rewrite(f, origins.as_deref_mut())
     });
