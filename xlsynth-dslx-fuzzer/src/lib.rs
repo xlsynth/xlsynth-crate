@@ -9,6 +9,7 @@ pub mod compound;
 pub mod constexpr;
 mod generate;
 pub mod imported_const;
+pub mod imported_struct;
 pub mod map_fragment;
 pub mod mission_expr;
 pub mod range_match;
@@ -48,6 +49,20 @@ pub struct PreparedSample {
     pub expected_ir: String,
     pub converted_ir: String,
     pub converted_top: String,
+}
+
+/// Imports each available module and gives its exported struct a local alias.
+fn render_imports(text: &mut String, helpers: &[HelperModule]) {
+    for index in 0..helpers.len() {
+        text.push_str(&format!("import m{index};\n"));
+    }
+    for (index, helper) in helpers.iter().enumerate() {
+        if helper.struct_export().is_some() {
+            text.push_str(&format!(
+                "type FuzzImportedRow{index} = m{index}::FuzzRow;\n"
+            ));
+        }
+    }
 }
 
 impl Sample {
@@ -100,10 +115,11 @@ impl Sample {
         let mut modules = Vec::new();
         for (index, module) in self.helpers.iter().enumerate() {
             let mut text = "// SPDX-License-Identifier: Apache-2.0\n\n".to_string();
-            for dependency in 0..index {
-                text.push_str(&format!("import m{dependency};\n"));
-            }
+            render_imports(&mut text, &self.helpers[..index]);
             text.push_str(&module.declarations().to_dslx());
+            if let Some(export) = module.struct_export() {
+                text.push_str(&export.declaration());
+            }
             if let Some(exports) = module.exports() {
                 text.push_str(&exports.declarations());
             }
@@ -154,9 +170,7 @@ impl Sample {
             });
         }
         let mut text = "// SPDX-License-Identifier: Apache-2.0\n\n".to_string();
-        for index in 0..self.helpers.len() {
-            text.push_str(&format!("import m{index};\n"));
-        }
+        render_imports(&mut text, &self.helpers);
         let mut declarations = compound::Declarations::default();
         for lane in &self.lanes {
             declarations.extend(lane.declarations());

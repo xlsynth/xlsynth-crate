@@ -4,7 +4,7 @@
 
 use crate::ast::{BitsType, Comparison, Width};
 use crate::compound::{metadata_literal, resize_unsigned};
-use xlsynth_pir::{BValue, BuilderError, FnBuilder};
+use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrValue};
 
 /// Maps a method bound to a runtime key over a small array, then projects one
 /// element. Each key type has a single concrete method signature.
@@ -156,21 +156,7 @@ impl CheckedCast {
     }
 
     pub(crate) fn to_dslx(self, ty: BitsType, args: [&str; 3]) -> String {
-        let [x, y, _] = args;
-        let lane = ty.to_dslx();
-        let extra = self.extra;
-        let wide = match ty.width {
-            Width::Concrete(width) => (width + extra).to_string(),
-            Width::Parametric if extra == 0 => "N".to_string(),
-            Width::Parametric => format!("N + u32:{extra}"),
-        };
-        let sign = if ty.signed { "s" } else { "u" };
-        format!(
-            r#"{{
-        let casted = checked_cast<{sign}N[{wide}]>({x});
-        (((casted as uN[{wide}]) >> u32:{extra}) as {lane}) ^ {y}
-    }}"#
-        )
+        cast_projection_dslx("checked_cast", self.extra, ty, args)
     }
 
     pub(crate) fn emit_ir(
@@ -179,15 +165,175 @@ impl CheckedCast {
         args: [BValue; 3],
         signed: bool,
     ) -> Result<BValue, BuilderError> {
-        let [x, y, _] = args;
-        // The top lane-width bits of an extended word equal a signed or
-        // unsigned right shift of the original word, even when extra >= width.
-        let shift = metadata_literal(builder, self.extra)?;
-        let projected = if signed {
-            builder.shra(x, shift)?
-        } else {
-            builder.shrl(x, shift)?
+        cast_projection_ir(builder, self.extra, args, signed)
+    }
+}
+
+/// Observes extension bits from a same-signedness `widening_cast`, including
+/// the equal-width case and wide extensions across machine-word boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideningCast {
+    extra: usize,
+}
+
+impl WideningCast {
+    pub fn new(extra: usize) -> Result<Self, String> {
+        if extra > 129 {
+            return Err("widening cast requires 0..=129 extra bits".into());
+        }
+        Ok(Self { extra })
+    }
+
+    pub(crate) fn to_dslx(self, ty: BitsType, args: [&str; 3]) -> String {
+        cast_projection_dslx("widening_cast", self.extra, ty, args)
+    }
+
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        args: [BValue; 3],
+        signed: bool,
+    ) -> Result<BValue, BuilderError> {
+        cast_projection_ir(builder, self.extra, args, signed)
+    }
+}
+
+/// Casts and selects the upper lane-width bits, exposing the extension bits.
+fn cast_projection_dslx(builtin: &str, extra: usize, ty: BitsType, args: [&str; 3]) -> String {
+    let [x, y, _] = args;
+    let lane = ty.to_dslx();
+    let wide = match ty.width {
+        Width::Concrete(width) => (width + extra).to_string(),
+        Width::Parametric if extra == 0 => "N".to_string(),
+        Width::Parametric => format!("N + u32:{extra}"),
+    };
+    let sign = if ty.signed { "s" } else { "u" };
+    format!(
+        r#"{{
+        let casted = {builtin}<{sign}N[{wide}]>({x});
+        (((casted as uN[{wide}]) >> u32:{extra}) as {lane}) ^ {y}
+    }}"#
+    )
+}
+
+/// The upper lane-width bits equal a right shift of the original word, even
+/// when the number of added bits exceeds the original width.
+fn cast_projection_ir(
+    builder: &mut FnBuilder,
+    extra: usize,
+    args: [BValue; 3],
+    signed: bool,
+) -> Result<BValue, BuilderError> {
+    let [x, y, _] = args;
+    let shift = metadata_literal(builder, extra)?;
+    let projected = if signed {
+        builder.shra(x, shift)?
+    } else {
+        builder.shrl(x, shift)?
+    };
+    builder.xor(projected, y)
+}
+
+/// The aggregate tested against a named constant in an ordinary runtime match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedPatternShape {
+    Tuple,
+    PayloadEnum,
+}
+
+impl NamedPatternShape {
+    pub const ALL: [Self; 2] = [Self::Tuple, Self::PayloadEnum];
+}
+
+/// Matches two runtime fields against independently chosen constant values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamedAggregateMatch {
+    shape: NamedPatternShape,
+    widths: [usize; 2],
+    values: [u8; 2],
+}
+
+impl NamedAggregateMatch {
+    /// Small field widths give both equality outcomes reachable inputs even in
+    /// small exhaustive tests. Each byte supplies its field's low bits.
+    pub fn new(
+        shape: NamedPatternShape,
+        widths: [usize; 2],
+        values: [u8; 2],
+    ) -> Result<Self, String> {
+        if widths.iter().any(|width| !(1..=8).contains(width)) {
+            return Err("named aggregate pattern fields must have widths in 1..=8".into());
+        }
+        let values = std::array::from_fn(|i| values[i] & (u8::MAX >> (8 - widths[i])));
+        Ok(Self {
+            shape,
+            widths,
+            values,
+        })
+    }
+
+    pub(crate) fn needs_sum(self) -> bool {
+        self.shape == NamedPatternShape::PayloadEnum
+    }
+
+    pub(crate) fn to_dslx(self, ty: BitsType, args: [&str; 3]) -> String {
+        let [x, y, z] = args;
+        let [a, b] = self.widths;
+        let [first, second] = self.values;
+        let unsigned = BitsType {
+            signed: false,
+            ..ty
+        }
+        .to_dslx();
+        let (constant, subject) = match self.shape {
+            NamedPatternShape::Tuple => (
+                format!("(uN[{a}]:{first}, uN[{b}]:{second})"),
+                "(low, high)".into(),
+            ),
+            NamedPatternShape::PayloadEnum => {
+                let nominal = format!("FuzzSum<u32:{a}, u32:{b}>");
+                (
+                    format!("{nominal}::Pair {{ lo: uN[{a}]:{first}, hi: uN[{b}]:{second} }}"),
+                    format!(
+                        "if {z} as bool {{ {nominal}::Pair {{ hi: high, lo: low }} }} else {{ {nominal}::Empty }}"
+                    ),
+                )
+            }
         };
-        builder.xor(projected, y)
+        format!(
+            r#"{{
+        const TARGET = {constant};
+        let low = ({x} as {unsigned}) as uN[{a}];
+        let high = ({y} as {unsigned}) as uN[{b}];
+        let subject = {subject};
+        match subject {{ TARGET => !{z}, _ => {z}, }}
+    }}"#
+        )
+    }
+
+    /// Computes each field equality and the enum discriminant directly. Both
+    /// arms differ in every output bit regardless of the selected lane value.
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        args: [BValue; 3],
+    ) -> Result<BValue, BuilderError> {
+        let [x, y, z] = args;
+        let equals = |builder: &mut FnBuilder, input, width, value: u8| {
+            let field = resize_unsigned(builder, input, width)?;
+            let literal = IrValue::make_ubits(width, u64::from(value))
+                .map_err(|e| BuilderError::InvalidOperation(e.to_string()))?;
+            let literal = builder.literal(literal)?;
+            builder.eq(field, literal)
+        };
+        let low = equals(builder, x, self.widths[0], self.values[0])?;
+        let high = equals(builder, y, self.widths[1], self.values[1])?;
+        let mut matched = builder.and(low, high)?;
+        if self.needs_sum() {
+            let pair = builder.bit_slice(z, 0, 1)?;
+            matched = builder.and(matched, pair)?;
+        }
+        let hit = builder.not(z)?;
+        builder.select(matched, &[z, hit], None)
     }
 }

@@ -153,6 +153,45 @@ fn v5_helpers_and_imported_constants_compose_and_prove() -> Result<(), String> {
 }
 
 #[test]
+fn v6_runtime_patterns_and_casts_compose_with_imported_struct_updates() -> Result<(), String> {
+    for (selector, options) in [
+        (152, &[0, 2, 3, 5, 7][..]), // named tuple pattern
+        (152, &[1, 3, 2, 9, 2][..]), // named enum pattern
+        (153, &[0][..]),             // width-preserving cast
+        (153, &[5][..]),             // widen by 64 bits
+    ] {
+        let mut bytes = vec![0, 0, 0, selector, 0, 1];
+        bytes.extend_from_slice(options);
+        bytes.extend_from_slice(&[
+            1, 0, 0, 0, 0, 0, // third operand, signed helper, no parametric default
+            6, 13, 9, 0, 2, 6, 8, // exported constants and seven- and nine-bit struct fields
+            0, 0, 0, 0, 2, 0,
+            0, // observation, unsigned seven-bit lane, literal, one fragment
+            154, 0, 1, 0, 1, 1, 2,
+            0, // update the imported struct's high field, then xor its fields
+            0, 1, 0, // feed the projected result and y into the unsigned helper
+        ]);
+        for grammar in [Grammar::MissionV6, Grammar::MissionLocalV6] {
+            let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+            let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
+            else {
+                panic!("expected a v6 helper production");
+            };
+            assert!(matches!(
+                (selector, op),
+                (152, CompoundOp::NamedAggregateMatch(_)) | (153, CompoundOp::WideningCast(_))
+            ));
+            assert!(matches!(
+                sample.lanes()[0].fragments()[1],
+                Fragment::ImportedStructUpdate { module: 0, .. }
+            ));
+            assert!(matches!(prove(&sample.prepare()?)?, EquivResult::Proved));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mission_typed_range_loops_prove() -> Result<(), String> {
     // A seven-bit lane computes x^y, slices an array, and passes both values
     // to a two-trip 65-bit signed loop starting at +3. The lane returns the

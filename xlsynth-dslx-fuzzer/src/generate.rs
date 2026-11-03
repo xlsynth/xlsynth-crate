@@ -12,8 +12,12 @@ use crate::ast::{
 use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
 use crate::imported_const::ExportedConstants;
+use crate::imported_struct::StructExport;
 use crate::map_fragment::{MapBody, MapFragment};
-use crate::mission_expr::{CheckedCast, LogicalPredicates, ReceiverMap};
+use crate::mission_expr::{
+    CheckedCast, LogicalPredicates, NamedAggregateMatch, NamedPatternShape, ReceiverMap,
+    WideningCast,
+};
 use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
@@ -60,6 +64,11 @@ pub enum Grammar {
     MissionV5,
     /// Uses v5 productions with module-local helpers.
     MissionLocalV5,
+    /// Adds named aggregate match patterns, widening casts and imported struct
+    /// aliases.
+    MissionV6,
+    /// Uses v6 productions with module-local helpers.
+    MissionLocalV6,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -84,22 +93,32 @@ impl Grammar {
                 | Self::MissionLocalV4
                 | Self::MissionV5
                 | Self::MissionLocalV5
+                | Self::MissionV6
+                | Self::MissionLocalV6
         )
     }
 
     fn local_helpers(self) -> bool {
         matches!(
             self,
-            Self::MissionLocal | Self::MissionLocalV2 | Self::MissionLocalV4 | Self::MissionLocalV5
+            Self::MissionLocal
+                | Self::MissionLocalV2
+                | Self::MissionLocalV4
+                | Self::MissionLocalV5
+                | Self::MissionLocalV6
         )
     }
 
     fn uses_deep_lanes(self) -> bool {
-        matches!(self, Self::MissionV4 | Self::MissionLocalV4) || self.is_v5()
+        matches!(self, Self::MissionV4 | Self::MissionLocalV4) || self.uses_v5_productions()
     }
 
-    fn is_v5(self) -> bool {
-        matches!(self, Self::MissionV5 | Self::MissionLocalV5)
+    fn uses_v5_productions(self) -> bool {
+        matches!(self, Self::MissionV5 | Self::MissionLocalV5) || self.is_v6()
+    }
+
+    fn is_v6(self) -> bool {
+        matches!(self, Self::MissionV6 | Self::MissionLocalV6)
     }
 }
 
@@ -114,12 +133,14 @@ impl std::str::FromStr for Grammar {
             "mission-local-v4" => Ok(Self::MissionLocalV4),
             "mission-v5" => Ok(Self::MissionV5),
             "mission-local-v5" => Ok(Self::MissionLocalV5),
+            "mission-v6" => Ok(Self::MissionV6),
+            "mission-local-v6" => Ok(Self::MissionLocalV6),
             "mission-v2" => Ok(Self::MissionV2),
             "mission-local-v2" => Ok(Self::MissionLocalV2),
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -269,9 +290,18 @@ impl Entropy<'_> {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         let draw = usize::from(self.byte());
-        // An imported constant needs an earlier module. In the first helper,
-        // its selector bytes retain their ordinary decoder meaning.
-        if self.grammar.is_v5() && (176..200).contains(&draw) && (draw % 4 != 3 || call != 0) {
+        // In the first helper, selectors for imported types and constants
+        // retain their ordinary meaning because no earlier module exists.
+        if self.grammar.is_v6() && (152..176).contains(&draw) {
+            let production = 37 + (draw - 152) % 3;
+            if production != 39 || call != 0 {
+                return production;
+            }
+        }
+        if self.grammar.uses_v5_productions()
+            && (176..200).contains(&draw)
+            && (draw % 4 != 3 || call != 0)
+        {
             return 33 + draw % 4;
         }
         if self.grammar.uses_deep_lanes() && (200..224).contains(&draw) {
@@ -373,7 +403,7 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
-                13..=17 | 21..=24 | 26..=35 => {
+                13..=17 | 21..=24 | 26..=35 | 37..=38 => {
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -480,6 +510,17 @@ impl Entropy<'_> {
                             self.choose(2) != 0,
                         )),
                         35 => CompoundOp::CheckedCast(CheckedCast::new(self.choose(5))?),
+                        37 => CompoundOp::NamedAggregateMatch(NamedAggregateMatch::new(
+                            NamedPatternShape::ALL[self.choose(NamedPatternShape::ALL.len())],
+                            std::array::from_fn(|_| 1 + self.choose(8)),
+                            [self.byte(), self.byte()],
+                        )?),
+                        38 => {
+                            let extensions = [0, 1, 4, 8, 32, 64, 128];
+                            CompoundOp::WideningCast(WideningCast::new(
+                                extensions[self.choose(extensions.len())],
+                            )?)
+                        }
                         _ if self.grammar.uses_mission_extensions() => {
                             CompoundOp::RangeValue(self.bounded_range(8, false)?)
                         }
@@ -512,6 +553,13 @@ impl Entropy<'_> {
                     module: self.choose(available_modules),
                     arg: lhs,
                     combine: self.export_combiners(),
+                },
+                39 => Fragment::ImportedStructUpdate {
+                    module: self.choose(available_modules),
+                    args: [lhs, rhs, values[self.choose(values.len())]],
+                    update_hi: self.choose(2) != 0,
+                    combine: ExportedConstants::COMBINERS
+                        [self.choose(ExportedConstants::COMBINERS.len())],
                 },
                 _ => Fragment::Call {
                     module: self.choose(available_modules),
@@ -686,13 +734,25 @@ pub fn generate_with_grammar(
                 combine: [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Xor][entropy.choose(3)],
             })?;
         }
-        if grammar.is_v5() {
+        if grammar.uses_v5_productions() {
             let width = 1 + entropy.choose(options.max_width);
             helper = helper.with_exports(ExportedConstants::new(
                 entropy.bits(width),
                 entropy.bits(width),
                 entropy.export_combiners(),
             )?);
+        }
+        if grammar.is_v6() {
+            let export = if index > 0 && entropy.choose(3) != 0 {
+                StructExport::Alias {
+                    module: entropy.choose(index),
+                }
+            } else {
+                StructExport::Definition {
+                    widths: std::array::from_fn(|_| 1 + entropy.choose(options.max_width)),
+                }
+            };
+            helper = helper.with_struct_export(export);
         }
         helpers.push(helper);
     }

@@ -7,7 +7,9 @@ use crate::array_fragment::{ArrayCast, MatrixUpdate};
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
-use crate::mission_expr::{CheckedCast, LogicalPredicates, ReceiverMap};
+use crate::mission_expr::{
+    CheckedCast, LogicalPredicates, NamedAggregateMatch, ReceiverMap, WideningCast,
+};
 use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, NestedFold};
 use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
@@ -134,6 +136,8 @@ pub enum CompoundOp {
     ReceiverMap(ReceiverMap),
     LogicalPredicates(LogicalPredicates),
     CheckedCast(CheckedCast),
+    WideningCast(WideningCast),
+    NamedAggregateMatch(NamedAggregateMatch),
     ConstMatch(ConstMatch),
     RangeValue(RangeValue),
     RangeLoop {
@@ -257,7 +261,7 @@ impl CompoundOp {
             sum: matches!(
                 self,
                 Self::Sum(_) | Self::SumComparison(_) | Self::AggregateMatch(_)
-            ),
+            ) || matches!(self, Self::NamedAggregateMatch(pattern) if pattern.needs_sum()),
             aggregate_match: matches!(self, Self::AggregateMatch(_)),
             receiver_maps: ReceiverMap::WIDTHS
                 .map(|width| matches!(self, Self::ReceiverMap(map) if map.key_width() == width)),
@@ -293,6 +297,8 @@ impl CompoundOp {
             Self::ReceiverMap(map) => map.to_dslx(ty, args),
             Self::LogicalPredicates(predicates) => predicates.to_dslx(args),
             Self::CheckedCast(cast) => cast.to_dslx(ty, args),
+            Self::WideningCast(cast) => cast.to_dslx(ty, args),
+            Self::NamedAggregateMatch(pattern) => pattern.to_dslx(ty, args),
             Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
             Self::RangeValue(range) => range.to_dslx(ty, args),
             Self::RangeLoop { range, constant } => range.loop_dslx(constant, ty, args),
@@ -434,6 +440,8 @@ impl CompoundOp {
             Self::ReceiverMap(map) => map.emit_ir(builder, args, width),
             Self::LogicalPredicates(predicates) => predicates.emit_ir(builder, args, signed),
             Self::CheckedCast(cast) => cast.emit_ir(builder, args, signed),
+            Self::WideningCast(cast) => cast.emit_ir(builder, args, signed),
+            Self::NamedAggregateMatch(pattern) => pattern.emit_ir(builder, args),
             Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::RangeValue(range) => range.emit_ir(builder, args, width),
             Self::RangeLoop { range, .. } => range.emit_loop_ir(builder, args, width),
