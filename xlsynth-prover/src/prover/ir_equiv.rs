@@ -7,11 +7,11 @@ use std::sync::Mutex;
 
 use super::types::{
     Assertion, AssertionSemantics, EquivResult, FnInputs, IrTypedBitVec, ProverFn, SmtFn,
-    UfRegistry, UfSignature,
+    UfRegistry,
 };
 use super::{
-    translate::{assert_param_domains, get_fn_inputs, ir_to_smt},
-    uf::infer_merged_uf_signatures,
+    translate::{assert_param_domains, get_fn_inputs, ir_to_smt_with_assertion_collection},
+    uf::UfBindings,
 };
 use crate::proof_outcome::{ProofStatus, aggregate_proof_statuses};
 use crate::proof_phases::{Phase, PhaseCollector};
@@ -184,65 +184,47 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     phases: &PhaseCollector,
 ) -> io::Result<EquivResult> {
     let encoding = phases.start(Phase::SmtEncode);
-    // --------------------------------------------
-    // Helper: build a 1-bit "failed" flag for each
-    // side indicating whether **any** assertion is
-    // violated (active bit == 0).
-    // --------------------------------------------
-
-    // Optionally filter assertions by label before applying semantics.
     let lhs_asserts =
         super::assertion_filter::filter_assertions(&lhs.assertions, assert_label_include);
     let rhs_asserts =
         super::assertion_filter::filter_assertions(&rhs.assertions, assert_label_include);
 
-    // Build a flag that is true iff ALL assertions are active (i.e., no
-    // violation).
-    let mk_success_flag = |solver: &mut S, asserts: &[&Assertion<'_, S::Term>]| {
-        if asserts.is_empty() {
-            // No assertions → always succeed (true)
-            solver.numerical(1, 1)
-        } else {
-            let mut acc: Option<BitVec<S::Term>> = None;
-            for a in asserts.iter() {
-                acc = Some(match acc {
-                    None => a.active.clone(),
-                    Some(prev) => solver.and(&prev, &a.active),
-                });
-            }
-            acc.expect("acc populated")
-        }
+    // Only assertion-observing modes need solver terms for the success flags.
+    let pass_flags = |solver: &mut S| {
+        let mut all_pass = |assertions: &[&Assertion<'_, S::Term>]| {
+            let Some((first, rest)) = assertions.split_first() else {
+                return solver.one(1);
+            };
+            rest.iter()
+                .fold(first.active.clone(), |acc, a| solver.and(&acc, &a.active))
+        };
+        (all_pass(&lhs_asserts), all_pass(&rhs_asserts))
     };
 
-    let lhs_pass = mk_success_flag(solver, &lhs_asserts);
-    let rhs_pass = mk_success_flag(solver, &rhs_asserts);
-
-    let lhs_failed = solver.not(&lhs_pass);
-    let rhs_failed = solver.not(&rhs_pass);
-
-    // diff of outputs
     let outputs_diff = solver.ne(&lhs.output.bitvec, &rhs.output.bitvec);
-
-    // Build the overall condition to assert based on semantics
     let condition = match assertion_semantics {
-        AssertionSemantics::Ignore => outputs_diff.clone(),
+        AssertionSemantics::Ignore => outputs_diff,
         AssertionSemantics::Never => {
-            let any_failed = solver.or(&lhs_failed, &rhs_failed);
+            let (lhs_pass, rhs_pass) = pass_flags(solver);
+            let both_pass = solver.and(&lhs_pass, &rhs_pass);
+            let any_failed = solver.not(&both_pass);
             solver.or(&outputs_diff, &any_failed)
         }
         AssertionSemantics::Same => {
-            // fail status differs OR (both pass AND outputs differ)
-            let fail_status_diff = solver.ne(&lhs_failed, &rhs_failed);
+            let (lhs_pass, rhs_pass) = pass_flags(solver);
+            let status_diff = solver.ne(&lhs_pass, &rhs_pass);
             let both_pass = solver.and(&lhs_pass, &rhs_pass);
             let diff_when_pass = solver.and(&outputs_diff, &both_pass);
-            solver.or(&fail_status_diff, &diff_when_pass)
+            solver.or(&status_diff, &diff_when_pass)
         }
         AssertionSemantics::Assume => {
+            let (lhs_pass, rhs_pass) = pass_flags(solver);
             let both_pass = solver.and(&lhs_pass, &rhs_pass);
             solver.and(&both_pass, &outputs_diff)
         }
         AssertionSemantics::Implies => {
-            // lhs passes AND (rhs fails OR outputs differ)
+            let (lhs_pass, rhs_pass) = pass_flags(solver);
+            let rhs_failed = solver.not(&rhs_pass);
             let rhs_fail_or_diff = solver.or(&rhs_failed, &outputs_diff);
             solver.and(&lhs_pass, &rhs_fail_or_diff)
         }
@@ -257,12 +239,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
     match response {
         Response::Sat => {
             let _read = phases.start(Phase::CounterexampleRead);
-            let (lhs_asserts, rhs_asserts) = match assertion_semantics {
-                AssertionSemantics::Ignore => (&[][..], &[][..]),
-                _ => (&lhs_asserts[..], &rhs_asserts[..]),
-            };
-            let left = lhs.read_counterexample(solver, lhs_asserts)?;
-            let right = rhs.read_counterexample(solver, rhs_asserts)?;
+            let left = lhs.read_counterexample(solver, &lhs_asserts)?;
+            let right = rhs.read_counterexample(solver, &rhs_asserts)?;
             Ok(EquivResult::Disproved {
                 lhs_inputs: left.inputs,
                 rhs_inputs: right.inputs,
@@ -339,31 +317,24 @@ fn prove_equiv_partition<S: Solver>(
     phases: &PhaseCollector,
 ) -> EquivResult {
     let setup = phases.start_prepare();
-    let uf_signatures: HashMap<String, UfSignature> =
-        if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
-            HashMap::new()
-        } else {
-            let lhs_pkg = match lhs.pkg_ref {
-                Some(pkg) => pkg,
-                None => {
-                    return EquivResult::Error(
-                        "UF map provided for LHS but no package reference available".to_string(),
-                    );
-                }
-            };
-            let rhs_pkg = match rhs.pkg_ref {
-                Some(pkg) => pkg,
-                None => {
-                    return EquivResult::Error(
-                        "UF map provided for RHS but no package reference available".to_string(),
-                    );
-                }
-            };
-            match infer_merged_uf_signatures(lhs_pkg, &lhs.uf_map, rhs_pkg, &rhs.uf_map) {
-                Ok(sigs) => sigs,
-                Err(e) => return EquivResult::Error(e),
-            }
-        };
+    let lhs_bindings = UfBindings::new(lhs.pkg_ref, &lhs.uf_map);
+    let rhs_bindings = UfBindings::new(rhs.pkg_ref, &rhs.uf_map);
+    if !lhs.uf_map.is_empty() || !rhs.uf_map.is_empty() {
+        if lhs.pkg_ref.is_none() {
+            return EquivResult::Error(
+                "UF map provided for LHS but no package reference available".to_string(),
+            );
+        }
+        if rhs.pkg_ref.is_none() {
+            return EquivResult::Error(
+                "UF map provided for RHS but no package reference available".to_string(),
+            );
+        }
+    }
+    let uf_signatures = match lhs_bindings.merged_signatures(&rhs_bindings) {
+        Ok(sigs) => sigs,
+        Err(e) => return EquivResult::Error(e),
+    };
     let mut solver = match S::new(solver_config) {
         Ok(solver) => solver,
         Err(error) => {
@@ -379,8 +350,21 @@ fn prove_equiv_partition<S: Solver>(
         assert_param_domains(&mut solver, &rhs_inputs)?;
         let ufs = UfRegistry::from_uf_signatures(&mut solver, &uf_signatures)?;
         let aligned = align_compatible_inputs(&mut solver, &lhs_inputs, &rhs_inputs)?;
-        let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &ufs);
-        let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &ufs);
+        let collect_assertions = assertion_semantics != AssertionSemantics::Ignore;
+        let smt_lhs = ir_to_smt_with_assertion_collection(
+            &mut solver,
+            &aligned.lhs,
+            &lhs_bindings,
+            &ufs,
+            collect_assertions,
+        );
+        let smt_rhs = ir_to_smt_with_assertion_collection(
+            &mut solver,
+            &aligned.rhs,
+            &rhs_bindings,
+            &ufs,
+            collect_assertions,
+        );
         if let Some(bit) = &constraint {
             let param = &aligned.lhs.inputs[bit.param].bitvec;
             let bit_bv = solver.slice(param, bit.index, 1);
@@ -692,6 +676,123 @@ mod partition_tests {
     }
 }
 
+#[cfg(all(test, feature = "with-z3-binary-test"))]
+mod counted_assertion_tests {
+    use super::{AssertionSemantics, EquivResult, ProverFn, UfRegistry, prove_ir_fn_equiv};
+    use crate::prover::quickcheck::prove_ir_quickcheck;
+    use crate::prover::translate::{
+        get_fn_inputs, ir_to_smt_with_assertion_collection, translate_with_node_terms,
+    };
+    use crate::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
+    use crate::solver::{
+        Solver,
+        easy_smt::{EasySmtConfig, EasySmtSolver},
+    };
+    use std::fs;
+    use tempfile::tempdir;
+    use xlsynth_pir::{ir_parser::Parser, ir_verify::verify_package};
+
+    const PACKAGE: &str = r#"package invariant_assertion
+
+fn body(i: bits[14] id=1, t: token id=2, ok: bits[1] id=3) -> token {
+  ret checked: token = assert(t, ok, message="invariant", label="check", id=4)
+}
+
+fn rolled(t: token id=5, ok: bits[1] id=6) -> (token, bits[1]) {
+  last: token = counted_for(t, trip_count=10000, stride=1, body=body, invariant_args=[ok], id=7)
+  ret result: (token, bits[1]) = tuple(last, ok, id=8)
+}
+
+fn plain(t: token id=9, ok: bits[1] id=10) -> (token, bits[1]) {
+  ret result: (token, bits[1]) = tuple(t, ok, id=11)
+}
+"#;
+
+    #[test]
+    fn collect_loop_assertions_only_when_requested() {
+        let pkg = Parser::new(PACKAGE).parse_package().unwrap();
+        verify_package(&pkg).unwrap();
+        let rolled = ProverFn::new(pkg.get_fn("rolled").unwrap(), Some(&pkg));
+        let mut solver = EasySmtSolver::new(&EasySmtConfig::z3()).unwrap();
+        let inputs = get_fn_inputs(&mut solver, rolled, None).unwrap();
+        let bindings = super::UfBindings::new(Some(&pkg), &inputs.prover_fn.uf_map);
+        let ufs = UfRegistry {
+            ufs: Default::default(),
+        };
+        for (collect, count) in [(false, 0), (true, 10_000)] {
+            let translated =
+                ir_to_smt_with_assertion_collection(&mut solver, &inputs, &bindings, &ufs, collect);
+            assert_eq!(translated.assertions.len(), count);
+            let nodes = translate_with_node_terms(
+                &mut solver,
+                &inputs,
+                &inputs.prover_fn.uf_map,
+                &ufs,
+                collect,
+            );
+            assert_eq!(nodes.smt_fn.assertions.len(), count);
+            assert_eq!(nodes.node_terms[&7].bitvec.get_width(), 0); // last token
+            assert_eq!(nodes.node_terms[&8].bitvec, translated.output.bitvec);
+        }
+    }
+
+    #[test]
+    fn ignore_omits_loop_assertion_flags_from_solver_query() {
+        let pkg = Parser::new(PACKAGE).parse_package().unwrap();
+        verify_package(&pkg).unwrap();
+        let rolled = ProverFn::new(pkg.get_fn("rolled").unwrap(), Some(&pkg));
+        let plain = ProverFn::new(pkg.get_fn("plain").unwrap(), Some(&pkg));
+        let dir = tempdir().unwrap();
+        let replay = dir.path().join("query.smt2");
+        let config = EasySmtConfig {
+            replay_file: Some(replay.clone()),
+            ..EasySmtConfig::z3()
+        };
+        assert_eq!(
+            prove_ir_fn_equiv::<EasySmtSolver>(
+                &config,
+                &rolled,
+                &plain,
+                AssertionSemantics::Ignore,
+                None,
+                false
+            ),
+            EquivResult::Proved
+        );
+        // The data path just forwards ok. Bitwise ANDs and NOTs would be
+        // building assertion success/failure flags that Ignore never reads.
+        let query = fs::read_to_string(replay).unwrap();
+        assert!(query.contains("(check-sat)"));
+        assert_eq!(query.matches("(bvand ").count(), 0);
+        assert_eq!(query.matches("(bvnot ").count(), 0);
+    }
+
+    #[test]
+    fn quickcheck_ignore_reports_loop_failure_without_folding_assertions() {
+        let pkg = Parser::new(PACKAGE).parse_package().unwrap();
+        let rolled = ProverFn::new(pkg.get_fn("rolled").unwrap(), Some(&pkg));
+        let dir = tempdir().unwrap();
+        let replay = dir.path().join("quickcheck.smt2");
+        let config = EasySmtConfig {
+            replay_file: Some(replay.clone()),
+            ..EasySmtConfig::z3()
+        };
+        let result = prove_ir_quickcheck::<EasySmtSolver>(
+            &config,
+            &rolled,
+            QuickCheckAssertionSemantics::Ignore,
+            None,
+        );
+        let BoolPropertyResult::Disproved { output, .. } = result else {
+            panic!("expected a counterexample for ok == 0, got {result:?}");
+        };
+        assert_eq!(output.assertion_violation.unwrap().label, "check");
+        let query = fs::read_to_string(replay).unwrap();
+        assert!(query.contains("(check-sat)"));
+        assert_eq!(query.matches("(bvand ").count(), 0);
+    }
+}
+
 #[cfg(test)]
 pub mod test_utils {
 
@@ -699,10 +800,10 @@ pub mod test_utils {
 
     use xlsynth_pir::IrValue;
 
-    use super::{align_compatible_inputs, ir_to_smt, prove_ir_fn_equiv};
+    use super::{align_compatible_inputs, prove_ir_fn_equiv};
     use crate::proof_phases::PhaseCollector;
     use crate::prover::Prover;
-    use crate::prover::translate::{get_fn_inputs, ir_value_to_bv};
+    use crate::prover::translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv};
     use crate::prover::types::{
         AssertionSemantics, EquivParallelism, EquivResult, FnInputs, ParamDomains, ProverFn,
     };

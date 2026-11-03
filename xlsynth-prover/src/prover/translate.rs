@@ -10,6 +10,7 @@ use xlsynth_pir::IrValue;
 use super::types::{
     Assertion, FnInputs, IrTypedBitVec, ProverFn, SmtFn, SmtFnWithNodeTerms, UfRegistry,
 };
+use super::uf::UfBindings;
 use crate::solver::{BitVec, Solver};
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
@@ -123,35 +124,31 @@ pub(crate) fn assert_param_domains<S: Solver>(
     Ok(())
 }
 
-/// Applies the same subroutine or uninterpreted function for an invoke or a map
-/// element.
+/// Applies the callee or its UF mapping to one set of actual arguments.
 fn translate_call<'ir, S: Solver>(
     solver: &mut S,
     caller: &FnInputs<'ir, S::Term>,
-    name: &str,
+    callee: &'ir ir::Fn,
     args: Vec<BitVec<S::Term>>,
-    uf_map: &HashMap<String, String>,
+    bindings: &UfBindings<'_>,
     uf_registry: &UfRegistry<S>,
     inline_call: impl FnOnce(&mut S, &FnInputs<'ir, S::Term>) -> BitVec<S::Term>,
 ) -> IrTypedBitVec<'ir, S::Term> {
-    let callee = caller.get_fn(name);
     assert_eq!(args.len(), callee.params.len(), "call arity mismatch");
-    if let Some(symbol) = uf_map.get(name.strip_prefix("__itok").unwrap_or(name)) {
+    if let Some((symbol, implicit_token)) = bindings.lookup(callee) {
+        let visible_args = if implicit_token {
+            log::warn!(
+                "calling UF {symbol} for {}, ignoring side effects",
+                callee.name
+            );
+            &args[2..]
+        } else {
+            &args[..]
+        };
         let uf = uf_registry
             .ufs
             .get(symbol)
             .expect("declared uninterpreted function");
-        let has_itok = name.starts_with("__itok")
-            || (callee.params.len() >= 2
-                && matches!(callee.get_param(0).ty, ir::Type::Token)
-                && matches!(callee.get_param(1).ty, ir::Type::Bits(1)))
-            || matches!(&callee.ret_ty, ir::Type::Tuple(fields) if fields.len() >= 2 && matches!(*fields[0], ir::Type::Token));
-        let visible_args = if has_itok {
-            log::warn!("calling UF {symbol} for {name}, ignoring side effects");
-            &args[2..]
-        } else {
-            &args
-        };
         return IrTypedBitVec {
             ir_type: &callee.ret_ty,
             bitvec: solver.apply_uf(uf, &visible_args.iter().collect::<Vec<_>>()),
@@ -180,47 +177,46 @@ fn translate_call<'ir, S: Solver>(
     }
 }
 
-fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
+/// Inlines concrete calls, recording their assertions in execution order when
+/// the caller supplies a collector.
+fn compute_smt_env<'ir, S: Solver>(
     solver: &mut S,
-    inputs: &'inputs FnInputs<'ir, S::Term>,
-    uf_map: &HashMap<String, String>,
+    inputs: &FnInputs<'ir, S::Term>,
+    bindings: &UfBindings<'_>,
     uf_registry: &UfRegistry<S>,
-) -> (
-    HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
-    Vec<Assertion<'ir, S::Term>>,
-) {
+    assertions: Option<&mut Vec<Assertion<'ir, S::Term>>>,
+) -> HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> {
     translate_nodes(
         solver,
         inputs,
-        uf_map,
+        bindings,
         uf_registry,
+        assertions,
         &mut |s, args, assertions| {
-            let callee = ir_to_smt(s, args, uf_map, uf_registry);
-            assertions.extend(callee.assertions);
-            callee.output.bitvec
+            let mut env = compute_smt_env(s, args, bindings, uf_registry, assertions);
+            env.remove(&args.prover_fn.fn_ref.ret_node_ref.unwrap())
+                .unwrap()
+                .bitvec
         },
     )
 }
 
 /// Translates the nodes of one function using the caller's policy for nested
-/// calls. A counted_for body contributes only its value to the accumulator.
+/// calls and loop iterations.
 fn translate_nodes<'ir, S: Solver>(
     solver: &mut S,
     inputs: &FnInputs<'ir, S::Term>,
-    uf_map: &HashMap<String, String>,
+    bindings: &UfBindings<'_>,
     uf_registry: &UfRegistry<S>,
+    mut assertions: Option<&mut Vec<Assertion<'ir, S::Term>>>,
     inline_call: &mut dyn FnMut(
         &mut S,
         &FnInputs<'ir, S::Term>,
-        &mut Vec<Assertion<'ir, S::Term>>,
+        Option<&mut Vec<Assertion<'ir, S::Term>>>,
     ) -> BitVec<S::Term>,
-) -> (
-    HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>>,
-    Vec<Assertion<'ir, S::Term>>,
-) {
+) -> HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> {
     let topo = get_topological(inputs.prover_fn.fn_ref);
     let mut env: HashMap<NodeRef, IrTypedBitVec<'ir, S::Term>> = HashMap::new();
-    let mut assertions = Vec::new();
     for nr in topo {
         let node = &inputs.prover_fn.fn_ref.nodes[nr.index];
         fn get_num_indexable_elements<'a, S: Solver>(
@@ -317,9 +313,6 @@ fn translate_nodes<'ir, S: Solver>(
                     stride
                 );
 
-                // Prepare callee wrapper and induction-constant builder.
-                let callee_prover_fn = ProverFn::new(callee, inputs.prover_fn.pkg_ref)
-                    .with_fixed_implicit_activation(false);
                 let mk_ind_var_bv = |solver: &mut S, k: usize| -> BitVec<S::Term> {
                     let val = (k as u128) * (*stride as u128);
                     solver.numerical_u128(ind_width, val)
@@ -346,28 +339,15 @@ fn translate_nodes<'ir, S: Solver>(
                         actual_bvs.push(iv.bitvec.clone());
                     }
 
-                    // Map by param name with types from callee signature.
-                    let callee_input_map =
-                        HashMap::from_iter(callee.param_nodes().zip(actual_bvs.into_iter()).map(
-                            |(p, bv)| {
-                                (
-                                    p.param_name().to_string(),
-                                    IrTypedBitVec {
-                                        ir_type: &p.ty,
-                                        bitvec: bv,
-                                    },
-                                )
-                            },
-                        ));
-
-                    let callee_inputs = FnInputs {
-                        prover_fn: callee_prover_fn.clone(),
-                        inputs: callee_input_map,
-                    };
-                    acc = IrTypedBitVec {
-                        ir_type: &node.ty,
-                        bitvec: inline_call(solver, &callee_inputs, &mut Vec::new()),
-                    };
+                    acc = translate_call(
+                        solver,
+                        inputs,
+                        callee,
+                        actual_bvs,
+                        bindings,
+                        uf_registry,
+                        |s, call| inline_call(s, call, assertions.as_deref_mut()),
+                    );
                 }
 
                 IrTypedBitVec {
@@ -955,12 +935,13 @@ fn translate_nodes<'ir, S: Solver>(
                 label,
                 ..
             } => {
-                let active = env.get(activate).expect("Assert activate must be present");
-                assertions.push(Assertion {
-                    active: active.bitvec.clone(),
-                    message: &message,
-                    label: &label,
-                });
+                if let Some(assertions) = &mut assertions {
+                    assertions.push(Assertion {
+                        active: env[activate].bitvec.clone(),
+                        message,
+                        label,
+                    });
+                }
                 IrTypedBitVec {
                     ir_type: &node.ty,
                     bitvec: BitVec::ZeroWidth,
@@ -1019,14 +1000,15 @@ fn translate_nodes<'ir, S: Solver>(
                 translate_call(
                     solver,
                     inputs,
-                    to_apply,
+                    inputs.get_fn(to_apply),
                     args,
-                    uf_map,
+                    bindings,
                     uf_registry,
-                    |s, call| inline_call(s, call, &mut assertions),
+                    |s, call| inline_call(s, call, assertions.as_deref_mut()),
                 )
             }
             NodePayload::Map { array, to_apply } => {
+                let callee = inputs.get_fn(to_apply);
                 let arg = &env[array];
                 let ir::Type::Array(array_ty) = arg.ir_type else {
                     unreachable!("verified map operand must be an array")
@@ -1045,11 +1027,11 @@ fn translate_nodes<'ir, S: Solver>(
                     let result = translate_call(
                         solver,
                         inputs,
-                        to_apply,
+                        callee,
                         vec![element],
-                        uf_map,
+                        bindings,
                         uf_registry,
-                        |s, call| inline_call(s, call, &mut assertions),
+                        |s, call| inline_call(s, call, assertions.as_deref_mut()),
                     );
                     // Array element zero occupies the low bits.
                     bitvec = solver.concat(&result.bitvec, &bitvec);
@@ -1205,7 +1187,7 @@ fn translate_nodes<'ir, S: Solver>(
         };
         env.insert(nr, exp);
     }
-    (env, assertions)
+    env
 }
 
 /// Translates the returned data of a verified function using its actual
@@ -1244,13 +1226,14 @@ where
     if let Some(output) = calls.get(&key) {
         return output.clone();
     }
-    let (mut env, _) = translate_nodes(
+    let mut env = translate_nodes(
         solver,
         inputs,
-        &HashMap::new(),
+        &UfBindings::new(None, &HashMap::new()),
         &UfRegistry {
             ufs: HashMap::new(),
         },
+        None,
         &mut |s, args, _| translate_data_call(s, args, calls),
     );
     let output = env.remove(&function.ret_node_ref.unwrap()).unwrap().bitvec;
@@ -1258,13 +1241,33 @@ where
     output
 }
 
+/// Translates both the output and all assertion events of a function.
 pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     solver: &mut S,
     inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
 ) -> SmtFn<'ir, S::Term> {
-    let (mut env, assertions) = compute_smt_env_and_assertions(solver, inputs, uf_map, uf_registry);
+    let bindings = UfBindings::new(inputs.prover_fn.pkg_ref, uf_map);
+    ir_to_smt_with_assertion_collection(solver, inputs, &bindings, uf_registry, true)
+}
+
+/// Translates a function, optionally retaining assertions for the proof.
+pub(super) fn ir_to_smt_with_assertion_collection<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    bindings: &UfBindings<'_>,
+    uf_registry: &UfRegistry<S>,
+    collect_assertions: bool,
+) -> SmtFn<'ir, S::Term> {
+    let mut assertions = Vec::new();
+    let mut env = compute_smt_env(
+        solver,
+        inputs,
+        bindings,
+        uf_registry,
+        collect_assertions.then_some(&mut assertions),
+    );
 
     let ret = inputs.prover_fn.fn_ref.ret_node_ref.unwrap();
 
@@ -1286,13 +1289,33 @@ pub fn ir_to_smt<'ir, 'inputs, S: Solver>(
     }
 }
 
+/// Translates a function with its intermediate terms and all assertion events.
 pub fn ir_to_smt_with_node_terms<'ir, 'inputs, S: Solver>(
     solver: &mut S,
     inputs: &'inputs FnInputs<'ir, S::Term>,
     uf_map: &HashMap<String, String>,
     uf_registry: &UfRegistry<S>,
 ) -> SmtFnWithNodeTerms<'ir, S::Term> {
-    let (mut env, assertions) = compute_smt_env_and_assertions(solver, inputs, uf_map, uf_registry);
+    translate_with_node_terms(solver, inputs, uf_map, uf_registry, true)
+}
+
+/// Keeps intermediate terms for node queries, optionally collecting assertions.
+pub(crate) fn translate_with_node_terms<'ir, S: Solver>(
+    solver: &mut S,
+    inputs: &FnInputs<'ir, S::Term>,
+    uf_map: &HashMap<String, String>,
+    uf_registry: &UfRegistry<S>,
+    collect_assertions: bool,
+) -> SmtFnWithNodeTerms<'ir, S::Term> {
+    let bindings = UfBindings::new(inputs.prover_fn.pkg_ref, uf_map);
+    let mut assertions = Vec::new();
+    let mut env = compute_smt_env(
+        solver,
+        inputs,
+        &bindings,
+        uf_registry,
+        collect_assertions.then_some(&mut assertions),
+    );
 
     let mut node_terms: BTreeMap<usize, IrTypedBitVec<'ir, S::Term>> = BTreeMap::new();
     for (nr, tbv) in env.iter() {

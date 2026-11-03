@@ -2,7 +2,7 @@
 
 //! Conditional independence of selected return bits from selected input bits.
 
-use super::translate::{get_fn_inputs, ir_to_smt};
+use super::translate::{get_fn_inputs, ir_to_smt_with_assertion_collection};
 use super::types::{
     EquivResult, FnInput, FnInputs, FnOutput, IrTypedBitVec, ProverFn, SmtFn, UfRegistry,
 };
@@ -226,10 +226,14 @@ pub(crate) fn prove_with_solver<S: Solver>(
                 .collect(),
         };
         let uf_map = HashMap::new();
+        let bindings = super::uf::UfBindings::new(None, &uf_map);
         let registry = UfRegistry {
             ufs: HashMap::new(),
         };
-        let guard = ir_to_smt(&mut solver, &guard_inputs, &uf_map, &registry);
+        let translate_data = |solver: &mut S, inputs| {
+            ir_to_smt_with_assertion_collection(solver, inputs, &bindings, &registry, false)
+        };
+        let guard = translate_data(&mut solver, &guard_inputs);
         solver.assert(&guard.output.bitvec)?;
         let guard_reachability = match solver.check()? {
             Response::Sat => PredicateReachability::Reachable,
@@ -242,8 +246,8 @@ pub(crate) fn prove_with_solver<S: Solver>(
                 guard_reachability,
             });
         }
-        let lhs = ir_to_smt(&mut solver, &original, &uf_map, &registry);
-        let rhs = ir_to_smt(&mut solver, &replacement, &uf_map, &registry);
+        let lhs = translate_data(&mut solver, &original);
+        let rhs = translate_data(&mut solver, &replacement);
         let mut differs = solver.false_bv();
         for range in outputs.iter().filter(|r| !r.is_empty()) {
             let left = solver.slice(&lhs.output.bitvec, range.start, range.len());

@@ -6,12 +6,12 @@ use super::types::{
 };
 use super::{
     assertion_filter,
-    translate::{assert_param_domains, get_fn_inputs, ir_to_smt},
-    uf::infer_uf_signatures,
+    translate::{assert_param_domains, get_fn_inputs, ir_to_smt_with_assertion_collection},
+    uf::UfBindings,
 };
 use crate::dslx_utils::validate_dslx_paths;
 use crate::proof_phases::{Phase, PhaseCollector};
-use crate::solver::{BitVec, Response, Solver, SolverConfig};
+use crate::solver::{Response, Solver, SolverConfig};
 
 use regex::Regex;
 use std::collections::HashMap;
@@ -101,20 +101,15 @@ where
         }
     };
 
-    let uf_signatures = if prover_fn.uf_map.is_empty() {
-        HashMap::new()
-    } else {
-        match prover_fn.pkg_ref {
-            Some(pkg) => match infer_uf_signatures(pkg, &prover_fn.uf_map) {
-                Ok(sigs) => sigs,
-                Err(e) => return BoolPropertyResult::Error(e),
-            },
-            None => {
-                return BoolPropertyResult::Error(
-                    "UF mapping provided but package reference missing for quickcheck".to_string(),
-                );
-            }
-        }
+    if !prover_fn.uf_map.is_empty() && prover_fn.pkg_ref.is_none() {
+        return BoolPropertyResult::Error(
+            "UF mapping provided but package reference missing for quickcheck".to_string(),
+        );
+    }
+    let bindings = UfBindings::new(prover_fn.pkg_ref, &prover_fn.uf_map);
+    let uf_signatures = match bindings.infer_signatures() {
+        Ok(sigs) => sigs,
+        Err(e) => return BoolPropertyResult::Error(e),
     };
     drop(setup);
     check_quickcheck_query(
@@ -123,6 +118,7 @@ where
         assertion_semantics,
         assert_label_include,
         &uf_signatures,
+        &bindings,
         phases,
     )
     .unwrap_or_else(|error| BoolPropertyResult::Error(format!("QuickCheck solver failed: {error}")))
@@ -135,31 +131,26 @@ fn check_quickcheck_query<S: Solver>(
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_include: Option<&Regex>,
     uf_signatures: &HashMap<String, UfSignature>,
+    bindings: &UfBindings<'_>,
     phases: &PhaseCollector,
 ) -> io::Result<BoolPropertyResult> {
     let encoding = phases.start(Phase::SmtEncode);
     let fn_inputs = get_fn_inputs(solver, prover_fn.clone(), None)?;
     assert_param_domains(solver, &fn_inputs)?;
     let uf_registry = UfRegistry::from_uf_signatures(solver, uf_signatures)?;
-    let smt_fn = ir_to_smt(solver, &fn_inputs, &prover_fn.uf_map, &uf_registry);
+    let smt_fn =
+        ir_to_smt_with_assertion_collection(solver, &fn_inputs, bindings, &uf_registry, true);
 
     // Optionally filter assertions by label before applying semantics.
     let filtered_assertions =
         assertion_filter::filter_assertions(&smt_fn.assertions, assert_label_include);
 
-    // Build a 1-bit flag that is `1` iff *all* selected in-function
-    // assertions pass.
-    let success_flag: BitVec<S::Term> = if filtered_assertions.is_empty() {
-        solver.numerical(1, 1)
-    } else {
-        let mut acc_opt: Option<BitVec<S::Term>> = None;
-        for a in filtered_assertions.iter() {
-            acc_opt = Some(match acc_opt {
-                None => a.active.clone(),
-                Some(prev) => solver.and(&prev, &a.active),
-            });
-        }
-        acc_opt.expect("acc populated")
+    let success_flag = |solver: &mut S| {
+        let Some((first, rest)) = filtered_assertions.split_first() else {
+            return solver.one(1);
+        };
+        rest.iter()
+            .fold(first.active.clone(), |acc, a| solver.and(&acc, &a.active))
     };
 
     let output_is_false = {
@@ -169,17 +160,19 @@ fn check_quickcheck_query<S: Solver>(
 
     // Build condition according to assertion semantics.
     let condition = match assertion_semantics {
-        QuickCheckAssertionSemantics::Ignore => output_is_false.clone(),
+        QuickCheckAssertionSemantics::Ignore => output_is_false,
         QuickCheckAssertionSemantics::Never => {
             // We require no assertion to fail, so any failure is a
             // counter-example.
-            let failed = solver.not(&success_flag);
+            let passed = success_flag(solver);
+            let failed = solver.not(&passed);
             solver.or(&failed, &output_is_false)
         }
         QuickCheckAssertionSemantics::Assume => {
             // If the function succeeds (all assertions pass) AND output is
             // false.
-            solver.and(&success_flag, &output_is_false)
+            let passed = success_flag(solver);
+            solver.and(&passed, &output_is_false)
         }
     };
 
