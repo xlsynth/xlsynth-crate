@@ -17,8 +17,8 @@ pub struct DelayMappingOptions {
     pub reference_load: f64,
 }
 
-/// Timing-preserving binding index; unlike area mode it retains cell/phase/pin
-/// alternatives.
+/// Binding index that retains distinct logical leaf polarities and fixed
+/// delays.
 #[derive(Debug)]
 pub struct DelayMappingLibrary {
     inner: AreaMappingLibrary,
@@ -50,32 +50,24 @@ pub fn map_gatefn_to_delay_netlist(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, PinDirection};
     use crate::liberty_proto::TimingTableKind;
 
-    /// Build timing-distinct equivalent cells, including a faster negative
-    /// phase.
-    fn timing_library() -> Library {
-        timing_library_at_pins(false)
-    }
-
-    fn timing_library_at_pins(asymmetric: bool) -> Library {
+    /// Builds single-output cells with constant Liberty tables for each input
+    /// pin.
+    pub(in crate::techmap) fn timing_library(
+        specs: &[(&str, &str, f64, &[(&str, f64)])],
+    ) -> Result<Library> {
         let mut b = LibraryBuilder::new();
-        for (name, inputs, function, area, delay) in [
-            ("INV", vec!["A"], "!A", 0.5, 5.0),
-            ("A_CHEAP", vec!["A", "B"], "A*B", 1.0, 10.0),
-            ("B_STRONG", vec!["A", "B"], "A*B", 2.0, 1.0),
-            ("C_EQUAL_AREA_FAST", vec!["A", "B"], "A*B", 2.0, 0.5),
-            ("NAND", vec!["A", "B"], "!(A*B)", 2.5, 0.2),
-        ] {
+        for &(name, function, area, inputs) in specs {
             let mut pins = Vec::new();
             let mut arcs = Vec::new();
-            for input in inputs {
+            for &(input, delay) in inputs {
                 pins.push(Pin {
-                    name: b.intern_string(input).unwrap(),
+                    name: b.intern_string(input)?,
                     direction: PinDirection::Input as i32,
                     ..Default::default()
                 });
@@ -86,35 +78,23 @@ mod tests {
                     TimingTableKind::RiseTransition,
                     TimingTableKind::FallTransition,
                 ] {
-                    tables.push(
-                        b.add_timing_table_f64(
-                            kind,
-                            0,
-                            vec![],
-                            vec![],
-                            vec![],
-                            vec![
-                                if asymmetric && name == "C_EQUAL_AREA_FAST" && input == "B" {
-                                    2.0
-                                } else {
-                                    delay
-                                },
-                            ],
-                            vec![],
-                            "",
-                        )
-                        .unwrap(),
-                    );
+                    tables.push(b.add_timing_table_f64(
+                        kind,
+                        0,
+                        vec![],
+                        vec![],
+                        vec![],
+                        vec![delay],
+                        vec![],
+                        "",
+                    )?);
                 }
-                arcs.push(
-                    b.add_timing_arc(input, "non_unate", "combinational", "", tables)
-                        .unwrap(),
-                );
+                arcs.push(b.add_timing_arc(input, "non_unate", "combinational", "", tables)?);
             }
             pins.push(Pin {
-                name: b.intern_string("Y").unwrap(),
+                name: b.intern_string("Y")?,
                 direction: PinDirection::Output as i32,
-                function: b.intern_string(function).unwrap(),
+                function: b.intern_string(function)?,
                 timing_arcs: arcs,
                 ..Default::default()
             });
@@ -125,12 +105,28 @@ mod tests {
                 ..Default::default()
             });
         }
-        b.finish()
+        Ok(b.finish())
+    }
+
+    /// Builds timing-distinct AND cells and a faster direct NAND.
+    fn timing_library_at_pins(asymmetric: bool) -> Result<Library> {
+        timing_library(&[
+            ("INV", "!A", 0.5, &[("A", 5.0)]),
+            ("A_CHEAP", "A*B", 1.0, &[("A", 10.0), ("B", 10.0)]),
+            ("B_STRONG", "A*B", 2.0, &[("A", 1.0), ("B", 1.0)]),
+            (
+                "C_EQUAL_AREA_FAST",
+                "A*B",
+                2.0,
+                &[("A", 0.5), ("B", if asymmetric { 2.0 } else { 0.5 })],
+            ),
+            ("NAND", "!(A*B)", 2.5, &[("A", 0.2), ("B", 0.2)]),
+        ])
     }
 
     #[test]
     fn retains_stronger_and_equal_area_alternatives_and_direct_negative_phase() {
-        let lib = timing_library();
+        let lib = timing_library_at_pins(false).unwrap();
         let delay = DelayMappingLibrary::new(
             &lib,
             DelayMappingOptions {
@@ -182,7 +178,7 @@ mod tests {
     #[test]
     fn binds_later_arrival_to_faster_symmetric_pin() {
         use crate::netlist::parse::NetRef;
-        let mut lib = timing_library_at_pins(true);
+        let mut lib = timing_library_at_pins(true).unwrap();
         lib.cells
             .retain(|c| c.name == "INV" || c.name == "C_EQUAL_AREA_FAST");
         let delay = DelayMappingLibrary::new(
@@ -220,7 +216,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_electrical_point_and_missing_timing() {
-        let mut lib = timing_library();
+        let mut lib = timing_library_at_pins(false).unwrap();
         assert!(
             DelayMappingLibrary::new(
                 &lib,
