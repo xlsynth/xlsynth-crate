@@ -13,7 +13,7 @@ the matching tools on PATH and DSLX_STDLIB_PATH set to the release's stdlib.
   `0..=0` at compile time. Both the typechecker and converter abort trying
   to represent +1 as a signed one-bit value. The same singleton with two-bit
   endpoints evaluates to zero.
-- `signed_loop_observer.input` is a saved `mission-local` fuzz mutation. The
+- `signed_loop_observer.input` is a saved `mission-local-v2` fuzz mutation. The
   second lane loops over `sN[65]:-5..=sN[65]:-4` with a 99-bit accumulator.
   Bitwuzla found inputs for which the standalone converter sets the top bit of
   the observed loop result incorrectly. Projecting both IR programs onto their
@@ -36,7 +36,7 @@ opt_main --top=__enumerate_width__main enumerate_width.ir
 
 ```sh
 cd ..
-DSLX_FUZZ_GRAMMAR=mission-local DSLX_FUZZ_CONVERTER="$XLSYNTH_TOOLS/ir_converter_main" \
+DSLX_FUZZ_GRAMMAR=mission-local-v2 DSLX_FUZZ_CONVERTER="$XLSYNTH_TOOLS/ir_converter_main" \
   cargo fuzz run --sanitizer none --features with-bitwuzla-system \
   fuzz_dslx_semantics repros/signed_loop_observer.input
 ```

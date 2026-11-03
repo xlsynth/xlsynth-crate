@@ -2,6 +2,7 @@
 
 //! DSLX programs assembled from AST fragments with independent PIR semantics.
 
+pub mod array_fragment;
 pub mod ast;
 pub mod compound;
 pub mod constexpr;

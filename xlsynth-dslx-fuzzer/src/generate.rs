@@ -3,6 +3,7 @@
 //! Bounded, deterministic generation of well-typed module environments.
 
 use crate::Sample;
+use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate};
 use crate::ast::{
     BinaryOp, BitsType, Body, Comparison, Fragment, HelperModule, SliceKind, UnaryOp, ValueRef,
     Width,
@@ -10,8 +11,8 @@ use crate::ast::{
 use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
 use crate::map_fragment::{MapBody, MapFragment};
-use crate::range_match::{ConstMatch, RangeValue};
-use crate::sum_pattern::{SumPattern, SumVariant};
+use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
@@ -37,6 +38,10 @@ pub enum Grammar {
     /// Uses the same mission productions with small module-local functions
     /// in place of standard library imports.
     MissionLocal,
+    /// Replays the signed-range and observation decoder with stdlib imports.
+    MissionV2,
+    /// Replays the signed-range and observation decoder with local helpers.
+    MissionLocalV2,
     /// Replays inputs from the mission decoder before signed ranges and extra
     /// observable values were introduced.
     MissionV1,
@@ -47,7 +52,14 @@ pub enum Grammar {
 impl Grammar {
     /// Selects the decoder with signed ranges and per-lane observations.
     pub fn uses_mission_extensions(self) -> bool {
-        matches!(self, Self::Mission | Self::MissionLocal)
+        matches!(
+            self,
+            Self::Mission | Self::MissionLocal | Self::MissionV2 | Self::MissionLocalV2
+        )
+    }
+
+    fn local_helpers(self) -> bool {
+        matches!(self, Self::MissionLocal | Self::MissionLocalV2)
     }
 }
 
@@ -56,12 +68,14 @@ impl std::str::FromStr for Grammar {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "mission" => Ok(Self::Mission),
-            "mission-local" => Ok(Self::MissionLocal),
+            "mission" | "mission-v3" => Ok(Self::Mission),
+            "mission-local" | "mission-local-v3" => Ok(Self::MissionLocal),
+            "mission-v2" => Ok(Self::MissionV2),
+            "mission-local-v2" => Ok(Self::MissionLocalV2),
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission, mission-local, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -125,13 +139,14 @@ impl Entropy<'_> {
             BinaryOp::And,
             BinaryOp::Or,
         ];
-        let choices = match self.grammar {
-            Grammar::Mission | Grammar::MissionLocal | Grammar::MissionV1 => 2,
-            Grammar::Experimental => 4,
+        let choices = if self.grammar == Grammar::Experimental {
+            4
+        } else {
+            2
         };
         let body = match self.choose(choices) {
             0 => MapBody::BUILTINS[self.choose(MapBody::BUILTINS.len())],
-            1 if self.grammar == Grammar::MissionLocal => MapBody::LocalIsEven,
+            1 if self.grammar.local_helpers() => MapBody::LocalIsEven,
             1 => MapBody::IsEven,
             2 => MapBody::Capture(OPS[self.choose(OPS.len())]),
             _ => MapBody::TwoCaptures(OPS[self.choose(OPS.len())], OPS[self.choose(OPS.len())]),
@@ -140,15 +155,40 @@ impl Entropy<'_> {
     }
 
     /// Chooses distinct runtime variants and independent payload widths.
-    fn sum_pattern(&mut self) -> SumPattern {
+    fn sum_variants_and_widths(&mut self) -> ([SumVariant; 2], [usize; 2]) {
         let count = SumVariant::ALL.len();
         let first = self.choose(count);
         let second = (first + 1 + self.choose(count - 1)) % count;
-        SumPattern {
-            variants: [SumVariant::ALL[first], SumVariant::ALL[second]],
-            widths: [1 + self.choose(129), 1 + self.choose(129)],
-            tail_when_marked: self.choose(2) != 0,
-        }
+        (
+            [SumVariant::ALL[first], SumVariant::ALL[second]],
+            [1 + self.choose(129), 1 + self.choose(129)],
+        )
+    }
+
+    /// Draws two overlapping match arms with a nonempty tail unique to the
+    /// second arm.
+    fn range_match(&mut self) -> Result<RangeMatch, String> {
+        let signed = self.choose(2) != 0;
+        let widths = [5, 7, 8, 31, 32, 63, 64, 65, 127, 128, 129];
+        let width = widths[self.choose(widths.len())];
+        let start = if signed {
+            self.choose(16) as i16 - 8
+        } else {
+            self.choose(8) as i16
+        };
+        let length = 1 + self.choose(4) as u8;
+        let overlap = 1 + self.choose(usize::from(length)) as u8;
+        let tail = 1 + self.choose(4) as u8;
+        RangeMatch::new([
+            RangeValue::typed(signed, width, start, length, self.choose(2) != 0)?,
+            RangeValue::typed(
+                signed,
+                width,
+                start + i16::from(length - overlap),
+                overlap + tail,
+                self.choose(2) != 0,
+            )?,
+        ])
     }
 
     /// Draws representable endpoints on either side of zero while keeping
@@ -179,18 +219,22 @@ impl Entropy<'_> {
         RangeValue::typed(signed, width, start, length as u8, inclusive)
     }
 
-    /// Selects a fragment, preserving the experimental decoder's slot for const
-    /// match.
+    /// Selects a fragment while keeping the historical byte decoders
+    /// replayable.
     fn fragment_choice(&mut self, available_modules: usize) -> usize {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
-        match self.grammar {
-            Grammar::Mission | Grammar::MissionLocal | Grammar::MissionV1 => {
-                let slot = self.choose(24 + call);
-                if slot >= CONST_MATCH { slot + 1 } else { slot }
-            }
-            Grammar::Experimental => self.choose(25 + call),
+        let draw = usize::from(self.byte());
+        if matches!(self.grammar, Grammar::Mission | Grammar::MissionLocal) && draw >= 224 {
+            // Reserve the high eighth for the four new productions. Lower
+            // selector bytes retain their meanings in the inherited corpus.
+            return 26 + draw % 4;
         }
+        if self.grammar == Grammar::Experimental {
+            return draw % (25 + call);
+        }
+        let slot = draw % (24 + call);
+        if slot >= CONST_MATCH { slot + 1 } else { slot }
     }
 
     /// Composes only already-typed values, so no rejection sampling is needed.
@@ -264,7 +308,7 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
-                13..=17 | 21..=24 => {
+                13..=17 | 21..=24 | 26..=29 => {
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -272,8 +316,7 @@ impl Entropy<'_> {
                         14 => {
                             let op = ArrayOp::ALL[self.choose(ArrayOp::ALL.len())];
                             CompoundOp::Array(
-                                if self.grammar == Grammar::MissionLocal && op == ArrayOp::Enumerate
-                                {
+                                if self.grammar.local_helpers() && op == ArrayOp::Enumerate {
                                     ArrayOp::LocalEnumerate
                                 } else {
                                     op
@@ -307,9 +350,44 @@ impl Entropy<'_> {
                                 }
                             }
                         }
-                        21 => CompoundOp::Sum(self.sum_pattern()),
+                        21 => {
+                            let (variants, widths) = self.sum_variants_and_widths();
+                            CompoundOp::Sum(SumPattern {
+                                variants,
+                                widths,
+                                tail_when_marked: self.choose(2) != 0,
+                            })
+                        }
                         22 => CompoundOp::Map(self.map_fragment()?),
                         23 => CompoundOp::ConstMatch(ConstMatch::new(self.choose(4) as u8)?),
+                        26 => {
+                            let (variants, widths) = self.sum_variants_and_widths();
+                            CompoundOp::SumComparison(SumComparison {
+                                variants,
+                                widths,
+                                shape: SumShape::ALL[self.choose(SumShape::ALL.len())],
+                                unequal: self.choose(2) != 0,
+                            })
+                        }
+                        27 => {
+                            let direction = if self.choose(2) == 0 {
+                                CastDirection::BitsToArray
+                            } else {
+                                CastDirection::ArrayToBits
+                            };
+                            CompoundOp::ArrayCast(ArrayCast::new(direction, 2 + self.choose(2))?)
+                        }
+                        28 => CompoundOp::RangeMatch(self.range_match()?),
+                        29 => {
+                            let rows = 2 + self.choose(3);
+                            let cols = 2 + self.choose(3);
+                            CompoundOp::MatrixUpdate(MatrixUpdate::new(
+                                rows,
+                                cols,
+                                self.choose(rows),
+                                self.choose(cols),
+                            )?)
+                        }
                         _ if self.grammar.uses_mission_extensions() => {
                             CompoundOp::RangeValue(self.bounded_range(8, false)?)
                         }

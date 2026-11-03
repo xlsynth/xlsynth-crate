@@ -5,6 +5,7 @@
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
+use xlsynth_dslx_fuzzer::compound::CompoundOp;
 use xlsynth_dslx_fuzzer::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
 use xlsynth_dslx_fuzzer_fuzz::prove;
@@ -33,6 +34,54 @@ fn generated_samples_prove() {
             "{result:#?}\n{sample:#?}"
         );
     }
+}
+
+#[test]
+fn mission_v3_productions_prove_and_v2_keeps_its_decoder() -> Result<(), String> {
+    // Generate one parametric helper production. The top calls it with two
+    // independent seven-bit arguments so its result participates in the proof.
+    let cases: &[(u8, &[u8])] = &[
+        (224, &[0, 1, 64, 4, 3, 1]),      // nested enum inequality
+        (225, &[0, 1]),                   // bits to array
+        (225, &[1, 1]),                   // array to bits
+        (226, &[1, 7, 7, 3, 1, 2, 0, 1]), // overlapping signed ranges
+        (227, &[0, 1, 1, 2]),             // rectangular array update
+    ];
+    for &(draw, options) in cases {
+        let mut bytes = vec![0, 0, 0, draw, 0, 1];
+        bytes.extend_from_slice(options);
+        bytes.extend_from_slice(&[
+            0, // third fragment operand
+            0, 0, 0, 0, 0, // signed helper and default choice
+            0, 0, 0, 0, 2, 0, // observation, unsigned seven-bit lane and literal
+            0, 0, 0, 2, 0, // lane computes x + zero
+            0, 1, 0, // call unsigned helper with x + zero and y
+        ]);
+        for (current, previous) in [
+            (Grammar::Mission, Grammar::MissionV2),
+            (Grammar::MissionLocal, Grammar::MissionLocalV2),
+        ] {
+            let sample = generate_with_grammar(&bytes, GenerateOptions::default(), current)?;
+            let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
+            else {
+                panic!("expected a mission v3 production");
+            };
+            assert!(matches!(
+                (draw, op),
+                (224, CompoundOp::SumComparison(_))
+                    | (225, CompoundOp::ArrayCast(_))
+                    | (226, CompoundOp::RangeMatch(_))
+                    | (227, CompoundOp::MatrixUpdate(_))
+            ));
+            assert!(matches!(prove(&sample.prepare()?)?, EquivResult::Proved));
+            let replay = generate_with_grammar(&bytes, GenerateOptions::default(), previous)?;
+            assert_ne!(
+                sample.helpers()[0].body(false),
+                replay.helpers()[0].body(false)
+            );
+        }
+    }
+    Ok(())
 }
 
 #[test]
