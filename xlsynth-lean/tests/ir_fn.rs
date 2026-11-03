@@ -43,6 +43,33 @@ fn emits_typed_lean_for_array_map() {
 }
 
 #[test]
+fn array_index_may_return_an_empty_array_but_cannot_index_into_it() {
+    for (indices, result_type) in [("i", "bits[8][0]"), ("i, i", "bits[8]")] {
+        let text = format!(
+            r#"package nested_empty
+top fn main() -> {result_type} {{
+  empty: bits[8][0] = array(id=1)
+  outer: bits[8][0][1] = array(empty, id=2)
+  i: bits[1] = literal(value=0, id=3)
+  ret result: {result_type} = array_index(outer, indices=[{indices}], id=4)
+}}"#
+        );
+        let pkg = Parser::new(&text).parse_and_validate_package().unwrap();
+        let module = LeanModuleName::new("Generated.Function").unwrap();
+        let result = export_ir_function(&pkg, None, &module);
+        if indices == "i" {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result.unwrap_err(),
+                LeanError::UnsupportedIr { function, op, id: 4, reason: "index into an empty array" }
+                    if function == "main" && op == "array_index"
+            ));
+        }
+    }
+}
+
+#[test]
 fn rejects_both_partial_products_even_in_a_callee() {
     for op in ["smulp", "umulp"] {
         let text = format!(

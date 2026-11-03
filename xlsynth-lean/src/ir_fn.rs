@@ -340,12 +340,29 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
             P::Array(rs) => format!("#v[{}]", names(rs).join(", ")),
             P::ArrayConcat(rs) => format!("concatMany![{}]", names(rs).join(", ")),
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple), ".2".repeat(*index)),
-            P::ArrayIndex { array, indices, .. } => indices.iter().fold(name(*array), |base, i| {
-                format!(
-                    "(_root_.XlsynthLean.IR.arrayIndex {base} {}.toNat)",
-                    name(*i)
-                )
-            }),
+            P::ArrayIndex { array, indices, .. } => {
+                let mut ty = f.get_node_ty(*array);
+                let mut base = name(*array);
+                for index in indices {
+                    let Type::Array(dimension) = ty else {
+                        unreachable!("verified array_index has one dimension per index")
+                    };
+                    if dimension.element_count == 0 {
+                        return Err(LeanError::UnsupportedIr {
+                            function: f.name.clone(),
+                            op: n.payload.get_operator().to_owned(),
+                            id: n.text_id,
+                            reason: "index into an empty array",
+                        });
+                    }
+                    ty = &dimension.element_type;
+                    base = format!(
+                        "(_root_.XlsynthLean.IR.arrayIndex {base} {}.toNat)",
+                        name(*index)
+                    );
+                }
+                base
+            }
             P::ArrayUpdate {
                 array,
                 value,
