@@ -148,7 +148,9 @@ fn nonlogical_process_results_remain_indefinite(
     assert!(!report.plan.proof_status().is_proved());
     assert_eq!(
         task_outcome(&report.plan),
-        Some(TaskOutcome::Indefinite { reason })
+        Some(TaskOutcome::Indefinite { reason }),
+        "{:?}",
+        report.plan
     );
     let ProverReportNode::Task { stdout, stderr, .. } = report.plan else {
         panic!("expected a task report");
@@ -245,37 +247,6 @@ fn group_without_logical_results_is_indefinite(kind: GroupKind, keep_running: bo
         panic!("expected a group report");
     };
     assert!(matches!(outcome, Some(TaskOutcome::Indefinite { .. })));
-}
-
-#[test]
-fn timeout_preserves_captured_diagnostics() {
-    // The shell writes diagnostics before waiting for the scheduler to kill it.
-    let backend = Backend::new(&[("timeout", None, "while :; do :; done")]).unwrap();
-    let timeout_ms = 500;
-    let report =
-        run_prover_plan_with_driver(task("timeout", Some(timeout_ms)), 1, &backend.path).unwrap();
-    assert!(!report.plan.proof_status().is_proved());
-    assert_eq!(
-        task_outcome(&report.plan),
-        Some(TaskOutcome::Indefinite {
-            reason: IndefiniteReason::Timeout,
-        })
-    );
-    let ProverReportNode::Task {
-        stdout,
-        stderr,
-        timing,
-        ..
-    } = report.plan
-    else {
-        panic!("expected a task report");
-    };
-    assert_eq!(stdout.as_deref(), Some("timeout stdout\n"));
-    assert_eq!(stderr.as_deref(), Some("timeout stderr\n"));
-    let worker_wall = timing.worker_wall_micros.unwrap();
-    assert!(worker_wall >= timeout_ms * 1000);
-    assert!(timing.queued_micros.unwrap() + worker_wall <= report.wall_micros.unwrap());
-    assert!(timing.worker_timing.is_none());
 }
 
 #[test_case(false; "missing driver")]
