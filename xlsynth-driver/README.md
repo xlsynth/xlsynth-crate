@@ -950,10 +950,8 @@ xlsynth-driver aig-tech-map my_design.aig --strategy area \
   --json_out mapping.json
 ```
 
-The experimental `delay` strategy reuses the same cuts and emission and minimizes
-estimated arrival before area. When cell and pin choices implement the same
-function with the same polarity and fixed delay at every leaf, the mapper keeps
-the smallest-area choice and breaks ties by cell name and pin order. It requires
+The experimental `delay` strategy reuses the same cuts and emission, retaining
+cell and pin alternatives and minimizing estimated arrival before area. It requires
 explicit `--primary-input-transition` and `--module-output-load` values in Liberty
 units, frozen for **every cell** during selection. One state per polarity, fixed
 shared boundaries, ideal wires and fixed loads are approximations, not a global
