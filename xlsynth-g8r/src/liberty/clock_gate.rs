@@ -88,6 +88,12 @@ fn unique_attr<'a>(block: &'a Block, key: &str) -> Option<&'a str> {
 
 /// Certifies every binary combination of clock, enable, test and prior latch
 /// state.
+///
+/// Liberty rows read `inputs : current state : next state`. `L` and `H` mean
+/// 0 and 1. A `-` matches either value, and `N` holds the current state.
+/// With inputs `CLK ENA SE`, the low-clock rows set the latch to `ENA | SE`.
+/// For example, `L H L : - : H` sets it to 1. `H - - : - : N` holds it
+/// while CLK is high, so neither enable can start or shorten a pulse.
 fn verifies_latch_table(table: &str, columns: &[&str], clock: &str) -> bool {
     let Some(clock_index) = columns.iter().position(|name| *name == clock) else {
         return false;
