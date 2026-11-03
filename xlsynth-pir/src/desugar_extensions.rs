@@ -20,7 +20,7 @@ use crate::ir::{
 use crate::ir_builder::{
     BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
 };
-use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
+use crate::ir_rebase_ids::{IdRebaseError, package_max_emitted_node_id, rebase_fn_ids_in_place};
 use crate::ir_utils::{compact_and_toposort_in_place, remap_payload_with};
 use crate::math::ceil_log2;
 use crate::{IrBits, IrValue};
@@ -66,15 +66,6 @@ pub enum ExtensionEmitMode {
     /// For example:
     ///   x: bits[3] = invoke(__pir_ext__ext_carry_out__w8, lhs, rhs, c_in);
     AsFfiFunction,
-}
-
-fn next_text_id(f: &NodeGraph) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
 }
 
 fn expect_bits_width(f: &NodeGraph, r: NodeRef, ctx: &str) -> Result<usize, DesugarError> {
@@ -429,10 +420,10 @@ fn append_lowered_ext_normalize_left(
 }
 
 fn push_node(f: &mut NodeGraph, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
     let new_index = f.nodes.len();
     f.nodes.push(Node {
-        text_id,
+        // Lowering uses NodeRefs. Assign text IDs once the final count is known.
+        text_id: 0,
         name: None,
         ty,
         payload,
@@ -1380,13 +1371,43 @@ pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
 
 /// Lowers extension nodes without imposing function interface or root rules.
 fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
-    let _changed = desugar_ext_carry_out_in_graph(f)?
-        | desugar_ext_clz_in_graph(f)?
-        | desugar_ext_normalize_left_in_graph(f)?
-        | desugar_ext_mask_low_in_graph(f)?
-        | desugar_ext_nary_add_in_graph(f)?
-        | desugar_ext_prio_encode_in_graph(f)?;
-    Ok(())
+    // Lowering only overwrites extension nodes and appends their dependencies.
+    // Keep those originals so an error can leave the graph unchanged.
+    let originals: Vec<_> = f
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.payload.is_extension_op())
+        .map(|(index, node)| (index, node.clone()))
+        .collect();
+    if originals.is_empty() {
+        return Ok(());
+    }
+    let original_len = f.nodes.len();
+    let max_id = max_text_id_in_graph(f);
+    let result = (|| {
+        desugar_ext_carry_out_in_graph(f)?;
+        desugar_ext_clz_in_graph(f)?;
+        desugar_ext_normalize_left_in_graph(f)?;
+        desugar_ext_mask_low_in_graph(f)?;
+        desugar_ext_nary_add_in_graph(f)?;
+        desugar_ext_prio_encode_in_graph(f)?;
+        let generated = &mut f.nodes[original_len..];
+        max_id
+            .checked_add(generated.len())
+            .ok_or_else(|| DesugarError::new(IdRebaseError.to_string()))?;
+        for (offset, node) in generated.iter_mut().enumerate() {
+            node.text_id = max_id + offset + 1;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        f.nodes.truncate(original_len);
+        for (index, node) in originals {
+            f.nodes[index] = node;
+        }
+    }
+    result
 }
 
 /// Desugars extension ops within `pkg` into upstream-compatible PIR operations.
@@ -1437,9 +1458,55 @@ mod tests {
     };
     use crate::ir::ExtNaryAddArchitecture;
     use crate::ir_eval::{FnEvalResult, eval_fn};
+    use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function;
     use crate::{IrBits, IrValue};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn inline_lowering_checks_the_exact_number_of_node_ids() {
+        // Carry-out needs six fresh IDs. Exercise an exhausted range, one
+        // missing ID, and an exact fit ending at usize::MAX.
+        for available in [0, 5, 6] {
+            let ir = format!(
+                "fn carry(a: bits[8] id=1, b: bits[8] id=2, c: bits[1] id=3) -> bits[1] {{
+                   ret result: bits[1] = ext_carry_out(a, b, c, id={})
+                 }}",
+                usize::MAX - available
+            );
+            let mut f = Parser::new(&ir).parse_fn().unwrap();
+            verify_function(&f).unwrap();
+            let original = f.to_string();
+            let result = super::desugar_extensions_in_fn(&mut f);
+            if available < 6 {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "DesugarError: node ID allocation or rebasing overflows usize"
+                );
+                assert_eq!(f.to_string(), original);
+            } else {
+                result.unwrap();
+                verify_function(&f).unwrap();
+                assert_eq!(super::max_text_id_in_graph(&f.graph), usize::MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn inline_lowering_can_reuse_an_operand_with_no_node_ids_left() {
+        let ir = format!(
+            "fn single(a: bits[8] id=1) -> bits[8] {{
+               ret result: bits[8] = ext_nary_add(a, signed=[false], negated=[false], id={})
+             }}",
+            usize::MAX
+        );
+        let mut f = Parser::new(&ir).parse_fn().unwrap();
+        let original_len = f.nodes.len();
+        super::desugar_extensions_in_fn(&mut f).unwrap();
+        verify_function(&f).unwrap();
+        assert_eq!(f.nodes.len(), original_len);
+        assert!(f.nodes.iter().all(|n| !n.payload.is_extension_op()));
+    }
 
     #[test]
     fn ffi_helpers_preserve_canonical_text() {
