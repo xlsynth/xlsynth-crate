@@ -3,9 +3,9 @@
 use test_case::test_matrix;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
-use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
+use xlsynth_g8r::aig_sim::gate_sim::{Collect, PreparedGateSim};
 use xlsynth_g8r::check_equivalence;
-use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify, gatify_node_as_fn};
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify, gatify_node_as_fn, gatify_prepared_fn};
 use xlsynth_g8r::process_ir_path::{
     CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
 };
@@ -231,6 +231,153 @@ fn canonical_shift_predicate_has_linear_gate_cost(width: usize, direction: &str)
         stats.max_depth <= 3 * (ceil_log2(width) + 1),
         "unexpected predicate depth: {stats:?}"
     );
+}
+
+#[test]
+fn priority_window_preserves_selector_bit_32() {
+    let mut arms = ["zero"; 33];
+    arms[0] = "y";
+    arms[32] = "x";
+    let arms = arms.join(", ");
+    let ir = format!(
+        r#"package p
+top fn f(k: bits[1], x: bits[2], y: bits[2]) -> bits[1] {{
+  low: bits[32] = literal(value=0, id=4)
+  s: bits[33] = concat(k, low, id=5)
+  zero: bits[2] = literal(value=0, id=6)
+  word: bits[2] = priority_sel(s, cases=[{arms}], default=zero, id=7)
+  ret pred: bits[1] = or_reduce(word, id=8)
+}}"#
+    );
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    let gates = gatify_prepared_fn(
+        package.get_top_fn().unwrap(),
+        GatifyOptions::all_opts_disabled(),
+    )
+    .unwrap()
+    .gate_fn;
+    assert_eq!(get_aig_stats(&gates).and_nodes, 2);
+    let mut sim = PreparedGateSim::new(&gates);
+    for k in [false, true] {
+        for x in 0..4 {
+            for y in 0..4 {
+                let inputs = [
+                    IrBits::bool(k),
+                    IrBits::make_ubits(2, x).unwrap(),
+                    IrBits::make_ubits(2, y).unwrap(),
+                ];
+                assert_eq!(sim.eval_outputs(&inputs), [IrBits::bool(k && x != 0)]);
+            }
+        }
+    }
+}
+
+#[test]
+fn window_prices_shared_selector_fanin_with_the_predicate() {
+    // A window can replace the balanced four-input AND with a chain when it
+    // is private. Returning the balanced tree as well would cost an extra AND.
+    for (ret_type, outputs, expected_ands) in [
+        ("bits[1]", "identity(pred, id=8)", 5),
+        ("(bits[1], bits[1])", "tuple(p, pred, id=8)", 6),
+    ] {
+        let ir = format!(
+            r#"package p
+top fn f(k: bits[4], x: bits[2]) -> {ret_type} {{
+  p: bits[1] = and_reduce(k, id=3)
+  s: bits[1] = identity(p, id=4)
+  zero: bits[2] = literal(value=0, id=5)
+  word: bits[2] = sel(s, cases=[zero, x], id=6)
+  pred: bits[1] = or_reduce(word, id=7)
+  ret result: {ret_type} = {outputs}
+}}"#
+        );
+        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+        let gates = gatify_prepared_fn(
+            package.get_top_fn().unwrap(),
+            GatifyOptions::all_opts_disabled(),
+        )
+        .unwrap()
+        .gate_fn;
+        let stats = get_aig_stats(&gates);
+        assert_eq!((stats.and_nodes, stats.max_depth), (expected_ands, 4));
+    }
+}
+
+#[test]
+fn hashed_selector_alias_keeps_an_independent_window_win() {
+    let ir = r#"package p
+top fn f(k: bits[4], x: bits[2], y: bits[2], t: bits[1]) -> (bits[1], bits[1], bits[1]) {
+  p: bits[1] = and_reduce(k, id=5)
+  q: bits[1] = and_reduce(k, id=6)
+  zero: bits[2] = literal(value=0, id=7)
+  a: bits[2] = sel(p, cases=[zero, x], id=8)
+  pa: bits[1] = or_reduce(a, id=9)
+  b: bits[2] = sel(t, cases=[zero, y], id=10)
+  pb: bits[1] = or_reduce(b, id=11)
+  ret result: (bits[1], bits[1], bits[1]) = tuple(q, pa, pb, id=12)
+}"#;
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let gates = gatify_prepared_fn(
+        package.get_top_fn().unwrap(),
+        GatifyOptions::all_opts_disabled(),
+    )
+    .unwrap()
+    .gate_fn;
+    check_equivalence::validate_same_fn_via_toolchain(package.get_top_fn().unwrap(), &gates)
+        .unwrap();
+    // q retains p's balanced tree. The first predicate costs six ANDs with
+    // that tree, and the independent guarded reduction costs two.
+    let stats = get_aig_stats(&gates);
+    assert_eq!((stats.and_nodes, stats.max_depth), (8, 4));
+}
+
+#[test_matrix([false, true])]
+fn winning_window_keeps_its_observable_tag(identity: bool) {
+    for (operation, tag) in [
+        ("or_reduce(word, id=7)", "or_reduce_7"),
+        ("eq(word, zero, id=7)", "eq_7"),
+        ("ne(word, zero, id=7)", "ne_7"),
+        ("sel(s, cases=[off, nz], id=7)", "sel_7_output_bit_0"),
+    ] {
+        let result = if identity {
+            format!("pred: bits[1] = {operation}\n  ret result: bits[1] = identity(pred, id=8)")
+        } else {
+            format!("ret pred: bits[1] = {operation}")
+        };
+        let ir = format!(
+            r#"package p
+top fn f(s: bits[1], x: bits[2]) -> bits[1] {{
+  zero: bits[2] = literal(value=0, id=3)
+  word: bits[2] = sel(s, cases=[zero, x], id=4)
+  nz: bits[1] = or_reduce(word, id=5)
+  off: bits[1] = literal(value=0, id=6)
+  {result}
+}}"#
+        );
+        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+        let gates = gatify_prepared_fn(
+            package.get_top_fn().unwrap(),
+            GatifyOptions::all_opts_disabled(),
+        )
+        .unwrap()
+        .gate_fn;
+        assert_eq!(get_aig_stats(&gates).and_nodes, 2);
+        let root = gates.outputs[0].bit_vector.get_lsb(0);
+        let mut sim = PreparedGateSim::new(&gates);
+        for s in [false, true] {
+            let result = sim.eval(
+                &[IrBits::bool(s), IrBits::make_ubits(2, 1).unwrap()],
+                Collect::Tagged,
+            );
+            // Tags identify AIG nodes and the output edge may invert that node.
+            let canonical = result.outputs[0].get_bit(0).unwrap() ^ root.negated;
+            assert_eq!(
+                result.tagged_values.unwrap().get(tag),
+                Some(&canonical),
+                "{tag}"
+            );
+        }
+    }
 }
 
 #[test]

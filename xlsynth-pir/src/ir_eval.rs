@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod bounded_bits_cone;
+
 use crate::corners::bucket_xor_popcount;
 use crate::corners::{
     AddCornerTag, ArrayIndexCornerTag, CompareDistanceCornerTag, CornerEvent, CornerKind,
@@ -466,14 +468,14 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                 ir::Binop::Smul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
-                    let r = lhs_bits.smul(&rhs_bits);
-                    IrValue::from_bits(&r)
+                    let product = lhs_bits.smul(&rhs_bits);
+                    IrValue::from_bits(&eval_sign_resize_bits(&product, n.ty.bit_count()))
                 }
                 ir::Binop::Umul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
-                    let r = lhs_bits.umul(&rhs_bits);
-                    IrValue::from_bits(&r)
+                    let product = lhs_bits.umul(&rhs_bits);
+                    IrValue::from_bits(&eval_zero_resize_bits(&product, n.ty.bit_count()))
                 }
                 ir::Binop::Smulp | ir::Binop::Umulp => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
@@ -2565,23 +2567,7 @@ fn eval_fn_impl<'a, 'ir>(
                 eval_pure_from_env(node, &env)
             }
         };
-        // Coerce only for specific nodes where a wider internal computation is
-        // permitted by semantics but the annotated type narrows (e.g.
-        // smul/umul, or decode results). For other nodes we do not
-        // coerce.
         let coerced: IrValue = match &node.payload {
-            ir::NodePayload::Binop(binop @ (ir::Binop::Smul | ir::Binop::Umul), _, _) => {
-                match (&node.ty, value.to_bits()) {
-                    (ir::Type::Bits(expected_w), Ok(bits)) => {
-                        if matches!(binop, ir::Binop::Smul) {
-                            IrValue::from_bits(&eval_sign_resize_bits(&bits, *expected_w))
-                        } else {
-                            IrValue::from_bits(&eval_zero_resize_bits(&bits, *expected_w))
-                        }
-                    }
-                    _ => value.clone(),
-                }
-            }
             ir::NodePayload::Decode { .. } => match (&node.ty, value.to_bits()) {
                 (ir::Type::Bits(expected_w), Ok(bits)) => {
                     let got_w = bits.get_bit_count();

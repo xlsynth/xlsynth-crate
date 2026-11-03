@@ -3683,6 +3683,7 @@ fn gatify_node(
     scope: LoweringScope,
 ) -> Result<(), String> {
     let payload = &node.payload;
+    let mut window_root_tag = None;
     match payload {
         ir::NodePayload::Param => {
             if !env.contains(node_ref) {
@@ -3912,10 +3913,7 @@ fn gatify_node(
                 .priority_predicate_plan
                 .lower_selection(node_ref, gates, env, g8_builder);
 
-            // Tag the result bits
-            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                g8_builder.add_tag(gate.node, format!("sel_{}_output_bit_{}", node.text_id, i));
-            }
+            window_root_tag = Some(format!("sel_{}", node.text_id));
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::Literal(literal) => {
@@ -3984,7 +3982,7 @@ fn gatify_node(
             let gate = env
                 .shift_reduction_predicate_plan
                 .lower(node_ref, gate, env, g8_builder);
-            g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
+            window_root_tag = Some(format!("or_reduce_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
         ir::NodePayload::Unop(ir::Unop::AndReduce, arg) => {
@@ -4294,7 +4292,7 @@ fn gatify_node(
             let gate = env
                 .shift_reduction_predicate_plan
                 .lower(node_ref, gate, env, g8_builder);
-            g8_builder.add_tag(gate.node, format!("eq_{}", node.text_id));
+            window_root_tag = Some(format!("eq_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
         ir::NodePayload::Binop(ir::Binop::Ne, a, b) => {
@@ -4310,7 +4308,7 @@ fn gatify_node(
             let gate = env
                 .shift_reduction_predicate_plan
                 .lower(node_ref, gate, env, g8_builder);
-            g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
+            window_root_tag = Some(format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
         ir::NodePayload::ArrayConcat(args) => {
@@ -4956,6 +4954,27 @@ fn gatify_node(
             return Err(msg);
         }
     }
+    if node.ty == ir::Type::Bits(1)
+        && let Some(value) = env
+            .shift_reduction_predicate_plan
+            .lower_window(node_ref, env, g8_builder)
+    {
+        let entry = env
+            .ir_to_g8
+            .get_mut(&node_ref)
+            .expect("ordinary result is present");
+        match entry {
+            GateOrVec::Gate(gate) => *gate = value,
+            GateOrVec::BitVector(bits) => *bits = value.into(),
+        }
+    }
+    // Attach the operation's tag to the mapping chosen by the window trial.
+    if let Some(tag) = window_root_tag {
+        match &env.ir_to_g8[&node_ref] {
+            GateOrVec::Gate(gate) => g8_builder.add_tag(gate.node, tag),
+            GateOrVec::BitVector(bits) => tag_output_bits(g8_builder, bits, &tag),
+        }
+    }
     env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
     Ok(())
 }
@@ -5235,7 +5254,7 @@ fn gatify_lower_prepared_fn(
         .then(|| ShiftReductionPredicatePlan::extract(f, &env));
     let mut g8_builder = lower(&mut env, plan.as_ref())?;
     if let Some(mut plan) = plan
-        && let Some(ordinary_area) = plan.retain_profitable(&env, &mut g8_builder)
+        && let Some(ordinary_area) = plan.retain_profitable(f, &env, &mut g8_builder)
     {
         // Gate references belong to their builder. Reuse the prepared IR
         // analyses, but collect a separate lowering map for the trial.
