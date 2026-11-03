@@ -61,12 +61,12 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     let spec_stats = get_summary_stats(&spec.gate_fn);
 
     assert_eq!(
-        base_stats.live_nodes, 1243,
+        base_stats.live_nodes, 1072,
         "baseline live_nodes={}",
         base_stats.live_nodes
     );
     assert_eq!(
-        spec_stats.live_nodes, 1148,
+        spec_stats.live_nodes, 956,
         "specialized live_nodes={}",
         spec_stats.live_nodes
     );

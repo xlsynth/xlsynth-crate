@@ -1735,38 +1735,47 @@ fn gatify_abs(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
     gb.add_mux2_vec(sign, &negated, bits)
 }
 
-fn gatify_udiv(
+/// Outputs of unsigned restoring division. A zero divisor leaves the dividend
+/// in the remainder.
+struct RestoringDivision {
+    quotient: AigBitVector,
+    remainder: AigBitVector,
+}
+
+fn gatify_restoring_division(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     gb: &mut GateBuilder,
-) -> AigBitVector {
+) -> RestoringDivision {
     assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
     let bit_count = lhs_bits.get_bit_count();
-
-    let mut remainder = AigBitVector::zeros(bit_count);
+    let mut remainder = AigBitVector::zeros(0);
     let mut quotient_bits = Vec::with_capacity(bit_count);
 
-    for dividend_bit in lhs_bits.iter_msb_to_lsb() {
-        let mut shifted_ops = Vec::with_capacity(bit_count);
+    for (i, dividend_bit) in lhs_bits.iter_msb_to_lsb().enumerate() {
+        // After consuming k bits, the remainder cannot exceed that k-bit
+        // dividend prefix. A divisor with higher bits set cannot be subtracted.
+        let width = i + 1;
+        let mut shifted_ops = Vec::with_capacity(width);
         shifted_ops.push(*dividend_bit);
-        for i in 0..bit_count - 1 {
-            shifted_ops.push(*remainder.get_lsb(i));
-        }
+        shifted_ops.extend(remainder.iter_lsb_to_msb().copied());
         let shifted = AigBitVector::from_lsb_is_index_0(&shifted_ops);
-
-        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted, rhs_bits);
-        let rhs_comp = gb.add_not_vec(rhs_bits);
-        let (_c, diff) = gatify_add_ripple_carry(&shifted, &rhs_comp, gb.get_true(), None, gb);
+        shifted_ops.resize(bit_count, gb.get_false());
+        let shifted_full = AigBitVector::from_lsb_is_index_0(&shifted_ops);
+        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted_full, rhs_bits);
+        let divisor_low = rhs_bits.get_lsb_slice(0, width);
+        let rhs_comp = gb.add_not_vec(&divisor_low);
+        let (_, diff) = gatify_add_brent_kung(&shifted, &rhs_comp, gb.get_true(), None, gb);
         remainder = gb.add_mux2_vec(&ge, &diff, &shifted);
         quotient_bits.push(ge);
     }
 
     quotient_bits.reverse();
-    let quotient = AigBitVector::from_lsb_is_index_0(&quotient_bits);
-
-    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
-    let ones = gb.replicate(gb.get_true(), bit_count);
-    gb.add_mux2_vec(&divisor_zero, &ones, &quotient)
+    // A zero divisor makes every comparison true, so the quotient is all ones.
+    RestoringDivision {
+        quotient: AigBitVector::from_lsb_is_index_0(&quotient_bits),
+        remainder,
+    }
 }
 
 fn gatify_div(
@@ -1776,12 +1785,12 @@ fn gatify_div(
     gb: &mut GateBuilder,
 ) -> AigBitVector {
     match signedness {
-        Signedness::Unsigned => gatify_udiv(lhs_bits, rhs_bits, gb),
+        Signedness::Unsigned => gatify_restoring_division(lhs_bits, rhs_bits, gb).quotient,
         Signedness::Signed => {
             let bit_count = lhs_bits.get_bit_count();
             let lhs_abs = gatify_abs(lhs_bits, gb);
             let rhs_abs = gatify_abs(rhs_bits, gb);
-            let unsigned = gatify_udiv(&lhs_abs, &rhs_abs, gb);
+            let unsigned = gatify_restoring_division(&lhs_abs, &rhs_abs, gb).quotient;
             let sign_a = lhs_bits.get_msb(0);
             let sign_b = rhs_bits.get_msb(0);
             let result_neg = gb.add_xor_binary(*sign_a, *sign_b);
@@ -1804,55 +1813,26 @@ fn gatify_div(
     }
 }
 
-fn gatify_umod(
-    lhs_bits: &AigBitVector,
-    rhs_bits: &AigBitVector,
-    gb: &mut GateBuilder,
-) -> AigBitVector {
-    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
-    let bit_count = lhs_bits.get_bit_count();
-
-    let mut remainder = AigBitVector::zeros(bit_count);
-
-    for dividend_bit in lhs_bits.iter_msb_to_lsb() {
-        let mut shifted_ops = Vec::with_capacity(bit_count);
-        shifted_ops.push(*dividend_bit);
-        for i in 0..bit_count - 1 {
-            shifted_ops.push(*remainder.get_lsb(i));
-        }
-        let shifted = AigBitVector::from_lsb_is_index_0(&shifted_ops);
-
-        let ge = gatify_uge_via_bit_tests(gb, 0, &shifted, rhs_bits);
-        let rhs_comp = gb.add_not_vec(rhs_bits);
-        let (_c, diff) = gatify_add_ripple_carry(&shifted, &rhs_comp, gb.get_true(), None, gb);
-        remainder = gb.add_mux2_vec(&ge, &diff, &shifted);
-    }
-
-    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
-    let zeros = AigBitVector::zeros(bit_count);
-    gb.add_mux2_vec(&divisor_zero, &zeros, &remainder)
-}
-
 fn gatify_mod(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
     signedness: Signedness,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
-    match signedness {
-        Signedness::Unsigned => gatify_umod(lhs_bits, rhs_bits, gb),
+    let remainder = match signedness {
+        Signedness::Unsigned => gatify_restoring_division(lhs_bits, rhs_bits, gb).remainder,
         Signedness::Signed => {
             let lhs_abs = gatify_abs(lhs_bits, gb);
             let rhs_abs = gatify_abs(rhs_bits, gb);
-            let unsigned = gatify_umod(&lhs_abs, &rhs_abs, gb);
+            let unsigned = gatify_restoring_division(&lhs_abs, &rhs_abs, gb).remainder;
             let sign_a = lhs_bits.get_msb(0);
             let negated = gatify_twos_complement(&unsigned, gb);
-            let signed_result = gb.add_mux2_vec(sign_a, &negated, &unsigned);
-            let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
-            let zeros = AigBitVector::zeros(lhs_bits.get_bit_count());
-            gb.add_mux2_vec(&divisor_zero, &zeros, &signed_result)
+            gb.add_mux2_vec(sign_a, &negated, &unsigned)
         }
-    }
+    };
+    let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
+    let zeros = AigBitVector::zeros(rhs_bits.get_bit_count());
+    gb.add_mux2_vec(&divisor_zero, &zeros, &remainder)
 }
 
 #[allow(dead_code)]
