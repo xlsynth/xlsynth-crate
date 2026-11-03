@@ -28,7 +28,12 @@ fn ordinary(text: &str) -> Option<TerminalWrapCapture> {
     let f = parse(text);
     let opt = GatifyOptions::all_opts_enabled();
     let reference = gatify(&f, opt.clone()).unwrap();
-    let (observed, observations) = gatify_with_terminal_observations(&f, opt, true).unwrap();
+    let (observed, observations) = gatify_with_terminal_observations(
+        &f,
+        opt,
+        crate::gatify::ir2gate::TerminalObservationMode::Incumbent,
+    )
+    .unwrap();
     assert_eq!(
         reference.gate_fn.to_string_including_dead_nodes(),
         observed.gate_fn.to_string_including_dead_nodes()
@@ -175,11 +180,15 @@ fn declines_changed_roots_sums_carry_definitions_and_explicit_architecture() {
     let mut options = GatifyOptions::all_opts_enabled();
     options.adder_mapping = AdderMapping::RippleCarry;
     assert!(
-        gatify_with_terminal_observations(&f, options, true)
-            .unwrap()
-            .1
-            .wrap
-            .is_none()
+        gatify_with_terminal_observations(
+            &f,
+            options,
+            crate::gatify::ir2gate::TerminalObservationMode::Incumbent
+        )
+        .unwrap()
+        .1
+        .wrap
+        .is_none()
     );
 }
 
@@ -210,7 +219,12 @@ fn captures_only_the_original_tracked_predicate_id() {
     for track in [false, true] {
         let mut options = GatifyOptions::all_opts_enabled();
         options.track_pir_node_ids = track;
-        let (_, observations) = gatify_with_terminal_observations(&f, options, true).unwrap();
+        let (_, observations) = gatify_with_terminal_observations(
+            &f,
+            options,
+            crate::gatify::ir2gate::TerminalObservationMode::Incumbent,
+        )
+        .unwrap();
         assert_eq!(
             observations.wrap.unwrap().predicate_pir_id,
             track.then_some(root)

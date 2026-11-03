@@ -7,7 +7,7 @@ use crate::aig_sim::gate_sim::PreparedGateSim;
 use crate::gate_builder::GateBuilderOptions;
 use crate::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
 use crate::gatify::ir2gate::{
-    GatifyOptions, TerminalObservations, gatify_lower_prepared_fn,
+    GatifyOptions, TerminalObservationMode, TerminalObservations, gatify_lower_prepared_fn,
     gatify_with_terminal_observations,
 };
 use crate::ir2gates::ir2gates_with_terminal_observations;
@@ -138,8 +138,13 @@ top fn main({}, mask: bits[5]) -> bits[{width}] {{
         ..Default::default()
     };
     let opts = options.to_process_ir_path_options(Some("main"), true, false, false, None);
-    let (ordinary, mut capture) =
-        ir2gates_with_terminal_observations(&ir, Some("main"), (&opts).into(), true).unwrap();
+    let (ordinary, mut capture) = ir2gates_with_terminal_observations(
+        &ir,
+        Some("main"),
+        (&opts).into(),
+        TerminalObservationMode::Incumbent,
+    )
+    .unwrap();
     let stock = optimize_gate_fn(
         ordinary.gatify_output.gate_fn,
         &GateFnOptimizeOptions::from(&opts),
@@ -273,7 +278,7 @@ top fn main(x: bits[8], mask: bits[5]) -> (bits[1], bits[{width}]) {{
             hash: true,
             ..GatifyOptions::all_opts_disabled()
         },
-        true,
+        TerminalObservationMode::Incumbent,
     )
     .unwrap();
     // Returning the input word leaves every ordinal intermediate exclusive.
@@ -347,7 +352,7 @@ fn computed_mask_capture_requires_an_unshared_ordinal_with_an_input_rail(compute
                 hash: true,
                 ..GatifyOptions::all_opts_disabled()
             },
-            true,
+            TerminalObservationMode::Incumbent,
         )
         .unwrap();
         if compute_mask && retained_width == 0 {

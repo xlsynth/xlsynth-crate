@@ -47,6 +47,12 @@ comfy-table = "7.2"
 csv = "1"
 num_cpus = "1.16"
 
+[target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
+rustix = { version = "1.1.5", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 paste = "1.0.15"
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
