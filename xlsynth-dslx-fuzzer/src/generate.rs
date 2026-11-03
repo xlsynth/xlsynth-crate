@@ -2,7 +2,7 @@
 
 //! Bounded, deterministic generation of well-typed module environments.
 
-use crate::Sample;
+use crate::aggregate_flow::{AggregateFlow, FlowKind, FlowObservation, FlowStep};
 use crate::aggregate_match::AggregateMatch;
 use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate};
 use crate::ast::{
@@ -22,6 +22,7 @@ use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
+use crate::{AggregateOutput, Sample};
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 
@@ -69,6 +70,10 @@ pub enum Grammar {
     MissionV6,
     /// Uses v6 productions with module-local helpers.
     MissionLocalV6,
+    /// Transports runtime aggregates through producer and updater functions.
+    MissionV7,
+    /// Uses v7 productions with module-local helpers.
+    MissionLocalV7,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -94,7 +99,9 @@ impl Grammar {
                 | Self::MissionV5
                 | Self::MissionLocalV5
                 | Self::MissionV6
+                | Self::MissionV7
                 | Self::MissionLocalV6
+                | Self::MissionLocalV7
         )
     }
 
@@ -106,6 +113,7 @@ impl Grammar {
                 | Self::MissionLocalV4
                 | Self::MissionLocalV5
                 | Self::MissionLocalV6
+                | Self::MissionLocalV7
         )
     }
 
@@ -114,11 +122,15 @@ impl Grammar {
     }
 
     fn uses_v5_productions(self) -> bool {
-        matches!(self, Self::MissionV5 | Self::MissionLocalV5) || self.is_v6()
+        matches!(self, Self::MissionV5 | Self::MissionLocalV5) || self.uses_v6_productions()
     }
 
-    fn is_v6(self) -> bool {
-        matches!(self, Self::MissionV6 | Self::MissionLocalV6)
+    fn uses_v6_productions(self) -> bool {
+        matches!(self, Self::MissionV6 | Self::MissionLocalV6) || self.is_v7()
+    }
+
+    fn is_v7(self) -> bool {
+        matches!(self, Self::MissionV7 | Self::MissionLocalV7)
     }
 }
 
@@ -133,6 +145,8 @@ impl std::str::FromStr for Grammar {
             "mission-local-v4" => Ok(Self::MissionLocalV4),
             "mission-v5" => Ok(Self::MissionV5),
             "mission-local-v5" => Ok(Self::MissionLocalV5),
+            "mission-v7" => Ok(Self::MissionV7),
+            "mission-local-v7" => Ok(Self::MissionLocalV7),
             "mission-v6" => Ok(Self::MissionV6),
             "mission-local-v6" => Ok(Self::MissionLocalV6),
             "mission-v2" => Ok(Self::MissionV2),
@@ -140,7 +154,7 @@ impl std::str::FromStr for Grammar {
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -292,7 +306,7 @@ impl Entropy<'_> {
         let draw = usize::from(self.byte());
         // In the first helper, selectors for imported types and constants
         // retain their ordinary meaning because no earlier module exists.
-        if self.grammar.is_v6() && (152..176).contains(&draw) {
+        if self.grammar.uses_v6_productions() && (152..176).contains(&draw) {
             let production = 37 + (draw - 152) % 3;
             if production != 39 || call != 0 {
                 return production;
@@ -682,6 +696,58 @@ pub fn generate_with_options(data: &[u8], options: GenerateOptions) -> Result<Sa
     generate_with_grammar(data, options, Grammar::Mission)
 }
 
+/// Draws the aggregate flow from the other end of the input so every v6
+/// scalar binding and observation still decodes identically for the same bytes.
+fn aggregate_output(data: &[u8], sample: &Sample) -> Result<AggregateOutput, String> {
+    const OPS: [BinaryOp; 5] = [
+        BinaryOp::Add,
+        BinaryOp::Sub,
+        BinaryOp::Xor,
+        BinaryOp::Or,
+        BinaryOp::And,
+    ];
+    let mut bytes = data.iter().rev().copied();
+    let mut choose = |count: usize| usize::from(bytes.next().unwrap_or(0)) % count;
+    let index = choose(sample.lanes.len());
+    let lane = &sample.lanes[index];
+    let Width::Concrete(width) = lane.bits_type().width else {
+        return Err("aggregate flow requires a concrete top lane".to_string());
+    };
+    let modules = sample.helpers.len();
+    let producer = choose(modules.saturating_sub(1).max(1));
+    let updater = if modules == 1 {
+        producer
+    } else {
+        producer + 1 + choose(modules - producer - 1)
+    };
+    let kind = [FlowKind::Array, FlowKind::Struct, FlowKind::Enum][choose(3)];
+    let seed_op = OPS[choose(OPS.len())];
+    let steps = (0..1 + choose(3))
+        .map(|_| FlowStep {
+            op: OPS[choose(OPS.len())],
+            invert_index: choose(2) != 0,
+            delta: choose(3),
+        })
+        .collect();
+    let observation = [FlowObservation::Whole, FlowObservation::Select][choose(2)];
+    let [left, right] =
+        lane.aggregate_operands(sample.observations[index], [choose(256), choose(256)]);
+    let parameter = [ValueRef::X, ValueRef::Y][choose(2)];
+    let flow = AggregateFlow::new(
+        index,
+        width,
+        [producer, updater],
+        kind,
+        seed_op,
+        steps,
+        observation,
+    )?;
+    Ok(AggregateOutput {
+        flow,
+        operands: [left, right, parameter],
+    })
+}
+
 /// Decodes mutation bytes deterministically with the given grammar and width
 /// bound.
 pub fn generate_with_grammar(
@@ -742,7 +808,7 @@ pub fn generate_with_grammar(
                 entropy.export_combiners(),
             )?);
         }
-        if grammar.is_v6() {
+        if grammar.uses_v6_productions() {
             let export = if index > 0 && entropy.choose(3) != 0 {
                 StructExport::Alias {
                     module: entropy.choose(index),
@@ -808,5 +874,8 @@ pub fn generate_with_grammar(
         .zip(observation_draws)
         .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.uses_deep_lanes()))
         .collect::<Result<_, _>>()?;
+    if grammar.is_v7() {
+        sample.aggregate = Some(aggregate_output(data, &sample)?);
+    }
     Ok(sample)
 }
