@@ -3,7 +3,7 @@
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_dslx_fuzzer::ast::{BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
-use xlsynth_dslx_fuzzer::range_match::RangeValue;
+use xlsynth_dslx_fuzzer::range_match::{RangeMatch, RangeValue};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
@@ -35,6 +35,81 @@ fn both_mission_profiles_generate_signed_ranges_and_independent_widths() -> Resu
             };
             assert_eq!(*op, expected);
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn runtime_range_matches_preserve_arm_order_and_selector_casts() -> Result<(), String> {
+    // Seven-bit lanes exercise sign extension to a wide signed key and
+    // truncation to a narrow unsigned key. At overlapping points the first
+    // result is 5; points unique to the second arm produce !5 (122).
+    for (signed, key_width, start, cases) in [
+        (
+            true,
+            65,
+            -3,
+            [
+                (124, 124),
+                (125, 5),
+                (126, 5),
+                (127, 5),
+                (0, 122),
+                (1, 122),
+                (2, 2),
+            ],
+        ),
+        (
+            false,
+            5,
+            2,
+            [
+                (1, 1),
+                (2, 5),
+                (35, 5),
+                (4, 5),
+                (5, 122),
+                (6, 122),
+                (39, 39),
+            ],
+        ),
+    ] {
+        let ranges = RangeMatch::new([
+            RangeValue::typed(signed, key_width, start, 3, !signed)?,
+            RangeValue::typed(signed, key_width, start + 1, 4, signed)?,
+        ])?;
+        let ty = BitsType {
+            signed,
+            width: Width::Concrete(7),
+        };
+        let mut lane = Body::new(ty)?;
+        lane.push(Fragment::Compound {
+            op: CompoundOp::RangeMatch(ranges),
+            args: [ValueRef::X, ValueRef::Y, ValueRef::Y],
+        })?;
+        let sample = Sample::new(vec![], vec![lane])?;
+        let reference = sample.expected_ir()?;
+        let mut source = sample.sources()?.pop().unwrap().text;
+        let lane_type = ty.to_dslx();
+        for (input, expected) in cases {
+            let args = [
+                IrValue::make_ubits(7, input).unwrap(),
+                IrValue::make_ubits(7, 5).unwrap(),
+            ];
+            let FnEvalResult::Success(result) = eval_fn(reference.get_top_fn().unwrap(), &args)
+            else {
+                panic!("could not evaluate the runtime match reference");
+            };
+            assert_eq!(
+                result.value,
+                IrValue::make_tuple(&[IrValue::make_ubits(7, expected).unwrap()])
+            );
+            source.push_str(&format!(
+                "const_assert!(main(u7:{input} as {lane_type}, {lane_type}:5) == ((u7:{expected} as {lane_type}),));\n"
+            ));
+        }
+        parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default())
+            .map_err(|error| format!("{error}\n{source}"))?;
     }
     Ok(())
 }

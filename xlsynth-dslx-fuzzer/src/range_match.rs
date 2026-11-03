@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bits-valued fragments for range indexing and specialization-time matching.
+//! Bits-valued fragments for range indexing, iteration, and match expressions.
 
 use crate::ast::{BitsType, Width};
 use crate::compound::resize_unsigned;
@@ -176,6 +176,71 @@ impl RangeValue {
             acc = builder.xor(sum, i)?;
         }
         Ok(acc)
+    }
+}
+
+/// Two ordered, overlapping ranges in an ordinary match on a runtime selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RangeMatch {
+    arms: [RangeValue; 2],
+}
+
+impl RangeMatch {
+    /// Requires a common selector type and reachable values for all three arms.
+    pub fn new(arms: [RangeValue; 2]) -> Result<Self, String> {
+        let [first, second] = arms;
+        if (first.signed, first.width) != (second.signed, second.width) {
+            return Err("match ranges must have the same selector type".to_string());
+        }
+        let first_limit = first.start + i32::from(first.length);
+        let second_limit = second.start + i32::from(second.length);
+        let overlap = first_limit.min(second_limit) - first.start.max(second.start);
+        if overlap <= 0 || overlap == i32::from(second.length) {
+            return Err("match ranges must overlap and leave the second arm reachable".to_string());
+        }
+        let covered = i32::from(first.length) + i32::from(second.length) - overlap;
+        if 1u32.checked_shl(first.width as u32) == Some(covered as u32) {
+            return Err("match ranges must leave the wildcard arm reachable".to_string());
+        }
+        Ok(Self { arms })
+    }
+
+    pub(crate) fn to_dslx(self, [x, y, z]: [&str; 3]) -> String {
+        let [first, second] = self.arms;
+        let selector = first.element_type();
+        let first = first.iterable();
+        let second = second.iterable();
+        format!("match ({x} as {selector}) {{ {first} => {y}, {second} => !{z}, _ => {x}, }}")
+    }
+
+    /// Tests membership by enumerating exact bit patterns instead of comparing
+    /// interval bounds. Selecting the earlier arm last preserves DSLX priority.
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        [x, y, z]: [BValue; 3],
+        width: usize,
+        signed: bool,
+    ) -> Result<BValue, BuilderError> {
+        let selector_width = self.arms[0].width;
+        let selector = if signed && width < selector_width {
+            builder.sign_extend(x, selector_width)?
+        } else {
+            resize_unsigned(builder, x, selector_width)?
+        };
+        let second_result = builder.not(z)?;
+        let mut result = x;
+        for (range, on_match) in self.arms.into_iter().zip([y, second_result]).rev() {
+            let first = builder.literal(range.literal(range.start)?)?;
+            let mut matches = builder.eq(selector, first)?;
+            for offset in 1..range.length {
+                let value = builder.literal(range.literal(range.start + i32::from(offset))?)?;
+                let equal = builder.eq(selector, value)?;
+                matches = builder.or(matches, equal)?;
+            }
+            result = builder.select(matches, &[result, on_match], None)?;
+        }
+        Ok(result)
     }
 }
 

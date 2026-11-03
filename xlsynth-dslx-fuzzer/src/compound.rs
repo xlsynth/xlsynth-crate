@@ -2,11 +2,12 @@
 
 //! Aggregate and builtin contracts with a bits-valued composition boundary.
 
+use crate::array_fragment::{ArrayCast, MatrixUpdate};
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
-use crate::range_match::{ConstMatch, RangeValue};
-use crate::sum_pattern::{self, SumPattern};
+use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue, ir};
 
 /// A builtin whose result is converted back to the surrounding bits type.
@@ -118,8 +119,12 @@ pub enum LoopKind {
 pub enum CompoundOp {
     Builtin(BuiltinOp),
     Array(ArrayOp),
+    ArrayCast(ArrayCast),
+    MatrixUpdate(MatrixUpdate),
+    RangeMatch(RangeMatch),
     Map(MapFragment),
     Sum(SumPattern),
+    SumComparison(SumComparison),
     ConstMatch(ConstMatch),
     RangeValue(RangeValue),
     RangeLoop {
@@ -143,6 +148,7 @@ pub(crate) struct Declarations {
     record: bool,
     choice: bool,
     sum: bool,
+    nested_sum: bool,
     std: bool,
     local_is_even: bool,
     local_enumerate: bool,
@@ -153,6 +159,7 @@ impl Declarations {
         self.record |= other.record;
         self.choice |= other.choice;
         self.sum |= other.sum;
+        self.nested_sum |= other.nested_sum;
         self.std |= other.std;
         self.local_is_even |= other.local_is_even;
         self.local_enumerate |= other.local_enumerate;
@@ -189,6 +196,9 @@ fn fuzz_enumerate<S: bool, W: u32, N: u32>(xs: xN[S][W][N]) -> (u32, xN[S][W])[N
         if self.sum {
             text.push_str(sum_pattern::DECLARATION);
         }
+        if self.nested_sum {
+            text.push_str(sum_pattern::NESTED_DECLARATION);
+        }
         text
     }
 }
@@ -211,6 +221,9 @@ impl CompoundOp {
         if let Self::Sum(pattern) = self {
             return pattern.validate();
         }
+        if let Self::SumComparison(comparison) = self {
+            return comparison.validate();
+        }
         Ok(())
     }
 
@@ -218,7 +231,8 @@ impl CompoundOp {
         Declarations {
             record: matches!(self, Self::Record { .. }),
             choice: self == Self::Pattern(PatternOp::Enum),
-            sum: matches!(self, Self::Sum(_)),
+            sum: matches!(self, Self::Sum(_) | Self::SumComparison(_)),
+            nested_sum: matches!(self, Self::SumComparison(comparison) if comparison.shape == SumShape::Nested),
             std: self == Self::Array(ArrayOp::Enumerate)
                 || matches!(self, Self::Map(map) if map.needs_std()),
             local_is_even: matches!(self, Self::Map(map) if map.needs_local_is_even()),
@@ -238,8 +252,12 @@ impl CompoundOp {
         let ux = format!("({x} as {unsigned})");
         let selector = format!("({ux} as u2)");
         match self {
+            Self::ArrayCast(cast) => cast.to_dslx(ty, args),
+            Self::MatrixUpdate(update) => update.to_dslx(ty, args),
+            Self::RangeMatch(pattern) => pattern.to_dslx(args),
             Self::Map(map) => map.to_dslx(ty, args),
             Self::Sum(pattern) => pattern.to_dslx(ty, args),
+            Self::SumComparison(comparison) => comparison.to_dslx(ty, args),
             Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
             Self::RangeValue(range) => range.to_dslx(ty, args),
             Self::RangeLoop { range, constant } => range.loop_dslx(constant, ty, args),
@@ -369,8 +387,12 @@ impl CompoundOp {
     ) -> Result<BValue, BuilderError> {
         let [x, y, z] = args;
         match self {
+            Self::ArrayCast(cast) => cast.emit_ir(builder, args),
+            Self::MatrixUpdate(update) => update.emit_ir(builder, args),
+            Self::RangeMatch(pattern) => pattern.emit_ir(builder, args, width, signed),
             Self::Map(map) => map.emit_ir(builder, args, width, signed),
             Self::Sum(pattern) => pattern.emit_ir(builder, args, width),
+            Self::SumComparison(comparison) => comparison.emit_ir(builder, args, width),
             Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::RangeValue(range) => range.emit_ir(builder, args, width),
             Self::RangeLoop { range, .. } => range.emit_loop_ir(builder, args, width),
@@ -559,7 +581,10 @@ pub(crate) fn resize_unsigned(
 }
 
 /// Encodes loop/index metadata as a checked arbitrary-width literal.
-fn metadata_literal(builder: &mut FnBuilder, value: usize) -> Result<BValue, BuilderError> {
+pub(crate) fn metadata_literal(
+    builder: &mut FnBuilder,
+    value: usize,
+) -> Result<BValue, BuilderError> {
     let bits = metadata_bits(value).map_err(BuilderError::InvalidOperation)?;
     builder.literal(IrValue::from_bits(&bits))
 }

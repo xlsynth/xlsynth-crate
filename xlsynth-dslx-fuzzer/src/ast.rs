@@ -703,6 +703,7 @@ impl Body {
                         ..
                     } | CompoundOp::Pattern(PatternOp::Tuple)
                         | CompoundOp::Sum(_)
+                        | CompoundOp::SumComparison(_)
                         | CompoundOp::Map(_),
                     ..
                 } | Fragment::TuplePattern { .. }

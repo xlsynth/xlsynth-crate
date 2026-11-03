@@ -4,7 +4,7 @@ use xlsynth::{IrPackage, XlsIrBits, XlsIrValue};
 use xlsynth_dslx_fuzzer::Sample;
 use xlsynth_dslx_fuzzer::ast::{BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
-use xlsynth_dslx_fuzzer::sum_pattern::{SumPattern, SumVariant};
+use xlsynth_dslx_fuzzer::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 
 /// Sets the sign bit and a payload bit, truncating to a field when requested.
 fn operand(width: usize, field_width: usize, low_bit: bool, payload_bit: usize) -> XlsIrBits {
@@ -78,6 +78,84 @@ fn both_tag_values_and_nested_arms_observe_payload_fields() {
                     assert_eq!(converted.interpret(&args).unwrap(), expected);
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn equality_observes_only_fields_of_the_active_variants() {
+    let ty = BitsType {
+        signed: true,
+        width: Width::Concrete(8),
+    };
+    let mut lanes = Vec::new();
+    let mut comparisons = Vec::new();
+    for variants in [
+        [SumVariant::Empty, SumVariant::Word],
+        [SumVariant::Pair, SumVariant::Nested],
+    ] {
+        for shape in SumShape::ALL {
+            for unequal in [false, true] {
+                let comparison = SumComparison {
+                    variants,
+                    widths: [3, 65],
+                    shape,
+                    unequal,
+                };
+                let mut body = Body::new(ty).unwrap();
+                body.push(Fragment::Compound {
+                    op: CompoundOp::SumComparison(comparison),
+                    args: [ValueRef::X, ValueRef::Y, ValueRef::X],
+                })
+                .unwrap();
+                lanes.push(body);
+                comparisons.push(comparison);
+            }
+        }
+    }
+    let sample = Sample::new(vec![], lanes).unwrap().prepare().unwrap();
+    let reference = IrPackage::parse_ir(&sample.expected_ir, None).unwrap();
+    let converted = IrPackage::parse_ir(&sample.converted_ir, None).unwrap();
+    let reference_main = reference.get_function("main").unwrap();
+    let converted_main = converted.get_function(&sample.converted_top).unwrap();
+    for x in [0u8, 1, 3, 4, 8, 12, 15, 255] {
+        for y in [x, x ^ 1, x ^ 128] {
+            let x_arg = XlsIrValue::make_ubits(8, u64::from(x)).unwrap();
+            let y_arg = XlsIrValue::make_ubits(8, u64::from(y)).unwrap();
+            let mut args = Vec::new();
+            let mut results = Vec::new();
+            for comparison in &comparisons {
+                args.extend([x_arg.clone(), y_arg.clone()]);
+                let left_variant = comparison.variants[usize::from(x & 1)];
+                let right_variant = comparison.variants[usize::from((x >> 1) & 1)];
+                let low_equal = (x & 7) == (y & 7);
+                let high_equal = y == x;
+                let marks_equal = (x == 255) == (y == 255);
+                let item_equal = left_variant == right_variant
+                    && match left_variant {
+                        SumVariant::Empty => true,
+                        SumVariant::Word => low_equal,
+                        SumVariant::Pair => low_equal && high_equal,
+                        SumVariant::Nested => low_equal && high_equal && marks_equal,
+                    };
+                let equal = item_equal
+                    && match comparison.shape {
+                        SumShape::Bare => true,
+                        SumShape::Tuple => marks_equal,
+                        SumShape::Array => low_equal,
+                        SumShape::Nested => match (x & 4 != 0, x & 8 != 0) {
+                            (false, false) => true,
+                            (true, true) => low_equal && high_equal,
+                            _ => false,
+                        },
+                    };
+                results.push(
+                    XlsIrValue::make_ubits(8, u64::from(equal ^ comparison.unequal)).unwrap(),
+                );
+            }
+            let expected = XlsIrValue::make_tuple(&results);
+            assert_eq!(reference_main.interpret(&args).unwrap(), expected);
+            assert_eq!(converted_main.interpret(&args).unwrap(), expected);
         }
     }
 }

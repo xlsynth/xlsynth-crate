@@ -10,9 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [input, output] => (Grammar::Mission, input, output),
         [flag, input, output] if flag == "--local" => (Grammar::MissionLocal, input, output),
         [flag, input, output] if flag == "--mission-v1" => (Grammar::MissionV1, input, output),
+        [flag, input, output] if flag == "--mission-v2" => (Grammar::MissionV2, input, output),
+        [flag, input, output] if flag == "--mission-local-v2" => (Grammar::MissionLocalV2, input, output),
         [flag, input, output] if flag == "--experimental" => (Grammar::Experimental, input, output),
         _ => return Err(
-            "usage: replay [--local|--mission-v1|--experimental] <input-bytes> <output-directory>"
+            "usage: replay [--local|--mission-v1|--mission-v2|--mission-local-v2|--experimental] <input-bytes> <output-directory>"
                 .into(),
         ),
     };

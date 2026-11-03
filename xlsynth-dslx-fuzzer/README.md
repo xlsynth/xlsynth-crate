@@ -54,9 +54,17 @@ unsigned and 1 through 129 bits wide, independently of the lane. Ordinary and
 `const for` loops take zero through four trips. Indexed ranges contain one
 through eight elements. The reference computes an element from the start and
 index at the induction width, then applies the DSLX cast to the lane width.
+Runtime match patterns draw two overlapping ranges with independently
+inclusive or exclusive endpoints and a wildcard. The reference enumerates the
+matching values and gives the earlier arm priority. Packed bits-to-array and
+array-to-bits casts observe element order at a runtime index. Two-dimensional
+array updates use a tuple of runtime indices and observe an independently
+selected cell. The references select directly from the input values.
 Payload-bearing enums select between two runtime constructors
 and match positional, named, or nested tuple payloads of independently chosen
-widths. The reference computes the chosen payload result directly. The
+widths. The mission grammar also compares enum values with `==` and `!=`,
+directly and inside tuples, arrays, and nested enums. The reference compares
+variant tags and active payload fields. The
 experimental grammar additionally generates maps with captured lambdas and
 `const match` expressions whose arm selection depends on the specialized lane
 width and a generated two-bit constant.
@@ -108,8 +116,11 @@ let comparison = sample.prepare()?;
 widths in `1..=129`. The ordinary generator and fuzz target retain the full
 129-bit range and use the mission grammar. `Grammar::MissionLocal` draws the
 same operations and widths but emits module-local implementations for named
-maps and enumeration. `Grammar::MissionV1` replays bytes from the earlier
-mission campaign. `Grammar::Experimental` replays the grammar with lambdas and
+maps and enumeration. The versioned names for these profiles are `mission-v3`
+and `mission-local-v3`. Use `mission-v2` or `mission-local-v2` to replay
+inputs from the preceding campaign with signed ranges and intermediate
+outputs. `Grammar::MissionV1` replays bytes from the earlier mission
+campaign. `Grammar::Experimental` replays the grammar with lambdas and
 `const match`. The grammar choice is part of reproducing a saved fuzz input.
 Historical formal regression sweeps use an eight-bit lane bound to keep
 multiplication and division proofs within the routine solver budget. Wide
@@ -181,7 +192,7 @@ Expand saved input bytes into reviewable files from the repository root:
 cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/to/reproducer
 ```
 
-Pass `--local`, `--mission-v1`, or `--experimental` before the input path for
+Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`, or `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before
 conversion. To repeat a standalone proof, set the original
