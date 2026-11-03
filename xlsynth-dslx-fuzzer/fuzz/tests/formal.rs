@@ -37,7 +37,7 @@ fn generated_samples_prove() {
 }
 
 #[test]
-fn mission_v3_productions_prove_and_v2_keeps_its_decoder() -> Result<(), String> {
+fn versioned_mission_productions_prove_and_preserve_previous_decoders() -> Result<(), String> {
     // Generate one parametric helper production. The top calls it with two
     // independent seven-bit arguments so its result participates in the proof.
     let cases: &[(u8, &[u8])] = &[
@@ -46,6 +46,10 @@ fn mission_v3_productions_prove_and_v2_keeps_its_decoder() -> Result<(), String>
         (225, &[1, 1]),                   // array to bits
         (226, &[1, 7, 7, 3, 1, 2, 0, 1]), // overlapping signed ranges
         (227, &[0, 1, 1, 2]),             // rectangular array update
+        (200, &[0, 0, 2]),                // one-hot select over an updated array
+        (200, &[1, 1, 1]),                // priority select over an ellipsis array
+        (201, &[128, 64, 1]),             // match a struct and an array of enums
+        (202, &[2, 2, 1, 0]),             // nested folds with a tuple carry
     ];
     for &(draw, options) in cases {
         let mut bytes = vec![0, 0, 0, draw, 0, 1];
@@ -57,14 +61,22 @@ fn mission_v3_productions_prove_and_v2_keeps_its_decoder() -> Result<(), String>
             0, 0, 0, 2, 0, // lane computes x + zero
             0, 1, 0, // call unsigned helper with x + zero and y
         ]);
-        for (current, previous) in [
-            (Grammar::Mission, Grammar::MissionV2),
-            (Grammar::MissionLocal, Grammar::MissionLocalV2),
-        ] {
+        let versions = if draw >= 224 {
+            [
+                (Grammar::Mission, Grammar::MissionV2),
+                (Grammar::MissionLocal, Grammar::MissionLocalV2),
+            ]
+        } else {
+            [
+                (Grammar::MissionV4, Grammar::Mission),
+                (Grammar::MissionLocalV4, Grammar::MissionLocal),
+            ]
+        };
+        for (current, previous) in versions {
             let sample = generate_with_grammar(&bytes, GenerateOptions::default(), current)?;
             let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
             else {
-                panic!("expected a mission v3 production");
+                panic!("expected a compound production in {current:?}");
             };
             assert!(matches!(
                 (draw, op),
@@ -72,6 +84,9 @@ fn mission_v3_productions_prove_and_v2_keeps_its_decoder() -> Result<(), String>
                     | (225, CompoundOp::ArrayCast(_))
                     | (226, CompoundOp::RangeMatch(_))
                     | (227, CompoundOp::MatrixUpdate(_))
+                    | (200, CompoundOp::ArraySelect(_))
+                    | (201, CompoundOp::AggregateMatch(_))
+                    | (202, CompoundOp::NestedFold(_))
             ));
             assert!(matches!(prove(&sample.prepare()?)?, EquivResult::Proved));
             let replay = generate_with_grammar(&bytes, GenerateOptions::default(), previous)?;

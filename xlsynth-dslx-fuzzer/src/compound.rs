@@ -2,11 +2,13 @@
 
 //! Aggregate and builtin contracts with a bits-valued composition boundary.
 
+use crate::aggregate_match::{self, AggregateMatch};
 use crate::array_fragment::{ArrayCast, MatrixUpdate};
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
 use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::select_fold::{ArraySelect, NestedFold};
 use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue, ir};
 
@@ -125,6 +127,9 @@ pub enum CompoundOp {
     Map(MapFragment),
     Sum(SumPattern),
     SumComparison(SumComparison),
+    ArraySelect(ArraySelect),
+    AggregateMatch(AggregateMatch),
+    NestedFold(NestedFold),
     ConstMatch(ConstMatch),
     RangeValue(RangeValue),
     RangeLoop {
@@ -149,6 +154,7 @@ pub(crate) struct Declarations {
     choice: bool,
     sum: bool,
     nested_sum: bool,
+    aggregate_match: bool,
     std: bool,
     local_is_even: bool,
     local_enumerate: bool,
@@ -160,6 +166,7 @@ impl Declarations {
         self.choice |= other.choice;
         self.sum |= other.sum;
         self.nested_sum |= other.nested_sum;
+        self.aggregate_match |= other.aggregate_match;
         self.std |= other.std;
         self.local_is_even |= other.local_is_even;
         self.local_enumerate |= other.local_enumerate;
@@ -199,6 +206,9 @@ fn fuzz_enumerate<S: bool, W: u32, N: u32>(xs: xN[S][W][N]) -> (u32, xN[S][W])[N
         if self.nested_sum {
             text.push_str(sum_pattern::NESTED_DECLARATION);
         }
+        if self.aggregate_match {
+            text.push_str(aggregate_match::DECLARATION);
+        }
         text
     }
 }
@@ -229,9 +239,13 @@ impl CompoundOp {
 
     pub(crate) fn declarations(self) -> Declarations {
         Declarations {
-            record: matches!(self, Self::Record { .. }),
+            record: matches!(self, Self::Record { .. } | Self::AggregateMatch(_)),
             choice: self == Self::Pattern(PatternOp::Enum),
-            sum: matches!(self, Self::Sum(_) | Self::SumComparison(_)),
+            sum: matches!(
+                self,
+                Self::Sum(_) | Self::SumComparison(_) | Self::AggregateMatch(_)
+            ),
+            aggregate_match: matches!(self, Self::AggregateMatch(_)),
             nested_sum: matches!(self, Self::SumComparison(comparison) if comparison.shape == SumShape::Nested),
             std: self == Self::Array(ArrayOp::Enumerate)
                 || matches!(self, Self::Map(map) if map.needs_std()),
@@ -258,6 +272,9 @@ impl CompoundOp {
             Self::Map(map) => map.to_dslx(ty, args),
             Self::Sum(pattern) => pattern.to_dslx(ty, args),
             Self::SumComparison(comparison) => comparison.to_dslx(ty, args),
+            Self::ArraySelect(select) => select.to_dslx(ty, args),
+            Self::AggregateMatch(pattern) => pattern.to_dslx(ty, args),
+            Self::NestedFold(fold) => fold.to_dslx(ty, args),
             Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
             Self::RangeValue(range) => range.to_dslx(ty, args),
             Self::RangeLoop { range, constant } => range.loop_dslx(constant, ty, args),
@@ -393,6 +410,9 @@ impl CompoundOp {
             Self::Map(map) => map.emit_ir(builder, args, width, signed),
             Self::Sum(pattern) => pattern.emit_ir(builder, args, width),
             Self::SumComparison(comparison) => comparison.emit_ir(builder, args, width),
+            Self::ArraySelect(select) => select.emit_ir(builder, args, width),
+            Self::AggregateMatch(pattern) => pattern.emit_ir(builder, args, width),
+            Self::NestedFold(fold) => fold.emit_ir(builder, args, signed),
             Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::RangeValue(range) => range.emit_ir(builder, args, width),
             Self::RangeLoop { range, .. } => range.emit_loop_ir(builder, args, width),

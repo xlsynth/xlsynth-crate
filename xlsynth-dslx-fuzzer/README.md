@@ -126,6 +126,15 @@ Historical formal regression sweeps use an eight-bit lane bound to keep
 multiplication and division proofs within the routine solver budget. Wide
 primitive tests and fuzzing exercise larger widths.
 
+Opt in to `mission-v4` or `mission-local-v4` to exercise one-hot and priority
+selects over updated or ellipsis-filled case arrays, runtime enum matches
+that unpack a struct and an array of enums, and nested folds that destructure
+tuple elements and capture outer values. In top lanes, three quarters of the
+first-operand draws reuse the previous ordinary fragment when one exists.
+The final helper consumes the latest ordinary fragment. The second output
+exposes the checkpoint with the most runtime fragments outside the final
+result's syntactic dependencies, with an input byte breaking ties.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -192,7 +201,8 @@ Expand saved input bytes into reviewable files from the repository root:
 cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/to/reproducer
 ```
 
-Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`, or `--experimental` before the input path for
+Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
+`--mission-v4`, `--mission-local-v4`, or `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before
 conversion. To repeat a standalone proof, set the original

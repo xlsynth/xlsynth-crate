@@ -7,6 +7,7 @@ use crate::constexpr::{
     ComputedWidth, ConstExpr, ConstantScope, ParametricDefault, bits_literal, metadata_bits,
 };
 use crate::tuple_pattern::{BindingContext, TuplePattern};
+use std::collections::BTreeSet;
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue};
 
 /// A concrete bit width or the width parameter of a helper function.
@@ -557,10 +558,14 @@ impl Body {
         self.result
     }
 
-    /// Chooses an ordinary runtime fragment before the top lane's final helper
-    /// call.
-    pub(crate) fn runtime_intermediate(&self, draw: u8) -> Result<ValueRef, String> {
-        let candidates: Vec<_> = self
+    /// Chooses an ordinary checkpoint, optionally maximizing the number of
+    /// runtime fragments it exposes beyond the result's syntactic dependencies.
+    pub(crate) fn runtime_intermediate(
+        &self,
+        draw: u8,
+        maximize: bool,
+    ) -> Result<ValueRef, String> {
+        let mut candidates: Vec<_> = self
             .fragments
             .iter()
             .enumerate()
@@ -573,6 +578,28 @@ impl Body {
             .collect();
         if candidates.is_empty() {
             return Err("generated top lane has no ordinary runtime fragments".to_string());
+        }
+        if maximize {
+            // Value indices are topologically ordered. Parameters and constants
+            // contribute no runtime fragments to the dependency sets.
+            let mut dependencies = vec![BTreeSet::<usize>::new(); 2];
+            for (index, fragment) in self.fragments.iter().enumerate() {
+                let mut reachable = BTreeSet::new();
+                if !matches!(fragment, Fragment::Literal(_) | Fragment::Constant { .. }) {
+                    reachable.insert(index + 2);
+                    for operand in fragment.operands() {
+                        reachable.extend(&dependencies[operand.0]);
+                    }
+                }
+                dependencies.push(reachable);
+            }
+            let additional = |value: &ValueRef| {
+                dependencies[value.0]
+                    .difference(&dependencies[self.result.0])
+                    .count()
+            };
+            let best = candidates.iter().map(additional).max().unwrap_or(0);
+            candidates.retain(|value| additional(value) == best);
         }
         Ok(candidates[usize::from(draw) % candidates.len()])
     }
@@ -704,6 +731,9 @@ impl Body {
                     } | CompoundOp::Pattern(PatternOp::Tuple)
                         | CompoundOp::Sum(_)
                         | CompoundOp::SumComparison(_)
+                        | CompoundOp::ArraySelect(_)
+                        | CompoundOp::AggregateMatch(_)
+                        | CompoundOp::NestedFold(_)
                         | CompoundOp::Map(_),
                     ..
                 } | Fragment::TuplePattern { .. }
