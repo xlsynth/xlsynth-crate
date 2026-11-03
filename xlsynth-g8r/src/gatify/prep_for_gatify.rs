@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod diagnostics;
+mod grouped_priority;
 mod lexicographic_comparisons;
 mod redundant_nonzero_mask;
 mod shifted_nonzero;
@@ -64,6 +65,13 @@ pub struct PrepForGatifyOptions {
     /// When true, rewrite left-normalization idioms like
     /// `shll(zero_ext(x), ext_clz(x, ...))` into `ext_normalize_left`.
     pub enable_rewrite_normalize_left: bool,
+}
+
+/// Gate optimizations that preparation can credit when choosing a lowering.
+#[derive(Clone, Copy)]
+pub(crate) struct GateCostOptions {
+    pub hash: bool,
+    pub reassociation: bool,
 }
 
 impl PrepForGatifyOptions {
@@ -1392,12 +1400,11 @@ fn rewrite_projected_positive_mask_to_sign_test(
     let original_len = f.nodes.len();
 
     for node_index in 0..original_len {
-        let payload = f.nodes[node_index].payload.clone();
         let NodePayload::BitSlice {
             arg: and_nr,
             start,
             width,
-        } = payload
+        } = f.nodes[node_index].payload
         else {
             continue;
         };
@@ -1405,8 +1412,7 @@ fn rewrite_projected_positive_mask_to_sign_test(
             continue;
         }
 
-        let NodePayload::Nary(NaryOp::And, and_operands) = f.nodes[and_nr.index].payload.clone()
-        else {
+        let NodePayload::Nary(NaryOp::And, and_operands) = &f.nodes[and_nr.index].payload else {
             continue;
         };
         if and_operands.len() != 2 {
@@ -1416,8 +1422,8 @@ fn rewrite_projected_positive_mask_to_sign_test(
         let first = and_operands[0];
         let second = and_operands[1];
         let (low_bits, sign_ext) = {
-            let first_payload = f.nodes[first.index].payload.clone();
-            let second_payload = f.nodes[second.index].payload.clone();
+            let first_payload = &f.nodes[first.index].payload;
+            let second_payload = &f.nodes[second.index].payload;
             match (first_payload, second_payload) {
                 (
                     NodePayload::BitSlice {
@@ -1429,8 +1435,8 @@ fn rewrite_projected_positive_mask_to_sign_test(
                         arg: pred,
                         new_bit_count,
                     },
-                ) if low_start == 0 && low_width == new_bit_count => (arg, (pred, new_bit_count)),
-                (
+                )
+                | (
                     NodePayload::SignExt {
                         arg: pred,
                         new_bit_count,
@@ -1440,7 +1446,9 @@ fn rewrite_projected_positive_mask_to_sign_test(
                         start: low_start,
                         width: low_width,
                     },
-                ) if low_start == 0 && low_width == new_bit_count => (arg, (pred, new_bit_count)),
+                ) if *low_start == 0 && low_width == new_bit_count => {
+                    (*arg, (*pred, *new_bit_count))
+                }
                 _ => continue,
             }
         };
@@ -1455,10 +1463,10 @@ fn rewrite_projected_positive_mask_to_sign_test(
             continue;
         }
 
-        let NodePayload::Unop(Unop::Not, sle_nr) = f.nodes[pred_nr.index].payload.clone() else {
+        let NodePayload::Unop(Unop::Not, sle_nr) = f.nodes[pred_nr.index].payload else {
             continue;
         };
-        let NodePayload::Binop(Binop::Sle, lhs, rhs) = f.nodes[sle_nr.index].payload.clone() else {
+        let NodePayload::Binop(Binop::Sle, lhs, rhs) = f.nodes[sle_nr.index].payload else {
             continue;
         };
         if lhs != low_bits {
@@ -1753,7 +1761,7 @@ where
         }
         (target, None)
     } else {
-        match f.get_node(ret_nr).payload.clone() {
+        match f.get_node(ret_nr).payload {
             NodePayload::Unop(Unop::Identity, arg)
                 if arg == target
                     && use_counts[target.index] == 1
@@ -2617,12 +2625,10 @@ fn rewrite_small_shift_choice_bit_slices(f: &mut ir::Fn) -> usize {
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
     for node_index in 0..original_len {
-        let payload = f.nodes[node_index].payload.clone();
-        let NodePayload::BitSlice { arg, start, width } = payload else {
+        let NodePayload::BitSlice { arg, start, width } = f.nodes[node_index].payload else {
             continue;
         };
-        let NodePayload::Binop(Binop::Shrl, shrl_arg, amount) = f.get_node(arg).payload.clone()
-        else {
+        let NodePayload::Binop(Binop::Shrl, shrl_arg, amount) = f.get_node(arg).payload else {
             continue;
         };
 
@@ -2681,18 +2687,31 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
-    prep_for_gatify_with_origins(f, range_info, options, None)
+    prep_for_gatify_with_origins(
+        f,
+        range_info,
+        options,
+        None,
+        GateCostOptions {
+            hash: true,
+            reassociation: false,
+        },
+    )
 }
 
 /// Optionally records source operation IDs for helpers whose values change.
-pub(super) fn prep_for_gatify_with_origins(
+pub(crate) fn prep_for_gatify_with_origins(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
     mut origins: Option<&mut HashMap<usize, usize>>,
+    gate_cost: GateCostOptions,
 ) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    diagnostics::run(&mut cloned, "grouped_priority", 0, |f| {
+        grouped_priority::rewrite(f, range_info, origins.is_some(), gate_cost)
+    });
     diagnostics::run(&mut cloned, "lexicographic_comparisons", 0, |f| {
         lexicographic_comparisons::rewrite(f, origins.as_deref_mut())
     });
