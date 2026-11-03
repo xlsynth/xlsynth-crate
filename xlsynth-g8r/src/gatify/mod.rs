@@ -6,3 +6,4 @@ pub mod ir2gate;
 pub mod ir2gate_arithmetic;
 pub mod mul_by_const_csd;
 pub mod prep_for_gatify;
+mod wiring;
