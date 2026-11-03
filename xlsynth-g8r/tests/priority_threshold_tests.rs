@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Write;
 use test_case::test_matrix;
-use xlsynth_g8r::aig::gate::GateFn;
+use xlsynth_g8r::aig::gate::{AigNode, GateFn};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_cone_stats;
 use xlsynth_g8r::aig_sim::gate_sim::PreparedGateSim;
 use xlsynth_g8r::check_equivalence;
@@ -15,6 +16,237 @@ use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::find_node_by_name;
 use xlsynth_pir::math::ceil_log2;
+
+/// Builds a masked ordinal whose observed bit depends on mask[4] and word[0].
+fn masked_affine_ir(
+    operation: &str,
+    constant: u32,
+    mask_op: &str,
+    width: usize,
+    returned: &str,
+) -> String {
+    format!(
+        r#"package affine
+top fn main(word: bits[13], mask: bits[5]) -> bits[{width}] {{
+  hot: bits[14] = one_hot(word, lsb_prio=true, id=3)
+  index: bits[4] = encode(hot, id=4)
+  extended: bits[5] = zero_ext(index, new_bit_count=5, id=5)
+  k: bits[5] = literal(value={constant}, id=6)
+  value: bits[5] = {operation}(k, extended, id=7)
+  masked: bits[5] = {mask_op}(mask, value, id=8)
+  {returned}
+}}"#
+    )
+}
+
+#[test_matrix([false, true])]
+fn masked_affine_priority_bit_forwards_the_winning_input(output_inverted: bool) {
+    for (operation, constant, invert) in [("sub", 16, false), ("add", 15, true)] {
+        let returned = if output_inverted {
+            "bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)\n  ret flag: bits[1] = not(bit, id=10)"
+        } else {
+            "ret bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)"
+        };
+        let ir = masked_affine_ir(operation, constant, "and", 1, returned);
+        let gates = canonical_ir_text_to_g8r_lowering_artifacts(
+            &ir,
+            Some("main"),
+            &CanonicalG8rOptions {
+                enable_formal_array_alias_analysis: false,
+                fraig: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+        let root = *gates.outputs[0].bit_vector.get_lsb(0);
+        assert_eq!(get_aig_cone_stats(&gates.gates, &[root]).and_nodes, 1);
+        let mut sim = PreparedGateSim::new(&gates);
+        for word in 0..8192 {
+            for mask in [15, 16] {
+                let inputs = [
+                    IrBits::make_ubits(13, word).unwrap(),
+                    IrBits::make_ubits(5, mask).unwrap(),
+                ];
+                assert_eq!(
+                    sim.eval_outputs(&inputs),
+                    vec![IrBits::bool(
+                        (mask == 16 && ((word & 1 != 0) ^ invert)) ^ output_inverted
+                    )]
+                );
+            }
+        }
+    }
+}
+
+/// Isolates the ordinal substitution from later gate rewrites.
+fn ordinal_trial_options(track_pir_node_ids: bool) -> CanonicalG8rOptions {
+    CanonicalG8rOptions {
+        track_pir_node_ids,
+        enable_formal_array_alias_analysis: false,
+        fraig: false,
+        reassociation: false,
+        cut_db_rewrite: false,
+        ..Default::default()
+    }
+}
+
+#[test_matrix([2, 64])]
+fn repeated_masked_ordinal_outputs_share_one_gate(width: usize) {
+    let mut parts = vec!["bit"; width];
+    parts[0] = "inv";
+    let returned = format!(
+        r#"bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)
+  inv: bits[1] = not(bit, id=10)
+  ret flags: bits[{width}] = concat({}, id=11)"#,
+        parts.join(", ")
+    );
+    let ir = masked_affine_ir("sub", 16, "and", width, &returned);
+    let gates = canonical_ir_text_to_g8r_lowering_artifacts(
+        &ir,
+        Some("main"),
+        &ordinal_trial_options(false),
+    )
+    .unwrap()
+    .gate_fn;
+    let flags = &gates.outputs[0].bit_vector;
+    let roots: Vec<_> = flags.iter_lsb_to_msb().copied().collect();
+    assert_eq!(get_aig_cone_stats(&gates.gates, &roots).and_nodes, 1);
+    let root = *flags.get_lsb(0);
+    assert_eq!(*flags.get_msb(0), root.negate());
+    assert!(flags.iter_msb_to_lsb().skip(1).all(|&bit| bit == root));
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    check_equivalence::validate_same_fn_with_solver(
+        package.get_top_fn().unwrap(),
+        &gates,
+        xlsynth_g8r::test_utils::equivalence_test_solver(),
+        None,
+    )
+    .unwrap();
+}
+
+#[test_matrix([("and", "nand"), ("or", "nor"), ("xor", "xor")])]
+fn independent_ordinal_masks_share_gates_and_provenance(ops: (&str, &str)) {
+    let (a, b) = ops;
+    let returned = format!(
+        r#"first: bits[1] = bit_slice(masked, start=4, width=1, id=9)
+  hot_b: bits[14] = one_hot(word, lsb_prio=true, id=10)
+  index_b: bits[4] = encode(hot_b, id=11)
+  extended_b: bits[5] = zero_ext(index_b, new_bit_count=5, id=12)
+  diff_b: bits[5] = sub(k, extended_b, id=13)
+  masked_b: bits[5] = {b}(diff_b, mask, id=14)
+  second: bits[1] = bit_slice(masked_b, start=4, width=1, id=15)
+  ret flags: bits[2] = concat(first, second, id=16)"#
+    );
+    let ir = masked_affine_ir("sub", 16, a, 2, &returned);
+    let gates = canonical_ir_text_to_g8r_lowering_artifacts(
+        &ir,
+        Some("main"),
+        &ordinal_trial_options(true),
+    )
+    .unwrap()
+    .gate_fn;
+    let bits = &gates.outputs[0].bit_vector;
+    let first = *bits.get_msb(0);
+    let second = *bits.get_lsb(0);
+    assert_eq!(first, if a == b { second } else { second.negate() });
+    let ands: Vec<_> = gates
+        .gates
+        .iter()
+        .filter(|g| matches!(g, AigNode::And2 { .. }))
+        .collect();
+    assert_eq!(ands.len(), if a == "xor" { 3 } else { 1 });
+    for gate in ands {
+        assert_eq!(gate.get_pir_node_ids(), &[8, 14]);
+    }
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    check_equivalence::validate_same_fn_with_solver(
+        package.get_top_fn().unwrap(),
+        &gates,
+        xlsynth_g8r::test_utils::equivalence_test_solver(),
+        None,
+    )
+    .unwrap();
+}
+
+#[test]
+fn folded_return_aliases_keep_their_ids_on_the_shared_root() {
+    const ALIASES: usize = 1024;
+    let mut returned = String::from(
+        "bit: bits[1] = bit_slice(masked, start=4, width=1, id=9)\n  inv: bits[1] = not(bit, id=10)\n",
+    );
+    let names: Vec<_> = (0..ALIASES).map(|i| format!("flag{i}")).collect();
+    for (i, name) in names.iter().enumerate() {
+        writeln!(returned, "  {name}: bits[1] = not(inv, id={})", 11 + i).unwrap();
+    }
+    write!(
+        returned,
+        "  ret flags: bits[{ALIASES}] = concat({}, id={})",
+        names.join(", "),
+        11 + ALIASES
+    )
+    .unwrap();
+    let ir = masked_affine_ir("sub", 16, "and", ALIASES, &returned);
+    let gates = canonical_ir_text_to_g8r_lowering_artifacts(
+        &ir,
+        Some("main"),
+        &ordinal_trial_options(true),
+    )
+    .unwrap()
+    .gate_fn;
+    let bits = &gates.outputs[0].bit_vector;
+    let root = *bits.get_lsb(0);
+    assert!(bits.iter_lsb_to_msb().all(|&b| b == root));
+    assert_eq!(get_aig_cone_stats(&gates.gates, &[root]).and_nodes, 1);
+    let ids = gates.get(root.node).get_pir_node_ids();
+    let expected: Vec<_> = std::iter::once(8).chain(11..11 + ALIASES as u32).collect();
+    assert_eq!(ids, expected);
+}
+
+#[test]
+fn affine_priority_preserves_an_independent_output_through_rewriting() {
+    use xlsynth_g8r::gate_fn_optimize::{GateFnOptimizeOptions, optimize_gate_fn};
+    use xlsynth_g8r::ir2gates::{Ir2GatesOptions, ir2gates_from_ir_text};
+    use xlsynth_g8r::process_ir_path::canonical_ir_text_to_g8r_artifacts;
+
+    let ir = r#"package dispatch
+top fn main(request: bits[13] id=1, bank: bits[3] id=2) -> (bits[1], bits[1]) {
+  hot: bits[14] = one_hot(request, lsb_prio=true, id=3)
+  ordinal: bits[4] = encode(hot, id=4)
+  wide: bits[6] = zero_ext(ordinal, new_bit_count=6, id=5)
+  bias: bits[6] = literal(value=31, id=6)
+  stamp: bits[6] = add(wide, bias, id=7)
+  defer: bits[1] = bit_slice(stamp, start=5, width=1, id=8)
+  lanes: bits[7] = bit_slice(request, start=4, width=7, id=9)
+  high: bits[8] = one_hot(lanes, lsb_prio=false, id=10)
+  idx: bits[3] = encode(high, id=11)
+  matches: bits[1] = eq(idx, bank, id=12)
+  ret result: (bits[1], bits[1]) = tuple(defer, matches, id=13)
+}"#;
+    let settings = CanonicalG8rOptions {
+        enable_formal_array_alias_analysis: false,
+        fraig: false,
+        enable_rewrite_prio_encode: false,
+        enable_rewrite_carry_out: false,
+        ..Default::default()
+    };
+    let options = settings.to_process_ir_path_options(Some("main"), true, false, false, None);
+    let ordinary =
+        ir2gates_from_ir_text(ir, Some("main"), Ir2GatesOptions::from(&options)).unwrap();
+    let finished = optimize_gate_fn(
+        ordinary.gatify_output.gate_fn,
+        &GateFnOptimizeOptions::from(&options),
+    )
+    .unwrap()
+    .gate_fn;
+    let actual = canonical_ir_text_to_g8r_artifacts(ir, Some("main"), &settings).unwrap();
+    let direct = *finished.inputs[0].bit_vector.get_lsb(0);
+    assert_eq!(*finished.outputs[0].bit_vector.get_lsb(1), direct.negate());
+    assert_eq!(
+        actual.binary_aiger,
+        xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary(&finished, true).unwrap()
+    );
+}
 
 #[test_matrix([1, 2, 3, 4, 8, 9, 33, 65, 161], [true, false], [true, false])]
 fn priority_threshold_preserves_ordinal_semantics(width: usize, lsb_prio: bool, fold: bool) {

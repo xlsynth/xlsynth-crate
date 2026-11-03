@@ -273,6 +273,24 @@ impl GateBuilder {
             .insert(aig_ref.id, original);
     }
 
+    /// Appends to a completed graph without rebuilding or renumbering its
+    /// nodes.
+    pub(crate) fn append_to(graph: GateFn) -> Self {
+        Self {
+            name: graph.name,
+            gates: graph.gates,
+            inputs: graph.inputs,
+            outputs: graph.outputs,
+            ..Self::new(
+                String::new(),
+                GateBuilderOptions {
+                    fold: true,
+                    hash: false,
+                },
+            )
+        }
+    }
+
     pub fn build(self) -> GateFn {
         debug_assert!(
             !self.outputs.is_empty(),
