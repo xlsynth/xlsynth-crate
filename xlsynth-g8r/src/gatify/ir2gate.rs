@@ -35,8 +35,10 @@ use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
 mod demanded_bits;
+mod priority_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
 pub(super) use arithmetic_cluster::gatify_arithmetic_cluster;
+use priority_predicate::PriorityPredicatePlan;
 mod region;
 pub use region::{IrRegion, gatify_region};
 
@@ -195,6 +197,7 @@ pub(super) struct GateEnv {
     /// Absent for standalone node lowering, where every target bit is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
+    priority_predicate_plan: PriorityPredicatePlan,
 }
 
 impl GateEnv {
@@ -214,6 +217,7 @@ impl GateEnv {
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
+            priority_predicate_plan: PriorityPredicatePlan::default(),
         }
     }
 
@@ -234,6 +238,7 @@ impl GateEnv {
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
+            priority_predicate_plan: PriorityPredicatePlan::default(),
         }
     }
 
@@ -3564,6 +3569,9 @@ fn gatify_node(
 
             let gates = early_unit_delta
                 .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
+            let gates = env
+                .priority_predicate_plan
+                .lower_selection(node_ref, gates, env, g8_builder);
 
             // Tag the result bits
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
@@ -3625,10 +3633,15 @@ fn gatify_node(
 
         // -- bitwise reductions
         ir::NodePayload::Unop(ir::Unop::OrReduce, arg) => {
-            let arg_gates = env
-                .get_bit_vector(*arg)
-                .expect("unop arg should be present");
-            let gate: AigOperand = g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree);
+            let gate = env
+                .priority_predicate_plan
+                .lower_reduction(node_ref, env, g8_builder)
+                .unwrap_or_else(|| {
+                    let arg_gates = env
+                        .get_bit_vector(*arg)
+                        .expect("unop arg should be present");
+                    g8_builder.add_or_reduce(&arg_gates, ReductionKind::Tree)
+                });
             g8_builder.add_tag(gate.node, format!("or_reduce_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
@@ -3988,6 +4001,18 @@ fn gatify_node(
         }
 
         // -- nary operations
+        ir::NodePayload::Nary(op @ (ir::NaryOp::And | ir::NaryOp::Nand), args)
+            if env
+                .priority_predicate_plan
+                .contradicts_selected_bit(f, args) =>
+        {
+            let gate = if *op == ir::NaryOp::Nand {
+                g8_builder.get_true()
+            } else {
+                g8_builder.get_false()
+            };
+            env.add(node_ref, GateOrVec::Gate(gate));
+        }
         ir::NodePayload::Nary(ir::NaryOp::And, args) => {
             let arg_gates: Vec<AigBitVector> = args
                 .iter()
@@ -4570,6 +4595,7 @@ fn gatify_internal(
     if options.enable_rewrite_nary_add {
         env.arithmetic_cluster_plan = ArithmeticClusterPlan::extract(f, env);
     }
+    env.priority_predicate_plan = PriorityPredicatePlan::extract(f, env);
 
     // First we place all the inputs into the G8 structure and environment.
     for &param_ref in &f.params {
