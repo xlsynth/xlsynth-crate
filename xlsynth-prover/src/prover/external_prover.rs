@@ -427,8 +427,10 @@ fn f(x: bits[1] id=1) -> bits[1] {
     fn external_quickcheck_process_outcomes_require_success(script: &str, expect_success: bool) {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("prove_quickcheck_main");
-        std::fs::write(&exe, format!("#!/bin/sh\n{script}")).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.path().join("behavior.sh"), script).unwrap();
+        let launcher =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/process_outcome_backend.sh");
+        std::os::unix::fs::symlink(launcher, &exe).unwrap();
         let entry_file = dir.path().join("property.x");
         let source = "#[quickcheck]\nfn property(x: u1) -> bool { x == x }\n";
         std::fs::write(&entry_file, source).unwrap();

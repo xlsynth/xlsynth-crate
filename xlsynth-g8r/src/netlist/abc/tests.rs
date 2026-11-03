@@ -11,12 +11,19 @@ use crate::aig_sim::{
 };
 use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::gv_eval::{GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use xlsynth_test_helpers::compare_golden_text;
 
 /// Short alternative flow with a trailing comment to exercise script framing.
 const CUSTOM_PASSES: &str = "&get -n; &dch; &nf; &put\n# caller-selected passes";
+
+/// Execute checked-in scripts so parallel tests never hold them open for
+/// writing.
+#[cfg(unix)]
+fn fake_abc(script: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/netlist/abc/fake_abc")
+        .join(script)
+}
 
 fn library() -> Library {
     let file = tempfile::NamedTempFile::new().unwrap();
@@ -483,22 +490,14 @@ fn options_resolve_library_defaults_at_construction() {
 #[test]
 fn explicit_options_map_without_usable_library_defaults() {
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake abc");
-    std::fs::write(
-        &executable,
-        r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-test "$(cat timing.constr)" = "set_driving_cell BUF
-set_load 20" || exit 3
-echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule' > mapped.v
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let raw = temp.path().join("cells.lib");
     std::fs::write(&raw, "library(test) {}").unwrap();
-    let mut context =
-        AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
+    let mut context = AbcMappingContext::new(
+        AbcToolchain::new(fake_abc("explicit_constraints.py")).unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
     let mut builder = GateBuilder::new("top".into(), GateBuilderOptions::no_opt());
     let input = builder.add_input("a".into(), 1);
     builder.add_output(
@@ -577,23 +576,14 @@ fn mapping_validates_explicit_and_modified_constraints() {
 #[test]
 fn constraint_file_is_written_and_missing_raw_driver_warning_is_fatal() {
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake abc");
-    std::fs::write(
-        &executable,
-        r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-test "$(cat timing.constr)" = "set_driving_cell BUF
-set_load 4" || exit 3
-echo 'Cannot find the default PI driving cell (BUF) in the library.'
-echo 'module mapped(); endmodule' > mapped.v
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let raw = temp.path().join("raw.lib");
     std::fs::write(&raw, "library(raw) {}").unwrap();
-    let context =
-        AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
+    let context = AbcMappingContext::new(
+        AbcToolchain::new(fake_abc("missing_driver.py")).unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
     let error = context
         .map_sequential(
             &design_with_logic(),
@@ -613,29 +603,10 @@ echo 'module mapped(); endmodule' > mapped.v
 #[test]
 fn mapping_invokes_the_override_and_records_the_complete_script() {
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake abc");
-    std::fs::write(
-        &executable,
-        format!(
-            r#"#!/bin/sh
-if [ "$2" = "-c" ]; then exit 0; fi
-test "$1" = '-s' && test "$2" = '-f' && test "$3" = 'map.abc' || exit 2
-cat <<'EXPECTED' | cmp - map.abc || exit 3
-{}EXPECTED
-test -s transition.aig || exit 4
-test "$(cat timing.constr)" = "set_driving_cell BUF
-set_load 4" || exit 5
-echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule' > mapped.v
-"#,
-            include_str!("custom_script.golden.txt")
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let raw = temp.path().join("cells.lib");
     std::fs::write(&raw, "library(test) {}").unwrap();
     let context = AbcMappingContext::new(
-        AbcToolchain::new(&executable).unwrap(),
+        AbcToolchain::new(fake_abc("custom_script.py")).unwrap(),
         &[&raw, &raw, &raw],
         library(),
     )
@@ -661,9 +632,12 @@ echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule
 #[test]
 fn post_abc_validation_and_assembly_errors_preserve_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake abc");
+    let executable = temp.path().join("fake_abc");
+    std::os::unix::fs::symlink(fake_abc("diagnostics.py"), &executable).unwrap();
     let raw = temp.path().join("raw.lib");
     std::fs::write(&raw, "library(raw) {}").unwrap();
+    let context =
+        AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
     let mut errors = Vec::new();
     for (label, netlist) in [
         (
@@ -676,22 +650,7 @@ fn post_abc_validation_and_assembly_errors_preserve_diagnostics() {
         ),
         ("boundary mismatch", "module mapped(); endmodule"),
     ] {
-        std::fs::write(
-            &executable,
-            format!(
-                r#"#!/bin/sh
-if [ "$2" = "-c" ]; then echo 'test ABC'; exit 0; fi
-echo 'mapping stdout'
-echo 'mapping stderr' >&2
-printf '%s\n' '{netlist}' > mapped.v
-"#
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let context =
-            AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[&raw], library())
-                .unwrap();
+        std::fs::write(temp.path().join("output.v"), format!("{netlist}\n")).unwrap();
         let error = context
             .map_sequential(
                 &design_with_logic(),
@@ -854,22 +813,32 @@ fn zero_width_and_clock_only_designs_need_no_abc_network() {
 #[test]
 fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
     let temp = tempfile::tempdir().unwrap();
-    let executable = temp.path().join("fake abc");
-    std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let raw = temp.path().join("raw library; name.lib");
+    let raw = temp.path().join("raw.lib");
     std::fs::write(&raw, "library(raw) {}").unwrap();
-    let context =
-        AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
-    assert!(
-        context
-            .map_sequential(
-                &design_with_logic(),
-                &AbcMappingOptions::from_library(context.library()).unwrap()
-            )
-            .is_err()
+    let context = AbcMappingContext::new(
+        AbcToolchain::new("/usr/bin/true").unwrap(),
+        &[&raw],
+        library(),
+    )
+    .unwrap();
+    let error = context
+        .map_sequential(
+            &design_with_logic(),
+            &AbcMappingOptions::from_library(context.library()).unwrap(),
+        )
+        .err()
+        .unwrap();
+    let message = error.to_string().replace(
+        temp.path().canonicalize().unwrap().to_str().unwrap(),
+        "<workdir>",
     );
-    std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
+    compare_golden_text(&message, "src/netlist/abc/missing_mapped_v.golden.txt");
+    let context = AbcMappingContext::new(
+        AbcToolchain::new(fake_abc("timeout.py")).unwrap(),
+        &[raw],
+        library(),
+    )
+    .unwrap();
     let error = context
         .map_sequential(
             &design_with_logic(),
@@ -880,5 +849,5 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
         )
         .err()
         .unwrap();
-    assert!(error.is_resource_failure());
+    assert_eq!(error.kind, xlsynth::external_tool::ToolFailureKind::Timeout);
 }

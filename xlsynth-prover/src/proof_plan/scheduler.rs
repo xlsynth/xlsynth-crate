@@ -1266,7 +1266,6 @@ mod tests {
     use super::*;
     use crate::proof_plan::config::IrEquivConfig;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use test_case::test_case;
 
@@ -1281,8 +1280,12 @@ mod tests {
         fn new(script: &str, plan: ProverPlan) -> io::Result<Self> {
             let directory = tempfile::tempdir()?;
             let driver = directory.path().join("driver.sh");
-            fs::write(&driver, script)?;
-            fs::set_permissions(&driver, fs::Permissions::from_mode(0o755))?;
+            // A sibling fork can inherit a writer for the script, so only
+            // execute the tracked launcher.
+            fs::write(directory.path().join("behavior.sh"), script)?;
+            let launcher = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/process_outcome_backend.sh");
+            std::os::unix::fs::symlink(launcher, &driver)?;
             Ok(Self {
                 scheduler: Scheduler::new_with_driver(
                     plan,

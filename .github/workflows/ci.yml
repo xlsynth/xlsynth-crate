@@ -226,16 +226,11 @@ jobs:
           echo "DSLX_STDLIB_PATH=${XLSYNTH_TOOLS}/xls/dslx/stdlib" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=${XLSYNTH_TOOLS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
 
-      - name: Install libc++ runtime
+      - name: Install CMake
         run: |
           echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
           sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          sudo apt-get install -y cmake
 
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
@@ -304,16 +299,11 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install libc++ from llvm-18
+      - name: Install CMake and system Z3 dependencies
         timeout-minutes: 15
         run: |
           sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install wget gnupg curl cmake
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install libc++-18-dev libc++abi-18-dev libz3-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install cmake libclang-dev libz3-dev
 
       - name: Resolve XLS release tag
         id: resolve-xls-tag-matrix
@@ -518,7 +508,8 @@ jobs:
       - name: Install dependencies for Python scripts and downloads
         run: |
           bash scripts/ci_apt_retry.sh update
-          bash scripts/ci_apt_retry.sh install --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
+          # z3-sys needs libclang to generate bindings for system Z3.
+          bash scripts/ci_apt_retry.sh install --no-install-recommends python3 python3-pip curl unzip git sudo build-essential pkg-config libssl-dev cmake libclang-dev libz3-dev zlib1g-dev
           pip3 install -r requirements.txt
 
       - name: Download xlsynth binaries
@@ -540,18 +531,6 @@ jobs:
 
       - name: Install pinned iverilog and vvp
         run: python3 scripts/install_ci_iverilog.py
-
-      - name: Install libc++ from llvm-18
-        run: |
-          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
-          # Install prerequisites for llvm.sh and libc++ installation
-          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends curl wget gnupg lsb-release software-properties-common
-          cd /tmp/
-          wget -4 --tries=5 --waitretry=5 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          ./llvm.sh 18
-          # Install libc++ itself
-          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Download Bitwuzla shared library (ubuntu20.04)
         run: |
@@ -1007,17 +986,6 @@ jobs:
           cache-on-failure: true
           key: ubuntu-22.04-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install libc++ from llvm-18
-        timeout-minutes: 15
-        run: |
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install curl wget gnupg
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install libc++-18-dev libc++abi-18-dev
-
       - name: Install valgrind
         run: |
           sudo apt-get update
@@ -1267,17 +1235,11 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install libc++ from llvm-18
+      - name: Install CMake and system Z3 dependencies
         run: |
           echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
           sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
-          sudo apt-get install -y libz3-dev
+          sudo apt-get install -y cmake libclang-dev libz3-dev
 
       - name: Install protobuf compiler
         run: |

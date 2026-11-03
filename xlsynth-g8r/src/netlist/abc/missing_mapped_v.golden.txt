@@ -1,0 +1,50 @@
+ABC did not produce mapped.v: No such file or directory (os error 2)
+ABC executable: /usr/bin/true
+ABC version: 
+ABC Liberty files: ["<workdir>/raw.lib"]
+ABC IO constraints: Some(AbcIoConstraints { driving_cell: "BUF", output_load_ff: 4.0 })
+ABC program:
+read_lib library_0.lib
+read_aiger transition.aig
+strash
+read_constr timing.constr
+&get -n
+&st
+&dch
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&st
+&syn2
+&if -g -K 6
+&synch2
+&nf
+&put
+buffer -c
+topo
+stime -c
+upsize -c
+dnsize -c
+write_verilog mapped.v
+
+ABC stdout:
+
+ABC stderr:
