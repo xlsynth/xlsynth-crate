@@ -8,8 +8,7 @@ use xlsynth_g8r::aig::graph_logical_effort::{
     GraphLogicalEffortOptions, score_graph_logical_effort,
 };
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, IrRegion, gatify_prepared_fn, gatify_region};
-use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, IrRegion, gatify, gatify_region};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::ir;
@@ -114,12 +113,11 @@ impl G8rFunctionCostEvaluator {
     }
 
     pub(crate) fn estimate(&mut self, f: &ir::Fn) -> Result<IrCost, String> {
-        let prepared = prep_for_gatify(f, None, PrepForGatifyOptions::all_opts_enabled());
         let mut options = GatifyOptions::all_opts_enabled();
         options.fold = self.gate_options.fold;
         options.hash = self.gate_options.hash;
         options.adder_mapping = AdderMapping::BrentKung;
-        let graph = dce(&gatify_prepared_fn(&prepared, options)?.gate_fn);
+        let graph = dce(&gatify(f, options)?.gate_fn);
         measure_gate_cost(
             &graph,
             &GraphLogicalEffortOptions {
@@ -127,5 +125,46 @@ impl G8rFunctionCostEvaluator {
                 beta2: 0.0,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::priority_result_fusion::rewrite_with_evaluator;
+    use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn fusion_costs_both_alternatives_with_automatic_table_lowering() {
+        let words = (0..64i32)
+            .map(|a| (((1 - a) >> 2) & 7).to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            r#"fn f(x: bits[32] id=1, a: bits[6] id=2) -> (bits[33], bits[3]) {{
+  hot: bits[33] = one_hot(x, lsb_prio=false, id=3)
+  count: bits[6] = encode(hot, id=4)
+  decoded: bits[33] = decode(count, width=33, id=5)
+  table: bits[3][64] = literal(value=[{words}], id=6)
+  read: bits[3] = array_index(table, indices=[a], assumed_in_bounds=true, id=7)
+  ret result: (bits[33], bits[3]) = tuple(decoded, read, id=8)
+}}"#
+        );
+        let mut f = Parser::new(&source).parse_fn().unwrap();
+        let mut evaluator = G8rFunctionCostEvaluator::default();
+        let mut alternatives = 0;
+        rewrite_with_evaluator(&mut f, &mut |alternative| {
+            let options = GatifyOptions {
+                adder_mapping: AdderMapping::BrentKung,
+                ..GatifyOptions::all_opts_enabled()
+            };
+            let graph = dce(&gatify(alternative, options)?.gate_fn);
+            let expected = measure_gate_cost(&graph, &GraphLogicalEffortOptions::default())?;
+            let estimated = evaluator.estimate(alternative)?;
+            assert_eq!(estimated, expected);
+            alternatives += 1;
+            Ok(estimated)
+        });
+        assert_eq!(alternatives, 2);
     }
 }

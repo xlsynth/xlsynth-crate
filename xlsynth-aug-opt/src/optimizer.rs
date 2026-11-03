@@ -586,6 +586,11 @@ fn apply_basis_rewrites_to_fn(
             evaluator,
         )?;
     }
+    // In-place rewrites may append operands after their users. Whole-function
+    // costing validates that operands come first, and both remaining passes
+    // topologically sort their candidates before installing them.
+    ir_utils::compact_and_toposort_in_place(&mut cloned)
+        .expect("aug_opt: compact_and_toposort_in_place failed");
     if options.fuse_priority_results {
         stats.priority_results_fused =
             crate::priority_result_fusion::rewrite_with_evaluator(&mut cloned, &mut |function| {
@@ -597,11 +602,6 @@ fn apply_basis_rewrites_to_fn(
             function_evaluator.estimate(function)
         });
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
-    // Ensure textual IR is defs-before-uses by reordering body nodes into a
-    // topological order (while preserving PIR layout invariants). This makes
-    // it safe for rewrites to append new nodes.
-    ir_utils::compact_and_toposort_in_place(&mut cloned)
-        .expect("aug_opt: compact_and_toposort_in_place failed");
     Ok((cloned, stats, total_rewrites))
 }
 

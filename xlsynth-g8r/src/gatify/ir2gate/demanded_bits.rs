@@ -10,7 +10,7 @@ use xlsynth_pir::{ir, ir_utils};
 /// Unions demanded flat bits across consumers. Only the supplied dependency-
 /// ordered nodes are traversed; operands outside that boundary remain opaque.
 /// Unsupported operations demand all operand bits, without value reasoning.
-pub(super) fn analyze(
+pub(in crate::gatify) fn analyze(
     f: &ir::Fn,
     nodes: &[ir::NodeRef],
     outputs: &[ir::NodeRef],
