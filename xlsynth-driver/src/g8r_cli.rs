@@ -333,3 +333,33 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         prepared_ir_out,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AdderMapping, parse_adder_mappings};
+    use crate::AppExt;
+    use clap::Command;
+
+    #[test]
+    fn scalar_adder_mapping_distinguishes_default_from_explicit_topologies() {
+        for (argument, expected) in [
+            (None, AdderMapping::Auto),
+            (Some("--adder-mapping=auto"), AdderMapping::Auto),
+            (
+                Some("--adder-mapping=ripple-carry"),
+                AdderMapping::RippleCarry,
+            ),
+            (Some("--adder-mapping=brent-kung"), AdderMapping::BrentKung),
+            (
+                Some("--adder-mapping=kogge-stone"),
+                AdderMapping::KoggeStone,
+            ),
+        ] {
+            let matches = Command::new("ir2g8r")
+                .add_g8r_lowering_flags()
+                .try_get_matches_from(["ir2g8r"].into_iter().chain(argument))
+                .unwrap();
+            assert_eq!(parse_adder_mappings(&matches).0, expected);
+        }
+    }
+}

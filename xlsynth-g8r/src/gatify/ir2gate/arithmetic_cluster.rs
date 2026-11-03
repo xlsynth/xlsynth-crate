@@ -111,9 +111,9 @@ fn estimated_resolution_depth(width: usize, mut height: usize, mapping: AdderMap
         height = 2 * (height / 3) + height % 3;
         compression_depth = compression_depth.saturating_add(4);
     }
-    let cpa_depth = match mapping {
-        AdderMapping::RippleCarry => width.saturating_mul(3),
-        AdderMapping::BrentKung | AdderMapping::KoggeStone => {
+    let cpa_depth = match mapping.carry_propagate_architecture() {
+        ir::ExtNaryAddArchitecture::RippleCarry => width.saturating_mul(3),
+        ir::ExtNaryAddArchitecture::BrentKung | ir::ExtNaryAddArchitecture::KoggeStone => {
             xlsynth_pir::math::ceil_log2(width).saturating_mul(4)
         }
     };
