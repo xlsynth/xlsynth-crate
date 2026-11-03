@@ -3,6 +3,7 @@
 //! Bounded, deterministic generation of well-typed module environments.
 
 use crate::Sample;
+use crate::aggregate_match::AggregateMatch;
 use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate};
 use crate::ast::{
     BinaryOp, BitsType, Body, Comparison, Fragment, HelperModule, SliceKind, UnaryOp, ValueRef,
@@ -12,6 +13,7 @@ use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
 use crate::map_fragment::{MapBody, MapFragment};
 use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_pir::IrBits;
@@ -38,6 +40,10 @@ pub enum Grammar {
     /// Uses the same mission productions with small module-local functions
     /// in place of standard library imports.
     MissionLocal,
+    /// Composes deeper runtime lanes, aggregate selections and nested folds.
+    MissionV4,
+    /// Uses v4 productions with module-local helpers.
+    MissionLocalV4,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -54,12 +60,24 @@ impl Grammar {
     pub fn uses_mission_extensions(self) -> bool {
         matches!(
             self,
-            Self::Mission | Self::MissionLocal | Self::MissionV2 | Self::MissionLocalV2
+            Self::Mission
+                | Self::MissionLocal
+                | Self::MissionV2
+                | Self::MissionLocalV2
+                | Self::MissionV4
+                | Self::MissionLocalV4
         )
     }
 
     fn local_helpers(self) -> bool {
-        matches!(self, Self::MissionLocal | Self::MissionLocalV2)
+        matches!(
+            self,
+            Self::MissionLocal | Self::MissionLocalV2 | Self::MissionLocalV4
+        )
+    }
+
+    fn is_v4(self) -> bool {
+        matches!(self, Self::MissionV4 | Self::MissionLocalV4)
     }
 }
 
@@ -70,12 +88,14 @@ impl std::str::FromStr for Grammar {
         match name {
             "mission" | "mission-v3" => Ok(Self::Mission),
             "mission-local" | "mission-local-v3" => Ok(Self::MissionLocal),
+            "mission-v4" => Ok(Self::MissionV4),
+            "mission-local-v4" => Ok(Self::MissionLocalV4),
             "mission-v2" => Ok(Self::MissionV2),
             "mission-local-v2" => Ok(Self::MissionLocalV2),
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -225,7 +245,13 @@ impl Entropy<'_> {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         let draw = usize::from(self.byte());
-        if matches!(self.grammar, Grammar::Mission | Grammar::MissionLocal) && draw >= 224 {
+        if self.grammar.is_v4() && (200..224).contains(&draw) {
+            return 30 + (draw - 200) % 3;
+        }
+        if (matches!(self.grammar, Grammar::Mission | Grammar::MissionLocal)
+            || self.grammar.is_v4())
+            && draw >= 224
+        {
             // Reserve the high eighth for the four new productions. Lower
             // selector bytes retain their meanings in the inherited corpus.
             return 26 + draw % 4;
@@ -251,9 +277,25 @@ impl Entropy<'_> {
             values.push(body.push(Fragment::Literal(self.bits(width)))?);
         }
         let count = 1 + self.choose(max_fragments);
+        // Only top lanes admit constants. Keep helper and constexpr operand
+        // draws independent while chaining ordinary results in v4 top lanes.
+        let chain = constants && self.grammar.is_v4();
+        let mut previous_runtime = None;
         for _ in 0..count {
             let choice = self.fragment_choice(available_modules);
-            let lhs = values[self.choose(values.len())];
+            let draw = usize::from(self.byte());
+            let lhs = if chain && let Some(previous) = previous_runtime {
+                if draw % 4 == 0 {
+                    // The low two bits selected a free draw. Use the remaining
+                    // bits so every operand is reachable even at lengths 4 or
+                    // 8.
+                    values[(draw / 4) % values.len()]
+                } else {
+                    previous
+                }
+            } else {
+                values[draw % values.len()]
+            };
             let rhs = values[self.choose(values.len())];
             let fragment = match choice {
                 0..=6 => {
@@ -308,7 +350,7 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
-                13..=17 | 21..=24 | 26..=29 => {
+                13..=17 | 21..=24 | 26..=32 => {
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -388,6 +430,21 @@ impl Entropy<'_> {
                                 self.choose(cols),
                             )?)
                         }
+                        30 => CompoundOp::ArraySelect(ArraySelect::new(
+                            SelectKind::ALL[self.choose(2)],
+                            CaseArray::ALL[self.choose(2)],
+                            3 + self.choose(3),
+                        )?),
+                        31 => CompoundOp::AggregateMatch(AggregateMatch::new(
+                            [1 + self.choose(129), 1 + self.choose(129)],
+                            self.choose(2) != 0,
+                        )?),
+                        32 => CompoundOp::NestedFold(NestedFold::new(
+                            2 + self.choose(3),
+                            1 + self.choose(3),
+                            NestedFold::COMBINERS[self.choose(NestedFold::COMBINERS.len())],
+                            self.choose(3),
+                        )?),
                         _ if self.grammar.uses_mission_extensions() => {
                             CompoundOp::RangeValue(self.bounded_range(8, false)?)
                         }
@@ -422,7 +479,9 @@ impl Entropy<'_> {
                     explicit_parametric: self.choose(2) != 0,
                 },
             };
-            values.push(body.push(fragment)?);
+            let ordinary = body.push(fragment)?;
+            values.push(ordinary);
+            previous_runtime = Some(ordinary);
             if constants && matches!(ty.width, Width::Concrete(_)) && self.choose(4) == 1 {
                 let expression = self.constant_expression(ty, available_modules, false)?;
                 let scope = if self.choose(2) == 0 {
@@ -440,7 +499,12 @@ impl Entropy<'_> {
         // Every concrete lane crosses a module boundary; random helper calls
         // above additionally exercise nested specialization through the DAG.
         if matches!(ty.width, Width::Concrete(_)) && available_modules != 0 {
-            let result = *values.last().ok_or("body has no values")?;
+            let result = if chain {
+                previous_runtime
+            } else {
+                values.last().copied()
+            }
+            .ok_or("body has no values")?;
             body.push(Fragment::Call {
                 module: self.choose(available_modules),
                 args: [result, values[self.choose(values.len())]],
@@ -627,7 +691,7 @@ pub fn generate_with_grammar(
         .lanes
         .iter()
         .zip(observation_draws)
-        .map(|(lane, draw)| lane.runtime_intermediate(draw))
+        .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.is_v4()))
         .collect::<Result<_, _>>()?;
     Ok(sample)
 }

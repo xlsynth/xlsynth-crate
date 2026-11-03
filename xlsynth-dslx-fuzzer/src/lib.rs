@@ -2,6 +2,7 @@
 
 //! DSLX programs assembled from AST fragments with independent PIR semantics.
 
+pub mod aggregate_match;
 pub mod array_fragment;
 pub mod ast;
 pub mod compound;
@@ -9,6 +10,7 @@ pub mod constexpr;
 mod generate;
 pub mod map_fragment;
 pub mod range_match;
+pub mod select_fold;
 pub mod sum_pattern;
 pub mod tuple_pattern;
 

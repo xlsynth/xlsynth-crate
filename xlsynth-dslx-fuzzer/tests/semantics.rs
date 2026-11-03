@@ -430,6 +430,71 @@ fn observation_draw_changes_only_the_returned_runtime_intermediate() -> Result<(
 }
 
 #[test]
+fn mission_v4_preserves_a_runtime_chain_and_exposes_its_disjoint_branch() -> Result<(), String> {
+    // Three ordinary fragments and a trailing zero constexpr. v4 chains the
+    // second fragment to the first. A zero draw starts an independent third
+    // fragment, which becomes the forced helper's first argument.
+    let mut bytes = vec![
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // helpers double their first input
+        0, 0, 0, 0, 3, 0, 2, // observation, unsigned u8, literal, three fragments
+        0, 0, 1, 0, // x + y
+        1, 1, 1, 0, // previous - y (v3 chooses y - y)
+        4, 0, 1, 1, // x ^ y, followed by a constant
+    ];
+    bytes.extend_from_slice(&[0; 16]); // zero-valued constexpr and forced helper call
+    let bits = |value: u8| IrValue::from_bits(&IrBits::from_lsb_fn(8, |i| value & (1 << i) != 0));
+    let inputs = vec![bits(7), bits(3)];
+    for (grammar, outputs) in [
+        (Grammar::Mission, [0, 10]),
+        (Grammar::MissionV4, [8, 7]),
+        (Grammar::MissionLocalV4, [8, 7]),
+    ] {
+        let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+        let reference = sample.expected_ir()?;
+        let FnEvalResult::Success(result) =
+            eval_fn(reference.get_top_fn().ok_or("no top")?, &inputs)
+        else {
+            return Err("reference evaluation failed".into());
+        };
+        assert_eq!(
+            result.value,
+            IrValue::make_tuple(&outputs.map(bits)),
+            "{grammar:?}"
+        );
+        check(&sample, Some(vec![inputs.clone()]));
+    }
+    Ok(())
+}
+
+#[test]
+fn mission_v4_free_operand_draw_can_reach_each_of_four_values() -> Result<(), String> {
+    let mut bytes = vec![
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // helpers double their first input
+        0, 0, 0, 0, 3, 5, 1, // observation, u8 lane, literal five, two fragments
+        0, 0, 1, 0, // x + y
+        0, // add the selected operand to x
+    ];
+    let draw_slot = bytes.len();
+    bytes.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    let bits = |value: u8| IrValue::from_bits(&IrBits::from_lsb_fn(8, |i| value & (1 << i) != 0));
+    for (draw, operand) in [(0, 7), (4, 3), (8, 5), (12, 10)] {
+        bytes[draw_slot] = draw;
+        let sample = generate_with_grammar(&bytes, GenerateOptions::default(), Grammar::MissionV4)?;
+        let reference = sample.expected_ir()?;
+        let FnEvalResult::Success(result) =
+            eval_fn(reference.get_top_fn().ok_or("no top")?, &[bits(7), bits(3)])
+        else {
+            return Err("reference evaluation failed".into());
+        };
+        assert_eq!(
+            result.value,
+            IrValue::make_tuple(&[bits(2 * (operand + 7)), bits(10)])
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn historical_grammars_preserve_their_map_and_match_forms() -> Result<(), String> {
     // The first three bytes select one module, one lane, and one unsigned
     // helper fragment. The next bytes select its production, operands, and
