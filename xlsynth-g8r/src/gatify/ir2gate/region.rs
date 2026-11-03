@@ -2,7 +2,7 @@
 
 //! Bounded IR region lowering through the ordinary g8r node implementation.
 
-use super::{GateEnv, GateOrVec, GatifyOptions, gatify_concat, gatify_node};
+use super::{GateEnv, GateOrVec, GatifyOptions, LoweringScope, gatify_concat, gatify_node};
 use crate::aig::dce::dce;
 use crate::aig::gate::{AigBitVector, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -167,7 +167,15 @@ pub fn gatify_region(
         if let Some(bits) = direct {
             env.add(nr, GateOrVec::BitVector(bits));
         } else {
-            gatify_node(f, nr, node, &mut builder, &mut env, &options)?;
+            gatify_node(
+                f,
+                nr,
+                node,
+                &mut builder,
+                &mut env,
+                &options,
+                LoweringScope::IndependentInputs,
+            )?;
         }
     }
     let outputs = region

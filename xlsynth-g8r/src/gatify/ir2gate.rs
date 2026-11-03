@@ -37,6 +37,7 @@ use crate::ir2gate_utils::{
 use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
+mod bounded_affine_clamp;
 mod conditional_select;
 mod demanded_bits;
 mod priority_predicate;
@@ -322,11 +323,16 @@ impl GateEnv {
 
     /// Returns whether a node has exactly one use within the mapping boundary.
     pub(super) fn has_single_use(&self, ir_node_ref: ir::NodeRef) -> bool {
-        let count = match &self.use_counts {
+        self.use_count(ir_node_ref) == 1
+    }
+
+    /// Counts operand edges and externally retained values at this mapping
+    /// boundary.
+    pub(super) fn use_count(&self, ir_node_ref: ir::NodeRef) -> usize {
+        match &self.use_counts {
             UseCounts::Function(counts) => counts[ir_node_ref.index],
             UseCounts::Region(counts) => counts.get(&ir_node_ref).copied().unwrap_or(0),
-        };
-        count == 1
+        }
     }
 
     /// Returns whether this product is emitted as rows at its sole sum
@@ -3560,6 +3566,14 @@ fn flatten_literal_to_bits(
     }
 }
 
+/// Only whole-function lowering can follow definitions across arbitrary
+/// operands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoweringScope {
+    WholeFunction,
+    IndependentInputs,
+}
+
 fn gatify_node(
     f: &ir::Fn,
     node_ref: ir::NodeRef,
@@ -3567,6 +3581,7 @@ fn gatify_node(
     g8_builder: &mut GateBuilder,
     env: &mut GateEnv,
     options: &GatifyOptions,
+    scope: LoweringScope,
 ) -> Result<(), String> {
     let payload = &node.payload;
     match payload {
@@ -3778,6 +3793,20 @@ fn gatify_node(
                         &cases,
                         default_bits.is_some(),
                     )
+                })
+                .or_else(|| {
+                    if scope == LoweringScope::WholeFunction && selector_bits.get_bit_count() == 1 {
+                        bounded_affine_clamp::lower(
+                            f,
+                            node_ref,
+                            env,
+                            g8_builder,
+                            selector_bits.get_lsb(0),
+                            &cases,
+                        )
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or_else(|| gatify_sel(g8_builder, &selector_bits, &cases, default_bits));
             let gates = env
@@ -4866,7 +4895,15 @@ fn gatify_internal(
         );
         set_provenance(g8_builder, node_ref);
         let first_gate = g8_builder.gates.len();
-        gatify_node(f, node_ref, node, g8_builder, env, options)?;
+        gatify_node(
+            f,
+            node_ref,
+            node,
+            g8_builder,
+            env,
+            options,
+            LoweringScope::WholeFunction,
+        )?;
         if let Some(plan) = observe {
             plan.observe_ordinary(node_ref, first_gate, env, g8_builder);
         }
@@ -5292,8 +5329,8 @@ pub fn gatify_node_as_fn(
     });
     isolated.ret_node_ref = Some(target);
 
-    // Facts about producers in the enclosing graph do not constrain these
-    // inputs.
+    // Whole-function lowering can only follow definitions in this isolated
+    // graph. Range facts about the enclosing producers do not apply here.
     let options = GatifyOptions {
         range_info: None,
         ..options.clone()
