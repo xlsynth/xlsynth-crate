@@ -9,6 +9,9 @@ use crate::ast::{
 };
 use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
+use crate::map_fragment::{MapBody, MapFragment};
+use crate::range_match::{ConstMatch, RangeValue};
+use crate::sum_pattern::{SumPattern, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
@@ -25,10 +28,21 @@ impl Default for GenerateOptions {
     }
 }
 
+/// Selects the DSLX constructs available in every generated body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grammar {
+    /// Uses named functions and builtins for maps and ordinary match
+    /// expressions.
+    Mission,
+    /// Also permits lambda map bodies and compile-time match expressions.
+    Experimental,
+}
+
 /// Consumes mutation bytes directly; exhausted inputs choose the smallest form.
 struct Entropy<'a> {
     data: &'a [u8],
     offset: usize,
+    grammar: Grammar,
 }
 
 impl Entropy<'_> {
@@ -73,6 +87,54 @@ impl Entropy<'_> {
         TuplePattern::new(elements, rest)
     }
 
+    /// Draws a bounded array and the scalar function to apply to each element.
+    fn map_fragment(&mut self) -> Result<MapFragment, String> {
+        const OPS: [BinaryOp; 5] = [
+            BinaryOp::Add,
+            BinaryOp::Sub,
+            BinaryOp::Xor,
+            BinaryOp::And,
+            BinaryOp::Or,
+        ];
+        let choices = match self.grammar {
+            Grammar::Mission => 2,
+            Grammar::Experimental => 4,
+        };
+        let body = match self.choose(choices) {
+            0 => MapBody::BUILTINS[self.choose(MapBody::BUILTINS.len())],
+            1 => MapBody::IsEven,
+            2 => MapBody::Capture(OPS[self.choose(OPS.len())]),
+            _ => MapBody::TwoCaptures(OPS[self.choose(OPS.len())], OPS[self.choose(OPS.len())]),
+        };
+        MapFragment::new(body, 1 + self.choose(MapFragment::MAX_LENGTH))
+    }
+
+    /// Chooses distinct runtime variants and independent payload widths.
+    fn sum_pattern(&mut self) -> SumPattern {
+        let count = SumVariant::ALL.len();
+        let first = self.choose(count);
+        let second = (first + 1 + self.choose(count - 1)) % count;
+        SumPattern {
+            variants: [SumVariant::ALL[first], SumVariant::ALL[second]],
+            widths: [1 + self.choose(129), 1 + self.choose(129)],
+            tail_when_marked: self.choose(2) != 0,
+        }
+    }
+
+    /// Selects a fragment, preserving the experimental decoder's slot for const
+    /// match.
+    fn fragment_choice(&mut self, available_modules: usize) -> usize {
+        const CONST_MATCH: usize = 23;
+        let call = usize::from(available_modules != 0);
+        match self.grammar {
+            Grammar::Mission => {
+                let slot = self.choose(24 + call);
+                if slot >= CONST_MATCH { slot + 1 } else { slot }
+            }
+            Grammar::Experimental => self.choose(25 + call),
+        }
+    }
+
     /// Composes only already-typed values, so no rejection sampling is needed.
     fn body(
         &mut self,
@@ -88,7 +150,7 @@ impl Entropy<'_> {
         }
         let count = 1 + self.choose(max_fragments);
         for _ in 0..count {
-            let choice = self.choose(if available_modules == 0 { 21 } else { 22 });
+            let choice = self.fragment_choice(available_modules);
             let lhs = values[self.choose(values.len())];
             let rhs = values[self.choose(values.len())];
             let fragment = match choice {
@@ -144,7 +206,7 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
-                13..=17 => {
+                13..=17 | 21..=24 => {
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -156,7 +218,7 @@ impl Entropy<'_> {
                         16 => CompoundOp::Record {
                             update: self.choose(2) != 0,
                         },
-                        _ => {
+                        17 => {
                             let kind = [LoopKind::Range, LoopKind::Array, LoopKind::ConstRange]
                                 [self.choose(3)];
                             let trips = if kind == LoopKind::Array {
@@ -169,6 +231,14 @@ impl Entropy<'_> {
                                 start: self.choose(5),
                                 trips,
                             }
+                        }
+                        21 => CompoundOp::Sum(self.sum_pattern()),
+                        22 => CompoundOp::Map(self.map_fragment()?),
+                        23 => CompoundOp::ConstMatch(ConstMatch::new(self.choose(4) as u8)?),
+                        _ => {
+                            let length = 1 + self.choose(8) as u8;
+                            let start = self.choose(256 - usize::from(length)) as u8;
+                            CompoundOp::RangeValue(RangeValue::new(start, length)?)
                         }
                     };
                     Fragment::Compound {
@@ -282,7 +352,8 @@ impl Entropy<'_> {
     }
 }
 
-/// Generates one valid sample, including for empty or exhausted input bytes.
+/// Generates one mission-grammar sample, including for empty or exhausted input
+/// bytes.
 ///
 /// At most three helper modules, three output lanes and six random fragments
 /// per body bound inlined reference size. Widths range from 1 through 129, with
@@ -291,12 +362,26 @@ pub fn generate(data: &[u8]) -> Result<Sample, String> {
     generate_with_options(data, GenerateOptions::default())
 }
 
-/// Generates the same fragment families with a configurable width bound.
+/// Generates mission-grammar samples with a configurable width bound.
 pub fn generate_with_options(data: &[u8], options: GenerateOptions) -> Result<Sample, String> {
+    generate_with_grammar(data, options, Grammar::Mission)
+}
+
+/// Decodes mutation bytes deterministically with the given grammar and width
+/// bound.
+pub fn generate_with_grammar(
+    data: &[u8],
+    options: GenerateOptions,
+    grammar: Grammar,
+) -> Result<Sample, String> {
     if !(1..=129).contains(&options.max_width) {
         return Err("maximum width must be in 1..=129".to_string());
     }
-    let mut entropy = Entropy { data, offset: 0 };
+    let mut entropy = Entropy {
+        data,
+        offset: 0,
+        grammar,
+    };
     let module_count = 1 + entropy.choose(3);
     let lane_count = 1 + entropy.choose(3);
     let mut helpers = Vec::new();

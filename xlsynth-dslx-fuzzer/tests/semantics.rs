@@ -10,8 +10,13 @@ use xlsynth_dslx_fuzzer::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, Pa
 use xlsynth_dslx_fuzzer::constexpr::{
     ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault,
 };
+use xlsynth_dslx_fuzzer::map_fragment::{MapBody, MapFragment};
+use xlsynth_dslx_fuzzer::range_match::{ConstMatch, RangeValue};
+use xlsynth_dslx_fuzzer::sum_pattern::{SumPattern, SumVariant};
 use xlsynth_dslx_fuzzer::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
-use xlsynth_dslx_fuzzer::{GenerateOptions, Sample, generate, generate_with_options};
+use xlsynth_dslx_fuzzer::{
+    GenerateOptions, Grammar, Sample, generate, generate_with_grammar, generate_with_options,
+};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
 use xlsynth_pir::random_inputs::generate_mixed_argument_sets_with_rng;
@@ -133,10 +138,32 @@ fn primitive_lanes(signed: bool, width: usize) -> Result<Vec<Body>, String> {
         .chain([
             CompoundOp::Record { update: false },
             CompoundOp::Record { update: true },
+            CompoundOp::RangeValue(RangeValue::new(247, 7)?),
+            CompoundOp::Sum(SumPattern {
+                variants: [SumVariant::Pair, SumVariant::Nested],
+                widths: [3, 65],
+                tail_when_marked: true,
+            }),
         ])
     {
         fragments.push(Fragment::Compound {
             op,
+            args: [ValueRef::X, ValueRef::Y, ValueRef::X],
+        });
+    }
+    for offset in 0..4 {
+        fragments.push(Fragment::Compound {
+            op: CompoundOp::ConstMatch(ConstMatch::new(offset)?),
+            args: [ValueRef::X, ValueRef::Y, ValueRef::X],
+        });
+    }
+    for mapper in MapBody::BUILTINS.into_iter().chain([
+        MapBody::IsEven,
+        MapBody::Capture(BinaryOp::Sub),
+        MapBody::TwoCaptures(BinaryOp::Xor, BinaryOp::Add),
+    ]) {
+        fragments.push(Fragment::Compound {
+            op: CompoundOp::Map(MapFragment::new(mapper, 3)?),
             args: [ValueRef::X, ValueRef::Y, ValueRef::X],
         });
     }
@@ -351,6 +378,51 @@ fn generated_module_environments_match() {
         assert_eq!(sample, generate(&data).unwrap());
         check(&sample, None);
     }
+}
+
+#[test]
+fn mission_and_experimental_grammars_select_their_map_and_match_forms() -> Result<(), String> {
+    // The first three bytes select one module, one lane, and one unsigned
+    // helper fragment. The next bytes select its production, operands, and
+    // body.
+    let cases = [
+        (
+            [0, 0, 0, 22, 0, 1, 2],
+            CompoundOp::Map(MapFragment::new(MapBody::Reverse, 1)?),
+            CompoundOp::Map(MapFragment::new(MapBody::Capture(BinaryOp::Add), 1)?),
+        ),
+        (
+            [0, 0, 0, 22, 0, 1, 3],
+            CompoundOp::Map(MapFragment::new(MapBody::IsEven, 1)?),
+            CompoundOp::Map(MapFragment::new(
+                MapBody::TwoCaptures(BinaryOp::Add, BinaryOp::Add),
+                1,
+            )?),
+        ),
+        (
+            [0, 0, 0, 23, 0, 1, 0],
+            CompoundOp::RangeValue(RangeValue::new(0, 1)?),
+            CompoundOp::ConstMatch(ConstMatch::new(0)?),
+        ),
+    ];
+    for (bytes, mission, experimental) in cases {
+        let default = generate(&bytes)?;
+        for (grammar, expected) in [
+            (Grammar::Mission, mission),
+            (Grammar::Experimental, experimental),
+        ] {
+            let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+            if grammar == Grammar::Mission {
+                assert_eq!(sample, default);
+            }
+            let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
+            else {
+                panic!("expected one compound fragment");
+            };
+            assert_eq!(*op, expected);
+        }
+    }
+    Ok(())
 }
 
 #[test]

@@ -4,6 +4,9 @@
 
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
+use crate::map_fragment::MapFragment;
+use crate::range_match::{ConstMatch, RangeValue};
+use crate::sum_pattern::{self, SumPattern};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue, ir};
 
 /// A builtin whose result is converted back to the surrounding bits type.
@@ -112,6 +115,10 @@ pub enum LoopKind {
 pub enum CompoundOp {
     Builtin(BuiltinOp),
     Array(ArrayOp),
+    Map(MapFragment),
+    Sum(SumPattern),
+    ConstMatch(ConstMatch),
+    RangeValue(RangeValue),
     Pattern(PatternOp),
     Record {
         update: bool,
@@ -128,6 +135,7 @@ pub enum CompoundOp {
 pub(crate) struct Declarations {
     record: bool,
     choice: bool,
+    sum: bool,
     std: bool,
 }
 
@@ -135,6 +143,7 @@ impl Declarations {
     pub(crate) fn extend(&mut self, other: Self) {
         self.record |= other.record;
         self.choice |= other.choice;
+        self.sum |= other.sum;
         self.std |= other.std;
     }
 
@@ -150,17 +159,24 @@ impl Declarations {
         if self.choice {
             text.push_str("\npub enum FuzzChoice: u2 { First = 0, Second = 1, Third = 2 }\n");
         }
+        if self.sum {
+            text.push_str(sum_pattern::DECLARATION);
+        }
         text
     }
 }
 
 impl CompoundOp {
-    /// Checks loop bounds before formatting or unrolling reference semantics.
+    /// Checks bounds and variant choices before rendering either
+    /// representation.
     pub(crate) fn validate(self) -> Result<(), String> {
         if let Self::Loop { kind, start, trips } = self
             && (trips > 4 || start > 4 || (kind == LoopKind::Array && trips == 0))
         {
             return Err("loop contracts require at most four trips and a start in 0..=4; array loops must be nonempty".to_string());
+        }
+        if let Self::Sum(pattern) = self {
+            return pattern.validate();
         }
         Ok(())
     }
@@ -169,7 +185,9 @@ impl CompoundOp {
         Declarations {
             record: matches!(self, Self::Record { .. }),
             choice: self == Self::Pattern(PatternOp::Enum),
-            std: self == Self::Array(ArrayOp::Enumerate),
+            sum: matches!(self, Self::Sum(_)),
+            std: self == Self::Array(ArrayOp::Enumerate)
+                || matches!(self, Self::Map(map) if map.needs_std()),
         }
     }
 
@@ -185,6 +203,10 @@ impl CompoundOp {
         let ux = format!("({x} as {unsigned})");
         let selector = format!("({ux} as u2)");
         match self {
+            Self::Map(map) => map.to_dslx(ty, args),
+            Self::Sum(pattern) => pattern.to_dslx(ty, args),
+            Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
+            Self::RangeValue(range) => range.to_dslx(ty, args),
             Self::Builtin(op) => {
                 let wide = match ty.width {
                     Width::Concrete(width) => {
@@ -310,6 +332,10 @@ impl CompoundOp {
     ) -> Result<BValue, BuilderError> {
         let [x, y, z] = args;
         match self {
+            Self::Map(map) => map.emit_ir(builder, args, width, signed),
+            Self::Sum(pattern) => pattern.emit_ir(builder, args, width),
+            Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
+            Self::RangeValue(range) => range.emit_ir(builder, args, width),
             Self::Builtin(op) => {
                 let value = match op {
                     BuiltinOp::Reverse => builder.rev(x)?,

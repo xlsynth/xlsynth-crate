@@ -42,6 +42,17 @@ independent reference semantics constructed by unrolling zero through four
 iterations. String lookup fragments carry three `IrBits` byte literals and
 print escaped DSLX strings, including arbitrary high bytes.
 
+Array maps apply builtins or imported functions to one through five elements.
+Their references apply the scalar operation independently to each element.
+Range expressions can also produce an
+array for dynamic indexing, with the reference computing the element from the
+start and index. Payload-bearing enums select between two runtime constructors
+and match positional, named, or nested tuple payloads of independently chosen
+widths. The reference computes the chosen payload result directly. The
+experimental grammar additionally generates maps with captured lambdas and
+`const match` expressions whose arm selection depends on the specialized lane
+width and a generated two-bit constant.
+
 Tuple binding fragments draw bounded trees with up to three levels and 40 nodes
 from mutation bytes. They cover plain and annotated `let`, single-arm `match`,
 nested bindings, wildcards, and leading/middle/trailing tuple-rest patterns,
@@ -70,8 +81,8 @@ AST. To add a fragment, give it checked operands in `ast.rs`, implement its DSLX
 printer and independent PIR semantics, add an observable primitive regression
 case, then add it to the generic generator. Heterogeneous aggregate values at
 body boundaries, first-class functions, processes, and effects are future
-extensions. `map` awaits PIR support for XLS map nodes, and partial-product multiplication
-awaits SMT translation support for `smulp`/`umulp`. Builtin enumeration and
+extensions. Partial-product multiplication awaits SMT translation support for
+`smulp`/`umulp`. Builtin enumeration and
 the old `range()` form differ across compiler releases; the generator uses
 `std::enumerate` and range syntax supported by the equivalence toolchain.
 
@@ -87,8 +98,11 @@ let comparison = sample.prepare()?;
 
 `generate_with_options` accepts `GenerateOptions { max_width }` to bound entry
 widths in `1..=129`. The ordinary generator and fuzz target retain the full
-129-bit range. Formal regression sweeps use an eight-bit bound so multiplication
-and division proofs stay within the routine solver budget; wide primitive tests
+129-bit range and use the mission grammar. To generate lambdas and `const match`
+as well, call `generate_with_grammar(data, options, Grammar::Experimental)`.
+The grammar choice is part of reproducing a saved fuzz input. Formal regression
+sweeps use an eight-bit bound so multiplication and division proofs stay within
+the routine solver budget; wide primitive tests
 and fuzzing exercise larger widths.
 
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
@@ -106,8 +120,8 @@ Use a current libxls and its matching standard library. The tuple grammar
 exercises a historical converter crash involving sibling tuple-rest patterns;
 the default released artifact can still contain that bug. See
 [building against a native checkout](native/README.md#use-the-same-checkout-for-conversion)
-to select a fixed top-of-tree converter for both tests and fuzzing. Generation
-retains the full grammar and conversion failures remain sample failures.
+to select a fixed top-of-tree converter for both tests and fuzzing. Both
+grammars exercise sibling tuple-rest patterns and flag conversion failures.
 
 ```bash
 cargo fuzz run --sanitizer none --features with-bitwuzla-system fuzz_dslx_semantics -- -max_total_time=60 -timeout=60 -max_len=1024
@@ -125,10 +139,11 @@ Expand saved input bytes into reviewable files from the repository root:
 cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/to/reproducer
 ```
 
-The output contains each DSLX module, `expected.ir`, and `converted.ir`. Source
-files and expected IR are written before conversion, preserving converter-error
-reproducers too. Replay the saved bytes directly through the fuzz target to
-repeat the formal check.
+For a saved input from the experimental grammar, pass `--experimental` before
+the input path. The output contains each DSLX module, `expected.ir`, and
+`converted.ir`. Source files and expected IR are written before conversion,
+preserving converter-error reproducers too. To repeat the formal check for a
+mission-mode input, replay the saved bytes directly through the fuzz target.
 
 ## Validation
 
