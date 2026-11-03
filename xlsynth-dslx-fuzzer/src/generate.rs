@@ -11,13 +11,24 @@ use crate::ast::{
 };
 use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
+use crate::imported_const::ExportedConstants;
 use crate::map_fragment::{MapBody, MapFragment};
+use crate::mission_expr::{CheckedCast, LogicalPredicates, ReceiverMap};
 use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_pir::IrBits;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
+
+const COMPARISONS: [Comparison; 6] = [
+    Comparison::Eq,
+    Comparison::Ne,
+    Comparison::Lt,
+    Comparison::Le,
+    Comparison::Gt,
+    Comparison::Ge,
+];
 
 /// Bounds for generated entry widths; runtime values remain IrBits.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +55,11 @@ pub enum Grammar {
     MissionV4,
     /// Uses v4 productions with module-local helpers.
     MissionLocalV4,
+    /// Adds bound-method maps, qualified constants, logical predicates and
+    /// checked casts.
+    MissionV5,
+    /// Uses v5 productions with module-local helpers.
+    MissionLocalV5,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -66,18 +82,24 @@ impl Grammar {
                 | Self::MissionLocalV2
                 | Self::MissionV4
                 | Self::MissionLocalV4
+                | Self::MissionV5
+                | Self::MissionLocalV5
         )
     }
 
     fn local_helpers(self) -> bool {
         matches!(
             self,
-            Self::MissionLocal | Self::MissionLocalV2 | Self::MissionLocalV4
+            Self::MissionLocal | Self::MissionLocalV2 | Self::MissionLocalV4 | Self::MissionLocalV5
         )
     }
 
-    fn is_v4(self) -> bool {
-        matches!(self, Self::MissionV4 | Self::MissionLocalV4)
+    fn uses_deep_lanes(self) -> bool {
+        matches!(self, Self::MissionV4 | Self::MissionLocalV4) || self.is_v5()
+    }
+
+    fn is_v5(self) -> bool {
+        matches!(self, Self::MissionV5 | Self::MissionLocalV5)
     }
 }
 
@@ -90,12 +112,14 @@ impl std::str::FromStr for Grammar {
             "mission-local" | "mission-local-v3" => Ok(Self::MissionLocal),
             "mission-v4" => Ok(Self::MissionV4),
             "mission-local-v4" => Ok(Self::MissionLocalV4),
+            "mission-v5" => Ok(Self::MissionV5),
+            "mission-local-v5" => Ok(Self::MissionLocalV5),
             "mission-v2" => Ok(Self::MissionV2),
             "mission-local-v2" => Ok(Self::MissionLocalV2),
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -245,11 +269,16 @@ impl Entropy<'_> {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         let draw = usize::from(self.byte());
-        if self.grammar.is_v4() && (200..224).contains(&draw) {
+        // An imported constant needs an earlier module. In the first helper,
+        // its selector bytes retain their ordinary decoder meaning.
+        if self.grammar.is_v5() && (176..200).contains(&draw) && (draw % 4 != 3 || call != 0) {
+            return 33 + draw % 4;
+        }
+        if self.grammar.uses_deep_lanes() && (200..224).contains(&draw) {
             return 30 + (draw - 200) % 3;
         }
         if (matches!(self.grammar, Grammar::Mission | Grammar::MissionLocal)
-            || self.grammar.is_v4())
+            || self.grammar.uses_deep_lanes())
             && draw >= 224
         {
             // Reserve the high eighth for the four new productions. Lower
@@ -278,8 +307,9 @@ impl Entropy<'_> {
         }
         let count = 1 + self.choose(max_fragments);
         // Only top lanes admit constants. Keep helper and constexpr operand
-        // draws independent while chaining ordinary results in v4 top lanes.
-        let chain = constants && self.grammar.is_v4();
+        // draws independent while chaining ordinary results in deeper top
+        // lanes.
+        let chain = constants && self.grammar.uses_deep_lanes();
         let mut previous_runtime = None;
         for _ in 0..count {
             let choice = self.fragment_choice(available_modules);
@@ -319,14 +349,7 @@ impl Entropy<'_> {
                     arg: lhs,
                 },
                 9 => Fragment::IfCompare {
-                    op: [
-                        Comparison::Eq,
-                        Comparison::Ne,
-                        Comparison::Lt,
-                        Comparison::Le,
-                        Comparison::Gt,
-                        Comparison::Ge,
-                    ][self.choose(6)],
+                    op: COMPARISONS[self.choose(COMPARISONS.len())],
                     lhs,
                     rhs,
                     on_true: values[self.choose(values.len())],
@@ -350,7 +373,7 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
-                13..=17 | 21..=24 | 26..=32 => {
+                13..=17 | 21..=24 | 26..=35 => {
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -445,6 +468,18 @@ impl Entropy<'_> {
                             NestedFold::COMBINERS[self.choose(NestedFold::COMBINERS.len())],
                             self.choose(3),
                         )?),
+                        33 => CompoundOp::ReceiverMap(ReceiverMap::new(
+                            ReceiverMap::WIDTHS[self.choose(ReceiverMap::WIDTHS.len())],
+                            2 + self.choose(3),
+                        )?),
+                        34 => CompoundOp::LogicalPredicates(LogicalPredicates::new(
+                            [
+                                COMPARISONS[self.choose(COMPARISONS.len())],
+                                COMPARISONS[self.choose(COMPARISONS.len())],
+                            ],
+                            self.choose(2) != 0,
+                        )),
+                        35 => CompoundOp::CheckedCast(CheckedCast::new(self.choose(5))?),
                         _ if self.grammar.uses_mission_extensions() => {
                             CompoundOp::RangeValue(self.bounded_range(8, false)?)
                         }
@@ -472,6 +507,11 @@ impl Entropy<'_> {
                     pattern: self.tuple_pattern(0)?,
                     context: BindingContext::ALL[self.choose(BindingContext::ALL.len())],
                     args: [lhs, rhs, values[self.choose(values.len())]],
+                },
+                36 => Fragment::ImportedConstant {
+                    module: self.choose(available_modules),
+                    arg: lhs,
+                    combine: self.export_combiners(),
                 },
                 _ => Fragment::Call {
                     module: self.choose(available_modules),
@@ -512,6 +552,13 @@ impl Entropy<'_> {
             })?;
         }
         Ok(body)
+    }
+
+    /// Draws the two operations in a constant definition or its consumer.
+    fn export_combiners(&mut self) -> [BinaryOp; 2] {
+        std::array::from_fn(|_| {
+            ExportedConstants::COMBINERS[self.choose(ExportedConstants::COMBINERS.len())]
+        })
     }
 
     /// Draws a bounded constexpr body without recursively adding constants.
@@ -639,6 +686,14 @@ pub fn generate_with_grammar(
                 combine: [BinaryOp::Add, BinaryOp::Sub, BinaryOp::Xor][entropy.choose(3)],
             })?;
         }
+        if grammar.is_v5() {
+            let width = 1 + entropy.choose(options.max_width);
+            helper = helper.with_exports(ExportedConstants::new(
+                entropy.bits(width),
+                entropy.bits(width),
+                entropy.export_combiners(),
+            )?);
+        }
         helpers.push(helper);
     }
     // Reserve independent mutation bytes for observing ordinary runtime
@@ -691,7 +746,7 @@ pub fn generate_with_grammar(
         .lanes
         .iter()
         .zip(observation_draws)
-        .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.is_v4()))
+        .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.uses_deep_lanes()))
         .collect::<Result<_, _>>()?;
     Ok(sample)
 }

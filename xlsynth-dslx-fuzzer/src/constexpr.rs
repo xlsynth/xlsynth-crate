@@ -92,8 +92,8 @@ impl ConstExpr {
             })
     }
 
-    pub(crate) fn validate_calls(&self, available: usize) -> Result<(), String> {
-        self.body.validate_calls(available)
+    pub(crate) fn validate_imports(&self, available: &[HelperModule]) -> Result<(), String> {
+        self.body.validate_imports(available)
     }
 
     pub(crate) fn declarations(&self) -> Declarations {
@@ -182,9 +182,9 @@ impl ConstExpr {
         bit_width: Option<usize>,
     ) -> Result<IrBits, String> {
         for (index, module) in modules.iter().enumerate() {
-            module.validate_calls(index)?;
+            module.validate_imports(&modules[..index])?;
         }
-        self.validate_calls(modules.len())?;
+        self.validate_imports(modules)?;
         let mut builder = FnBuilder::new("constant");
         let value = self.emit_ir(&mut builder, modules, bit_width)?;
         let function = builder.build(value).map_err(|error| error.to_string())?;
