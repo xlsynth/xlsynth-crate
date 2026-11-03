@@ -479,6 +479,7 @@ fn prepared_ir_text_from_package(
         Some(range_info),
         prep_opts,
         track_pir_node_ids.then(HashMap::new).as_mut(),
+        track_pir_node_ids.then(HashMap::new).as_mut(),
         gate_cost,
     );
     let external_refs = ir_utils::external_function_references(&prepared_fn);

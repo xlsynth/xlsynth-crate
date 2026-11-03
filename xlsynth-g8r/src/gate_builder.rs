@@ -55,7 +55,7 @@ pub struct GateBuilder {
     /// Selected, freshly emitted ANDs and their caller-supplied producer IDs.
     /// A later hash hit can expose the same gate independently of its producer.
     pub(crate) sole_and_producers: HashMap<AigRef, usize>,
-    current_pir_node_id: Option<u32>,
+    current_pir_node_ids: PirNodeIds,
     active_append_checkpoint: Option<ActiveAppendCheckpoint>,
     reused_pir_targets: Option<Vec<AigRef>>,
 }
@@ -65,7 +65,7 @@ struct ActiveAppendCheckpoint {
     gate_count: usize,
     input_count: usize,
     output_count: usize,
-    current_pir_node_id: Option<u32>,
+    current_pir_node_ids: PirNodeIds,
     original_prefix_nodes: HashMap<usize, AigNode>,
     invalidated_producers: Vec<(AigRef, usize)>,
 }
@@ -126,6 +126,8 @@ impl GateBuilder {
         operand
     }
 
+    /// Tags a reused operand with the origins of the current PIR operation.
+    /// A shared helper can implement several original operations.
     pub(crate) fn union_current_pir_node_id_into_operand(
         &mut self,
         operand: AigOperand,
@@ -133,8 +135,13 @@ impl GateBuilder {
         if let Some(targets) = &mut self.reused_pir_targets {
             targets.push(operand.node);
         }
-        if let Some(pir_node_id) = self.current_pir_node_id {
-            self.add_pir_node_id(operand.node, pir_node_id);
+        match self.current_pir_node_ids.as_slice() {
+            [] => return operand,
+            &[id] => self.add_pir_node_id(operand.node, id),
+            _ => {
+                self.journal_prefix_node_before_mutation(operand.node);
+                self.gates[operand.node.id].try_add_pir_node_ids(&self.current_pir_node_ids);
+            }
         }
         operand
     }
@@ -173,7 +180,7 @@ impl GateBuilder {
             options,
             hash_cons,
             sole_and_producers: HashMap::new(),
-            current_pir_node_id: None,
+            current_pir_node_ids: PirNodeIds::new(),
             active_append_checkpoint: None,
             reused_pir_targets: None,
         }
@@ -195,7 +202,7 @@ impl GateBuilder {
             gate_count: checkpoint.gate_count,
             input_count: checkpoint.input_count,
             output_count: checkpoint.output_count,
-            current_pir_node_id: self.current_pir_node_id,
+            current_pir_node_ids: self.current_pir_node_ids.clone(),
             original_prefix_nodes: HashMap::new(),
             invalidated_producers: Vec::new(),
         });
@@ -231,7 +238,7 @@ impl GateBuilder {
             hash_cons.truncate_to_gate_count(checkpoint.gate_count, &self.gates);
         }
         self.gates.truncate(checkpoint.gate_count);
-        self.current_pir_node_id = active.current_pir_node_id;
+        self.current_pir_node_ids = active.current_pir_node_ids;
         self.sole_and_producers.extend(active.invalidated_producers);
         for (id, node) in active.original_prefix_nodes {
             self.gates[id] = node;
@@ -286,7 +293,13 @@ impl GateBuilder {
     }
 
     pub fn set_current_pir_node_id(&mut self, pir_node_id: Option<u32>) {
-        self.current_pir_node_id = pir_node_id;
+        self.current_pir_node_ids.clear();
+        self.current_pir_node_ids.extend(pir_node_id);
+    }
+
+    /// Sets the sorted original PIR IDs implemented by the current operation.
+    pub(crate) fn set_current_pir_node_ids(&mut self, ids: &PirNodeIds) {
+        self.current_pir_node_ids.clone_from(ids);
     }
 
     pub fn add_pir_node_id(&mut self, aig_ref: AigRef, pir_node_id: u32) {
@@ -355,7 +368,7 @@ impl GateBuilder {
             self.gates.push(AigNode::Input {
                 name: name.clone(),
                 lsb_index: lsb_i,
-                pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
+                pir_node_ids: self.current_pir_node_ids.clone(),
             });
             if let Some(hash_cons) = &mut self.hash_cons {
                 hash_cons.register_input(gate_ref, &name, lsb_i);
@@ -428,7 +441,7 @@ impl GateBuilder {
             a: lhs,
             b: rhs,
             tags: None,
-            pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
+            pir_node_ids: self.current_pir_node_ids.clone(),
         };
         let gate_ref = AigRef {
             id: self.gates.len(),
@@ -1713,7 +1726,7 @@ mod tests {
 
         assert_eq!(builder.gates.len(), prefix_gate_count);
         assert_eq!(builder.sole_and_producers.get(&ab.node), Some(&7));
-        assert_eq!(builder.current_pir_node_id, None);
+        assert!(builder.current_pir_node_ids.is_empty());
         assert_eq!(builder.gates[ab.node.id].get_pir_node_ids(), &[7]);
         assert_eq!(
             builder.gates[ab.node.id].get_tags(),
