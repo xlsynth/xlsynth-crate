@@ -868,6 +868,80 @@ pub(super) fn gatify_sub_binop(
     gates
 }
 
+/// Lowers a two-bit sum with a late upper bit from a preceding sum.
+/// The upper result is the word's high bit XOR the majority of its low bit
+/// and the two scalars. Preparing both cofactors leaves a mux on the late path.
+fn gatify_cofactored_carry_column(
+    f: &ir::Fn,
+    env: &GateEnv,
+    terms: &[ir::ExtNaryAddTerm],
+    gb: &mut GateBuilder,
+) -> Option<AigBitVector> {
+    let mut word = None;
+    let mut scalar = None;
+    let mut late_bit = None;
+    for term in terms {
+        if term.signed || term.negated || env.product_is_deferred(term.operand) {
+            return None;
+        }
+        let node = f.get_node(term.operand);
+        let slot = match node.ty {
+            ir::Type::Bits(2) => {
+                // With folding, literal addition needs just one carry gate:
+                // e.g. the high bit of 1 + a + c is a | c.
+                if gb.options.fold && matches!(node.payload, ir::NodePayload::Literal(_)) {
+                    return None;
+                }
+                &mut word
+            }
+            ir::Type::Bits(1) => match node.payload {
+                ir::NodePayload::BitSlice {
+                    arg,
+                    start: 1,
+                    width: 1,
+                } if f.get_node_ty(arg) == &ir::Type::Bits(2)
+                    && matches!(f.get_node(arg).payload, ir::NodePayload::ExtNaryAdd { .. }) =>
+                {
+                    &mut late_bit
+                }
+                _ => &mut scalar,
+            },
+            _ => return None,
+        };
+        if slot.replace(term.operand).is_some() {
+            return None;
+        }
+    }
+    let word = env.get_bit_vector(word?).ok()?;
+    let low = *word.get_lsb(0);
+    let high = *word.get_lsb(1);
+    let scalar = *env.get_bit_vector(scalar?).ok()?.get_lsb(0);
+    let late_bit = *env.get_bit_vector(late_bit?).ok()?.get_lsb(0);
+    let early_depth = gb
+        .aig_depth(low)?
+        .max(gb.aig_depth(high)?)
+        .max(gb.aig_depth(scalar)?);
+    if gb.aig_depth(late_bit)? <= early_depth {
+        return None;
+    }
+    let propagate = gb.add_xor_binary(low, scalar);
+    let sum = gb.add_xor_binary(propagate, late_bit);
+    let generate = gb.add_and_binary(low, scalar);
+    let carry_when_zero = gb.add_xor_binary(high, generate);
+    let transmit = gb.add_or_binary(low, scalar);
+    let carry_when_one = gb.add_xor_binary(high, transmit);
+    // A true cofactor needs only one OR after the late bit arrives.
+    let next = if gb.options.fold && gb.is_known_true(carry_when_zero) {
+        let not_late = gb.add_not(late_bit);
+        gb.add_or_binary(not_late, carry_when_one)
+    } else if gb.options.fold && gb.is_known_true(carry_when_one) {
+        gb.add_or_binary(late_bit, carry_when_zero)
+    } else {
+        gb.add_mux2(late_bit, carry_when_one, carry_when_zero)
+    };
+    Some(AigBitVector::from_lsb_is_index_0(&[sum, next]))
+}
+
 /// Lowers an `ext_nary_add` node.
 pub(super) fn gatify_ext_nary_add(
     f: &ir::Fn,
@@ -884,6 +958,16 @@ pub(super) fn gatify_ext_nary_add(
     }
     if terms.is_empty() {
         return AigBitVector::zeros(output_width);
+    }
+
+    if enable_rewrite_nary_add
+        && adder_mapping == AdderMapping::Auto
+        && output_width == 2
+        && terms.len() == 3
+        && let Some(column) = gatify_cofactored_carry_column(f, env, terms, g8_builder)
+    {
+        log::debug!("cofactored carry column: node={text_id}");
+        return column;
     }
 
     // Three unsigned scalar terms form one full-adder. Keep their arrival-aware
