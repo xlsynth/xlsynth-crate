@@ -36,6 +36,7 @@ use crate::{
 };
 
 mod full_adder;
+mod region_trial;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReductionKind {
@@ -51,6 +52,9 @@ pub struct GateBuilder {
     pub outputs: Vec<Output>,
     pub options: GateBuilderOptions,
     hash_cons: Option<StructuralHashCons>,
+    /// Selected, freshly emitted ANDs and their caller-supplied producer IDs.
+    /// A later hash hit can expose the same gate independently of its producer.
+    pub(crate) sole_and_producers: HashMap<AigRef, usize>,
     current_pir_node_id: Option<u32>,
     active_append_checkpoint: Option<ActiveAppendCheckpoint>,
 }
@@ -62,6 +66,7 @@ struct ActiveAppendCheckpoint {
     output_count: usize,
     current_pir_node_id: Option<u32>,
     original_prefix_nodes: HashMap<usize, AigNode>,
+    invalidated_producers: Vec<(AigRef, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +148,7 @@ impl GateBuilder {
             outputs: Vec::new(),
             options,
             hash_cons,
+            sole_and_producers: HashMap::new(),
             current_pir_node_id: None,
             active_append_checkpoint: None,
         }
@@ -166,6 +172,7 @@ impl GateBuilder {
             output_count: checkpoint.output_count,
             current_pir_node_id: self.current_pir_node_id,
             original_prefix_nodes: HashMap::new(),
+            invalidated_producers: Vec::new(),
         });
         checkpoint
     }
@@ -200,6 +207,7 @@ impl GateBuilder {
         }
         self.gates.truncate(checkpoint.gate_count);
         self.current_pir_node_id = active.current_pir_node_id;
+        self.sole_and_producers.extend(active.invalidated_producers);
         for (id, node) in active.original_prefix_nodes {
             self.gates[id] = node;
         }
@@ -384,6 +392,11 @@ impl GateBuilder {
             .as_ref()
             .and_then(|hash_cons| hash_cons.find_and(lhs, rhs))
         {
+            if let Some(producer) = self.sole_and_producers.remove(&existing)
+                && let Some(trial) = &mut self.active_append_checkpoint
+            {
+                trial.invalidated_producers.push((existing, producer));
+            }
             return self.union_current_pir_node_id_into_operand(existing.into());
         }
         let gate = AigNode::And2 {
@@ -1660,6 +1673,7 @@ mod tests {
         assert_eq!(folded_to_b, b);
 
         let prefix_gate_count = builder.gates.len();
+        builder.sole_and_producers.insert(ab.node, 7);
 
         let checkpoint = builder.begin_append_checkpoint();
         builder.set_current_pir_node_id(Some(8));
@@ -1667,11 +1681,13 @@ mod tests {
         builder.add_tag(reused_ab.node, "trial".to_string());
 
         assert_eq!(reused_ab, ab);
+        assert!(!builder.sole_and_producers.contains_key(&ab.node));
         assert_eq!(builder.gates[ab.node.id].get_pir_node_ids(), &[7, 8]);
 
         builder.rollback_append_checkpoint(checkpoint);
 
         assert_eq!(builder.gates.len(), prefix_gate_count);
+        assert_eq!(builder.sole_and_producers.get(&ab.node), Some(&7));
         assert_eq!(builder.current_pir_node_id, None);
         assert_eq!(builder.gates[ab.node.id].get_pir_node_ids(), &[7]);
         assert_eq!(
