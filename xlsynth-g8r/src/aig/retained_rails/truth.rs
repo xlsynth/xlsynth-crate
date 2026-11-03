@@ -151,6 +151,11 @@ impl CutIndex {
         self.first(sig.table)
     }
 
+    /// Find a live rail computing the conjunction on this input cut.
+    pub(crate) fn conjunction(&self, a: AigOperand, b: AigOperand) -> Option<AigOperand> {
+        self.first(self.value(a)? & self.value(b)?)
+    }
+
     /// Minimum depth, then lowest existing node index. The returned phase
     /// matches the queried operand even for complemented or duplicate nodes.
     pub(crate) fn best_equivalent(&self, edge: AigOperand) -> Option<AigOperand> {
