@@ -6,7 +6,7 @@ use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
-use xlsynth_dslx_fuzzer::{GenerateOptions, Sample, generate_with_options};
+use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
 use xlsynth_dslx_fuzzer_fuzz::prove;
 use xlsynth_pir::{FnBuilder, ir};
 use xlsynth_prover::prover::types::EquivResult;
@@ -19,16 +19,42 @@ fn generated_samples_prove() {
         rng.fill_bytes(&mut bytes);
         // Small widths keep multiplication/division proofs within the routine
         // solver budget; the fuzz target retains its full 129-bit range.
-        let sample = generate_with_options(&bytes, GenerateOptions { max_width: 8 })
-            .unwrap()
-            .prepare()
-            .unwrap();
+        // Preserve the historical differential corpus. Newly generated
+        // signed ranges can abort the stock converter and are exercised by
+        // the fuzz campaign and the dedicated range reference tests.
+        let sample =
+            generate_with_grammar(&bytes, GenerateOptions { max_width: 8 }, Grammar::MissionV1)
+                .unwrap()
+                .prepare()
+                .unwrap();
         let result = prove(&sample).unwrap();
         assert!(
             matches!(result, EquivResult::Proved),
             "{result:#?}\n{sample:#?}"
         );
     }
+}
+
+#[test]
+fn mission_typed_range_loops_prove() -> Result<(), String> {
+    // A seven-bit lane computes x^y, slices an array, and passes both values
+    // to a two-trip 65-bit signed loop starting at +3. The lane returns the
+    // loop's result and the independently observable xor.
+    let seed = [
+        0, 0, 0, 17, 0, 1, 0, 1, 0, 9, 1, 1, 11, 0, // unsigned helper
+        0, 0, 0, 0, 0, // signed helper and no parametric default
+        0, 0, 0, 0, 2, // observation and lane width selection
+        85, 1, // literal and two runtime fragments
+        4, 0, 1, 0, // xor(x, y)
+        14, 3, 1, 2, 0, 0, // array slice using the xor, y and x
+        0, 3, 0, // call the loop helper with the slice and xor
+    ];
+    for grammar in [Grammar::Mission, Grammar::MissionLocal] {
+        let sample =
+            generate_with_grammar(&seed, GenerateOptions::default(), grammar)?.prepare()?;
+        assert!(matches!(prove(&sample)?, EquivResult::Proved));
+    }
+    Ok(())
 }
 
 #[test]

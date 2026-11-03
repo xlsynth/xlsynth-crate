@@ -18,6 +18,7 @@ pub enum MapBody {
     XorReduce,
     Encode,
     IsEven,
+    LocalIsEven,
     Capture(BinaryOp),
     TwoCaptures(BinaryOp, BinaryOp),
 }
@@ -51,6 +52,7 @@ impl MapBody {
             Self::XorReduce => "xor_reduce",
             Self::Encode => "encode",
             Self::IsEven => "std::is_even",
+            Self::LocalIsEven => "fuzz_is_even",
             Self::Capture(op) => {
                 let body = op.to_dslx("element", y, ty);
                 return format!("|{param}| -> {lane} {{ {body} }}");
@@ -82,7 +84,7 @@ impl MapBody {
             Self::OrReduce => builder.or_reduce(element),
             Self::XorReduce => builder.xor_reduce(element),
             Self::Encode => builder.encode(element),
-            Self::IsEven => {
+            Self::IsEven | Self::LocalIsEven => {
                 let lsb = builder.bit_slice(element, 0, 1)?;
                 builder.not(lsb)
             }
@@ -115,6 +117,10 @@ impl MapFragment {
 
     pub(crate) fn needs_std(self) -> bool {
         self.body == MapBody::IsEven
+    }
+
+    pub(crate) fn needs_local_is_even(self) -> bool {
+        self.body == MapBody::LocalIsEven
     }
 
     /// Formats map input and result casts at the lane's composition boundary.

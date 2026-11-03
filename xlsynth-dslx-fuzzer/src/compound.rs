@@ -72,11 +72,14 @@ pub enum ArrayOp {
     Concat,
     Reverse,
     Enumerate,
+    LocalEnumerate,
     Zip,
     Repeat,
 }
 
 impl ArrayOp {
+    /// The eight distinct computations drawn by the decoder. Both
+    /// enumerate implementations occupy the same production slot.
     pub const ALL: [Self; 8] = [
         Self::Index,
         Self::Update,
@@ -119,6 +122,10 @@ pub enum CompoundOp {
     Sum(SumPattern),
     ConstMatch(ConstMatch),
     RangeValue(RangeValue),
+    RangeLoop {
+        range: RangeValue,
+        constant: bool,
+    },
     Pattern(PatternOp),
     Record {
         update: bool,
@@ -137,6 +144,8 @@ pub(crate) struct Declarations {
     choice: bool,
     sum: bool,
     std: bool,
+    local_is_even: bool,
+    local_enumerate: bool,
 }
 
 impl Declarations {
@@ -145,6 +154,8 @@ impl Declarations {
         self.choice |= other.choice;
         self.sum |= other.sum;
         self.std |= other.std;
+        self.local_is_even |= other.local_is_even;
+        self.local_enumerate |= other.local_enumerate;
     }
 
     /// Prints nominal types only when an expression in this module uses them.
@@ -152,6 +163,22 @@ impl Declarations {
         let mut text = String::new();
         if self.std {
             text.push_str("import std;\n");
+        }
+        if self.local_is_even {
+            text.push_str(
+                "\nfn fuzz_is_even<S: bool, N: u32>(x: xN[S][N]) -> bool { (x as u1) == u1:0 }\n",
+            );
+        }
+        if self.local_enumerate {
+            text.push_str(
+                r#"
+fn fuzz_enumerate<S: bool, W: u32, N: u32>(xs: xN[S][W][N]) -> (u32, xN[S][W])[N] {
+    for (i, result) in u32:0..N {
+        update(result, i, (i, xs[i]))
+    }(zero!<(u32, xN[S][W])[N]>())
+}
+"#,
+            );
         }
         if self.record {
             text.push_str("\npub struct FuzzPair<N: u32> { first: uN[N], second: uN[N] }\n");
@@ -170,6 +197,12 @@ impl CompoundOp {
     /// Checks bounds and variant choices before rendering either
     /// representation.
     pub(crate) fn validate(self) -> Result<(), String> {
+        if matches!(self, Self::RangeValue(range) if range.len() == 0) {
+            return Err("indexed ranges must be nonempty".to_string());
+        }
+        if matches!(self, Self::RangeLoop { range, .. } if range.len() > 4) {
+            return Err("range loops require at most four trips".to_string());
+        }
         if let Self::Loop { kind, start, trips } = self
             && (trips > 4 || start > 4 || (kind == LoopKind::Array && trips == 0))
         {
@@ -188,6 +221,8 @@ impl CompoundOp {
             sum: matches!(self, Self::Sum(_)),
             std: self == Self::Array(ArrayOp::Enumerate)
                 || matches!(self, Self::Map(map) if map.needs_std()),
+            local_is_even: matches!(self, Self::Map(map) if map.needs_local_is_even()),
+            local_enumerate: self == Self::Array(ArrayOp::LocalEnumerate),
         }
     }
 
@@ -207,6 +242,7 @@ impl CompoundOp {
             Self::Sum(pattern) => pattern.to_dslx(ty, args),
             Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
             Self::RangeValue(range) => range.to_dslx(ty, args),
+            Self::RangeLoop { range, constant } => range.loop_dslx(constant, ty, args),
             Self::Builtin(op) => {
                 let wide = match ty.width {
                     Width::Concrete(width) => {
@@ -264,9 +300,14 @@ impl CompoundOp {
                     ArrayOp::Slice => format!("array_slice(a, i, [{x}, {y}])[u32:1]"),
                     ArrayOp::Concat => format!("([{x}, {y}] ++ [{z}])[i]"),
                     ArrayOp::Reverse => "array_rev(a)[i]".to_string(),
-                    ArrayOp::Enumerate => format!(
-                        "{{ let (j, element) = std::enumerate(a)[i]; element ^ (j as {result}) }}"
-                    ),
+                    ArrayOp::Enumerate | ArrayOp::LocalEnumerate => {
+                        let name = if op == ArrayOp::LocalEnumerate {
+                            "fuzz_enumerate"
+                        } else {
+                            "std::enumerate"
+                        };
+                        format!("{{ let (j, element) = {name}(a)[i]; element ^ (j as {result}) }}")
+                    }
                     ArrayOp::Zip => format!(
                         "{{ let (left, right) = zip(a, [{z}, {x}, {y}])[i]; left + right }}"
                     ),
@@ -308,14 +349,10 @@ impl CompoundOp {
                         "for (element, acc): ({result}, {result}) in [{elements}] {{ (acc + element) ^ {z} }}({x})"
                     )
                 } else {
-                    let qualifier = if kind == LoopKind::ConstRange {
-                        "const "
-                    } else {
-                        ""
-                    };
-                    let iterable = format!("u32:{start}..u32:{}", start + trips);
-                    format!(
-                        "{qualifier}for (i, acc): (u32, {result}) in {iterable} {{ (acc + {y}) ^ (i as {result}) }}({x})"
+                    RangeValue::unsigned_loop(start, trips).loop_dslx(
+                        kind == LoopKind::ConstRange,
+                        ty,
+                        args,
                     )
                 }
             }
@@ -336,6 +373,7 @@ impl CompoundOp {
             Self::Sum(pattern) => pattern.emit_ir(builder, args, width),
             Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::RangeValue(range) => range.emit_ir(builder, args, width),
+            Self::RangeLoop { range, .. } => range.emit_loop_ir(builder, args, width),
             Self::Builtin(op) => {
                 let value = match op {
                     BuiltinOp::Reverse => builder.rev(x)?,
@@ -429,7 +467,7 @@ impl CompoundOp {
                         let array = builder.array(ir::Type::Bits(width), &[z, y, x])?;
                         builder.array_index(array, index)
                     }
-                    ArrayOp::Enumerate => {
+                    ArrayOp::Enumerate | ArrayOp::LocalEnumerate => {
                         let element = builder.array_index(array, index)?;
                         let i = resize_unsigned(builder, index, width)?;
                         builder.xor(element, i)
@@ -483,18 +521,15 @@ impl CompoundOp {
             }
             Self::Record { update } => builder.add(x, if update { z } else { y }),
             Self::Loop { kind, start, trips } => {
+                if kind != LoopKind::Array {
+                    return RangeValue::unsigned_loop(start, trips)
+                        .emit_loop_ir(builder, args, width);
+                }
                 let mut acc = x;
                 for iteration in 0..trips {
-                    if kind == LoopKind::Array {
-                        let element = if iteration % 2 == 0 { y } else { z };
-                        let sum = builder.add(acc, element)?;
-                        acc = builder.xor(sum, z)?;
-                    } else {
-                        let i = metadata_literal(builder, start + iteration)?;
-                        let i = resize_unsigned(builder, i, width)?;
-                        let sum = builder.add(acc, y)?;
-                        acc = builder.xor(sum, i)?;
-                    }
+                    let element = if iteration % 2 == 0 { y } else { z };
+                    let sum = builder.add(acc, element)?;
+                    acc = builder.xor(sum, z)?;
                 }
                 Ok(acc)
             }

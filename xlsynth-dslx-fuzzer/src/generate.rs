@@ -34,8 +34,37 @@ pub enum Grammar {
     /// Uses named functions and builtins for maps and ordinary match
     /// expressions.
     Mission,
+    /// Uses the same mission productions with small module-local functions
+    /// in place of standard library imports.
+    MissionLocal,
+    /// Replays inputs from the mission decoder before signed ranges and extra
+    /// observable values were introduced.
+    MissionV1,
     /// Also permits lambda map bodies and compile-time match expressions.
     Experimental,
+}
+
+impl Grammar {
+    /// Selects the decoder with signed ranges and per-lane observations.
+    pub fn uses_mission_extensions(self) -> bool {
+        matches!(self, Self::Mission | Self::MissionLocal)
+    }
+}
+
+impl std::str::FromStr for Grammar {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "mission" => Ok(Self::Mission),
+            "mission-local" => Ok(Self::MissionLocal),
+            "mission-v1" => Ok(Self::MissionV1),
+            "experimental" => Ok(Self::Experimental),
+            _ => Err(format!(
+                "unknown DSLX grammar {name:?}; expected mission, mission-local, mission-v1, or experimental"
+            )),
+        }
+    }
 }
 
 /// Consumes mutation bytes directly; exhausted inputs choose the smallest form.
@@ -97,11 +126,12 @@ impl Entropy<'_> {
             BinaryOp::Or,
         ];
         let choices = match self.grammar {
-            Grammar::Mission => 2,
+            Grammar::Mission | Grammar::MissionLocal | Grammar::MissionV1 => 2,
             Grammar::Experimental => 4,
         };
         let body = match self.choose(choices) {
             0 => MapBody::BUILTINS[self.choose(MapBody::BUILTINS.len())],
+            1 if self.grammar == Grammar::MissionLocal => MapBody::LocalIsEven,
             1 => MapBody::IsEven,
             2 => MapBody::Capture(OPS[self.choose(OPS.len())]),
             _ => MapBody::TwoCaptures(OPS[self.choose(OPS.len())], OPS[self.choose(OPS.len())]),
@@ -121,13 +151,41 @@ impl Entropy<'_> {
         }
     }
 
+    /// Draws representable endpoints on either side of zero while keeping
+    /// ranges small enough to materialize or unroll in every context.
+    fn bounded_range(
+        &mut self,
+        max_length: usize,
+        allow_empty: bool,
+    ) -> Result<RangeValue, String> {
+        let signed = self.choose(2) != 0;
+        let width = if self.choose(2) == 0 {
+            let boundaries = [1, 2, 3, 7, 8, 31, 32, 63, 64, 65, 127, 128, 129];
+            boundaries[self.choose(boundaries.len())]
+        } else {
+            1 + self.choose(129)
+        };
+        let inclusive = self.choose(2) != 0;
+        // Intersect the endpoint sampling window [-8, 8] with the induction
+        // type's domain before choosing a length and start.
+        let magnitude = 1i16 << (width - usize::from(signed)).min(4);
+        let lower = if signed { -magnitude.min(8) } else { 0 };
+        let upper = (magnitude - 1).min(8);
+        let available = (upper - lower) as usize + usize::from(inclusive);
+        let minimum = usize::from(inclusive || !allow_empty);
+        let length = minimum + self.choose(max_length.min(available) - minimum + 1);
+        let last_start = upper - length as i16 + i16::from(inclusive);
+        let start = lower + self.choose((last_start - lower + 1) as usize) as i16;
+        RangeValue::typed(signed, width, start, length as u8, inclusive)
+    }
+
     /// Selects a fragment, preserving the experimental decoder's slot for const
     /// match.
     fn fragment_choice(&mut self, available_modules: usize) -> usize {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         match self.grammar {
-            Grammar::Mission => {
+            Grammar::Mission | Grammar::MissionLocal | Grammar::MissionV1 => {
                 let slot = self.choose(24 + call);
                 if slot >= CONST_MATCH { slot + 1 } else { slot }
             }
@@ -211,7 +269,17 @@ impl Entropy<'_> {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
                         }
-                        14 => CompoundOp::Array(ArrayOp::ALL[self.choose(ArrayOp::ALL.len())]),
+                        14 => {
+                            let op = ArrayOp::ALL[self.choose(ArrayOp::ALL.len())];
+                            CompoundOp::Array(
+                                if self.grammar == Grammar::MissionLocal && op == ArrayOp::Enumerate
+                                {
+                                    ArrayOp::LocalEnumerate
+                                } else {
+                                    op
+                                },
+                            )
+                        }
                         15 => {
                             CompoundOp::Pattern(PatternOp::ALL[self.choose(PatternOp::ALL.len())])
                         }
@@ -221,20 +289,30 @@ impl Entropy<'_> {
                         17 => {
                             let kind = [LoopKind::Range, LoopKind::Array, LoopKind::ConstRange]
                                 [self.choose(3)];
-                            let trips = if kind == LoopKind::Array {
-                                1 + self.choose(4)
+                            if kind != LoopKind::Array && self.grammar.uses_mission_extensions() {
+                                CompoundOp::RangeLoop {
+                                    range: self.bounded_range(4, true)?,
+                                    constant: kind == LoopKind::ConstRange,
+                                }
                             } else {
-                                self.choose(5)
-                            };
-                            CompoundOp::Loop {
-                                kind,
-                                start: self.choose(5),
-                                trips,
+                                let trips = if kind == LoopKind::Array {
+                                    1 + self.choose(4)
+                                } else {
+                                    self.choose(5)
+                                };
+                                CompoundOp::Loop {
+                                    kind,
+                                    start: self.choose(5),
+                                    trips,
+                                }
                             }
                         }
                         21 => CompoundOp::Sum(self.sum_pattern()),
                         22 => CompoundOp::Map(self.map_fragment()?),
                         23 => CompoundOp::ConstMatch(ConstMatch::new(self.choose(4) as u8)?),
+                        _ if self.grammar.uses_mission_extensions() => {
+                            CompoundOp::RangeValue(self.bounded_range(8, false)?)
+                        }
                         _ => {
                             let length = 1 + self.choose(8) as u8;
                             let start = self.choose(256 - usize::from(length)) as u8;
@@ -421,6 +499,14 @@ pub fn generate_with_grammar(
         }
         helpers.push(helper);
     }
+    // Reserve independent mutation bytes for observing ordinary runtime
+    // fragments. Earlier grammars retain their original input layout and
+    // top signatures.
+    let observation_draws: Vec<_> = if grammar.uses_mission_extensions() {
+        (0..lane_count).map(|_| entropy.byte()).collect()
+    } else {
+        vec![]
+    };
     let mut lanes = Vec::new();
     for _ in 0..lane_count {
         let signed = entropy.choose(2) != 0;
@@ -458,5 +544,12 @@ pub fn generate_with_grammar(
         }
         lanes.push(body);
     }
-    Sample::new(helpers, lanes)
+    let mut sample = Sample::new(helpers, lanes)?;
+    sample.observations = sample
+        .lanes
+        .iter()
+        .zip(observation_draws)
+        .map(|(lane, draw)| lane.runtime_intermediate(draw))
+        .collect::<Result<_, _>>()?;
+    Ok(sample)
 }

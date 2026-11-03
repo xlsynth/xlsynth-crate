@@ -36,7 +36,7 @@ impl BitsType {
 
 /// An earlier value in a body: parameters occupy slots zero and one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValueRef(usize);
+pub struct ValueRef(pub(crate) usize);
 
 impl ValueRef {
     pub const X: Self = Self(0);
@@ -557,6 +557,26 @@ impl Body {
         self.result
     }
 
+    /// Chooses an ordinary runtime fragment before the top lane's final helper
+    /// call.
+    pub(crate) fn runtime_intermediate(&self, draw: u8) -> Result<ValueRef, String> {
+        let candidates: Vec<_> = self
+            .fragments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, fragment)| {
+                let value = ValueRef(index + 2);
+                (value != self.result
+                    && !matches!(fragment, Fragment::Literal(_) | Fragment::Constant { .. }))
+                .then_some(value)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Err("generated top lane has no ordinary runtime fragments".to_string());
+        }
+        Ok(candidates[usize::from(draw) % candidates.len()])
+    }
+
     pub fn computed_width(&self) -> Option<&ComputedWidth> {
         self.computed_width.as_ref()
     }
@@ -678,7 +698,10 @@ impl Body {
                     },
                     ..
                 } | Fragment::Compound {
-                    op: CompoundOp::Pattern(PatternOp::Tuple)
+                    op: CompoundOp::RangeLoop {
+                        constant: false,
+                        ..
+                    } | CompoundOp::Pattern(PatternOp::Tuple)
                         | CompoundOp::Sum(_)
                         | CompoundOp::Map(_),
                     ..
@@ -758,7 +781,7 @@ impl Body {
         Ok(text)
     }
 
-    fn value_name(&self, reference: ValueRef, prefix: &str) -> String {
+    pub(crate) fn value_name(&self, reference: ValueRef, prefix: &str) -> String {
         let name = format!("{prefix}v{}", reference.0);
         if reference.0 >= 2 && matches!(self.fragments[reference.0 - 2], Fragment::Constant { .. })
         {
@@ -842,7 +865,23 @@ impl Body {
         Ok(text)
     }
 
-    /// Builds reference nodes bottom up for a particular width instantiation.
+    /// Builds each bound value once so the top can observe intermediate
+    /// results.
+    pub(crate) fn emit_values(
+        &self,
+        builder: &mut FnBuilder,
+        args: [BValue; 2],
+        width: usize,
+        modules: &[HelperModule],
+    ) -> Result<Vec<BValue>, BuilderError> {
+        let mut values = args.to_vec();
+        for fragment in &self.fragments {
+            values.push(fragment.emit_ir(builder, &values, self.ty.signed, width, modules)?);
+        }
+        Ok(values)
+    }
+
+    /// Emits the scalar result of a helper or constexpr body.
     pub(crate) fn emit_ir(
         &self,
         builder: &mut FnBuilder,
@@ -850,10 +889,7 @@ impl Body {
         width: usize,
         modules: &[HelperModule],
     ) -> Result<BValue, BuilderError> {
-        let mut values = args.to_vec();
-        for fragment in &self.fragments {
-            values.push(fragment.emit_ir(builder, &values, self.ty.signed, width, modules)?);
-        }
+        let values = self.emit_values(builder, args, width, modules)?;
         Ok(values[self.result.0])
     }
 }

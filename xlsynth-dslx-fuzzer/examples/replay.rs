@@ -8,8 +8,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let (grammar, input, output) = match args.as_slice() {
         [input, output] => (Grammar::Mission, input, output),
+        [flag, input, output] if flag == "--local" => (Grammar::MissionLocal, input, output),
+        [flag, input, output] if flag == "--mission-v1" => (Grammar::MissionV1, input, output),
         [flag, input, output] if flag == "--experimental" => (Grammar::Experimental, input, output),
-        _ => return Err("usage: replay [--experimental] <input-bytes> <output-directory>".into()),
+        _ => return Err(
+            "usage: replay [--local|--mission-v1|--experimental] <input-bytes> <output-directory>"
+                .into(),
+        ),
     };
     let bytes = std::fs::read(input)?;
     let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;

@@ -157,9 +157,13 @@ pub fn probe_feedback(inputs: &[Vec<u8>]) -> Result<FeedbackReport, String> {
         wrong_reference_disproved: false,
     };
     for bytes in inputs {
-        let sample = xlsynth_dslx_fuzzer::generate_with_options(
+        // This instrumentation probe requires each input to complete and
+        // prove so it can check counter isolation. Keep its established
+        // decoder as new mission ranges can abort the stock converter.
+        let sample = xlsynth_dslx_fuzzer::generate_with_grammar(
             bytes,
             xlsynth_dslx_fuzzer::GenerateOptions { max_width: 8 },
+            xlsynth_dslx_fuzzer::Grammar::MissionV1,
         )?;
         checker.check(&sample.sources()?)?;
         let counters = checker.counter_snapshot();

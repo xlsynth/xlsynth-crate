@@ -12,6 +12,8 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4"
+sha2 = "0.10"
+xlsynth = { path = "../../xlsynth" }
 xlsynth-dslx-fuzzer = { path = ".." }
 xlsynth-prover = { path = "../../xlsynth-prover" }
 tempfile = "3.20"
