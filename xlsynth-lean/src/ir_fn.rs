@@ -338,7 +338,7 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
             P::Literal(v) => literal(v)?,
             P::Tuple(rs) => tuple(&names(rs)),
             P::Array(rs) => format!("#v[{}]", names(rs).join(", ")),
-            P::ArrayConcat(rs) => names(rs).join(" ++ "),
+            P::ArrayConcat(rs) => format!("concatMany![{}]", names(rs).join(", ")),
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple), ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => indices.iter().fold(name(*array), |base, i| {
                 format!(

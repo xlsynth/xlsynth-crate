@@ -182,15 +182,20 @@ fn evaluates_word_operations_and_aggregate_interfaces() {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
-fn evaluates_a_wide_concat() {
+fn evaluates_wide_bit_and_array_concats() {
     let operands = (0..2048)
         .map(|index| if index % 3 == 0 { "x" } else { "y" })
         .collect::<Vec<_>>()
         .join(", ");
-    let ir = format!(
-        "package wide\ntop fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[2048] {{\n  ret result: bits[2048] = concat({operands}, id=3)\n}}"
-    );
-    check_differential(&ir);
+    for (op, input, output) in [
+        ("concat", "bits[1]", "bits[2048]"),
+        ("array_concat", "bits[1][1]", "bits[1][2048]"),
+    ] {
+        let ir = format!(
+            "package wide\ntop fn main(x: {input} id=1, y: {input} id=2) -> {output} {{\n  ret result: {output} = {op}({operands}, id=3)\n}}"
+        );
+        check_differential(&ir);
+    }
 }
 
 #[test]

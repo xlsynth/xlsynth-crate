@@ -5,12 +5,12 @@ import Std
 namespace XlsynthLean.IR
 
 open Lean in
-/-- Concatenate bit vectors from most to least significant. Splitting the operands in half
-    at each step keeps the nesting depth logarithmic in the number of operands. -/
-macro "concatBits![" operands:term,* "]" : term => do
+/-- Append bit vectors or arrays in order. Splitting the operands in half keeps the
+    nesting depth logarithmic in the number of operands. -/
+macro "concatMany![" operands:term,+ "]" : term => do
   let args := operands.getElems
   let rec expand (start : Nat) : Nat → MacroM (TSyntax `term)
-    | 0 => `(0#0)
+    | 0 => Lean.Macro.throwError "expected at least one concat operand"
     | 1 => pure args[start]!
     | n + 2 => do
       let count := n + 2
@@ -20,6 +20,10 @@ macro "concatBits![" operands:term,* "]" : term => do
       `($high ++ $low)
   decreasing_by all_goals omega
   expand 0 args.size
+
+/-- An empty bit concatenation has width zero. -/
+macro "concatBits![" operands:term,* "]" : term =>
+  if operands.getElems.isEmpty then `(0#0) else `(concatMany![$operands,*])
 
 /-- The LSB-first bit layout used at the evaluator boundary and by aggregate one-hot select. -/
 class Packed (α : Type) where
