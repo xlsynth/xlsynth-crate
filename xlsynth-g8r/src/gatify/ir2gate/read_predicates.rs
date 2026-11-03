@@ -1,48 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shares a row-local conjunction between different predicates on an indexed
 //! value.
+use super::word_observations::{Cube, Pin, WordObservations};
 use super::*;
 use crate::aig::{gate::AigRef, topo::postorder_for_aig_refs_node_only};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque, hash_map::Entry};
-use xlsynth_pir::ir::{Binop, NaryOp, NodePayload as Op, NodeRef, Type, Unop};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
+use xlsynth_pir::ir::{NodePayload as Op, NodeRef, Type};
 use xlsynth_pir::ir_utils::Users;
 
-type Pin = (usize, bool);
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-struct Cube {
-    pins: Vec<Pin>,
-    inverted: bool,
-}
-
-#[derive(Clone)]
-enum Expr {
-    View {
-        start: usize,
-        width: usize,
-        inverted: bool,
-    },
-    Test(Cube),
-}
-
-impl Expr {
-    fn predicate(&self) -> Option<Cube> {
-        match self {
-            Self::View {
-                start,
-                width: 1,
-                inverted,
-            } => Some(Cube {
-                pins: vec![(*start, !inverted)],
-                inverted: false,
-            }),
-            Self::Test(cube) => Some(cube.clone()),
-            _ => None,
-        }
-    }
-}
-
+/// Predicate classes that share row logic and the values bound to their
+/// results.
 struct Region {
     // Slot order is part of the table, independent of where its results were
     // computed.
@@ -59,55 +27,24 @@ struct SelectionCost {
 
 impl Region {
     fn find(f: &ir::Fn, read: NodeRef, users: &Users) -> Option<Self> {
-        // Each comparison can describe up to a whole record. Bound the number
-        // visited so unsuccessful searches in long Boolean chains stay local.
-        const MAX_REGION_NODES: usize = 128;
-        let mut exprs = HashMap::from([(
-            read,
-            Expr::View {
-                start: 0,
-                width: f.get_node_ty(read).bit_count(),
+        let observations = WordObservations::find(f, read, users, |_| true)?;
+        if !observations.escapes.is_empty() {
+            return None;
+        }
+        let mut tests: Vec<_> = observations
+            .boundary_scalars()
+            .map(|s| Cube {
+                pins: s.cube.pins.clone(),
                 inverted: false,
-            },
-        )]);
-        let mut pending = VecDeque::from([read]);
-        while let Some(n) = pending.pop_front() {
-            for &u in users.get(&n).unwrap_or_default() {
-                if !exprs.contains_key(&u) {
-                    if let Some(expr) = expression(f, u, &exprs) {
-                        if exprs.len() == MAX_REGION_NODES {
-                            return None;
-                        }
-                        exprs.insert(u, expr);
-                        pending.push_back(u);
-                    }
-                }
-            }
-        }
-        let mut tests = Vec::new();
-        for (&n, expr) in &exprs {
-            if Some(n) == f.ret_node_ref
-                || users
-                    .get(&n)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|u| !exprs.contains_key(u))
-            {
-                if f.get_node_ty(n) != &Type::Bits(1) {
-                    return None;
-                }
-                let mut test = expr.predicate()?;
-                test.inverted = false;
-                tests.push(test);
-            }
-        }
+            })
+            .collect();
         // Two complementary consumers need only one comparison.
         tests.sort_unstable();
         tests.dedup();
         if tests.len() < 2 {
             return None;
         }
-        let mut common = tests[0].pins.clone();
+        let mut common = tests[0].pins.to_vec();
         common.retain(|pin| tests.iter().all(|c| c.pins.binary_search(pin).is_ok()));
         // Sharing one wire does not eliminate a row-local logic operation.
         if common.len() < 2 {
@@ -116,15 +53,14 @@ impl Region {
         // Bind the producer as well as every alias of an output class. The
         // producer's tag and the aliases' origins then reach the same gate.
         // A single-pin view cannot match a class with two common pins.
-        let mut outputs = Vec::new();
-        for (n, expr) in exprs {
-            if let Expr::Test(c) = expr
-                && let Ok(slot) = tests.binary_search_by(|t| t.pins.cmp(&c.pins))
-            {
-                outputs.push((n, slot, c.inverted));
-            }
-        }
-        outputs.sort_unstable_by_key(|(n, _, _)| n.index);
+        let outputs = observations
+            .scalars
+            .iter()
+            .filter_map(|s| {
+                let slot = tests.binary_search_by(|t| t.pins.cmp(&s.cube.pins)).ok()?;
+                Some((s.value, slot, s.cube.inverted))
+            })
+            .collect();
         Some(Self {
             tests,
             outputs,
@@ -166,116 +102,6 @@ impl Region {
                 row_ands,
             }
         })
-    }
-}
-
-/// AND and OR are idempotent. Resolve all distinct operands by reference
-/// before expanding any pins, including when many users of a wide predicate
-/// each have an independent enable.
-fn region_operands<'a>(
-    args: &[NodeRef],
-    exprs: &'a HashMap<NodeRef, Expr>,
-) -> Option<Vec<&'a Expr>> {
-    let mut seen = HashSet::new();
-    args.iter()
-        .filter(|&a| seen.insert(a))
-        .map(|a| exprs.get(a))
-        .collect()
-}
-
-fn expression(f: &ir::Fn, n: NodeRef, exprs: &HashMap<NodeRef, Expr>) -> Option<Expr> {
-    let view = |n: NodeRef| match exprs.get(&n)? {
-        Expr::View {
-            start,
-            width,
-            inverted,
-        } => Some((*start, *width, *inverted)),
-        _ => None,
-    };
-    let node = f.get_node(n);
-    let test = |pins: Vec<Pin>, inverted| Some(Expr::Test(Cube { pins, inverted }));
-    match &node.payload {
-        Op::Unop(Unop::Identity, a) => exprs.get(a).cloned(),
-        Op::Unop(Unop::Not, a) => match exprs.get(a)? {
-            Expr::View {
-                start,
-                width,
-                inverted,
-            } => Some(Expr::View {
-                start: *start,
-                width: *width,
-                inverted: !inverted,
-            }),
-            Expr::Test(c) => test(c.pins.clone(), !c.inverted),
-        },
-        Op::BitSlice {
-            arg,
-            start: offset,
-            width,
-        } => {
-            let (start, _, inverted) = view(*arg)?;
-            Some(Expr::View {
-                start: start + offset,
-                width: *width,
-                inverted,
-            })
-        }
-        Op::TupleIndex { tuple, index } => {
-            let (start, _, inverted) = view(*tuple)?;
-            let field = f
-                .get_node_ty(*tuple)
-                .tuple_get_flat_bit_slice_for_index(*index)
-                .ok()?;
-            Some(Expr::View {
-                start: start + field.start,
-                width: field.limit - field.start,
-                inverted,
-            })
-        }
-        Op::Binop(op @ (Binop::Eq | Binop::Ne), a, b) => {
-            let (source, literal) = if matches!(f.get_node(*b).payload, Op::Literal(_)) {
-                (*a, *b)
-            } else {
-                (*b, *a)
-            };
-            let (start, width, inverted) = view(source)?;
-            let value = literal_bits_if_bits_node(f, literal)?;
-            let pins = (0..width)
-                .map(|bit| (start + bit, value.get_bit(bit).unwrap() ^ inverted))
-                .collect();
-            test(pins, *op == Binop::Ne)
-        }
-        Op::Unop(op @ (Unop::AndReduce | Unop::OrReduce), a) => {
-            let (start, width, inverted) = view(*a)?;
-            let ones = *op == Unop::AndReduce;
-            test(
-                (0..width).map(|i| (start + i, ones ^ inverted)).collect(),
-                !ones,
-            )
-        }
-        Op::Nary(op @ (NaryOp::And | NaryOp::Nand | NaryOp::Or | NaryOp::Nor), args)
-            if node.ty == Type::Bits(1) =>
-        {
-            let disjunction = matches!(op, NaryOp::Or | NaryOp::Nor);
-            let mut pins = Vec::new();
-            for operand in region_operands(args, exprs)? {
-                let c = operand.predicate()?;
-                if c.inverted == disjunction {
-                    pins.extend(c.pins);
-                } else if let [(bit, value)] = c.pins[..] {
-                    pins.push((bit, !value));
-                } else {
-                    return None;
-                }
-            }
-            pins.sort_unstable();
-            pins.dedup();
-            if pins.windows(2).any(|p| p[0].0 == p[1].0) {
-                return None;
-            }
-            test(pins, matches!(op, NaryOp::Or | NaryOp::Nand))
-        }
-        _ => None,
     }
 }
 

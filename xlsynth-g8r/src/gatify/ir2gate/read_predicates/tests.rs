@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use crate::aig::get_summary_stats::get_aig_stats;
+use crate::aig::get_summary_stats::{get_aig_cone_stats, get_aig_stats};
 use crate::aig::table::build_area_table_report;
 use crate::aig::topo::extract_cone;
 use crate::aig_sim::gate_sim::{Collect, PreparedGateSim};
@@ -106,6 +106,85 @@ fn compact_class_preserves_clamps_exact_zero_and_output_polarity() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn a_shared_consumer_observes_both_an_indexed_read_and_a_word_select() {
+    // The read's scalar pair costs ten ANDs when factored and eleven on
+    // the ordinary word. Returning the select word always permits its cut.
+    for (payload, read_ands) in [("x", 10), ("r", 11)] {
+        let text = format!(
+            r#"package mixed
+top fn f(rows: bits[3][2] id=1, i: bits[1] id=2, x: bits[3] id=3, s: bits[1] id=4) -> (bits[1], bits[1], bits[3], bits[3]) {{
+ r: bits[3] = array_index(rows, indices=[i], assumed_in_bounds=true, id=5)
+ hi: bits[2] = bit_slice(r, start=1, width=2, id=6)
+ a: bits[1] = and_reduce(hi, id=7)
+ b: bits[1] = and_reduce(r, id=8)
+ an: bits[1] = not(a, id=9)
+ both: bits[1] = and(b, b, id=16)
+ bi: bits[1] = identity(both, id=10)
+ fill: bits[3] = literal(value=2, id=11)
+ word: bits[3] = sel(s, cases=[fill, x], id=12)
+ c: bits[1] = or_reduce(word, id=13)
+ ci: bits[1] = identity(c, id=17)
+ mixed: bits[1] = and(an, ci, id=14)
+ ret result: (bits[1], bits[1], bits[3], bits[3]) = tuple(mixed, bi, word, {payload}, id=15)
+}}"#
+        );
+        let pkg = Parser::new(&text).parse_and_validate_package().unwrap();
+        let f = pkg.get_top_fn().unwrap();
+        let options = GatifyOptions {
+            fold: true,
+            hash: true,
+            track_pir_node_ids: true,
+            ..GatifyOptions::all_opts_disabled()
+        };
+        let mut captures = TerminalObservations::default();
+        let out = gatify_lower_prepared_fn(f, &options, None, f, Some(&mut captures)).unwrap();
+        assert_eq!(captures.words.len(), 1);
+        let predicates = ["an", "bi"].map(|name| {
+            let n = ir_utils::find_node_by_name(f, name).unwrap();
+            *out.lowering_map[&n].get_lsb(0)
+        });
+        assert_eq!(
+            get_aig_cone_stats(&out.gate_fn.gates, &predicates).and_nodes,
+            read_ands
+        );
+        let trial =
+            observed_select_rails::apply(out.gate_fn, &captures.words, &mut captures.rail_budget);
+        let live = trial.post_order_operands(false);
+        for (tag, origins) in [
+            ("and_reduce_7", &[7, 9][..]),
+            ("and_reduce_8", &[8, 10, 16]),
+            ("or_reduce_13", &[13, 17]),
+        ] {
+            let gate = live
+                .iter()
+                .map(|r| &trial.gates[r.node.id])
+                .find(|g| g.get_tags().unwrap_or_default().iter().any(|t| t == tag))
+                .unwrap();
+            assert!(
+                origins
+                    .iter()
+                    .all(|id| gate.get_pir_node_ids().contains(id)),
+                "{payload}: {tag} has origins {:?}",
+                gate.get_pir_node_ids()
+            );
+        }
+        let ordinary = gatify_prepared_fn(
+            f,
+            GatifyOptions {
+                array_index_lowering_strategy: ArrayIndexLoweringStrategy::ForceOobOneHot,
+                ..options
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prove_gate_fn_equiv_with_backend(&ordinary.gate_fn, &trial, GateFormalBackend::Cadical)
+                .unwrap(),
+            EquivResult::Proved
+        );
     }
 }
 
@@ -286,43 +365,36 @@ fn repeated_scalar_operands_expand_a_wide_cube_once() {
     let repeated = vec!["p"; 4096].join(", ");
     let text = format!(
         r#"package repeated
-top fn f(arr: bits[256][2] id=1, i: bits[1] id=2) -> bits[2] {{
+top fn f(arr: bits[256][2] id=1, i: bits[1] id=2) -> bits[4] {{
  r: bits[256] = array_index(arr, indices=[i], id=3)
  p: bits[1] = and_reduce(r, id=4)
  short: bits[1] = and(p, p, id=5)
  long: bits[1] = and({repeated}, id=6)
- ret out: bits[2] = concat(short, long, id=7)
+ en_first: bits[1] = and(i, p, id=7)
+ en_last: bits[1] = and(p, i, id=8)
+ ret out: bits[4] = concat(short, long, en_first, en_last, id=9)
 }}"#
     );
     let pkg = Parser::new(&text).parse_and_validate_package().unwrap();
     let f = pkg.get_top_fn().unwrap();
     let [read, reduce, short, long] =
         ["r", "p", "short", "long"].map(|name| ir_utils::find_node_by_name(f, name).unwrap());
-    let mut exprs = HashMap::from([(
-        read,
-        Expr::View {
-            start: 0,
-            width: 256,
-            inverted: false,
-        },
-    )]);
-    let p = expression(f, reduce, &exprs).unwrap();
-    exprs.insert(reduce, p);
-    // Checking a user of the reduction must fail before pin expansion if
-    // either operand is independent, regardless of operand order.
-    let enable = ir_utils::param_node_ref_by_name(f, "i").unwrap();
-    assert!(region_operands(&[reduce, enable], &exprs).is_none());
-    assert!(region_operands(&[enable, reduce], &exprs).is_none());
-    let Some(Expr::Test(short)) = expression(f, short, &exprs) else {
-        panic!("expected scalar conjunction")
+    let mut copied_pins = 0;
+    let observations = WordObservations::find(f, read, &ir_utils::compute_users(f), |pins| {
+        copied_pins += pins;
+        true
+    })
+    .unwrap();
+    let boundary = observations.boundary_scalars().collect::<Vec<_>>();
+    let [p, a, b] = boundary.as_slice() else {
+        panic!("expected the reduction and both scalar conjunctions")
     };
-    let Some(Expr::Test(long)) = expression(f, long, &exprs) else {
-        panic!("expected scalar conjunction")
-    };
-    assert_eq!(short, long);
-    // Deduplication after appending every operand leaves a multiplicity-sized
-    // allocation behind, even though the final lengths agree.
-    assert_eq!(short.pins.capacity(), long.pins.capacity());
+    assert_eq!([p.value, a.value, b.value], [reduce, short, long]);
+    assert_eq!(a.cube, b.cube);
+    assert_eq!(a.cube.pins.len(), 256);
+    // The independent enables in either position cost no pin copies. Each
+    // ready conjunction copies the wide predicate once, regardless of fan-in.
+    assert_eq!(copied_pins, 2 * 256);
 }
 
 #[test]
@@ -645,7 +717,7 @@ fn folded_predicate_does_not_cache_a_discarded_subtree() {
         axes: vec![(1, 5)],
         tests: vec![
             Cube {
-                pins: common.clone(),
+                pins: common.as_slice().into(),
                 inverted: false,
             },
             Cube {
