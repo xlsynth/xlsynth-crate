@@ -11,6 +11,8 @@ use crate::aig_sim::{
 };
 use crate::liberty::parser::parse_liberty_files;
 use crate::netlist::gv_eval::{GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty};
+use crate::netlist::register_mapping::RegisterCellSelection;
+use crate::netlist::sequential_mapping::SequentialMappingOptions;
 #[cfg(unix)]
 use crate::netlist::{
     emit::emit_netlist_as_text,
@@ -125,13 +127,15 @@ fn mapped_shared_enable_preserves_outputs_and_every_next_state() -> anyhow::Resu
   DFF __reg_4 (.CLK(clk), .D(d3), .Q(q[3]));
 endmodule"#;
     let source = project(feedback)?.sequential_gate_fn;
-    let mut options = AbcMappingOptions::new(AbcIoConstraints {
+    let mut sequential_options = SequentialMappingOptions::default();
+    let abc_options = AbcMappingOptions::new(AbcIoConstraints {
         driving_cell: "BUF".into(),
         output_load_ff: 1.0,
     });
-    let mapped = context.map_sequential(&source, &options)?;
+    let mapped = context.map_sequential(&source, &sequential_options, &abc_options)?;
     let text = mapped.emit_verilog().map_err(anyhow::Error::msg)?;
-    let structural = context.map_sequential_structural(&source, &options)?;
+    let structural =
+        context.map_sequential_structural(&source, &sequential_options, &abc_options)?;
     let decoded = decode_netlist(&encode_netlist(&structural.netlist)?)?;
     assert_eq!(emit_netlist_as_text(&decoded)?, text);
 
@@ -184,14 +188,14 @@ endmodule"#;
     let qn = make_context(&CLOCK_GATE_LIB.replace(r#"function: "IQ""#, r#"function: "IQN""#))?;
     let ports = RegisterBoundaryPorts::new(&source);
     assert!(
-        qn.plan_clock_gates(&source, &options, &ports)
+        qn.plan_clock_gates(&source, &sequential_options, &ports)
             .map_err(anyhow::Error::msg)?
             .is_none()
     );
-    options.clock_gating = None;
+    sequential_options.clock_gating = None;
     assert!(
         context
-            .plan_clock_gates(&source, &options, &ports)
+            .plan_clock_gates(&source, &sequential_options, &ports)
             .map_err(anyhow::Error::msg)?
             .is_none()
     );
@@ -452,6 +456,7 @@ fn direct_identity_maps_without_invoking_abc_or_adding_cells() {
     let result = context
         .map_sequential(
             &design,
+            &SequentialMappingOptions::default(),
             &AbcMappingOptions::from_library(context.library()).unwrap(),
         )
         .unwrap();
@@ -628,12 +633,18 @@ fn library_defaults_still_check_abc_name_and_float_limits() {
 #[test]
 fn options_resolve_library_defaults_at_construction() {
     let mut library = library();
-    let options = AbcMappingOptions::from_library(&library).unwrap();
+    let sequential_options = SequentialMappingOptions::default();
     assert_eq!(
-        options.register_selection,
+        sequential_options.register_selection,
         RegisterCellSelection::SmallestArea
     );
-    assert!(!options.cleanup_registers);
+    assert!(!sequential_options.cleanup_registers);
+    let gating = sequential_options
+        .clock_gating
+        .expect("gating is enabled by default");
+    assert_eq!(gating.min_flops, 4);
+    assert_eq!(gating.max_enable_depth, 8);
+    let options = AbcMappingOptions::from_library(&library).unwrap();
     assert_eq!(options.timeout, Duration::from_secs(180));
     assert_eq!(options.script, ABC_SPEED_SCRIPT);
     assert_eq!(
@@ -691,28 +702,30 @@ echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule
         driving_cell: "BUF".into(),
         output_load_ff: 20.0,
     };
+    let sequential_options = SequentialMappingOptions::default();
     let options = AbcMappingOptions::new(explicit.clone());
-    assert_eq!(
-        options.register_selection,
-        RegisterCellSelection::SmallestArea
-    );
-    assert!(!options.cleanup_registers);
     assert_eq!(options.timeout, Duration::from_secs(180));
     assert_eq!(options.script, ABC_SPEED_SCRIPT);
     for load in [Some(0.004), None, Some(-1.0), Some(f64::NAN)] {
         context.library.default_output_load = load;
-        let result = context.map_sequential(&design, &options).unwrap();
+        let result = context
+            .map_sequential(&design, &sequential_options, &options)
+            .unwrap();
         assert_eq!(result.diagnostics.io_constraints.as_ref(), Some(&explicit));
     }
     context.library.reference_buffer_cell = None;
     context.library.units = None;
-    let result = context.map_sequential(&design, &options).unwrap();
+    let result = context
+        .map_sequential(&design, &sequential_options, &options)
+        .unwrap();
     assert_eq!(result.diagnostics.io_constraints.as_ref(), Some(&explicit));
 
     // A caller can also change already-resolved options before mapping.
     let mut overridden = AbcMappingOptions::from_library(&library()).unwrap();
     overridden.io_constraints = explicit;
-    context.map_sequential(&design, &overridden).unwrap();
+    context
+        .map_sequential(&design, &sequential_options, &overridden)
+        .unwrap();
 }
 
 #[cfg(unix)]
@@ -727,6 +740,7 @@ fn mapping_validates_explicit_and_modified_constraints() {
         library(),
     )
     .unwrap();
+    let sequential_options = SequentialMappingOptions::default();
     for constraints in [
         AbcIoConstraints {
             driving_cell: "INV".into(),
@@ -744,7 +758,7 @@ fn mapping_validates_explicit_and_modified_constraints() {
         for options in [explicit, modified] {
             assert_eq!(
                 context
-                    .map_sequential(&design(), &options)
+                    .map_sequential(&design(), &sequential_options, &options)
                     .err()
                     .expect("invalid explicit constraints must be rejected before ABC runs")
                     .to_string(),
@@ -778,6 +792,7 @@ echo 'module mapped(); endmodule' > mapped.v
     let error = context
         .map_sequential(
             &design_with_logic(),
+            &SequentialMappingOptions::default(),
             &AbcMappingOptions::from_library(context.library()).unwrap(),
         )
         .err()
@@ -827,7 +842,9 @@ echo 'module mapped(i0,o0); input i0; output o0; INV c(.A(i0),.Y(o0)); endmodule
     let design = SequentialGateFn::from_gate_fn(builder.build());
     let mut options = AbcMappingOptions::from_library(context.library()).unwrap();
     options.script = CUSTOM_PASSES.to_owned();
-    let result = context.map_sequential(&design, &options).unwrap();
+    let result = context
+        .map_sequential(&design, &SequentialMappingOptions::default(), &options)
+        .unwrap();
     compare_golden_text(
         &result.diagnostics.script,
         "src/netlist/abc/custom_script.golden.txt",
@@ -846,6 +863,7 @@ fn post_abc_validation_and_assembly_errors_preserve_diagnostics() {
     let raw = temp.path().join("raw.lib");
     std::fs::write(&raw, "library(raw) {}").unwrap();
     let mut errors = Vec::new();
+    let sequential_options = SequentialMappingOptions::default();
     for (label, netlist) in [
         (
             "unknown cell",
@@ -876,6 +894,7 @@ printf '%s\n' '{netlist}' > mapped.v
         let error = context
             .map_sequential(
                 &design_with_logic(),
+                &sequential_options,
                 &AbcMappingOptions::from_library(context.library()).unwrap(),
             )
             .err()
@@ -945,6 +964,7 @@ fn mapping_rejects_all_physical_port_name_collisions_before_abc() {
         library(),
     )
     .unwrap();
+    let abc_options = AbcMappingOptions::from_library(context.library()).unwrap();
     // All pairings: input/input, output/output, input/output, and either with
     // the clock. ABC would fail to emit a netlist if validation let one
     // through.
@@ -966,10 +986,11 @@ fn mapping_rejects_all_physical_port_name_collisions_before_abc() {
                 let error = context
                     .map_sequential(
                         &design,
-                        &AbcMappingOptions {
+                        &SequentialMappingOptions {
                             cleanup_registers,
-                            ..AbcMappingOptions::from_library(context.library()).unwrap()
+                            ..Default::default()
                         },
+                        &abc_options,
                     )
                     .err()
                     .expect("colliding physical ports must be rejected");
@@ -1021,6 +1042,7 @@ fn zero_width_and_clock_only_designs_need_no_abc_network() {
     let result = context
         .map_sequential(
             &design,
+            &SequentialMappingOptions::default(),
             &AbcMappingOptions::from_library(context.library()).unwrap(),
         )
         .unwrap();
@@ -1042,10 +1064,12 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
     std::fs::write(&raw, "library(raw) {}").unwrap();
     let context =
         AbcMappingContext::new(AbcToolchain::new(&executable).unwrap(), &[raw], library()).unwrap();
+    let sequential_options = SequentialMappingOptions::default();
     assert!(
         context
             .map_sequential(
                 &design_with_logic(),
+                &sequential_options,
                 &AbcMappingOptions::from_library(context.library()).unwrap()
             )
             .is_err()
@@ -1054,6 +1078,7 @@ fn zero_exit_without_output_is_an_error_and_timeout_is_typed() {
     let error = context
         .map_sequential(
             &design_with_logic(),
+            &sequential_options,
             &AbcMappingOptions {
                 timeout: Duration::from_millis(30),
                 ..AbcMappingOptions::from_library(context.library()).unwrap()

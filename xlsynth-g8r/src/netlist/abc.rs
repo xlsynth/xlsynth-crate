@@ -14,9 +14,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-mod clock_gating;
-pub use clock_gating::ClockGatingOptions;
-
 use xlsynth::external_tool::{ToolError, resolve_executable, run_with_timeout_detailed};
 use xlsynth_pir::IrBits;
 
@@ -35,9 +32,10 @@ use crate::netlist::parse::{
     NetlistPort, PortDirection, Pos, Span,
 };
 use crate::netlist::register_mapping::{
-    RegisterBoundaryPorts, RegisterCellSelection, RegisterMappingLibrary, RegisterMappingPlan,
+    RegisterBoundaryPorts, RegisterMappingLibrary, RegisterMappingPlan,
     validate_sequential_mapping_policy,
 };
+use crate::netlist::sequential_mapping::{self, SequentialMappingOptions};
 
 /// Explicit standalone ABC executable, independent of a Liberty library.
 #[derive(Clone, Debug)]
@@ -133,14 +131,9 @@ impl AbcIoConstraints {
     }
 }
 
-/// Bounded, deterministic mapping policy. Cleanup is opt-in.
+/// Electrical constraints, mapping passes, and time limit for standalone ABC.
 #[derive(Clone, Debug)]
 pub struct AbcMappingOptions {
-    pub register_selection: RegisterCellSelection,
-    pub cleanup_registers: bool,
-    /// Extract shared feedback enables using a certified Liberty clock gate.
-    /// `None` keeps the feedback muxes on the data paths.
-    pub clock_gating: Option<ClockGatingOptions>,
     pub timeout: Duration,
     /// Required electrical boundary conditions, validated against the mapping
     /// library before ABC runs. There is no unconstrained mapping mode.
@@ -154,14 +147,9 @@ pub struct AbcMappingOptions {
 }
 
 impl AbcMappingOptions {
-    /// Uses explicit constraints, area-first FF selection, default clock
-    /// gating thresholds, the speed script, and a 180-second timeout. Register
-    /// cleanup is opt-in. Mapping validates the constraints.
+    /// Uses explicit constraints, the speed script, and a 180-second timeout.
     pub fn new(io_constraints: AbcIoConstraints) -> Self {
         Self {
-            register_selection: RegisterCellSelection::SmallestArea,
-            cleanup_registers: false,
-            clock_gating: Some(ClockGatingOptions::default()),
             timeout: Duration::from_secs(180),
             io_constraints,
             script: ABC_SPEED_SCRIPT.to_owned(),
@@ -312,9 +300,10 @@ impl AbcMappingContext {
     pub fn map_sequential(
         &self,
         source: &SequentialGateFn,
-        options: &AbcMappingOptions,
+        sequential: &SequentialMappingOptions,
+        abc: &AbcMappingOptions,
     ) -> Result<AbcMappedDesign, ToolError> {
-        let mut mapped = self.map_sequential_structural(source, options)?;
+        let mut mapped = self.map_sequential_structural(source, sequential, abc)?;
         // Validate the emitted GV and attach source positions in that GV.
         let text = mapped
             .emit_verilog()
@@ -328,10 +317,11 @@ impl AbcMappingContext {
     pub fn map_sequential_structural(
         &self,
         source: &SequentialGateFn,
-        options: &AbcMappingOptions,
+        sequential: &SequentialMappingOptions,
+        abc: &AbcMappingOptions,
     ) -> Result<AbcMappedDesign, ToolError> {
         let mut design = source.legalize_register_controls()?;
-        let cleanup_stats = if options.cleanup_registers {
+        let cleanup_stats = if sequential.cleanup_registers {
             let result = cleanup_sequential_gate_fn(&design)?;
             design = result.design;
             Some(result.stats)
@@ -342,20 +332,20 @@ impl AbcMappingContext {
         if self.library.cells.iter().any(|c| c.name == design.name) {
             return Err("top module name conflicts with a Liberty cell name".into());
         }
-        if options.timeout.is_zero() {
+        if abc.timeout.is_zero() {
             return Err("ABC timeout must be positive".into());
         }
-        options.io_constraints.validate(&self.library)?;
+        abc.io_constraints.validate(&self.library)?;
         let ports = RegisterBoundaryPorts::new(&design);
-        let gates = self.plan_clock_gates(&design, options, &ports)?;
+        let gates = self.plan_clock_gates(&design, sequential, &ports)?;
         let registers = self.registers.map_registers_with_data(
             &design,
-            &options.register_selection,
+            &sequential.register_selection,
             &ports,
             |reg, bit| gates.as_ref()?.bits.get(&(reg.q, bit)).map(|g| g.data),
         )?;
         let boundary = Boundary::new(&design, &registers, gates.as_ref());
-        let (mut netlist, diagnostics) = self.map_transition(&boundary.graph, options)?;
+        let (mut netlist, diagnostics) = self.map_transition(&boundary.graph, abc)?;
         validate_mapped_cells(&netlist, &self.library).map_err(|e| diagnostics.failure(e))?;
         assemble(&mut netlist, &design, &registers, &boundary, gates.as_ref())
             .map_err(|e| diagnostics.failure(e))?;
@@ -372,7 +362,7 @@ impl AbcMappingContext {
     fn plan_clock_gates(
         &self,
         design: &SequentialGateFn,
-        options: &AbcMappingOptions,
+        options: &SequentialMappingOptions,
         ports: &RegisterBoundaryPorts,
     ) -> Result<Option<ClockGatePlan<'_>>, String> {
         let Some(policy) = &options.clock_gating else {
@@ -391,7 +381,7 @@ impl AbcMappingContext {
         let direct_io_ok = self
             .registers
             .supports_direct_input_to_output(&options.register_selection);
-        let groups = clock_gating::plan_clock_gates(design, policy, |q, data| {
+        let groups = sequential_mapping::plan_clock_gates(design, policy, |q, data| {
             direct_io_ok || !(ports.is_direct_input(data) && ports.is_direct_output(q))
         });
         if groups.is_empty() {

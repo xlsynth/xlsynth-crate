@@ -27,6 +27,7 @@ pub mod register_mapping;
 pub mod report;
 pub mod resize;
 pub(crate) mod sequential_liberty;
+pub mod sequential_mapping;
 pub mod sta;
 pub mod stages;
 pub mod stats;

@@ -14,6 +14,7 @@ use xlsynth_g8r::netlist::abc::{
     AbcIoConstraints, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics, AbcToolchain,
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
+use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
@@ -268,16 +269,23 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         Some(load) => *load,
         None => default_output_load_ff(&library)?,
     };
-    let mut options = AbcMappingOptions::new(AbcIoConstraints {
+    let mut abc_options = AbcMappingOptions::new(AbcIoConstraints {
         driving_cell,
         output_load_ff,
     });
-    options.timeout = Duration::from_secs(*matches.get_one::<u64>("timeout-seconds").unwrap());
-    options.cleanup_registers = matches.get_flag("cleanup-registers");
-    if !matches.get_flag("clock-gating") {
-        options.clock_gating = None;
+    abc_options.timeout = Duration::from_secs(*matches.get_one::<u64>("timeout-seconds").unwrap());
+    if let Some(path) = matches.get_one::<String>("abc-script") {
+        abc_options.script = std::fs::read_to_string(path)
+            .map_err(|e| format!("reading ABC script '{path}': {e}"))?;
     }
-    if let Some(gating) = &mut options.clock_gating {
+    let mut sequential_options = SequentialMappingOptions {
+        cleanup_registers: matches.get_flag("cleanup-registers"),
+        ..Default::default()
+    };
+    if !matches.get_flag("clock-gating") {
+        sequential_options.clock_gating = None;
+    }
+    if let Some(gating) = &mut sequential_options.clock_gating {
         if let Some(min_flops) = matches.get_one::<NonZeroUsize>("clock-gate-min-flops") {
             gating.min_flops = min_flops.get();
         }
@@ -286,11 +294,7 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         }
     }
     if let Some(cell) = matches.get_one::<String>("register-cell") {
-        options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
-    }
-    if let Some(path) = matches.get_one::<String>("abc-script") {
-        options.script = std::fs::read_to_string(path)
-            .map_err(|e| format!("reading ABC script '{path}': {e}"))?;
+        sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
     let toolchain = match matches.get_one::<String>("abc-path") {
         Some(path) => AbcToolchain::new(path),
@@ -305,8 +309,8 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
     let mapped = match format {
-        Format::Gv => context.map_sequential(&design, &options),
-        Format::Pb => context.map_sequential_structural(&design, &options),
+        Format::Gv => context.map_sequential(&design, &sequential_options, &abc_options),
+        Format::Pb => context.map_sequential_structural(&design, &sequential_options, &abc_options),
     }
     .map_err(|e| e.to_string())?;
     let output = format

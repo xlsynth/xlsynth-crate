@@ -1,11 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Find shared load enables in a legalized one-cycle transition AIG.
+//! Native sequential mapping policy and shared load-enable recognition.
 
 use std::collections::BTreeMap;
 
 use crate::aig::get_summary_stats::get_aig_cone_stats;
 use crate::aig::{AigNode, AigOperand, AigRef, GateFn, SequentialGateFn};
+use crate::netlist::register_mapping::RegisterCellSelection;
+
+/// Controls register cleanup, physical flop selection, and clock-gate
+/// extraction.
+#[derive(Clone, Debug)]
+pub struct SequentialMappingOptions {
+    pub register_selection: RegisterCellSelection,
+    /// Run native register cleanup before selecting flops and clock gates.
+    pub cleanup_registers: bool,
+    /// `None` keeps shared load enables on the flop data paths.
+    pub clock_gating: Option<ClockGatingOptions>,
+}
+
+impl Default for SequentialMappingOptions {
+    fn default() -> Self {
+        Self {
+            register_selection: RegisterCellSelection::SmallestArea,
+            cleanup_registers: false,
+            clock_gating: Some(ClockGatingOptions::default()),
+        }
+    }
+}
 
 /// Inclusive size and depth thresholds for extracting an integrated clock gate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

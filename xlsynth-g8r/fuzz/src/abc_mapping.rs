@@ -24,6 +24,7 @@ use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
+use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
@@ -68,9 +69,10 @@ pub fn preflight() -> Result<(), String> {
         ClockPort { name: "clk".into() },
     )?;
     let context = context()?;
-    let options = AbcMappingOptions::from_library(context.library())?;
+    let sequential_options = SequentialMappingOptions::default();
+    let abc_options = AbcMappingOptions::from_library(context.library())?;
     context
-        .map_sequential(&design, &options)
+        .map_sequential(&design, &sequential_options, &abc_options)
         .map_err(|e| e.to_string())?;
     // The direct identity requires a non-inverting FF and bypasses ABC. Also
     // require an actual combinational mapping before starting the campaign.
@@ -78,7 +80,11 @@ pub fn preflight() -> Result<(), String> {
     let a = logic.add_input("a".into(), 1);
     logic.add_output("y".into(), a.get_lsb(0).negate().into());
     context
-        .map_sequential(&SequentialGateFn::from_gate_fn(logic.build()), &options)
+        .map_sequential(
+            &SequentialGateFn::from_gate_fn(logic.build()),
+            &sequential_options,
+            &abc_options,
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -257,14 +263,15 @@ fn check_with_script(data: &[u8], script: &str) {
     }
     let warmup_cycles = 1 + usize::from(flop_inputs) + usize::from(flop_outputs);
     let source = emit_g8r(&original).unwrap();
-    let mut options = AbcMappingOptions::from_library(context.library())
+    let mut abc_options = AbcMappingOptions::from_library(context.library())
         .expect("library defaults were validated during ABC preflight");
-    options.timeout = Duration::from_secs(30);
-    options.script = script.to_owned();
+    abc_options.timeout = Duration::from_secs(30);
+    abc_options.script = script.to_owned();
+    let mut sequential_options = SequentialMappingOptions::default();
     for cleanup_registers in [false, true] {
-        options.cleanup_registers = cleanup_registers;
+        sequential_options.cleanup_registers = cleanup_registers;
         let mapped = context
-            .map_sequential(&original, &options)
+            .map_sequential(&original, &sequential_options, &abc_options)
             .unwrap_or_else(|error| panic!("ABC mapping failed: {error}\n{source}"));
         mapped.design.validate_legalized().unwrap();
         check_direct_connections(&mapped);
