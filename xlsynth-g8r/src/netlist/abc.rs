@@ -3,9 +3,10 @@
 //! Direct ABC combinational mapping with native sequential netlist assembly.
 //!
 //! Raw Liberty files are passed to ABC; the separately supplied normalized
-//! library is used for FF selection and checking emitted cells. Matching names
-//! and pins do not prove that the two library sources have identical semantics
-//! or timing. No Yosys invocation, retiming, or register sizing is performed.
+//! library is used for FF and ICG selection and checking emitted cells.
+//! Matching names and pins do not prove that the two library sources have
+//! identical semantics or timing. No Yosys invocation, retiming, or register
+//! sizing is performed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -13,17 +14,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod clock_gating;
+pub use clock_gating::ClockGatingOptions;
+
 use xlsynth::external_tool::{ToolError, resolve_executable, run_with_timeout_detailed};
 use xlsynth_pir::IrBits;
 
 use crate::aig::gate::{Input, Output};
 use crate::aig::sequential_cleanup::{SequentialCleanupStats, cleanup_sequential_gate_fn};
-use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn};
+use crate::aig::{AigBitVector, AigNode, AigOperand, GateFn, SequentialGateFn, TransitionInputId};
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use crate::liberty::io_defaults::{
     buffer_input_pin, default_output_load_ff, resolve_reference_buffer,
 };
-use crate::liberty_model::{Library, PinDirection};
+use crate::liberty_model::{ClockGate, Library, PinDirection};
 use crate::netlist::emit::emit_module_as_netlist_text;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
 use crate::netlist::parse::{
@@ -31,7 +35,8 @@ use crate::netlist::parse::{
     NetlistPort, PortDirection, Pos, Span,
 };
 use crate::netlist::register_mapping::{
-    RegisterCellSelection, RegisterMappingLibrary, RegisterMappingPlan,
+    RegisterBoundaryPorts, RegisterCellSelection, RegisterMappingLibrary, RegisterMappingPlan,
+    validate_sequential_mapping_policy,
 };
 
 /// Explicit standalone ABC executable, independent of a Liberty library.
@@ -133,6 +138,9 @@ impl AbcIoConstraints {
 pub struct AbcMappingOptions {
     pub register_selection: RegisterCellSelection,
     pub cleanup_registers: bool,
+    /// Extract shared feedback enables using a certified Liberty clock gate.
+    /// `None` keeps the feedback muxes on the data paths.
+    pub clock_gating: Option<ClockGatingOptions>,
     pub timeout: Duration,
     /// Required electrical boundary conditions, validated against the mapping
     /// library before ABC runs. There is no unconstrained mapping mode.
@@ -146,13 +154,14 @@ pub struct AbcMappingOptions {
 }
 
 impl AbcMappingOptions {
-    /// Uses explicit constraints with area-first FF selection, no register
-    /// cleanup, the default speed script, and a 180-second timeout. Mapping
-    /// validates the constraints.
+    /// Uses explicit constraints, area-first FF selection, default clock
+    /// gating thresholds, the speed script, and a 180-second timeout. Register
+    /// cleanup is opt-in. Mapping validates the constraints.
     pub fn new(io_constraints: AbcIoConstraints) -> Self {
         Self {
             register_selection: RegisterCellSelection::SmallestArea,
             cleanup_registers: false,
+            clock_gating: Some(ClockGatingOptions::default()),
             timeout: Duration::from_secs(180),
             io_constraints,
             script: ABC_SPEED_SCRIPT.to_owned(),
@@ -214,8 +223,9 @@ ABC stderr:
 /// it.
 pub struct AbcMappedDesign {
     pub netlist: ParsedNetlist,
-    /// Legalized, optionally cleaned design. Zero-width external ports remain
-    /// here but are omitted from Verilog, which has no zero-width port syntax.
+    /// Legalized, optionally cleaned design with logical feedback muxes intact
+    /// for equivalence checking. Zero-width external ports remain here but are
+    /// omitted from Verilog, which has no zero-width port syntax.
     pub design: SequentialGateFn,
     pub registers: RegisterMappingPlan,
     pub cleanup_stats: Option<SequentialCleanupStats>,
@@ -240,6 +250,8 @@ pub struct AbcMappingContext {
     raw_liberty_files: Vec<PathBuf>,
     library: Library,
     registers: RegisterMappingLibrary,
+    /// Index of the smallest usable, certified ICG in the normalized library.
+    clock_gate_cell: Option<usize>,
 }
 
 impl AbcMappingContext {
@@ -271,11 +283,23 @@ impl AbcMappingContext {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let registers = RegisterMappingLibrary::new(&library)?;
+        let clock_gate_cell = library
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| {
+                cell.clock_gate.is_some()
+                    && validate_sequential_mapping_policy(cell).is_ok()
+                    && cell.positive_edge_clock_gate(&library).is_ok()
+            })
+            .min_by(|(_, a), (_, b)| a.area.total_cmp(&b.area).then_with(|| a.name.cmp(&b.name)))
+            .map(|(index, _)| index);
         Ok(Self {
             toolchain,
             raw_liberty_files: files,
             library,
             registers,
+            clock_gate_cell,
         })
     }
 
@@ -322,13 +346,18 @@ impl AbcMappingContext {
             return Err("ABC timeout must be positive".into());
         }
         options.io_constraints.validate(&self.library)?;
-        let registers = self
-            .registers
-            .map_registers(&design, &options.register_selection)?;
-        let boundary = Boundary::new(&design, &registers);
+        let ports = RegisterBoundaryPorts::new(&design);
+        let gates = self.plan_clock_gates(&design, options, &ports)?;
+        let registers = self.registers.map_registers_with_data(
+            &design,
+            &options.register_selection,
+            &ports,
+            |reg, bit| gates.as_ref()?.bits.get(&(reg.q, bit)).map(|g| g.data),
+        )?;
+        let boundary = Boundary::new(&design, &registers, gates.as_ref());
         let (mut netlist, diagnostics) = self.map_transition(&boundary.graph, options)?;
         validate_mapped_cells(&netlist, &self.library).map_err(|e| diagnostics.failure(e))?;
-        assemble(&mut netlist, &design, &registers, &boundary)
+        assemble(&mut netlist, &design, &registers, &boundary, gates.as_ref())
             .map_err(|e| diagnostics.failure(e))?;
         Ok(AbcMappedDesign {
             netlist,
@@ -337,6 +366,58 @@ impl AbcMappingContext {
             cleanup_stats,
             diagnostics,
         })
+    }
+
+    /// Keeps only clock-gate groups that preserve the direct FF boundary wires.
+    fn plan_clock_gates(
+        &self,
+        design: &SequentialGateFn,
+        options: &AbcMappingOptions,
+        ports: &RegisterBoundaryPorts,
+    ) -> Result<Option<ClockGatePlan<'_>>, String> {
+        let Some(policy) = &options.clock_gating else {
+            return Ok(None);
+        };
+        policy.validate()?;
+        if design.registers.is_empty() {
+            return Ok(None);
+        }
+        let Some(index) = self.clock_gate_cell else {
+            return Ok(None);
+        };
+        let cell = &self.library.cells[index];
+        // Bypassing a mux can expose a primary-input -> FF -> primary-output
+        // path. Such a bit needs a non-inverting FF to preserve both wires.
+        let direct_io_ok = self
+            .registers
+            .supports_direct_input_to_output(&options.register_selection);
+        let groups = clock_gating::plan_clock_gates(design, policy, |q, data| {
+            direct_io_ok || !(ports.is_direct_input(data) && ports.is_direct_output(q))
+        });
+        if groups.is_empty() {
+            return Ok(None);
+        }
+        let mut enables = Vec::with_capacity(groups.len());
+        let mut bits = BTreeMap::new();
+        for (group_index, group) in groups.into_iter().enumerate() {
+            enables.push(group.enable);
+            for member in group.members {
+                let q = design.registers[member.register_index].q;
+                bits.insert(
+                    (q, member.bit_index),
+                    GatedBit {
+                        data: member.data,
+                        group_index,
+                    },
+                );
+            }
+        }
+        Ok(Some(ClockGatePlan {
+            cell_name: &cell.name,
+            pins: cell.clock_gate.as_ref().expect("certified clock gate"),
+            enables,
+            bits,
+        }))
     }
 
     fn map_transition(
@@ -518,16 +599,35 @@ impl BoundarySignal {
     }
 }
 
+/// Load operand and shared clock for an individual physical FF bit.
+struct GatedBit {
+    data: AigOperand,
+    group_index: usize,
+}
+
+/// Native clock-gate wiring and the corresponding combinational ABC boundary.
+struct ClockGatePlan<'a> {
+    cell_name: &'a str,
+    pins: &'a ClockGate,
+    enables: Vec<AigOperand>,
+    bits: BTreeMap<(TransitionInputId, usize), GatedBit>,
+}
+
 /// Scalar ABC interface with direct wires kept outside ABC's output buffering.
 struct Boundary {
     graph: GateFn,
     inputs: BTreeMap<(usize, usize), String>,
     external_outputs: Vec<Vec<BoundarySignal>>,
     register_data: Vec<BoundarySignal>,
+    gate_enables: Vec<BoundarySignal>,
 }
 
 impl Boundary {
-    fn new(design: &SequentialGateFn, plan: &RegisterMappingPlan) -> Self {
+    fn new(
+        design: &SequentialGateFn,
+        plan: &RegisterMappingPlan,
+        gates: Option<&ClockGatePlan<'_>>,
+    ) -> Self {
         let mut graph = design.transition.clone();
         graph.name = "mapped".into();
         graph.inputs.clear();
@@ -581,22 +681,29 @@ impl Boundary {
         }
         let mut register_data = Vec::new();
         for bit in &plan.bits {
-            let mut operand = rephase(
-                *design.transition.outputs[bit.d.index()]
-                    .bit_vector
-                    .get_lsb(bit.bit_index),
-            );
-            // Physical D = logical D XOR cell polarity XOR state phase.
-            // `rephase` above expresses logical D using physical state inputs.
+            let gated_bit = gates.and_then(|g| g.bits.get(&(bit.q, bit.bit_index)));
+            let effective_d = design.transition.outputs[bit.d.index()]
+                .bit_vector
+                .get_lsb(bit.bit_index);
+            let data = gated_bit.map_or(*effective_d, |g| g.data);
+            let mut operand = rephase(data);
+            // Physical D = load data XOR cell polarity XOR state phase.
+            // `rephase` expresses the load operand using physical state inputs.
             operand.negated ^=
                 plan.cells[bit.cell_index].inverts_data_to_output ^ bit.output_inverted;
             register_data.push(add_boundary_signal(&mut graph, operand, &input_nodes));
         }
+        let gate_enables = gates
+            .into_iter()
+            .flat_map(|g| &g.enables)
+            .map(|enable| add_boundary_signal(&mut graph, rephase(*enable), &input_nodes))
+            .collect();
         Self {
             graph,
             inputs,
             external_outputs,
             register_data,
+            gate_enables,
         }
     }
 }
@@ -702,12 +809,13 @@ fn validate_mapped_cells(parsed: &ParsedNetlist, library: &Library) -> Result<()
 }
 
 /// Reuses ABC's flat netlist, replacing its interface with native ports and
-/// FFs.
+/// FFs and clock gates.
 fn assemble(
     parsed: &mut ParsedNetlist,
     design: &SequentialGateFn,
     plan: &RegisterMappingPlan,
     boundary: &Boundary,
+    gates: Option<&ClockGatePlan<'_>>,
 ) -> Result<(), String> {
     let module = &parsed.modules[0];
     let mut ports = BTreeMap::new();
@@ -808,12 +916,62 @@ fn assemble(
         .map(|clock| add_port(parsed, &clock.name, 1, PortDirection::Input))
         .transpose()?
         .flatten();
+    let mut gated_clocks = Vec::with_capacity(boundary.gate_enables.len());
+    if let Some(gates) = gates {
+        let clock = clock.ok_or("mapped ICG has no clock")?;
+        for (index, enable) in boundary.gate_enables.iter().enumerate() {
+            let gated_clock = NetIndex(parsed.nets.len());
+            parsed.nets.push(Net {
+                name: parsed
+                    .interner
+                    .get_or_intern(fresh_name(&mut used, format!("__gclk_{index}"))),
+                width: None,
+            });
+            parsed.modules[0].wires.push(gated_clock);
+            let pins = gates.pins;
+            let mut connections = vec![
+                (
+                    parsed.interner.get_or_intern(&pins.clock_pin),
+                    NetRef::Simple(clock),
+                ),
+                (
+                    parsed.interner.get_or_intern(&pins.enable_pins[0]),
+                    NetRef::Simple(ports[enable.port_name()].1),
+                ),
+                (
+                    parsed.interner.get_or_intern(&pins.output_pin),
+                    NetRef::Simple(gated_clock),
+                ),
+            ];
+            for pin in &pins.test_pins {
+                connections.push((
+                    parsed.interner.get_or_intern(pin),
+                    NetRef::Literal(IrBits::bool(false)),
+                ));
+            }
+            parsed.modules[0].instances.push(NetlistInstance {
+                type_name: parsed.interner.get_or_intern(gates.cell_name),
+                instance_name: parsed
+                    .interner
+                    .get_or_intern(fresh_name(&mut used, format!("__icg_{index}"))),
+                connections,
+                inst_lineno: 0,
+                inst_colno: 0,
+            });
+            gated_clocks.push(gated_clock);
+        }
+    }
     for (index, bit) in plan.bits.iter().enumerate() {
         let cell = &plan.cells[bit.cell_index];
+        let clock = gates
+            .and_then(|g| g.bits.get(&(bit.q, bit.bit_index)))
+            .map(|g| gated_clocks[g.group_index])
+            .or(clock)
+            .ok_or("mapped FF has no clock")?;
         let mut connections = vec![
             (
                 parsed.interner.get_or_intern(&cell.clock_pin),
-                NetRef::Simple(clock.ok_or("mapped FF has no clock")?),
+                NetRef::Simple(clock),
             ),
             (
                 parsed.interner.get_or_intern(&cell.data_pin),

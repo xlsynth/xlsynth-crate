@@ -1485,6 +1485,14 @@ registers. A register directly connecting both a module input and output needs
 a non-inverting D-to-output implementation; mapping fails if none is available.
 Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 
+By default, `g8r2gv` looks for flop bits whose next state is
+`enable ? data : own_Q`. For eligible bits sharing the same enable and
+polarity, the mapper emits one integrated clock gate (ICG), connects the
+data arms to the FFs, and ties the ICG's optional test-enable pin low.
+This requires a Liberty proto with a certified low-transparent ICG. Libraries
+without a usable ICG, including older role-only protos, use feedback muxes.
+Use `--clock-gating=false` to generate an ungated baseline.
+
 - `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
   this flag for split libraries, in loading order. The first one or two files
   must together supply a usable combinational library, including buffers and
@@ -1506,6 +1514,13 @@ Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 - `--timeout-seconds <SECONDS>` – positive ABC mapping timeout; default `180`.
 - `--cleanup-registers` – opt in to native register cleanup; default is to
   preserve registers.
+- `--clock-gating <BOOL>` – extract ICGs after optional register cleanup
+  (default `true`).
+- `--clock-gate-min-flops <N>` – minimum number of eligible flop bits per
+  shared enable, inclusive (default `4`, must be positive).
+- `--clock-gate-max-enable-depth <N>` – maximum AIG depth of the enable,
+  inclusive (default `8`). Inputs, register Qs, and literals have depth zero.
+  Each AND adds one level and inversion adds none.
 - `--register-cell <CELL>` – require a supported FF cell instead of selecting
   the smallest-area compatible one. The cell must preserve every direct boundary
   connection; an incompatible forced cell is rejected rather than substituted.

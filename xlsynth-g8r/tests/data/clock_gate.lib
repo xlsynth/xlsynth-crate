@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 library (clock_gate_test) {
+  cell (BUF) {
+    pin (A) { direction: input; }
+    pin (Y) { direction: output; function: "A"; }
+  }
   cell (DFF) {
     ff (IQ, IQN) {
       clocked_on: "CLK";

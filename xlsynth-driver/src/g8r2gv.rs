@@ -2,6 +2,7 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,6 +46,15 @@ pub fn command() -> Command {
             .value_parser(clap::value_parser!(u64).range(1..)).help("ABC mapping process timeout"))
         .arg(Arg::new("cleanup-registers").long("cleanup-registers").action(ArgAction::SetTrue)
             .help("Opt in to native register cleanup before mapping; otherwise preserve all registers"))
+        .arg(Arg::new("clock-gating").long("clock-gating").value_name("BOOL")
+            .value_parser(clap::value_parser!(bool)).default_value("true")
+            .help("Extract integrated clock gates for shared flop enables (default: true)"))
+        .arg(Arg::new("clock-gate-min-flops").long("clock-gate-min-flops").value_name("N")
+            .value_parser(clap::value_parser!(NonZeroUsize))
+            .help("Minimum number of flop bits sharing a clock-gate enable (default: 4)"))
+        .arg(Arg::new("clock-gate-max-enable-depth").long("clock-gate-max-enable-depth").value_name("N")
+            .value_parser(clap::value_parser!(usize))
+            .help("Maximum AND depth of a clock-gate enable, inclusive (default: 8)"))
         .arg(Arg::new("register-cell").long("register-cell").value_name("CELL")
             .help("Require a specific supported FF cell; otherwise select the smallest-area compatible FF"))
         .arg(Arg::new("add-clk-port").long("add-clk-port").value_name("NAME")
@@ -264,6 +274,17 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     });
     options.timeout = Duration::from_secs(*matches.get_one::<u64>("timeout-seconds").unwrap());
     options.cleanup_registers = matches.get_flag("cleanup-registers");
+    if !matches.get_flag("clock-gating") {
+        options.clock_gating = None;
+    }
+    if let Some(gating) = &mut options.clock_gating {
+        if let Some(min_flops) = matches.get_one::<NonZeroUsize>("clock-gate-min-flops") {
+            gating.min_flops = min_flops.get();
+        }
+        if let Some(max_depth) = matches.get_one::<usize>("clock-gate-max-enable-depth") {
+            gating.max_enable_depth = *max_depth;
+        }
+    }
     if let Some(cell) = matches.get_one::<String>("register-cell") {
         options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
