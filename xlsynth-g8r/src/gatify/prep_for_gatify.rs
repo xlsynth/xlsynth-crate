@@ -19,8 +19,10 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod diagnostics;
+mod redundant_nonzero_mask;
 mod shifted_nonzero;
 
+use std::collections::HashMap;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_match;
@@ -103,10 +105,61 @@ fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
     use_counts
 }
 
+/// Assigns new semantic IDs above this pass's input IDs and optionally records
+/// the original operation for gate attribution. Callers check capacity before
+/// modifying a group of nodes.
+struct RewriteIds<'a> {
+    last: usize,
+    origins: Option<&'a mut HashMap<usize, usize>>,
+}
+
+impl<'a> RewriteIds<'a> {
+    fn new(f: &ir::Fn, origins: Option<&'a mut HashMap<usize, usize>>) -> Self {
+        Self {
+            last: f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0),
+            origins,
+        }
+    }
+
+    fn has_room(&self, count: usize) -> bool {
+        // A prepared function can be lowered directly with u32 provenance.
+        // Preserve that range when all input IDs fit. Wider, untracked PIR
+        // can still use the full usize range.
+        let limit = if self.last <= u32::MAX as usize {
+            u32::MAX as usize
+        } else {
+            usize::MAX
+        };
+        count <= limit - self.last
+    }
+
+    fn fresh(&mut self, source: usize) -> usize {
+        self.last += 1;
+        if let Some(origins) = self.origins.as_deref_mut() {
+            let original = origins.get(&source).copied().unwrap_or(source);
+            origins.insert(self.last, original);
+        }
+        self.last
+    }
+}
+
+/// An explicit `op.digits` name on a verified node encodes its opcode and ID.
+fn clear_opcode_name(node: &mut ir::Node) {
+    if node
+        .name
+        .as_deref()
+        .and_then(|name| name.rsplit_once('.'))
+        .is_some_and(|(_, suffix)| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+    {
+        node.name = None;
+    }
+}
+
 /// Convert `or(or_reduce(a), or_reduce(b), ...)` into
 /// `or_reduce(concat(a, b, ...))` when each of the `or_reduce` nodes has a
 /// single use.
-fn combine_or_reduces(f: &mut ir::Fn) -> usize {
+fn combine_or_reduces(f: &mut ir::Fn, origins: Option<&mut HashMap<usize, usize>>) -> usize {
+    let mut ids = RewriteIds::new(f, origins);
     let use_counts = get_use_counts(f);
     let mut rewrites = 0;
     for node_index in 0..f.nodes.len() {
@@ -144,19 +197,22 @@ fn combine_or_reduces(f: &mut ir::Fn) -> usize {
             .iter()
             .map(|nr| f.nodes[nr.index].ty.bit_count())
             .sum();
-        if concat_width == 0 {
+        if concat_width == 0 || !ids.has_room(1) {
             continue;
         }
 
         let concat_ref = reductions[0];
         {
             let concat_node = &mut f.nodes[concat_ref.index];
+            concat_node.text_id = ids.fresh(concat_node.text_id);
+            concat_node.name = None;
             concat_node.payload = NodePayload::Nary(NaryOp::Concat, concat_inputs);
             concat_node.ty = ir::Type::Bits(concat_width);
         }
 
         {
             let node = &mut f.nodes[node_index];
+            clear_opcode_name(node);
             node.payload = NodePayload::Unop(Unop::OrReduce, concat_ref);
         }
 
@@ -1325,7 +1381,11 @@ fn rewrite_nary_adds_to_fixed_point(f: &mut ir::Fn) -> usize {
 /// When already ANDed with a non-sign data bit `x[k]` (where `k < x_w-1`),
 /// the `x != 0` predicate is redundant because `x[k] == 1` implies non-zero.
 /// So the mask collapses to just `!sign(x)` for that projected bit.
-fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
+fn rewrite_projected_positive_mask_to_sign_test(
+    f: &mut ir::Fn,
+    origins: Option<&mut HashMap<usize, usize>>,
+) -> usize {
+    let mut ids = RewriteIds::new(f, origins);
     let use_counts = get_use_counts(f);
     let mut rewrites: usize = 0;
     let original_len = f.nodes.len();
@@ -1416,9 +1476,10 @@ fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
         // stays zero. Only mutate the chain when no other consumer observes
         // the comparison, its negation, or the replicated mask. Sharing the
         // final AND is safe because its entire value is preserved.
-        if [sle_nr, pred_nr, mask_nr]
-            .iter()
-            .any(|nr| use_counts[nr.index] != 1)
+        if !ids.has_room(3)
+            || [sle_nr, pred_nr, mask_nr]
+                .iter()
+                .any(|nr| use_counts[nr.index] != 1)
         {
             continue;
         }
@@ -1437,6 +1498,13 @@ fn rewrite_projected_positive_mask_to_sign_test(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(1)),
         )
         .expect("prep_for_gatify: projected positive-mask rewrite failed");
+        // All three values change at zero. Range facts and the prover use
+        // text IDs to identify values in the original function.
+        for nr in [sle_nr, pred_nr, mask_nr] {
+            let node = f.get_node_mut(nr);
+            node.text_id = ids.fresh(node.text_id);
+            node.name = None;
+        }
 
         rewrites += 1;
     }
@@ -2394,6 +2462,7 @@ fn rewrite_not_shifted_all_ones_to_ext_mask_low(f: &mut ir::Fn) -> usize {
 /// Rewrites `shll(shrl(bits[N]:all_ones, count), count)` into
 /// `not(ext_mask_low(count))`.
 fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
+    let mut ids = RewriteIds::new(f, None);
     let use_counts = get_use_counts(f);
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
@@ -2406,14 +2475,14 @@ fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
         else {
             continue;
         };
-        if use_counts[inner_shrl.index] != 1 {
+        if use_counts[inner_shrl.index] != 1 || !ids.has_room(1) {
             continue;
         }
 
         // The inner `shrl(all_ones, count)` node is changing meaning to
         // `ext_mask_low(count)`; keep the outer node's text id because the
         // overall high-mask value is unchanged.
-        f.nodes[inner_shrl.index].text_id = next_text_id(f);
+        f.nodes[inner_shrl.index].text_id = ids.fresh(f.nodes[inner_shrl.index].text_id);
         f.nodes[inner_shrl.index].name = None;
         ir_utils::replace_node_payload(
             f,
@@ -2441,6 +2510,7 @@ fn rewrite_shifted_shrl_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
 /// This preserves textual/SSA ordering without reindexing and catches the
 /// common `bit_slice(shll(all_ones, count), ...)` sticky-mask shape.
 fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
+    let mut ids = RewriteIds::new(f, None);
     let use_counts = get_use_counts(f);
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
@@ -2455,7 +2525,7 @@ fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
         let NodePayload::Binop(Binop::Shll, lhs, _) = f.nodes[node_index].payload else {
             continue;
         };
-        if use_counts[lhs.index] != 1 {
+        if use_counts[lhs.index] != 1 || !ids.has_room(1) {
             continue;
         }
         if count.index >= lhs.index {
@@ -2464,7 +2534,7 @@ fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
 
         // This node no longer has the old literal's semantics, so give it a
         // fresh text id to avoid applying stale known-bits range info.
-        f.nodes[lhs.index].text_id = next_text_id(f);
+        f.nodes[lhs.index].text_id = ids.fresh(f.nodes[lhs.index].text_id);
         f.nodes[lhs.index].name = None;
         ir_utils::replace_node_payload(
             f,
@@ -2604,17 +2674,31 @@ fn rewrite_small_shift_choices(f: &mut ir::Fn) -> usize {
 /// - may rewrite into extension ops (e.g. `ExtCarryOut`) to expose intent for
 ///   cheaper gateification
 /// - may mark dead nodes `Nil`
-/// - does **not** reindex/compact nodes and does **not** change the function
-///   signature
+/// - compacts and topologically orders the result, preserving the signature
 pub fn prep_for_gatify(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
+    prep_for_gatify_with_origins(f, range_info, options, None)
+}
+
+/// Optionally records source operation IDs for helpers whose values change.
+pub(super) fn prep_for_gatify_with_origins(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+    mut origins: Option<&mut HashMap<usize, usize>>,
+) -> ir::Fn {
     let mut cloned = f.clone();
     diagnostics::snapshot(&cloned, "input", 0);
+    diagnostics::run(&mut cloned, "redundant_nonzero_mask", 0, |f| {
+        redundant_nonzero_mask::rewrite(f, origins.as_deref_mut())
+    });
     diagnostics::run(&mut cloned, "shifted_nonzero", 0, shifted_nonzero::rewrite);
-    diagnostics::run(&mut cloned, "combine_or_reduces", 0, combine_or_reduces);
+    diagnostics::run(&mut cloned, "combine_or_reduces", 0, |f| {
+        combine_or_reduces(f, origins.as_deref_mut())
+    });
     diagnostics::run(
         &mut cloned,
         "add_xor_and_to_or",
@@ -2717,12 +2801,9 @@ pub fn prep_for_gatify(
             rewrite_left_normalize_shift_to_ext_normalize_left,
         );
     }
-    diagnostics::run(
-        &mut cloned,
-        "projected_positive_mask",
-        0,
-        rewrite_projected_positive_mask_to_sign_test,
-    );
+    diagnostics::run(&mut cloned, "projected_positive_mask", 0, |f| {
+        rewrite_projected_positive_mask_to_sign_test(f, origins)
+    });
     diagnostics::run(&mut cloned, "dead_nodes", 0, mark_dead_nodes_as_nil);
     diagnostics::run(&mut cloned, "compact_toposort", 0, |f| {
         let before = f.nodes.len();
@@ -3135,8 +3216,8 @@ fn f(x: bits[2], y: bits[3]) -> bits[1] {
         let optimized = prep_for_gatify(f, None, PrepForGatifyOptions::default());
 
         let expected = r#"fn f(x: bits[2] id=1, y: bits[3] id=2) -> bits[1] {
-  x_any: bits[5] = concat(x, y, id=3)
-  ret combined: bits[1] = or_reduce(x_any, id=5)
+  concat.6: bits[5] = concat(x, y, id=6)
+  ret combined: bits[1] = or_reduce(concat.6, id=5)
 }"#;
         assert_eq!(optimized.to_string(), expected);
     }

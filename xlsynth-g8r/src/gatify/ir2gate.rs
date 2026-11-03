@@ -10,7 +10,7 @@ use crate::gatify::ir2gate_arithmetic::{
     gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop, try_gatify_selected_unit_delta,
 };
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_with_origins};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::IrBits;
@@ -194,7 +194,7 @@ enum UseCounts {
 pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
     use_counts: UseCounts,
-    /// Absent for standalone node lowering, where every target bit is required.
+    /// When absent, every bit of a lowered value is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
     priority_predicate_plan: PriorityPredicatePlan,
@@ -4664,19 +4664,21 @@ fn gatify_internal(
     Ok(())
 }
 
-/// Attributes prep-created nodes to an original operand when no original node
-/// with the same text ID survives the preparation rewrite.
+/// Attributes prepared nodes to their source operation, falling back to an
+/// operand when the rewrite supplied no origin for a helper.
 fn build_prepared_provenance_map(
     f: &ir::Fn,
     orig_ref_by_text_id: &HashMap<usize, ir::NodeRef>,
+    origins: &HashMap<usize, usize>,
 ) -> HashMap<ir::NodeRef, Option<u32>> {
     let mut provenance_by_node: HashMap<ir::NodeRef, Option<u32>> = HashMap::new();
     for (index, node) in f.nodes.iter().enumerate() {
         let node_ref = ir::NodeRef { index };
-        if orig_ref_by_text_id.contains_key(&node.text_id) {
+        let origin = origins.get(&node.text_id).unwrap_or(&node.text_id);
+        if orig_ref_by_text_id.contains_key(origin) {
             provenance_by_node.insert(
                 node_ref,
-                Some(u32::try_from(node.text_id).expect("node id too large for u32")),
+                Some(u32::try_from(*origin).expect("node id too large for u32")),
             );
         }
     }
@@ -4793,6 +4795,7 @@ fn gatify_lower_prepared_fn(
     options: &GatifyOptions,
     orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
     equiv_fn: &ir::Fn,
+    provenance_by_node: Option<&HashMap<ir::NodeRef, Option<u32>>>,
 ) -> Result<GatifyOutput, String> {
     let mut g8_builder = GateBuilder::new(
         f.name.clone(),
@@ -4805,17 +4808,12 @@ fn gatify_lower_prepared_fn(
     let topological = ir_utils::get_topological(f);
     let outputs = f.ret_node_ref.into_iter().collect::<Vec<_>>();
     env.demanded_bits = Some(demanded_bits::analyze(f, &topological, &outputs));
-    let provenance_by_node = if options.track_pir_node_ids {
-        orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original))
-    } else {
-        None
-    };
     gatify_internal(
         f,
         &mut g8_builder,
         &mut env,
         options,
-        provenance_by_node.as_ref(),
+        provenance_by_node,
         &topological,
     )?;
     let gate_fn = g8_builder.build();
@@ -4874,7 +4872,7 @@ fn gatify_lower_prepared_fn(
 pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before gatify_prepared_fn: {e}"))?;
-    gatify_lower_prepared_fn(f, &options, None, f)
+    gatify_lower_prepared_fn(f, &options, None, f, None)
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
@@ -4892,7 +4890,8 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
     }
 
-    let prepared_fn = prep_for_gatify(
+    let mut origins = options.track_pir_node_ids.then(HashMap::new);
+    let prepared_fn = prep_for_gatify_with_origins(
         orig_fn,
         options.range_info.as_deref(),
         PrepForGatifyOptions {
@@ -4903,103 +4902,109 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
+        origins.as_mut(),
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)
+    let provenance_by_node = origins
+        .map(|origins| build_prepared_provenance_map(&prepared_fn, &orig_ref_by_text_id, &origins));
+    gatify_lower_prepared_fn(
+        &prepared_fn,
+        &options,
+        Some(&orig_ref_by_text_id),
+        orig_fn,
+        provenance_by_node.as_ref(),
+    )
 }
 
+/// Lowers the original operation with one input per distinct operand, in
+/// first-use order. Enclosing-function range facts are inapplicable to these
+/// independent inputs. Preparation and mapping use the isolated function.
 pub fn gatify_node_as_fn(
     f: &ir::Fn,
     node_ref: ir::NodeRef,
     options: &GatifyOptions,
 ) -> Result<GateFn, String> {
-    let target_text_id = f.get_node(node_ref).text_id;
-    validate_fn_for_gatify(f)
-        .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
-    let prepared_fn = prep_for_gatify(
-        f,
-        options.range_info.as_deref(),
-        PrepForGatifyOptions {
-            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-            enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
-            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
-            enable_rewrite_mask_low: options.enable_rewrite_mask_low,
-            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
-            ..PrepForGatifyOptions::all_opts_enabled()
-        },
-    );
-    validate_fn_for_gatify(&prepared_fn)
-        .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-    let f = &prepared_fn;
-    let prepared_node_ref: ir::NodeRef = f
+    let node = f
         .nodes
-        .iter()
-        .enumerate()
-        .find_map(|(idx, n)| {
-            if n.text_id == target_text_id {
-                Some(ir::NodeRef { index: idx })
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| {
-            format!(
-                "gatify_node_as_fn: could not find node with original text_id={} after prep",
-                target_text_id
-            )
-        })?;
-    let node = f.get_node(prepared_node_ref);
-    let mut g8_builder = GateBuilder::new(
-        format!("{}_node_{}", f.name, node.text_id),
-        GateBuilderOptions {
-            fold: options.fold,
-            hash: options.hash,
-        },
-    );
-    let mut env = GateEnv::new(f);
+        .get(node_ref.index)
+        .ok_or_else(|| format!("gatify_node_as_fn: node {} does not exist", node_ref.index))?;
+    let name = format!("{}_node_{}", f.name, node.text_id);
+    if matches!(node.payload, ir::NodePayload::Nil) {
+        // A Nil has a gate placeholder but cannot be a prepared PIR return
+        // node.
+        let mut builder = GateBuilder::new(
+            name,
+            GateBuilderOptions {
+                fold: options.fold,
+                hash: options.hash,
+            },
+        );
+        builder.add_output(
+            "output_value".into(),
+            AigBitVector::zeros(node.ty.bit_count()),
+        );
+        return Ok(builder.build());
+    }
 
-    // Seed the direct operands of this node as independent GateFn inputs.
-    let operands: Vec<ir::NodeRef> = ir_utils::operands(&node.payload);
-    for (i, operand_ref) in operands.iter().enumerate() {
-        if env.contains(*operand_ref) {
+    let mut isolated = ir::Fn {
+        graph: ir::NodeGraph::new(name),
+        params: Vec::new(),
+        ret_ty: node.ty.clone(),
+        ret_node_ref: None,
+    };
+    let mut inputs = HashMap::new();
+    for (slot, operand) in ir_utils::operands(&node.payload).into_iter().enumerate() {
+        if inputs.contains_key(&operand) {
             continue;
         }
-        let operand_ty = f.get_node_ty(*operand_ref);
-        let width = operand_ty.bit_count();
-        let input_bits = g8_builder.add_input(format!("op{}_n{}", i, operand_ref.index), width);
-        env.add(*operand_ref, GateOrVec::BitVector(input_bits));
+        let producer = f.nodes.get(operand.index).ok_or_else(|| {
+            format!(
+                "gatify_node_as_fn: operand {} does not exist",
+                operand.index
+            )
+        })?;
+        let param = ir::NodeRef {
+            index: isolated.nodes.len(),
+        };
+        isolated.nodes.push(ir::Node {
+            text_id: producer.text_id,
+            name: Some(format!("op{slot}_n{}", operand.index)),
+            ty: producer.ty.clone(),
+            payload: ir::NodePayload::Param,
+            pos: None,
+        });
+        isolated.params.push(param);
+        inputs.insert(operand, param);
     }
 
-    // Lower the node into env/builder and emit it as the single output.
-    match &node.payload {
-        ir::NodePayload::Param => {
-            let bits = g8_builder.add_input(node.param_name().to_string(), node.ty.bit_count());
-            g8_builder.add_output("output_value".to_string(), bits);
-            return Ok(g8_builder.build());
-        }
-        ir::NodePayload::Literal(literal) => {
-            let bits = flatten_literal_to_bits(literal, &node.ty, &mut g8_builder);
-            g8_builder.add_output("output_value".to_string(), bits);
-            return Ok(g8_builder.build());
-        }
-        ir::NodePayload::Nil
-        | ir::NodePayload::Assert { .. }
-        | ir::NodePayload::AfterAll(..)
-        | ir::NodePayload::Trace { .. } => {
-            g8_builder.add_output(
-                "output_value".to_string(),
-                AigBitVector::zeros(node.ty.bit_count()),
-            );
-            return Ok(g8_builder.build());
-        }
-        _ => {}
-    }
+    let target = ir::NodeRef {
+        index: isolated.nodes.len(),
+    };
+    let payload = ir_utils::remap_payload_with(&node.payload, |(_, operand)| inputs[&operand]);
+    let name = if matches!(payload, ir::NodePayload::Param) {
+        // Requesting a parameter produces a one-input identity function.
+        isolated.params.push(target);
+        node.name.clone()
+    } else {
+        None
+    };
+    isolated.nodes.push(ir::Node {
+        text_id: node.text_id,
+        name,
+        ty: node.ty.clone(),
+        payload,
+        pos: None,
+    });
+    isolated.ret_node_ref = Some(target);
 
-    gatify_node(f, node_ref, node, &mut g8_builder, &mut env, options)?;
-    let output_bits = env.get_bit_vector(node_ref)?;
-    g8_builder.add_output("output_value".to_string(), output_bits);
-    Ok(g8_builder.build())
+    // Facts about producers in the enclosing graph do not constrain these
+    // inputs.
+    let options = GatifyOptions {
+        range_info: None,
+        ..options.clone()
+    };
+    Ok(gatify(&isolated, options)?.gate_fn)
 }
 
 #[cfg(test)]
