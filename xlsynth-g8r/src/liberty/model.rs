@@ -543,9 +543,8 @@ impl Cell {
         Ok(())
     }
 
-    /// Rejects cells whose imported behavior cannot safely be used as Boolean
-    /// logic.
-    pub fn validate_functional_semantics(&self) -> std::result::Result<(), String> {
+    /// Rejects source features that affect functional behavior and were lost.
+    fn validate_functional_coverage(&self) -> std::result::Result<(), String> {
         let functional_issues = self
             .unsupported_semantics
             .iter()
@@ -561,6 +560,39 @@ impl Cell {
                 functional_issues.join(", ")
             ));
         }
+        Ok(())
+    }
+
+    /// Resolves a certified low-transparent clock gate for rising-edge FFs.
+    /// Legacy role-only metadata cannot establish the polarity or latch phase.
+    pub fn positive_edge_clock_gate(
+        &self,
+        library: &Library,
+    ) -> std::result::Result<Option<&wire::ClockGate>, String> {
+        let Some(gate) = self.clock_gate.as_ref() else {
+            return Ok(None);
+        };
+        if gate.behavior != wire::ClockGateBehavior::LowLatchEnableOrTest as i32 {
+            return Err(format!(
+                "cell '{}' lacks verified low-transparent positive-edge clock-gate behavior; re-import the source Liberty to check its latch table and output equation",
+                self.name
+            ));
+        }
+        self.validate_functional_coverage()?;
+        if !self.sequential.is_empty() {
+            return Err(format!(
+                "cell '{}' has incompatible clock-gate controls",
+                self.name
+            ));
+        }
+        super::clock_gate::validate_pin_roles(&self.name, &self.pins, library, gate)?;
+        Ok(Some(gate))
+    }
+
+    /// Rejects cells whose imported behavior cannot safely be used as Boolean
+    /// logic.
+    pub fn validate_functional_semantics(&self) -> std::result::Result<(), String> {
+        self.validate_functional_coverage()?;
         // Check represented controls too: callers may construct normalized
         // libraries or protos directly, without going through the raw importer.
         if self

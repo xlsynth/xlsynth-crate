@@ -1,0 +1,42 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+library (clock_gate_test) {
+  cell (DFF) {
+    ff (IQ, IQN) {
+      clocked_on: "CLK";
+      next_state: "D";
+    }
+    pin (CLK) { direction: input; clock: true; }
+    pin (D) { direction: input; }
+    pin (Q) { direction: output; function: "IQ"; }
+  }
+  cell (AND2) {
+    pin (A) { direction: input; }
+    pin (B) { direction: input; }
+    pin (Y) { direction: output; function: "A & B"; }
+  }
+  cell (INV) {
+    pin (A) { direction: input; }
+    pin (Y) { direction: output; function: "!A"; }
+  }
+  cell (MUX2) {
+    pin (S) { direction: input; }
+    pin (A) { direction: input; }
+    pin (B) { direction: input; }
+    pin (Y) { direction: output; function: "(!S & A) | (S & B)"; }
+  }
+  cell (ICG) {
+    clock_gating_integrated_cell: latch_posedge_precontrol;
+    statetable ("CLK ENA SE", "IQ") {
+      table: "L L L : - : L, L L H : - : H, L H L : - : H, L H H : - : H, H - - : - : N";
+    }
+    pin (IQ) { direction: internal; internal_node: "IQ"; }
+    pin (CLK) { direction: input; clock: true; clock_gate_clock_pin: true; }
+    pin (ENA) { direction: input; clock_gate_enable_pin: true; }
+    pin (SE) { direction: input; clock_gate_test_pin: true; }
+    pin (GCLK) {
+      direction: output;
+      clock_gate_out_pin: true;
+      state_function: "CLK & IQ";
+    }
+  }
+}

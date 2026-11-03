@@ -1203,7 +1203,6 @@ top fn invert(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
 
     #[test]
     fn rejects_scalar_and_vector_ports_aliased_to_the_clock() {
-        let reference = delayed_x(0).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("alias.gv");
         for (extra_port, alias_bit) in [("input extra", "extra"), ("input [1:0] extra", "extra[0]")]
@@ -1220,7 +1219,7 @@ endmodule
                 ),
             )
             .unwrap();
-            let mapped = load_labeled_sequential_netlist_aig_with_liberty(
+            let error = load_labeled_sequential_netlist_aig_with_liberty(
                 &path,
                 &Library::default(),
                 &GvEvalOptions {
@@ -1228,11 +1227,10 @@ endmodule
                     clock_port_name: Some("clk".into()),
                 },
             )
-            .unwrap();
+            .unwrap_err();
             assert_eq!(
-                prove_stitched_pipeline_equiv(&reference, &mapped, 0, GateFormalOptions::default())
-                    .unwrap_err(),
-                "mapped port 'extra' bit 0 aliases the pipeline clock"
+                error.to_string(),
+                "clock net has multiple top-level input drivers 'clk' and 'extra'"
             );
         }
     }

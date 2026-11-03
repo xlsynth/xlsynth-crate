@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty::cell_formula::parse_formula;
+use crate::liberty::clock_gate::{source_gate_behavior, validate_pin_roles};
 use crate::liberty::import::{ElectricalDefaults, electrical_value, prepare_cell};
 use crate::liberty::liberty_parser::{Block, BlockMember, ParseWithVisitorError, Value};
 use crate::liberty::model::{
@@ -1148,12 +1149,14 @@ fn block_to_model_cell(
         .first()
         .and_then(qualifier_to_string)
         .unwrap_or_default();
-    let prepared = prepare_cell(cell_block).map_err(|error| format!("cell '{name}': {error}"))?;
+    let mut prepared =
+        prepare_cell(cell_block).map_err(|error| format!("cell '{name}': {error}"))?;
     let cell_block = prepared.block.as_ref();
     let mut area = 0.0;
     let mut threshold_voltage_group_id = 0;
     let mut dont_use = None;
     let mut use_for_size_only = None;
+    let mut declared_gate = false;
     let mut clocking_pins: HashSet<String> = HashSet::new();
     let sequential = extract_sequential_blocks(cell_block)?;
 
@@ -1163,6 +1166,8 @@ fn block_to_model_cell(
         if let BlockMember::BlockAttr(attr) = cell_member {
             if attr.attr_name == "area" {
                 area = electrical_value(&attr.value, "area")?;
+            } else if attr.attr_name == "clock_gating_integrated_cell" {
+                declared_gate = true;
             } else if attr.attr_name == "threshold_voltage_group" {
                 threshold_voltage_group_id = threshold_voltage_group_interner
                     .intern(value_to_attr_string(&attr.value), None)?;
@@ -1364,13 +1369,26 @@ fn block_to_model_cell(
         String::new()
     };
     let output_pin = clock_gate_output_pins.first().cloned().unwrap_or_default();
-    let clock_gate = if has_clock_gate_roles {
-        Some(ClockGate {
+    let clock_gate = if has_clock_gate_roles || declared_gate {
+        let mut gate = ClockGate {
             clock_pin,
             output_pin,
             enable_pins: clock_gate_enable_pins,
             test_pins: clock_gate_test_pins,
-        })
+            ..Default::default()
+        };
+        if clock_gate_clock_pins.len() == 1
+            && clock_gate_output_pins.len() == 1
+            && sequential.is_empty()
+            && validate_pin_roles(&name, &pins, builder, &gate).is_ok()
+            && let Some(behavior) = source_gate_behavior(cell_block, &gate, &prepared.unsupported)
+        {
+            gate.behavior = behavior as i32;
+            // Certification covers all three recorded state features. Other
+            // unsupported features preclude certification and stay recorded.
+            prepared.unsupported.clear();
+        }
+        Some(gate)
     } else {
         None
     };
