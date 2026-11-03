@@ -177,6 +177,36 @@ class ValgrindRunnerTest(unittest.TestCase):
                     self.assertEqual(run.call_args[1]["cwd"], "/workspace")
                     self.assertEqual(len(found), 1)
 
+    def test_cli_scopes_cargo_build_and_requires_both_requested_harnesses(self):
+        version = subprocess.CompletedProcess([], 0, stdout="cargo 1.94.0-nightly\n")
+        partial = subprocess.CompletedProcess([], 0, stdout=json.dumps(self.artifact()))
+        selectors = [
+            "--package",
+            "sample-usage",
+            "--package",
+            "xlsynth",
+            "--bin",
+            "sample-usage",
+            "--test",
+            "ir_interpret_test",
+        ]
+        argv = ["runner", "--filter-to-run=sample_usage,ir_interpret_test"] + selectors
+        with mock.patch.object(runner.sys, "argv", argv):
+            with mock.patch.dict(os.environ, {"XLSYNTH_TOOLS": "/tools"}):
+                with mock.patch.object(
+                    runner.subprocess, "run", side_effect=[version, partial]
+                ) as run:
+                    with self.assertRaises(SystemExit) as raised:
+                        runner.main()
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(
+            run.call_args[0][0],
+            ["cargo", "test", "--no-run"] + selectors + ["--message-format=json"],
+        )
+        self.assertIn(
+            "Unmatched executable filters: sample_usage", self.stderr.getvalue()
+        )
+
     def test_compile_failure_preserves_rustc_diagnostics_and_failure(self):
         message = {
             "reason": "compiler-message",

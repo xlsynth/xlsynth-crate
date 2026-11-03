@@ -18,6 +18,7 @@ from typing import (
     Tuple,
     TypedDict,
     NamedTuple,
+    Sequence,
 )
 
 import termcolor
@@ -229,9 +230,21 @@ def parse_cargo_test_executables(output: str, build_cwd: str) -> List[TestExecut
     return list(executables.values())
 
 
-def compile_test_executables(release: bool, build_cwd: str) -> List[TestExecutable]:
+def compile_test_executables(
+    release: bool,
+    build_cwd: str,
+    packages: Sequence[str] = (),
+    bins: Sequence[str] = (),
+    tests: Sequence[str] = (),
+) -> List[TestExecutable]:
     """Builds test harnesses and obtains their paths from Cargo's JSON interface."""
-    command = ["cargo", "test", "--no-run", "--workspace", "--message-format=json"]
+    command = ["cargo", "test", "--no-run"]
+    if not packages:
+        command.append("--workspace")
+    for flag, names in (("--package", packages), ("--bin", bins), ("--test", tests)):
+        for name in names:
+            command.extend([flag, name])
+    command.append("--message-format=json")
     if release:
         command.append("--release")
     result = subprocess.run(
@@ -829,6 +842,25 @@ def main() -> None:
 
     parser = optparse.OptionParser()
     parser.add_option(
+        "-p",
+        "--package",
+        action="append",
+        default=[],
+        help="Build tests from this Cargo package (repeatable, defaults to the workspace)",
+    )
+    parser.add_option(
+        "--bin",
+        action="append",
+        default=[],
+        help="Build the test harness for this Cargo binary target (repeatable)",
+    )
+    parser.add_option(
+        "--test",
+        action="append",
+        default=[],
+        help="Build this Cargo integration test target (repeatable)",
+    )
+    parser.add_option(
         "-k",
         "--filter-to-run",
         type="string",
@@ -875,7 +907,10 @@ def main() -> None:
     script_cwd = os.path.realpath(os.getcwd())
     try:
         test_binaries = select_test_executables(
-            compile_test_executables(opts.release, script_cwd), filter_substrings
+            compile_test_executables(
+                opts.release, script_cwd, opts.package, opts.bin, opts.test
+            ),
+            filter_substrings,
         )
     except (subprocess.CalledProcessError, ValueError, OSError) as error:
         termcolor.cprint(
