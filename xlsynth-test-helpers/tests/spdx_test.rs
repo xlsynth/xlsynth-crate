@@ -103,8 +103,13 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             // identifiers.
             let path_str = path.as_os_str().to_str().unwrap();
 
-            // Exclude fuzz corpora; these are inputs, not source files.
-            if path_str.contains("/fuzz/corpus/") || path_str.contains("/fuzz/artifacts/") {
+            // Fuzz corpora, artifacts, and saved DSLX mutation bytes contain
+            // input data.
+            if path_str.contains("/fuzz/corpus/")
+                || path_str.contains("/fuzz/artifacts/")
+                || (path_str.contains("/xlsynth-dslx-fuzzer/repros/")
+                    && path_str.ends_with(".input"))
+            {
                 continue;
             }
 
