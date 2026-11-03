@@ -8,7 +8,9 @@ pub mod ast;
 pub mod compound;
 pub mod constexpr;
 mod generate;
+pub mod imported_const;
 pub mod map_fragment;
+pub mod mission_expr;
 pub mod range_match;
 pub mod select_fold;
 pub mod sum_pattern;
@@ -55,13 +57,13 @@ impl Sample {
             return Err("sample must have at least one output lane".to_string());
         }
         for (index, module) in helpers.iter().enumerate() {
-            module.validate_calls(index)?;
+            module.validate_imports(&helpers[..index])?;
         }
         for lane in &lanes {
             if lane.bits_type().width == Width::Parametric {
                 return Err("top-level lanes must have concrete widths".to_string());
             }
-            lane.validate_calls(helpers.len())?;
+            lane.validate_imports(&helpers)?;
             if let Some(computation) = lane.computed_width() {
                 let Width::Concrete(width) = lane.bits_type().width else {
                     return Err("computed width must have a concrete type".to_string());
@@ -102,6 +104,9 @@ impl Sample {
                 text.push_str(&format!("import m{dependency};\n"));
             }
             text.push_str(&module.declarations().to_dslx());
+            if let Some(exports) = module.exports() {
+                text.push_str(&exports.declarations());
+            }
             for signed in [false, true] {
                 text.push_str(
                     &module

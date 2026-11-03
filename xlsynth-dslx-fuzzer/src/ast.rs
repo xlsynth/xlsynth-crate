@@ -6,6 +6,7 @@ use crate::compound::{CompoundOp, Declarations, LoopKind, PatternOp, resize_unsi
 use crate::constexpr::{
     ComputedWidth, ConstExpr, ConstantScope, ParametricDefault, bits_literal, metadata_bits,
 };
+use crate::imported_const::{ExportedConstants, import_dslx};
 use crate::tuple_pattern::{BindingContext, TuplePattern};
 use std::collections::BTreeSet;
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue};
@@ -150,7 +151,7 @@ pub enum Comparison {
 }
 
 impl Comparison {
-    fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             Self::Eq => "==",
             Self::Ne => "!=",
@@ -161,7 +162,7 @@ impl Comparison {
         }
     }
 
-    fn emit_ir(
+    pub(crate) fn emit_ir(
         self,
         builder: &mut FnBuilder,
         lhs: BValue,
@@ -229,6 +230,11 @@ pub enum Fragment {
         args: [ValueRef; 2],
         explicit_parametric: bool,
     },
+    ImportedConstant {
+        module: usize,
+        arg: ValueRef,
+        combine: [BinaryOp; 2],
+    },
     Constant {
         expression: Box<ConstExpr>,
         scope: ConstantScope,
@@ -264,7 +270,9 @@ impl Fragment {
     fn operands(&self) -> Vec<ValueRef> {
         match self {
             Self::Literal(_) | Self::Constant { .. } => vec![],
-            Self::Unary { arg, .. } | Self::WidenShift { arg, .. } => vec![*arg],
+            Self::Unary { arg, .. }
+            | Self::WidenShift { arg, .. }
+            | Self::ImportedConstant { arg, .. } => vec![*arg],
             Self::Binary { lhs, rhs, .. } | Self::ConcatSlice { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::IfCompare {
                 lhs,
@@ -351,6 +359,11 @@ impl Fragment {
                 )
             }
             Self::Constant { expression, .. } => expression.to_dslx(prefix, modules)?,
+            Self::ImportedConstant {
+                module,
+                arg,
+                combine,
+            } => import_dslx(*module, &name(*arg), *combine, ty),
             Self::ConcatSlice { lhs, rhs, kind } => {
                 let unsigned = BitsType {
                     signed: false,
@@ -472,6 +485,21 @@ impl Fragment {
             Self::Constant { expression, .. } => expression
                 .emit_ir(builder, modules, None)
                 .map_err(BuilderError::InvalidOperation),
+            Self::ImportedConstant {
+                module,
+                arg,
+                combine,
+            } => {
+                let exports = modules
+                    .get(*module)
+                    .and_then(HelperModule::exports)
+                    .ok_or_else(|| {
+                        BuilderError::InvalidOperation(
+                            "helper does not export constants".to_string(),
+                        )
+                    })?;
+                exports.emit_import_ir(builder, value(*arg), *combine, width, signed)
+            }
             Self::ConcatSlice { lhs, rhs, .. } => {
                 let concatenated = builder.concat(&[value(*lhs), value(*rhs)])?;
                 builder.bit_slice(concatenated, width / 2, width)
@@ -658,6 +686,9 @@ impl Body {
         if let Fragment::Compound { op, .. } = &fragment {
             op.validate()?;
         }
+        if let Fragment::ImportedConstant { combine, .. } = &fragment {
+            ExportedConstants::validate_combiners(*combine)?;
+        }
         if let Fragment::StringLookup { bytes, .. } = &fragment
             && bytes.iter().any(|bits| bits.get_bit_count() != 8)
         {
@@ -678,18 +709,31 @@ impl Body {
     }
 
     /// Checks module references against the acyclic translation environment.
-    pub(crate) fn validate_calls(&self, available_modules: usize) -> Result<(), String> {
+    pub(crate) fn validate_imports(
+        &self,
+        available_modules: &[HelperModule],
+    ) -> Result<(), String> {
         if let Some(width) = &self.computed_width {
-            width.expression.validate_calls(available_modules)?;
+            width.expression.validate_imports(available_modules)?;
         }
         for fragment in &self.fragments {
             if let Fragment::Call { module, .. } = fragment
-                && *module >= available_modules
+                && *module >= available_modules.len()
             {
                 return Err("call must reference an earlier helper module".to_string());
             }
+            if let Fragment::ImportedConstant { module, .. } = fragment
+                && available_modules
+                    .get(*module)
+                    .and_then(HelperModule::exports)
+                    .is_none()
+            {
+                return Err(
+                    "constant import must reference an earlier helper with exports".to_string(),
+                );
+            }
             if let Fragment::Constant { expression, .. } = fragment {
-                expression.validate_calls(available_modules)?;
+                expression.validate_imports(available_modules)?;
             }
         }
         Ok(())
@@ -734,6 +778,9 @@ impl Body {
                         | CompoundOp::ArraySelect(_)
                         | CompoundOp::AggregateMatch(_)
                         | CompoundOp::NestedFold(_)
+                        | CompoundOp::ReceiverMap(_)
+                        | CompoundOp::LogicalPredicates(_)
+                        | CompoundOp::CheckedCast(_)
                         | CompoundOp::Map(_),
                     ..
                 } | Fragment::TuplePattern { .. }
@@ -931,6 +978,7 @@ pub struct HelperModule {
     unsigned: Body,
     signed: Body,
     default: Option<ParametricDefault>,
+    exports: Option<ExportedConstants>,
 }
 
 impl HelperModule {
@@ -961,6 +1009,7 @@ impl HelperModule {
             unsigned,
             signed,
             default: None,
+            exports: None,
         })
     }
 
@@ -970,6 +1019,16 @@ impl HelperModule {
 
     pub fn parametric_default(&self) -> Option<&ParametricDefault> {
         self.default.as_ref()
+    }
+
+    pub fn exports(&self) -> Option<&ExportedConstants> {
+        self.exports.as_ref()
+    }
+
+    /// Adds constants that later helpers and the top module can import by name.
+    pub fn with_exports(mut self, exports: ExportedConstants) -> Self {
+        self.exports = Some(exports);
+        self
     }
 
     /// Adds a u32 default parameter, whose cast participates in the result.
@@ -986,11 +1045,11 @@ impl HelperModule {
         Ok(self)
     }
 
-    pub(crate) fn validate_calls(&self, available: usize) -> Result<(), String> {
-        self.unsigned.validate_calls(available)?;
-        self.signed.validate_calls(available)?;
+    pub(crate) fn validate_imports(&self, available: &[HelperModule]) -> Result<(), String> {
+        self.unsigned.validate_imports(available)?;
+        self.signed.validate_imports(available)?;
         if let Some(default) = &self.default {
-            default.expression.validate_calls(available)?;
+            default.expression.validate_imports(available)?;
         }
         Ok(())
     }

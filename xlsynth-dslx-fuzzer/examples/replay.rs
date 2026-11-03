@@ -9,16 +9,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (grammar, input, output) = match args.as_slice() {
         [input, output] => (Grammar::Mission, input, output),
         [flag, input, output] if flag == "--local" => (Grammar::MissionLocal, input, output),
-        [flag, input, output] if flag == "--mission-v1" => (Grammar::MissionV1, input, output),
-        [flag, input, output] if flag == "--mission-v2" => (Grammar::MissionV2, input, output),
-        [flag, input, output] if flag == "--mission-local-v2" => (Grammar::MissionLocalV2, input, output),
-        [flag, input, output] if flag == "--mission-v4" => (Grammar::MissionV4, input, output),
-        [flag, input, output] if flag == "--mission-local-v4" => (Grammar::MissionLocalV4, input, output),
-        [flag, input, output] if flag == "--experimental" => (Grammar::Experimental, input, output),
-        _ => return Err(
-            "usage: replay [--local|--mission-v1|--mission-v2|--mission-local-v2|--mission-v4|--mission-local-v4|--experimental] <input-bytes> <output-directory>"
-                .into(),
-        ),
+        [flag, input, output] => {
+            let name = flag
+                .to_str()
+                .and_then(|s| s.strip_prefix("--"))
+                .ok_or("expected -- followed by a DSLX grammar name")?;
+            (name.parse::<Grammar>()?, input, output)
+        }
+        _ => {
+            return Err(
+                "usage: replay [--<grammar>|--local] <input-bytes> <output-directory>".into(),
+            );
+        }
     };
     let bytes = std::fs::read(input)?;
     let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;

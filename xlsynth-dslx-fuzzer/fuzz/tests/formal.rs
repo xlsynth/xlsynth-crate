@@ -100,6 +100,59 @@ fn versioned_mission_productions_prove_and_preserve_previous_decoders() -> Resul
 }
 
 #[test]
+fn v5_helpers_and_imported_constants_compose_and_prove() -> Result<(), String> {
+    for (selector, options) in [
+        (176, &[2, 2][..]),    // map a bound method over four elements
+        (177, &[2, 1, 1][..]), // two runtime comparisons, logical AND
+        (177, &[4, 3, 0][..]), // logical OR
+        (178, &[0][..]),       // preserve width
+        (178, &[4][..]),       // widen by four bits
+    ] {
+        let mut bytes = vec![0, 0, 0, selector, 0, 1];
+        bytes.extend_from_slice(options);
+        bytes.extend_from_slice(&[
+            1, 0, 0, 0, 0, 0, // third operand, signed helper, no parametric default
+            6, 13, 9, 0, 2, // seven-bit exported constant chain
+            0, 0, 0, 0, 2, 0,
+            0, // observation, unsigned seven-bit lane, literal, one fragment
+            179, 0, 1, 0, 2, 0, 0, // combine x with two qualified constants from m0
+            0, 1, 0, // call the unsigned helper with the result and y
+        ]);
+        for (grammar, previous) in [
+            (Grammar::MissionV5, Grammar::MissionV4),
+            (Grammar::MissionLocalV5, Grammar::MissionLocalV4),
+        ] {
+            let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+            let [Fragment::Compound { op, .. }] = sample.helpers()[0].body(false).fragments()
+            else {
+                panic!("expected a v5 helper production");
+            };
+            assert!(matches!(
+                (selector, op),
+                (176, CompoundOp::ReceiverMap(_))
+                    | (177, CompoundOp::LogicalPredicates(_))
+                    | (178, CompoundOp::CheckedCast(_))
+            ));
+            assert!(matches!(
+                sample.lanes()[0].fragments(),
+                [
+                    Fragment::Literal(_),
+                    Fragment::ImportedConstant { module: 0, .. },
+                    Fragment::Call { .. }
+                ]
+            ));
+            assert!(matches!(prove(&sample.prepare()?)?, EquivResult::Proved));
+            let replay = generate_with_grammar(&bytes, GenerateOptions::default(), previous)?;
+            assert_ne!(
+                sample.helpers()[0].body(false),
+                replay.helpers()[0].body(false)
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn mission_typed_range_loops_prove() -> Result<(), String> {
     // A seven-bit lane computes x^y, slices an array, and passes both values
     // to a two-trip 65-bit signed loop starting at +3. The lane returns the
