@@ -9,25 +9,30 @@ import Std
 namespace XlsBlock
 
 structure State where
+  Constructors.mk ::
   «a» : BitVec 2
   «b» : BitVec 2
   deriving Repr
 
 structure Input where
+  Constructors.mk ::
   «rst» : BitVec 1
   «en» : BitVec 1
   deriving Repr
 
 structure Output where
+  Constructors.mk ::
   «out» : BitVec 2
   deriving Repr
 
 structure Assertions where
+  Constructors.mk ::
   -- id=6; label=enable; message=enable expected
   «checked» : Bool
   deriving Repr
 
 structure Evaluation where
+  Constructors.mk ::
   next : State
   output : Output
   assertions : Assertions

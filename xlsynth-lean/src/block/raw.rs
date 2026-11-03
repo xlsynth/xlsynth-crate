@@ -141,7 +141,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
             .output_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
-    source.push_str("structure Assertions where\n");
+    source.push_str(&structure_header("Assertions"));
     for reference in &assertions {
         let node = graph.get_node(*reference);
         if let NodePayload::Assert { label, message, .. } = &node.payload {
@@ -155,10 +155,10 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
             )?;
         }
     }
+    source.push_str("  deriving Repr\n\n");
+    source.push_str(&structure_header("Evaluation"));
     source.push_str(
-        "  deriving Repr\n\n\
-         structure Evaluation where\n\
-         \x20 next : State\n\
+        "  next : State\n\
          \x20 output : Output\n\
          \x20 assertions : Assertions\n\
          \x20 deriving Repr\n\n\
@@ -275,12 +275,18 @@ pub(crate) fn lean_type(ty: &Type) -> Result<String> {
     }
 }
 
+/// Keep the constructor in a separate namespace so every source field keeps its
+/// name.
+pub(super) fn structure_header(name: &str) -> String {
+    format!("structure {name} where\n  Constructors.mk ::\n")
+}
+
 /// Declare fields in caller order, retaining names through Lean quotation.
 fn record_type<'a>(
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
-    let mut source = format!("structure {name} where\n");
+    let mut source = structure_header(name);
     for (field, ty) in fields {
         writeln!(
             source,
