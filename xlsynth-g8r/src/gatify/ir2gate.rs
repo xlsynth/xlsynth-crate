@@ -38,8 +38,10 @@ use crate::gate_builder::ReductionKind;
 
 mod arithmetic_cluster;
 mod bounded_affine_clamp;
+mod bounded_conjunction;
 mod conditional_select;
 mod demanded_bits;
+mod guarded_unit;
 mod priority_predicate;
 mod shift_reduction_predicate;
 use arithmetic_cluster::ArithmeticClusterPlan;
@@ -253,6 +255,7 @@ pub(super) struct GateEnv {
     shared_carries: HashSet<ir::NodeRef>,
     carry_prefixes: CarryPrefixes,
     select_proof_visits: usize,
+    guarded_unit_facts: bounded_conjunction::Facts,
     /// When absent, every bit of a lowered value is required.
     demanded_bits: Option<HashMap<ir::NodeRef, Vec<bool>>>,
     arithmetic_cluster_plan: ArithmeticClusterPlan,
@@ -277,6 +280,7 @@ impl GateEnv {
             shared_carries: HashSet::new(),
             carry_prefixes: CarryPrefixes::default(),
             select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Function(use_counts),
             demanded_bits: None,
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -302,6 +306,7 @@ impl GateEnv {
             shared_carries: HashSet::new(),
             carry_prefixes: CarryPrefixes::default(),
             select_proof_visits: 0,
+            guarded_unit_facts: bounded_conjunction::Facts::default(),
             use_counts: UseCounts::Region(use_counts),
             demanded_bits: Some(demanded_bits::analyze(f, nodes, outputs)),
             arithmetic_cluster_plan: ArithmeticClusterPlan::default(),
@@ -4241,16 +4246,31 @@ fn gatify_node(
             let mapping = arch
                 .map(AdderMapping::from)
                 .unwrap_or(options.adder_mapping);
-            let gates = gatify_ext_nary_add(
-                f,
-                env,
-                node.text_id,
-                terms,
-                output_width,
-                mapping,
-                options,
-                g8_builder,
-            );
+            let gates = if arch.is_none()
+                && options.fold
+                && options.enable_rewrite_nary_add
+                && let Some(gates) = guarded_unit::try_lower(
+                    f,
+                    env,
+                    terms,
+                    output_width,
+                    options,
+                    g8_builder,
+                    node.text_id,
+                ) {
+                gates
+            } else {
+                gatify_ext_nary_add(
+                    f,
+                    env,
+                    node.text_id,
+                    terms,
+                    output_width,
+                    mapping,
+                    options,
+                    g8_builder,
+                )
+            };
             let arch = mapping.carry_propagate_architecture();
             for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
                 // Only AND nodes carry tags. A wide scalar sum can have many
