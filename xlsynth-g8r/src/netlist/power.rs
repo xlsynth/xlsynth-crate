@@ -691,10 +691,13 @@ fn combinational_power_view(model: &LabeledNetlistAig) -> PowerModelView<'_> {
     }
 }
 
-fn sequential_power_signal(signal: SequentialAigSignal) -> PowerSignal {
+fn sequential_power_signal(signal: SequentialAigSignal) -> Result<PowerSignal, String> {
     match signal {
-        SequentialAigSignal::Operand(operand) => PowerSignal::Operand(operand),
-        SequentialAigSignal::Clock => PowerSignal::Clock,
+        SequentialAigSignal::Operand(operand) => Ok(PowerSignal::Operand(operand)),
+        SequentialAigSignal::Clock => Ok(PowerSignal::Clock),
+        SequentialAigSignal::GatedClock(_) => {
+            Err("sequential dynamic-power analysis does not support gated clocks".to_string())
+        }
     }
 }
 
@@ -711,13 +714,15 @@ fn sequential_power_view(
                 pins: instance
                     .pins
                     .iter()
-                    .map(|pin| PowerPin {
-                        pin_name: pin.pin_name.clone(),
-                        direction: pin.direction,
-                        signal: sequential_power_signal(pin.signal),
-                        connection: pin.connection.clone(),
+                    .map(|pin| {
+                        Ok(PowerPin {
+                            pin_name: pin.pin_name.clone(),
+                            direction: pin.direction,
+                            signal: sequential_power_signal(pin.signal)?,
+                            connection: pin.connection.clone(),
+                        })
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>, String>>()?,
                 is_sequential: instance.state_register_index.is_some(),
                 state_signal: sequential_state_signal(model, instance)?,
             })
@@ -729,19 +734,23 @@ fn sequential_power_view(
         module_ports: model
             .module_ports
             .iter()
-            .map(|port| PowerPort {
-                name: port.name.clone(),
-                direction: port.direction.clone(),
-                bits_lsb_to_msb: port
-                    .bits_lsb_to_msb
-                    .iter()
-                    .map(|bit| PowerPortBit {
-                        bit_number: bit.bit_number,
-                        signal: sequential_power_signal(bit.signal),
-                    })
-                    .collect(),
+            .map(|port| {
+                Ok(PowerPort {
+                    name: port.name.clone(),
+                    direction: port.direction.clone(),
+                    bits_lsb_to_msb: port
+                        .bits_lsb_to_msb
+                        .iter()
+                        .map(|bit| {
+                            Ok(PowerPortBit {
+                                bit_number: bit.bit_number,
+                                signal: sequential_power_signal(bit.signal)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, String>>()?,
         instances,
     })
 }
@@ -911,6 +920,7 @@ pub fn analyze_sequential_dynamic_power(
     trace: &SequentialTrace,
     options: GvSequentialDynamicPowerOptions,
 ) -> Result<GvSequentialDynamicPowerReport, String> {
+    let power_model = sequential_power_view(model)?;
     validate_sequential_options(options)?;
     let nominal_voltage = nominal_voltage(library)?;
     let clock = model
@@ -950,7 +960,6 @@ pub fn analyze_sequential_dynamic_power(
         })
         .collect::<Vec<_>>();
 
-    let power_model = sequential_power_view(model)?;
     let mut topology = build_topology(
         &power_model,
         library,

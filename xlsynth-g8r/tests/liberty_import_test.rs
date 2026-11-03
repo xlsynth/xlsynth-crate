@@ -24,7 +24,9 @@ use xlsynth_g8r::liberty::parser::{
 };
 use xlsynth_g8r::liberty::proto_info::liberty_proto_info_from_path;
 use xlsynth_g8r::liberty_model::{Library, Pin, PinDirection, SequentialKind};
-use xlsynth_g8r::liberty_proto::{Library as WireLibrary, UnsupportedFeature};
+use xlsynth_g8r::liberty_proto::{
+    ClockGate, ClockGateBehavior, Library as WireLibrary, UnsupportedFeature,
+};
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::netlist::register_mapping::{RegisterCellSelection, RegisterMappingLibrary};
@@ -143,6 +145,131 @@ fn scan_equations_and_explicit_clock_annotations_roundtrip() {
             }
         }
     }
+}
+
+const CLOCK_GATE_LIB: &str = include_str!("data/clock_gate.lib");
+
+#[test]
+fn clock_gate_certifies_low_latch_table_and_survives_proto_roundtrip() {
+    // Use the same multiline continuation and commuted AND used by Liberty
+    // writers. The latch holds either prior state throughout the high phase.
+    let source = CLOCK_GATE_LIB
+        .replace(", ", ", \\\n")
+        .replace("CLK & IQ", "IQ * CLK");
+    let library = roundtrip(parse(&source, LibertyPayloadOptions::all()).unwrap());
+    let cell = library
+        .cells
+        .iter()
+        .find(|cell| cell.name == "ICG")
+        .unwrap();
+    let gate = cell.positive_edge_clock_gate(&library).unwrap().unwrap();
+    assert_eq!(
+        gate.behavior,
+        ClockGateBehavior::LowLatchEnableOrTest as i32
+    );
+    assert_eq!((&gate.clock_pin[..], &gate.output_pin[..]), ("CLK", "GCLK"));
+    assert_eq!(gate.enable_pins, ["ENA"]);
+    assert_eq!(gate.test_pins, ["SE"]);
+    assert!(cell.unsupported_semantics.is_empty());
+}
+
+#[test]
+fn clock_gate_certifies_a_complete_two_input_table_without_test_control() {
+    let source = CLOCK_GATE_LIB
+        .replace(r#""CLK ENA SE""#, r#""ENA CLK""#)
+        .replace(
+            "L L L : - : L, L L H : - : H, L H L : - : H, L H H : - : H, H - - : - : N",
+            "- H : - : N, H L : - : H, L L : - : L",
+        )
+        .replace(
+            "pin (SE) { direction: input; clock_gate_test_pin: true; }",
+            "",
+        );
+    let library = parse(&source, LibertyPayloadOptions::all()).unwrap();
+    let cell = library
+        .cells
+        .iter()
+        .find(|cell| cell.name == "ICG")
+        .unwrap();
+    let gate = cell.positive_edge_clock_gate(&library).unwrap().unwrap();
+    assert!(gate.test_pins.is_empty());
+    assert_eq!(gate.enable_pins, ["ENA"]);
+}
+
+#[test]
+fn clock_gate_rejects_incomplete_and_conflicting_source_behavior() {
+    for (old, new) in [
+        ("latch_posedge_precontrol", "latch_negedge_precontrol"),
+        (
+            "clock_gating_integrated_cell: latch_posedge_precontrol;",
+            "",
+        ),
+        ("clock_gate_enable_pin: true;", ""),
+        (
+            "clock_gate_enable_pin: true;",
+            "clock_gate_enable_pin: false; clock_gate_enable_pin: true;",
+        ),
+        (
+            "clock_gate_enable_pin: true;",
+            "clock_gate_enable_pin: true; clock_gate_clock_pin: true;",
+        ),
+        ("internal_node: \"IQ\";", "internal_node: \"OTHER\";"),
+        (
+            "state_function: \"CLK & IQ\";",
+            "state_function: \"CLK & !IQ\";",
+        ),
+        (
+            "state_function: \"CLK & IQ\";",
+            "state_function: \"CLK & IQ\"; three_state: \"ENA\";",
+        ),
+        ("L L H : - : H,", ""),
+        ("L L H : - : H", "L L H : - : L"),
+        ("H - - : - : N", "H - - : - : H"),
+        ("H - - : - : N", "H - - : - : N, H - - : L : H"),
+        ("L L L : - : L", "X L L : - : L"),
+        (
+            "pin (SE) { direction: input;",
+            "pin (SE) { direction: output;",
+        ),
+    ] {
+        let source = CLOCK_GATE_LIB.replace(old, new);
+        assert_ne!(source, CLOCK_GATE_LIB, "{old}");
+        let library = parse(&source, LibertyPayloadOptions::all()).unwrap();
+        let cell = library
+            .cells
+            .iter()
+            .find(|cell| cell.name == "ICG")
+            .unwrap();
+        assert_eq!(
+            cell.clock_gate.as_ref().unwrap().behavior,
+            ClockGateBehavior::Unknown as i32,
+            "{new}"
+        );
+        assert!(cell.positive_edge_clock_gate(&library).is_err(), "{new}");
+        assert!(!cell.unsupported_semantics.is_empty(), "{new}");
+    }
+}
+
+#[test]
+fn clock_gate_revalidates_legacy_and_malformed_wire_models() {
+    let library = parse(CLOCK_GATE_LIB, LibertyPayloadOptions::all()).unwrap();
+    let original = library
+        .cells
+        .iter()
+        .find(|cell| cell.name == "ICG")
+        .unwrap();
+    let mut cell = original.clone();
+    // Fields 1 through 4 as encoded before clock-gate behavior was recorded.
+    cell.clock_gate =
+        Some(ClockGate::decode(&b"\x0a\x03CLK\x12\x04GCLK\x1a\x03ENA\x22\x02SE"[..]).unwrap());
+    assert_eq!(cell.clock_gate.as_ref().unwrap().test_pins, ["SE"]);
+    assert!(cell.positive_edge_clock_gate(&library).is_err());
+    let mut cell = original.clone();
+    cell.pins.push(cell.pins[0].clone());
+    assert!(cell.positive_edge_clock_gate(&library).is_err());
+    let mut cell = original.clone();
+    cell.clock_gate.as_mut().unwrap().output_pin = "MISSING".into();
+    assert!(cell.positive_edge_clock_gate(&library).is_err());
 }
 
 #[test]

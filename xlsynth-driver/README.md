@@ -422,6 +422,10 @@ Converts a techmapped gate-level netlist plus Liberty proto into an XLS block IR
 
 Module, top-level port, and instance names are legalized to XLS identifiers, with deterministic collision handling. Reserved words receive an underscore suffix: for example, a module named `top` produces package `top_` with top block `top_`. Valid, non-colliding names are preserved. Instance input connections are checked against their cell signatures; explicitly empty input connections remain tied to zero, while missing or incorrectly sized inputs are rejected.
 
+`gv2block` rejects functional clock gates because its FF block would lose the
+capture enable. Use `stitch-equiv` for a proof or `gv-eval --sequential` for
+cycle-level evaluation of supported gated netlists.
+
 ```shell
 xlsynth-driver gv2block \
   --netlist ~/my_netlist.v \
@@ -906,8 +910,18 @@ ordering. Connections use `kind: "net"`, `kind: "literal"`, or
 not included.
 
 Combinational mode supports combinational cells with scalar external pins.
-Sequential mode supports one FF-only clock domain and rejects latches,
-asynchronous clear/preset cells, mixed clock edges, and derived clocks. Both
+Sequential mode supports one root clock. Rising-edge FFs can also receive that
+clock through one supported integrated clock gate (ICG). The Liberty importer
+recognizes a low-transparent latch that captures an active-high enable and a
+clock output that ANDs the latched value with the root clock, as in ASAP7
+`ICGx1_ASAP7_75t_R`. Tie any test-enable pin low. Regenerate older Liberty
+protos with `lib2proto` to record the gate behavior. Each input record supplies
+the settled data inputs immediately before the root edge. Gated FFs hold their
+previous value on disabled edges. Toggle and dynamic-power reports currently
+require ungated clocks.
+
+Sequential mode rejects standalone latches, asynchronous clear/preset cells,
+mixed clock edges, cascaded gates, and other derived clocks. Both
 modes reject module `inout` ports, unconnected input pins, non-scalar
 standard-cell pin connections, and unresolved combinational cycles.
 
@@ -4084,9 +4098,11 @@ unrolls both gate graphs from independent arbitrary power-up states.
 Inputs and outputs must agree in name and packed bit width, with bit zero as
 the LSB. The native g8r result `output_value` and the stitched RTL result
 `out` identify the same data port. Internal register names, counts, and
-encodings can differ. Mapped FFs must share the spec's rising-edge clock.
-The importer rejects latches, derived clocks, and
-asynchronous clear/preset cells.
+encodings can differ. Mapped FFs must share the spec's rising-edge root clock.
+For a supported Liberty ICG, the checker follows its actual enable connection
+and compares the gated FF's conditional next state. The clock-gate requirements
+are the same as for `gv-eval --sequential`. Standalone latches, other derived
+clocks, and asynchronous clear/preset cells are rejected.
 
 Supply a valid structural Verilog netlist (`.gv`) with cell instances and wiring assignments.
 The checker uses the strict GV reader and reports the source location for

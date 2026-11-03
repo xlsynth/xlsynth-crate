@@ -117,6 +117,17 @@ message ClockGate {
   string output_pin = 2;
   repeated string enable_pins = 3;
   repeated string test_pins = 4;
+  // Pin roles alone do not establish the phase, polarities, or state equation.
+  // Older producers recorded only roles; re-import source Liberty to certify
+  // a gate for operations that require functional clock behavior.
+  ClockGateBehavior behavior = 5;
+}
+
+enum ClockGateBehavior {
+  CLOCK_GATE_BEHAVIOR_UNKNOWN = 0;
+  // A low-transparent latch captures the active-high enable OR an optional
+  // active-high test input. The output is clock AND the held latch state.
+  CLOCK_GATE_BEHAVIOR_LOW_LATCH_ENABLE_OR_TEST = 1;
 }
 
 message LibraryUnits {

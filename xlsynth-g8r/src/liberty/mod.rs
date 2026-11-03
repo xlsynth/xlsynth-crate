@@ -3,6 +3,7 @@
 mod ascii_stream;
 pub mod cell_filter;
 pub mod cell_formula;
+mod clock_gate;
 pub mod descriptor;
 mod import;
 pub mod indexed;

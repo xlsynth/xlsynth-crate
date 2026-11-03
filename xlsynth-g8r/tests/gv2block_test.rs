@@ -593,6 +593,38 @@ top block top_(clk: clock, d: bits[1], q: bits[1]) {
 }
 
 #[test]
+fn test_gv2block_rejects_clock_gate_with_capture_enable() -> anyhow::Result<()> {
+    let netlist = r#"module top(input clk, input en, input d, output q);
+  wire gclk;
+  CKG gate (.CLK(clk), .EN(en), .GCLK(gclk));
+  DFF flop (.CLK(gclk), .D(d), .Q(q));
+endmodule"#;
+    let mut gv = NamedTempFile::new()?;
+    write!(gv, "{netlist}")?;
+    // Legacy role metadata can omit the enable annotation. The additional
+    // input must still prevent this instance from becoming a clock alias.
+    for roles in ["", r#"enable_pins: "EN""#] {
+        let library = LIBERTY_TEXTPROTO
+            .replace(
+                r#"name: "CKG""#,
+                r#"name: "CKG" pins: { name_string_id: 16 direction: INPUT }"#,
+            )
+            .replace(
+                r#"output_pin: "GCLK""#,
+                &format!(r#"output_pin: "GCLK" {roles}"#),
+            );
+        let mut lib = NamedTempFile::new()?;
+        write!(lib, "{library}")?;
+        let error = convert_gv2block_paths(gv.path(), lib.path()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "gv2block cannot preserve the capture enable of clock-gate cell 'CKG'"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn test_gv2block_rejects_derived_clock() {
     let netlist = r#"
 module top (clk, en, d, q);

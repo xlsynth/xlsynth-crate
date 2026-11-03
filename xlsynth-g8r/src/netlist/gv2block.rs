@@ -385,6 +385,21 @@ fn get_clock_gate_passthrough_spec(
         )));
     }
 
+    // The block emitter can elide a clock-only wiring cell. Eliding a gate
+    // with another input would discard its capture condition.
+    if !clock_gate.enable_pins.is_empty()
+        || !clock_gate.test_pins.is_empty()
+        || cell.pins.iter().any(|p| {
+            p.direction == PinDirection::Input as i32
+                && library.resolve_string(&p.name) != clock_pin
+        })
+    {
+        return Err(anyhow!(
+            "gv2block cannot preserve the capture enable of clock-gate cell '{}'",
+            cell.name
+        ));
+    }
+
     Ok(Some(ClockGatePassthroughSpec {
         clock_pin,
         output_pin,
@@ -649,9 +664,10 @@ fn build_package_from_normalized_netlist(
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty proto", cell_name)))?;
+        let passthrough = get_clock_gate_passthrough_spec(cell, lib_indexed.library())?;
         cell.validate_functional_semantics()
             .map_err(|error| anyhow!(error))?;
-        if get_clock_gate_passthrough_spec(cell, lib_indexed.library())?.is_some() {
+        if passthrough.is_some() {
             continue;
         }
         cell_blocks.push((cell.name.clone(), build_cell_block(cell, lib_indexed)?));

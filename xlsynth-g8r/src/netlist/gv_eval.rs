@@ -798,6 +798,9 @@ fn sequential_signal_toggle_activity(
         SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock {
             toggle_count: clock_toggle_count,
         }),
+        SequentialAigSignal::GatedClock(_) => {
+            Err("sequential toggle reporting does not support gated clocks".to_string())
+        }
     }
 }
 
