@@ -19,6 +19,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 mod affine_equality;
+mod complement_partitions;
 mod diagnostics;
 mod grouped_priority;
 mod lexicographic_comparisons;
@@ -118,6 +119,17 @@ fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
     use_counts
 }
 
+/// Keep prepared IDs trackable when all input IDs fit in u32. Wider,
+/// untracked PIR can use the full usize range.
+fn remaining_text_ids(last: usize) -> usize {
+    let limit = if last <= u32::MAX as usize {
+        u32::MAX as usize
+    } else {
+        usize::MAX
+    };
+    limit - last
+}
+
 /// Assigns new semantic IDs above this pass's input IDs and optionally records
 /// the original operation for gate attribution. Callers check capacity before
 /// modifying a group of nodes.
@@ -135,15 +147,11 @@ impl<'a> RewriteIds<'a> {
     }
 
     fn has_room(&self, count: usize) -> bool {
-        // A prepared function can be lowered directly with u32 provenance.
-        // Preserve that range when all input IDs fit. Wider, untracked PIR
-        // can still use the full usize range.
-        let limit = if self.last <= u32::MAX as usize {
-            u32::MAX as usize
-        } else {
-            usize::MAX
-        };
-        count <= limit - self.last
+        count <= remaining_text_ids(self.last)
+    }
+
+    fn has_trackable_room(&self, count: usize) -> bool {
+        count <= (u32::MAX as usize).saturating_sub(self.last)
     }
 
     fn fresh(&mut self, source: usize) -> usize {
@@ -1489,12 +1497,12 @@ fn rewrite_projected_positive_mask_to_sign_test(
         // stays zero. Only mutate the chain when no other consumer observes
         // the comparison, its negation, or the replicated mask. Sharing the
         // final AND is safe because its entire value is preserved.
-        if !ids.has_room(3)
-            || [sle_nr, pred_nr, mask_nr]
-                .iter()
-                .any(|nr| use_counts[nr.index] != 1)
-        {
+        let changed = [sle_nr, pred_nr, mask_nr];
+        if changed.iter().any(|nr| use_counts[nr.index] != 1) {
             continue;
+        }
+        if !ids.has_trackable_room(changed.len()) {
+            break;
         }
 
         // Keep node ordering valid by rewriting the existing `sle` node into a
@@ -1513,7 +1521,7 @@ fn rewrite_projected_positive_mask_to_sign_test(
         .expect("prep_for_gatify: projected positive-mask rewrite failed");
         // All three values change at zero. Range facts and the prover use
         // text IDs to identify values in the original function.
-        for nr in [sle_nr, pred_nr, mask_nr] {
+        for nr in changed {
             let node = f.get_node_mut(nr);
             node.text_id = ids.fresh(node.text_id);
             node.name = None;
@@ -2722,7 +2730,7 @@ pub fn prep_for_gatify(
 }
 
 /// Records source operations for rewritten helpers and all observers for
-/// generated comparison helpers. Text IDs preserve both across compaction.
+/// comparison helpers. Text IDs preserve both across compaction.
 pub(crate) fn prep_for_gatify_with_origins(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
@@ -2738,6 +2746,9 @@ pub(crate) fn prep_for_gatify_with_origins(
     });
     diagnostics::run(&mut cloned, "lexicographic_comparisons", 0, |f| {
         lexicographic_comparisons::rewrite(f, origins.as_deref_mut())
+    });
+    diagnostics::run(&mut cloned, "complement_partitions", 0, |f| {
+        complement_partitions::rewrite(f, origins.as_deref_mut())
     });
     diagnostics::run(&mut cloned, "redundant_nonzero_mask", 0, |f| {
         redundant_nonzero_mask::rewrite(f, origins.as_deref_mut())

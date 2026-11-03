@@ -137,14 +137,14 @@ pub(super) fn rewrite(
         if !complete(&relations) {
             continue;
         }
-        // Reserve the entire helper group before touching the function. The
-        // inclusive range can issue usize::MAX as its final ID.
+        // Reserve the entire helper group before touching the function.
         let plan = plan_order(&relations);
         let helper_count = 16 + usize::from(plan.unsigned_merge) + usize::from(plan.signed_merge);
-        let Some(last_id) = max_id.checked_add(helper_count) else {
+        if helper_count > super::remaining_text_ids(max_id) {
             // A later group may need fewer order merges.
             continue;
-        };
+        }
+        let last_id = max_id + helper_count;
         let mut ids = max_id + 1..=last_id;
         max_id = last_id;
         let (a, b) = if plan.reverse { (b, a) } else { (a, b) };
