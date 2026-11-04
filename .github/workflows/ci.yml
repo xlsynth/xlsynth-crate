@@ -228,14 +228,8 @@ jobs:
 
       - name: Install libc++ runtime
         run: |
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends cmake libc++-18-dev libc++abi-18-dev
 
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
@@ -1267,17 +1261,10 @@ jobs:
       - name: Check out code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install libc++ from llvm-18
+      - name: Install benchmark build dependencies
         run: |
-          echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg curl cmake
-          cd /tmp/
-          wget -4 https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 18
-          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
-          sudo apt-get install -y libz3-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends cmake libc++-18-dev libc++abi-18-dev libz3-dev
 
       - name: Install protobuf compiler
         run: |
