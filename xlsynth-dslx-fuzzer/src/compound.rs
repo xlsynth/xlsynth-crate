@@ -3,7 +3,7 @@
 //! Aggregate and builtin contracts with a bits-valued composition boundary.
 
 use crate::aggregate_match::{self, AggregateMatch};
-use crate::array_fragment::{ArrayCast, MatrixUpdate};
+use crate::array_fragment::{ArrayCast, MatrixUpdate, UpdateIndexForm};
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
@@ -167,6 +167,7 @@ pub(crate) struct Declarations {
     std: bool,
     local_is_even: bool,
     local_enumerate: bool,
+    coordinate_helper: bool,
 }
 
 impl Declarations {
@@ -182,6 +183,7 @@ impl Declarations {
         self.std |= other.std;
         self.local_is_even |= other.local_is_even;
         self.local_enumerate |= other.local_enumerate;
+        self.coordinate_helper |= other.coordinate_helper;
     }
 
     /// Prints nominal types only when an expression in this module uses them.
@@ -204,6 +206,11 @@ fn fuzz_enumerate<S: bool, W: u32, N: u32>(xs: xN[S][W][N]) -> (u32, xN[S][W])[N
     }(zero!<(u32, xN[S][W])[N]>())
 }
 "#,
+            );
+        }
+        if self.coordinate_helper {
+            text.push_str(
+                "\nfn fuzz_coordinate(row: u3, col: u3) -> (u3, u32) { (row, col as u32) }\n",
             );
         }
         if self.record {
@@ -270,6 +277,7 @@ impl CompoundOp {
                 || matches!(self, Self::Map(map) if map.needs_std()),
             local_is_even: matches!(self, Self::Map(map) if map.needs_local_is_even()),
             local_enumerate: self == Self::Array(ArrayOp::LocalEnumerate),
+            coordinate_helper: matches!(self, Self::MatrixUpdate(update) if update.index_form == UpdateIndexForm::HelperCall),
         }
     }
 

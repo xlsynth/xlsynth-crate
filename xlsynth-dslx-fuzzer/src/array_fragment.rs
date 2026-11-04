@@ -76,6 +76,24 @@ impl ArrayCast {
     }
 }
 
+/// How the runtime coordinate reaches a multidimensional update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateIndexForm {
+    Literal,
+    Binding,
+    TupleProjection,
+    HelperCall,
+}
+
+impl UpdateIndexForm {
+    pub const ALL: [Self; 4] = [
+        Self::Literal,
+        Self::Binding,
+        Self::TupleProjection,
+        Self::HelperCall,
+    ];
+}
+
 /// A rectangular array update observed at a cell chosen independently of the
 /// runtime write address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +102,7 @@ pub struct MatrixUpdate {
     cols: usize,
     observed_row: usize,
     observed_col: usize,
+    pub(crate) index_form: UpdateIndexForm,
 }
 
 impl MatrixUpdate {
@@ -106,7 +125,14 @@ impl MatrixUpdate {
             cols,
             observed_row,
             observed_col,
+            index_form: UpdateIndexForm::Literal,
         })
+    }
+
+    /// Changes how the address is expressed without changing either coordinate.
+    pub fn with_index_form(mut self, index_form: UpdateIndexForm) -> Self {
+        self.index_form = index_form;
+        self
     }
 
     /// Checkerboard initialization makes both row and column affect the
@@ -132,8 +158,20 @@ impl MatrixUpdate {
             .collect::<Vec<_>>()
             .join(", ");
         let [x, y, z] = args;
+        let update = match self.index_form {
+            UpdateIndexForm::Literal => format!("update(matrix, (row, col), {z})"),
+            UpdateIndexForm::Binding => {
+                format!("let coord = (row, col); update(matrix, coord, {z})")
+            }
+            UpdateIndexForm::TupleProjection => {
+                format!("let write = ((row, col), {z}); update(matrix, write.0, write.1)")
+            }
+            UpdateIndexForm::HelperCall => {
+                format!("update(matrix, fuzz_coordinate(row, col), {z})")
+            }
+        };
         format!(
-            "{{ let matrix = [{rows}]; let row = (({x} as {unsigned}) as u3) % u3:{}; let col = (({y} as {unsigned}) as u3) % u3:{}; update(matrix, (row, col), {z})[u32:{}][u32:{}] }}",
+            "{{ let matrix = [{rows}]; let row = (({x} as {unsigned}) as u3) % u3:{}; let col = (({y} as {unsigned}) as u3) % u3:{}; {update}[u32:{}][u32:{}] }}",
             self.rows, self.cols, self.observed_row, self.observed_col
         )
     }

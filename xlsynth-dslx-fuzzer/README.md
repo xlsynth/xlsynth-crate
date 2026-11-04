@@ -161,6 +161,14 @@ The operands favor lane fragments outside the existing scalar outputs'
 dependency closures. Aggregate choices read mutation bytes from the end, so
 v6 and v7 decode the same scalar lanes and observations for a given input.
 
+`mission-v8` and `mission-local-v8` vary how a multidimensional `update`
+receives its coordinates. They can appear as a tuple literal, a local binding,
+a projection from a tuple containing the coordinate and data, or the result of
+a helper with differently sized row and column indices.
+For the same input bytes, v7 and v8 have identical reference
+IR. Use a converter and DSO with the tuple-index fix in
+[google/xls#5260](https://github.com/google/xls/pull/5260) for v8 campaigns.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -229,7 +237,8 @@ cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/
 
 Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
-`--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`, or
+`--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`,
+`--mission-v8`, `--mission-local-v8`, or
 `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before

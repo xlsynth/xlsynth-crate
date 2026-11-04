@@ -4,7 +4,7 @@
 
 use crate::aggregate_flow::{AggregateFlow, FlowKind, FlowObservation, FlowStep};
 use crate::aggregate_match::AggregateMatch;
-use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate};
+use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate, UpdateIndexForm};
 use crate::ast::{
     BinaryOp, BitsType, Body, Comparison, Fragment, HelperModule, SliceKind, UnaryOp, ValueRef,
     Width,
@@ -74,6 +74,10 @@ pub enum Grammar {
     MissionV7,
     /// Uses v7 productions with module-local helpers.
     MissionLocalV7,
+    /// Varies how multidimensional updates receive their tuple-valued indices.
+    MissionV8,
+    /// Uses v8 productions with module-local helpers.
+    MissionLocalV8,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -102,6 +106,8 @@ impl Grammar {
                 | Self::MissionV7
                 | Self::MissionLocalV6
                 | Self::MissionLocalV7
+                | Self::MissionV8
+                | Self::MissionLocalV8
         )
     }
 
@@ -114,6 +120,7 @@ impl Grammar {
                 | Self::MissionLocalV5
                 | Self::MissionLocalV6
                 | Self::MissionLocalV7
+                | Self::MissionLocalV8
         )
     }
 
@@ -126,11 +133,15 @@ impl Grammar {
     }
 
     fn uses_v6_productions(self) -> bool {
-        matches!(self, Self::MissionV6 | Self::MissionLocalV6) || self.is_v7()
+        matches!(self, Self::MissionV6 | Self::MissionLocalV6) || self.uses_aggregate_flow()
     }
 
-    fn is_v7(self) -> bool {
-        matches!(self, Self::MissionV7 | Self::MissionLocalV7)
+    fn uses_aggregate_flow(self) -> bool {
+        matches!(self, Self::MissionV7 | Self::MissionLocalV7) || self.is_v8()
+    }
+
+    fn is_v8(self) -> bool {
+        matches!(self, Self::MissionV8 | Self::MissionLocalV8)
     }
 }
 
@@ -147,6 +158,8 @@ impl std::str::FromStr for Grammar {
             "mission-local-v5" => Ok(Self::MissionLocalV5),
             "mission-v7" => Ok(Self::MissionV7),
             "mission-local-v7" => Ok(Self::MissionLocalV7),
+            "mission-v8" => Ok(Self::MissionV8),
+            "mission-local-v8" => Ok(Self::MissionLocalV8),
             "mission-v6" => Ok(Self::MissionV6),
             "mission-local-v6" => Ok(Self::MissionLocalV6),
             "mission-v2" => Ok(Self::MissionV2),
@@ -154,7 +167,7 @@ impl std::str::FromStr for Grammar {
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -490,12 +503,17 @@ impl Entropy<'_> {
                         29 => {
                             let rows = 2 + self.choose(3);
                             let cols = 2 + self.choose(3);
-                            CompoundOp::MatrixUpdate(MatrixUpdate::new(
-                                rows,
-                                cols,
-                                self.choose(rows),
-                                self.choose(cols),
-                            )?)
+                            let observed_row = self.choose(rows);
+                            let col_draw = usize::from(self.byte());
+                            let update =
+                                MatrixUpdate::new(rows, cols, observed_row, col_draw % cols)?;
+                            let update = if self.grammar.is_v8() {
+                                let forms = UpdateIndexForm::ALL;
+                                update.with_index_form(forms[col_draw / cols % forms.len()])
+                            } else {
+                                update
+                            };
+                            CompoundOp::MatrixUpdate(update)
                         }
                         30 => CompoundOp::ArraySelect(ArraySelect::new(
                             SelectKind::ALL[self.choose(2)],
@@ -874,7 +892,7 @@ pub fn generate_with_grammar(
         .zip(observation_draws)
         .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.uses_deep_lanes()))
         .collect::<Result<_, _>>()?;
-    if grammar.is_v7() {
+    if grammar.uses_aggregate_flow() {
         sample.aggregate = Some(aggregate_output(data, &sample)?);
     }
     Ok(sample)
