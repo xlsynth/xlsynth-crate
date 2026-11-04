@@ -112,7 +112,7 @@ block rounding(clk, x: u32) -> u32 {
 }"#;
     let checked = check_module(&parse_module(source).unwrap()).unwrap();
     let enumerate = checked
-        .std_calls()
+        .imported_calls()
         .iter()
         .find(|call| call.function == "enumerate")
         .unwrap();

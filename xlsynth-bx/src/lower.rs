@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use xlsynth::dslx::ImportData;
 use xlsynth_pir::ir::{self, NodePayload, Package, PackageMember};
 use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_verify::verify_package;
@@ -20,60 +19,53 @@ use crate::check::{
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
-use crate::std_import::compile_calls;
 
 /// Destination package indices for explicitly declared externs and inferred
-/// standard library specializations.
+/// imported DSLX specializations.
 struct LinkedFunctions {
     externs: BTreeMap<String, usize>,
-    std: Vec<usize>,
+    imported: BTreeMap<usize, usize>,
 }
 
 /// Links every extern and appends verified blocks in child-before-parent order.
 pub fn lower_module(
     module: &CheckedModule,
-    package: Package,
-    reset: ResetBehavior,
-) -> Result<Package, String> {
-    lower_module_with_imports(module, package, reset, None)
-}
-
-/// Reuse the stdlib parsed during checking if both phases share one compile.
-pub(crate) fn lower_module_with_imports(
-    module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
-    imports: Option<ImportData>,
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
     let externs = link_externs(module, &package, &mut layouts)?;
     check_extern_blocks(module, &package, &mut layouts, reset)?;
-    let std = if module.std_calls.is_empty() {
-        Vec::new()
-    } else {
-        let (imported, roots) = compile_calls(&module.std_calls, imports)?;
-        let block_names = module
-            .blocks
-            .iter()
-            .map(|block| block.name.clone())
-            .collect::<Vec<_>>();
-        let indices = link_imported_functions(&mut package, imported, &roots, &block_names)?;
-        for (call, &index) in module.std_calls.iter().zip(&indices) {
+    let block_names = module
+        .blocks
+        .iter()
+        .map(|block| block.name.clone())
+        .collect::<Vec<_>>();
+    let mut imported = BTreeMap::new();
+    for batch in &module.imports.batches {
+        let indices = link_imported_functions(
+            &mut package,
+            batch.package.clone(),
+            &batch.roots,
+            &block_names,
+        )?;
+        for (&id, index) in batch.call_ids.iter().zip(indices) {
+            let call = &module.imports.calls[id];
             let PackageMember::Function(function) = &package.members[index] else {
                 unreachable!("imported roots are function members")
             };
             check_signature(
-                &format!("std::{}", call.function),
+                &format!("{}::{}", call.module, call.function),
                 call.args.iter(),
                 &call.result,
                 function,
                 &mut layouts,
             )?;
+            imported.insert(id, index);
         }
-        indices
-    };
-    let functions = LinkedFunctions { externs, std };
+    }
+    let functions = LinkedFunctions { externs, imported };
     for block in &module.blocks {
         let builder = LowerBlock::build(
             block,
@@ -602,7 +594,9 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 .builder
                 .instantiation_output(self.instances[instance], port),
             TypedExprKind::Call { name, args } => self.invoke(self.functions.externs[name], args),
-            TypedExprKind::StdCall { id, args } => self.invoke(self.functions.std[*id], args),
+            TypedExprKind::ImportedCall { id, args } => {
+                self.invoke(self.functions.imported[id], args)
+            }
             TypedExprKind::Unary { op, value } => {
                 let value = self.expr(value)?;
                 match op {

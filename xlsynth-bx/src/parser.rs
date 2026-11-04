@@ -2,8 +2,11 @@
 
 //! Parser for BX's structural declarations and DSLX-style value expressions.
 
+use std::collections::BTreeSet;
+
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type, UnaryOp,
+    BinaryOp, Block, Expr, ExternBlock, ExternFn, Import, Module, Param, Stmt, StructDef, Type,
+    UnaryOp,
 };
 
 /// A borrowed spelling and byte offset in the original UTF-8 input.
@@ -22,6 +25,39 @@ fn diagnostic(source: &str, offset: usize, message: &str) -> String {
 
 fn identifier_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
+}
+
+/// A single identifier word safe to pass to the DSLX parser. DSLX validates
+/// its own keywords in import subjects and qualified function names.
+pub(crate) fn is_identifier_word(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(identifier_start)
+        && bytes.all(|b| identifier_start(b) || b.is_ascii_digit())
+}
+
+/// A local BX binding may use any identifier word other than reserved syntax.
+pub(crate) fn is_identifier(text: &str) -> bool {
+    let keyword = matches!(
+        text,
+        "pub"
+            | "block"
+            | "struct"
+            | "extern"
+            | "fn"
+            | "reg"
+            | "let"
+            | "inst"
+            | "if"
+            | "else"
+            | "as"
+            | "true"
+            | "false"
+            | "bool"
+            | "bits"
+            | "uN"
+            | "sN"
+    );
+    is_identifier_word(text) && !keyword && fixed_width(text).is_none()
 }
 
 /// Tokenize source without interpreting integer widths or values.
@@ -198,35 +234,12 @@ impl<'s> Parser<'s> {
     }
 
     fn ident(&mut self) -> Result<String, String> {
+        self.take_identifier(is_identifier)
+    }
+
+    fn take_identifier(&mut self, valid: fn(&str) -> bool) -> Result<String, String> {
         let text = self.peek(0);
-        let keyword = matches!(
-            text,
-            "pub"
-                | "block"
-                | "struct"
-                | "extern"
-                | "fn"
-                | "reg"
-                | "let"
-                | "inst"
-                | "if"
-                | "else"
-                | "as"
-                | "true"
-                | "false"
-                | "bool"
-                | "bits"
-                | "uN"
-                | "sN"
-        );
-        if text
-            .as_bytes()
-            .first()
-            .copied()
-            .is_some_and(identifier_start)
-            && !keyword
-            && fixed_width(text).is_none()
-        {
+        if valid(text) {
             self.pos += 1;
             Ok(text.to_owned())
         } else {
@@ -236,6 +249,7 @@ impl<'s> Parser<'s> {
 
     fn module(&mut self) -> Result<Module, String> {
         let mut module = Module::default();
+        let mut import_bindings = BTreeSet::new();
         while !self.peek(0).is_empty() {
             let public = self.eat("pub");
             if self.eat("block") {
@@ -252,15 +266,16 @@ impl<'s> Parser<'s> {
             } else if public {
                 return Err(self.error("expected block or struct after pub"));
             } else if self.eat("import") {
-                if self.peek(0) != "std" {
-                    return Err(self.error("BX only supports 'import std;'"));
+                let offset = self.tokens[self.pos].start;
+                let import = self.import()?;
+                if !import_bindings.insert(import.binding().to_owned()) {
+                    return Err(diagnostic(
+                        self.source,
+                        offset,
+                        &format!("duplicate import binding '{}'", import.binding()),
+                    ));
                 }
-                if module.std_import {
-                    return Err(self.error("duplicate 'import std;'"));
-                }
-                self.pos += 1;
-                self.expect(";")?;
-                module.std_import = true;
+                module.imports.push(import);
             } else if self.eat("extern") {
                 if self.eat("fn") {
                     module.externs.push(self.extern_fn()?);
@@ -278,13 +293,36 @@ impl<'s> Parser<'s> {
         Ok(module)
     }
 
+    /// Read a dotted DSLX import subject and its optional local binding.
+    fn import(&mut self) -> Result<Import, String> {
+        let mut subject = self.take_identifier(is_identifier_word)?;
+        while self.eat(".") {
+            subject.push('.');
+            subject.push_str(&self.take_identifier(is_identifier_word)?);
+        }
+        let alias = if self.eat("as") {
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        let import = Import { subject, alias };
+        if !is_identifier(import.binding()) {
+            return Err(self.error(&format!(
+                "import '{}' requires an alias that is a BX identifier",
+                import.subject
+            )));
+        }
+        self.expect(";")?;
+        Ok(import)
+    }
+
     /// A module qualifier is permitted only on a function declaration or call.
     fn name_or_function_path(&mut self) -> Result<String, String> {
         let head = self.ident()?;
         if !self.eat("::") {
             return Ok(head);
         }
-        let function = self.ident()?;
+        let function = self.take_identifier(is_identifier_word)?;
         if self.peek(0) != "(" {
             return Err(self.error("expected '(' after module-qualified function name"));
         }
@@ -848,17 +886,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn std_import_is_contextual_and_may_appear_after_a_block() {
+    fn imports_are_contextual_and_bind_the_alias_or_last_path_component() {
         let src = "block import(clk, import: u8) -> u8 { import }";
-        assert!(!parse_module(src).unwrap().std_import);
-        assert!(
-            parse_module(&format!("{src} import std;"))
-                .unwrap()
-                .std_import
+        assert!(parse_module(src).unwrap().imports.is_empty());
+        let module = parse_module(&format!(
+            "{src} import std; import vendor.math; import vendor.math as m;"
+        ))
+        .unwrap();
+        assert_eq!(
+            module
+                .imports
+                .iter()
+                .map(|i| (i.subject.as_str(), i.binding(), i.alias.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("std", "std", None),
+                ("vendor.math", "math", None),
+                ("vendor.math", "m", Some("m"))
+            ],
         );
         for (source, error) in [
-            ("import std; import std;", "duplicate 'import std;'"),
-            ("import arithmetic;", "only supports 'import std;'"),
+            ("import std; import std;", "duplicate import binding 'std'"),
+            (
+                "import a.math; import b.math;",
+                "duplicate import binding 'math'",
+            ),
+            (
+                "import std as s; import vendor.s;",
+                "duplicate import binding 's'",
+            ),
+            ("import vendor..math;", "expected identifier"),
+            ("import vendor.math as ;", "expected identifier"),
+            ("import vendor::math;", "expected ';'"),
+            ("import ip.reg;", "requires an alias"),
+            ("import math as inst;", "expected identifier"),
             ("import std", "expected ';'"),
             ("pub import std;", "expected block or struct after pub"),
         ] {
@@ -867,6 +928,15 @@ mod tests {
                 "{source}"
             );
         }
+    }
+
+    #[test]
+    fn qualified_dslx_names_can_use_bx_keywords() {
+        let module =
+            parse_module("import ip.reg as r; block b(clk, x: u8) -> u8 { r::block(x) }").unwrap();
+        assert_eq!(module.imports[0].subject, "ip.reg");
+        assert_eq!(module.imports[0].binding(), "r");
+        assert!(matches!(&module.blocks[0].output, Expr::Call { name, .. } if name == "r::block"));
     }
 
     #[test]

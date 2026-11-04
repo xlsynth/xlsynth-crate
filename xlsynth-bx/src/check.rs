@@ -4,11 +4,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use xlsynth::dslx::ImportData;
 use xlsynth_pir::IrValue;
 
+use crate::ImportOptions;
 use crate::ast::{BinaryOp, Block, Expr, ExternFn, Module, Param, Stmt, StructDef, Type};
-use crate::std_import::StdResolver;
+use crate::dslx_import::ImportResolver;
 pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -92,7 +92,7 @@ struct BlockInterface<'a> {
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
-    std_import: bool,
+    imports: BTreeMap<&'a str, &'a str>,
     struct_list: &'a [StructDef],
     structs: BTreeMap<&'a str, &'a StructDef>,
     struct_shapes: BTreeMap<&'a str, TypeShape>,
@@ -328,14 +328,21 @@ fn dependency_order<'a>(
 /// Type-check a parsed module without requiring the external functions' IR
 /// bodies.
 pub fn check_module(module: &Module) -> Result<CheckedModule, String> {
-    check_module_and_imports(module).map(|(checked, _)| checked)
+    check_module_with_options(module, &ImportOptions::default())
 }
 
-/// Preserve the parsed DSLX stdlib for the batch conversion when compiling
-/// both phases together.
-pub(crate) fn check_module_and_imports(
+/// Check BX declarations and resolve the imported DSLX functions for lowering.
+pub fn check_module_with_options(
     module: &Module,
-) -> Result<(CheckedModule, Option<ImportData>), String> {
+    options: &ImportOptions<'_>,
+) -> Result<CheckedModule, String> {
+    let mut imports = BTreeMap::new();
+    for import in &module.imports {
+        let binding = import.binding();
+        if imports.insert(binding, import.subject.as_str()).is_some() {
+            return Err(format!("duplicate import binding '{binding}'"));
+        }
+    }
     let mut names = BTreeSet::new();
     let mut struct_graph = Vec::new();
     for s in &module.structs {
@@ -350,7 +357,7 @@ pub(crate) fn check_module_and_imports(
     }
     let struct_order = dependency_order("struct", &struct_graph)?;
     let mut declarations = Declarations {
-        std_import: module.std_import,
+        imports,
         struct_list: &module.structs,
         struct_shapes: BTreeMap::new(),
         structs: module
@@ -373,9 +380,11 @@ pub(crate) fn check_module_and_imports(
         declarations.struct_shapes.insert(&s.name, shape);
     }
     for f in &module.externs {
-        if module.std_import && f.name.starts_with("std::") {
+        if let Some((binding, _)) = f.name.split_once("::")
+            && declarations.imports.contains_key(binding)
+        {
             return Err(format!(
-                "extern fn '{}' conflicts with 'import std;'",
+                "extern fn '{}' conflicts with imported namespace '{binding}'",
                 f.name
             ));
         }
@@ -428,31 +437,29 @@ pub(crate) fn check_module_and_imports(
             .map(|b| (b.name.as_str(), Vec::new())),
     );
     let mut blocks = Vec::new();
-    let mut std_resolver = StdResolver::default();
+    let mut resolver = ImportResolver::new(&module.imports, options)?;
     for index in dependency_order("block", &block_graph)? {
         if let Some(block) = module.blocks.get(index) {
             blocks.push(
-                BlockChecker::check(&declarations, block, &mut std_resolver)
+                BlockChecker::check(&declarations, block, &mut resolver)
                     .map_err(|e| format!("block '{}': {e}", block.name))?,
             );
         }
     }
-    let (std_calls, imports) = std_resolver.into_parts();
-    let checked = CheckedModule {
+    Ok(CheckedModule {
         structs: module.structs.clone(),
         externs: module.externs.clone(),
         extern_blocks: module.extern_blocks.clone(),
-        std_calls,
+        imports: resolver.finish()?,
         blocks,
-    };
-    Ok((checked, imports))
+    })
 }
 
 /// Lexically visible values, static declarations, and the drivers seen in one
 /// block.
 struct BlockChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
-    std_resolver: &'a mut StdResolver,
+    resolver: &'a mut ImportResolver,
     block: &'m Block,
     names: BTreeSet<String>,
     outputs: BTreeSet<String>,
@@ -472,7 +479,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     fn check(
         decls: &'a Declarations<'m>,
         block: &'m Block,
-        std_resolver: &'a mut StdResolver,
+        resolver: &'a mut ImportResolver,
     ) -> Result<CheckedBlock, String> {
         let outputs = decls.blocks[block.name.as_str()]
             .outputs
@@ -493,7 +500,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         }));
         let mut c = Self {
             decls,
-            std_resolver,
+            resolver,
             block,
             names: BTreeSet::new(),
             outputs,
@@ -1039,8 +1046,8 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Resolve either a concrete extern declaration or an imported DSLX
     /// specialization inferred from its actual argument types.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
-        if self.decls.std_import
-            && let Some(function) = name.strip_prefix("std::")
+        if let Some((binding, function)) = name.split_once("::")
+            && let Some(&subject) = self.decls.imports.get(binding)
         {
             let args = args
                 .iter()
@@ -1051,9 +1058,9 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let types = args.iter().map(|arg| arg.ty.clone()).collect();
-            let (id, ty) = self.std_resolver.resolve(function, types)?;
+            let (id, ty) = self.resolver.resolve(subject, function, types)?;
             self.decls.validate_type(&ty)?;
-            return Ok((ty, K::StdCall { id, args }));
+            return Ok((ty, K::ImportedCall { id, args }));
         }
         if self.decls.blocks.contains_key(name) {
             return Err(format!(
@@ -1213,18 +1220,31 @@ mod tests {
     use xlsynth_pir::IrValue;
 
     #[test]
-    fn explicit_std_extern_requires_the_std_namespace_to_be_unimported() {
-        let decl = "extern fn std::id(x: u8) -> u8;";
-        let body = "block b(clk, x: u8) -> u8 { std::id(x) }";
-        let module = parse_module(&format!("{decl} {body}")).unwrap();
-        assert!(check_module(&module).unwrap().std_calls.is_empty());
-        for source in [format!("import std; {decl}"), format!("{decl} import std;")] {
+    fn qualified_extern_conflicts_only_with_an_import_bound_to_its_namespace() {
+        let decl = "extern fn math::id(x: u8) -> u8;";
+        let body = "block b(clk, x: u8) -> u8 { math::id(x) }";
+        let module = parse_module(&format!("import std as other; {decl} {body}")).unwrap();
+        assert!(check_module(&module).unwrap().imported_calls().is_empty());
+        for source in [
+            format!("import vendor.math; {decl}"),
+            format!("{decl} import std as math;"),
+        ] {
             let module = parse_module(&source).unwrap();
             assert_eq!(
                 check_module(&module).unwrap_err(),
-                "extern fn 'std::id' conflicts with 'import std;'"
+                "extern fn 'math::id' conflicts with imported namespace 'math'"
             );
         }
+    }
+
+    #[test]
+    fn checker_validates_import_bindings_on_programmatically_constructed_modules() {
+        let mut module = parse_module("import first.math; import second.math as m;").unwrap();
+        module.imports[1].alias = None;
+        assert_eq!(
+            check_module(&module).unwrap_err(),
+            "duplicate import binding 'math'"
+        );
     }
 
     #[test]
