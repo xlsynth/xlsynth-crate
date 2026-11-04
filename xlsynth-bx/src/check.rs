@@ -15,7 +15,14 @@ use crate::typed::{TypedExprKind as K, bits};
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Bits { signed, width } => write!(f, "{}{width}", if *signed { "s" } else { "u" }),
+            Type::Bits { signed, width } => {
+                let prefix = if *signed { "s" } else { "u" };
+                if (1..=64).contains(width) {
+                    write!(f, "{prefix}{width}")
+                } else {
+                    write!(f, "{prefix}N[{width}]")
+                }
+            }
             Type::Bool => write!(f, "bool"),
             Type::Named(name) => write!(f, "{name}"),
             Type::Array { element, size } => write!(f, "{element}[{size}]"),

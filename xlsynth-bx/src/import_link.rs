@@ -4,15 +4,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlsynth_pir::ir::{Fn, NodePayload, Package, PackageMember};
+use xlsynth_pir::ir::{NodePayload, Package, PackageMember};
 use xlsynth_pir::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
 use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_verify::verify_package;
 
 use crate::lower::check_function_purity;
 
-/// Appends the roots and their callees and returns their destination member
-/// indices. All allocation and validation take place before changing the
+/// Appends a checked import snapshot and returns the destination indices of its
+/// roots. All allocation and validation take place before changing the
 /// destination.
 pub(crate) fn link_imported_functions(
     destination: &mut Package,
@@ -23,7 +23,6 @@ pub(crate) fn link_imported_functions(
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    retain_reachable_functions(&mut imported, roots)?;
     let symbols = allocate_symbols(destination, &imported, reserved_blocks);
     let files = allocate_files(destination, &imported)?;
     let mut node_base = package_max_emitted_node_id(destination);
@@ -69,41 +68,31 @@ pub(crate) fn link_imported_functions(
     Ok(roots.iter().map(|root| symbols[root].index).collect())
 }
 
-/// Moves reachable definitions into callee-before-caller order, checking each
-/// body for effects once even when several roots share it.
-fn retain_reachable_functions(package: &mut Package, roots: &[String]) -> Result<(), String> {
-    enum Visit {
-        Load(String),
-        Emit(Fn),
-    }
-    let mut available = BTreeMap::new();
-    for member in std::mem::take(&mut package.members) {
-        if let PackageMember::Function(function) = member {
-            let name = function.name.clone();
-            if available.insert(name.clone(), function).is_some() {
-                return Err(format!("duplicate imported function '{name}'"));
-            }
+/// Selects and checks the IR bodies reachable from the requested
+/// specializations. XLS dumps callees before callers, so a reverse scan
+/// discovers each dependency before reaching its definition.
+pub(crate) fn retain_reachable_functions(
+    package: &mut Package,
+    roots: &[String],
+) -> Result<(), String> {
+    let mut needed: BTreeSet<_> = roots.iter().cloned().collect();
+    let mut retained = Vec::new();
+    for member in package.members.drain(..).rev() {
+        if let PackageMember::Function(function) = &member
+            && needed.remove(&function.name)
+        {
+            check_function_purity(function)?;
+            needed.extend(external_function_references(function));
+            retained.push(member);
         }
     }
-    let mut seen = BTreeSet::new();
-    let mut pending: Vec<_> = roots.iter().rev().cloned().map(Visit::Load).collect();
-    while let Some(visit) = pending.pop() {
-        match visit {
-            Visit::Load(name) => {
-                if !seen.insert(name.clone()) {
-                    continue;
-                }
-                let function = available
-                    .remove(&name)
-                    .ok_or_else(|| format!("missing imported function '{name}'"))?;
-                check_function_purity(&function)?;
-                let callees = external_function_references(&function);
-                pending.push(Visit::Emit(function));
-                pending.extend(callees.into_iter().rev().map(Visit::Load));
-            }
-            Visit::Emit(function) => package.members.push(PackageMember::Function(function)),
-        }
+    if let Some(name) = needed.first() {
+        return Err(format!(
+            "missing imported function '{name}' in callee-before-caller order"
+        ));
     }
+    retained.reverse();
+    package.members = retained;
     package.top = None;
     Ok(())
 }
@@ -239,7 +228,7 @@ block body() {}
         )
         .parse_package()
         .unwrap();
-        let imported = Parser::new(
+        let mut imported = Parser::new(
             r#"package wrappers
 file_number 1 "other.x"
 file_number 2 "shared.x"
@@ -270,6 +259,7 @@ fn unused() -> bits[8] {
         let original = destination.get_fn("piece").unwrap().to_string();
         let top = destination.top.clone();
         let roots = ["main".into(), "piece__bx_1".into(), "main".into()];
+        retain_reachable_functions(&mut imported, &roots).unwrap();
         let indices =
             link_imported_functions(&mut destination, imported, &roots, &["main".into()]).unwrap();
         assert_eq!(indices[0], indices[2]);

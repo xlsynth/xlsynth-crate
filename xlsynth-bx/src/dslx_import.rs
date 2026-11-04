@@ -33,8 +33,8 @@ pub(crate) struct ResolvedImports {
     pub(crate) batches: Vec<ImportBatch>,
 }
 
-/// Functions compiled together from one canonical DSLX module. Each root
-/// symbol corresponds to a call ID in the same position.
+/// Reachable IR functions from one canonical DSLX module. Each root symbol
+/// corresponds to a call ID in the same position.
 #[derive(Clone, Debug)]
 pub(crate) struct ImportBatch {
     pub(crate) package: Package,
@@ -115,9 +115,6 @@ impl ImportResolver {
         function: &str,
         mut args: Vec<Type>,
     ) -> Result<(usize, Type), String> {
-        for arg in &mut args {
-            canonicalize_bool(arg);
-        }
         if !self.subjects.contains(module) {
             return Err(format!("undeclared DSLX import {module:?}"));
         }
@@ -126,14 +123,21 @@ impl ImportResolver {
                 "invalid function name {function:?} in DSLX import {module}"
             ));
         }
+        for arg in &mut args {
+            normalize_import_type(arg).map_err(|e| format!("{module}::{function}: {e}"))?;
+        }
         let key = (module.to_owned(), function.to_owned(), args);
         if let Some(&id) = self.ids.get(&key) {
             return Ok((id, self.calls[id].result.clone()));
         }
         let id = self.calls.len();
-        let probe = probe_definition(id, function, &key.2)
-            .map_err(|e| format!("{module}::{function}: {e}"))?;
-        let source = format!("import {module} as bx_module;\n{probe}");
+        let probe = probe_definition(id, function, &key.2, true);
+        let source = format!(
+            r#"#![feature(generics)]
+import {module} as bx_module;
+fn capture<T: type>(_value: T) {{}}
+{probe}"#
+        );
         let data = self
             .imports
             .as_mut()
@@ -186,8 +190,8 @@ fn check_probe(
         .map_err(|e| e.to_string())
 }
 
-/// DSLX uses the same concrete type and specialization for bool and u1.
-fn canonicalize_bool(ty: &mut Type) {
+/// Validate structural import arguments and canonicalize DSLX's bool/u1 alias.
+fn normalize_import_type(ty: &mut Type) -> Result<(), String> {
     match ty {
         Type::Bool => {
             *ty = Type::Bits {
@@ -195,106 +199,64 @@ fn canonicalize_bool(ty: &mut Type) {
                 width: 1,
             }
         }
-        Type::Tuple(items) => items.iter_mut().for_each(canonicalize_bool),
-        Type::Array { element, .. } => canonicalize_bool(element),
-        Type::Bits { .. } | Type::Named(_) => {
-            // These types have no bool components.
+        Type::Tuple(items) => items.iter_mut().try_for_each(normalize_import_type)?,
+        Type::Array { element, .. } => normalize_import_type(element)?,
+        Type::Bits { .. } => {
+            // A bit type is already canonical.
+        }
+        Type::Named(name) => {
+            return Err(format!(
+                "unsupported nominal type '{name}' in imported function signature"
+            ));
         }
     }
+    Ok(())
 }
 
-/// Serialize BX value types using DSLX's arbitrary-width bit type syntax.
-/// Reject nominal types even inside a tuple or array.
-fn dslx_type(ty: &Type) -> Result<String, String> {
-    match ty {
-        Type::Bits { signed, width } => {
-            Ok(format!("{}N[{width}]", if *signed { "s" } else { "u" }))
-        }
-        Type::Bool => Ok("bool".into()),
-        Type::Array { element, size } => Ok(format!("{}[{size}]", dslx_type(element)?)),
-        Type::Tuple(members) => {
-            let types = members
-                .iter()
-                .map(dslx_type)
-                .collect::<Result<Vec<_>, _>>()?;
-            let trailing = if types.len() == 1 { "," } else { "" };
-            Ok(format!("({}{trailing})", types.join(", ")))
-        }
-        Type::Named(name) => Err(format!(
-            "unsupported nominal type '{name}' in imported function signature"
-        )),
-    }
-}
-
-/// A unit-returning DSLX probe checks the call without needing to know its
-/// result in advance. Its unoptimized IR contains the specialized invoke.
-fn probe_definition(index: usize, function: &str, args: &[Type]) -> Result<String, String> {
+/// A signature probe captures the call's inferred type. A batch probe emits
+/// just the imported call so its IR identifies the specialized callee.
+fn probe_definition(index: usize, function: &str, args: &[Type], capture_result: bool) -> String {
     let mut params = Vec::with_capacity(args.len());
     let mut arguments = Vec::with_capacity(args.len());
     for (i, ty) in args.iter().enumerate() {
         let name = format!("arg_{i}");
-        let ty = dslx_type(ty)?;
         params.push(format!("{name}: {ty}"));
         arguments.push(name);
     }
-    Ok(format!(
-        "fn probe_{index}({}) {{ let _ = bx_module::{function}({}); }}\n",
-        params.join(", "),
-        arguments.join(", "),
-    ))
+    let mut call = format!("bx_module::{function}({})", arguments.join(", "));
+    if capture_result {
+        call = format!("capture({call})");
+    }
+    format!(
+        "fn probe_{index}({}) {{ let _ = {call}; }}\n",
+        params.join(", ")
+    )
 }
 
-/// Recover the specialized return annotation from this specific invocation.
-/// Imported modules may have other calls to the same function in their tests.
+/// Read the concrete T from the signature probe's sole invocation of capture.
 fn probe_result_type(checked: &TypecheckedModule) -> Result<Type, String> {
     let module = checked.get_module();
-    let probe = (0..module.get_member_count())
-        .find_map(|i| match module.get_member(i).to_matchable() {
+    let mut functions =
+        (0..module.get_member_count()).filter_map(|i| match module.get_member(i).to_matchable() {
             Some(MatchableModuleMember::Function(f)) => Some(f),
             _ => None,
-        })
-        .ok_or("could not find the generated DSLX probe")?;
+        });
+    let capture = functions.next().ok_or("missing DSLX capture function")?;
+    let probe = functions.next().ok_or("missing DSLX signature probe")?;
     let root = checked.get_type_info();
-    let graph = root
-        .build_function_call_graph(&module)
-        .map_err(|e| e.to_string())?;
-    let callee = graph
-        .get_callee(&probe, 0)
-        .ok_or("call did not resolve to a DSLX function")?;
-    if !callee.is_public() {
-        return Err("function is private".into());
-    }
     if root
         .requires_implicit_token(&probe)
         .map_err(|e| e.to_string())?
     {
         return Err("function requires an implicit token and cannot be lifted into BX".into());
     }
-    let Some(annotation) = callee.get_return_type() else {
-        // Omitting a DSLX return annotation declares a unit result.
-        return Ok(Type::Tuple(Vec::new()));
-    };
-    let context = if callee.is_parametric() {
-        let entries = root
-            .get_all_invocation_callee_data(&callee)
-            .ok_or("missing DSLX invocation data")?;
-        (0..entries.len()).find_map(|index| {
-            let entry = entries.get(index)?;
-            let caller = root
-                .get_root_invocation_data(&entry.invocation()?)?
-                .caller()?;
-            if caller.is_same_definition(&probe) {
-                entry.derived_type_info()
-            } else {
-                None
-            }
-        })
-    } else {
-        checked.get_type_info_for_module(&callee.get_body().get_owner_module())
-    }
-    .ok_or("missing DSLX type information for the call")?;
+    let context = root
+        .get_unique_invocation_callee_data(&capture)
+        .and_then(|entries| entries.get(0))
+        .and_then(|entry| entry.derived_type_info())
+        .ok_or("missing DSLX type information for the capture invocation")?;
     let resolved = context
-        .get_type_for_type_annotation(&annotation)
+        .get_type_for_type_annotation(&capture.get_param(0).get_type_annotation())
         .ok_or("could not resolve the DSLX return type")?;
     let text = resolved.to_string().map_err(|e| e.to_string())?;
     parse_value_type(&text).map_err(|e| format!("unsupported result type '{text}': {e}"))
@@ -312,7 +274,7 @@ fn compile_batch(
     let mut source = format!("import {subject} as bx_module;\n");
     for &id in &call_ids {
         let call = &calls[id];
-        source.push_str(&probe_definition(id, &call.function, &call.args)?);
+        source.push_str(&probe_definition(id, &call.function, &call.args, false));
     }
     let module = format!("0bx_batch_{index}");
     let checked = check_probe(&source, &module, imports)?;
@@ -364,6 +326,7 @@ fn compile_batch(
         }
         roots.push(symbol.clone());
     }
+    crate::import_link::retain_reachable_functions(&mut package, &roots)?;
     Ok(ImportBatch {
         package,
         roots,
@@ -377,6 +340,18 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn import_argument_types_use_dslx_widths_and_reject_nested_nominals() {
+        let module =
+            crate::parse_module("extern fn f(x: (u0, s64, u65, (Packet,)[2])) -> ();").unwrap();
+        let mut ty = module.externs[0].params[0].ty.clone();
+        assert_eq!(ty.to_string(), "(uN[0], s64, uN[65], (Packet,)[2])");
+        assert_eq!(
+            normalize_import_type(&mut ty).unwrap_err(),
+            "unsupported nominal type 'Packet' in imported function signature"
+        );
+    }
 
     #[test]
     fn invalid_import_names_from_a_programmatic_ast_are_rejected_before_loading_dslx() {
@@ -402,14 +377,17 @@ mod tests {
     }
 
     #[test]
-    fn transitive_function_with_a_probe_name_survives_batch_compilation()
-    -> Result<(), Box<dyn Error>> {
+    fn checked_batch_retains_only_runtime_callees() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         // A user dependency can have the name of an ordinary generated module
         // and define a function with the name of the generated probe.
         fs::write(
             dir.path().join("bx_batch_0.x"),
-            "pub fn probe_0(x: u8) -> u8 { x + u8:1 }",
+            r#"#[extern_verilog("external_bound {fn} (.out({return}));")]
+fn bound() -> u32 { u32:2 }
+pub fn probe_0(x: u8) -> u8 {
+    for (_i, acc): (u32, u8) in u32:0..bound() { acc + x }(x)
+}"#,
         )?;
         fs::write(
             dir.path().join("wrapper.x"),
@@ -419,23 +397,17 @@ mod tests {
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let import = Import {
-            subject: "wrapper".into(),
-            alias: None,
-        };
-        let mut resolver = ImportResolver::new(&[import], &options)?;
-        resolver.resolve(
-            "wrapper",
-            "apply",
-            vec![Type::Bits {
-                signed: false,
-                width: 8,
-            }],
-        )?;
-        let imports = resolver.finish()?;
-        let batch = &imports.batches[0];
+        let module =
+            crate::parse_module("import wrapper; block b(clk, x: u8) -> u8 { wrapper::apply(x) }")?;
+        let checked = crate::check_module_with_options(&module, &options)?;
+        let batch = &checked.imports.batches[0];
         assert_eq!(batch.roots, ["__wrapper__apply"]);
+        // DSLX folds bound() into the trip count. The snapshot keeps apply,
+        // the user's probe_0 and its loop body.
         assert!(batch.package.get_fn("__bx_batch_0__probe_0").is_some());
+        assert!(batch.package.get_fn("__bx_batch_0__bound").is_none());
+        assert_eq!(batch.package.members.len(), 3);
+        xlsynth_pir::ir_verify::verify_package(&batch.package)?;
         Ok(())
     }
 }
