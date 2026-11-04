@@ -369,6 +369,16 @@ tuple grammar; older released converters contain a sibling-rest crash.
 See the [crate guide](xlsynth-dslx-fuzzer/README.md) for running and reproducing
 the target.
 
+### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_dslx_converter_contracts.rs
+
+Varies DSLX source names, expressions and types to exercise specific converter
+properties alongside passing controls. It runs the standalone converter and
+parses its output with the C++ IR parser. Bitwuzla compares the return value
+and assertion failure condition against independently constructed IR. A nested
+guard case also checks the AND-node count after the semantic proof succeeds.
+The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
+how to retain each failure for replay.
+
 ### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard acyclic random package directly as PIR, including

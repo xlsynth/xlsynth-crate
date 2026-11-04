@@ -9,6 +9,7 @@ pub mod ast;
 pub mod bit_projection;
 pub mod compound;
 pub mod constexpr;
+pub mod converter_contracts;
 mod generate;
 pub mod imported_const;
 pub mod imported_struct;

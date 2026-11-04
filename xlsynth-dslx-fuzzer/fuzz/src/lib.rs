@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod campaign;
 pub mod cli;
 pub mod native;
 
@@ -42,6 +43,8 @@ fn prove_with_assertions(
 pub enum CheckFailure {
     Disproved(String),
     ConverterRejected(String),
+    InvalidOutput(String),
+    StructuralGrowth(String),
     Checker(String),
 }
 
@@ -56,6 +59,8 @@ impl CheckFailure {
         match self {
             Self::Disproved(message)
             | Self::ConverterRejected(message)
+            | Self::InvalidOutput(message)
+            | Self::StructuralGrowth(message)
             | Self::Checker(message) => message,
         }
     }
@@ -76,6 +81,13 @@ fn classify_prepared(
     } else {
         AssertionSemantics::Ignore
     };
+    classify_with_assertions(sample, semantics)
+}
+
+fn classify_with_assertions(
+    sample: &PreparedSample,
+    semantics: AssertionSemantics,
+) -> Result<EquivResult, CheckFailure> {
     match prove_with_assertions(sample, semantics) {
         Ok(result @ (EquivResult::Proved | EquivResult::Inconclusive(_))) => Ok(result),
         failure => {
