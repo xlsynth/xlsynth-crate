@@ -135,6 +135,7 @@ pub struct GvDynamicPowerDiagnostics {
     pub when_changed_during_transition_count: usize,
     pub multiply_attributed_output_transition_count: usize,
     pub unattributed_output_transition_count: usize,
+    /// Owner-pin events with competing selectors on at least one supply rail.
     pub multiply_attributed_internal_event_count: usize,
 }
 
@@ -227,6 +228,18 @@ enum SignalOwner {
 enum PowerSignal {
     Operand(AigOperand),
     Clock,
+    /// Full root-clock pulses admitted by this enable in the preceding low
+    /// phase.
+    GatedClock(AigOperand),
+    /// The ICG's private state tracks its enable while low and holds while
+    /// high.
+    GateLatch(AigOperand),
+}
+
+impl PowerSignal {
+    fn is_clock(self) -> bool {
+        matches!(self, Self::Clock | Self::GatedClock(_))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -277,6 +290,7 @@ struct PreparedInstanceBindings {
 struct PreparedPinBindings {
     timing_arcs: Vec<PreparedTimingBinding>,
     power_groups: Vec<PreparedPowerBinding>,
+    rail_count: usize,
 }
 
 /// An arc's condition and related pin, including a deferred missing-pin error.
@@ -291,6 +305,7 @@ struct PreparedTimingBinding {
 struct PreparedPowerBinding {
     condition: Option<usize>,
     related_pins: Result<Vec<usize>, StringId>,
+    rail: usize,
 }
 
 /// A parsed and bound condition, or a parse error reported only if it is
@@ -542,6 +557,7 @@ impl SampleState {
 struct TransitionScratch {
     timing_candidates: Vec<TimingCauseKey>,
     internal_candidates: Vec<InternalEventKey>,
+    rail_candidate_counts: Vec<usize>,
     conditions: ConditionCache,
 }
 
@@ -557,6 +573,7 @@ impl TransitionScratch {
         Self {
             timing_candidates: Vec::new(),
             internal_candidates: Vec::new(),
+            rail_candidate_counts: Vec::new(),
             conditions: ConditionCache::new(condition_count),
         }
     }
@@ -625,6 +642,18 @@ struct PowerInstance {
     state_signal: Option<PowerSignal>,
 }
 
+impl PowerInstance {
+    /// Finds the enable sampled by the physical output of a certified ICG.
+    fn gated_output_enable(&self) -> Option<AigOperand> {
+        self.pins
+            .iter()
+            .find_map(|pin| match (pin.direction, pin.signal) {
+                (PinDirection::Output, PowerSignal::GatedClock(enable)) => Some(enable),
+                _ => None,
+            })
+    }
+}
+
 #[derive(Clone, Debug)]
 struct StateAlias {
     name: String,
@@ -691,13 +720,11 @@ fn combinational_power_view(model: &LabeledNetlistAig) -> PowerModelView<'_> {
     }
 }
 
-fn sequential_power_signal(signal: SequentialAigSignal) -> Result<PowerSignal, String> {
+fn sequential_power_signal(signal: SequentialAigSignal) -> PowerSignal {
     match signal {
-        SequentialAigSignal::Operand(operand) => Ok(PowerSignal::Operand(operand)),
-        SequentialAigSignal::Clock => Ok(PowerSignal::Clock),
-        SequentialAigSignal::GatedClock(_) => {
-            Err("sequential dynamic-power analysis does not support gated clocks".to_string())
-        }
+        SequentialAigSignal::Operand(operand) => PowerSignal::Operand(operand),
+        SequentialAigSignal::Clock => PowerSignal::Clock,
+        SequentialAigSignal::GatedClock(enable) => PowerSignal::GatedClock(enable),
     }
 }
 
@@ -714,15 +741,13 @@ fn sequential_power_view(
                 pins: instance
                     .pins
                     .iter()
-                    .map(|pin| {
-                        Ok(PowerPin {
-                            pin_name: pin.pin_name.clone(),
-                            direction: pin.direction,
-                            signal: sequential_power_signal(pin.signal)?,
-                            connection: pin.connection.clone(),
-                        })
+                    .map(|pin| PowerPin {
+                        pin_name: pin.pin_name.clone(),
+                        direction: pin.direction,
+                        signal: sequential_power_signal(pin.signal),
+                        connection: pin.connection.clone(),
                     })
-                    .collect::<Result<Vec<_>, String>>()?,
+                    .collect(),
                 is_sequential: instance.state_register_index.is_some(),
                 state_signal: sequential_state_signal(model, instance)?,
             })
@@ -734,23 +759,19 @@ fn sequential_power_view(
         module_ports: model
             .module_ports
             .iter()
-            .map(|port| {
-                Ok(PowerPort {
-                    name: port.name.clone(),
-                    direction: port.direction.clone(),
-                    bits_lsb_to_msb: port
-                        .bits_lsb_to_msb
-                        .iter()
-                        .map(|bit| {
-                            Ok(PowerPortBit {
-                                bit_number: bit.bit_number,
-                                signal: sequential_power_signal(bit.signal)?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, String>>()?,
-                })
+            .map(|port| PowerPort {
+                name: port.name.clone(),
+                direction: port.direction.clone(),
+                bits_lsb_to_msb: port
+                    .bits_lsb_to_msb
+                    .iter()
+                    .map(|bit| PowerPortBit {
+                        bit_number: bit.bit_number,
+                        signal: sequential_power_signal(bit.signal),
+                    })
+                    .collect(),
             })
-            .collect::<Result<Vec<_>, String>>()?,
+            .collect(),
         instances,
     })
 }
@@ -814,6 +835,7 @@ pub fn analyze_dynamic_power_bits(
         library,
         options.module_output_load,
         options.wire_load,
+        &HashMap::new(),
     )?;
     let mut activity = observe_activity(&power_model, library, batch_inputs, &mut topology)?;
     let buckets = build_slew_buckets(library, &[options.primary_input_transition])?;
@@ -934,6 +956,16 @@ pub fn analyze_sequential_dynamic_power(
         // away. No sequential arc remains whose polarity could depend on it.
         None => true,
     };
+    // A falling-edge design starts high. Its first low-transparent latch value
+    // cannot be inferred from the pre-edge sample in that phase.
+    if !active_clock_level
+        && power_model
+            .instances
+            .iter()
+            .any(|instance| instance.gated_output_enable().is_some())
+    {
+        return Err("ICG power analysis requires a rising-edge root clock".to_string());
+    }
     let phase_inputs = build_clocked_phase_inputs(&model.sequential_gate_fn, trace)?;
     let batch_inputs = phase_inputs
         .iter()
@@ -965,6 +997,7 @@ pub fn analyze_sequential_dynamic_power(
         library,
         options.module_output_load,
         options.wire_load,
+        &model.wire_aliases,
     )?;
     let mut activity = observe_ordered_activity(
         &power_model,
@@ -1234,6 +1267,7 @@ fn build_topology(
     library: &Library,
     module_output_load: f64,
     wire_load: WireLoadModel,
+    wire_aliases: &HashMap<(String, u32), (String, u32)>,
 ) -> Result<PowerTopology, String> {
     let cell_by_name: HashMap<_, _> = library
         .cells
@@ -1263,6 +1297,7 @@ fn build_topology(
             );
             insert_net_driver(
                 &mut net_drivers,
+                wire_aliases,
                 (port.name.clone(), bit.bit_number),
                 signal_id,
             )?;
@@ -1270,6 +1305,7 @@ fn build_topology(
     }
 
     let mut instances = Vec::with_capacity(model.instances.len());
+    let mut validated_cells = vec![false; library.cells.len()];
     let mut prepared_bindings = HashMap::new();
     let mut table_budget = CONDITION_TABLE_BUDGET;
     for (instance_index, instance) in model.instances.iter().enumerate() {
@@ -1281,7 +1317,11 @@ fn build_topology(
                     instance.instance_name, instance.cell_type
                 )
             })?;
-        library.cells[cell].validate_driver_type_semantics()?;
+        if !validated_cells[cell] {
+            library.cells[cell].validate_driver_type_semantics()?;
+            validate_internal_power_rails(&library.cells[cell])?;
+            validated_cells[cell] = true;
+        }
         let pin_by_name: HashMap<_, _> = library.cells[cell]
             .pins
             .iter()
@@ -1316,13 +1356,14 @@ fn build_topology(
                 {
                     insert_net_driver(
                         &mut net_drivers,
+                        wire_aliases,
                         (net_name.clone(), *bit_number),
                         signal_id,
                     )?;
                 }
             }
         }
-        let state_aliases = state_aliases_for_instance(instance, &library.cells[cell])?;
+        let state_aliases = state_aliases_for_instance(instance, &library.cells[cell], library)?;
         // The cell fixes the alias names, order, and polarity; only their
         // presence and the ordered bound pins vary across instances of
         // the same cell.
@@ -1354,6 +1395,13 @@ fn build_topology(
 
     let mut sink_pins = vec![0; signals.len()];
     let mut drives_output = vec![false; signals.len()];
+    // Multiple cells may implement the same AIG operand. Follow physical wire
+    // aliases before considering Boolean equivalence for an unresolved net.
+    for (alias, terminal) in wire_aliases {
+        if let Some(&driver) = net_drivers.get(terminal) {
+            net_drivers.insert(alias.clone(), driver);
+        }
+    }
     for (instance_index, instance) in model.instances.iter().enumerate() {
         for (pin_index, pin) in instance.pins.iter().enumerate() {
             if let Some(signal_id) = instances[instance_index].output_signals[pin_index] {
@@ -1427,6 +1475,25 @@ fn build_topology(
     })
 }
 
+/// An unset related_pg_pin denotes whole-cell energy, which cannot be added to
+/// rail-specific energy.
+fn validate_internal_power_rails(cell: &Cell) -> Result<(), String> {
+    let mut whole_cell = cell
+        .pins
+        .iter()
+        .flat_map(|pin| &pin.internal_power)
+        .map(|group| group.related_pg_pin.is_unset());
+    if let Some(first) = whole_cell.next()
+        && whole_cell.any(|mode| mode != first)
+    {
+        return Err(format!(
+            "Liberty cell '{}' mixes whole-cell and related_pg_pin internal_power groups",
+            cell.name
+        ));
+    }
+    Ok(())
+}
+
 /// Binds selector names without making errors in unvisited metadata observable.
 fn prepare_instance_bindings(
     library: &Library,
@@ -1489,10 +1556,17 @@ fn prepare_instance_bindings(
                         .ok_or(arc.related_pin),
                 })
                 .collect();
+            let mut rail_indices = HashMap::new();
             let power_groups = pin
                 .internal_power
                 .iter()
                 .map(|group| PreparedPowerBinding {
+                    rail: {
+                        let next_index = rail_indices.len();
+                        *rail_indices
+                            .entry(library.resolve_string(&group.related_pg_pin))
+                            .or_insert(next_index)
+                    },
                     condition: prepare_condition(group.when),
                     related_pins: if group.related_pins.is_empty() {
                         Ok(vec![owner_pin_index])
@@ -1513,6 +1587,7 @@ fn prepare_instance_bindings(
             PreparedPinBindings {
                 timing_arcs,
                 power_groups,
+                rail_count: rail_indices.len(),
             }
         })
         .collect();
@@ -1529,11 +1604,65 @@ fn prepare_instance_bindings(
     }
 }
 
-/// Builds Liberty state-variable aliases backed by the mapped register Q.
+/// Binds Liberty state names to the FF's stored Q or the ICG's held enable.
 fn state_aliases_for_instance(
     instance: &PowerInstance,
     cell: &Cell,
+    library: &Library,
 ) -> Result<Vec<StateAlias>, String> {
+    if let Some(enable) = instance.gated_output_enable() {
+        // The caller can supply a characterized library separately from the
+        // one used to project the netlist. Its physical roles must still agree.
+        let gate = cell.positive_edge_clock_gate(library)?.ok_or_else(|| {
+            format!(
+                "power library lacks certified ICG behavior for instance '{}'",
+                instance.instance_name
+            )
+        })?;
+        if let Some(test_pin) = gate.test_pins.first()
+            && !instance.pins.iter().any(|pin| pin.pin_name == *test_pin)
+        {
+            return Err(format!(
+                "ICG '{}' lacks the power library's test input '{test_pin}'",
+                instance.instance_name
+            ));
+        }
+        for (name, signal) in [
+            (&gate.clock_pin, PowerSignal::Clock),
+            (&gate.output_pin, PowerSignal::GatedClock(enable)),
+            (&gate.enable_pins[0], PowerSignal::Operand(enable)),
+        ] {
+            if !instance
+                .pins
+                .iter()
+                .any(|pin| pin.pin_name == *name && pin.signal == signal)
+            {
+                return Err(format!(
+                    "ICG '{}' has incompatible power-library pin role for '{name}'",
+                    instance.instance_name
+                ));
+            }
+        }
+        let Some(pin) = cell
+            .pins
+            .iter()
+            .find(|p| p.direction == PinDirection::Internal as i32)
+        else {
+            return Ok(Vec::new());
+        };
+        if !pin.internal_power.is_empty() {
+            return Err(format!(
+                "ICG '{}' has unsupported internal_power on its private latch pin '{}'",
+                instance.instance_name,
+                library.resolve_string(&pin.name)
+            ));
+        }
+        return Ok(vec![StateAlias {
+            name: library.resolve_string(&pin.name).to_string(),
+            signal: PowerSignal::GateLatch(enable),
+            complemented: false,
+        }]);
+    }
     let Some(signal) = instance.state_signal else {
         return Ok(Vec::new());
     };
@@ -1593,15 +1722,21 @@ fn add_signal(
             operand_sources.entry(operand).or_default().push(signal_id);
         }
         PowerSignal::Clock => *clock_signal = Some(signal_id),
+        PowerSignal::GatedClock(_) | PowerSignal::GateLatch(_) => {
+            // Physical net labels identify an ICG driver even if another gate
+            // samples the same enable. Its private latch is only a state alias.
+        }
     }
     signal_id
 }
 
 fn insert_net_driver(
     net_drivers: &mut HashMap<(String, u32), SignalId>,
+    wire_aliases: &HashMap<(String, u32), (String, u32)>,
     key: (String, u32),
     signal_id: SignalId,
 ) -> Result<(), String> {
+    let key = wire_aliases.get(&key).cloned().unwrap_or(key);
     if let Some(previous) = net_drivers.insert(key.clone(), signal_id) {
         return Err(format!(
             "net '{}[{}]' has multiple dynamic-power drivers ({previous:?} and {signal_id:?})",
@@ -1638,6 +1773,12 @@ fn resolve_source(
         PowerSignal::Clock => clock_signal
             .map(ResolvedSource::Signal)
             .ok_or_else(|| format!("{context}: selected clock has no physical driver")),
+        PowerSignal::GatedClock(_) => {
+            Err(format!("{context}: gated clock has no physical ICG driver"))
+        }
+        PowerSignal::GateLatch(_) => {
+            Err(format!("{context}: private ICG state cannot drive a net"))
+        }
         PowerSignal::Operand(operand) => {
             match operand_sources
                 .get(&operand)
@@ -1690,25 +1831,31 @@ fn topological_instance_order(
     let mut outgoing = vec![BTreeSet::new(); instances.len()];
     let mut indegree = vec![0usize; instances.len()];
     for (consumer, instance) in instances.iter().enumerate() {
-        // FF outputs are timing roots driven by the selected clock, so their
-        // D-side fanin must not create a combinational dependency cycle.
-        let dependencies: BTreeSet<_> = if instance.is_sequential {
-            BTreeSet::new()
-        } else {
-            instance
-                .pin_sources
+        // A gated FF's Q slew depends on GCLK, whose slew depends on root CLK.
+        // D and EN can be driven by Q itself without creating a slew cycle.
+        let clock_driven = instance.is_sequential
+            || instance
+                .output_signals
                 .iter()
-                .filter_map(|source| match source {
-                    ResolvedSource::Signal(signal_id) => match signals[signal_id.0].owner {
+                .flatten()
+                .any(|id| matches!(signals[id.0].source, PowerSignal::GatedClock(_)));
+        let dependencies: BTreeSet<_> = instance
+            .pin_sources
+            .iter()
+            .filter_map(|source| match source {
+                ResolvedSource::Signal(signal_id)
+                    if !clock_driven || signals[signal_id.0].source.is_clock() =>
+                {
+                    match signals[signal_id.0].owner {
                         SignalOwner::CellOutput { instance } if instance != consumer => {
                             Some(instance)
                         }
                         _ => None,
-                    },
-                    ResolvedSource::Literal => None,
-                })
-                .collect()
-        };
+                    }
+                }
+                _ => None,
+            })
+            .collect();
         indegree[consumer] = dependencies.len();
         for dependency in dependencies {
             outgoing[dependency].insert(consumer);
@@ -1826,6 +1973,7 @@ fn observe_scalar_activity(
     let mut scratch = TransitionScratch::new(topology);
     let live_nodes = vec![true; model.gate_fn.gates.len()];
     let mut nodes = Vec::new();
+    let mut gate_latches = packed::GateLatchSamples::new(topology);
     for chunk_start in (0..batch_inputs.len()).step_by(256) {
         let chunk_len = (batch_inputs.len() - chunk_start).min(256);
         simulate_chunk(
@@ -1836,6 +1984,10 @@ fn observe_scalar_activity(
             &live_nodes,
             &mut nodes,
         );
+        gate_latches.capture(
+            &nodes,
+            packed::clock_levels(&clock_values[chunk_start..chunk_start + chunk_len]),
+        )?;
         for lane in 0..chunk_len {
             let sample_index = chunk_start + lane;
             // A failed fill can leave current partially overwritten, but it is
@@ -1846,6 +1998,7 @@ fn observe_scalar_activity(
                 &nodes,
                 lane,
                 clock_values[sample_index],
+                &gate_latches,
                 &mut current,
             )?;
             if has_previous {
@@ -1874,6 +2027,7 @@ fn sample_state_into(
     nodes: &[gate_simd::Vec256],
     lane: usize,
     clock_value: Option<bool>,
+    gate_latches: &packed::GateLatchSamples,
     state: &mut SampleState,
 ) -> Result<(), String> {
     let operand_value = |operand: AigOperand| {
@@ -1885,6 +2039,12 @@ fn sample_state_into(
     };
     let signal_value = |signal: PowerSignal| match signal {
         PowerSignal::Operand(operand) => operand_value(operand),
+        PowerSignal::GateLatch(enable) => gate_latches.value_at(enable, lane),
+        PowerSignal::GatedClock(enable) => {
+            let clock = clock_value
+                .ok_or_else(|| "power sample omitted selected clock value".to_string())?;
+            Ok(clock && gate_latches.value_at(enable, lane)?)
+        }
         PowerSignal::Clock => {
             clock_value.ok_or_else(|| "power sample omitted selected clock value".to_string())
         }
@@ -1997,6 +2157,18 @@ fn observe_transition(
                         library.resolve_string(&name)
                     )
                 })?;
+                let ResolvedSource::Signal(source) =
+                    topology_instance.pin_sources[related_pin_index]
+                else {
+                    continue;
+                };
+                if !timing_source_drives_output(
+                    topology.signals[source.0].source,
+                    topology.signals[output_signal.0].source,
+                    is_sequential_edge_arc,
+                ) {
+                    continue;
+                }
                 let source_rise = current_values[related_pin_index];
                 if previous_values[related_pin_index] == source_rise
                     || (!is_sequential_edge_arc
@@ -2013,16 +2185,6 @@ fn observe_transition(
                         &mut result.diagnostics,
                         &mut scratch.conditions,
                     )?
-                {
-                    continue;
-                }
-                let ResolvedSource::Signal(source) =
-                    topology_instance.pin_sources[related_pin_index]
-                else {
-                    continue;
-                };
-                if is_sequential_edge_arc
-                    && !matches!(topology.signals[source.0].owner, SignalOwner::Clock)
                 {
                     continue;
                 }
@@ -2111,10 +2273,11 @@ fn observe_transition(
                 ));
             }
             if !candidates.is_empty() {
-                attribute_candidates(
+                attribute_internal_candidates(
                     candidates,
-                    &mut result.internal_events,
-                    &mut result.diagnostics.multiply_attributed_internal_event_count,
+                    &bindings.pins[owner_pin_index],
+                    &mut scratch.rail_candidate_counts,
+                    result,
                 );
             }
         }
@@ -2132,6 +2295,35 @@ fn attribute_candidates<K: Copy + Ord>(
     let weight = 1.0 / candidates.len() as f64;
     for &candidate in candidates {
         *totals.entry(candidate).or_default() += weight;
+    }
+}
+
+/// Charges each supply rail independently, splitting competing selectors on
+/// that rail.
+fn attribute_internal_candidates(
+    candidates: &[InternalEventKey],
+    pin: &PreparedPinBindings,
+    rail_counts: &mut Vec<usize>,
+    result: &mut ObservedActivity,
+) {
+    if pin.rail_count == 1 || candidates.len() == 1 {
+        attribute_candidates(
+            candidates,
+            &mut result.internal_events,
+            &mut result.diagnostics.multiply_attributed_internal_event_count,
+        );
+        return;
+    }
+    rail_counts.clear();
+    rail_counts.resize(pin.rail_count, 0);
+    for candidate in candidates {
+        rail_counts[pin.power_groups[candidate.group].rail] += 1;
+    }
+    result.diagnostics.multiply_attributed_internal_event_count +=
+        usize::from(rail_counts.iter().any(|&count| count > 1));
+    for &candidate in candidates {
+        let count = rail_counts[pin.power_groups[candidate.group].rail];
+        *result.internal_events.entry(candidate).or_default() += 1.0 / count as f64;
     }
 }
 
@@ -2191,6 +2383,20 @@ fn when_is_true(
 
 fn is_sequential_edge_timing_type(timing_type: &str) -> bool {
     matches!(timing_type, "rising_edge" | "falling_edge")
+}
+
+/// GCLK follows its root clock. A simultaneous FF-driven change on EN can
+/// affect a later pulse, while clock-to-Q slew follows the FF's local clock.
+fn timing_source_drives_output(
+    source: PowerSignal,
+    output: PowerSignal,
+    ff_edge_arc: bool,
+) -> bool {
+    if matches!(output, PowerSignal::GatedClock(_)) {
+        matches!(source, PowerSignal::Clock)
+    } else {
+        !ff_edge_arc || source.is_clock()
+    }
 }
 
 fn timing_type_allows_output(
@@ -2339,13 +2545,14 @@ fn seed_root_histograms(
 }
 
 fn signal_source_transition(
-    owner: SignalOwner,
+    source: PowerSignal,
     primary_input_transition: f64,
     clock_transition: f64,
 ) -> f64 {
-    match owner {
-        SignalOwner::Clock => clock_transition,
-        SignalOwner::ModuleInput | SignalOwner::CellOutput { .. } => primary_input_transition,
+    if source.is_clock() {
+        clock_transition
+    } else {
+        primary_input_transition
     }
 }
 
@@ -2360,9 +2567,11 @@ fn output_fallback_transition(
         SignalOwner::CellOutput { instance } if model.instances[instance].is_sequential => {
             clock_transition
         }
-        SignalOwner::ModuleInput | SignalOwner::Clock | SignalOwner::CellOutput { .. } => {
-            primary_input_transition
-        }
+        _ => signal_source_transition(
+            topology.signals[output.0].source,
+            primary_input_transition,
+            clock_transition,
+        ),
     }
 }
 
@@ -2422,7 +2631,7 @@ fn propagate_slew_histograms(
                         let fallback_bucket = slew_bucket_index(
                             buckets,
                             signal_source_transition(
-                                topology.signals[cause.source.0].owner,
+                                topology.signals[cause.source.0].source,
                                 primary_input_transition,
                                 clock_transition,
                             ),
@@ -2609,7 +2818,7 @@ fn calculate_internal_energy(
         let mut average_energy = 0.0;
         if histogram_total == 0.0 {
             let fallback_transition = signal_source_transition(
-                topology.signals[event.source.0].owner,
+                topology.signals[event.source.0].source,
                 primary_input_transition,
                 clock_transition,
             );
@@ -2884,7 +3093,14 @@ mod tests {
                 binding_test_instance(&["B", "A"]),
             ],
         };
-        let topology = build_topology(&model, &library, 0.0, WireLoadModel::default()).unwrap();
+        let topology = build_topology(
+            &model,
+            &library,
+            0.0,
+            WireLoadModel::default(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert!(Arc::ptr_eq(
             &topology.instances[0].bindings,
             &topology.instances[1].bindings

@@ -822,8 +822,9 @@ after conversion from the CLI's fF values. An absent `wire_load` means both
 coefficients are zero, preserving the JSON format for disabled wire load.
 
 Sequential toggle reports preserve clock ports and pins as explicit
-`kind: "clock"` entries with two assumed transitions per cycle: one
-inactive-to-active edge and one active-to-inactive edge. These clock
+`kind: "clock"` entries. The root clock makes two transitions per cycle.
+A gated clock makes two transitions for each cycle in which its enable is
+asserted immediately before the root rising edge. These clock
 transitions are included in labeled port and pin aggregates. The report also
 records active-edge count separately.
 
@@ -850,16 +851,22 @@ analyzer creates 32 logarithmically spaced buckets over the transition range
 present in the Liberty timing and power tables; each lookup uses the arithmetic
 midpoint of its bucket. Output transitions with multiple simultaneously
 eligible related inputs are fractionally attributed so one observed output edge
-still has total weight one. Liberty `when` expressions use the stable pin
-values from the earlier sample in each adjacent sample pair. Consequently, an
+still has total weight one. For internal power, competing causes share the
+event within each `related_pg_pin`. The model sums the signed energy
+contributions from the characterized rails. Liberty `when` expressions use
+the stable pin values from the earlier sample in each adjacent sample pair. Consequently, an
 `.irvals` record should represent one stable cycle boundary rather than an
 intra-cycle event trace.
 
-Sequential power treats FF Q outputs as clock-driven timing roots, so ordinary
-Q-to-D feedback does not form a combinational power-topology cycle. It uses
-Liberty `rising_edge` or `falling_edge` clock-to-Q arcs for Q slew, includes
-clock-pin capacitance and clock-pin `internal_power`, and reports average power
-as total energy divided by `cycle_count * cycle_time`.
+Sequential power uses the clock connected to each FF for its Liberty
+`rising_edge` or `falling_edge` clock-to-Q slew. For a supported ICG, the root
+clock drives the gate's clock-input capacitance every cycle, including cycles
+with a blocked pulse. On a passed pulse the gate's clock-to-output arc sets
+the slew at the downstream FF clock pins. The ICG output's switching energy
+includes those pins' capacitance and the configured wire load. The model
+evaluates `internal_power` groups on the ICG's external pins. Their `when`
+conditions may reference the held latch state. The report gives average
+power as total energy divided by `cycle_count * cycle_time`.
 
 The toggle JSON has this structure:
 
@@ -917,8 +924,8 @@ clock output that ANDs the latched value with the root clock, as in ASAP7
 `ICGx1_ASAP7_75t_R`. Tie any test-enable pin low. Regenerate older Liberty
 protos with `lib2proto` to record the gate behavior. Each input record supplies
 the settled data inputs immediately before the root edge. Gated FFs hold their
-previous value on disabled edges. Toggle and dynamic-power reports currently
-require ungated clocks.
+previous value on disabled edges. Toggle and dynamic-power reports use the same
+pre-edge enable to determine which clock pulses pass.
 
 Sequential mode rejects standalone latches, asynchronous clear/preset cells,
 mixed clock edges, cascaded gates, and other derived clocks. Both

@@ -896,6 +896,7 @@ mod tests {
             module_ports: Vec::new(),
             module_boundaries: Vec::new(),
             instances: Vec::new(),
+            wire_aliases: Default::default(),
         }
     }
 

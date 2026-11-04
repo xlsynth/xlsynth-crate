@@ -11,8 +11,8 @@ use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::emit::emit_netlist_as_text;
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_labeled_sequential_netlist_aig;
 use xlsynth_g8r::netlist::gv_eval::{
-    GvEvalOptions, LabeledSequentialNetlistAig, SequentialAigSignal,
-    load_labeled_sequential_netlist_aig_with_liberty,
+    GvEvalOptions, GvSequentialSignalToggleActivity, LabeledSequentialNetlistAig,
+    SequentialAigSignal, load_labeled_sequential_netlist_aig_with_liberty,
 };
 use xlsynth_g8r::netlist::io::{read_gv_for_proof_from_path, read_gv_from_str};
 use xlsynth_g8r::netlist::power::GvSequentialDynamicPowerOptions;
@@ -198,22 +198,49 @@ fn icg_projection_labels_clocks_and_holds_physical_state_for_q_or_qn() -> anyhow
             ],
         );
         assert_eq!(trace.final_state().values(), [IrBits::bool(true)]);
+        let activity = model
+            .count_toggle_activity(&trace)
+            .map_err(anyhow::Error::msg)?;
+        let clock_pins = activity
+            .instances
+            .iter()
+            .flat_map(|instance| {
+                instance.pins.iter().filter_map(|pin| match pin.activity {
+                    GvSequentialSignalToggleActivity::Clock { toggle_count } => Some((
+                        (instance.instance_name.as_str(), pin.pin_name.as_str()),
+                        toggle_count,
+                    )),
+                    GvSequentialSignalToggleActivity::Sampled { .. } => None,
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
-            model.count_toggle_activity(&trace).unwrap_err(),
-            "sequential toggle reporting does not support gated clocks"
+            clock_pins,
+            BTreeMap::from([
+                (("gate", "CLK"), 6),
+                (("gate", "GCLK"), 2),
+                (("bit0", "CLK"), 2)
+            ])
         );
+        let power = model
+            .analyze_dynamic_power(&library, &trace, GvSequentialDynamicPowerOptions::default())
+            .map_err(anyhow::Error::msg)?;
+        let q = &power
+            .instances
+            .iter()
+            .find(|instance| instance.instance_name == "bit0")
+            .unwrap()
+            .outputs[0];
         assert_eq!(
-            model
-                .analyze_dynamic_power(&library, &trace, GvSequentialDynamicPowerOptions::default())
-                .unwrap_err(),
-            "sequential dynamic-power analysis does not support gated clocks"
+            (q.rise_count, q.fall_count),
+            (usize::from(!inverted), usize::from(inverted))
         );
+        assert_eq!(power.total_dynamic_energy, 61.0);
     }
     Ok(())
 }
 
 #[test]
-#[ignore = "sequential dynamic-power analysis currently rejects gated clocks"]
 fn icg_dynamic_power_counts_passed_pulses_and_blocked_clock_energy() -> anyhow::Result<()> {
     let library = parse_clock_gate_library(CLOCK_GATE_LIB)?;
     let path = NamedTempFile::new()?;
@@ -274,6 +301,189 @@ fn icg_dynamic_power_counts_passed_pulses_and_blocked_clock_energy() -> anyhow::
     assert_eq!(report.cell_output_switching_energy, 8.0); // 4 GCLK edges × 4 pF / 2
     assert_eq!(report.cell_internal_energy, 65.0);
     assert_eq!(report.total_dynamic_energy, 84.0);
+    Ok(())
+}
+
+#[test]
+fn icg_latches_the_pre_edge_enable_across_packed_batches() -> anyhow::Result<()> {
+    let netlist = r#"module bank(input clk, input en, output q);
+      wire ready, gclk;
+      DFF enable_ff (.CLK(clk), .D(en), .Q(ready));
+      ICG gate (.CLK(clk), .ENA(ready), .SE(1'b0), .GCLK(gclk));
+      DFF sink (.CLK(gclk), .D(1'b1), .Q(q));
+    endmodule"#;
+    let library = parse_clock_gate_library(
+        &CLOCK_GATE_LIB
+            .replace("!ENA", "!IQ")
+            .replace(r#"when: "ENA""#, r#"when: "IQ""#),
+    )?;
+    let model = project_clock_gate_for_proof(netlist, &library)?;
+    // Cycle 85's rise starts a new 256-phase SIMD chunk, and cycle 170's
+    // fall starts the next. The final root edge sets ready for a future pulse.
+    let passed = [85, 170, 171, 255];
+    let cycles = (0..257)
+        .map(|i| vec![IrBits::bool(passed.contains(&(i + 1)) || i == 256)])
+        .collect::<Vec<_>>();
+    let trace = model
+        .simulate_bits(
+            &cycles,
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let activity = model
+        .count_toggle_activity(&trace)
+        .map_err(anyhow::Error::msg)?;
+    let gate = activity
+        .instances
+        .iter()
+        .find(|i| i.instance_name == "gate")
+        .unwrap();
+    let clock = &gate
+        .pins
+        .iter()
+        .find(|p| p.pin_name == "GCLK")
+        .unwrap()
+        .activity;
+    assert_eq!(
+        *clock,
+        GvSequentialSignalToggleActivity::Clock { toggle_count: 8 }
+    );
+    let power = model
+        .analyze_dynamic_power(&library, &trace, GvSequentialDynamicPowerOptions::default())
+        .map_err(anyhow::Error::msg)?;
+    let gate = power
+        .instances
+        .iter()
+        .find(|i| i.instance_name == "gate")
+        .unwrap();
+    assert_eq!(
+        (gate.outputs[0].rise_count, gate.outputs[0].fall_count),
+        (4, 4)
+    );
+    let clock_energy = gate
+        .pin_internal_energy
+        .iter()
+        .find(|p| p.pin_name == "CLK")
+        .unwrap();
+    // Both root edges see the pre-edge latch state. 506 blocked edges cost
+    // 1 pJ each, and the eight edges of four full pulses cost 2 pJ each.
+    assert_eq!(clock_energy.internal_energy, 522.0);
+    Ok(())
+}
+
+#[test]
+fn icgs_with_one_enable_keep_separate_loads_and_propagate_local_clock_slew() -> anyhow::Result<()> {
+    let netlist = r#"module gated_bit(input gclk, input d, output q);
+      DFF bit0 (.CLK(gclk), .D(d), .Q(q));
+    endmodule
+    module bank(input clk, input en, input d, output [2:0] q);
+      wire g0, g1, ck0, ck1, d_alias, d_copy;
+      assign ck0 = g0;
+      assign ck1 = g1;
+      assign d_alias = d;
+      BUF copy (.A(d), .Y(d_copy));
+      gated_bit lane (.gclk(ck0), .d(d_alias), .q(q[0]));
+      DFF bit1 (.CLK(ck1), .D(d_copy), .Q(q[1]));
+      DFF bit2 (.CLK(ck1), .D(d_copy), .Q(q[2]));
+      ICG light (.CLK(clk), .ENA(en), .SE(1'b0), .GCLK(g0));
+      ICG heavy (.CLK(clk), .ENA(en), .SE(1'b0), .GCLK(g1));
+    endmodule"#;
+    let library = parse_clock_gate_library(CLOCK_GATE_LIB)?;
+    let file = NamedTempFile::new()?;
+    std::fs::write(file.path(), netlist)?;
+    let model = load_labeled_sequential_netlist_aig_with_liberty(
+        file.path(),
+        &library,
+        &GvEvalOptions {
+            module_name: Some("bank".into()),
+            ..Default::default()
+        },
+    )?;
+    let trace = model
+        .simulate_bits(
+            &[vec![IrBits::bool(true), IrBits::bool(true)]],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let activity = model
+        .count_toggle_activity(&trace)
+        .map_err(anyhow::Error::msg)?;
+    let child = activity
+        .module_boundaries
+        .iter()
+        .find(|b| b.instance_path == "lane")
+        .unwrap();
+    let child_clock = child.ports.iter().find(|p| p.port_name == "gclk").unwrap();
+    assert_eq!(
+        child_clock.bits_lsb_to_msb[0].activity,
+        GvSequentialSignalToggleActivity::Clock { toggle_count: 2 }
+    );
+
+    let options = GvSequentialDynamicPowerOptions {
+        clock_transition: 1.0,
+        primary_input_transition: 1.0,
+        ..Default::default()
+    };
+    let power = model
+        .analyze_dynamic_power(&library, &trace, options)
+        .map_err(anyhow::Error::msg)?;
+    let outputs = power
+        .instances
+        .iter()
+        .filter_map(|i| i.outputs.first().map(|o| (i.instance_name.as_str(), o)))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(outputs["light"].rise_load, 4.0);
+    assert_eq!(outputs["light"].switching_energy, 4.0);
+    assert_eq!(outputs["heavy"].rise_load, 8.0);
+    assert_eq!(outputs["heavy"].switching_energy, 8.0);
+    // Root slew is 1 ns, both GCLK outputs have 8 ns slew, and that input
+    // slew selects a 6 ns Q transition on every sink, including the first
+    // declared cell in the child hierarchy.
+    let q_bucket = power
+        .slew_buckets
+        .iter()
+        .position(|b| b.lower <= 6.0 && 6.0 < b.upper)
+        .unwrap();
+    for name in ["lane/bit0", "bit1", "bit2"] {
+        assert_eq!(outputs[name].slew_histogram.rise[q_bucket], 1.0, "{name}");
+    }
+    assert_eq!(power.diagnostics.unattributed_output_transition_count, 0);
+    Ok(())
+}
+
+#[test]
+fn icg_power_requires_compatible_roles_in_the_characterized_library() -> anyhow::Result<()> {
+    let library = parse_clock_gate_library(CLOCK_GATE_LIB)?;
+    let model = project_clock_gate_for_proof(CLOCK_GATE_WIRING, &library)?;
+    let trace = model
+        .simulate_bits(
+            &[vec![IrBits::bool(true), IrBits::bool(false)]],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .map_err(anyhow::Error::msg)?;
+    // Both libraries certify a low-transparent gate. Swapping ENA and SE in
+    // the characterization changes which physical pin must be tied low.
+    let mut characterized = library;
+    let gate = characterized
+        .cells
+        .iter_mut()
+        .find(|c| c.name == "ICG")
+        .unwrap()
+        .clock_gate
+        .as_mut()
+        .unwrap();
+    std::mem::swap(&mut gate.enable_pins, &mut gate.test_pins);
+    let error = model
+        .analyze_dynamic_power(
+            &characterized,
+            &trace,
+            GvSequentialDynamicPowerOptions::default(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        "ICG 'gate' has incompatible power-library pin role for 'SE'"
+    );
     Ok(())
 }
 

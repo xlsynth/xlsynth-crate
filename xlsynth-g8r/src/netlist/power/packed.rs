@@ -5,12 +5,14 @@
 use super::{
     BoundConditionTerm, ConditionValueSlot, EdgeValue, GvDynamicPowerDiagnostics, InstanceTopology,
     InternalEventKey, ObservedActivity, PowerInstance, PowerModelView, PowerSignal, PowerTopology,
-    PowerTransitionKind, ResolvedSource, Signal, SignalId, SignalOwner, TimingCauseKey,
-    attribute_candidates, is_sequential_edge_timing_type, simulate_chunk, timing_sense_matches,
-    timing_type_allows_output, transition_table,
+    PowerTransitionKind, ResolvedSource, Signal, SignalId, TimingCauseKey, attribute_candidates,
+    is_sequential_edge_timing_type, simulate_chunk, timing_sense_matches,
+    timing_source_drives_output, timing_type_allows_output, transition_table,
 };
+use crate::aig::AigOperand;
 use crate::aig_sim::gate_simd::Vec256;
 use crate::liberty_model::{Library, Pin, PinDirection};
+use std::collections::BTreeMap;
 use xlsynth_pir::IrBits;
 
 const EMPTY: Vec256 = Vec256::zero();
@@ -52,12 +54,82 @@ impl Samples {
     }
 }
 
+/// Settled values of each distinct low-transparent ICG latch across a batch.
+pub(super) struct GateLatchSamples {
+    by_enable: BTreeMap<AigOperand, Samples>,
+}
+
+impl GateLatchSamples {
+    pub(super) fn new(topology: &PowerTopology) -> Self {
+        let by_enable = topology
+            .signals
+            .iter()
+            .filter_map(|signal| {
+                let PowerSignal::GatedClock(enable) = signal.source else {
+                    return None;
+                };
+                Some((
+                    enable,
+                    Samples {
+                        before: EMPTY,
+                        now: EMPTY,
+                    },
+                ))
+            })
+            .collect();
+        Self { by_enable }
+    }
+
+    /// Each high sample is immediately preceded by the low pre-edge sample.
+    /// During that high phase, register updates may change the live enable
+    /// while the latch retains the bit that admitted the clock pulse.
+    pub(super) fn capture(
+        &mut self,
+        nodes: &[Vec256],
+        clock: Option<Vec256>,
+    ) -> Result<(), String> {
+        for (&enable, latch) in &mut self.by_enable {
+            let high =
+                clock.ok_or_else(|| "power sample omitted selected clock value".to_string())?;
+            let raw = nodes
+                .get(enable.node.id)
+                .ok_or_else(|| format!("AIG node {} is out of range", enable.node.id))?
+                .apply_neg(enable.negated);
+            // Every nonfinal batch has 256 lanes. If this batch starts high,
+            // the previous batch ended low, with the latch tracking its enable.
+            let predecessor = latch.now.get_lane(255);
+            let input = Samples::from_batch(raw, predecessor);
+            let held = (high & input.before) | (!high & input.now);
+            *latch = Samples::from_batch(held, predecessor);
+        }
+        Ok(())
+    }
+
+    pub(super) fn value_at(&self, enable: AigOperand, lane: usize) -> Result<bool, String> {
+        self.by_enable
+            .get(&enable)
+            .map(|sample| sample.now.get_lane(lane))
+            .ok_or_else(|| format!("no sampled clock-gate latch for enable {enable:?}"))
+    }
+}
+
+/// Packs the selected root clock levels, or returns None for an unclocked
+/// trace.
+pub(super) fn clock_levels(values: &[Option<bool>]) -> Option<Vec256> {
+    let mut words = [0u64; 4];
+    for (lane, value) in values.iter().enumerate() {
+        words[lane / 64] |= u64::from((*value)?) << (lane % 64);
+    }
+    Some(Vec256::from_words(words))
+}
+
 /// Packed simulator nodes, predecessor bits and clock phases for one batch.
 struct SampleBatch<'a> {
     nodes: &'a [Vec256],
     carry: &'a [bool],
     valid: Vec256,
     clock: Option<Samples>,
+    gate_latches: &'a GateLatchSamples,
     active_edges: EdgeValue<Vec256>,
 }
 
@@ -65,6 +137,15 @@ impl SampleBatch<'_> {
     fn signal(&self, source: PowerSignal) -> Option<Samples> {
         match source {
             PowerSignal::Clock => self.clock,
+            PowerSignal::GateLatch(enable) => self.gate_latches.by_enable.get(&enable).copied(),
+            PowerSignal::GatedClock(enable) => {
+                let latch = self.gate_latches.by_enable.get(&enable)?;
+                let clock = self.clock?;
+                Some(Samples {
+                    before: clock.before & latch.before,
+                    now: clock.now & latch.now,
+                })
+            }
             PowerSignal::Operand(op) => {
                 let value =
                     Samples::from_batch(*self.nodes.get(op.node.id)?, self.carry[op.node.id]);
@@ -191,6 +272,7 @@ struct CellScratch {
     conditions: Vec<Option<Samples>>,
     timing: Candidates<TimingCauseKey>,
     internal: Candidates<InternalEventKey>,
+    rail_candidate_counts: Vec<usize>,
 }
 
 impl CellScratch {
@@ -201,6 +283,7 @@ impl CellScratch {
             conditions: Vec::new(),
             timing: Candidates::new(),
             internal: Candidates::new(),
+            rail_candidate_counts: Vec::new(),
         }
     }
 
@@ -285,10 +368,11 @@ impl CellScratch {
             timing.clear();
             let internal = &mut self.internal.lanes[lane];
             for events in internal.chunk_by(|a, b| a.owner_pin == b.owner_pin) {
-                attribute_candidates(
+                super::attribute_internal_candidates(
                     events,
-                    &mut result.internal_events,
-                    &mut result.diagnostics.multiply_attributed_internal_event_count,
+                    &bindings.pins[events[0].owner_pin],
+                    &mut self.rail_candidate_counts,
+                    result,
                 );
             }
             internal.clear();
@@ -331,6 +415,16 @@ impl CellScratch {
                     continue;
                 }
                 let related = *binding.related_pin.as_ref().ok()?;
+                let ResolvedSource::Signal(source) = layout.pin_sources[related] else {
+                    continue;
+                };
+                if !timing_source_drives_output(
+                    signals[source.0].source,
+                    signals[output.0].source,
+                    edge_arc,
+                ) {
+                    continue;
+                }
                 let source_values = self.pins[related];
                 for source_rise in [false, true] {
                     if !edge_arc
@@ -350,12 +444,6 @@ impl CellScratch {
                         &self.conditions,
                         &mut result.diagnostics,
                     )?;
-                    let ResolvedSource::Signal(source) = layout.pin_sources[related] else {
-                        continue;
-                    };
-                    if edge_arc && !matches!(signals[source.0].owner, SignalOwner::Clock) {
-                        continue;
-                    }
                     attributed |= mask;
                     self.timing.add(
                         mask,
@@ -460,6 +548,7 @@ pub(super) fn observe(
     let live = vec![true; model.gate_fn.gates.len()];
     let mut carry = vec![false; live.len()];
     let mut nodes = Vec::new();
+    let mut gate_latches = GateLatchSamples::new(topology);
     for start in (0..inputs.len()).step_by(256) {
         let len = (inputs.len() - start).min(256);
         simulate_chunk(model.gate_fn, inputs, start, len, &live, &mut nodes);
@@ -479,13 +568,8 @@ pub(super) fn observe(
                 edge[i / 64] |= bit;
             }
         }
-        let clock = clocks[start..start + len].iter().enumerate().try_fold(
-            [0u64; 4],
-            |mut words, (i, value)| {
-                words[i / 64] |= u64::from((*value)?) << (i % 64);
-                Some(words)
-            },
-        );
+        let clock = clock_levels(&clocks[start..start + len]);
+        gate_latches.capture(&nodes, clock).ok()?;
         let previous_clock = start
             .checked_sub(1)
             .and_then(|i| clocks[i])
@@ -494,8 +578,8 @@ pub(super) fn observe(
             nodes: &nodes,
             carry: &carry,
             valid: Vec256::from_words(valid),
-            clock: clock
-                .map(|words| Samples::from_batch(Vec256::from_words(words), previous_clock)),
+            clock: clock.map(|levels| Samples::from_batch(levels, previous_clock)),
+            gate_latches: &gate_latches,
             active_edges: EdgeValue {
                 rise: Vec256::from_words(active_edges.rise),
                 fall: Vec256::from_words(active_edges.fall),

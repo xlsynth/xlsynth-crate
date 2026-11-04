@@ -412,8 +412,18 @@ fn sample_fill_overwrites_values_and_reuses_nested_storage() {
     let signal_pointer = sample.signal_values.as_ptr();
     let pin_pointers: Vec<_> = sample.pin_values.iter().map(Vec::as_ptr).collect();
     let alias_pointers: Vec<_> = sample.state_alias_values.iter().map(Vec::as_ptr).collect();
+    let gate_latches = packed::GateLatchSamples::new(&fixture.topology);
     for value in [true, false, true] {
-        sample_state_into(&model, &fixture.topology, &[], 0, Some(value), &mut sample).unwrap();
+        sample_state_into(
+            &model,
+            &fixture.topology,
+            &[],
+            0,
+            Some(value),
+            &gate_latches,
+            &mut sample,
+        )
+        .unwrap();
         assert_eq!(sample.signal_values, vec![value; 6]);
         assert_eq!(sample.pin_values, vec![vec![value; 3]; 2]);
         assert_eq!(sample.state_alias_values, vec![vec![!value]; 2]);
@@ -460,21 +470,36 @@ fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
             fixture.topology.signals[3 * index + pin].source = source;
         }
     }
+    // The second buffer sees a gated clock and its latch in its when
+    // expression.
+    let enable = AigOperand {
+        negated: true,
+        ..data
+    };
+    fixture.instances[1].pins[1].signal = PowerSignal::GatedClock(enable);
+    fixture.topology.signals[4].source = PowerSignal::GatedClock(enable);
+    fixture.topology.instances[1].state_aliases[0].signal = PowerSignal::GateLatch(enable);
     let model = PowerModelView {
         module_name: "test",
         gate_fn: &fixture.gate_fn,
         module_ports: Vec::new(),
         instances: fixture.instances,
     };
-    for len in [63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257] {
+    for len in [
+        63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257, 512, 513, 769,
+    ] {
         for sparse in [false, true] {
             // Sparse traces start high and only change at the final sample.
             // Busy traces exercise fractional thirds and both alias polarities.
+            let data_level = |i| if sparse { i != len - 1 } else { i % 2 == 0 };
             let inputs: Vec<_> = (0..len)
-                .map(|i| vec![IrBits::bool(if sparse { i != len - 1 } else { i % 2 == 0 })])
+                .map(|i| vec![IrBits::bool(data_level(i))])
                 .collect();
-            let clocks: Vec<_> = (0..len).map(|i| Some(i % 3 == 0)).collect();
+            let clocks: Vec<_> = (0..len).map(|i| Some(i % 3 == 1)).collect();
             let kinds = vec![PowerTransitionKind::Combinational; len - 1];
+            for signal in &mut fixture.topology.signals {
+                signal.edges = EdgeValue::default();
+            }
             let mut scalar_topology = PowerTopology {
                 signals: fixture.topology.signals.clone(),
                 instances: fixture.topology.instances.clone(),
@@ -502,6 +527,15 @@ fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
             assert_eq!(scalar.internal_events, packed.internal_events);
             assert_eq!(scalar.timing_causes, packed.timing_causes);
             assert_eq!(scalar.unattributed, packed.unattributed);
+            // The busy trace flips enable at the rising edge. Only its pre-edge
+            // value decides the pulse, including pulses split across batches.
+            let pulses = (1..len).step_by(3).filter(|high| !data_level(high - 1));
+            let gated_edges = &fixture.topology.signals[4].edges;
+            assert_eq!(gated_edges.rise, pulses.clone().count());
+            assert_eq!(
+                gated_edges.fall,
+                pulses.filter(|high| high + 1 < len).count()
+            );
             for (a, b) in scalar_topology
                 .signals
                 .iter()
