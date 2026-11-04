@@ -10,7 +10,7 @@ use crate::netlist::fanout_opt::{
     FanoutOptimizationOptions, FanoutOptimizationReport, optimize_fanout,
 };
 use crate::netlist::mapped::MappedNetlist;
-use crate::netlist::resize::{ResizeOptions, ResizeReport, resize_netlist};
+use crate::netlist::resize::{ResizeOptions, ResizeReport, resize_netlist_with_remaining_budget};
 use anyhow::{Context, Result};
 
 /// Electrical optimization stages requested after covering, in execution order.
@@ -67,26 +67,14 @@ impl PostMappingOptions {
             .recovery
             .as_mut()
             .map(|options| {
-                let result = resize_netlist(
+                resize_netlist_with_remaining_budget(
                     &mut mapped.module,
                     &mapped.nets,
                     &mut mapped.interner,
                     library,
                     options,
-                );
-                // Fanout errors return before this point and spend no visits.
-                // A failed resize does not report how much work it performed.
-                if let Some(limit) = &mut options.timing_evaluation_budget {
-                    *limit = result
-                        .as_ref()
-                        .map_or(0, |r| limit.saturating_sub(r.upsize.propagated_instances));
-                }
-                if let Some(limit) = &mut options.recovery_evaluation_budget {
-                    *limit = result
-                        .as_ref()
-                        .map_or(0, |r| limit.saturating_sub(r.downsize.propagated_instances));
-                }
-                result.context("mapped area recovery failed")
+                )
+                .context("mapped area recovery failed")
             })
             .transpose()?;
         Ok(PostMappingReport { fanout, recovery })
@@ -139,7 +127,7 @@ mod tests {
     };
 
     #[test]
-    fn fanout_failure_preserves_recovery_budget_for_the_other_cover() -> Result<()> {
+    fn initial_timing_failure_preserves_recovery_budget_for_the_other_cover() -> Result<()> {
         let mut builder = LibraryBuilder::from_library(timing_library(&[
             ("INV", "!A", 1.0, &[("A", 1.0)]),
             (
@@ -176,26 +164,27 @@ mod tests {
                 reference_load: 1.0,
             },
         )?;
-        let candidates = map_gatefn_to_delay_candidates(&b.build(), &mapping_library)?;
-        // The local cover selects OAI21 + INV. Tying an OR input to zero
-        // disables its timing arcs, so fanout STA fails before any resizing.
-        let mut local = candidates.local.as_ref().unwrap().netlist.clone();
-        let fanout = FanoutOptimizationOptions::default();
-        assert!(optimize_fanout(&mut local, &library, fanout.clone()).is_err());
-
-        let options = PostMappingOptions {
-            fanout: Some(fanout),
-            recovery: Some(ResizeOptions {
-                max_upsize_rounds: 0,
-                recovery_evaluation_budget: Some(1),
-                ..Default::default()
-            }),
-        };
-        let (_, report) = options.select_delay_cover(candidates, &library)?;
-        let recovery = report.recovery.unwrap();
-        assert_eq!(recovery.work_limits.recovery_evaluations, 1);
-        assert_eq!(recovery.downsize.propagated_instances, 1);
-        assert_eq!((recovery.initial_area, recovery.final_area), (2.0, 1.0));
+        let aig = b.build();
+        for fanout in [None, Some(FanoutOptimizationOptions::default())] {
+            let candidates = map_gatefn_to_delay_candidates(&aig, &mapping_library)?;
+            let options = PostMappingOptions {
+                fanout,
+                recovery: Some(ResizeOptions {
+                    max_upsize_rounds: 0,
+                    recovery_evaluation_budget: Some(1),
+                    ..Default::default()
+                }),
+            };
+            // The local OAI21 + INV ties an OR input to zero, disabling
+            // its timing arcs. Initial STA fails in the first enabled stage.
+            let mut local = candidates.local.as_ref().unwrap().netlist.clone();
+            assert!(options.apply(&mut local, &library).is_err());
+            let (_, report) = options.select_delay_cover(candidates, &library)?;
+            let recovery = report.recovery.unwrap();
+            assert_eq!(recovery.work_limits.recovery_evaluations, 1);
+            assert_eq!(recovery.downsize.propagated_instances, 1);
+            assert_eq!((recovery.initial_area, recovery.final_area), (2.0, 1.0));
+        }
         Ok(())
     }
 }
