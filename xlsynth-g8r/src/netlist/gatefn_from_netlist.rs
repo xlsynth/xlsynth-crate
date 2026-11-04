@@ -155,6 +155,9 @@ pub struct LabeledSequentialNetlistAig {
     pub module_ports: Vec<SequentialModulePortAigBinding>,
     pub module_boundaries: Vec<SequentialModuleBoundaryAigBinding>,
     pub instances: Vec<SequentialInstanceAigBinding>,
+    /// Physical terminal net bits for simple wiring aliases, used to assign
+    /// capacitance to the correct driver even when two pins have equal logic.
+    pub wire_aliases: HashMap<(String, u32), (String, u32)>,
 }
 
 /// One flattened child-module boundary bound to sequential transition signals.
@@ -1236,14 +1239,6 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
         &resolved,
         selected_clock.as_ref(),
     )?;
-    let module_boundaries = build_sequential_module_boundary_aig_bindings(
-        &normalized,
-        module_boundaries,
-        interner,
-        &resolved,
-        selected_clock.as_ref(),
-        &gate_enables,
-    )?;
     let mut external_outputs = Vec::new();
     for port in &normalized.ports {
         if port.direction != PortDirection::Output {
@@ -1295,6 +1290,16 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    let wire_terminals = physical_wire_terminals(&normalized, interner, &instances);
+    let module_boundaries = build_sequential_module_boundary_aig_bindings(
+        &normalized,
+        module_boundaries,
+        interner,
+        &resolved,
+        &wire_terminals,
+        selected_clock.as_ref(),
+        &gate_enables,
+    )?;
     let labeled_clock = selected_clock.map(|clock| LabeledSequentialClock {
         port_name: clock.port_name,
         active_edge: clock.active_edge,
@@ -1311,7 +1316,9 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
         registers,
     )
     .map_err(|error| format!("invalid sequential netlist transition function: {}", error))?;
+    let wire_aliases = named_wire_aliases(&normalized, nets, interner, &wire_terminals);
     Ok(LabeledSequentialNetlistAig {
+        wire_aliases,
         module_name,
         sequential_gate_fn,
         clock: labeled_clock,
@@ -1319,6 +1326,105 @@ pub fn project_labeled_sequential_netlist_aig_with_boundaries(
         module_boundaries,
         instances,
     })
+}
+
+/// Follows uniquely driven wire assigns from physical drivers. Reconvergent
+/// Boolean logic and disconnected assignment cycles do not establish aliases.
+fn physical_wire_terminals(
+    normalized: &NormalizedNetlistModule<'_>,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    instances: &[SequentialInstanceAigBinding],
+) -> Vec<Option<BitIndex>> {
+    if normalized.assigns.is_empty() {
+        return Vec::new();
+    }
+    let mut terminals = vec![None; normalized.bit_count()];
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Input {
+            for &bit in &port.bits {
+                terminals[bit] = Some(bit);
+            }
+        }
+    }
+    for instance in &normalized.instances {
+        for pin in &instances[instance.raw_index.0].pins {
+            if pin.direction != PinDirection::Output {
+                continue;
+            }
+            let connection = instance
+                .connections
+                .iter()
+                .find(|conn| interner.resolve(conn.port) == Some(pin.pin_name.as_str()));
+            if let Some([BitSource::Bit(bit)]) = connection.map(|conn| conn.bits.as_slice()) {
+                terminals[*bit] = Some(*bit);
+            }
+        }
+    }
+    let mut wire_sources = HashMap::new();
+    for assign in &normalized.assigns {
+        for (&target, rhs) in assign.lhs_bits.iter().zip(&assign.rhs_bits) {
+            let source = match rhs {
+                BitExpr::Source(BitSource::Bit(source)) if terminals[target].is_none() => {
+                    Some(*source)
+                }
+                _ => None,
+            };
+            // A multiply assigned bit has no unique wire source.
+            wire_sources
+                .entry(target)
+                .and_modify(|prior| *prior = None)
+                .or_insert(source);
+        }
+    }
+    let mut outgoing = vec![Vec::new(); normalized.bit_count()];
+    for (target, source) in wire_sources {
+        if let Some(source) = source {
+            outgoing[source].push(target);
+        }
+    }
+    let mut pending = terminals.iter().flatten().copied().collect::<Vec<_>>();
+    while let Some(bit) = pending.pop() {
+        for &next in &outgoing[bit] {
+            terminals[next] = terminals[bit];
+            pending.push(next);
+        }
+    }
+    terminals
+}
+
+/// Without a wire assign, the canonical bit itself identifies the terminal.
+fn physical_terminal(wire_terminals: &[Option<BitIndex>], canonical: BitIndex) -> BitIndex {
+    wire_terminals
+        .get(canonical)
+        .copied()
+        .flatten()
+        .unwrap_or(canonical)
+}
+
+/// Names the physical aliases so power replay can assign loads to their
+/// drivers.
+fn named_wire_aliases(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    wire_terminals: &[Option<BitIndex>],
+) -> HashMap<(String, u32), (String, u32)> {
+    let net_key = |idx| {
+        let bit = normalized.bit(idx);
+        (
+            crate::netlist::bit_ref::net_name(bit.net, nets, interner),
+            bit.bit_number,
+        )
+    };
+    normalized
+        .canonical_bits()
+        .iter()
+        .enumerate()
+        .filter_map(|(raw, &canonical)| {
+            let terminal = physical_terminal(wire_terminals, canonical);
+            (raw != terminal).then(|| (net_key(raw), net_key(terminal)))
+        })
+        .collect()
 }
 
 /// Verified FF and ICG instance metadata in normalized netlist order.
@@ -2642,6 +2748,7 @@ fn build_sequential_module_boundary_aig_bindings(
     boundaries: &[ElaboratedModuleBoundary],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     resolved: &ResolvedBitValues,
+    wire_terminals: &[Option<BitIndex>],
     selected_clock: Option<&SelectedSequentialClock>,
     gate_enables: &HashMap<BitIndex, AigOperand>,
 ) -> Result<Vec<SequentialModuleBoundaryAigBinding>, String> {
@@ -2659,20 +2766,12 @@ fn build_sequential_module_boundary_aig_bindings(
                     let mut bits_lsb_to_msb = Vec::new();
                     for raw_bit_idx in normalized.net_bits(port.net) {
                         let canonical_bit_idx = normalized.canonical_bit(*raw_bit_idx);
-                        let clock_source = selected_clock
-                            .and_then(|clock| clock.wiring_bits.get(&canonical_bit_idx));
-                        let signal = if let Some(enable) =
-                            clock_source.and_then(|bit| gate_enables.get(bit))
-                        {
+                        // A boundary can pass a clock in either direction, even
+                        // if no FF uses this particular alias.
+                        let terminal = physical_terminal(wire_terminals, canonical_bit_idx);
+                        let signal = if let Some(enable) = gate_enables.get(&terminal) {
                             SequentialAigSignal::GatedClock(*enable)
-                        } else if selected_clock.is_some_and(|clock| clock.bit == canonical_bit_idx)
-                        {
-                            if port.direction != PortDirection::Input {
-                                return Err(format!(
-                                    "selected clock crosses non-input module boundary port '{}'",
-                                    name
-                                ));
-                            }
+                        } else if selected_clock.is_some_and(|clock| clock.bit == terminal) {
                             SequentialAigSignal::Clock
                         } else {
                             let Some(operand) = resolved.resolve_bit(canonical_bit_idx) else {

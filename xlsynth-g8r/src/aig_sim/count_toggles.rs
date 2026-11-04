@@ -164,7 +164,8 @@ fn node_kind(node: &AigNode) -> ToggleNodeKind {
     }
 }
 
-fn count_low_bits_set(words: [u64; 4], bit_count: usize) -> usize {
+/// Counts asserted lanes up to the valid sample count in a packed batch.
+pub(crate) fn count_low_bits_set(words: [u64; 4], bit_count: usize) -> usize {
     assert!(
         bit_count <= 256,
         "bit_count must be <= 256; got {bit_count}"

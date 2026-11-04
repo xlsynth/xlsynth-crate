@@ -1,5 +1,13 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 library (clock_gate_test) {
+  time_unit: "1ns";
+  voltage_unit: "1V";
+  capacitive_load_unit (1,pf);
+  nom_voltage: 1;
+  lu_table_template (slew) {
+    variable_1: input_net_transition;
+    index_1 ("1,2,4,8");
+  }
   cell (BUF) {
     area: 1;
     pin (A) { direction: input; }
@@ -11,9 +19,27 @@ library (clock_gate_test) {
       clocked_on: "CLK";
       next_state: "D";
     }
-    pin (CLK) { direction: input; clock: true; }
+    pin (CLK) {
+      direction: input;
+      clock: true;
+      capacitance: 4;
+      internal_power () { power (scalar) { values ("5"); } }
+    }
     pin (D) { direction: input; }
-    pin (Q) { direction: output; function: "IQ"; }
+    pin (Q) {
+      direction: output;
+      function: "IQ";
+      timing () {
+        related_pin: "CLK";
+        timing_type: rising_edge;
+        rise_transition (slew) { values ("1,1,6,6"); }
+        fall_transition (slew) { values ("1,1,6,6"); }
+      }
+      internal_power () {
+        related_pin: "CLK";
+        power (scalar) { values ("11"); }
+      }
+    }
   }
   cell (AND2) {
     area: 1;
@@ -40,13 +66,35 @@ library (clock_gate_test) {
       table: "L L L : - : L, L L H : - : H, L H L : - : H, L H H : - : H, H - - : - : N";
     }
     pin (IQ) { direction: internal; internal_node: "IQ"; }
-    pin (CLK) { direction: input; clock: true; clock_gate_clock_pin: true; }
-    pin (ENA) { direction: input; clock_gate_enable_pin: true; }
+    pin (CLK) {
+      direction: input;
+      clock: true;
+      clock_gate_clock_pin: true;
+      capacitance: 2;
+      internal_power () { when: "!ENA"; power (scalar) { values ("1"); } }
+      internal_power () { when: "ENA"; power (scalar) { values ("2"); } }
+    }
+    pin (ENA) {
+      direction: input;
+      clock_gate_enable_pin: true;
+      capacitance: 2;
+      internal_power () { power (scalar) { values ("7"); } }
+    }
     pin (SE) { direction: input; clock_gate_test_pin: true; }
     pin (GCLK) {
       direction: output;
       clock_gate_out_pin: true;
       state_function: "CLK & IQ";
+      timing () {
+        related_pin: "CLK";
+        timing_sense: positive_unate;
+        rise_transition (scalar) { values ("8"); }
+        fall_transition (scalar) { values ("8"); }
+      }
+      internal_power () {
+        related_pin: "CLK";
+        power (scalar) { values ("3"); }
+      }
     }
   }
 }

@@ -2,12 +2,14 @@
 
 //! Functional evaluation of Liberty-backed gate-level netlists.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use serde::Serialize;
 use xlsynth_pir::{IrBits, IrValue};
 
+use crate::aig::topo::extract_cone;
 use crate::aig::{AigOperand, SequentialGateFn};
 use crate::aig_sim::count_toggles;
 use crate::aig_sim::gate_sim::{self, Collect};
@@ -137,7 +139,7 @@ pub enum GvSequentialSignalToggleActivity {
         toggle_count: usize,
         toggle_rate: f64,
     },
-    /// A selected clock is metadata rather than a transition-AIG input.
+    /// The root clock or an ICG output with two transitions per enabled cycle.
     Clock { toggle_count: usize },
 }
 
@@ -533,22 +535,17 @@ impl LabeledSequentialNetlistAig {
         let counted =
             count_sequential_toggle_activity_with_all_node_counts(&self.sequential_gate_fn, trace)?;
         let sequential = counted.activity;
-        let per_node_toggles = counted.per_node_toggles;
-        let transition_count = sequential.logic_transition_count;
-        let cycle_count = sequential.cycle_count;
-        let clock_toggle_count = sequential.clock_transition_count;
+        let counts = SequentialSignalToggleCounts {
+            per_node: counted.per_node_toggles,
+            logic_transitions: sequential.logic_transition_count,
+            root_clock: sequential.clock_transition_count,
+            gated_clocks: self.count_gated_clock_toggles(trace)?,
+        };
 
         let module_ports = self
             .module_ports
             .iter()
-            .map(|port| {
-                sequential_module_port_toggle_activity(
-                    port,
-                    &per_node_toggles,
-                    transition_count,
-                    clock_toggle_count,
-                )
-            })
+            .map(|port| sequential_module_port_toggle_activity(port, &counts))
             .collect::<Result<Vec<_>, String>>()?;
         let module_boundaries = self
             .module_boundaries
@@ -557,14 +554,7 @@ impl LabeledSequentialNetlistAig {
                 let ports = boundary
                     .ports
                     .iter()
-                    .map(|port| {
-                        sequential_module_port_toggle_activity(
-                            port,
-                            &per_node_toggles,
-                            transition_count,
-                            clock_toggle_count,
-                        )
-                    })
+                    .map(|port| sequential_module_port_toggle_activity(port, &counts))
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(SequentialModuleBoundaryToggleActivity {
                     instance_path: boundary.instance_path.clone(),
@@ -586,12 +576,7 @@ impl LabeledSequentialNetlistAig {
                             pin_name: pin.pin_name.clone(),
                             direction: cell_pin_direction(pin.direction)?,
                             connection: toggle_pin_connection(&pin.connection),
-                            activity: sequential_signal_toggle_activity(
-                                pin.signal,
-                                &per_node_toggles,
-                                transition_count,
-                                clock_toggle_count,
-                            )?,
+                            activity: counts.activity(pin.signal)?,
                         })
                     })
                     .collect::<Result<Vec<_>, String>>()?;
@@ -624,8 +609,8 @@ impl LabeledSequentialNetlistAig {
         let clock = self.clock.as_ref().map(|clock| GvSequentialClockActivity {
             port_name: clock.port_name.clone(),
             active_edge: clock.active_edge,
-            active_edge_count: cycle_count,
-            toggle_count: clock_toggle_count,
+            active_edge_count: sequential.cycle_count,
+            toggle_count: counts.root_clock,
         });
 
         Ok(GvSequentialToggleActivity {
@@ -637,6 +622,55 @@ impl LabeledSequentialNetlistAig {
             module_boundaries,
             instances,
         })
+    }
+
+    /// Counts one complete gated-clock pulse for each asserted pre-edge enable.
+    fn count_gated_clock_toggles(
+        &self,
+        trace: &SequentialTrace,
+    ) -> Result<HashMap<AigOperand, usize>, String> {
+        let mut counts: HashMap<_, _> = self
+            .instances
+            .iter()
+            .flat_map(|instance| &instance.pins)
+            .filter_map(|pin| match pin.signal {
+                SequentialAigSignal::GatedClock(enable) => Some((enable, 0)),
+                SequentialAigSignal::Operand(_) | SequentialAigSignal::Clock => None,
+            })
+            .collect();
+        if counts.is_empty() {
+            return Ok(counts);
+        }
+        if self.clock.as_ref().and_then(|clock| clock.active_edge)
+            == Some(SequentialClockEdge::Falling)
+        {
+            return Err("ICG toggle reporting requires a rising-edge root clock".into());
+        }
+        let gate_fn = &self.sequential_gate_fn.transition;
+        let roots = counts.keys().map(|enable| enable.node).collect::<Vec<_>>();
+        if let Some(invalid) = roots.iter().find(|node| node.id >= gate_fn.gates.len()) {
+            return Err(format!(
+                "ICG enable AIG node {} is out of range",
+                invalid.id
+            ));
+        }
+        let (cone, inputs) = extract_cone(&roots, &gate_fn.gates);
+        let mut live = vec![false; gate_fn.gates.len()];
+        for node in cone.into_iter().chain(inputs) {
+            live[node.id] = true;
+        }
+        let samples = trace.pre_edge_inputs();
+        let mut nodes = Vec::new();
+        for start in (0..samples.len()).step_by(256) {
+            let len = (samples.len() - start).min(256);
+            let packed = gate_simd::pack_ordered_input_chunk(gate_fn, samples, start, len);
+            gate_simd::eval_live_node_values_dense_into(gate_fn, &packed, &live, &mut nodes);
+            for (enable, toggles) in &mut counts {
+                let asserted = nodes[enable.node.id].apply_neg(enable.negated);
+                *toggles += 2 * count_toggles::count_low_bits_set(asserted.to_array(), len);
+            }
+        }
+        Ok(counts)
     }
 
     fn lower_ir_values(&self, args: &[IrValue]) -> Result<Vec<Vec<IrBits>>, String> {
@@ -781,26 +815,40 @@ fn operand_toggle_stats(
     Ok((toggle_count, toggle_count as f64 / transition_count as f64))
 }
 
-fn sequential_signal_toggle_activity(
-    signal: SequentialAigSignal,
-    per_node_toggles: &[usize],
-    transition_count: usize,
-    clock_toggle_count: usize,
-) -> Result<GvSequentialSignalToggleActivity, String> {
-    match signal {
-        SequentialAigSignal::Operand(operand) => {
-            let (toggle_count, toggle_rate) =
-                operand_toggle_stats(operand, per_node_toggles, transition_count)?;
-            Ok(GvSequentialSignalToggleActivity::Sampled {
-                toggle_count,
-                toggle_rate,
-            })
-        }
-        SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock {
-            toggle_count: clock_toggle_count,
-        }),
-        SequentialAigSignal::GatedClock(_) => {
-            Err("sequential toggle reporting does not support gated clocks".to_string())
+/// Activity for each AIG operand and each clock waveform in a settled trace.
+struct SequentialSignalToggleCounts {
+    per_node: Vec<usize>,
+    logic_transitions: usize,
+    root_clock: usize,
+    gated_clocks: HashMap<AigOperand, usize>,
+}
+
+impl SequentialSignalToggleCounts {
+    /// Looks up the waveform count for a port, boundary, or cell pin.
+    fn activity(
+        &self,
+        signal: SequentialAigSignal,
+    ) -> Result<GvSequentialSignalToggleActivity, String> {
+        match signal {
+            SequentialAigSignal::Operand(operand) => {
+                let (toggle_count, toggle_rate) =
+                    operand_toggle_stats(operand, &self.per_node, self.logic_transitions)?;
+                Ok(GvSequentialSignalToggleActivity::Sampled {
+                    toggle_count,
+                    toggle_rate,
+                })
+            }
+            SequentialAigSignal::Clock => Ok(GvSequentialSignalToggleActivity::Clock {
+                toggle_count: self.root_clock,
+            }),
+            SequentialAigSignal::GatedClock(enable) => {
+                Ok(GvSequentialSignalToggleActivity::Clock {
+                    toggle_count: *self
+                        .gated_clocks
+                        .get(&enable)
+                        .ok_or_else(|| format!("no physical ICG binding for enable {enable:?}"))?,
+                })
+            }
         }
     }
 }
@@ -808,9 +856,7 @@ fn sequential_signal_toggle_activity(
 /// Builds one source-labeled sequential module-port activity report.
 fn sequential_module_port_toggle_activity(
     port: &SequentialModulePortAigBinding,
-    per_node_toggles: &[usize],
-    transition_count: usize,
-    clock_toggle_count: usize,
+    counts: &SequentialSignalToggleCounts,
 ) -> Result<SequentialModulePortToggleActivity, String> {
     let direction = module_port_direction(&port.direction)?;
     let bits_lsb_to_msb = port
@@ -819,12 +865,7 @@ fn sequential_module_port_toggle_activity(
         .map(|bit| {
             Ok(SequentialModulePortBitToggleActivity {
                 bit_number: bit.bit_number,
-                activity: sequential_signal_toggle_activity(
-                    bit.signal,
-                    per_node_toggles,
-                    transition_count,
-                    clock_toggle_count,
-                )?,
+                activity: counts.activity(bit.signal)?,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

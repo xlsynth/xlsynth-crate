@@ -81,6 +81,11 @@ pub struct SequentialTrace {
 }
 
 impl SequentialTrace {
+    /// Settled data and prior Q values for each root-clock edge.
+    pub(crate) fn pre_edge_inputs(&self) -> &[Vec<IrBits>] {
+        &self.transition_inputs
+    }
+
     /// Returns externally visible outputs for each simulated cycle.
     pub fn external_outputs(&self) -> &[Vec<IrBits>] {
         &self.external_outputs

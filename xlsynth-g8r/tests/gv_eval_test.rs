@@ -746,6 +746,9 @@ cells: {
         shape_id: 1
         values: 10.0
       }
+    }
+    internal_power: {
+      related_pin_string_ids: 1
       tables: {
         transition: POWER_TRANSITION_FALL
         shape_id: 1
@@ -806,6 +809,81 @@ endmodule
     assert_eq!(
         output_rise.instances[0].pin_internal_energy[0].internal_energy,
         10.0
+    );
+}
+
+#[test]
+fn dynamic_power_sums_signed_rails_and_splits_competing_selectors_within_each_rail() {
+    let liberty = r#"
+format_magic: 5496997758228255311
+units: { time_unit: "ns" capacitance_unit: "pf" voltage_unit: "V" }
+nominal_voltage: 1.0
+cells: {
+  name: "BUF"
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: {
+    name_string_id: 2 direction: OUTPUT function_string_id: 1
+    internal_power: {
+      related_pin_string_ids: 1 related_pg_pin_string_id: 3
+      tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: 10.0 }
+      tables: { transition: POWER_TRANSITION_FALL shape_id: 1 values: 6.0 }
+    }
+    internal_power: {
+      related_pin_string_ids: 1 related_pg_pin_string_id: 4
+      tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: -4.0 }
+    }
+    internal_power: {
+      related_pin_string_ids: 1 related_pg_pin_string_id: 3 when_string_id: 5
+      tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: 2.0 }
+    }
+  }
+  pins: { name_string_id: 5 direction: INPUT }
+}
+lut_shapes: {}
+interned_strings: ["A", "Y", "VDD", "VSS", "C"]
+"#;
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  BUF buf_inst (.A(a), .C(1'b1), .Y(y));
+endmodule
+"#;
+    let (_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
+    let library = xlsynth_g8r::netlist::io::load_liberty_from_path(&liberty_path).unwrap();
+    let model =
+        load_labeled_netlist_aig_with_liberty(&netlist_path, &library, &GvEvalOptions::default())
+            .unwrap();
+    let low = IrValue::parse_typed("(bits[1]:0)").unwrap();
+    let high = IrValue::parse_typed("(bits[1]:1)").unwrap();
+    let rise_samples = [low.clone(), high.clone()];
+    let options = GvDynamicPowerOptions::default();
+    // The two eligible VDD selectors share the rise. VSS contributes its
+    // signed energy independently: (10 + 2) / 2 - 4 = 2.
+    let rise = model
+        .analyze_dynamic_power(&library, &rise_samples, options)
+        .unwrap();
+    assert_eq!(rise.cell_internal_energy, 2.0);
+    assert_eq!(rise.diagnostics.multiply_attributed_internal_event_count, 1);
+    // Both VDD groups match the related pin, but only one characterizes a
+    // fall. It gets the full 6 pJ. VSS also has only a rise table.
+    let fall = model
+        .analyze_dynamic_power(&library, &[high, low], options)
+        .unwrap();
+    assert_eq!(fall.cell_internal_energy, 6.0);
+    assert_eq!(fall.diagnostics.multiply_attributed_internal_event_count, 0);
+
+    // A whole-cell group on another pin conflicts with the rail-specific
+    // description of this cell as well.
+    let mut mixed = library;
+    let mut input_group = mixed.cells[0].pins[1].internal_power[0].clone();
+    input_group.related_pg_pin = Default::default();
+    mixed.cells[0].pins[0].internal_power.push(input_group);
+    assert_eq!(
+        model
+            .analyze_dynamic_power(&mixed, &rise_samples, options)
+            .unwrap_err(),
+        "Liberty cell 'BUF' mixes whole-cell and related_pg_pin internal_power groups"
     );
 }
 
