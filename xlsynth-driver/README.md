@@ -1486,6 +1486,12 @@ registers. A register directly connecting both a module input and output needs
 a non-inverting D-to-output implementation; mapping fails if none is available.
 Direct wires bypass ABC, and wire-only designs need no ABC mapping invocation.
 
+The native mapper selects FFs before it maps combinational logic. In a library
+without an inverter, the chosen FF can require a polarity the mapper cannot
+produce. `--register-cell` can help when one alternative FF works for every
+bit. A design that needs different FF polarities on individual bits can still
+fail to map.
+
 By default, `g8r2gv` looks for flop bits whose next state is
 `enable ? data : own_Q`. For eligible bits sharing the same enable and
 polarity, the mapper emits one integrated clock gate (ICG), connects the

@@ -11,6 +11,9 @@ use crate::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 
 /// Maps combinational logic with g8r's area mapper and assembles the selected
 /// flops and clock gates into the same flat netlist.
+///
+/// Flop selection precedes combinational mapping. With no library inverter,
+/// mapping can fail even when another choice of flop polarities would work.
 pub fn map_sequential_to_area_netlist(
     design: &SequentialGateFn,
     library: &Library,
