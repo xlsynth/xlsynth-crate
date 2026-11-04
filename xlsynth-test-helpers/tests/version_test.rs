@@ -230,6 +230,18 @@ fn test_xlsynth_aug_opt_crate_version() {
 }
 
 #[test]
+fn test_xlsynth_bx_crate_version() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
+    let workspace_root = get_workspace_root();
+    let workspace_path = workspace_root.join("xlsynth-bx");
+    validate_local_version_is_latest_patch_version("xlsynth-bx", workspace_path.as_path()).unwrap();
+}
+
+#[test]
 fn test_xlsynth_driver_crate_version() {
     let _ = env_logger::builder().is_test(true).try_init();
     if std::env::var("CARGO_NET_OFFLINE").is_ok() {
@@ -318,6 +330,7 @@ fn test_crate_versions_are_equal() {
         workspace_root.join("xlsynth-ir-value"),
         workspace_root.join("xlsynth-vastly"),
         workspace_root.join("xlsynth-aug-opt"),
+        workspace_root.join("xlsynth-bx"),
         workspace_root.join("xlsynth-driver"),
         workspace_root.join("xlsynth-mcmc"),
         workspace_root.join("xlsynth-mcmc-pir"),

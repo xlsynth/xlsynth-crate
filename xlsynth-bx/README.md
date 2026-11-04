@@ -1,0 +1,85 @@
+# xlsynth-bx
+
+BX describes clocked hardware with DSLX-style value expressions. The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. An ordinary DSLX function can supply combinational logic through an `extern fn` declaration.
+
+```text
+extern fn math::transform(x: u8) -> u16;
+
+struct ResultPorts {
+    data: u16,
+    valid: bool,
+}
+
+pub block transform_pipe(clk, rst, x: u8, valid_in: bool) -> ResultPorts {
+    reg data_q: u16;
+    reg valid_q: bool = false;
+    if valid_in {
+        data_q := math::transform(x);
+    }
+    valid_q := valid_in;
+    ResultPorts { data: data_q, valid: valid_q }
+}
+```
+
+## Compile and link
+
+Use `parse_module` and `check_module` to inspect BX without supplying function bodies. Pass their checked result to `lower_module`, or use `compile` for all three stages. Supply the PIR package from an independent DSLX conversion, or `empty_package("design")` for a standalone block.
+
+```rust
+use xlsynth_bx::{compile, ResetBehavior};
+use xlsynth_pir::ir_parser::Parser;
+
+let ir = r#"package design
+fn __math__transform(x: bits[8] id=1) -> bits[16] {
+  ret zero_ext.2: bits[16] = zero_ext(x, new_bit_count=16, id=2)
+}"#;
+let linked = Parser::new(ir).parse_and_validate_package().map_err(|e| e.to_string())?;
+let bx = r#"
+extern fn math::transform(x: u8) -> u16;
+block transform_pipe(clk, x: u8) -> u16 {
+    reg q: u16;
+    q := math::transform(x);
+    q
+}"#;
+let package = compile(bx, linked, ResetBehavior::default())?;
+let block_ir = package.to_string();
+# Ok::<(), String>(())
+```
+
+Declare and call a DSLX function by its module-qualified name, such as `math::transform`. The qualifier is a single module identifier. The linker looks for the corresponding DSLX symbol (`__math__transform`) in the supplied IR package, whatever the package is named. Two modules can export functions with the same name.
+
+For an unqualified declaration such as `extern fn transform(x: u8) -> u16;`, call `transform(x)`. The linker tries the plain IR name first and then the DSLX symbol for the package's own module. To bind a specialization or choose a local alias, supply the exact IR symbol, as in `extern fn widen(x: u8) -> u16 = "__math__transform";`.
+
+The linker checks argument order, widths, aggregate shapes, and result type before emitting `invoke`. Signedness and struct names are BX-level distinctions. Their IR representations are bits and tuples respectively. The linked function and its callees must have pure IR bodies.
+
+## Clocked blocks
+
+- The first port is `clk`, followed by optional `rst` and typed data inputs. The final expression drives the outputs continuously. A struct result exposes its fields in declaration order. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
+- A `reg` name in an expression reads its current value. Each register has exactly one `:=` update site. A surrounding `if` supplies the load enable. An ordinary value expression such as `q := if en { x } else { q };` supplies a mux on the data input. All registers update together at the active edge.
+- A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
+- A module with one block selects it as top. With multiple blocks, a single `pub block` selects the top. For other configurations, select the desired block on the returned package.
+
+### Calling a block
+
+An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
+
+```text
+struct LaneOut { data: u8, valid: bool }
+extern block lane(clk, rst, x: u8) -> LaneOut;
+
+block pair(clk, rst, x: u8, y: u8) -> (LaneOut, LaneOut) {
+    let left = lane(x);
+    let right = lane(y);
+    (left, right)
+}
+```
+
+Use the same call syntax for a BX block defined anywhere in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
+
+For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
+
+BX currently accepts concrete bit widths, booleans, tuples, named structs, and fixed-size arrays. Expressions support arithmetic, comparisons, bitwise and logical operations, shifts, unsigned bit concatenation, bit casts, field selection, array indexing, and value-producing `if` expressions. Pure functions and parametric algorithms are compiled separately and linked using concrete signatures. The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a DSLX multiplier, and load enables.
+
+Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
+
+To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting and block hierarchies are limited to 64 levels.

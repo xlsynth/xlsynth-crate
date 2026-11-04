@@ -1,0 +1,38 @@
+package arithmetic
+
+file_number 0 "arithmetic.x"
+
+fn __arithmetic__mul_wide(a: bits[8] id=1, b: bits[8] id=2) -> bits[16] {
+  zero_ext.3: bits[16] = zero_ext(a, new_bit_count=16, id=3)
+  zero_ext.4: bits[16] = zero_ext(b, new_bit_count=16, id=4)
+  ret umul.5: bits[16] = umul(zero_ext.3, zero_ext.4, id=5, pos=[(0,1,5)])
+}
+
+top block mul_add(clk: clock, rst: bits[1], a: bits[8], b: bits[8], bias: bits[8], valid_in: bits[1], value: bits[16], valid: bits[1]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  reg product(bits[16])
+  reg bias_d1(bits[8])
+  reg valid_d1(bits[1], reset_value=0)
+  reg result(bits[16])
+  reg valid_d2(bits[1], reset_value=0)
+  rst: bits[1] = input_port(name=rst, id=6)
+  a: bits[8] = input_port(name=a, id=7)
+  b: bits[8] = input_port(name=b, id=8)
+  bias: bits[8] = input_port(name=bias, id=9)
+  valid_in: bits[1] = input_port(name=valid_in, id=10)
+  register_read.11: bits[16] = register_read(register=product, id=11)
+  register_read.12: bits[8] = register_read(register=bias_d1, id=12)
+  register_read.13: bits[1] = register_read(register=valid_d1, id=13)
+  invoke.14: bits[16] = invoke(a, b, to_apply=__arithmetic__mul_wide, id=14)
+  register_write.15: () = register_write(invoke.14, register=product, load_enable=valid_in, id=15)
+  register_write.16: () = register_write(bias, register=bias_d1, load_enable=valid_in, id=16)
+  register_write.17: () = register_write(valid_in, register=valid_d1, reset=rst, id=17)
+  register_read.18: bits[16] = register_read(register=result, id=18)
+  register_read.19: bits[1] = register_read(register=valid_d2, id=19)
+  zero_ext.20: bits[16] = zero_ext(register_read.12, new_bit_count=16, id=20)
+  add.21: bits[16] = add(register_read.11, zero_ext.20, id=21)
+  register_write.22: () = register_write(add.21, register=result, id=22)
+  register_write.23: () = register_write(register_read.13, register=valid_d2, reset=rst, id=23)
+  value: () = output_port(register_read.18, name=value, id=24)
+  valid: () = output_port(register_read.19, name=valid, id=25)
+}
