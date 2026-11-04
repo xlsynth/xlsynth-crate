@@ -87,13 +87,19 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
 
 /// Parse a source module. Syntax diagnostics carry one-based line and column.
 pub fn parse_module(source: &str) -> Result<Module, String> {
-    Parser {
-        source,
-        tokens: lex(source)?,
-        pos: 0,
-        depth: 0,
+    Parser::new(source, false)?.module()
+}
+
+/// Parse a concrete value type printed by the DSLX type checker. In this
+/// representation parentheses always delimit tuples, including singletons.
+pub(crate) fn parse_value_type(source: &str) -> Result<Type, String> {
+    let mut parser = Parser::new(source, true)?;
+    let ty = parser.ty()?;
+    if !parser.peek(0).is_empty() {
+        return Err(parser.error("expected end of DSLX value type"));
     }
-    .module()
+    crate::check::validate_structural_type(&ty)?;
+    Ok(ty)
 }
 
 /// Cursor over the token stream, whose final element always represents EOF.
@@ -101,6 +107,13 @@ struct Parser<'s> {
     source: &'s str,
     tokens: Vec<Token<'s>>,
     pos: usize,
+    depth: usize,
+    dslx_type_display: bool,
+}
+
+/// The depth of a parsed type includes both tuple and array constructors.
+struct ParsedType {
+    value: Type,
     depth: usize,
 }
 
@@ -124,6 +137,16 @@ impl ParsedExpr {
 }
 
 impl<'s> Parser<'s> {
+    fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
+        Ok(Self {
+            source,
+            tokens: lex(source)?,
+            pos: 0,
+            depth: 0,
+            dslx_type_display,
+        })
+    }
+
     /// Report excessive nesting before recursion consumes the host thread
     /// stack.
     fn nested<T>(
@@ -228,6 +251,16 @@ impl<'s> Parser<'s> {
                 });
             } else if public {
                 return Err(self.error("expected block or struct after pub"));
+            } else if self.eat("import") {
+                if self.peek(0) != "std" {
+                    return Err(self.error("BX only supports 'import std;'"));
+                }
+                if module.std_import {
+                    return Err(self.error("duplicate 'import std;'"));
+                }
+                self.pos += 1;
+                self.expect(";")?;
+                module.std_import = true;
             } else if self.eat("extern") {
                 if self.eat("fn") {
                     module.externs.push(self.extern_fn()?);
@@ -239,7 +272,7 @@ impl<'s> Parser<'s> {
                     return Err(self.error("expected fn or block after extern"));
                 }
             } else {
-                return Err(self.error("expected a block, struct, or extern declaration"));
+                return Err(self.error("expected a block, struct, extern, or import declaration"));
             }
         }
         Ok(module)
@@ -366,17 +399,20 @@ impl<'s> Parser<'s> {
     }
 
     fn ty(&mut self) -> Result<Type, String> {
+        Ok(self.parsed_ty()?.value)
+    }
+
+    fn parsed_ty(&mut self) -> Result<ParsedType, String> {
         let mut ty = self.type_atom()?;
-        let mut dimensions = 0;
         while self.eat("[") {
-            dimensions += 1;
-            if dimensions > 64 {
-                return Err(self.error("array type exceeds 64 dimensions"));
+            ty.depth += 1;
+            if ty.depth > 64 {
+                return Err(self.error("type nesting exceeds 64 levels"));
             }
             let size = self.dimension()?;
             self.expect("]")?;
-            ty = Type::Array {
-                element: Box::new(ty),
+            ty.value = Type::Array {
+                element: Box::new(ty.value),
                 size,
             };
         }
@@ -397,37 +433,55 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
-    fn type_atom(&mut self) -> Result<Type, String> {
+    fn type_atom(&mut self) -> Result<ParsedType, String> {
         if self.eat("(") {
             return self.nested(|parser| {
-                parser.parenthesized(Self::ty, |_, fields| Ok(Type::Tuple(fields)))
+                if parser.dslx_type_display {
+                    let fields = parser.list(")", Self::parsed_ty)?;
+                    parser.tuple_type(fields)
+                } else {
+                    parser.parenthesized(Self::parsed_ty, Self::tuple_type)
+                }
             });
         }
         let spelling = self.peek(0);
-        if self.eat("bool") {
-            return Ok(Type::Bool);
-        }
-        if matches!(spelling, "bits" | "uN" | "sN") {
+        let value = if self.eat("bool") {
+            Type::Bool
+        } else if matches!(spelling, "bits" | "uN" | "sN") {
             self.pos += 1;
             self.expect("[")?;
             let width = self.dimension()?;
             self.expect("]")?;
-            return Ok(Type::Bits {
+            Type::Bits {
                 signed: spelling == "sN",
                 width,
-            });
-        }
-        if let Some(digits) = fixed_width(spelling) {
+            }
+        } else if let Some(digits) = fixed_width(spelling) {
             let width = digits
                 .parse::<usize>()
                 .map_err(|_| self.error("bit width is too large"))?;
             self.pos += 1;
-            return Ok(Type::Bits {
+            Type::Bits {
                 signed: spelling.starts_with('s'),
                 width,
-            });
+            }
+        } else if self.dslx_type_display {
+            return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
+        } else {
+            Type::Named(self.ident()?)
+        };
+        Ok(ParsedType { value, depth: 0 })
+    }
+
+    fn tuple_type(&self, fields: Vec<ParsedType>) -> Result<ParsedType, String> {
+        let depth = 1 + fields.iter().map(|field| field.depth).max().unwrap_or(0);
+        if depth > 64 {
+            return Err(self.error("type nesting exceeds 64 levels"));
         }
-        Ok(Type::Named(self.ident()?))
+        Ok(ParsedType {
+            value: Type::Tuple(fields.into_iter().map(|field| field.value).collect()),
+            depth,
+        })
     }
 
     /// Distinguish grouping (x) from a singleton tuple (x,).
@@ -792,6 +846,66 @@ fn fixed_width(spelling: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn std_import_is_contextual_and_may_appear_after_a_block() {
+        let src = "block import(clk, import: u8) -> u8 { import }";
+        assert!(!parse_module(src).unwrap().std_import);
+        assert!(
+            parse_module(&format!("{src} import std;"))
+                .unwrap()
+                .std_import
+        );
+        for (source, error) in [
+            ("import std; import std;", "duplicate 'import std;'"),
+            ("import arithmetic;", "only supports 'import std;'"),
+            ("import std", "expected ';'"),
+            ("pub import std;", "expected block or struct after pub"),
+        ] {
+            assert!(
+                parse_module(source).unwrap_err().contains(error),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn concrete_dslx_result_types_preserve_singletons_and_check_layout_limits() {
+        let singleton = Type::Tuple(vec![Type::Bits {
+            signed: true,
+            width: 8,
+        }]);
+        assert_eq!(
+            parse_value_type("(sN[8])[3]").unwrap(),
+            Type::Array {
+                element: Box::new(singleton),
+                size: 3
+            },
+        );
+        assert_eq!(parse_value_type("()").unwrap(), Type::Tuple(vec![]));
+        let bx_group = parse_module("block b(clk) -> (s8) { s8:0 }").unwrap();
+        assert_eq!(
+            bx_group.blocks[0].result,
+            Type::Bits {
+                signed: true,
+                width: 8
+            }
+        );
+        for invalid in [
+            "(uN[8], Ordering)[3]",
+            "uN[8] extra",
+            "uN[10000000]",
+            "uN[8][10000000]",
+        ] {
+            assert!(parse_value_type(invalid).is_err(), "{invalid}");
+        }
+        let grouped = format!("(uN[8]{})[1]", "[1]".repeat(63));
+        assert!(
+            parse_value_type(&grouped)
+                .unwrap_err()
+                .contains("type nesting")
+        );
+    }
 
     #[test]
     fn distinguishes_a_guarded_update_from_a_final_if_expression() {

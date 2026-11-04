@@ -4,9 +4,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use xlsynth::dslx::ImportData;
 use xlsynth_pir::IrValue;
 
 use crate::ast::{BinaryOp, Block, Expr, ExternFn, Module, Param, Stmt, StructDef, Type};
+use crate::std_import::StdResolver;
 pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -88,12 +90,20 @@ struct BlockInterface<'a> {
 }
 
 /// Source declaration indices for lookup during checking.
+#[derive(Default)]
 struct Declarations<'a> {
+    std_import: bool,
     struct_list: &'a [StructDef],
     structs: BTreeMap<&'a str, &'a StructDef>,
     struct_shapes: BTreeMap<&'a str, TypeShape>,
     externs: BTreeMap<&'a str, &'a ExternFn>,
     blocks: BTreeMap<&'a str, BlockInterface<'a>>,
+}
+
+/// Apply BX's concrete layout budget to a value type with no named
+/// declarations.
+pub(crate) fn validate_structural_type(ty: &Type) -> Result<(), String> {
+    Declarations::default().validate_type(ty)
 }
 
 fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
@@ -318,6 +328,14 @@ fn dependency_order<'a>(
 /// Type-check a parsed module without requiring the external functions' IR
 /// bodies.
 pub fn check_module(module: &Module) -> Result<CheckedModule, String> {
+    check_module_and_imports(module).map(|(checked, _)| checked)
+}
+
+/// Preserve the parsed DSLX stdlib for the batch conversion when compiling
+/// both phases together.
+pub(crate) fn check_module_and_imports(
+    module: &Module,
+) -> Result<(CheckedModule, Option<ImportData>), String> {
     let mut names = BTreeSet::new();
     let mut struct_graph = Vec::new();
     for s in &module.structs {
@@ -332,6 +350,7 @@ pub fn check_module(module: &Module) -> Result<CheckedModule, String> {
     }
     let struct_order = dependency_order("struct", &struct_graph)?;
     let mut declarations = Declarations {
+        std_import: module.std_import,
         struct_list: &module.structs,
         struct_shapes: BTreeMap::new(),
         structs: module
@@ -354,6 +373,12 @@ pub fn check_module(module: &Module) -> Result<CheckedModule, String> {
         declarations.struct_shapes.insert(&s.name, shape);
     }
     for f in &module.externs {
+        if module.std_import && f.name.starts_with("std::") {
+            return Err(format!(
+                "extern fn '{}' conflicts with 'import std;'",
+                f.name
+            ));
+        }
         declare(&mut names, &f.name)?;
         let mut params = BTreeSet::new();
         for p in &f.params {
@@ -403,26 +428,31 @@ pub fn check_module(module: &Module) -> Result<CheckedModule, String> {
             .map(|b| (b.name.as_str(), Vec::new())),
     );
     let mut blocks = Vec::new();
+    let mut std_resolver = StdResolver::default();
     for index in dependency_order("block", &block_graph)? {
         if let Some(block) = module.blocks.get(index) {
             blocks.push(
-                BlockChecker::check(&declarations, block)
+                BlockChecker::check(&declarations, block, &mut std_resolver)
                     .map_err(|e| format!("block '{}': {e}", block.name))?,
             );
         }
     }
-    Ok(CheckedModule {
+    let (std_calls, imports) = std_resolver.into_parts();
+    let checked = CheckedModule {
         structs: module.structs.clone(),
         externs: module.externs.clone(),
         extern_blocks: module.extern_blocks.clone(),
+        std_calls,
         blocks,
-    })
+    };
+    Ok((checked, imports))
 }
 
 /// Lexically visible values, static declarations, and the drivers seen in one
 /// block.
 struct BlockChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
+    std_resolver: &'a mut StdResolver,
     block: &'m Block,
     names: BTreeSet<String>,
     outputs: BTreeSet<String>,
@@ -439,7 +469,11 @@ struct BlockChecker<'a, 'm> {
 impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Reserve interface and instance names before checking dataflow
     /// expressions.
-    fn check(decls: &'a Declarations<'m>, block: &'m Block) -> Result<CheckedBlock, String> {
+    fn check(
+        decls: &'a Declarations<'m>,
+        block: &'m Block,
+        std_resolver: &'a mut StdResolver,
+    ) -> Result<CheckedBlock, String> {
         let outputs = decls.blocks[block.name.as_str()]
             .outputs
             .iter()
@@ -459,6 +493,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         }));
         let mut c = Self {
             decls,
+            std_resolver,
             block,
             names: BTreeSet::new(),
             outputs,
@@ -721,9 +756,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     let ty = self
                         .regs
                         .get(name)
-                        .ok_or_else(|| format!("'{name}' is not a declared register"))?;
+                        .ok_or_else(|| format!("'{name}' is not a declared register"))?
+                        .clone();
                     let value = self
-                        .expr(value, Some(ty))
+                        .expr(value, Some(&ty))
                         .map_err(|e| format!("update of '{name}': {e}"))?;
                     if !self.writes.insert(name.clone()) {
                         return Err(format!("multiple updates to register '{name}'"));
@@ -757,7 +793,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
 
     /// Propagate expected types to literals, aggregate members, and pure call
     /// arguments.
-    fn expr(&self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
+    fn expr(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let (ty, kind) = match expr {
             Expr::Name(name) => {
                 let ty = self
@@ -946,40 +982,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     )
                 }
             }
-            Expr::Call { name, args } => {
-                if self.decls.blocks.contains_key(name.as_str()) {
-                    return Err(format!(
-                        "call to block '{name}' must be the entire right-hand side of an unconditional top-level let"
-                    ));
-                }
-                let f = self
-                    .decls
-                    .externs
-                    .get(name.as_str())
-                    .ok_or_else(|| format!("unknown extern function '{name}'"))?;
-                if args.len() != f.params.len() {
-                    return Err(format!(
-                        "'{name}' expects {} arguments, got {}",
-                        f.params.len(),
-                        args.len()
-                    ));
-                }
-                let args = args
-                    .iter()
-                    .zip(&f.params)
-                    .map(|(a, p)| {
-                        self.expr(a, Some(&p.ty))
-                            .map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
-                    })
-                    .collect::<Result<_, _>>()?;
-                (
-                    f.result.clone(),
-                    K::Call {
-                        name: name.clone(),
-                        args,
-                    },
-                )
-            }
+            Expr::Call { name, args } => self.function_call(name, args)?,
             Expr::Cast { value, ty } => {
                 self.decls.validate_type(ty)?;
                 let v = self.expr(
@@ -1033,10 +1036,63 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         Ok(TypedExpr { ty, kind })
     }
 
+    /// Resolve either a concrete extern declaration or an imported DSLX
+    /// specialization inferred from its actual argument types.
+    fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+        if self.decls.std_import
+            && let Some(function) = name.strip_prefix("std::")
+        {
+            let args = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    self.expr(arg, None)
+                        .map_err(|e| format!("argument {}, call to '{name}': {e}", i + 1))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let types = args.iter().map(|arg| arg.ty.clone()).collect();
+            let (id, ty) = self.std_resolver.resolve(function, types)?;
+            self.decls.validate_type(&ty)?;
+            return Ok((ty, K::StdCall { id, args }));
+        }
+        if self.decls.blocks.contains_key(name) {
+            return Err(format!(
+                "call to block '{name}' must be the entire right-hand side of an unconditional top-level let"
+            ));
+        }
+        let f = self
+            .decls
+            .externs
+            .get(name)
+            .ok_or_else(|| format!("unknown extern function '{name}'"))?;
+        if args.len() != f.params.len() {
+            return Err(format!(
+                "'{name}' expects {} arguments, got {}",
+                f.params.len(),
+                args.len()
+            ));
+        }
+        let args = args
+            .iter()
+            .zip(&f.params)
+            .map(|(a, p)| {
+                self.expr(a, Some(&p.ty))
+                    .map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((
+            f.result.clone(),
+            K::Call {
+                name: name.to_owned(),
+                args,
+            },
+        ))
+    }
+
     /// Infer an unannotated integer from the opposite operand when no result
     /// type is available.
     fn pair(
-        &self,
+        &mut self,
         left: &Expr,
         right: &Expr,
         expected: Option<&Type>,
@@ -1053,7 +1109,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
 
     /// Type-check a shift distance or array index, defaulting a bare literal to
     /// u32.
-    fn unsigned_index(&self, expr: &Expr) -> Result<TypedExpr, String> {
+    fn unsigned_index(&mut self, expr: &Expr) -> Result<TypedExpr, String> {
         let hint = Type::Bits {
             signed: false,
             width: 32,
@@ -1071,7 +1127,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Select operator signatures before lowering erases signedness and nominal
     /// types.
     fn binary(
-        &self,
+        &mut self,
         op: BinaryOp,
         left: &Expr,
         right: &Expr,
@@ -1155,6 +1211,21 @@ mod tests {
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn explicit_std_extern_requires_the_std_namespace_to_be_unimported() {
+        let decl = "extern fn std::id(x: u8) -> u8;";
+        let body = "block b(clk, x: u8) -> u8 { std::id(x) }";
+        let module = parse_module(&format!("{decl} {body}")).unwrap();
+        assert!(check_module(&module).unwrap().std_calls.is_empty());
+        for source in [format!("import std; {decl}"), format!("{decl} import std;")] {
+            let module = parse_module(&source).unwrap();
+            assert_eq!(
+                check_module(&module).unwrap_err(),
+                "extern fn 'std::id' conflicts with 'import std;'"
+            );
+        }
+    }
 
     #[test]
     fn grouped_operator_chains_obey_the_expression_tree_depth_limit() {

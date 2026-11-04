@@ -1,6 +1,6 @@
 # xlsynth-bx
 
-BX describes clocked hardware with DSLX-style value expressions. The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. An ordinary DSLX function can supply combinational logic through an `extern fn` declaration.
+BX describes clocked hardware with DSLX-style value expressions. The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. DSLX functions can supply combinational logic through `import std;` or an `extern fn` declaration.
 
 ```text
 extern fn math::transform(x: u8) -> u16;
@@ -52,6 +52,27 @@ For an unqualified declaration such as `extern fn transform(x: u8) -> u16;`, cal
 
 The linker checks argument order, widths, aggregate shapes, and result type before emitting `invoke`. Signedness and struct names are BX-level distinctions. Their IR representations are bits and tuples respectively. The linked function and its callees must have pure IR bodies.
 
+### Importing the DSLX standard library
+
+`import std;` makes public functions from the bundled DSLX `std.x` available by qualified name. Use `empty_package("design")` when the standard library supplies all your function calls. You can also supply a package containing other extern functions and blocks.
+
+```text
+import std;
+
+block mul_pipe(clk, a: u8, b: u5) -> u13 {
+    let product = std::umul(a, b);
+    reg q: u13;
+    q := product;
+    q
+}
+```
+
+BX checks the arguments, then asks the DSLX typechecker to infer the concrete function signature. Here `std::umul` returns `u13` because its result width is the sum of the operand widths. A call with `u8` and `u12` in the same block gets a separate `u20` specialization. Write a standalone integer argument with its type, as in `std::round_up_to_nearest(x, u32:4)`.
+
+Imported calls support bits, booleans, tuples, and fixed-size arrays of these types. Parametric values must be inferable from the arguments and DSLX defaults. Functions such as `std::lsbs` require an explicit result-width parameter and are outside this syntax. An explicit `extern fn std::...` declaration and `import std;` claim the same namespace and cannot appear together.
+
+Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. Some functions, including `std::popcount`, contain a loop in their original IR. Consumers such as `xlsynth-codegen` that require unrolled loops need an optimization step for those bodies before RTL emission.
+
 ## Clocked blocks
 
 - The first port is `clk`, followed by optional `rst` and typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields in declaration order. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
@@ -78,7 +99,7 @@ Use the same call syntax for a BX block defined anywhere in the module. An `exte
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 
-BX currently accepts concrete bit widths, booleans, tuples, named structs, and fixed-size arrays. Expressions support arithmetic, comparisons, bitwise and logical operations, shifts, unsigned bit concatenation, bit casts, field selection, array indexing, and value-producing `if` expressions. Pure functions and parametric algorithms are compiled separately and linked using concrete signatures. The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a DSLX multiplier, and load enables.
+BX currently accepts concrete bit widths, booleans, tuples, named structs, and fixed-size arrays. Expressions support arithmetic, comparisons, bitwise and logical operations, shifts, unsigned bit concatenation, bit casts, field selection, array indexing, and value-producing `if` expressions. The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separately compiled DSLX multiplier, and load enables.
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
 

@@ -4,14 +4,17 @@
 
 pub mod ast;
 pub mod check;
+mod import_link;
 mod layout;
 pub mod lower;
 pub mod parser;
+mod std_import;
 mod typed;
 
 pub use check::{CheckedModule, check_module};
 pub use lower::lower_module;
 pub use parser::parse_module;
+pub use std_import::StdCall;
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
 use xlsynth_pir::ir::{FileTable, Package};
@@ -20,8 +23,8 @@ use xlsynth_pir::ir::{FileTable, Package};
 /// package.
 pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<Package, String> {
     let module = parse_module(source)?;
-    let checked = check_module(&module)?;
-    lower_module(&checked, package, reset)
+    let (checked, imports) = check::check_module_and_imports(&module)?;
+    lower::lower_module_with_imports(&checked, package, reset, imports)
 }
 
 /// Creates a destination for BX modules whose externs require no linked IR.

@@ -134,8 +134,8 @@ pub enum Expr {
         index: Box<Expr>,
     },
     Call {
-        /// An extern function's canonical source name, or a block name when
-        /// the call is the initializer of a let binding.
+        /// A function name (including qualified imported or extern functions),
+        /// or a block name when the call initializes a let binding.
         name: String,
         args: Vec<Expr>,
     },
@@ -208,6 +208,8 @@ pub struct Block {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// Whether this module contains an `import std;` declaration.
+    pub std_import: bool,
     pub structs: Vec<StructDef>,
     pub externs: Vec<ExternFn>,
     pub extern_blocks: Vec<ExternBlock>,
