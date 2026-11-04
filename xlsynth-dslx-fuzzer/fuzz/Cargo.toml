@@ -14,6 +14,7 @@ members = ["."]
 libfuzzer-sys = "0.4"
 sha2 = "0.10"
 xlsynth = { path = "../../xlsynth" }
+xlsynth-pir = { path = "../../xlsynth-pir" }
 xlsynth-dslx-fuzzer = { path = ".." }
 xlsynth-prover = { path = "../../xlsynth-prover" }
 tempfile = "3.20"
@@ -23,7 +24,6 @@ serde_json = "1"
 
 [dev-dependencies]
 rand = "0.8"
-xlsynth-pir = { path = "../../xlsynth-pir" }
 
 [features]
 default = []
@@ -34,6 +34,13 @@ with-bitwuzla-built = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-built"]
 [[bin]]
 name = "fuzz_dslx_semantics"
 path = "fuzz_targets/fuzz_dslx_semantics.rs"
+test = false
+doc = false
+required-features = ["has-bitwuzla"]
+
+[[bin]]
+name = "fuzz_dslx_converter_contracts"
+path = "fuzz_targets/fuzz_dslx_converter_contracts.rs"
 test = false
 doc = false
 required-features = ["has-bitwuzla"]
