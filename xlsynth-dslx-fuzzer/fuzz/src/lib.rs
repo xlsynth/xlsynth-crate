@@ -9,14 +9,14 @@ pub mod native;
 use libfuzzer_sys as _;
 
 use xlsynth_dslx_fuzzer::{Grammar, PreparedSample};
-use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult};
-use xlsynth_prover::prover::{SolverChoice, SolverLimits};
+use xlsynth_prover::ir_utils::parse_package_and_drop_params;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
+use xlsynth_prover::prover::{SolverChoice, SolverLimits, prover_for_choice_with_limits};
 
 /// Proves equality for all inputs, retaining counterexamples and bounded
 /// unknowns.
 pub fn prove(sample: &PreparedSample) -> Result<EquivResult, String> {
-    prove_with_assertions(sample, AssertionSemantics::Ignore)
+    prove_with_assertions(sample, AssertionSemantics::Ignore).map_err(CheckFailure::into_message)
 }
 
 /// Includes the assertion failure condition in the counterexample query when
@@ -24,18 +24,39 @@ pub fn prove(sample: &PreparedSample) -> Result<EquivResult, String> {
 fn prove_with_assertions(
     sample: &PreparedSample,
     semantics: AssertionSemantics,
-) -> Result<EquivResult, String> {
-    let request = IrEquivRequest::new(
-        IrModule::new(&sample.expected_ir).with_top(Some("main")),
-        IrModule::new(&sample.converted_ir).with_top(Some(&sample.converted_top)),
-    )
-    .with_solver(Some(SolverChoice::Bitwuzla))
-    .with_assertion_semantics(semantics)
-    .with_solver_limits(SolverLimits {
-        time_limit_per_ms: Some(10_000),
-        memory_limit_mb: Some(1024),
-    });
-    Ok(run_ir_equiv(&request)?.result)
+) -> Result<EquivResult, CheckFailure> {
+    let (expected_pkg, expected_fn) =
+        parse_package_and_drop_params(&sample.expected_ir, Some("main"), &[])?;
+    let (converted_pkg, converted_fn) =
+        parse_package_and_drop_params(&sample.converted_ir, Some(&sample.converted_top), &[])?;
+    // The public DSLX interface must survive lowering, even when distinct IR
+    // return types have the same flattened bit width in the SMT comparison.
+    let expected = expected_fn.get_type();
+    let converted = converted_fn.get_type();
+    if expected != converted {
+        return Err(CheckFailure::InvalidOutput(format!(
+            "Converted top signature differs from the DSLX reference: expected {expected:?}, got {converted:?}\n{sample:#?}"
+        )));
+    }
+    let prover = prover_for_choice_with_limits(
+        SolverChoice::Bitwuzla,
+        None,
+        SolverLimits {
+            time_limit_per_ms: Some(10_000),
+            memory_limit_mb: Some(1024),
+        },
+    );
+    match prover.prove_ir_equiv(
+        &ProverFn::new(&expected_fn, Some(&expected_pkg)),
+        &ProverFn::new(&converted_fn, Some(&converted_pkg)),
+        EquivParallelism::SingleThreaded,
+        semantics,
+        None,
+        false,
+    ) {
+        EquivResult::Error(message) => Err(CheckFailure::Checker(message)),
+        result => Ok(result),
+    }
 }
 
 /// A concrete sample finding or a failure to run the checker reliably.
@@ -90,6 +111,7 @@ fn classify_with_assertions(
 ) -> Result<EquivResult, CheckFailure> {
     match prove_with_assertions(sample, semantics) {
         Ok(result @ (EquivResult::Proved | EquivResult::Inconclusive(_))) => Ok(result),
+        Err(failure @ CheckFailure::InvalidOutput(_)) => Err(failure),
         failure => {
             let message = format!("equivalence check failed: {failure:#?}\n{sample:#?}");
             match failure {

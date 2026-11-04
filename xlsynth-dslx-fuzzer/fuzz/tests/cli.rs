@@ -58,6 +58,22 @@ IR
         )
     };
     assert!(matches!(classify(), Err(CheckFailure::Disproved(_))));
+    // Both alternatives are valid IR. A wrong input width prevents an SMT
+    // comparison, whereas flattening hides the missing result tuple.
+    for wrong_top in [
+        r#"top fn __sample__main(x: bits[2] id=1, y: bits[8] id=2) -> (bits[8]) {
+  ret result: (bits[8]) = tuple(y, id=3)
+}"#,
+        r#"top fn __sample__main(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret result: bits[8] = add(x, y, id=3)
+}"#,
+    ] {
+        std::fs::write(
+            &converter,
+            format!("#!/bin/sh\ncat <<'IR'\npackage sample\n\n{wrong_top}\nIR\n"),
+        )?;
+        assert!(matches!(classify(), Err(CheckFailure::InvalidOutput(_))));
+    }
     std::fs::write(&converter, "#!/bin/sh\nexit 1\n")?;
     assert!(matches!(
         classify(),
