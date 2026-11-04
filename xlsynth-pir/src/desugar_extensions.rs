@@ -68,15 +68,6 @@ pub enum ExtensionEmitMode {
     AsFfiFunction,
 }
 
-fn next_text_id(f: &NodeGraph) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
-}
-
 fn expect_bits_width(f: &NodeGraph, r: NodeRef, ctx: &str) -> Result<usize, DesugarError> {
     let ty = f.get_node_ty(r);
     match ty {
@@ -429,10 +420,11 @@ fn append_lowered_ext_normalize_left(
 }
 
 fn push_node(f: &mut NodeGraph, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
     let new_index = f.nodes.len();
     f.nodes.push(Node {
-        text_id,
+        // Lowering uses NodeRefs. The caller assigns text IDs to the appended
+        // nodes.
+        text_id: 0,
         name: None,
         ty,
         payload,
@@ -1380,13 +1372,42 @@ pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
 
 /// Lowers extension nodes without imposing function interface or root rules.
 fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
-    let _changed = desugar_ext_carry_out_in_graph(f)?
-        | desugar_ext_clz_in_graph(f)?
-        | desugar_ext_normalize_left_in_graph(f)?
-        | desugar_ext_mask_low_in_graph(f)?
-        | desugar_ext_nary_add_in_graph(f)?
-        | desugar_ext_prio_encode_in_graph(f)?;
-    Ok(())
+    // Lowering rewrites only the original extension nodes and appends their
+    // dependencies.
+    let originals: Vec<_> = f
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.payload.is_extension_op())
+        .map(|(index, node)| (index, node.clone()))
+        .collect();
+    if originals.is_empty() {
+        return Ok(());
+    }
+    let original_len = f.nodes.len();
+    let mut last_id = max_text_id_in_graph(f);
+    let result = (|| {
+        desugar_ext_carry_out_in_graph(f)?;
+        desugar_ext_clz_in_graph(f)?;
+        desugar_ext_normalize_left_in_graph(f)?;
+        desugar_ext_mask_low_in_graph(f)?;
+        desugar_ext_nary_add_in_graph(f)?;
+        desugar_ext_prio_encode_in_graph(f)?;
+        for node in &mut f.nodes[original_len..] {
+            last_id = last_id.checked_add(1).ok_or_else(|| {
+                DesugarError::new("node ID allocation overflows usize while lowering extensions")
+            })?;
+            node.text_id = last_id;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        f.nodes.truncate(original_len);
+        for (index, node) in originals {
+            f.nodes[index] = node;
+        }
+    }
+    result
 }
 
 /// Desugars extension ops within `pkg` into upstream-compatible PIR operations.
@@ -1437,9 +1458,58 @@ mod tests {
     };
     use crate::ir::ExtNaryAddArchitecture;
     use crate::ir_eval::{FnEvalResult, eval_fn};
+    use crate::ir_parser::Parser;
     use crate::ir_verify::verify_function;
     use crate::{IrBits, IrValue};
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn inline_lowering_checks_fresh_ids_across_extensions() {
+        // Carry-out appends six nodes and priority encode appends two. The
+        // largest input ID belongs to the tuple after both extensions.
+        for available in [0, 7, 8] {
+            let max_id = usize::MAX - available;
+            let ir = format!(
+                r#"fn pair(a: bits[8] id=1, b: bits[8] id=2, c: bits[1] id=3) -> (bits[1], bits[4]) {{
+  carry: bits[1] = ext_carry_out(a, b, c, id=4)
+  index: bits[4] = ext_prio_encode(a, lsb_prio=true, id=5)
+  ret result: (bits[1], bits[4]) = tuple(carry, index, id={max_id})
+}}"#
+            );
+            let mut f = Parser::new(&ir).parse_fn().unwrap();
+            let original = f.to_string();
+            let result = super::desugar_extensions_in_fn(&mut f);
+            if available < 8 {
+                assert_eq!(
+                    result.unwrap_err().to_string(),
+                    "DesugarError: node ID allocation overflows usize while lowering extensions"
+                );
+                assert_eq!(f.to_string(), original);
+            } else {
+                result.unwrap();
+                verify_function(&f).unwrap();
+                let ids: BTreeSet<_> = f.nodes.iter().map(|node| node.text_id).collect();
+                assert_eq!(ids, (0..=5).chain(max_id..=usize::MAX).collect());
+            }
+        }
+    }
+
+    #[test]
+    fn inline_lowering_can_reuse_an_operand_with_no_ids_left() {
+        let ir = format!(
+            r#"fn single(a: bits[8] id=1) -> bits[8] {{
+  ret result: bits[8] = ext_nary_add(a, signed=[false], negated=[false], id={})
+}}"#,
+            usize::MAX
+        );
+        let mut f = Parser::new(&ir).parse_fn().unwrap();
+        let original_len = f.nodes.len();
+        super::desugar_extensions_in_fn(&mut f).unwrap();
+        verify_function(&f).unwrap();
+        assert_eq!(f.nodes.len(), original_len);
+        assert_eq!(f.get_node(f.ret_node_ref.unwrap()).text_id, usize::MAX);
+        assert!(f.nodes.iter().all(|n| !n.payload.is_extension_op()));
+    }
 
     #[test]
     fn ffi_helpers_preserve_canonical_text() {
