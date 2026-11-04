@@ -338,6 +338,102 @@ impl RangeMatch {
     }
 }
 
+/// An ordered runtime match with assertions scoped to the winning arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardedMatch {
+    arm_count: usize,
+    shape: u8,
+}
+
+/// The written interval can include values already taken by earlier arms.
+#[derive(Debug, Clone, Copy)]
+struct GuardedArm {
+    pattern_start: u8,
+    winning_start: u8,
+    limit: u8,
+}
+
+impl GuardedMatch {
+    /// Draws up to three regular arms followed by an exhaustive wildcard.
+    pub fn from_draws(arm_count: usize, shape: u8) -> Result<Self, String> {
+        if arm_count > 3 {
+            return Err("guarded matches support at most three regular arms".to_string());
+        }
+        Ok(Self { arm_count, shape })
+    }
+
+    /// Each regular arm adds one to four new keys. Later patterns overlap the
+    /// preceding one by one or two keys; the union leaves at least one default.
+    fn arms(self) -> impl Iterator<Item = GuardedArm> {
+        let base = self.shape & 3;
+        (0..self.arm_count).scan(base, move |frontier, i| {
+            let length = 1 + ((self.shape >> (2 + 2 * i)) & 3);
+            let overlap = 1 + (length & 1);
+            let arm = GuardedArm {
+                pattern_start: frontier.saturating_sub(overlap).max(base),
+                winning_start: *frontier,
+                limit: *frontier + length,
+            };
+            *frontier = arm.limit;
+            Some(arm)
+        })
+    }
+
+    pub(crate) fn to_dslx(self, ty: BitsType, [x, y, z]: [&str; 3]) -> String {
+        let unsigned = BitsType {
+            signed: false,
+            ..ty
+        }
+        .to_dslx();
+        let mut text = format!("{{ let k = ({x} as {unsigned}) as u4; match k {{\n");
+        let base = self.shape & 3;
+        let mut limit = base;
+        for (arm, value) in self
+            .arms()
+            .zip([y.to_owned(), format!("!{z}"), format!("{x} ^ {z}")])
+        {
+            limit = arm.limit;
+            let start = arm.pattern_start;
+            let winning = arm.winning_start;
+            text.push_str(&format!(
+                "    u4:{start}..u4:{limit} => {{ assert_eq(k >= u4:{winning} && k < u4:{limit}, true); {value} }},\n"
+            ));
+        }
+        text.push_str(&format!(
+            "    _ => {{ assert_eq(k < u4:{base} || k >= u4:{limit}, true); {x} + {y} }},\n}} }}"
+        ));
+        text
+    }
+
+    /// Assigns each key to its first matching pattern using scalar equality.
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        [x, y, z]: [BValue; 3],
+    ) -> Result<BValue, BuilderError> {
+        let key = resize_unsigned(builder, x, 4)?;
+        let mut result = builder.add(x, y)?;
+        for (i, arm) in self.arms().enumerate() {
+            let value = match i {
+                0 => y,
+                1 => builder.not(z)?,
+                _ => builder.xor(x, z)?,
+            };
+            // The lower portion of the pattern was assigned to an earlier
+            // arm. Enumerating only its remaining keys preserves priority.
+            for n in arm.winning_start..arm.limit {
+                let literal = builder
+                    .literal(IrValue::from_bits(&IrBits::from_lsb_fn(4, |bit| {
+                        n & (1 << bit) != 0
+                    })))?;
+                let equal = builder.eq(key, literal)?;
+                result = builder.select(equal, &[result, value], None)?;
+            }
+        }
+        Ok(result)
+    }
+}
+
 /// Selects a runtime expression using the low bits of the specialized lane
 /// width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

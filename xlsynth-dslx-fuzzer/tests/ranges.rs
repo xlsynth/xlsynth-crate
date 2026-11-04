@@ -3,7 +3,7 @@
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_dslx_fuzzer::ast::{BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
-use xlsynth_dslx_fuzzer::range_match::{NestedCapture, RangeMatch, RangeValue};
+use xlsynth_dslx_fuzzer::range_match::{GuardedMatch, NestedCapture, RangeMatch, RangeValue};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
@@ -106,6 +106,50 @@ fn runtime_range_matches_preserve_arm_order_and_selector_casts() -> Result<(), S
             );
             source.push_str(&format!(
                 "const_assert!(main(u7:{input} as {lane_type}, {lane_type}:5) == ((u7:{expected} as {lane_type}),));\n"
+            ));
+        }
+        parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default())
+            .map_err(|error| format!("{error}\n{source}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn guarded_range_winners_match_constexpr_for_every_selector() -> Result<(), String> {
+    // Base 1 and arm lengths 2, 3, 1 give disjoint winning intervals [1,3),
+    // [3,6), and [6,7). The latter two written patterns overlap earlier ones.
+    for count in 0..=3 {
+        let mut lane = Body::new(BitsType {
+            signed: false,
+            width: Width::Concrete(8),
+        })?;
+        lane.push(Fragment::Compound {
+            op: CompoundOp::GuardedMatch(GuardedMatch::from_draws(count, 37)?),
+            args: [ValueRef::X, ValueRef::Y, ValueRef::Y],
+        })?;
+        let sample = Sample::new(vec![], vec![lane])?;
+        let reference = sample.expected_ir()?;
+        let mut source = sample.sources()?.pop().unwrap().text;
+        for key in 0..16 {
+            let x = key + 32u64;
+            let y = 9;
+            let expected = match key {
+                1..=2 if count >= 1 => y,
+                3..=5 if count >= 2 => !y & 255,
+                6 if count == 3 => x ^ y,
+                _ => x + y,
+            };
+            let args = [x, y].map(|value| IrValue::make_ubits(8, value).unwrap());
+            let FnEvalResult::Success(result) = eval_fn(reference.get_top_fn().unwrap(), &args)
+            else {
+                panic!("could not evaluate guarded match reference");
+            };
+            assert_eq!(
+                result.value,
+                IrValue::make_tuple(&[IrValue::make_ubits(8, expected).unwrap()])
+            );
+            source.push_str(&format!(
+                "const_assert!(main(u8:{x}, u8:{y}) == (u8:{expected},));\n"
             ));
         }
         parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default())

@@ -41,6 +41,8 @@ pub struct AggregateFlow {
     kind: FlowKind,
     seed_op: BinaryOp,
     steps: Vec<FlowStep>,
+    /// Optional later write whose data also depends on the opposite field.
+    cross_field_step: Option<usize>,
     observation: FlowObservation,
 }
 
@@ -86,12 +88,22 @@ impl AggregateFlow {
             kind,
             seed_op,
             steps,
+            cross_field_step: None,
             observation,
         })
     }
 
     pub fn lane(&self) -> usize {
         self.lane
+    }
+
+    /// Mixes the preserved field into the delta of a write after the first.
+    pub fn with_cross_field_update(mut self, step: usize) -> Result<Self, String> {
+        if !(1..self.steps.len()).contains(&step) {
+            return Err("cross-field update requires a later step in the flow".into());
+        }
+        self.cross_field_step = Some(step);
+        Ok(self)
     }
 
     fn word_type(&self) -> BitsType {
@@ -165,15 +177,26 @@ pub fn update_flow{index}(packet: FlowPacket, delta: {ty}) -> FlowPacket {{
     let index_bit = {index_bit};
 "#
             ));
+            let delta = if self.cross_field_step == Some(index) {
+                match self.kind {
+                    FlowKind::Array => "(delta ^ packet[!index_bit])",
+                    FlowKind::Struct => {
+                        "(delta ^ (if index_bit { packet.left } else { packet.right }))"
+                    }
+                    FlowKind::Enum => "(delta ^ (if choose_right { left } else { right }))",
+                }
+            } else {
+                "delta"
+            };
             match self.kind {
                 FlowKind::Array => {
-                    let updated = step.op.to_dslx("packet[index_bit]", "delta", word);
+                    let updated = step.op.to_dslx("packet[index_bit]", delta, word);
                     text.push_str(&format!(
                         "    let updated = {updated};\n    update(packet, index_bit, updated)\n"
                     ));
                 }
                 FlowKind::Struct => {
-                    let updated = step.op.to_dslx("old", "delta", word);
+                    let updated = step.op.to_dslx("old", delta, word);
                     text.push_str(&format!(
                         r#"    let old = if index_bit {{ packet.right }} else {{ packet.left }};
     let updated = {updated};
@@ -187,7 +210,7 @@ pub fn update_flow{index}(packet: FlowPacket, delta: {ty}) -> FlowPacket {{
                 }
                 FlowKind::Enum => {
                     let fields = Self::enum_projection("FlowPacket", "packet");
-                    let updated = step.op.to_dslx("old", "delta", word);
+                    let updated = step.op.to_dslx("old", delta, word);
                     text.push_str(&format!(
                         r#"    let (tag, left, right) = {fields};
     let choose_right = tag ^ index_bit;
@@ -275,7 +298,7 @@ pub fn update_flow{index}(packet: FlowPacket, delta: {ty}) -> FlowPacket {{
         let left = self.seed_op.emit_ir(builder, computed, x, false)?;
         let mut fields = [left, y];
         let mut tag = builder.bit_slice(x, 0, 1)?;
-        for step in &self.steps {
+        for (number, step) in self.steps.iter().enumerate() {
             let delta = args[step.delta];
             let mut index = builder.bit_slice(delta, 0, 1)?;
             if step.invert_index {
@@ -287,8 +310,16 @@ pub fn update_flow{index}(packet: FlowPacket, delta: {ty}) -> FlowPacket {{
             }
             // Calculate both possible destinations independently, preserving
             // the value in the other slot regardless of its bit pattern.
-            let new_left = step.op.emit_ir(builder, fields[0], delta, false)?;
-            let new_right = step.op.emit_ir(builder, fields[1], delta, false)?;
+            let (left_delta, right_delta) = if self.cross_field_step == Some(number) {
+                (
+                    builder.xor(delta, fields[1])?,
+                    builder.xor(delta, fields[0])?,
+                )
+            } else {
+                (delta, delta)
+            };
+            let new_left = step.op.emit_ir(builder, fields[0], left_delta, false)?;
+            let new_right = step.op.emit_ir(builder, fields[1], right_delta, false)?;
             fields = [
                 builder.select(index, &[new_left, fields[0]], None)?,
                 builder.select(index, &[fields[1], new_right], None)?,

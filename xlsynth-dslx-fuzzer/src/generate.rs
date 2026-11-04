@@ -18,7 +18,7 @@ use crate::mission_expr::{
     CheckedCast, LogicalPredicates, NamedAggregateMatch, NamedPatternShape, ReceiverMap,
     WideningCast,
 };
-use crate::range_match::{ConstMatch, NestedCapture, RangeMatch, RangeValue};
+use crate::range_match::{ConstMatch, GuardedMatch, NestedCapture, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
@@ -83,6 +83,11 @@ pub enum Grammar {
     MissionV9,
     /// Uses v9 productions with module-local helpers.
     MissionLocalV9,
+    /// Checks match-arm activation and varies slice addresses and aggregate
+    /// dependencies.
+    MissionV10,
+    /// Uses v10 productions with module-local helpers.
+    MissionLocalV10,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -115,6 +120,8 @@ impl Grammar {
                 | Self::MissionLocalV8
                 | Self::MissionV9
                 | Self::MissionLocalV9
+                | Self::MissionV10
+                | Self::MissionLocalV10
         )
     }
 
@@ -129,6 +136,7 @@ impl Grammar {
                 | Self::MissionLocalV7
                 | Self::MissionLocalV8
                 | Self::MissionLocalV9
+                | Self::MissionLocalV10
         )
     }
 
@@ -149,11 +157,17 @@ impl Grammar {
     }
 
     fn uses_tuple_coordinates(self) -> bool {
-        matches!(self, Self::MissionV8 | Self::MissionLocalV8) || self.is_v9()
+        matches!(self, Self::MissionV8 | Self::MissionLocalV8) || self.uses_v9_productions()
     }
 
-    fn is_v9(self) -> bool {
-        matches!(self, Self::MissionV9 | Self::MissionLocalV9)
+    fn uses_v9_productions(self) -> bool {
+        matches!(self, Self::MissionV9 | Self::MissionLocalV9) || self.is_v10()
+    }
+
+    /// Identifies grammars whose ordinary runtime assertions must hold for all
+    /// inputs.
+    pub fn is_v10(self) -> bool {
+        matches!(self, Self::MissionV10 | Self::MissionLocalV10)
     }
 }
 
@@ -174,6 +188,8 @@ impl std::str::FromStr for Grammar {
             "mission-local-v8" => Ok(Self::MissionLocalV8),
             "mission-v9" => Ok(Self::MissionV9),
             "mission-local-v9" => Ok(Self::MissionLocalV9),
+            "mission-v10" => Ok(Self::MissionV10),
+            "mission-local-v10" => Ok(Self::MissionLocalV10),
             "mission-v6" => Ok(Self::MissionV6),
             "mission-local-v6" => Ok(Self::MissionLocalV6),
             "mission-v2" => Ok(Self::MissionV2),
@@ -181,7 +197,7 @@ impl std::str::FromStr for Grammar {
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v9, mission-local-v9, mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v10, mission-local-v10, mission-v9, mission-local-v9, mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -271,30 +287,46 @@ impl Entropy<'_> {
         )
     }
 
-    /// Draws two overlapping match arms with a nonempty tail unique to the
-    /// second arm.
-    fn range_match(&mut self) -> Result<RangeMatch, String> {
-        let signed = self.choose(2) != 0;
+    /// Reuses the range decoder's eight draws for both pure and asserted
+    /// matches.
+    fn range_match(&mut self, allow_assertions: bool) -> Result<CompoundOp, String> {
+        let [
+            sign,
+            width,
+            start,
+            length,
+            overlap,
+            tail,
+            first_bound,
+            second_bound,
+        ] = std::array::from_fn(|_| self.byte());
+        if allow_assertions && sign & 2 != 0 {
+            return Ok(CompoundOp::GuardedMatch(GuardedMatch::from_draws(
+                usize::from(length % 4),
+                start,
+            )?));
+        }
+        let signed = sign % 2 != 0;
         let widths = [5, 7, 8, 31, 32, 63, 64, 65, 127, 128, 129];
-        let width = widths[self.choose(widths.len())];
+        let width = widths[usize::from(width) % widths.len()];
         let start = if signed {
-            self.choose(16) as i16 - 8
+            i16::from(start % 16) - 8
         } else {
-            self.choose(8) as i16
+            i16::from(start % 8)
         };
-        let length = 1 + self.choose(4) as u8;
-        let overlap = 1 + self.choose(usize::from(length)) as u8;
-        let tail = 1 + self.choose(4) as u8;
-        RangeMatch::new([
-            RangeValue::typed(signed, width, start, length, self.choose(2) != 0)?,
+        let length = 1 + length % 4;
+        let overlap = 1 + overlap % length;
+        let tail = 1 + tail % 4;
+        Ok(CompoundOp::RangeMatch(RangeMatch::new([
+            RangeValue::typed(signed, width, start, length, first_bound % 2 != 0)?,
             RangeValue::typed(
                 signed,
                 width,
                 start + i16::from(length - overlap),
                 overlap + tail,
-                self.choose(2) != 0,
+                second_bound % 2 != 0,
             )?,
-        ])
+        ])?))
     }
 
     /// Draws representable endpoints on either side of zero while keeping
@@ -331,6 +363,9 @@ impl Entropy<'_> {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         let draw = usize::from(self.byte());
+        if self.grammar.is_v10() && (136..152).contains(&draw) {
+            return 40;
+        }
         // In the first helper, selectors for imported types and constants
         // retain their ordinary meaning because no earlier module exists.
         if self.grammar.uses_v6_productions() && (152..176).contains(&draw) {
@@ -397,7 +432,8 @@ impl Entropy<'_> {
             } else {
                 values[draw % values.len()]
             };
-            let rhs = values[self.choose(values.len())];
+            let rhs_slot = self.choose(values.len());
+            let rhs = values[rhs_slot];
             let fragment = match choice {
                 0..=6 => {
                     let op = [
@@ -444,7 +480,26 @@ impl Entropy<'_> {
                     extra: 1 + self.choose(65),
                     shift: self.choose(194),
                 },
+                40 => {
+                    // A runtime parameter supplies the address independently of
+                    // the selected data whenever the data itself is a
+                    // parameter.
+                    let start = if lhs == ValueRef::X {
+                        ValueRef::Y
+                    } else if lhs == ValueRef::Y || draw % 2 == 0 {
+                        ValueRef::X
+                    } else {
+                        ValueRef::Y
+                    };
+                    let widths = [32, 64, 65, 96, 129];
+                    Fragment::RuntimeWidthSlice {
+                        subject: lhs,
+                        start,
+                        start_width: widths[self.choose(widths.len())],
+                    }
+                }
                 13..=17 | 21..=24 | 26..=35 | 37..=38 => {
+                    let mut diversify_cube = false;
                     let op = match choice {
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
@@ -471,7 +526,7 @@ impl Entropy<'_> {
                                 [kind_draw % 3];
                             if kind != LoopKind::Array && self.grammar.uses_mission_extensions() {
                                 let range = self.bounded_range(4, true)?;
-                                if self.grammar.is_v9()
+                                if self.grammar.uses_v9_productions()
                                     && kind == LoopKind::Range
                                     && (kind_draw / 3) % 2 != 0
                                 {
@@ -522,7 +577,7 @@ impl Entropy<'_> {
                             };
                             CompoundOp::ArrayCast(ArrayCast::new(direction, 2 + self.choose(2))?)
                         }
-                        28 => CompoundOp::RangeMatch(self.range_match()?),
+                        28 => self.range_match(constants && self.grammar.is_v10())?,
                         29 => {
                             let rows = 2 + self.choose(3);
                             let cols = 2 + self.choose(3);
@@ -535,8 +590,11 @@ impl Entropy<'_> {
                                 update =
                                     update.with_index_form(forms[col_draw / cols % forms.len()]);
                             }
-                            if self.grammar.is_v9() {
+                            if self.grammar.uses_v9_productions() {
                                 let shape_draw = row_draw / rows;
+                                diversify_cube = self.grammar.is_v10()
+                                    && shape_draw % 4 == 3
+                                    && (col_draw / cols) % 4 != 0;
                                 update = update.with_shape(match shape_draw % 4 {
                                     0 => UpdateShape::MatrixCell,
                                     1 => UpdateShape::WholeMatrix,
@@ -560,7 +618,7 @@ impl Entropy<'_> {
                         32 => {
                             let [outer, inner, combiner, member] =
                                 std::array::from_fn(|_| usize::from(self.byte()));
-                            if self.grammar.is_v9() && (outer / 3) % 2 != 0 {
+                            if self.grammar.uses_v9_productions() && (outer / 3) % 2 != 0 {
                                 CompoundOp::NestedCapture(NestedCapture::new(
                                     nested_capture_range(outer, combiner)?,
                                     nested_capture_range(inner, member)?,
@@ -606,9 +664,24 @@ impl Entropy<'_> {
                             CompoundOp::RangeValue(RangeValue::new(start, length)?)
                         }
                     };
+                    let mut third_slot = self.choose(values.len());
+                    let mut right = rhs;
+                    if diversify_cube {
+                        if right == lhs {
+                            right = values[(rhs_slot + 1) % values.len()];
+                        }
+                        // Each SSA value appears once. With three available,
+                        // at most two skips are needed to keep the write data
+                        // distinct from the two coordinate operands.
+                        while values.len() >= 3
+                            && (values[third_slot] == lhs || values[third_slot] == right)
+                        {
+                            third_slot = (third_slot + 1) % values.len();
+                        }
+                    }
                     Fragment::Compound {
                         op,
-                        args: [lhs, rhs, values[self.choose(values.len())]],
+                        args: [lhs, right, values[third_slot]],
                     }
                 }
                 18 => Fragment::Binary {
@@ -819,10 +892,14 @@ fn aggregate_output(
     let parameter = [ValueRef::X, ValueRef::Y][choose(2)];
     // Decode extra updates after the original operands and observation so
     // increasing the depth preserves the prefix of the aggregate computation.
-    if grammar.is_v9() && (step_draw / 3) % 4 == 1 {
+    if grammar.uses_v9_productions() && (step_draw / 3) % 4 == 1 {
         steps.extend((0..3).map(|_| draw_flow_step(&mut choose)));
     }
-    let flow = AggregateFlow::new(
+    // Reuse the length byte to select a later write that reads the other
+    // field as well as its destination, preserving the original write indices.
+    let cross_field_step = (grammar.is_v10() && steps.len() > 1 && (step_draw / 12) % 4 == 2)
+        .then(|| 1 + (step_draw / 48) % (steps.len() - 1));
+    let mut flow = AggregateFlow::new(
         index,
         width,
         [producer, updater],
@@ -831,6 +908,9 @@ fn aggregate_output(
         steps,
         observation,
     )?;
+    if let Some(step) = cross_field_step {
+        flow = flow.with_cross_field_update(step)?;
+    }
     Ok(AggregateOutput {
         flow,
         operands: [left, right, parameter],

@@ -4,12 +4,56 @@ use std::error::Error;
 use std::fmt::Write;
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth::{IrPackage, XlsIrBits, XlsIrValue};
-use xlsynth_dslx_fuzzer::Sample;
 use xlsynth_dslx_fuzzer::array_fragment::{
     ArrayCast, CastDirection, MatrixUpdate, UpdateIndexForm, UpdateShape,
 };
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
+use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
+
+#[test]
+fn v10_cube_operand_selection_preserves_the_chain_and_uses_available_values() -> Result<(), String>
+{
+    for preceding_add in [false, true] {
+        for diversify in [false, true] {
+            // The unsigned helper contains a cube write after zero or one
+            // adds. All three operand draws select its first parameter.
+            let mut bytes = vec![0, 0, u8::from(preceding_add)];
+            if preceding_add {
+                bytes.extend([0, 0, 0]);
+            }
+            bytes.extend([227, 0, 0, 0, 0, 6, if diversify { 2 } else { 0 }, 0]);
+            bytes.resize(256, 0);
+            for grammar in [
+                Grammar::MissionV9,
+                Grammar::MissionV10,
+                Grammar::MissionLocalV10,
+            ] {
+                let sample = generate_with_grammar(&bytes, GenerateOptions::default(), grammar)?;
+                let Some(Fragment::Compound {
+                    op: CompoundOp::MatrixUpdate(_),
+                    args,
+                }) = sample.helpers()[0].body(false).fragments().last()
+                else {
+                    return Err("expected a matrix update at the end of the unsigned helper".into());
+                };
+                assert_eq!(args[0], ValueRef::X);
+                if grammar.is_v10() && diversify {
+                    assert_eq!(args[1], ValueRef::Y);
+                    if preceding_add {
+                        assert_ne!(args[2], ValueRef::X);
+                        assert_ne!(args[2], ValueRef::Y);
+                    } else {
+                        assert_eq!(args[2], ValueRef::X);
+                    }
+                } else {
+                    assert_eq!(*args, [ValueRef::X; 3]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn both_cast_directions_and_each_rectangular_update_cell_match() -> Result<(), String> {

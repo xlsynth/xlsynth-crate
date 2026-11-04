@@ -4,11 +4,14 @@
 
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
+use std::path::Path;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
+use xlsynth_dslx_fuzzer::mission_expr::ReceiverMap;
+use xlsynth_dslx_fuzzer::range_match::GuardedMatch;
 use xlsynth_dslx_fuzzer::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
-use xlsynth_dslx_fuzzer_fuzz::prove;
+use xlsynth_dslx_fuzzer_fuzz::{check_prepared, prove};
 use xlsynth_pir::{FnBuilder, ir};
 use xlsynth_prover::prover::types::EquivResult;
 
@@ -209,6 +212,50 @@ fn mission_typed_range_loops_prove() -> Result<(), String> {
         let sample =
             generate_with_grammar(&seed, GenerateOptions::default(), grammar)?.prepare()?;
         assert!(matches!(prove(&sample)?, EquivResult::Proved));
+    }
+    Ok(())
+}
+
+#[test]
+fn v10_rejects_an_assertion_failure_with_equal_return_values() -> Result<(), String> {
+    let mut lane = Body::new(BitsType {
+        signed: false,
+        width: Width::Concrete(8),
+    })?;
+    // With another function in the package, a private fallible main can lose
+    // its ordinary entry wrapper when the converter processes the whole module.
+    let mapped = lane.push(Fragment::Compound {
+        op: CompoundOp::ReceiverMap(ReceiverMap::new(7, 2)?),
+        args: [ValueRef::X, ValueRef::Y, ValueRef::Y],
+    })?;
+    lane.push(Fragment::Compound {
+        op: CompoundOp::GuardedMatch(GuardedMatch::from_draws(3, 37)?),
+        args: [ValueRef::X, mapped, ValueRef::Y],
+    })?;
+    let mut sample = Sample::new(vec![], vec![lane])?.prepare()?;
+    for grammar in [Grammar::MissionV10, Grammar::MissionLocalV10] {
+        assert!(matches!(
+            check_prepared(&sample, grammar)?,
+            EquivResult::Proved
+        ));
+    }
+    // Exclude key 3 from the second arm's assertion while retaining its
+    // pattern and value. The old equality-only proof still succeeds.
+    let source = &sample.modules.last().unwrap().text;
+    let faulty = source.replace("k >= u4:3 &&", "k > u4:3 &&");
+    assert_ne!(*source, faulty);
+    sample.converted_ir =
+        xlsynth::convert_dslx_to_ir_text(&faulty, Path::new("sample.x"), &Default::default())
+            .map_err(|error| error.to_string())?
+            .ir;
+    assert!(matches!(
+        check_prepared(&sample, Grammar::MissionV9)?,
+        EquivResult::Proved
+    ));
+    for grammar in [Grammar::MissionV10, Grammar::MissionLocalV10] {
+        let failure =
+            check_prepared(&sample, grammar).expect_err("v10 must detect the false assertion");
+        assert!(failure.contains("Disproved"), "{failure}");
     }
     Ok(())
 }

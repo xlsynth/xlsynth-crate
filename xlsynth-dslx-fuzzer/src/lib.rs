@@ -124,10 +124,13 @@ impl Sample {
     /// Formats the AST as helper files followed by the importing entry module.
     pub fn sources(&self) -> Result<Vec<SourceModule>, String> {
         let mut modules = Vec::new();
+        let mut runtime_assertions = false;
         for (index, module) in self.helpers.iter().enumerate() {
             let mut text = "// SPDX-License-Identifier: Apache-2.0\n\n".to_string();
             render_imports(&mut text, &self.helpers[..index]);
-            text.push_str(&module.declarations().to_dslx());
+            let declarations = module.declarations();
+            runtime_assertions |= declarations.runtime_assertions;
+            text.push_str(&declarations.to_dslx());
             if let Some(export) = module.struct_export() {
                 text.push_str(&export.declaration());
             }
@@ -209,8 +212,15 @@ impl Sample {
         if let Some(aggregate) = &self.aggregate {
             return_types.push(aggregate.flow.output_type());
         }
+        // Fallible functions use an implicit token. A public entry guarantees
+        // that full-module conversion also emits its ordinary calling wrapper.
+        let visibility = if runtime_assertions || declarations.runtime_assertions {
+            "pub "
+        } else {
+            ""
+        };
         text.push_str(&format!(
-            "\nfn main({}) -> ({},) {{\n",
+            "\n{visibility}fn main({}) -> ({},) {{\n",
             params.join(", "),
             return_types.join(", ")
         ));

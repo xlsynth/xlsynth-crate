@@ -252,6 +252,13 @@ pub enum Fragment {
         rhs: ValueRef,
         kind: SliceKind,
     },
+    /// An unsigned width slice with a runtime start, including high address
+    /// bits.
+    RuntimeWidthSlice {
+        subject: ValueRef,
+        start: ValueRef,
+        start_width: usize,
+    },
     WidenShift {
         arg: ValueRef,
         extra: usize,
@@ -281,6 +288,7 @@ impl Fragment {
             | Self::WidenShift { arg, .. }
             | Self::ImportedConstant { arg, .. } => vec![*arg],
             Self::Binary { lhs, rhs, .. } | Self::ConcatSlice { lhs, rhs, .. } => vec![*lhs, *rhs],
+            Self::RuntimeWidthSlice { subject, start, .. } => vec![*subject, *start],
             Self::IfCompare {
                 lhs,
                 rhs,
@@ -406,6 +414,24 @@ impl Fragment {
                     SliceKind::Width => format!("{concat}[{start}+:{unsigned}]"),
                 };
                 format!("({slice} as {})", ty.to_dslx())
+            }
+            Self::RuntimeWidthSlice {
+                subject,
+                start,
+                start_width,
+            } => {
+                let unsigned = BitsType {
+                    signed: false,
+                    ..ty
+                }
+                .to_dslx();
+                let subject = name(*subject);
+                let start = name(*start);
+                let low_width = start_width - 1;
+                let result = ty.to_dslx();
+                format!(
+                    "{{ let addr_byte = (({start} as {unsigned}) as u8); let addr = (addr_byte as u1) ++ ((addr_byte >> u32:1) as uN[{low_width}]); (({subject} as {unsigned})[addr+:{unsigned}] as {result}) }}"
+                )
             }
             Self::WidenShift { arg, extra, shift } => {
                 let unsigned32 = BitsType {
@@ -539,6 +565,21 @@ impl Fragment {
             Self::ConcatSlice { lhs, rhs, .. } => {
                 let concatenated = builder.concat(&[value(*lhs), value(*rhs)])?;
                 builder.bit_slice(concatenated, width / 2, width)
+            }
+            Self::RuntimeWidthSlice {
+                subject,
+                start,
+                start_width,
+            } => {
+                // The low seven address bits select a nearby position. Moving
+                // bit zero to the top also makes large offsets reachable from
+                // narrow lanes. A logical shift models the zero-filled slice.
+                let byte = resize_unsigned(builder, value(*start), 8)?;
+                let high = builder.bit_slice(byte, 0, 1)?;
+                let low = builder.bit_slice(byte, 1, 7)?;
+                let low = resize_unsigned(builder, low, start_width - 1)?;
+                let amount = builder.concat(&[high, low])?;
+                builder.shrl(value(*subject), amount)
             }
             Self::WidenShift { arg, extra, shift } => {
                 let extended_width = width
@@ -758,6 +799,11 @@ impl Body {
             }
             metadata_bits(*extra)?;
             metadata_bits(*shift)?;
+        }
+        if let Fragment::RuntimeWidthSlice { start_width, .. } = &fragment
+            && !(8..=129).contains(start_width)
+        {
+            return Err("runtime slice address width must be in 8..=129".to_string());
         }
         if let Fragment::Compound { op, .. } = &fragment {
             op.validate()?;

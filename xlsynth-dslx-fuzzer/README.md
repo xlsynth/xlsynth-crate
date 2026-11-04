@@ -179,6 +179,16 @@ referencing a named helper and an enum member. About a quarter of aggregate
 length draws add three updates after the original one to three. The extra
 updates keep the original operands and observation.
 
+`mission-v10` and `mission-local-v10` add ordinary runtime matches with
+assertions that describe the keys reaching each arm under first-match
+priority. The v10 proof requires every assertion to hold for every input as
+well as checking the returned values. A width slice can take a runtime
+address up to 129 bits wide. The generator puts an input bit at the top of
+the address so small input lanes can also exercise out-of-range offsets.
+The scalar reference uses a logical right shift. Cube writes prefer distinct
+operands on selected draws, and a later aggregate update can read the
+opposite field before writing the selected field.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -254,6 +264,15 @@ campaign with inline sanitizer coverage, the instrumented DSO also exposes
 those paths to libFuzzer. Use the ordinary standalone converter from the same
 revision for the formal comparison. Keep raw profiles separate for each build.
 
+For v10, apply the [match guard and width-slice coverpoints](native/guard_and_width_slice_coverpoints.patch)
+after the update-arity patch. The six `CoverMatch*` counters distinguish
+regular and default arms with zero, one or multiple earlier selectors when
+the converter constructs their activation predicates. Three `CoverWidthSlice*`
+counters distinguish compile-time starts from runtime starts up to and above
+64 bits. These measure converter execution. To check that the result matters
+to the proof, replay an ordinary input with a deliberately altered guard or
+slice address in its converted IR.
+
 Expand saved input bytes into reviewable files from the repository root:
 
 ```bash
@@ -263,7 +282,8 @@ cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/
 Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
 `--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`,
-`--mission-v8`, `--mission-local-v8`, `--mission-v9`, `--mission-local-v9`, or
+`--mission-v8`, `--mission-local-v8`, `--mission-v9`, `--mission-local-v9`,
+`--mission-v10`, `--mission-local-v10`, or
 `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before

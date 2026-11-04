@@ -95,6 +95,7 @@ impl Config {
         let result = if let Some(converter) = &self.converter {
             check_cli(
                 &sample,
+                self.grammar,
                 converter,
                 &self.stdlib,
                 self.cli_profile.as_deref(),
@@ -114,7 +115,7 @@ impl Config {
                     sample.expected_ir()
                 )
             });
-            check_prepared(&prepared)
+            check_prepared(&prepared, self.grammar)
         }
         .unwrap_or_else(|error| panic!("DSLX semantics check failed: {error}"));
 
