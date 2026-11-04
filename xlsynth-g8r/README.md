@@ -271,8 +271,9 @@ let plan = cells.map_registers(&legalized, &RegisterCellSelection::SmallestArea)
 
 `netlist::abc::AbcMappingContext` maps a `SequentialGateFn` to a complete flat
 gate-level netlist without invoking Yosys. It legalizes explicit reset/enable
-controls, optionally runs native register cleanup, selects physical FFs, and
-sends only combinational transition logic to standalone ABC. The established
+controls, optionally runs native register cleanup, extracts eligible shared
+clock gates, selects physical FFs, and sends combinational transition logic to
+standalone ABC. The established
 `abc-speed` script performs optimization, mapping, buffering, and resizing of
 that combinational logic. Registers stay outside ABC; there is no retiming or
 register sizing.
@@ -294,14 +295,20 @@ D/external-output bindings keep their original polarity. Zero-width ports are
 retained in `AbcMappedDesign::design` and omitted from GV, which has no zero-width
 port syntax. `emit_verilog()` returns deterministic text without ABC timestamps.
 
+`map_sequential` and `map_sequential_structural` take separate sequential and
+ABC options. Callers migrating from the combined options pass FF selection and
+register cleanup through `netlist::sequential_mapping::SequentialMappingOptions`.
+Its defaults select the smallest compatible FF, preserve all registers, and
+extract a clock gate for four or more flop bits sharing an enable of at most
+eight AIG AND levels. Set `clock_gating` to `None` to keep feedback muxes.
+
 `AbcMappingOptions` requires explicit `io_constraints` and has no `Default`
 implementation. `AbcMappingOptions::from_library(&library)` resolves and validates
 the library's `reference_buffer_cell` and `default_output_load` at construction.
 Alternatively, `AbcMappingOptions::new(constraints)` uses caller-supplied
-`AbcIoConstraints`, without requiring library defaults. Both constructors select
-the smallest-area FF, preserve all registers, and use a 180-second ABC timeout.
-Callers can modify these options before mapping; the mapper validates the
-constraints against its library rather than resolving defaults again.
+`AbcIoConstraints`, without requiring library defaults. Both constructors use a
+180-second ABC timeout. The mapper validates the resolved constraints against
+its library before running ABC.
 The reference must be a usable ordinary non-inverting buffer. The library's
 independent default load is expressed in its declared capacitance units and
 converted to femtofarads for ABC; caller-supplied `output_load_ff` is already in
@@ -327,7 +334,8 @@ unchanged. Custom passes must leave a mapped network in ABC's main workspace
 (use `&put` after GIA commands), preserve the combinational boundary, and omit
 library/constraint/design IO commands. This is trusted ABC code, not a sandbox;
 the wrapper does not parse or restrict the supplied commands. The full composed
-script is captured in diagnostics. There is no CLI script flag yet.
+script is captured in diagnostics. `g8r2gv --abc-script` reads custom passes
+from a file.
 
 ABC's legacy constraints are global: **the same output load also applies to
 register-D boundaries**, rather than the actual selected flop pin capacitance.
@@ -336,11 +344,13 @@ or a numeric PI-slew interface. Register-boundary STA remains a separate analysi
 
 ```rust,ignore
 use xlsynth_g8r::netlist::abc::{AbcMappingContext, AbcMappingOptions, AbcToolchain};
+use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
 
 let toolchain = AbcToolchain::new("/path/to/abc")?;
 let context = AbcMappingContext::new(toolchain, &["/path/to/cells.lib"], liberty)?;
-let options = AbcMappingOptions::from_library(context.library())?;
-let mapped = context.map_sequential(&design, &options)?;
+let sequential_options = SequentialMappingOptions::default();
+let abc_options = AbcMappingOptions::from_library(context.library())?;
+let mapped = context.map_sequential(&design, &sequential_options, &abc_options)?;
 let verilog = mapped.emit_verilog()?;
 ```
 

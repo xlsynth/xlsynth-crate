@@ -9,8 +9,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use crate::aig::gate::AigOperand;
 use crate::aig::sequential_gate::{
-    ClockPort, SequentialGateFn, TransitionInputId, TransitionOutputId,
+    ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
 };
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, PinDirection};
@@ -61,12 +62,13 @@ pub struct RegisterBitMapping {
     /// Original LSB-based bit position within the packed logical register.
     pub bit_index: usize,
     pub q: TransitionInputId,
+    /// Logical next state on the root clock, including any feedback mux.
     pub d: TransitionOutputId,
     /// Index into the owning plan's deduplicated cell assignments.
     pub cell_index: usize,
-    /// The physical output equals logical Q XOR this phase bit. The physical D
-    /// input must therefore equal logical D XOR this phase XOR the selected
-    /// cell's `inverts_data_to_output`, after rephasing logical state uses.
+    /// The physical output equals logical Q XOR this phase bit. On each
+    /// active FF clock edge, physical D equals logical D XOR this phase XOR
+    /// the selected cell's `inverts_data_to_output`.
     pub output_inverted: bool,
 }
 
@@ -85,6 +87,43 @@ pub struct RegisterMappingPlan {
 pub struct RejectedRegisterCell {
     pub cell_name: String,
     pub reason: String,
+}
+
+/// Direct module-port connections that constrain FF data and output polarity.
+pub(crate) struct RegisterBoundaryPorts {
+    primary_inputs: BTreeSet<usize>,
+    direct_outputs: BTreeSet<usize>,
+}
+
+impl RegisterBoundaryPorts {
+    pub(crate) fn new(design: &SequentialGateFn) -> Self {
+        let graph = &design.transition;
+        let primary_inputs = design
+            .inputs
+            .iter()
+            .flat_map(|id| graph.inputs[id.index()].bit_vector.iter_lsb_to_msb())
+            .map(|bit| bit.node.id)
+            .collect();
+        let direct_outputs = design
+            .outputs
+            .iter()
+            .flat_map(|id| graph.outputs[id.index()].bit_vector.iter_lsb_to_msb())
+            .filter(|bit| !bit.negated)
+            .map(|bit| bit.node.id)
+            .collect();
+        Self {
+            primary_inputs,
+            direct_outputs,
+        }
+    }
+
+    pub(crate) fn is_direct_input(&self, data: AigOperand) -> bool {
+        !data.negated && self.primary_inputs.contains(&data.node.id)
+    }
+
+    pub(crate) fn is_direct_output(&self, q: AigOperand) -> bool {
+        self.direct_outputs.contains(&q.node.id)
+    }
 }
 
 /// Reusable FF catalog; independent of timing tables and the source library's
@@ -184,27 +223,23 @@ impl RegisterMappingLibrary {
         selection: &RegisterCellSelection,
     ) -> Result<RegisterMappingPlan, String> {
         design.validate_legalized()?;
-        let primary_inputs = design
-            .inputs
-            .iter()
-            .flat_map(|id| {
-                design.transition.inputs[id.index()]
-                    .bit_vector
-                    .iter_lsb_to_msb()
-            })
-            .map(|bit| bit.node.id)
-            .collect::<BTreeSet<_>>();
-        let direct_outputs = design
-            .outputs
-            .iter()
-            .flat_map(|id| {
-                design.transition.outputs[id.index()]
-                    .bit_vector
-                    .iter_lsb_to_msb()
-            })
-            .filter(|bit| !bit.negated)
-            .map(|bit| bit.node.id)
-            .collect::<BTreeSet<_>>();
+        self.map_registers_with_data(
+            design,
+            selection,
+            &RegisterBoundaryPorts::new(design),
+            |_, _| None,
+        )
+    }
+
+    /// Selects FFs for a validated, legalized design using the data arm for
+    /// bits whose clock is gated.
+    pub(crate) fn map_registers_with_data(
+        &self,
+        design: &SequentialGateFn,
+        selection: &RegisterCellSelection,
+        ports: &RegisterBoundaryPorts,
+        data_override: impl Fn(&RegisterBinding, usize) -> Option<AigOperand>,
+    ) -> Result<RegisterMappingPlan, String> {
         let mut cells = Vec::new();
         // Only two selection classes are needed. Cache their plan indices so
         // selecting thousands of bits does not repeatedly scan the catalog.
@@ -216,11 +251,13 @@ impl RegisterMappingLibrary {
                 let q = design.transition.inputs[register.q.index()]
                     .bit_vector
                     .get_lsb(bit_index);
-                let d = design.transition.outputs[register.d.index()]
-                    .bit_vector
-                    .get_lsb(bit_index);
-                let direct_input = !d.negated && primary_inputs.contains(&d.node.id);
-                let needs_noninverting = direct_input && direct_outputs.contains(&q.node.id);
+                let d = data_override(register, bit_index).unwrap_or_else(|| {
+                    *design.transition.outputs[register.d.index()]
+                        .bit_vector
+                        .get_lsb(bit_index)
+                });
+                let direct_input = ports.is_direct_input(d);
+                let needs_noninverting = direct_input && ports.is_direct_output(*q);
                 let slot = usize::from(needs_noninverting);
                 let cell_index = if let Some(index) = cell_indices_by_requirement[slot] {
                     index
@@ -259,6 +296,15 @@ impl RegisterMappingLibrary {
         })
     }
 
+    /// Whether the selected FF can directly wire both a primary input and
+    /// output.
+    pub(crate) fn supports_direct_input_to_output(
+        &self,
+        selection: &RegisterCellSelection,
+    ) -> bool {
+        self.select_compatible(selection, true).is_ok()
+    }
+
     /// Applies a boundary's polarity requirement without relaxing fixed-cell
     /// selection. Catalog order already supplies stable minimum-area ranking.
     fn select_compatible(
@@ -294,9 +340,8 @@ fn compare_mappings(a: &RegisterCellMapping, b: &RegisterCellMapping) -> Orderin
         .then_with(|| a.tied_inputs.cmp(&b.tied_inputs))
 }
 
-/// Finds the deterministic legal data/output/control assignment for one cell.
-fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, String> {
-    cell.validate_functional_semantics()?;
+/// Checks the area and Liberty usage restrictions for native FF or ICG mapping.
+pub(super) fn validate_sequential_mapping_policy(cell: &Cell) -> Result<(), String> {
     cell.validate_mapping_policy_coverage()?;
     if cell.name.is_empty() {
         return Err("cell name is empty".into());
@@ -310,6 +355,13 @@ fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, Strin
     if !cell.area.is_finite() || cell.area < 0.0 {
         return Err("cell area must be finite and non-negative".into());
     }
+    Ok(())
+}
+
+/// Finds the deterministic legal data/output/control assignment for one cell.
+fn map_cell(cell: &Cell, library: &Library) -> Result<RegisterCellMapping, String> {
+    cell.validate_functional_semantics()?;
+    validate_sequential_mapping_policy(cell)?;
     if cell.clock_gate.is_some() {
         return Err("clock-gating cells are not supported".into());
     }

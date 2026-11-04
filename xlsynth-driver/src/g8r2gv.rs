@@ -2,6 +2,7 @@
 
 use std::fs::{File, Metadata, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use xlsynth_g8r::netlist::abc::{
     AbcIoConstraints, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics, AbcToolchain,
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
+use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
@@ -45,6 +47,15 @@ pub fn command() -> Command {
             .value_parser(clap::value_parser!(u64).range(1..)).help("ABC mapping process timeout"))
         .arg(Arg::new("cleanup-registers").long("cleanup-registers").action(ArgAction::SetTrue)
             .help("Opt in to native register cleanup before mapping; otherwise preserve all registers"))
+        .arg(Arg::new("clock-gating").long("clock-gating").value_name("BOOL")
+            .value_parser(clap::value_parser!(bool)).default_value("true")
+            .help("Extract integrated clock gates for shared flop enables (default: true)"))
+        .arg(Arg::new("clock-gate-min-flops").long("clock-gate-min-flops").value_name("N")
+            .value_parser(clap::value_parser!(NonZeroUsize))
+            .help("Minimum number of flop bits sharing a clock-gate enable (default: 4)"))
+        .arg(Arg::new("clock-gate-max-enable-depth").long("clock-gate-max-enable-depth").value_name("N")
+            .value_parser(clap::value_parser!(usize))
+            .help("Maximum AND depth of a clock-gate enable, inclusive (default: 8)"))
         .arg(Arg::new("register-cell").long("register-cell").value_name("CELL")
             .help("Require a specific supported FF cell; otherwise select the smallest-area compatible FF"))
         .arg(Arg::new("add-clk-port").long("add-clk-port").value_name("NAME")
@@ -258,18 +269,32 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         Some(load) => *load,
         None => default_output_load_ff(&library)?,
     };
-    let mut options = AbcMappingOptions::new(AbcIoConstraints {
+    let mut abc_options = AbcMappingOptions::new(AbcIoConstraints {
         driving_cell,
         output_load_ff,
     });
-    options.timeout = Duration::from_secs(*matches.get_one::<u64>("timeout-seconds").unwrap());
-    options.cleanup_registers = matches.get_flag("cleanup-registers");
-    if let Some(cell) = matches.get_one::<String>("register-cell") {
-        options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
-    }
+    abc_options.timeout = Duration::from_secs(*matches.get_one::<u64>("timeout-seconds").unwrap());
     if let Some(path) = matches.get_one::<String>("abc-script") {
-        options.script = std::fs::read_to_string(path)
+        abc_options.script = std::fs::read_to_string(path)
             .map_err(|e| format!("reading ABC script '{path}': {e}"))?;
+    }
+    let mut sequential_options = SequentialMappingOptions {
+        cleanup_registers: matches.get_flag("cleanup-registers"),
+        ..Default::default()
+    };
+    if !matches.get_flag("clock-gating") {
+        sequential_options.clock_gating = None;
+    }
+    if let Some(gating) = &mut sequential_options.clock_gating {
+        if let Some(min_flops) = matches.get_one::<NonZeroUsize>("clock-gate-min-flops") {
+            gating.min_flops = min_flops.get();
+        }
+        if let Some(max_depth) = matches.get_one::<usize>("clock-gate-max-enable-depth") {
+            gating.max_enable_depth = *max_depth;
+        }
+    }
+    if let Some(cell) = matches.get_one::<String>("register-cell") {
+        sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
     let toolchain = match matches.get_one::<String>("abc-path") {
         Some(path) => AbcToolchain::new(path),
@@ -284,8 +309,8 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
     let mapped = match format {
-        Format::Gv => context.map_sequential(&design, &options),
-        Format::Pb => context.map_sequential_structural(&design, &options),
+        Format::Gv => context.map_sequential(&design, &sequential_options, &abc_options),
+        Format::Pb => context.map_sequential_structural(&design, &sequential_options, &abc_options),
     }
     .map_err(|e| e.to_string())?;
     let output = format
