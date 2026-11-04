@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use xlsynth_dslx_fuzzer::{PreparedSample, Sample};
+use xlsynth_dslx_fuzzer::{Grammar, PreparedSample, Sample};
 use xlsynth_prover::prover::types::EquivResult;
 
 use crate::{check_prepared, native::NativeChecker};
@@ -12,6 +12,7 @@ use crate::{check_prepared, native::NativeChecker};
 /// Proves the standalone CLI output before running in-process native feedback.
 pub fn check_cli(
     sample: &Sample,
+    grammar: Grammar,
     converter: &Path,
     stdlib: &Path,
     profile: Option<&Path>,
@@ -54,7 +55,7 @@ pub fn check_cli(
         converted_top: xlsynth::mangle_dslx_name("sample", "main")
             .map_err(|error| error.to_string())?,
     };
-    let result = check_prepared(&prepared)?;
+    let result = check_prepared(&prepared, grammar)?;
 
     // Run the same source through the DSO to supply in-process C++ counters.
     // The CLI's IR has already been checked, even if the DSO fails separately.

@@ -12,6 +12,7 @@ use xlsynth_pir::{FnBuilder, ir};
 fn packages(
     flow: &AggregateFlow,
     last_module: usize,
+    width: usize,
 ) -> Result<(IrPackage, IrPackage), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let mut imports = String::new();
@@ -21,7 +22,7 @@ fn packages(
         imports.push_str(&format!("import m{module};\n"));
     }
     let source = format!(
-        "{imports}fn main(x: s2, y: s2, computed: s2) -> {} {{ {} }}",
+        "{imports}fn main(x: sN[{width}], y: sN[{width}], computed: sN[{width}]) -> {} {{ {} }}",
         flow.output_type(),
         flow.caller_expression(["x", "y", "computed"])
     );
@@ -33,9 +34,9 @@ fn packages(
     let converted = IrPackage::parse_ir(&conversion.ir, None)?;
     let mut builder = FnBuilder::new("main");
     let args = [
-        builder.param("x", ir::Type::Bits(2))?,
-        builder.param("y", ir::Type::Bits(2))?,
-        builder.param("computed", ir::Type::Bits(2))?,
+        builder.param("x", ir::Type::Bits(width))?,
+        builder.param("y", ir::Type::Bits(width))?,
+        builder.param("computed", ir::Type::Bits(width))?,
     ];
     let result = flow.emit_ir(&mut builder, args)?;
     let expected = builder.build_package(result, "expected")?;
@@ -74,7 +75,7 @@ fn chained_updates_observe_preserved_members_and_runtime_tags() -> Result<(), Bo
                     steps.clone(),
                     observation,
                 )?;
-                let (converted, reference) = packages(&flow, updater)?;
+                let (converted, reference) = packages(&flow, updater, 2)?;
                 let converted = converted.get_function(&mangled)?;
                 let reference = reference.get_function("main")?;
                 for x in 0..4 {
@@ -124,6 +125,64 @@ fn chained_updates_observe_preserved_members_and_runtime_tags() -> Result<(), Bo
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cross_field_write_reads_the_preserved_word_including_bit_64() -> Result<(), Box<dyn Error>> {
+    let zero = XlsIrValue::make_ubits(65, 0)?;
+    let one = XlsIrValue::make_ubits(65, 1)?;
+    let two = XlsIrValue::make_ubits(65, 2)?;
+    let high = XlsIrValue::parse_typed("bits[65]:0x10000000000000000")?;
+    let high_one = XlsIrValue::parse_typed("bits[65]:0x10000000000000001")?;
+    let high_two = XlsIrValue::parse_typed("bits[65]:0x10000000000000002")?;
+    let mangled = xlsynth::mangle_dslx_name("sample", "main")?;
+    for kind in [FlowKind::Array, FlowKind::Struct, FlowKind::Enum] {
+        let flow = AggregateFlow::new(
+            0,
+            65,
+            [0, 1],
+            kind,
+            BinaryOp::Add,
+            vec![
+                FlowStep {
+                    op: BinaryOp::Or,
+                    invert_index: false,
+                    delta: 0,
+                },
+                FlowStep {
+                    op: BinaryOp::Xor,
+                    invert_index: false,
+                    delta: 2,
+                },
+            ],
+            FlowObservation::Whole,
+        )?;
+        let (converted, reference) = packages(&flow.with_cross_field_update(1)?, 1, 65)?;
+        // Each case selects a different destination. Bit 64 in the preserved
+        // word must propagate into the updated word across the module call.
+        for (args, words, tag) in [
+            ([&zero, &high_two, &zero], [&high_two, &high_two], false),
+            ([&high, &two, &one], [&high_one, &high_two], true),
+        ] {
+            let args = args.map(Clone::clone);
+            let words = words.map(Clone::clone);
+            let expected = match kind {
+                FlowKind::Array => XlsIrValue::make_array(&words)?,
+                FlowKind::Struct => XlsIrValue::make_tuple(&words),
+                FlowKind::Enum => XlsIrValue::make_tuple(&[
+                    XlsIrValue::make_ubits(1, u64::from(tag))?,
+                    words[0].clone(),
+                    words[1].clone(),
+                ]),
+            };
+            assert_eq!(reference.get_function("main")?.interpret(&args)?, expected);
+            assert_eq!(
+                converted.get_function(&mangled)?.interpret(&args)?,
+                expected
+            );
         }
     }
     Ok(())

@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: Apache-2.0
+
+--- a/xls/dslx/ir_convert/function_converter.cc
++++ b/xls/dslx/ir_convert/function_converter.cc
+@@ -1368,6 +1368,25 @@
+   return absl::OkStatus();
+ }
+
++__attribute__((noinline)) static void CoverMatchArmGuardZero() {
++  asm volatile("" : : "i"(5));
++}
++__attribute__((noinline)) static void CoverMatchArmGuardOne() {
++  asm volatile("" : : "i"(6));
++}
++__attribute__((noinline)) static void CoverMatchArmGuardMany() {
++  asm volatile("" : : "i"(7));
++}
++__attribute__((noinline)) static void CoverMatchDefaultGuardZero() {
++  asm volatile("" : : "i"(8));
++}
++__attribute__((noinline)) static void CoverMatchDefaultGuardOne() {
++  asm volatile("" : : "i"(9));
++}
++__attribute__((noinline)) static void CoverMatchDefaultGuardMany() {
++  asm volatile("" : : "i"(10));
++}
++
+ absl::Status FunctionConverter::HandleMatch(const Match* node) {
+   if (node->arms().empty()) {
+     return IrConversionErrorStatus(
+@@ -1420,11 +1439,14 @@
+                                        .subspan(0, arm_selectors.size() - 1);
+             BValue not_any_prev_selected;
+             if (prior_selectors.empty()) {
++              CoverMatchArmGuardZero();
+               not_any_prev_selected = function_builder_->Literal(UBits(1, 1));
+             } else if (prior_selectors.size() == 1) {
++              CoverMatchArmGuardOne();
+               not_any_prev_selected =
+                   function_builder_->Not(prior_selectors.front());
+             } else {
++              CoverMatchArmGuardMany();
+               not_any_prev_selected = function_builder_->Nor(prior_selectors);
+             }
+             BValue this_arm_selected = arm_selectors.back();
+@@ -1449,11 +1471,14 @@
+         auto prior_selectors = absl::MakeSpan(arm_selectors);
+         BValue not_any_prev_selected;
+         if (prior_selectors.empty()) {
++          CoverMatchDefaultGuardZero();
+           not_any_prev_selected = function_builder_->Literal(UBits(1, 1));
+         } else if (prior_selectors.size() == 1) {
++          CoverMatchDefaultGuardOne();
+           not_any_prev_selected =
+               function_builder_->Not(prior_selectors.front());
+         } else {
++          CoverMatchDefaultGuardMany();
+           not_any_prev_selected = function_builder_->Nor(prior_selectors);
+         }
+         return function_builder_->And(
+@@ -2465,6 +2490,16 @@
+       });
+ }
+
++__attribute__((noinline)) static void CoverWidthSliceConstStart() {
++  asm volatile("" : : "i"(11));
++}
++__attribute__((noinline)) static void CoverWidthSliceRuntimeStart() {
++  asm volatile("" : : "i"(12));
++}
++__attribute__((noinline)) static void CoverWidthSliceRuntimeWideStart() {
++  asm volatile("" : : "i"(13));
++}
++
+ absl::Status FunctionConverter::HandleIndex(const Index* node) {
+   VLOG(5) << "HandleIndex: " << node->ToString();
+   if (proc_id_.has_value()) {
+@@ -2523,6 +2558,13 @@
+       auto* width_slice = std::get<WidthSlice*>(rhs);
+       XLS_RETURN_IF_ERROR(Visit(width_slice->start()));
+       XLS_ASSIGN_OR_RETURN(BValue start, Use(width_slice->start()));
++      if (current_type_info_->IsKnownConstExpr(width_slice->start())) {
++        CoverWidthSliceConstStart();
++      } else if (start.GetType()->GetFlatBitCount() > 64) {
++        CoverWidthSliceRuntimeWideStart();
++      } else {
++        CoverWidthSliceRuntimeStart();
++      }
+       XLS_ASSIGN_OR_RETURN(std::unique_ptr<Type> output_type,
+                            ResolveType(node));
+       XLS_ASSIGN_OR_RETURN(TypeDim output_type_dim,

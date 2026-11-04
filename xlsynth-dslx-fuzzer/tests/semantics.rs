@@ -108,6 +108,13 @@ fn primitive_lanes(signed: bool, width: usize) -> Result<Vec<Body>, String> {
             kind,
         });
     }
+    for start_width in [32, 65, 129] {
+        fragments.push(Fragment::RuntimeWidthSlice {
+            subject: ValueRef::X,
+            start: ValueRef::Y,
+            start_width,
+        });
+    }
     for shift in [0, 1, width, width + 7] {
         fragments.push(Fragment::WidenShift {
             arg: ValueRef::X,

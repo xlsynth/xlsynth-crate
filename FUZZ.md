@@ -343,7 +343,12 @@ through local bindings, tuple projections, and helper calls. V9 adds whole-array
 row and cube-cell updates, loops that ignore the carry, nested counted loops
 that capture both indices and runtime values, and aggregate chains up to six
 updates deep. Optional native converter coverpoints distinguish the five index
-arity categories during corpus replay and mutation. Captured lambdas
+arity categories during corpus replay and mutation. V10 checks the activation
+of assertions in overlapping ordinary match arms, slices with wide runtime
+starts, cube updates with diverse operands, and updates that read the other
+aggregate field. Its proof requires assertions to succeed on every input.
+Native coverpoints record the lowered arm guards and slice address widths.
+Captured lambdas
 and `const match` belong to the experimental grammar.
 Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple

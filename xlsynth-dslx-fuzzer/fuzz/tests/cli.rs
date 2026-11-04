@@ -3,8 +3,8 @@
 #![cfg(all(unix, feature = "has-bitwuzla"))]
 
 use std::os::unix::fs::PermissionsExt;
-use xlsynth_dslx_fuzzer::Sample;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
+use xlsynth_dslx_fuzzer::{Grammar, Sample};
 use xlsynth_dslx_fuzzer_fuzz::cli::check_cli;
 
 #[test]
@@ -38,6 +38,7 @@ IR
     std::fs::set_permissions(&converter, std::fs::Permissions::from_mode(0o755))?;
     let error = check_cli(
         &sample,
+        Grammar::Mission,
         &converter,
         xlsynth::default_dslx_stdlib_path(),
         None,

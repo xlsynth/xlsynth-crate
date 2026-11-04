@@ -11,7 +11,7 @@ use crate::mission_expr::{
     CheckedCast, LogicalPredicates, NamedAggregateMatch, ReceiverMap, WideningCast,
 };
 use crate::range_match::{
-    ConstMatch, LOOP_BUMP_DECLARATION, NestedCapture, RangeMatch, RangeValue,
+    ConstMatch, GuardedMatch, LOOP_BUMP_DECLARATION, NestedCapture, RangeMatch, RangeValue,
 };
 use crate::select_fold::{ArraySelect, NestedFold};
 use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
@@ -129,6 +129,7 @@ pub enum CompoundOp {
     ArrayCast(ArrayCast),
     MatrixUpdate(MatrixUpdate),
     RangeMatch(RangeMatch),
+    GuardedMatch(GuardedMatch),
     Map(MapFragment),
     Sum(SumPattern),
     SumComparison(SumComparison),
@@ -162,6 +163,7 @@ pub enum CompoundOp {
 /// Module declarations required by the recursively composed expression bodies.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Declarations {
+    pub(crate) runtime_assertions: bool,
     record: bool,
     choice: bool,
     sum: bool,
@@ -177,6 +179,7 @@ pub(crate) struct Declarations {
 
 impl Declarations {
     pub(crate) fn extend(&mut self, other: Self) {
+        self.runtime_assertions |= other.runtime_assertions;
         self.record |= other.record;
         self.choice |= other.choice;
         self.sum |= other.sum;
@@ -272,6 +275,7 @@ impl CompoundOp {
 
     pub(crate) fn declarations(self) -> Declarations {
         Declarations {
+            runtime_assertions: matches!(self, Self::GuardedMatch(_)),
             record: matches!(self, Self::Record { .. } | Self::AggregateMatch(_)),
             choice: matches!(
                 self,
@@ -309,6 +313,7 @@ impl CompoundOp {
             Self::ArrayCast(cast) => cast.to_dslx(ty, args),
             Self::MatrixUpdate(update) => update.to_dslx(ty, args),
             Self::RangeMatch(pattern) => pattern.to_dslx(args),
+            Self::GuardedMatch(pattern) => pattern.to_dslx(ty, args),
             Self::Map(map) => map.to_dslx(ty, args),
             Self::Sum(pattern) => pattern.to_dslx(ty, args),
             Self::SumComparison(comparison) => comparison.to_dslx(ty, args),
@@ -454,6 +459,7 @@ impl CompoundOp {
             Self::ArrayCast(cast) => cast.emit_ir(builder, args),
             Self::MatrixUpdate(update) => update.emit_ir(builder, args),
             Self::RangeMatch(pattern) => pattern.emit_ir(builder, args, width, signed),
+            Self::GuardedMatch(pattern) => pattern.emit_ir(builder, args),
             Self::Map(map) => map.emit_ir(builder, args, width, signed),
             Self::Sum(pattern) => pattern.emit_ir(builder, args, width),
             Self::SumComparison(comparison) => comparison.emit_ir(builder, args, width),
