@@ -306,6 +306,18 @@ struct PreparedPowerBinding {
     condition: Option<usize>,
     related_pins: Result<Vec<usize>, StringId>,
     rail: usize,
+    table_coverage: EdgeValue<bool>,
+}
+
+impl PreparedPowerBinding {
+    /// Only groups with an applicable LUT can share an event's energy.
+    fn covers_edge(&self, rise: bool) -> bool {
+        if rise {
+            self.table_coverage.rise
+        } else {
+            self.table_coverage.fall
+        }
+    }
 }
 
 /// A parsed and bound condition, or a parse error reported only if it is
@@ -1561,6 +1573,20 @@ fn prepare_instance_bindings(
                 .internal_power
                 .iter()
                 .map(|group| PreparedPowerBinding {
+                    table_coverage: EdgeValue {
+                        rise: group.tables.iter().any(|table| {
+                            matches!(
+                                table.transition,
+                                PowerTransition::Rise | PowerTransition::Both
+                            )
+                        }),
+                        fall: group.tables.iter().any(|table| {
+                            matches!(
+                                table.transition,
+                                PowerTransition::Fall | PowerTransition::Both
+                            )
+                        }),
+                    },
                     rail: {
                         let next_index = rail_indices.len();
                         *rail_indices
@@ -2255,7 +2281,9 @@ fn observe_transition(
                 candidates.extend(source_pin_indices.iter().copied().filter_map(
                     |source_pin_index| {
                         let source_rise = current_values[source_pin_index];
-                        if previous_values[source_pin_index] == source_rise {
+                        if previous_values[source_pin_index] == source_rise
+                            || !prepared_group.covers_edge(owner_output_rise.unwrap_or(source_rise))
+                        {
                             return None;
                         }
                         match topology_instance.pin_sources[source_pin_index] {

@@ -746,6 +746,9 @@ cells: {
         shape_id: 1
         values: 10.0
       }
+    }
+    internal_power: {
+      related_pin_string_ids: 1
       tables: {
         transition: POWER_TRANSITION_FALL
         shape_id: 1
@@ -834,15 +837,16 @@ cells: {
       tables: { transition: POWER_TRANSITION_RISE shape_id: 1 values: 2.0 }
     }
   }
+  pins: { name_string_id: 5 direction: INPUT }
 }
 lut_shapes: {}
-interned_strings: ["A", "Y", "VDD", "VSS", "!Y"]
+interned_strings: ["A", "Y", "VDD", "VSS", "C"]
 "#;
     let netlist = r#"
 module top (a, y);
   input a;
   output y;
-  BUF buf_inst (.A(a), .Y(y));
+  BUF buf_inst (.A(a), .C(1'b1), .Y(y));
 endmodule
 "#;
     let (_dir, netlist_path, liberty_path) = write_fixture(netlist, liberty);
@@ -861,8 +865,8 @@ endmodule
         .unwrap();
     assert_eq!(rise.cell_internal_energy, 2.0);
     assert_eq!(rise.diagnostics.multiply_attributed_internal_event_count, 1);
-    // VDD has one eligible fall selector. VSS has no fall table, so it
-    // contributes zero without diluting the VDD measurement.
+    // Both VDD groups match the related pin, but only one characterizes a
+    // fall. It gets the full 6 pJ. VSS also has only a rise table.
     let fall = model
         .analyze_dynamic_power(&library, &[high, low], options)
         .unwrap();

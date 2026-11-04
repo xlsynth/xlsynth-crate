@@ -515,8 +515,13 @@ impl CellScratch {
                         source_rise,
                         owner_output_rise: None,
                     };
-                    self.internal.add(events & !output_changed, key);
+                    if binding.covers_edge(source_rise) {
+                        self.internal.add(events & !output_changed, key);
+                    }
                     for rise in [false, true] {
+                        if !binding.covers_edge(rise) {
+                            continue;
+                        }
                         self.internal.add(
                             owner_values.level(rise, events & output_changed),
                             InternalEventKey {

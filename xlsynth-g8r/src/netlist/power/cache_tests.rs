@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::aig::{AigRef, Input};
-use crate::liberty_model::{InternalPower, LibraryBuilder, TimingArc};
+use crate::liberty_model::{InternalPower, LibraryBuilder, PowerTable, TimingArc};
 
 /// Two buffers with opposite sample values and shared condition bindings for
 /// testing cache isolation and reusable sample storage.
@@ -17,17 +17,20 @@ struct ObservationFixture {
 
 impl ObservationFixture {
     /// Builds timing and power selectors that share a condition expression.
-    fn new(power_groups: usize, when: &str) -> anyhow::Result<Self> {
+    fn new(power_groups: &[PowerTransition], when: &str) -> anyhow::Result<Self> {
         let mut builder = LibraryBuilder::new();
         let a = builder.intern_string("A")?;
         let c = builder.intern_string("C")?;
         let y = builder.intern_string("Y")?;
         let condition = builder.intern_string(when)?;
         let mut groups = Vec::new();
-        for _ in 0..power_groups {
+        for &direction in power_groups {
+            let mut table = PowerTable::default();
+            table.transition = direction;
             groups.push(InternalPower {
                 when: condition,
                 related_pins: vec![a],
+                tables: vec![table],
                 ..InternalPower::default()
             });
         }
@@ -167,7 +170,7 @@ impl ObservationFixture {
 
 #[test]
 fn cache_reuses_selectors_across_timing_and_power_but_not_instances_or_transitions() {
-    let mut fixture = ObservationFixture::new(2, "!C").unwrap();
+    let mut fixture = ObservationFixture::new(&[PowerTransition::Both; 2], "!C").unwrap();
     let model = PowerModelView {
         module_name: "test",
         gate_fn: &fixture.gate_fn,
@@ -401,7 +404,7 @@ fn cache_preserves_lazy_errors_and_counts_only_successful_requests() {
 
 #[test]
 fn sample_fill_overwrites_values_and_reuses_nested_storage() {
-    let fixture = ObservationFixture::new(1, "!C").unwrap();
+    let fixture = ObservationFixture::new(&[PowerTransition::Both], "!C").unwrap();
     let model = PowerModelView {
         module_name: "test",
         gate_fn: &fixture.gate_fn,
@@ -449,7 +452,15 @@ fn sample_fill_overwrites_values_and_reuses_nested_storage() {
 
 #[test]
 fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
-    let mut fixture = ObservationFixture::new(3, "(Y ^ IQN) | (!C & A)").unwrap();
+    let mut fixture = ObservationFixture::new(
+        &[
+            PowerTransition::Both,
+            PowerTransition::Both,
+            PowerTransition::Rise,
+        ],
+        "(Y ^ IQN) | (!C & A)",
+    )
+    .unwrap();
     let data: AigOperand = AigRef { id: 0 }.into();
     fixture.gate_fn.inputs.push(Input {
         name: "data".to_string(),
@@ -549,7 +560,7 @@ fn packed_activity_matches_scalar_across_word_and_batch_boundaries() {
 
 #[test]
 fn failed_sample_fill_stops_before_transition_accounting() {
-    let mut fixture = ObservationFixture::new(1, "!C").unwrap();
+    let mut fixture = ObservationFixture::new(&[PowerTransition::Both], "!C").unwrap();
     fixture.gate_fn.gates.push(AigNode::Literal {
         value: false,
         pir_node_ids: Default::default(),
