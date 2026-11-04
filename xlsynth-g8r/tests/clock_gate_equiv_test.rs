@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use tempfile::NamedTempFile;
 use xlsynth_pir::IrBits;
 
@@ -208,6 +209,71 @@ fn icg_projection_labels_clocks_and_holds_physical_state_for_q_or_qn() -> anyhow
             "sequential dynamic-power analysis does not support gated clocks"
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "sequential dynamic-power analysis currently rejects gated clocks"]
+fn icg_dynamic_power_counts_passed_pulses_and_blocked_clock_energy() -> anyhow::Result<()> {
+    let library = parse_clock_gate_library(CLOCK_GATE_LIB)?;
+    let path = NamedTempFile::new()?;
+    std::fs::write(path.path(), CLOCK_GATE_WIRING)?;
+    let model = load_labeled_sequential_netlist_aig_with_liberty(
+        path.path(),
+        &library,
+        &GvEvalOptions::default(),
+    )?;
+    // D and the initial Q are zero, so only the enable and the two clocks
+    // switch.
+    let cycles = [false, true, false, true].map(|en| vec![IrBits::bool(en), IrBits::bool(false)]);
+    let trace = model
+        .simulate_bits(
+            &cycles,
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let report = model
+        .analyze_dynamic_power(&library, &trace, GvSequentialDynamicPowerOptions::default())
+        .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(report.active_edge_transition_count, 4);
+    assert_eq!(report.inactive_edge_transition_count, 4);
+    assert_eq!(report.clock_transition_count, 8);
+    let mut output_edges = BTreeMap::new();
+    let mut pin_energy = BTreeMap::new();
+    for instance in &report.instances {
+        for output in &instance.outputs {
+            output_edges.insert(
+                (instance.instance_name.as_str(), output.pin_name.as_str()),
+                (output.rise_count, output.fall_count),
+            );
+        }
+        for pin in &instance.pin_internal_energy {
+            pin_energy.insert(
+                (instance.instance_name.as_str(), pin.pin_name.as_str()),
+                pin.internal_energy,
+            );
+        }
+    }
+    assert_eq!(
+        output_edges,
+        BTreeMap::from([(("gate", "GCLK"), (2, 2)), (("bit0", "Q"), (0, 0))])
+    );
+    assert_eq!(
+        pin_energy,
+        BTreeMap::from([
+            (("gate", "CLK"), 12.0),  // 4 blocked edges × 1 + 4 passed edges × 2
+            (("gate", "ENA"), 21.0),  // 3 input transitions × 7
+            (("gate", "GCLK"), 12.0), // 4 gated edges × 3
+            (("bit0", "CLK"), 20.0),  // 4 gated edges × 5; stable Q consumes no output energy
+        ])
+    );
+    // At 1 V each edge costs half its net capacitance in pJ.
+    assert_eq!(report.clock_switching_energy, 8.0); // 8 root edges × 2 pF / 2
+    assert_eq!(report.primary_input_switching_energy, 3.0); // 3 ENA edges × 2 pF / 2
+    assert_eq!(report.cell_output_switching_energy, 8.0); // 4 GCLK edges × 4 pF / 2
+    assert_eq!(report.cell_internal_energy, 65.0);
+    assert_eq!(report.total_dynamic_energy, 84.0);
     Ok(())
 }
 
