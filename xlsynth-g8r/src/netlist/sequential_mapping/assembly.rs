@@ -340,14 +340,16 @@ impl PreparedSequentialMapping<'_> {
                 "{backend} must emit exactly one combinational module"
             ));
         };
+        let net_by_name = module.net_indices_by_name(&parsed.nets);
         let mut ports = BTreeMap::new();
         for port in &module.ports {
             let name = parsed.interner.resolve(port.name).unwrap().to_string();
             if port.width.is_some() {
                 return Err(format!("{backend} boundary ports must be scalar"));
             }
-            let net = module
-                .find_net_index(port.name, &parsed.nets)
+            let net = net_by_name
+                .get(&port.name)
+                .copied()
                 .ok_or_else(|| format!("{backend} port net missing"))?;
             ports.insert(name, (port.direction.clone(), net));
         }

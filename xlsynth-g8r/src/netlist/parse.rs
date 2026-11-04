@@ -126,6 +126,16 @@ impl NetlistModule {
             .position(|net| net.name == net_name)
             .map(|offset| NetIndex(self.net_index_range.start + offset))
     }
+
+    /// Indexes this module's nets for repeated lookups, keeping the first match
+    /// for each name as in `find_net_index`.
+    pub(crate) fn net_indices_by_name(&self, nets: &[Net]) -> HashMap<NetId, NetIndex> {
+        let mut by_name = HashMap::with_capacity(self.net_index_range.len());
+        for i in self.net_index_range.clone() {
+            by_name.entry(nets[i].name).or_insert(NetIndex(i));
+        }
+        by_name
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
