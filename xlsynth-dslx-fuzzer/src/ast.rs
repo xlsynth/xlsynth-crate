@@ -900,6 +900,7 @@ impl Body {
                     } | CompoundOp::Pattern(PatternOp::Tuple)
                         | CompoundOp::Sum(_)
                         | CompoundOp::SumComparison(_)
+                        | CompoundOp::ArrayFold(_)
                         | CompoundOp::ArraySelect(_)
                         | CompoundOp::AggregateMatch(_)
                         | CompoundOp::NestedFold(_)

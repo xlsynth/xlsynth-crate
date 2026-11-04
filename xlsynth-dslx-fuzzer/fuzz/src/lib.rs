@@ -37,18 +37,53 @@ fn prove_with_assertions(
     Ok(run_ir_equiv(&request)?.result)
 }
 
+/// A concrete sample finding or a failure to run the checker reliably.
+#[derive(Debug)]
+pub enum CheckFailure {
+    Disproved(String),
+    ConverterRejected(String),
+    Checker(String),
+}
+
+impl From<String> for CheckFailure {
+    fn from(message: String) -> Self {
+        Self::Checker(message)
+    }
+}
+
+impl CheckFailure {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::Disproved(message)
+            | Self::ConverterRejected(message)
+            | Self::Checker(message) => message,
+        }
+    }
+}
+
 /// Returns proved or resource-limited outcomes and includes the full sample on
 /// failure.
 pub fn check_prepared(sample: &PreparedSample, grammar: Grammar) -> Result<EquivResult, String> {
-    let semantics = if grammar.is_v10() {
+    classify_prepared(sample, grammar).map_err(CheckFailure::into_message)
+}
+
+fn classify_prepared(
+    sample: &PreparedSample,
+    grammar: Grammar,
+) -> Result<EquivResult, CheckFailure> {
+    let semantics = if grammar.uses_v10_productions() {
         AssertionSemantics::Never
     } else {
         AssertionSemantics::Ignore
     };
     match prove_with_assertions(sample, semantics) {
         Ok(result @ (EquivResult::Proved | EquivResult::Inconclusive(_))) => Ok(result),
-        failure => Err(format!(
-            "equivalence check failed: {failure:#?}\n{sample:#?}"
-        )),
+        failure => {
+            let message = format!("equivalence check failed: {failure:#?}\n{sample:#?}");
+            match failure {
+                Ok(EquivResult::Disproved { .. }) => Err(CheckFailure::Disproved(message)),
+                _ => Err(CheckFailure::Checker(message)),
+            }
+        }
     }
 }

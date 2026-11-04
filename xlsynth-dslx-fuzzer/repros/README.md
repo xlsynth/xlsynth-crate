@@ -31,9 +31,15 @@ below reproduced on stock XLS v0.61.0.
   one IR index. Inlining `(row, col)` at the update call converts correctly.
   With [google/xls#5260](https://github.com/google/xls/pull/5260) applied,
   both spellings convert to IR equivalent to the scalar specification.
+- `map_builtin_name_collision.x` maps the built-in bit reversal over a
+  two-bit word and XORs it with the result of the user identity `rev__2`.
+  At input 1, DSLX returns 3. The converter at XLS revision `77b64c916`
+  reuses the identity as the map body and returns 0. Renaming the identity
+  restores the correct result on all four inputs.
 
 ```sh
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --top=main bound_tuple_update_index.x
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --top=main map_builtin_name_collision.x
 dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=dslx-interpreter signed_loop_wide.x
 dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=ir-interpreter signed_loop_wide.x
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_loop_narrow.x

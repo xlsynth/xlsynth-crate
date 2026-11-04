@@ -6,6 +6,7 @@ pub mod aggregate_flow;
 pub mod aggregate_match;
 pub mod array_fragment;
 pub mod ast;
+pub mod bit_projection;
 pub mod compound;
 pub mod constexpr;
 mod generate;
@@ -24,7 +25,7 @@ pub use generate::{
 
 use aggregate_flow::AggregateFlow;
 use ast::{Body, HelperModule, ValueRef, Width};
-use constexpr::metadata_bits;
+use constexpr::{ConstExpr, metadata_bits};
 use std::path::Path;
 use xlsynth_pir::{FnBuilder, IrFormatPreference, IrValue, ir};
 
@@ -43,6 +44,7 @@ pub struct Sample {
     // Mission generation selects one ordinary intermediate per lane.
     observations: Vec<ValueRef>,
     aggregate: Option<AggregateOutput>,
+    specialization: Option<ConstExpr>,
 }
 
 /// The cross-helper flow and the lane bindings that supply its three words.
@@ -105,7 +107,19 @@ impl Sample {
             lanes,
             observations: vec![],
             aggregate: None,
+            specialization: None,
         })
+    }
+
+    /// Observes an ordinary call and a parametric specialization with the same
+    /// constant operands as separate top outputs, each checked against PIR.
+    pub fn with_specialization_check(mut self, expression: ConstExpr) -> Result<Self, String> {
+        if expression.requires_bit_width() {
+            return Err("specialization observation requires closed arguments".into());
+        }
+        expression.validate_imports(&self.helpers)?;
+        self.specialization = Some(expression);
+        Ok(self)
     }
 
     pub fn helpers(&self) -> &[HelperModule] {
@@ -192,7 +206,15 @@ impl Sample {
         for lane in &self.lanes {
             declarations.extend(lane.declarations());
         }
+        if let Some(expr) = &self.specialization {
+            declarations.extend(expr.declarations());
+        }
         text.push_str(&declarations.to_dslx());
+        if let Some(expr) = &self.specialization {
+            text.push_str(&expr.render_function("observation_", &self.helpers)?);
+            let ty = expr.bits_type().to_dslx();
+            text.push_str(&format!("\nfn specialized<V: {ty}>() -> {ty} {{ V }}\n"));
+        }
         for (index, lane) in self.lanes.iter().enumerate() {
             text.push_str(&lane.render_const_functions(&format!("a{index}_"), &self.helpers)?);
         }
@@ -211,6 +233,9 @@ impl Sample {
         }
         if let Some(aggregate) = &self.aggregate {
             return_types.push(aggregate.flow.output_type());
+        }
+        if let Some(expr) = &self.specialization {
+            return_types.extend([expr.bits_type().to_dslx(), expr.bits_type().to_dslx()]);
         }
         // Fallible functions use an implicit token. A public entry guarantees
         // that full-module conversion also emits its ordinary calling wrapper.
@@ -238,6 +263,11 @@ impl Sample {
                 .caller_expression(args.each_ref().map(String::as_str));
             text.push_str(&format!("    let aggregate_output = {expr};\n"));
             results.push("aggregate_output".to_string());
+        }
+        if let Some(expr) = &self.specialization {
+            let call = expr.call("observation_");
+            results.push(call.clone());
+            results.push(format!("specialized<{{{call}}}>()"));
         }
         text.push_str(&format!("    ({},)\n}}\n", results.join(", ")));
         modules.push(SourceModule {
@@ -269,6 +299,11 @@ impl Sample {
                     .lane_outputs(index)
                     .map(|_| lane.bits_type().to_dslx()))
                 .chain(self.aggregate.iter().map(|a| a.flow.output_type()))
+                .chain(
+                    self.specialization
+                        .iter()
+                        .flat_map(|expr| [expr.bits_type().to_dslx(), expr.bits_type().to_dslx()])
+                )
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -344,6 +379,10 @@ impl Sample {
             }
         }
         outputs.extend(aggregate_output);
+        if let Some(expr) = &self.specialization {
+            let expected = expr.emit_ir(&mut builder, &self.helpers, None)?;
+            outputs.extend([expected, expected]);
+        }
         let result = builder.tuple(&outputs).map_err(|error| error.to_string())?;
         builder
             .build_package(result, "expected")

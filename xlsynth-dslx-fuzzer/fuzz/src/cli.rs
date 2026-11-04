@@ -7,7 +7,7 @@ use std::process::Command;
 use xlsynth_dslx_fuzzer::{Grammar, PreparedSample, Sample};
 use xlsynth_prover::prover::types::EquivResult;
 
-use crate::{check_prepared, native::NativeChecker};
+use crate::{CheckFailure, classify_prepared, native::NativeChecker};
 
 /// Proves the standalone CLI output before running in-process native feedback.
 pub fn check_cli(
@@ -18,6 +18,20 @@ pub fn check_cli(
     profile: Option<&Path>,
     native: Option<&NativeChecker>,
 ) -> Result<EquivResult, String> {
+    classify_cli(sample, grammar, converter, stdlib, profile, native)
+        .map_err(CheckFailure::into_message)
+}
+
+/// Distinguishes production converter findings from checker and execution
+/// errors.
+pub fn classify_cli(
+    sample: &Sample,
+    grammar: Grammar,
+    converter: &Path,
+    stdlib: &Path,
+    profile: Option<&Path>,
+    native: Option<&NativeChecker>,
+) -> Result<EquivResult, CheckFailure> {
     let modules = sample.sources()?;
     let expected_ir = sample.expected_ir()?.to_string();
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -42,11 +56,11 @@ pub fn check_cli(
         .output()
         .map_err(|error| format!("could not execute {}: {error}", converter.display()))?;
     if !output.status.success() {
-        return Err(format!(
+        return Err(CheckFailure::ConverterRejected(format!(
             "ir_converter_main failed ({}): {}\n{modules:#?}",
             output.status,
             String::from_utf8_lossy(&output.stderr)
-        ));
+        )));
     }
     let prepared = PreparedSample {
         modules,
@@ -55,11 +69,14 @@ pub fn check_cli(
         converted_top: xlsynth::mangle_dslx_name("sample", "main")
             .map_err(|error| error.to_string())?,
     };
-    let result = check_prepared(&prepared, grammar)?;
+    let result = classify_prepared(&prepared, grammar)?;
 
     // Run the same source through the DSO to supply in-process C++ counters.
     // The CLI's IR has already been checked, even if the DSO fails separately.
-    let entry = prepared.modules.last().ok_or("missing entry module")?;
+    let entry = prepared
+        .modules
+        .last()
+        .ok_or_else(|| String::from("missing entry module"))?;
     let options = xlsynth::DslxConvertOptions {
         dslx_stdlib_path: Some(stdlib),
         additional_search_paths: vec![directory.path()],

@@ -5,6 +5,7 @@
 use crate::aggregate_match::{self, AggregateMatch};
 use crate::array_fragment::{ArrayCast, MatrixUpdate};
 use crate::ast::{BitsType, Width};
+use crate::bit_projection::BitProjection;
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
 use crate::mission_expr::{
@@ -13,7 +14,7 @@ use crate::mission_expr::{
 use crate::range_match::{
     ConstMatch, GuardedMatch, LOOP_BUMP_DECLARATION, NestedCapture, RangeMatch, RangeValue,
 };
-use crate::select_fold::{ArraySelect, NestedFold};
+use crate::select_fold::{ArrayFold, ArraySelect, NestedFold};
 use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue, ir};
 
@@ -127,6 +128,8 @@ pub enum CompoundOp {
     Builtin(BuiltinOp),
     Array(ArrayOp),
     ArrayCast(ArrayCast),
+    BitProjection(BitProjection),
+    ArrayFold(ArrayFold),
     MatrixUpdate(MatrixUpdate),
     RangeMatch(RangeMatch),
     GuardedMatch(GuardedMatch),
@@ -275,7 +278,8 @@ impl CompoundOp {
 
     pub(crate) fn declarations(self) -> Declarations {
         Declarations {
-            runtime_assertions: matches!(self, Self::GuardedMatch(_)),
+            runtime_assertions: matches!(self, Self::GuardedMatch(_))
+                || matches!(self, Self::ArrayFold(fold) if fold.has_assertion()),
             record: matches!(self, Self::Record { .. } | Self::AggregateMatch(_)),
             choice: matches!(
                 self,
@@ -310,6 +314,8 @@ impl CompoundOp {
         let ux = format!("({x} as {unsigned})");
         let selector = format!("({ux} as u2)");
         match self {
+            Self::ArrayFold(fold) => fold.to_dslx(ty, args),
+            Self::BitProjection(projection) => projection.to_dslx(ty, args),
             Self::ArrayCast(cast) => cast.to_dslx(ty, args),
             Self::MatrixUpdate(update) => update.to_dslx(ty, args),
             Self::RangeMatch(pattern) => pattern.to_dslx(args),
@@ -456,6 +462,8 @@ impl CompoundOp {
     ) -> Result<BValue, BuilderError> {
         let [x, y, z] = args;
         match self {
+            Self::ArrayFold(fold) => fold.emit_ir(builder, args),
+            Self::BitProjection(projection) => projection.emit_ir(builder, args, width),
             Self::ArrayCast(cast) => cast.emit_ir(builder, args),
             Self::MatrixUpdate(update) => update.emit_ir(builder, args),
             Self::RangeMatch(pattern) => pattern.emit_ir(builder, args, width, signed),

@@ -5,7 +5,8 @@
 use std::os::unix::fs::PermissionsExt;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::{Grammar, Sample};
-use xlsynth_dslx_fuzzer_fuzz::cli::check_cli;
+use xlsynth_dslx_fuzzer_fuzz::CheckFailure;
+use xlsynth_dslx_fuzzer_fuzz::cli::{check_cli, classify_cli};
 
 #[test]
 fn standalone_output_is_the_program_under_proof() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,5 +47,23 @@ IR
     )
     .expect_err("wrong standalone output must fail even when the DSO is correct");
     assert!(error.contains("Disproved"), "{error}");
+    let classify = || {
+        classify_cli(
+            &sample,
+            Grammar::Mission,
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+            None,
+            None,
+        )
+    };
+    assert!(matches!(classify(), Err(CheckFailure::Disproved(_))));
+    std::fs::write(&converter, "#!/bin/sh\nexit 1\n")?;
+    assert!(matches!(
+        classify(),
+        Err(CheckFailure::ConverterRejected(_))
+    ));
+    std::fs::remove_file(&converter)?;
+    assert!(matches!(classify(), Err(CheckFailure::Checker(_))));
     Ok(())
 }
