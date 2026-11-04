@@ -372,6 +372,70 @@ fn icg_latches_the_pre_edge_enable_across_packed_batches() -> anyhow::Result<()>
 }
 
 #[test]
+fn hierarchy_toggle_report_follows_root_and_gated_clock_wire_aliases() -> anyhow::Result<()> {
+    let netlist = r#"module pass(input clk, output ck);
+      assign ck = clk;
+    endmodule
+    module observer(input clk, input d, output y);
+      BUF copy (.A(d), .Y(y));
+    endmodule
+    module bank(input clk, input en, output q, output data);
+      wire root_alias, gclk, observer_alias;
+      pass path (.clk(clk), .ck(root_alias));
+      ICG gate (.CLK(root_alias), .ENA(en), .SE(1'b0), .GCLK(gclk));
+      DFF bit0 (.CLK(gclk), .D(1'b1), .Q(q));
+      assign observer_alias = gclk;
+      observer child (.clk(observer_alias), .d(en), .y(data));
+    endmodule"#;
+    let library = parse_clock_gate_library(CLOCK_GATE_LIB)?;
+    let file = NamedTempFile::new()?;
+    std::fs::write(file.path(), netlist)?;
+    let model = load_labeled_sequential_netlist_aig_with_liberty(
+        file.path(),
+        &library,
+        &GvEvalOptions {
+            module_name: Some("bank".into()),
+            ..Default::default()
+        },
+    )?;
+    let trace = model
+        .simulate_bits(
+            &[vec![IrBits::bool(false)], vec![IrBits::bool(true)]],
+            SequentialState::all_zeros(&model.sequential_gate_fn),
+        )
+        .map_err(anyhow::Error::msg)?;
+    let activity = model
+        .count_toggle_activity(&trace)
+        .map_err(anyhow::Error::msg)?;
+    let mut clocks = BTreeMap::new();
+    for boundary in &activity.module_boundaries {
+        for port in &boundary.ports {
+            for bit in &port.bits_lsb_to_msb {
+                if let GvSequentialSignalToggleActivity::Clock { toggle_count } = bit.activity {
+                    clocks.insert(
+                        (
+                            boundary.instance_path.as_str(),
+                            port.port_name.as_str(),
+                            bit.bit_number,
+                        ),
+                        toggle_count,
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        clocks,
+        BTreeMap::from([
+            (("path", "clk", 0), 4),
+            (("path", "ck", 0), 4),
+            (("child", "clk", 0), 2),
+        ]),
+    );
+    Ok(())
+}
+
+#[test]
 fn icgs_with_one_enable_keep_separate_loads_and_propagate_local_clock_slew() -> anyhow::Result<()> {
     let netlist = r#"module gated_bit(input gclk, input d, output q);
       DFF bit0 (.CLK(gclk), .D(d), .Q(q));
