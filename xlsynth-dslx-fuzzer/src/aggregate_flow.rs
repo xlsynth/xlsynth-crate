@@ -57,8 +57,11 @@ impl AggregateFlow {
         observation: FlowObservation,
     ) -> Result<Self, String> {
         let [producer, updater] = modules;
-        if width == 0 || producer > updater || !(1..=3).contains(&steps.len()) {
-            return Err("aggregate flow requires a positive width, ordered modules and one to three updates".into());
+        if width == 0 || producer > updater || !(1..=6).contains(&steps.len()) {
+            return Err(
+                "aggregate flow requires a positive width, ordered modules and one to six updates"
+                    .into(),
+            );
         }
         let supported = |op| {
             matches!(

@@ -3,7 +3,7 @@
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_dslx_fuzzer::ast::{BitsType, Body, Fragment, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
-use xlsynth_dslx_fuzzer::range_match::{RangeMatch, RangeValue};
+use xlsynth_dslx_fuzzer::range_match::{NestedCapture, RangeMatch, RangeValue};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, Sample, generate_with_grammar};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
@@ -183,6 +183,71 @@ fn range_elements_and_loop_indices_match_dslx_constant_evaluation() -> Result<()
             // DSLX constexpr evaluation checks the same mathematical answers
             // without invoking the C++ converter under test,
             // including for its known failures.
+            parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default())
+                .map_err(|error| format!("{error}\n{source}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn ignored_carries_and_nested_captures_match_dslx_constant_evaluation() -> Result<(), String> {
+    for (signed_index, start) in [(true, -2i16), (false, 2i16)] {
+        let empty = RangeValue::typed(signed_index, 65, start, 0, false)?;
+        let singleton = RangeValue::typed(signed_index, 65, start, 1, true)?;
+        let outer = RangeValue::typed(signed_index, 65, start, 3, true)?;
+        let inner_start = if signed_index { 1i16 } else { -1i16 };
+        let inner = RangeValue::typed(!signed_index, 3, inner_start, 2, false)?;
+        for lane_width in [8, 129] {
+            let ty = BitsType {
+                signed: !signed_index,
+                width: Width::Concrete(lane_width),
+            };
+            let mut lanes = Vec::new();
+            for op in [
+                CompoundOp::IgnoredCarryLoop(empty),
+                CompoundOp::IgnoredCarryLoop(singleton),
+                CompoundOp::IgnoredCarryLoop(outer),
+                CompoundOp::NestedCapture(NestedCapture::new(outer, inner)?),
+            ] {
+                let mut lane = Body::new(ty)?;
+                lane.push(Fragment::Compound {
+                    op,
+                    args: [ValueRef::X, ValueRef::Y, ValueRef::X],
+                })?;
+                lanes.push(lane);
+            }
+            let sample = Sample::new(vec![], lanes)?;
+            let reference = sample.expected_ir()?;
+            let mut source = sample.sources()?.pop().unwrap().text;
+            let lane_type = ty.to_dslx();
+            for (x, y) in [(3i64, 5i64), (0, 2), (11, 0)] {
+                let start = i64::from(start);
+                let inner_start = i64::from(inner_start);
+                let nested = (start..start + 3).fold(x, |acc, i| {
+                    (inner_start..inner_start + 2)
+                        .fold(acc ^ x, |acc, j| ((acc + 1) ^ (i + y)) + j + 2)
+                });
+                let expected = [x, y + start, y + start + 2, nested];
+                let pair = [x, y].map(|v| IrValue::make_sbits(lane_width, v).unwrap());
+                let args: Vec<_> = pair.iter().cycle().take(8).cloned().collect();
+                let FnEvalResult::Success(result) = eval_fn(reference.get_top_fn().unwrap(), &args)
+                else {
+                    panic!("captured loop reference evaluation failed");
+                };
+                assert_eq!(
+                    result.value,
+                    IrValue::make_tuple(
+                        &expected.map(|v| IrValue::make_sbits(lane_width, v).unwrap())
+                    )
+                );
+                let arg_pair = format!("{lane_type}:{x}, {lane_type}:{y}");
+                let results = expected.map(|v| format!("(sN[{lane_width}]:{v} as {lane_type})"));
+                source.push_str(&format!(
+                    "const_assert!(main({arg_pair}, {arg_pair}, {arg_pair}, {arg_pair}) == ({},));\n",
+                    results.join(", ")
+                ));
+            }
             parse_and_typecheck(&source, "sample.x", "sample", &mut ImportData::default())
                 .map_err(|error| format!("{error}\n{source}"))?;
         }

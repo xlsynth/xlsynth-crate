@@ -158,7 +158,11 @@ for maps and enumeration. The `mission` profile exercises the real stdlib.
 V7 adds a separately observed array, struct, or payload enum that flows through
 producer and updater functions. Its scalar reference checks both changed and
 preserved fields across those calls. V8 passes multidimensional update indices
-through local bindings, tuple projections, and helper calls. Captured lambdas
+through local bindings, tuple projections, and helper calls. V9 adds whole-array,
+row and cube-cell updates, loops that ignore the carry, nested counted loops
+that capture both indices and runtime values, and aggregate chains up to six
+updates deep. Optional native converter coverpoints distinguish the five index
+arity categories during corpus replay and mutation. Captured lambdas
 and `const match` belong to the experimental grammar.
 Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple

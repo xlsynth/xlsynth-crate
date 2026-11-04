@@ -5,6 +5,7 @@ use xlsynth_dslx_fuzzer::Sample;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, HelperModule, ValueRef, Width};
 use xlsynth_dslx_fuzzer::compound::CompoundOp;
 use xlsynth_dslx_fuzzer::constexpr::{ConstExpr, ConstInput, ConstantScope};
+use xlsynth_dslx_fuzzer::range_match::{NestedCapture, RangeValue};
 use xlsynth_dslx_fuzzer::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use xlsynth_pir::IrBits;
 
@@ -114,8 +115,7 @@ fn tuple_folds_preserve_all_carry_projections() -> Result<(), String> {
 }
 
 #[test]
-fn array_selects_and_nested_folds_specialize_and_evaluate_in_constant_bindings()
--> Result<(), String> {
+fn array_selects_and_loops_specialize_and_evaluate_in_constant_bindings() -> Result<(), String> {
     for op in [
         CompoundOp::ArraySelect(ArraySelect::new(SelectKind::OneHot, CaseArray::Updated, 5)?),
         CompoundOp::ArraySelect(ArraySelect::new(
@@ -125,6 +125,11 @@ fn array_selects_and_nested_folds_specialize_and_evaluate_in_constant_bindings()
         )?),
         CompoundOp::NestedFold(NestedFold::new(2, 1, BinaryOp::Sub, 0)?),
         CompoundOp::NestedFold(NestedFold::new(4, 3, BinaryOp::Add, 2)?),
+        CompoundOp::IgnoredCarryLoop(RangeValue::typed(false, 3, 1, 3, true)?),
+        CompoundOp::NestedCapture(NestedCapture::new(
+            RangeValue::typed(false, 7, 1, 3, true)?,
+            RangeValue::typed(true, 65, 2, 2, false)?,
+        )?),
     ] {
         let parametric = |signed| BitsType {
             signed,

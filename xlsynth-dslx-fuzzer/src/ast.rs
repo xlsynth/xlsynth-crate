@@ -857,6 +857,8 @@ impl Body {
                         | CompoundOp::ArraySelect(_)
                         | CompoundOp::AggregateMatch(_)
                         | CompoundOp::NestedFold(_)
+                        | CompoundOp::NestedCapture(_)
+                        | CompoundOp::IgnoredCarryLoop(_)
                         | CompoundOp::ReceiverMap(_)
                         | CompoundOp::LogicalPredicates(_)
                         | CompoundOp::CheckedCast(_)

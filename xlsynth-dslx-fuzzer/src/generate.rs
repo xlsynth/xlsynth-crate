@@ -4,7 +4,7 @@
 
 use crate::aggregate_flow::{AggregateFlow, FlowKind, FlowObservation, FlowStep};
 use crate::aggregate_match::AggregateMatch;
-use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate, UpdateIndexForm};
+use crate::array_fragment::{ArrayCast, CastDirection, MatrixUpdate, UpdateIndexForm, UpdateShape};
 use crate::ast::{
     BinaryOp, BitsType, Body, Comparison, Fragment, HelperModule, SliceKind, UnaryOp, ValueRef,
     Width,
@@ -18,7 +18,7 @@ use crate::mission_expr::{
     CheckedCast, LogicalPredicates, NamedAggregateMatch, NamedPatternShape, ReceiverMap,
     WideningCast,
 };
-use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::range_match::{ConstMatch, NestedCapture, RangeMatch, RangeValue};
 use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
@@ -78,6 +78,11 @@ pub enum Grammar {
     MissionV8,
     /// Uses v8 productions with module-local helpers.
     MissionLocalV8,
+    /// Adds update index shapes, loop captures and selectively deeper aggregate
+    /// flows.
+    MissionV9,
+    /// Uses v9 productions with module-local helpers.
+    MissionLocalV9,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -108,6 +113,8 @@ impl Grammar {
                 | Self::MissionLocalV7
                 | Self::MissionV8
                 | Self::MissionLocalV8
+                | Self::MissionV9
+                | Self::MissionLocalV9
         )
     }
 
@@ -121,6 +128,7 @@ impl Grammar {
                 | Self::MissionLocalV6
                 | Self::MissionLocalV7
                 | Self::MissionLocalV8
+                | Self::MissionLocalV9
         )
     }
 
@@ -137,11 +145,15 @@ impl Grammar {
     }
 
     fn uses_aggregate_flow(self) -> bool {
-        matches!(self, Self::MissionV7 | Self::MissionLocalV7) || self.is_v8()
+        matches!(self, Self::MissionV7 | Self::MissionLocalV7) || self.uses_tuple_coordinates()
     }
 
-    fn is_v8(self) -> bool {
-        matches!(self, Self::MissionV8 | Self::MissionLocalV8)
+    fn uses_tuple_coordinates(self) -> bool {
+        matches!(self, Self::MissionV8 | Self::MissionLocalV8) || self.is_v9()
+    }
+
+    fn is_v9(self) -> bool {
+        matches!(self, Self::MissionV9 | Self::MissionLocalV9)
     }
 }
 
@@ -160,6 +172,8 @@ impl std::str::FromStr for Grammar {
             "mission-local-v7" => Ok(Self::MissionLocalV7),
             "mission-v8" => Ok(Self::MissionV8),
             "mission-local-v8" => Ok(Self::MissionLocalV8),
+            "mission-v9" => Ok(Self::MissionV9),
+            "mission-local-v9" => Ok(Self::MissionLocalV9),
             "mission-v6" => Ok(Self::MissionV6),
             "mission-local-v6" => Ok(Self::MissionLocalV6),
             "mission-v2" => Ok(Self::MissionV2),
@@ -167,7 +181,7 @@ impl std::str::FromStr for Grammar {
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v9, mission-local-v9, mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -452,12 +466,21 @@ impl Entropy<'_> {
                             update: self.choose(2) != 0,
                         },
                         17 => {
+                            let kind_draw = usize::from(self.byte());
                             let kind = [LoopKind::Range, LoopKind::Array, LoopKind::ConstRange]
-                                [self.choose(3)];
+                                [kind_draw % 3];
                             if kind != LoopKind::Array && self.grammar.uses_mission_extensions() {
-                                CompoundOp::RangeLoop {
-                                    range: self.bounded_range(4, true)?,
-                                    constant: kind == LoopKind::ConstRange,
+                                let range = self.bounded_range(4, true)?;
+                                if self.grammar.is_v9()
+                                    && kind == LoopKind::Range
+                                    && (kind_draw / 3) % 2 != 0
+                                {
+                                    CompoundOp::IgnoredCarryLoop(range)
+                                } else {
+                                    CompoundOp::RangeLoop {
+                                        range,
+                                        constant: kind == LoopKind::ConstRange,
+                                    }
                                 }
                             } else {
                                 let trips = if kind == LoopKind::Array {
@@ -503,16 +526,26 @@ impl Entropy<'_> {
                         29 => {
                             let rows = 2 + self.choose(3);
                             let cols = 2 + self.choose(3);
-                            let observed_row = self.choose(rows);
+                            let row_draw = usize::from(self.byte());
                             let col_draw = usize::from(self.byte());
-                            let update =
-                                MatrixUpdate::new(rows, cols, observed_row, col_draw % cols)?;
-                            let update = if self.grammar.is_v8() {
+                            let mut update =
+                                MatrixUpdate::new(rows, cols, row_draw % rows, col_draw % cols)?;
+                            if self.grammar.uses_tuple_coordinates() {
                                 let forms = UpdateIndexForm::ALL;
-                                update.with_index_form(forms[col_draw / cols % forms.len()])
-                            } else {
-                                update
-                            };
+                                update =
+                                    update.with_index_form(forms[col_draw / cols % forms.len()]);
+                            }
+                            if self.grammar.is_v9() {
+                                let shape_draw = row_draw / rows;
+                                update = update.with_shape(match shape_draw % 4 {
+                                    0 => UpdateShape::MatrixCell,
+                                    1 => UpdateShape::WholeMatrix,
+                                    2 => UpdateShape::Row,
+                                    _ => UpdateShape::CubeCell {
+                                        observed_plane: (shape_draw / 4) % 2 != 0,
+                                    },
+                                });
+                            }
                             CompoundOp::MatrixUpdate(update)
                         }
                         30 => CompoundOp::ArraySelect(ArraySelect::new(
@@ -524,12 +557,23 @@ impl Entropy<'_> {
                             [1 + self.choose(129), 1 + self.choose(129)],
                             self.choose(2) != 0,
                         )?),
-                        32 => CompoundOp::NestedFold(NestedFold::new(
-                            2 + self.choose(3),
-                            1 + self.choose(3),
-                            NestedFold::COMBINERS[self.choose(NestedFold::COMBINERS.len())],
-                            self.choose(3),
-                        )?),
+                        32 => {
+                            let [outer, inner, combiner, member] =
+                                std::array::from_fn(|_| usize::from(self.byte()));
+                            if self.grammar.is_v9() && (outer / 3) % 2 != 0 {
+                                CompoundOp::NestedCapture(NestedCapture::new(
+                                    nested_capture_range(outer, combiner)?,
+                                    nested_capture_range(inner, member)?,
+                                )?)
+                            } else {
+                                CompoundOp::NestedFold(NestedFold::new(
+                                    2 + outer % 3,
+                                    1 + inner % 3,
+                                    NestedFold::COMBINERS[combiner % NestedFold::COMBINERS.len()],
+                                    member % 3,
+                                )?)
+                            }
+                        }
                         33 => CompoundOp::ReceiverMap(ReceiverMap::new(
                             ReceiverMap::WIDTHS[self.choose(ReceiverMap::WIDTHS.len())],
                             2 + self.choose(3),
@@ -714,16 +758,41 @@ pub fn generate_with_options(data: &[u8], options: GenerateOptions) -> Result<Sa
     generate_with_grammar(data, options, Grammar::Mission)
 }
 
-/// Draws the aggregate flow from the other end of the input so every v6
-/// scalar binding and observation still decodes identically for the same bytes.
-fn aggregate_output(data: &[u8], sample: &Sample) -> Result<AggregateOutput, String> {
-    const OPS: [BinaryOp; 5] = [
-        BinaryOp::Add,
-        BinaryOp::Sub,
-        BinaryOp::Xor,
-        BinaryOp::Or,
-        BinaryOp::And,
-    ];
+const AGGREGATE_OPS: [BinaryOp; 5] = [
+    BinaryOp::Add,
+    BinaryOp::Sub,
+    BinaryOp::Xor,
+    BinaryOp::Or,
+    BinaryOp::And,
+];
+
+/// Draws a nonempty loop range using the two bytes already assigned to this
+/// axis in the nested-fold production.
+fn nested_capture_range(length: usize, bounds: usize) -> Result<RangeValue, String> {
+    let widths = [5, 8, 31, 32, 63, 64, 65, 129];
+    let width = widths[bounds % widths.len()];
+    let signed = bounds & 8 != 0;
+    let inclusive = bounds & 16 != 0;
+    let start = (bounds >> 5) as i16 - if signed { 4 } else { 0 };
+    RangeValue::typed(signed, width, start, (1 + length % 3) as u8, inclusive)
+}
+
+/// Decodes a helper's operation, runtime write index and scalar input.
+fn draw_flow_step(choose: &mut impl FnMut(usize) -> usize) -> FlowStep {
+    FlowStep {
+        op: AGGREGATE_OPS[choose(AGGREGATE_OPS.len())],
+        invert_index: choose(2) != 0,
+        delta: choose(3),
+    }
+}
+
+/// Draws aggregate operations from the end without advancing the scalar
+/// decoder.
+fn aggregate_output(
+    data: &[u8],
+    sample: &Sample,
+    grammar: Grammar,
+) -> Result<AggregateOutput, String> {
     let mut bytes = data.iter().rev().copied();
     let mut choose = |count: usize| usize::from(bytes.next().unwrap_or(0)) % count;
     let index = choose(sample.lanes.len());
@@ -739,18 +808,20 @@ fn aggregate_output(data: &[u8], sample: &Sample) -> Result<AggregateOutput, Str
         producer + 1 + choose(modules - producer - 1)
     };
     let kind = [FlowKind::Array, FlowKind::Struct, FlowKind::Enum][choose(3)];
-    let seed_op = OPS[choose(OPS.len())];
-    let steps = (0..1 + choose(3))
-        .map(|_| FlowStep {
-            op: OPS[choose(OPS.len())],
-            invert_index: choose(2) != 0,
-            delta: choose(3),
-        })
+    let seed_op = AGGREGATE_OPS[choose(AGGREGATE_OPS.len())];
+    let step_draw = choose(256);
+    let mut steps: Vec<_> = (0..1 + step_draw % 3)
+        .map(|_| draw_flow_step(&mut choose))
         .collect();
     let observation = [FlowObservation::Whole, FlowObservation::Select][choose(2)];
     let [left, right] =
         lane.aggregate_operands(sample.observations[index], [choose(256), choose(256)]);
     let parameter = [ValueRef::X, ValueRef::Y][choose(2)];
+    // Decode extra updates after the original operands and observation so
+    // increasing the depth preserves the prefix of the aggregate computation.
+    if grammar.is_v9() && (step_draw / 3) % 4 == 1 {
+        steps.extend((0..3).map(|_| draw_flow_step(&mut choose)));
+    }
     let flow = AggregateFlow::new(
         index,
         width,
@@ -893,7 +964,7 @@ pub fn generate_with_grammar(
         .map(|(lane, draw)| lane.runtime_intermediate(draw, grammar.uses_deep_lanes()))
         .collect::<Result<_, _>>()?;
     if grammar.uses_aggregate_flow() {
-        sample.aggregate = Some(aggregate_output(data, &sample)?);
+        sample.aggregate = Some(aggregate_output(data, &sample, grammar)?);
     }
     Ok(sample)
 }

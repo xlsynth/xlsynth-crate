@@ -3,14 +3,16 @@
 //! Aggregate and builtin contracts with a bits-valued composition boundary.
 
 use crate::aggregate_match::{self, AggregateMatch};
-use crate::array_fragment::{ArrayCast, MatrixUpdate, UpdateIndexForm};
+use crate::array_fragment::{ArrayCast, MatrixUpdate};
 use crate::ast::{BitsType, Width};
 use crate::constexpr::metadata_bits;
 use crate::map_fragment::MapFragment;
 use crate::mission_expr::{
     CheckedCast, LogicalPredicates, NamedAggregateMatch, ReceiverMap, WideningCast,
 };
-use crate::range_match::{ConstMatch, RangeMatch, RangeValue};
+use crate::range_match::{
+    ConstMatch, LOOP_BUMP_DECLARATION, NestedCapture, RangeMatch, RangeValue,
+};
 use crate::select_fold::{ArraySelect, NestedFold};
 use crate::sum_pattern::{self, SumComparison, SumPattern, SumShape};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue, ir};
@@ -133,6 +135,7 @@ pub enum CompoundOp {
     ArraySelect(ArraySelect),
     AggregateMatch(AggregateMatch),
     NestedFold(NestedFold),
+    NestedCapture(NestedCapture),
     ReceiverMap(ReceiverMap),
     LogicalPredicates(LogicalPredicates),
     CheckedCast(CheckedCast),
@@ -140,6 +143,7 @@ pub enum CompoundOp {
     NamedAggregateMatch(NamedAggregateMatch),
     ConstMatch(ConstMatch),
     RangeValue(RangeValue),
+    IgnoredCarryLoop(RangeValue),
     RangeLoop {
         range: RangeValue,
         constant: bool,
@@ -168,6 +172,7 @@ pub(crate) struct Declarations {
     local_is_even: bool,
     local_enumerate: bool,
     coordinate_helper: bool,
+    loop_bump: bool,
 }
 
 impl Declarations {
@@ -184,6 +189,7 @@ impl Declarations {
         self.local_is_even |= other.local_is_even;
         self.local_enumerate |= other.local_enumerate;
         self.coordinate_helper |= other.coordinate_helper;
+        self.loop_bump |= other.loop_bump;
     }
 
     /// Prints nominal types only when an expression in this module uses them.
@@ -212,6 +218,9 @@ fn fuzz_enumerate<S: bool, W: u32, N: u32>(xs: xN[S][W][N]) -> (u32, xN[S][W])[N
             text.push_str(
                 "\nfn fuzz_coordinate(row: u3, col: u3) -> (u3, u32) { (row, col as u32) }\n",
             );
+        }
+        if self.loop_bump {
+            text.push_str(LOOP_BUMP_DECLARATION);
         }
         if self.record {
             text.push_str("\npub struct FuzzPair<N: u32> { first: uN[N], second: uN[N] }\n");
@@ -264,7 +273,10 @@ impl CompoundOp {
     pub(crate) fn declarations(self) -> Declarations {
         Declarations {
             record: matches!(self, Self::Record { .. } | Self::AggregateMatch(_)),
-            choice: self == Self::Pattern(PatternOp::Enum),
+            choice: matches!(
+                self,
+                Self::Pattern(PatternOp::Enum) | Self::NestedCapture(_)
+            ),
             sum: matches!(
                 self,
                 Self::Sum(_) | Self::SumComparison(_) | Self::AggregateMatch(_)
@@ -277,7 +289,8 @@ impl CompoundOp {
                 || matches!(self, Self::Map(map) if map.needs_std()),
             local_is_even: matches!(self, Self::Map(map) if map.needs_local_is_even()),
             local_enumerate: self == Self::Array(ArrayOp::LocalEnumerate),
-            coordinate_helper: matches!(self, Self::MatrixUpdate(update) if update.index_form == UpdateIndexForm::HelperCall),
+            coordinate_helper: matches!(self, Self::MatrixUpdate(update) if update.needs_coordinate_helper()),
+            loop_bump: matches!(self, Self::NestedCapture(_)),
         }
     }
 
@@ -302,6 +315,7 @@ impl CompoundOp {
             Self::ArraySelect(select) => select.to_dslx(ty, args),
             Self::AggregateMatch(pattern) => pattern.to_dslx(ty, args),
             Self::NestedFold(fold) => fold.to_dslx(ty, args),
+            Self::NestedCapture(capture) => capture.to_dslx(ty, args),
             Self::ReceiverMap(map) => map.to_dslx(ty, args),
             Self::LogicalPredicates(predicates) => predicates.to_dslx(args),
             Self::CheckedCast(cast) => cast.to_dslx(ty, args),
@@ -309,6 +323,7 @@ impl CompoundOp {
             Self::NamedAggregateMatch(pattern) => pattern.to_dslx(ty, args),
             Self::ConstMatch(pattern) => pattern.to_dslx(ty, args),
             Self::RangeValue(range) => range.to_dslx(ty, args),
+            Self::IgnoredCarryLoop(range) => range.ignored_carry_dslx(ty, args),
             Self::RangeLoop { range, constant } => range.loop_dslx(constant, ty, args),
             Self::Builtin(op) => {
                 let wide = match ty.width {
@@ -445,6 +460,7 @@ impl CompoundOp {
             Self::ArraySelect(select) => select.emit_ir(builder, args, width),
             Self::AggregateMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::NestedFold(fold) => fold.emit_ir(builder, args, signed),
+            Self::NestedCapture(capture) => capture.emit_ir(builder, args, width),
             Self::ReceiverMap(map) => map.emit_ir(builder, args, width),
             Self::LogicalPredicates(predicates) => predicates.emit_ir(builder, args, signed),
             Self::CheckedCast(cast) => cast.emit_ir(builder, args, signed),
@@ -452,6 +468,7 @@ impl CompoundOp {
             Self::NamedAggregateMatch(pattern) => pattern.emit_ir(builder, args),
             Self::ConstMatch(pattern) => pattern.emit_ir(builder, args, width),
             Self::RangeValue(range) => range.emit_ir(builder, args, width),
+            Self::IgnoredCarryLoop(range) => range.emit_ignored_carry_ir(builder, args, width),
             Self::RangeLoop { range, .. } => range.emit_loop_ir(builder, args, width),
             Self::Builtin(op) => {
                 let value = match op {
