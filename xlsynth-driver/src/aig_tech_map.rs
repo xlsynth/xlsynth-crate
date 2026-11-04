@@ -10,17 +10,19 @@ use std::path::{Path, PathBuf};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::io_defaults::default_output_load;
-use xlsynth_g8r::netlist::fanout_opt::{FanoutOptimizationOptions, optimize_fanout};
+use xlsynth_g8r::netlist::fanout_opt::FanoutOptimizationOptions;
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_data_from_path};
-use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
+use xlsynth_g8r::netlist::resize::ResizeOptions;
 use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
 use xlsynth_g8r::techmap::delay::{
-    DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_netlist,
+    DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_candidates,
+    map_gatefn_to_delay_netlist,
 };
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
 };
+use xlsynth_g8r::techmap::postprocess::{PostMappingOptions, PostMappingReport};
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::metadata_if_exists;
@@ -230,7 +232,40 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
     } else {
         None
     };
-    let (mut mapped, mut report, mut summary) = match strategy {
+    let post = PostMappingOptions {
+        fanout: fanout_opt.then(|| {
+            let defaults = FanoutOptimizationOptions::default();
+            let timing = timing.expect("fanout optimization has a timing model");
+            FanoutOptimizationOptions {
+                primary_input_transition: timing.primary_input_transition,
+                module_output_load: timing.module_output_load,
+                wire_load: timing.wire_load,
+                area_growth_limit: matches
+                    .get_one::<f64>("fanout_max_area_growth")
+                    .copied()
+                    .unwrap_or(defaults.area_growth_limit),
+                ..defaults
+            }
+        }),
+        recovery: area_recovery.then(|| {
+            let defaults = ResizeOptions::default();
+            ResizeOptions {
+                timing: timing.expect("area recovery has a timing model"),
+                max_area_growth: 0.0,
+                max_upsize_rounds: 0,
+                timing_evaluation_budget: Some(0),
+                max_downsize_rounds: matches
+                    .get_one::<usize>("area-recovery-rounds")
+                    .copied()
+                    .unwrap_or(defaults.max_downsize_rounds),
+                recovery_evaluation_budget: matches
+                    .get_one::<usize>("area-recovery-evaluation-budget")
+                    .copied(),
+                ..defaults
+            }
+        }),
+    };
+    let (mut mapped, mut report, mut summary, stages) = match strategy {
         "nand2" => {
             let policy = match matches.get_one::<String>("cell_policy").unwrap().as_str() {
                 "small-normal-vt" => CellPolicy::SmallNormalVt,
@@ -250,7 +285,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 "cell_policy": policy.as_str(),
                 "inv_cell": options.inv_cell_name, "nand2_cell": options.nand2_cell_name
             });
-            (mapped, report, summary)
+            (mapped, report, summary, PostMappingReport::default())
         }
         "delay" => {
             let options = DelayMappingOptions {
@@ -264,7 +299,15 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("delay mode requires --module-output-load"))?,
             };
             let library = DelayMappingLibrary::new(&lib, options)?;
-            let mapped = map_gatefn_to_delay_netlist(&gate_fn, &library)?;
+            let (mapped, stages) = if timing.is_some() {
+                let candidates = map_gatefn_to_delay_candidates(&gate_fn, &library)?;
+                post.select_delay_cover(candidates, &lib)?
+            } else {
+                (
+                    map_gatefn_to_delay_netlist(&gate_fn, &library)?,
+                    PostMappingReport::default(),
+                )
+            };
             let summary = format!(
                 "using experimental strategy='delay' area={}",
                 mapped.stats.cell_area
@@ -273,12 +316,13 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 "timing_model": "scalar worst-edge pin delay at fixed slew/load; one state per polarity",
                 "reference_transition": options.reference_transition,
                 "reference_load": options.reference_load});
-            (mapped.netlist, report, summary)
+            (mapped.netlist, report, summary, stages)
         }
         "area" => {
             let library = AreaMappingLibrary::new(&lib)?;
-            let mapped =
+            let mut mapped =
                 map_gatefn_to_area_netlist(&gate_fn, &library).context("area mapping failed")?;
+            let stages = post.apply(&mut mapped.netlist, &lib)?;
             let summary = format!(
                 "using strategy='area' area={} inverters={} duplicated_ands={}",
                 mapped.stats.cell_area, mapped.stats.inverter_count, mapped.stats.duplicated_ands
@@ -287,29 +331,14 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                 "stats": mapped.stats,
                 "excluded_cells": library.excluded_cells
             });
-            (mapped.netlist, report, summary)
+            (mapped.netlist, report, summary, stages)
         }
         _ => unreachable!("strategy is constrained by clap"),
     };
     if let Some(name) = module_name {
         mapped.module.name = mapped.interner.get_or_intern(name);
     }
-    if fanout_opt {
-        let defaults = FanoutOptimizationOptions::default();
-        let options = FanoutOptimizationOptions {
-            primary_input_transition: timing.unwrap().primary_input_transition,
-            module_output_load: timing.unwrap().module_output_load,
-            wire_load: timing.unwrap().wire_load,
-            area_growth_limit: matches
-                .get_one::<f64>("fanout_max_area_growth")
-                .copied()
-                .unwrap_or(defaults.area_growth_limit),
-            ..defaults
-        };
-        let optimized =
-            optimize_fanout(&mut mapped, &lib, options).context(
-                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
-            )?;
+    if let Some(optimized) = stages.fanout {
         summary.push_str(&format!(
             "; fanout delay {} -> {}, area {} -> {}",
             optimized.before.worst_delay,
@@ -320,30 +349,7 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
         report["fanout_optimization"] = serde_json::to_value(optimized)?;
         remove_runtime(&mut report["fanout_optimization"]);
     }
-    if area_recovery {
-        let defaults = ResizeOptions::default();
-        let options = ResizeOptions {
-            timing: timing.unwrap(),
-            max_area_growth: 0.0,
-            max_upsize_rounds: 0,
-            timing_evaluation_budget: Some(0),
-            max_downsize_rounds: matches
-                .get_one::<usize>("area-recovery-rounds")
-                .copied()
-                .unwrap_or(defaults.max_downsize_rounds),
-            recovery_evaluation_budget: matches
-                .get_one::<usize>("area-recovery-evaluation-budget")
-                .copied(),
-            ..defaults
-        };
-        let recovered = resize_netlist(
-            &mut mapped.module,
-            &mapped.nets,
-            &mut mapped.interner,
-            &lib,
-            &options,
-        )
-        .context("mapped area recovery failed")?;
+    if let (Some(recovered), Some(options)) = (stages.recovery, &post.recovery) {
         summary.push_str(&format!(
             "; area recovery {} -> {}",
             recovered.initial_area, recovered.final_area

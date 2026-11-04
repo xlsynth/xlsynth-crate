@@ -278,6 +278,7 @@ mod tests {
         Cell {
             name: name.to_string(),
             pins: (0..INPUTS).map(|i| format!("I{i}")).collect(),
+            truth_table: 0,
             output: "Y".to_string(),
             area,
             pin_delays: vec![0.0; INPUTS],

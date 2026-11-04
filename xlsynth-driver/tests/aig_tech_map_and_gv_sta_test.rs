@@ -25,6 +25,7 @@ use xlsynth_g8r::aig_sim::gate_sim::{Collect, eval};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, read_gv_from_str};
+use xlsynth_g8r::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 use xlsynth_pir::IrBits;
 
 /// Builds the two-input AND fixture used by the structural mapping smoke test.
@@ -1819,6 +1820,109 @@ interned_strings: ["A", "Y", "!A", "B", "!(A*B)"]
 }
 
 /// Composed recovery must match an explicit native resize with the same model.
+#[test]
+fn delay_mapping_selects_the_faster_final_cover_of_shared_outputs() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let aig_path = dir.path().join("shared.aag");
+    let lib_path = dir.path().join("cells.textproto");
+    let mut builder = GateBuilder::new("shared".into(), GateBuilderOptions::no_opt());
+    let a = *builder.add_input("a".into(), 1).get_lsb(0);
+    let b = *builder.add_input("b".into(), 1).get_lsb(0);
+    let shared = builder.add_and_binary(a, b);
+    builder.add_output("x".into(), shared.into());
+    builder.add_output("y".into(), shared.into());
+    let aig = builder.build();
+    std::fs::write(
+        &aig_path,
+        emit_aiger(&aig, true).map_err(anyhow::Error::msg)?,
+    )?;
+
+    // NAND2 + INV takes 3 ps at either load. AND2 takes 2.5 ps at the
+    // mapper's single-output reference load, but 5 ps driving both outputs.
+    let base = make_timing_enabled_inv_nand2_liberty_textproto()
+        .replace("values: 1.1", "values: 1.0")
+        .replace("values: 2.1", "values: 2.0");
+    let start = base.find("cells: {\n  name: \"NAND2\"").unwrap();
+    let end = base.find("default_output_load:").unwrap();
+    let and = base[start..end]
+        .replace("\"NAND2\"", "\"AND2\"")
+        .replace("function_string_id: 5", "function_string_id: 6")
+        .replace("TIMING_SENSE_NEGATIVE_UNATE", "TIMING_SENSE_POSITIVE_UNATE")
+        .replace("shape_id: 1 values: 2.0", "shape_id: 2 values: [2.5, 5.0]");
+    std::fs::write(
+        &lib_path,
+        format!(
+            r#"{base}{and}
+interned_strings: "A*B"
+lut_axes: {{ values: [0.01, 0.02] }}
+lu_table_templates: {{
+  kind: LUT_TEMPLATE_KIND_TIMING name: "load"
+  variable_1: LUT_VARIABLE_TOTAL_OUTPUT_NET_CAPACITANCE index_1_id: 1
+}}
+lut_shapes: {{ template_id: 1 index_1_id: 1 dimensions: 2 }}
+"#
+        ),
+    )?;
+    let lib = load_liberty_from_path(&lib_path)?;
+    for (flags, cells, delay) in [
+        (&["--area-recovery=false"][..], &["AND2"][..], 5.0),
+        (&[][..], &["NAND2", "INV"][..], 3.0),
+    ] {
+        let report_path = dir.path().join("mapping.json");
+        let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .arg("aig-tech-map")
+            .arg(&aig_path)
+            .args(["--strategy", "delay", "--liberty_proto"])
+            .arg(&lib_path)
+            .args([
+                "--primary-input-transition",
+                "0.01",
+                "--module-output-load",
+                "0.01",
+            ])
+            .arg("--json_out")
+            .arg(&report_path)
+            .args(flags)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = std::str::from_utf8(&output.stdout)?;
+        assert_mapping_equivalent(&aig, text, &aig_path, &lib_path);
+        let netlist = read_gv_from_str(text)?;
+        let module = &netlist.modules[0];
+        let types: Vec<_> = module
+            .instances
+            .iter()
+            .map(|i| netlist.interner.resolve(i.type_name).unwrap())
+            .collect();
+        assert_eq!(types, cells);
+        let timing = analyze_combinational_max_arrival(
+            module,
+            &netlist.nets,
+            &netlist.interner,
+            &lib,
+            StaOptions {
+                primary_input_transition: 0.01,
+                module_output_load: 0.01,
+                ..Default::default()
+            },
+        )?;
+        assert_eq!(timing.worst_output_arrival, delay);
+        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path)?)?;
+        assert_eq!(report["stats"]["cell_count"], cells.len());
+        if flags.is_empty() {
+            assert_eq!(
+                report["area_recovery"]["final_delay"]["input_to_output"],
+                delay
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
     let dir = tempfile::tempdir().unwrap();

@@ -1546,21 +1546,25 @@ fn coverage_rescan_budget_limit_restores_trial_without_charging_unvisited_cells(
     assert_eq!(sta.cell_indices(), original_cells);
     drop(sta);
 
-    let report = resize(
-        &mut parsed,
+    let mut remaining = ResizeOptions {
+        max_upsize_rounds: 0,
+        max_downsize_rounds: 1,
+        recovery_evaluation_budget: Some(3),
+        ..options()
+    };
+    let report = resize_netlist_with_remaining_budget(
+        &mut parsed.modules[0],
+        &parsed.nets,
+        &mut parsed.interner,
         &library,
-        &ResizeOptions {
-            max_upsize_rounds: 0,
-            max_downsize_rounds: 1,
-            recovery_evaluation_budget: Some(3),
-            ..options()
-        },
+        &mut remaining,
     )?;
     assert_eq!(
         report.downsize.stop_reason,
         ResizeStopReason::PropagationLimit
     );
     assert_eq!(report.downsize.propagated_instances, 2);
+    assert_eq!(remaining.recovery_evaluation_budget, Some(1));
     assert!(report.budget_exhausted);
     assert_eq!(parsed.modules, before);
     Ok(())

@@ -472,15 +472,11 @@ impl ResizeSearch<'_> {
     }
 
     /// Runs one bounded phase without changing candidate or tie-breaking order.
-    fn run_phase(
-        &mut self,
-        phase: SearchPhase,
-        sta: &mut IncrementalSta<'_>,
-    ) -> Result<ResizePhaseStats> {
+    fn run_phase(&mut self, phase: SearchPhase, sta: &mut IncrementalSta<'_>) -> ResizePhaseStats {
         let mut stats = ResizePhaseStats::default();
         let rounds = phase.rounds(self.options);
         if rounds == 0 {
-            return Ok(stats);
+            return stats;
         }
         stats.stop_reason = ResizeStopReason::RoundLimit;
         let start_work = sta.propagated_instances();
@@ -569,7 +565,7 @@ impl ResizeSearch<'_> {
             }
         }
         stats.propagated_instances = sta.propagated_instances() - start_work;
-        Ok(stats)
+        stats
     }
 }
 
@@ -586,6 +582,18 @@ pub fn resize_netlist(
     interner: &mut StringInterner<StringBackend<SymbolU32>>,
     library: &Library,
     options: &ResizeOptions,
+) -> Result<ResizeReport> {
+    resize_netlist_with_remaining_budget(module, nets, interner, library, &mut options.clone())
+}
+
+/// Charges each phase's actual visits to explicit budgets shared across resize
+/// calls.
+pub(crate) fn resize_netlist_with_remaining_budget(
+    module: &mut NetlistModule,
+    nets: &[Net],
+    interner: &mut StringInterner<StringBackend<SymbolU32>>,
+    library: &Library,
+    options: &mut ResizeOptions,
 ) -> Result<ResizeReport> {
     if !options.max_area_growth.is_finite() || options.max_area_growth < 0.0 {
         return Err(anyhow!("max_area_growth must be finite and nonnegative"));
@@ -625,7 +633,7 @@ pub fn resize_netlist(
         area_limit,
         work_limits,
     };
-    let upsize = search.run_phase(SearchPhase::Timing, &mut sta)?;
+    let upsize = search.run_phase(SearchPhase::Timing, &mut sta);
     let upsized_delay = sta.score();
     search.timing_checkpoint = upsized_delay;
     // Re-anchor at the phase boundary to avoid incremental cancellation error.
@@ -635,7 +643,15 @@ pub fn resize_netlist(
         .map(|i| library.cells[*i].area)
         .sum();
     search.area = upsized_area;
-    let downsize = search.run_phase(SearchPhase::AreaRecovery, &mut sta)?;
+    let downsize = search.run_phase(SearchPhase::AreaRecovery, &mut sta);
+    // Preparation failures spend no visits. Once search completes, charge
+    // even rejected trials before final verification can reject this netlist.
+    if let Some(limit) = &mut options.timing_evaluation_budget {
+        *limit -= upsize.propagated_instances;
+    }
+    if let Some(limit) = &mut options.recovery_evaluation_budget {
+        *limit -= downsize.propagated_instances;
+    }
     let budget_exhausted = upsize.stop_reason == ResizeStopReason::PropagationLimit
         || downsize.stop_reason == ResizeStopReason::PropagationLimit;
     let incremental_delay = sta.score();

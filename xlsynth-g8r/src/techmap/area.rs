@@ -3,7 +3,10 @@
 //! Area-only cell covering of a fixed AIG.
 //!
 //! Cuts stop at every live fanout > 1, including output uses. A shared node has
-//! one locally selected base polarity; all opposite uses share one inverter.
+//! one base polarity. A reverse cover walk proposes phases based on actual
+//! uses. Area mapping compares the emitted area against the original phases,
+//! accounting for inverters shared across regions. Opposite uses share one
+//! inverter.
 //! No choices, graph rewriting, or logic replication are performed. Constants
 //! and wiring aliases are ideal wires, with no physical tie-cell area.
 //!
@@ -34,8 +37,10 @@ use string_interner::StringInterner;
 use xlsynth_pir::IrBits;
 
 mod six_input;
+mod tied_inputs;
 
 use six_input::{SixInputCache, SixInputIndex};
+use tied_inputs::{PinValue, possible_assignments};
 
 const MAX_EAGER_INPUTS: usize = 5;
 const MAX_INPUTS: usize = 6;
@@ -47,6 +52,7 @@ const MAX_SIX_INPUT_CUTS: usize = 16;
 struct Cell {
     name: String,
     pins: Vec<String>,
+    truth_table: u64,
     output: String,
     area: f64,
     pin_delays: Vec<f64>,
@@ -68,6 +74,16 @@ fn delay_bits(delay: f64) -> u64 {
 }
 
 impl Binding {
+    /// Resolves a logical cut leaf to the signal consumed by this binding.
+    fn operand(&self, cut: &Cut, leaf: usize) -> AigOperand {
+        AigOperand {
+            node: AigRef {
+                id: cut.leaves[leaf],
+            },
+            negated: self.phases & (1 << leaf) != 0,
+        }
+    }
+
     /// Orders fixed pin delays by logical leaf so equivalent bindings compare
     /// alike.
     fn leaf_delay_key(&self, cells: &[Cell]) -> [u64; MAX_INPUTS] {
@@ -323,6 +339,7 @@ impl AreaMappingLibrary {
             cells.push(Cell {
                 name: cell.name.clone(),
                 pins,
+                truth_table: tt,
                 output: lib.resolve_string(&outputs[0].name).to_string(),
                 area: cell.area,
                 pin_delays,
@@ -389,6 +406,20 @@ struct Cut {
     tt: u64,
 }
 
+impl Cut {
+    /// Restricts the independent-leaf table to rows consistent with previously
+    /// proven AIG aliases. The original leaf IDs still delimit physical covers.
+    fn possible_assignments(&self, facts: &[Option<PinValue<usize>>]) -> u64 {
+        if facts.is_empty() || self.leaves.iter().all(|&id| facts[id].is_none()) {
+            return mask(self.leaves.len());
+        }
+        possible_assignments(self.leaves.len(), |pin| {
+            let id = self.leaves[pin];
+            facts[id].unwrap_or(PinValue::Signal(id, false))
+        })
+    }
+}
+
 /// Creates the identity cut used to stop covering at a boundary.
 fn trivial(id: usize) -> Cut {
     Cut {
@@ -431,14 +462,26 @@ enum PlanKind {
     Invert(Box<Plan>),
 }
 impl Plan {
-    /// Adds one inverter cost per distinct demand opposite its boundary phase.
-    fn score(&self, inv_area: f64) -> f64 {
-        self.area + self.demands.len() as f64 * inv_area
+    /// Propagates the phases consumed by the chosen implementation.
+    fn mark_input_demands(&self, demanded: &mut [[bool; 2]]) {
+        let mut mark = |op: AigOperand| demanded[op.node.id][usize::from(op.negated)] = true;
+        match &self.kind {
+            PlanKind::Literal(_) => {
+                // An ideal constant consumes no input signal.
+            }
+            PlanKind::Leaf(op) => mark(*op),
+            PlanKind::Invert(inner) => inner.mark_input_demands(demanded),
+            PlanKind::Cell { binding, cut } => {
+                for &leaf in &binding.perm {
+                    mark(binding.operand(cut, leaf));
+                }
+            }
+        }
     }
 }
 
 /// Actual emitted instance accounting and structural nonduplication audit.
-#[derive(Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct AreaMappingStats {
     pub cell_area: f64,
     pub cell_count: usize,
@@ -449,6 +492,17 @@ pub struct AreaMappingStats {
     pub duplicated_ands: usize,
     pub shared_and_boundaries: usize,
     pub shared_opposite_polarities: usize,
+}
+
+impl AreaMappingStats {
+    /// Charges one physical instance in netlist order.
+    fn record_cell(&mut self, index: usize, lib: &AreaMappingLibrary) {
+        let cell = &lib.cells[index];
+        self.cell_area += cell.area;
+        self.cell_count += 1;
+        self.inverter_count += usize::from(Some(index) == lib.inv);
+        *self.cells_by_type.entry(cell.name.clone()).or_default() += 1;
+    }
 }
 /// Mapped netlist and measured unique cell costs (ideal constants and aliases
 /// are free).
@@ -550,18 +604,66 @@ impl Cover<'_> {
             self.plans[operand.node.id][usize::from(operand.negated)].clone()
         }
     }
-    /// Keeps the first minimum-cost plan to make area ties deterministic.
+    /// Ranks a plan, optionally including an inverter on its output. Area
+    /// includes one inverter for each distinct opposite boundary demand.
+    fn cost(&self, plan: &Plan, invert: bool) -> (f64, f64) {
+        let inv = self.lib.inv.map(|i| &self.lib.cells[i]);
+        let inv_area = inv.map_or(0.0, |cell| cell.area);
+        let output_inv = inv.filter(|_| invert);
+        let arrival = if self.lib.delay_first {
+            plan.arrival + output_inv.map_or(0.0, |cell| cell.pin_delays[0])
+        } else {
+            0.0
+        };
+        let area = plan.area
+            + output_inv.map_or(0.0, |cell| cell.area)
+            + plan.demands.len() as f64 * inv_area;
+        (arrival, area)
+    }
+
+    /// Keeps the first minimum-cost plan to make ties deterministic.
     fn consider(&self, best: &mut Option<Plan>, candidate: Plan) {
-        let inv = self.lib.inv.map_or(0.0, |i| self.lib.cells[i].area);
-        if best.as_ref().is_none_or(|b| {
-            if self.lib.delay_first {
-                candidate.arrival < b.arrival
-                    || (candidate.arrival == b.arrival && candidate.score(inv) < b.score(inv))
-            } else {
-                candidate.score(inv) < b.score(inv)
-            }
-        }) {
+        if best
+            .as_ref()
+            .is_none_or(|b| self.cost(&candidate, false) < self.cost(b, false))
+        {
             *best = Some(candidate);
+        }
+    }
+
+    /// Walks the selected cover from outputs to inputs. Each node sees all of
+    /// its consumers before it propagates demands from its final plan, even
+    /// when changing a phase selects a different cut or different pin phases.
+    fn select_demanded_phases(&mut self, order: &[AigRef], outputs: &[AigOperand]) {
+        let mut demanded = vec![[false; 2]; self.aig.gates.len()];
+        for op in outputs {
+            demanded[op.node.id][usize::from(op.negated)] = true;
+        }
+        for &node in order.iter().rev() {
+            let id = node.id;
+            let uses = demanded[id];
+            if uses == [false; 2] || !matches!(self.aig.get(node), AigNode::And2 { .. }) {
+                continue;
+            }
+            let phase = if self.boundary[id] {
+                let anchor = self.anchors[id];
+                if !uses[usize::from(anchor)]
+                    && let [Some(base), Some(opposite)] = [
+                        self.plans[id][usize::from(anchor)].as_ref(),
+                        self.plans[id][usize::from(!anchor)].as_ref(),
+                    ]
+                    && self.cost(opposite, false) < self.cost(base, true)
+                {
+                    self.anchors[id] = !anchor;
+                }
+                self.anchors[id]
+            } else {
+                // A fanout-free node is consumed by at most one selected plan.
+                uses[1]
+            };
+            if let Some(plan) = &self.plans[id][usize::from(phase)] {
+                plan.mark_input_demands(&mut demanded);
+            }
         }
     }
     /// Combines selected child states, unioning shared polarity costs.
@@ -575,11 +677,8 @@ impl Cover<'_> {
                 cut: cut.clone(),
             },
         };
-        for (i, id) in cut.leaves.iter().enumerate() {
-            let mut child = self.leaf_plan(AigOperand {
-                node: AigRef { id: *id },
-                negated: binding.phases & (1 << i) != 0,
-            })?;
+        for i in 0..cut.leaves.len() {
+            let mut child = self.leaf_plan(binding.operand(cut, i))?;
             let pin = binding.perm.iter().position(|leaf| *leaf == i).unwrap();
             plan.arrival = plan
                 .arrival
@@ -607,15 +706,28 @@ pub fn map_gatefn_to_area_netlist(
     aig: &GateFn,
     lib: &AreaMappingLibrary,
 ) -> Result<AreaMappedNetlist> {
-    let roots = aig
+    let (demanded, local) = map_cover_candidates(aig, lib, true)?;
+    Ok(match local {
+        Some(local) if local.stats.cell_area < demanded.stats.cell_area => local,
+        _ => demanded,
+    })
+}
+
+/// Builds both polarity plans once. A caller comparing the two phase policies
+/// can request a second emission when demand selection actually changed a
+/// phase.
+pub(super) fn map_cover_candidates(
+    aig: &GateFn,
+    lib: &AreaMappingLibrary,
+    include_local: bool,
+) -> Result<(AreaMappedNetlist, Option<AreaMappedNetlist>)> {
+    let outputs = aig
         .outputs
         .iter()
         .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
         .copied()
-        .collect::<Vec<_>>()
-        .iter()
-        .map(|op| op.node)
         .collect::<Vec<_>>();
+    let roots = outputs.iter().map(|op| op.node).collect::<Vec<_>>();
     let order = postorder_for_aig_refs_node_only(&roots, &aig.gates, &HashMap::<AigRef, ()>::new());
     let mut fanout = vec![0; aig.gates.len()];
     for id in &order {
@@ -623,13 +735,7 @@ pub fn map_gatefn_to_area_netlist(
             fanout[op.node.id] += 1;
         }
     }
-    for op in aig
-        .outputs
-        .iter()
-        .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
-        .copied()
-        .collect::<Vec<_>>()
-    {
+    for op in &outputs {
         fanout[op.node.id] += 1;
     }
     let mut cover = Cover {
@@ -648,6 +754,7 @@ pub fn map_gatefn_to_area_netlist(
         plans: vec![[None, None]; aig.gates.len()],
     };
     let mut cuts: Vec<Vec<Cut>> = vec![Vec::new(); aig.gates.len()];
+    let mut facts: Vec<Option<PinValue<usize>>> = Vec::new();
     let mut stats = AreaMappingStats::default();
     let mut six_input_cache = SixInputCache::default();
     let max_cut_inputs = if lib.six_input.is_empty() {
@@ -655,7 +762,7 @@ pub fn map_gatefn_to_area_netlist(
     } else {
         MAX_INPUTS
     };
-    for node in order {
+    for &node in &order {
         let id = node.id;
         match aig.get(node) {
             AigNode::Literal { value, .. } => {
@@ -719,28 +826,41 @@ pub fn map_gatefn_to_area_netlist(
                 candidates.truncate(MAX_CUTS);
                 candidates.extend(wide.into_iter().take(MAX_SIX_INPUT_CUTS));
                 let mut direct: [Option<Plan>; 2] = [None, None];
+                let mut fact = None;
                 for cut in &candidates {
+                    let possible = cut.possible_assignments(&facts);
+                    let ones = cut.tt & possible;
+                    if ones == 0 || ones == possible {
+                        fact = Some(PinValue::Literal(ones != 0));
+                        direct = std::array::from_fn(|p| {
+                            Some(Plan {
+                                arrival: 0.0,
+                                area: 0.0,
+                                demands: OrdSet::new(),
+                                kind: PlanKind::Literal((ones != 0) ^ (p != 0)),
+                            })
+                        });
+                        break;
+                    }
                     for p in 0..2 {
                         let tt = cut.tt ^ if p != 0 { mask(cut.leaves.len()) } else { 0 };
-                        if tt == 0 || tt == mask(cut.leaves.len()) {
-                            cover.consider(
-                                &mut direct[p],
-                                Plan {
-                                    arrival: 0.0,
-                                    area: 0.0,
-                                    demands: OrdSet::new(),
-                                    kind: PlanKind::Literal(tt != 0),
-                                },
-                            );
-                        }
-                        for (i, id) in cut.leaves.iter().enumerate() {
+                        for (i, &leaf) in cut.leaves.iter().enumerate() {
                             for negated in [false, true] {
-                                if tt
-                                    == variable(cut.leaves.len(), i)
-                                        ^ if negated { mask(cut.leaves.len()) } else { 0 }
-                                {
+                                let projection = variable(cut.leaves.len(), i)
+                                    ^ if negated { mask(cut.leaves.len()) } else { 0 };
+                                if (tt ^ projection) & possible == 0 {
+                                    // The logical alias holds even when the
+                                    // library cannot supply this leaf phase.
+                                    if p == 0 {
+                                        let source = facts
+                                            .get(leaf)
+                                            .copied()
+                                            .flatten()
+                                            .unwrap_or(PinValue::Signal(leaf, false));
+                                        fact = Some(if negated { source.negate() } else { source });
+                                    }
                                     let op = AigOperand {
-                                        node: AigRef { id: *id },
+                                        node: AigRef { id: leaf },
                                         negated,
                                     };
                                     if let Some(mut plan) = cover.leaf_plan(op) {
@@ -764,6 +884,12 @@ pub fn map_gatefn_to_area_netlist(
                         }
                     }
                 }
+                if let Some(value) = fact {
+                    if facts.is_empty() {
+                        facts.resize(aig.gates.len(), None);
+                    }
+                    facts[id] = Some(value);
+                }
                 for p in 0..2 {
                     let mut best = direct[p].clone();
                     if let (Some(inv), Some(other)) = (lib.inv, &direct[1 - p]) {
@@ -775,16 +901,9 @@ pub fn map_gatefn_to_area_netlist(
                     }
                     cover.plans[id][p] = best;
                 }
-                let inv_area = lib.inv.map_or(0.0, |i| lib.cells[i].area);
                 cover.anchors[id] = match (&cover.plans[id][0], &cover.plans[id][1]) {
                     (Some(positive), Some(negative)) => {
-                        if lib.delay_first {
-                            negative.arrival < positive.arrival
-                                || (negative.arrival == positive.arrival
-                                    && negative.score(inv_area) < positive.score(inv_area))
-                        } else {
-                            negative.score(inv_area) < positive.score(inv_area)
-                        }
+                        cover.cost(negative, false) < cover.cost(positive, false)
                     }
                     (None, Some(_)) => true,
                     _ => false,
@@ -794,17 +913,32 @@ pub fn map_gatefn_to_area_netlist(
             }
         }
     }
-    Emitter::new(cover, stats)?.emit()
+    let local_anchors = if stats.shared_and_boundaries != 0 && lib.inv.is_some() {
+        let initial = include_local.then(|| cover.anchors.clone());
+        cover.select_demanded_phases(&order, &outputs);
+        initial.filter(|anchors| *anchors != cover.anchors)
+    } else {
+        None
+    };
+    let demanded = Emitter::new(&cover, stats.clone())?.emit()?;
+    let local = if let Some(anchors) = local_anchors {
+        cover.anchors = anchors;
+        Some(Emitter::new(&cover, stats)?.emit()?)
+    } else {
+        None
+    };
+    Ok((demanded, local))
 }
 
 /// Emits each demanded signal once and audits ownership of covered AIG ANDs.
 struct Emitter<'a> {
-    cover: Cover<'a>,
+    cover: &'a Cover<'a>,
     result: AreaMappedNetlist,
     names: BTreeSet<String>,
     signals: BTreeMap<AigOperand, NetRef>,
     ownership: Vec<usize>,
     outputs: Vec<(NetIndex, AigOperand)>,
+    needs_pruning: bool,
 }
 
 /// Pending work for depth-first signal emission without call-stack recursion.
@@ -820,7 +954,7 @@ enum EmitStep {
 impl<'a> Emitter<'a> {
     /// Allocates the output module and scalar ports before emitting demanded
     /// cells.
-    fn new(cover: Cover<'a>, stats: AreaMappingStats) -> Result<Self> {
+    fn new(cover: &'a Cover<'a>, stats: AreaMappingStats) -> Result<Self> {
         let mut interner = StringInterner::new();
         let name = interner.get_or_intern(&cover.aig.name);
         let module = NetlistModule {
@@ -846,6 +980,7 @@ impl<'a> Emitter<'a> {
             signals: BTreeMap::new(),
             ownership: vec![0; count],
             outputs: vec![],
+            needs_pruning: false,
         };
         for input in &this.cover.aig.inputs {
             for (i, op) in input.bit_vector.iter_lsb_to_msb().enumerate() {
@@ -893,6 +1028,9 @@ impl<'a> Emitter<'a> {
     }
     /// Emits one uniquely named cell and charges its area exactly once.
     fn cell(&mut self, index: usize, inputs: Vec<NetRef>) -> NetRef {
+        if let Some(folded) = self.fold_cell(index, &inputs) {
+            return folded;
+        }
         let mut name = format!("tm_{}", self.result.netlist.module.instances.len());
         while self.names.contains(&name) || self.names.contains(&format!("u_{name}")) {
             name.push('_');
@@ -920,15 +1058,7 @@ impl<'a> Emitter<'a> {
             inst_lineno: 0,
             inst_colno: 0,
         });
-        self.result.stats.cell_area += cell.area;
-        self.result.stats.cell_count += 1;
-        self.result.stats.inverter_count += usize::from(Some(index) == self.cover.lib.inv);
-        *self
-            .result
-            .stats
-            .cells_by_type
-            .entry(cell.name.clone())
-            .or_default() += 1;
+        self.result.stats.record_cell(index, self.cover.lib);
         NetRef::Simple(output)
     }
     /// Memoizes each demanded polarity, sharing boundary implementations and
@@ -1008,10 +1138,7 @@ impl<'a> Emitter<'a> {
                             inputs: binding.perm.len(),
                         });
                         for &i in binding.perm.iter().rev() {
-                            work.push(EmitStep::Signal(AigOperand {
-                                node: AigRef { id: cut.leaves[i] },
-                                negated: binding.phases & (1 << i) != 0,
-                            }));
+                            work.push(EmitStep::Signal(binding.operand(&cut, i)));
                         }
                     }
                 },
@@ -1084,6 +1211,9 @@ impl<'a> Emitter<'a> {
                 },
             });
         }
+        if self.needs_pruning {
+            self.prune_dead_cells();
+        }
         self.result.stats.covered_ands = self.ownership.iter().filter(|&&n| n != 0).count();
         self.result.stats.duplicated_ands =
             self.ownership.iter().map(|n| n.saturating_sub(1)).sum();
@@ -1123,7 +1253,10 @@ mod tests {
     use crate::netlist::emit::emit_module_as_netlist_text;
     use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
     use crate::netlist::io::read_gv_from_str;
-    use crate::techmap::delay::{DelayMappingOptions, tests::timing_library};
+    use crate::techmap::delay::{
+        DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_candidates,
+        map_gatefn_to_delay_netlist, tests::timing_library,
+    };
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use rand::{Rng, SeedableRng};
@@ -1318,6 +1451,150 @@ mod tests {
         assert_eq!(mapped.stats.covered_ands, 1);
     }
     #[test]
+    fn shared_single_phase_compares_direct_cell_with_anchor_and_inverter() {
+        let (mut b, x) = builder();
+        let y = b.add_and_binary(x[0], x[1]);
+        for name in ["first", "second"] {
+            b.add_output(name.into(), y.into());
+        }
+        let aig = b.build();
+        for (and_area, and_delay, area_direct, delay_direct) in [
+            (1.5, 3.0, true, false),
+            (3.0, 1.5, false, true),
+            (1.5, 2.0, true, true),   // Equal arrival favors the cheaper AND.
+            (2.0, 2.0, false, false), // Equal costs keep the existing anchor.
+        ] {
+            let lib = timing_library(&[
+                ("INV", "!A", 1.0, &[("A", 1.0)]),
+                ("NAND", "!(A*B)", 1.0, &[("A", 1.0), ("B", 1.0)]),
+                (
+                    "AND",
+                    "A*B",
+                    and_area,
+                    &[("A", and_delay), ("B", and_delay)],
+                ),
+            ])
+            .unwrap();
+            let delay = DelayMappingLibrary::new(
+                &lib,
+                DelayMappingOptions {
+                    reference_transition: 1.0,
+                    reference_load: 1.0,
+                },
+            )
+            .unwrap();
+            let candidates = map_gatefn_to_delay_candidates(&aig, &delay).unwrap();
+            let single = map_gatefn_to_delay_netlist(&aig, &delay).unwrap();
+            assert_eq!(
+                candidates.demanded.stats.cells_by_type,
+                single.stats.cells_by_type
+            );
+            assert_eq!(candidates.local.is_some(), delay_direct);
+            if let Some(local) = candidates.local {
+                assert_eq!(
+                    local.stats.cells_by_type,
+                    BTreeMap::from([("INV".into(), 1), ("NAND".into(), 1)])
+                );
+                assert_eq!(local.stats.duplicated_ands, 0);
+            }
+            for (mapped, direct) in [(verify(&aig, &lib), area_direct), (single, delay_direct)] {
+                let expected = if direct {
+                    BTreeMap::from([("AND".into(), 1)])
+                } else {
+                    BTreeMap::from([("INV".into(), 1), ("NAND".into(), 1)])
+                };
+                assert_eq!(mapped.stats.cells_by_type, expected);
+                assert_eq!(mapped.stats.duplicated_ands, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn emitted_area_accounts_for_inverters_shared_with_other_outputs() {
+        for (request_negative, nor_area) in [(false, 1.3), (true, 1.0)] {
+            let (mut b, x) = builder();
+            let shared = b.add_and_binary(x[0].negate(), x[1]);
+            let (requested, inverted_input) = if request_negative {
+                (shared.negate(), x[1].negate())
+            } else {
+                (shared, x[0].negate())
+            };
+            for (name, op) in [
+                ("first", requested),
+                ("second", requested),
+                ("inv", inverted_input),
+            ] {
+                b.add_output(name.into(), op.into());
+            }
+            let aig = b.build();
+            let lib = timing_library(&[
+                ("INV", "!A", 1.0, &[("A", 1.0)]),
+                ("NAND", "!(A*B)", 1.0, &[("A", 1.0), ("B", 1.0)]),
+                ("NOR", "!(A+B)", nor_area, &[("A", 1.0), ("B", 1.0)]),
+            ])
+            .unwrap();
+            // For a positive result the local NAND cover reuses !a, costing
+            // 3.0 against 3.3 for the demand-selected NOR. For a negative
+            // result the local NOR reuses !b and both covers cost 3.0, so the
+            // demand-selected NAND wins the tie.
+            let mapped = verify(&aig, &lib);
+            assert_eq!(mapped.stats.cell_area, 3.0);
+            assert_eq!(
+                mapped.stats.cells_by_type,
+                BTreeMap::from([("INV".into(), 2), ("NAND".into(), 1)])
+            );
+
+            let delay = DelayMappingLibrary::new(
+                &lib,
+                DelayMappingOptions {
+                    reference_transition: 1.0,
+                    reference_load: 1.0,
+                },
+            )
+            .unwrap();
+            let raw_delay = map_gatefn_to_delay_netlist(&aig, &delay).unwrap();
+            let faster_gate = if request_negative { "NAND" } else { "NOR" };
+            assert_eq!(
+                raw_delay.stats.cells_by_type,
+                BTreeMap::from([("INV".into(), 2), (faster_gate.into(), 1)])
+            );
+        }
+    }
+
+    #[test]
+    fn shared_phase_changes_propagate_the_selected_cells_pin_demands() {
+        let lib = library(&[
+            ("INV", &["A"], "!A", 1.0),
+            ("NAND", &["A", "B"], "!(A*B)", 1.0),
+            ("NOR", &["A", "B"], "!(A+B)", 1.5),
+            ("AND", &["A", "B"], "A*B", 1.7),
+        ]);
+        for mixed in [false, true] {
+            let (mut b, x) = builder();
+            let g = b.add_and_binary(x[0], x[1]);
+            let h = b.add_and_binary(g.negate(), x[2].negate());
+            // The zero output creates a structural fanout of G but demands no
+            // signal from it. Choosing NOR(G, x2) for H changes the demand on G
+            // from negative (the original NAND(!G, !x2) anchor) to positive.
+            let zero = b.add_and_binary(g, b.get_false());
+            for (name, value) in [("first", h), ("second", h), ("zero", zero)] {
+                b.add_output(name.into(), value.into());
+            }
+            if mixed {
+                b.add_output("negative_g".into(), g.negate().into());
+            }
+            let mapped = verify(&b.build(), &lib);
+            let expected = if mixed {
+                BTreeMap::from([("INV".into(), 1), ("NAND".into(), 1), ("NOR".into(), 1)])
+            } else {
+                BTreeMap::from([("AND".into(), 1), ("NOR".into(), 1)])
+            };
+            assert_eq!(mapped.stats.cells_by_type, expected);
+            assert_eq!(mapped.stats.shared_opposite_polarities, usize::from(mixed));
+        }
+    }
+
+    #[test]
     fn reconvergent_shared_cone_is_never_absorbed_twice() {
         let (mut b, x) = builder();
         let shared = b.add_and_binary(x[0], x[1]);
@@ -1373,6 +1650,184 @@ mod tests {
         assert_eq!(mapped.stats.cell_count, 0);
     }
     #[test]
+    fn tied_xor_after_wiring_alias_maps_to_constants() {
+        let library = timing_library(&[
+            ("INV", "!A", 1.0, &[("A", 1.0)]),
+            ("AND2", "A*B", 2.0, &[("A", 2.0), ("B", 2.0)]),
+            ("XOR2", "A^B", 2.0, &[("A", 2.0), ("B", 2.0)]),
+        ])
+        .unwrap();
+        let delay = DelayMappingLibrary::new(
+            &library,
+            DelayMappingOptions {
+                reference_transition: 10.0,
+                reference_load: 1.0,
+            },
+        )
+        .unwrap();
+        for keep_base in [false, true] {
+            let (mut b, x) = builder();
+            let base = b.add_and_binary(x[0], x[1]);
+            let either = b.add_or_binary(base, x[2]);
+            let alias = b.add_and_binary(base, either);
+            // The two XOR leaves have distinct AIG IDs but resolve to the same
+            // wire.
+            let difference = b.add_xor_binary(base, alias);
+            b.add_output("zero".into(), difference.into());
+            b.add_output("one".into(), difference.negate().into());
+            let independent = b.add_and_binary(x[3], x[4]);
+            b.add_output("independent".into(), independent.into());
+            b.add_output("opposite".into(), independent.negate().into());
+            if keep_base {
+                b.add_output("base".into(), base.into());
+            }
+            let aig = b.build();
+            for mapped in [
+                verify(&aig, &library),
+                map_gatefn_to_delay_netlist(&aig, &delay).unwrap(),
+            ] {
+                let and_count = 1 + usize::from(keep_base);
+                let cell_count = and_count + 1;
+                assert_eq!(
+                    mapped.stats.cells_by_type,
+                    BTreeMap::from([("AND2".into(), and_count), ("INV".into(), 1)])
+                );
+                assert_eq!(mapped.stats.cell_area, 2.0 * and_count as f64 + 1.0);
+                assert_eq!(mapped.stats.cell_count, cell_count);
+                assert_eq!(mapped.stats.inverter_count, 1);
+                assert_eq!(mapped.stats.shared_opposite_polarities, 1);
+                assert_eq!(mapped.stats.duplicated_ands, 0);
+                let module = &mapped.netlist.module;
+                assert_eq!(module.wires.len(), cell_count);
+                assert_eq!(mapped.netlist.nets.len(), module.ports.len() + cell_count);
+                assert_eq!(module.assigns[0].rhs, AssignExpr::Leaf(literal(false)));
+                assert_eq!(module.assigns[1].rhs, AssignExpr::Leaf(literal(true)));
+            }
+        }
+    }
+    #[test]
+    fn emitter_relocates_live_cells_after_folding_tied_inputs() -> Result<()> {
+        let mut builder = GateBuilder::new("prune".into(), GateBuilderOptions::no_opt());
+        let a = *builder.add_input("a".into(), 1).get_lsb(0);
+        let b = *builder.add_input("b".into(), 1).get_lsb(0);
+        let alias = builder.add_and_binary(a, a);
+        let zero = builder.add_xor_binary(alias.negate(), alias.negate());
+        let live = builder.add_and_binary(a, b);
+        builder.add_output("zero".into(), zero.into());
+        builder.add_output("pos".into(), live.into());
+        builder.add_output("neg".into(), live.negate().into());
+        let aig = builder.build();
+        let lib = AreaMappingLibrary::new(&library(&[
+            ("AND2", &["A", "B"], "A*B", 2.0),
+            ("INV", &["A"], "!A", 1.0),
+            ("XOR2", &["A", "B"], "A^B", 3.0),
+        ]))?;
+        let and = lib
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2")
+            .unwrap();
+        let xor = lib
+            .cells
+            .iter()
+            .position(|cell| cell.name == "XOR2")
+            .unwrap();
+        let mut cover = Cover {
+            aig: &aig,
+            lib: &lib,
+            boundary: vec![false; aig.gates.len()],
+            anchors: vec![false; aig.gates.len()],
+            plans: vec![[None, None]; aig.gates.len()],
+        };
+        cover.boundary[alias.node.id] = true;
+        cover.boundary[live.node.id] = true;
+        let mut emitter = Emitter::new(&cover, AreaMappingStats::default())?;
+        // Seed the wired alias so the XOR fold happens after its input inverter
+        // has been emitted. Cut planning would already prove this XOR constant.
+        emitter.signals.insert(alias, emitter.signals[&a].clone());
+        let dead = emitter.signal(alias.negate())?;
+        let folded = emitter.cell(xor, vec![dead.clone(), dead]);
+        emitter.signals.insert(zero, folded);
+        let positive = emitter.cell(
+            and,
+            vec![emitter.signals[&a].clone(), emitter.signals[&b].clone()],
+        );
+        emitter.signals.insert(live, positive);
+
+        let mapped = emitter.emit()?;
+        assert_eq!(mapped.stats.cell_count, 2);
+        assert_eq!(mapped.stats.cell_area, 3.0);
+        assert_eq!(mapped.stats.inverter_count, 1);
+        assert_eq!(mapped.stats.shared_opposite_polarities, 1);
+        assert_eq!(
+            mapped.stats.cells_by_type,
+            BTreeMap::from([("AND2".into(), 1), ("INV".into(), 1)])
+        );
+        assert_eq!(
+            emit_module_as_netlist_text(
+                &mapped.netlist.module,
+                &mapped.netlist.nets,
+                &mapped.netlist.interner
+            )?,
+            r#"module prune(a, b, zero, pos, neg);
+  input a;
+  input b;
+  output zero;
+  output pos;
+  output neg;
+  wire tm_1;
+  wire tm_2;
+  assign zero = 1'b0;
+  assign pos = tm_1;
+  assign neg = tm_2;
+  AND2 u_tm_1 (.A(a), .B(b), .Y(tm_1));
+  INV u_tm_2 (.A(tm_1), .Y(tm_2));
+endmodule
+"#
+        );
+        Ok(())
+    }
+    #[test]
+    fn tied_nand_uses_an_inverter_only_when_it_meets_the_objective() {
+        let (mut b, x) = builder();
+        let either = b.add_or_binary(x[0], x[1]);
+        let alias = b.add_and_binary(x[0], either);
+        let same = b.add_and_binary(alias, x[0]);
+        b.add_output("inverted".into(), same.negate().into());
+        b.add_output("alias".into(), alias.into());
+        let aig = b.build();
+        for (inv_area, inv_delay, area_cell, delay_cell) in [
+            (1.0, 3.0, "INV", "NAND2"),
+            (3.0, 1.1, "NAND2", "INV"),
+            (3.0, 2.0, "NAND2", "NAND2"),
+            (1.0, 2.0, "INV", "INV"),
+        ] {
+            let library = timing_library(&[
+                ("INV", "!A", inv_area, &[("A", inv_delay)]),
+                ("NAND2", "!(A*B)", 2.0, &[("A", 1.0), ("B", 2.0)]),
+            ])
+            .unwrap();
+            let area = verify(&aig, &library);
+            assert_eq!(
+                area.stats.cells_by_type,
+                BTreeMap::from([(area_cell.into(), 1)])
+            );
+            let delay = DelayMappingLibrary::new(
+                &library,
+                DelayMappingOptions {
+                    reference_transition: 10.0,
+                    reference_load: 1.0,
+                },
+            )
+            .unwrap();
+            let delay = map_gatefn_to_delay_netlist(&aig, &delay).unwrap();
+            assert_eq!(
+                delay.stats.cells_by_type,
+                BTreeMap::from([(delay_cell.into(), 1)])
+            );
+        }
+    }
+    #[test]
     fn wider_cell_can_cover_an_intermediate_without_its_own_cover() {
         let (mut b, x) = builder();
         let inner = b.add_and_binary(x[0], x[1]);
@@ -1416,6 +1871,46 @@ mod tests {
         assert_eq!(mapped.stats.cell_count, 0);
         assert_eq!(mapped.stats.live_ands, 3);
         assert_eq!(mapped.stats.covered_ands, 3);
+    }
+    #[test]
+    fn tied_constant_without_inverter_propagates_before_physical_cover_selection() {
+        let lib = library(&[
+            ("AND2", &["A", "B"], "A*B", 2.0),
+            ("XOR2", &["A", "B"], "A^B", 3.0),
+        ]);
+        for (invert_alias, outputs) in [
+            (false, &[1][..]),
+            (false, &[0, 1][..]),
+            (false, &[1, 0][..]),
+            (false, &[0, 2][..]),
+            (true, &[0, 1, 2][..]),
+        ] {
+            let (mut b, x) = builder();
+            let base = b.add_and_binary(x[0], x[1]);
+            let source = if invert_alias { base.negate() } else { base };
+            let either = b.add_or_binary(source, x[2]);
+            let alias = b.add_and_binary(source, either);
+            let difference = b.add_xor_binary(base, alias);
+            let downstream = b.add_and_binary(difference.negate(), x[2]);
+            let signals = [difference, difference.negate(), downstream];
+            for (i, &choice) in outputs.iter().enumerate() {
+                b.add_output(format!("o{i}"), signals[choice].into());
+            }
+            let mapped = verify(&b.build(), &lib);
+            let expected = [
+                literal(invert_alias),
+                literal(!invert_alias),
+                if invert_alias {
+                    literal(false)
+                } else {
+                    NetRef::Simple(NetIndex(2))
+                },
+            ];
+            for (assign, &choice) in mapped.netlist.module.assigns.iter().zip(outputs) {
+                assert_eq!(assign.rhs, AssignExpr::Leaf(expected[choice].clone()));
+            }
+            assert_eq!(mapped.stats.cell_count, 0);
+        }
     }
     #[test]
     fn wider_cell_does_not_claim_a_substituted_shared_constant() {
