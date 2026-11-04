@@ -876,6 +876,33 @@ fn v7_preserves_scalar_lanes_and_interprets_the_aggregate_output() -> Result<(),
     Ok(())
 }
 
+#[test]
+fn v8_preserves_the_v7_reference_for_existing_seed_bytes() -> Result<(), String> {
+    let mut rng = StdRng::from_seed([81; 32]);
+    for (old, new) in [
+        (Grammar::MissionV7, Grammar::MissionV8),
+        (Grammar::MissionLocalV7, Grammar::MissionLocalV8),
+    ] {
+        let mut source_varied = false;
+        for _ in 0..16 {
+            let mut bytes = [0; 256];
+            rng.fill_bytes(&mut bytes);
+            let before = generate_with_grammar(&bytes, GenerateOptions::default(), old)?;
+            let after = generate_with_grammar(&bytes, GenerateOptions::default(), new)?;
+            source_varied |= before.sources()? != after.sources()?;
+            assert_eq!(
+                before.expected_ir()?.to_string(),
+                after.expected_ir()?.to_string()
+            );
+        }
+        assert!(
+            source_varied,
+            "{new:?} should generate alternate update indices"
+        );
+    }
+    Ok(())
+}
+
 /// Compares all tuple fields in the wrapper with independent PIR evaluations.
 fn check_interpreter_entry(sample: &Sample) {
     let reference = sample.expected_ir().unwrap();

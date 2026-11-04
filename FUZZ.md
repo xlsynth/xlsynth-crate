@@ -157,7 +157,9 @@ runtime intermediate. The `mission-local` profile emits module-local named helpe
 for maps and enumeration. The `mission` profile exercises the real stdlib.
 V7 adds a separately observed array, struct, or payload enum that flows through
 producer and updater functions. Its scalar reference checks both changed and
-preserved fields across those calls. Captured lambdas and `const match` belong to the experimental grammar.
+preserved fields across those calls. V8 passes multidimensional update indices
+through local bindings, tuple projections, and helper calls. Captured lambdas
+and `const match` belong to the experimental grammar.
 Bounded nested tuple
 binding trees cover annotated/unannotated `let`, `match`, wildcards, and tuple
 rest while an independent ordered fold makes retained bindings observable.
