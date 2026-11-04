@@ -2,7 +2,6 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::OnceLock;
 
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
@@ -192,46 +191,18 @@ top fn divide(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
     let package = Parser::new(ir).parse_and_validate_package().unwrap();
     let module = LeanModuleName::new("BitVec").unwrap();
     let function = export_ir_function(&package, None, &module).unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    let exported = function.write_to(root).unwrap();
-
-    // Import the actual BitVec namespace. The batch evaluator nests it under a
-    // fresh namespace.
-    let mut checks = String::from("import BitVec\n");
-    for (x, y) in [(1, 0), (0xff, 0), (0xf4, 3)] {
-        let args = [x, y].map(|v| IrValue::make_ubits(8, v).unwrap());
-        let FnEvalResult::Success(expected) =
-            eval_fn_in_package(&package, package.get_top_fn().unwrap(), &args)
-        else {
-            panic!("PIR evaluation failed for {args:?}")
-        };
-        writeln!(
-            checks,
-            "#guard (BitVec.eval {x} {y}).toNat == {}",
-            expected.value.to_u64().unwrap()
-        )
+    let inputs = [[1, 0], [0xff, 0], [0xf4, 3]]
+        .map(|args| args.map(|v| IrValue::make_ubits(8, v).unwrap()).to_vec());
+    let actual = evaluator()
+        .eval_ir_function_batch(&function, &inputs)
         .unwrap();
-    }
-    let check_file = root.join("Check.lean");
-    std::fs::write(&check_file, checks).unwrap();
-    for source in [root.join("XlsynthLean/IR.lean"), exported, check_file] {
-        let output = Command::new(evaluator().lean_executable())
-            .arg("-o")
-            .arg(source.with_extension("olean"))
-            .arg(&source)
-            .current_dir(root)
-            .env("LEAN_PATH", root)
-            .env_remove("LEAN_SYSROOT")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "Lean failed for {}:\n{}\n{}",
-            source.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    assert_eq!(actual.len(), inputs.len());
+    let top = package.get_top_fn().unwrap();
+    for (args, value) in inputs.iter().zip(actual) {
+        let FnEvalResult::Success(expected) = eval_fn_in_package(&package, top, args) else {
+            panic!("PIR evaluation failed for {args:?}");
+        };
+        assert_eq!(value, expected.value, "signed division for {args:?}");
     }
 }
 

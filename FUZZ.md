@@ -350,15 +350,16 @@ Primarily tests:
 
 Generates pure, acyclic PIR packages, exports their selected function directly
 to word-level Lean, and compares every typed output with `eval_fn_in_package`
-on the original package. Each fuzz input checks eight packages in one Lean
-invocation, with 32 input vectors per top function and 256 typed comparisons.
-For a nullary function each argument list is empty.
-The first function uses up to 3,072 bytes directly. Its first eight bytes
-seed the mixed-input sampler (zero-padded for short inputs), and the rest drive
-graph generation so libFuzzer can mutate and shrink that graph. A hash of the
-whole fuzz input seeds seven companion functions. Each uses `RngEntropy`, a
-body-node budget sampled from 1 through 32, and its own reproducible seed for
-the graph and vectors. Packages include nested arrays/tuples, calls, maps,
+on the original package. Each fuzz input checks one exported function with
+32 argument sets. The fuzzer imports the generated module using a name
+selected from `Generated.Function`, `BitVec`, `Vector`, and `Nat.Generated` by
+hashing the input. This exercises Lean name resolution in different namespaces.
+
+The first eight bytes seed the argument sampler (zero-padded for short inputs).
+Additional bytes, up to a total of 3,072, drive graph generation directly so
+libFuzzer can mutate and shrink the graph. For inputs of eight bytes or fewer,
+the same seed drives `RngEntropy` with a body-node budget sampled from 1 through
+32. Packages include nested arrays/tuples, calls, maps,
 PIR extensions, zero-width and wide bits. The generator excludes loops,
 events, and partial-product multiplies and only
 generates proven-safe bounds promises. Unexpected export, elaboration,

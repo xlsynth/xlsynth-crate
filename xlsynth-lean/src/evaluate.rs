@@ -16,7 +16,9 @@ use xlsynth_pir::ir_value_utils::{
 
 use crate::process::{resolve_lean_executable, run_lean_process};
 use crate::support::{EVALUATOR_SUPPORT, write_file, write_toolchain};
-use crate::{LeanCircuitBundle, LeanError, LeanExportOptions, LeanFunction, export_gate_fn};
+use crate::{
+    LeanCircuitBundle, LeanError, LeanExportOptions, LeanFunction, LeanModuleName, export_gate_fn,
+};
 
 /// Reusable evaluator that compiles the companion Lean support modules once.
 ///
@@ -136,29 +138,13 @@ impl LeanEvaluator {
         let cases = encode_input_cases(bundle, input_cases)?;
         let work = evaluation_directory()?;
         let source = bundle.write_to(work.path())?.source;
-        run_lean_process(
-            &self.lean_executable,
+        let response = self.run_exported_function(
             work.path(),
-            &[self.support_root.path(), work.path()],
-            "module compilation",
-            &[
-                OsString::from("-o"),
-                source.with_extension("olean").into_os_string(),
-                source.into_os_string(),
-            ],
+            source,
+            bundle.module_name(),
+            "eval",
+            &EvalRequest { cases },
         )?;
-        let module = bundle.module_name().lean_identifier();
-        let driver = format!(
-            r#"-- SPDX-License-Identifier: Apache-2.0
-import EvalMain
-import {module}
-
-def main (args : List String) : IO UInt32 :=
-  XlsynthLean.EvalMain.runFunction {module}.eval args
-"#
-        );
-        let response: EvalResponse =
-            self.run_driver(work.path(), &driver, &EvalRequest { cases })?;
         validate_outputs(
             input_cases.len(),
             bundle.interface().output_bit_count(),
@@ -167,19 +153,28 @@ def main (args : List String) : IO UInt32 :=
         Ok(decode_outputs(bundle, response.outputs))
     }
 
-    /// Evaluates a translated word-level function on a batch of typed XLS
-    /// argument lists.
+    /// Compiles and imports the exported module, then evaluates all typed XLS
+    /// argument lists in a single request.
     pub fn eval_ir_function_batch(
         &self,
         function: &LeanFunction,
         input_cases: &[Vec<IrValue>],
     ) -> Result<Vec<IrValue>, LeanError> {
-        self.eval_ir_functions(&[LeanFunctionInputs {
+        let batch = LeanFunctionInputs {
             function,
             input_cases,
-        }])?
-        .pop()
-        .ok_or_else(|| LeanError::Protocol("missing single-function response".into()))
+        };
+        let request = encode_ir_request(&batch)?;
+        let work = evaluation_directory()?;
+        let source = function.write_to(work.path())?;
+        let response = self.run_exported_function(
+            work.path(),
+            source,
+            function.module_name(),
+            "evalPacked",
+            &request,
+        )?;
+        decode_ir_response(&batch, response)
     }
 
     /// Evaluates independently typed functions in one Lean invocation,
@@ -235,19 +230,42 @@ def main (args : List String) : IO UInt32 :=
         batches
             .iter()
             .zip(responses)
-            .map(|(batch, response)| {
-                let ty = &batch.function.signature().return_type;
-                validate_outputs(batch.input_cases.len(), ty.bit_count(), &response)?;
-                response
-                    .outputs
-                    .iter()
-                    .map(|text| {
-                        let bits = text.bytes().map(|b| b == b'1').collect::<Vec<_>>();
-                        ir_value_from_lsb0_bits_with_layout(ty, &bits).map_err(LeanError::Protocol)
-                    })
-                    .collect()
-            })
+            .map(|(batch, response)| decode_ir_response(batch, response))
             .collect()
+    }
+
+    /// Compiles one standalone module and imports it into the evaluation
+    /// driver.
+    fn run_exported_function(
+        &self,
+        root: &Path,
+        source: PathBuf,
+        module_name: &LeanModuleName,
+        entry: &str,
+        request: &EvalRequest,
+    ) -> Result<EvalResponse, LeanError> {
+        run_lean_process(
+            &self.lean_executable,
+            root,
+            &[self.support_root.path(), root],
+            "module compilation",
+            &[
+                OsString::from("-o"),
+                source.with_extension("olean").into_os_string(),
+                source.into_os_string(),
+            ],
+        )?;
+        let module = module_name.lean_identifier();
+        let driver = format!(
+            r#"-- SPDX-License-Identifier: Apache-2.0
+import EvalMain
+import {module}
+
+def main (args : List String) : IO UInt32 :=
+  XlsynthLean.EvalMain.runFunction {module}.{entry} args
+"#
+        );
+        self.run_driver(root, &driver, request)
     }
 
     /// Runs one driver and exchanges its JSON request and response in the batch
@@ -328,6 +346,23 @@ fn encode_ir_request(batch: &LeanFunctionInputs<'_>) -> Result<EvalRequest, Lean
         );
     }
     Ok(EvalRequest { cases })
+}
+
+/// Reconstructs each typed IR result from the evaluation driver's packed bits.
+fn decode_ir_response(
+    batch: &LeanFunctionInputs<'_>,
+    response: EvalResponse,
+) -> Result<Vec<IrValue>, LeanError> {
+    let ty = &batch.function.signature().return_type;
+    validate_outputs(batch.input_cases.len(), ty.bit_count(), &response)?;
+    response
+        .outputs
+        .iter()
+        .map(|text| {
+            let bits = text.bytes().map(|b| b == b'1').collect::<Vec<_>>();
+            ir_value_from_lsb0_bits_with_layout(ty, &bits).map_err(LeanError::Protocol)
+        })
+        .collect()
 }
 
 /// Validates vector shapes and flattens input cases into LSB-first strings.

@@ -258,8 +258,9 @@ element, and out-of-range writes preserve the array. For operations marked
 the promised bounds.
 
 Use `LeanEvaluator::eval_ir_function_batch(&function, &argument_lists)` to
-evaluate one function on multiple inputs and receive one typed `IrValue` per
-case. `LeanEvaluator::eval_ir_functions` accepts a slice of
+compile the standalone module written by `LeanFunction::write_to`. A runner
+imports that module and evaluates all argument lists in one request, returning
+one typed `IrValue` per case. `LeanEvaluator::eval_ir_functions` accepts a slice of
 `LeanFunctionInputs { function, input_cases }` and runs all functions in one
 Lean invocation. Each function has its own namespace and may have a different
 signature. Results follow function order, then input order.
