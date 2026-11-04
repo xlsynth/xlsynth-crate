@@ -79,7 +79,7 @@ block bundle(clk, x: u8, flag: bool) -> Bundle { Bundle { data: x, flags: (flag,
 // Data-port order differs from the BX declaration. Clock and reset use their
 // physical IR names, while BX identifies them by role.
 const HISTORY: &str = r#"package imported
-block history(en: bits[1], previous: bits[8], fast_clock: clock, din: bits[8], clear: bits[1], observed: bits[8]) {
+block history(din: bits[8], previous: bits[8], fast_clock: clock, en: bits[1], clear: bits[1], observed: bits[8]) {
   #![reset(port="clear", asynchronous=false, active_low=false)]
   reg saved(bits[8], reset_value=0)
   en: bits[1] = input_port(name=en, id=1)
@@ -93,9 +93,9 @@ block history(en: bits[1], previous: bits[8], fast_clock: clock, din: bits[8], c
 
 const IMPORTED_CALL: &str = r#"
 struct Samples { observed: u8, previous: u8 }
-extern block history(clk, rst, din: u8, en: bool) -> Samples;
-block parent(clk, rst, x: u8, valid: bool) -> u8 {
-    let outputs = history(x, valid);
+extern block history(clk, rst, en: bool, din: u8) -> Samples;
+block parent(clk, rst, valid: bool, x: u8) -> u8 {
+    let outputs = history(valid, x);
     outputs.previous
 }"#;
 

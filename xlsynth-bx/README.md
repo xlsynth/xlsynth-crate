@@ -10,7 +10,7 @@ struct ResultPorts {
     valid: bool,
 }
 
-pub block transform_pipe(clk, rst, x: u8, valid_in: bool) -> ResultPorts {
+pub block transform_pipe(clk, rst, valid_in: bool, x: u8) -> ResultPorts {
     reg data_q: u16;
     reg valid_q: bool = false;
     if valid_in {
@@ -54,7 +54,7 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 
 ## Clocked blocks
 
-- The first port is `clk`, followed by optional `rst` and typed data inputs. The final expression drives the outputs continuously. A struct result exposes its fields in declaration order. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
+- The first port is `clk`, followed by optional `rst` and typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields in declaration order. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
 - A `reg` name in an expression reads its current value. Each register has exactly one `:=` update site. A surrounding `if` supplies the load enable. An ordinary value expression such as `q := if en { x } else { q };` supplies a mux on the data input. All registers update together at the active edge.
 - A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
 - A module with one block selects it as top. With multiple blocks, a single `pub block` selects the top. For other configurations, select the desired block on the returned package.

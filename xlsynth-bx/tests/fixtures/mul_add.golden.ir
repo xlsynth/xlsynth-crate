@@ -8,7 +8,7 @@ fn __arithmetic__mul_wide(a: bits[8] id=1, b: bits[8] id=2) -> bits[16] {
   ret umul.5: bits[16] = umul(zero_ext.3, zero_ext.4, id=5, pos=[(0,1,5)])
 }
 
-top block mul_add(clk: clock, rst: bits[1], a: bits[8], b: bits[8], bias: bits[8], valid_in: bits[1], value: bits[16], valid: bits[1]) {
+top block mul_add(clk: clock, rst: bits[1], valid_in: bits[1], a: bits[8], b: bits[8], bias: bits[8], value: bits[16], valid: bits[1]) {
   #![reset(port="rst", asynchronous=false, active_low=false)]
   reg product(bits[16])
   reg bias_d1(bits[8])
@@ -16,10 +16,10 @@ top block mul_add(clk: clock, rst: bits[1], a: bits[8], b: bits[8], bias: bits[8
   reg result(bits[16])
   reg valid_d2(bits[1], reset_value=0)
   rst: bits[1] = input_port(name=rst, id=6)
-  a: bits[8] = input_port(name=a, id=7)
-  b: bits[8] = input_port(name=b, id=8)
-  bias: bits[8] = input_port(name=bias, id=9)
-  valid_in: bits[1] = input_port(name=valid_in, id=10)
+  valid_in: bits[1] = input_port(name=valid_in, id=7)
+  a: bits[8] = input_port(name=a, id=8)
+  b: bits[8] = input_port(name=b, id=9)
+  bias: bits[8] = input_port(name=bias, id=10)
   register_read.11: bits[16] = register_read(register=product, id=11)
   register_read.12: bits[8] = register_read(register=bias_d1, id=12)
   register_read.13: bits[1] = register_read(register=valid_d1, id=13)
