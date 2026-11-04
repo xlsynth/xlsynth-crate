@@ -48,6 +48,16 @@ impl PostMappingOptions {
         mapped: &mut MappedNetlist,
         library: &Library,
     ) -> Result<PostMappingReport> {
+        self.clone().apply_with_remaining_budget(mapped, library)
+    }
+
+    /// Runs the stages and deducts completed resizing visits from the explicit
+    /// budgets shared with subsequent covers.
+    fn apply_with_remaining_budget(
+        &mut self,
+        mapped: &mut MappedNetlist,
+        library: &Library,
+    ) -> Result<PostMappingReport> {
         let fanout = self.fanout.as_ref().map(|options| {
             optimize_fanout(mapped, library, options.clone()).context(
                 "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
@@ -55,16 +65,28 @@ impl PostMappingOptions {
         }).transpose()?;
         let recovery = self
             .recovery
-            .as_ref()
+            .as_mut()
             .map(|options| {
-                resize_netlist(
+                let result = resize_netlist(
                     &mut mapped.module,
                     &mapped.nets,
                     &mut mapped.interner,
                     library,
                     options,
-                )
-                .context("mapped area recovery failed")
+                );
+                // Fanout errors return before this point and spend no visits.
+                // A failed resize does not report how much work it performed.
+                if let Some(limit) = &mut options.timing_evaluation_budget {
+                    *limit = result
+                        .as_ref()
+                        .map_or(0, |r| limit.saturating_sub(r.upsize.propagated_instances));
+                }
+                if let Some(limit) = &mut options.recovery_evaluation_budget {
+                    *limit = result
+                        .as_ref()
+                        .map_or(0, |r| limit.saturating_sub(r.downsize.propagated_instances));
+                }
+                result.context("mapped area recovery failed")
             })
             .transpose()?;
         Ok(PostMappingReport { fanout, recovery })
@@ -80,34 +102,19 @@ impl PostMappingOptions {
         candidates: DelayMappedCandidates,
         library: &Library,
     ) -> Result<(AreaMappedNetlist, PostMappingReport)> {
-        let finish = |mut cover: AreaMappedNetlist, options: &Self| {
-            let report = options.apply(&mut cover.netlist, library)?;
+        let mut remaining = self.clone();
+        let mut finish = |mut cover: AreaMappedNetlist| {
+            let report = remaining.apply_with_remaining_budget(&mut cover.netlist, library)?;
             Ok((cover, report))
         };
         let Some(local) = candidates.local else {
-            return finish(candidates.demanded, self);
+            return finish(candidates.demanded);
         };
         if self.fanout.is_none() && self.recovery.is_none() {
-            return finish(candidates.demanded, self);
+            return finish(candidates.demanded);
         }
-        let local = finish(local, self);
-        let mut remaining = self.clone();
-        if let Some(options) = &mut remaining.recovery {
-            // Explicit budgets bound the entire command. Preserve the full
-            // allowance for the local cover and spend only unused visits on
-            // the alternative. A failed run has no usable visit count.
-            let spent = local
-                .as_ref()
-                .ok()
-                .and_then(|(_, stages)| stages.recovery.as_ref());
-            if let Some(limit) = &mut options.timing_evaluation_budget {
-                *limit = spent.map_or(0, |r| limit.saturating_sub(r.upsize.propagated_instances));
-            }
-            if let Some(limit) = &mut options.recovery_evaluation_budget {
-                *limit = spent.map_or(0, |r| limit.saturating_sub(r.downsize.propagated_instances));
-            }
-        }
-        match (finish(candidates.demanded, &remaining), local) {
+        let local = finish(local);
+        match (finish(candidates.demanded), local) {
             (Ok(demanded), Ok(local)) => {
                 if local.1.delay_and_area() < demanded.1.delay_and_area() {
                     Ok(local)
@@ -118,5 +125,77 @@ impl PostMappingOptions {
             (Ok(cover), Err(_)) | (Err(_), Ok(cover)) => Ok(cover),
             (Err(d), Err(l)) => Err(d.context(format!("local-polarity cover also failed: {l:#}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::liberty_model::LibraryBuilder;
+    use crate::techmap::delay::{
+        DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_candidates,
+        tests::timing_library,
+    };
+
+    #[test]
+    fn fanout_failure_preserves_recovery_budget_for_the_other_cover() -> Result<()> {
+        let mut builder = LibraryBuilder::from_library(timing_library(&[
+            ("INV", "!A", 1.0, &[("A", 1.0)]),
+            (
+                "OAI21",
+                "!((A+C)*B)",
+                2.0,
+                &[("A", 2.0), ("B", 2.0), ("C", 2.0)],
+            ),
+            ("AND2", "A*B", 2.0, &[("A", 2.5), ("B", 2.5)]),
+            ("AND2_SMALL", "A*B", 1.0, &[("A", 2.5), ("B", 2.5)]),
+        ])?);
+        let when = builder.intern_string("A*C")?;
+        let cells = &mut builder.library_mut().cells;
+        for arc in &mut cells[1].pins.last_mut().unwrap().timing_arcs {
+            arc.when = when;
+        }
+        cells[3].use_for_size_only = Some(true);
+        let library = builder.finish();
+
+        let mut b = GateBuilder::new("shared".into(), GateBuilderOptions::no_opt());
+        let x = *b.add_input("x".into(), 1).get_lsb(0);
+        let y = *b.add_input("y".into(), 1).get_lsb(0);
+        let z = *b.add_input("z".into(), 1).get_lsb(0);
+        let zero = b.add_and_binary(z, z.negate());
+        let x_or_zero = b.add_or_binary(x, zero);
+        let shared = b.add_and_binary(x_or_zero, y);
+        b.add_output("first".into(), shared.into());
+        b.add_output("second".into(), shared.into());
+
+        let mapping_library = DelayMappingLibrary::new(
+            &library,
+            DelayMappingOptions {
+                reference_transition: 1.0,
+                reference_load: 1.0,
+            },
+        )?;
+        let candidates = map_gatefn_to_delay_candidates(&b.build(), &mapping_library)?;
+        // The local cover selects OAI21 + INV. Tying an OR input to zero
+        // disables its timing arcs, so fanout STA fails before any resizing.
+        let mut local = candidates.local.as_ref().unwrap().netlist.clone();
+        let fanout = FanoutOptimizationOptions::default();
+        assert!(optimize_fanout(&mut local, &library, fanout.clone()).is_err());
+
+        let options = PostMappingOptions {
+            fanout: Some(fanout),
+            recovery: Some(ResizeOptions {
+                max_upsize_rounds: 0,
+                recovery_evaluation_budget: Some(1),
+                ..Default::default()
+            }),
+        };
+        let (_, report) = options.select_delay_cover(candidates, &library)?;
+        let recovery = report.recovery.unwrap();
+        assert_eq!(recovery.work_limits.recovery_evaluations, 1);
+        assert_eq!(recovery.downsize.propagated_instances, 1);
+        assert_eq!((recovery.initial_area, recovery.final_area), (2.0, 1.0));
+        Ok(())
     }
 }

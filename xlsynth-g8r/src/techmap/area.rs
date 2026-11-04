@@ -1650,7 +1650,7 @@ mod tests {
         assert_eq!(mapped.stats.cell_count, 0);
     }
     #[test]
-    fn tied_xor_after_wiring_alias_prunes_only_unobservable_cells() {
+    fn tied_xor_after_wiring_alias_maps_to_constants() {
         let library = timing_library(&[
             ("INV", "!A", 1.0, &[("A", 1.0)]),
             ("AND2", "A*B", 2.0, &[("A", 2.0), ("B", 2.0)]),
@@ -1704,6 +1704,88 @@ mod tests {
                 assert_eq!(module.assigns[1].rhs, AssignExpr::Leaf(literal(true)));
             }
         }
+    }
+    #[test]
+    fn emitter_relocates_live_cells_after_folding_tied_inputs() -> Result<()> {
+        let mut builder = GateBuilder::new("prune".into(), GateBuilderOptions::no_opt());
+        let a = *builder.add_input("a".into(), 1).get_lsb(0);
+        let b = *builder.add_input("b".into(), 1).get_lsb(0);
+        let alias = builder.add_and_binary(a, a);
+        let zero = builder.add_xor_binary(alias.negate(), alias.negate());
+        let live = builder.add_and_binary(a, b);
+        builder.add_output("zero".into(), zero.into());
+        builder.add_output("pos".into(), live.into());
+        builder.add_output("neg".into(), live.negate().into());
+        let aig = builder.build();
+        let lib = AreaMappingLibrary::new(&library(&[
+            ("AND2", &["A", "B"], "A*B", 2.0),
+            ("INV", &["A"], "!A", 1.0),
+            ("XOR2", &["A", "B"], "A^B", 3.0),
+        ]))?;
+        let and = lib
+            .cells
+            .iter()
+            .position(|cell| cell.name == "AND2")
+            .unwrap();
+        let xor = lib
+            .cells
+            .iter()
+            .position(|cell| cell.name == "XOR2")
+            .unwrap();
+        let mut cover = Cover {
+            aig: &aig,
+            lib: &lib,
+            boundary: vec![false; aig.gates.len()],
+            anchors: vec![false; aig.gates.len()],
+            plans: vec![[None, None]; aig.gates.len()],
+        };
+        cover.boundary[alias.node.id] = true;
+        cover.boundary[live.node.id] = true;
+        let mut emitter = Emitter::new(&cover, AreaMappingStats::default())?;
+        // Seed the wired alias so the XOR fold happens after its input inverter
+        // has been emitted. Cut planning would already prove this XOR constant.
+        emitter.signals.insert(alias, emitter.signals[&a].clone());
+        let dead = emitter.signal(alias.negate())?;
+        let folded = emitter.cell(xor, vec![dead.clone(), dead]);
+        emitter.signals.insert(zero, folded);
+        let positive = emitter.cell(
+            and,
+            vec![emitter.signals[&a].clone(), emitter.signals[&b].clone()],
+        );
+        emitter.signals.insert(live, positive);
+
+        let mapped = emitter.emit()?;
+        assert_eq!(mapped.stats.cell_count, 2);
+        assert_eq!(mapped.stats.cell_area, 3.0);
+        assert_eq!(mapped.stats.inverter_count, 1);
+        assert_eq!(mapped.stats.shared_opposite_polarities, 1);
+        assert_eq!(
+            mapped.stats.cells_by_type,
+            BTreeMap::from([("AND2".into(), 1), ("INV".into(), 1)])
+        );
+        assert_eq!(
+            emit_module_as_netlist_text(
+                &mapped.netlist.module,
+                &mapped.netlist.nets,
+                &mapped.netlist.interner
+            )?,
+            r#"module prune(a, b, zero, pos, neg);
+  input a;
+  input b;
+  output zero;
+  output pos;
+  output neg;
+  wire tm_1;
+  wire tm_2;
+  assign zero = 1'b0;
+  assign pos = tm_1;
+  assign neg = tm_2;
+  AND2 u_tm_1 (.A(a), .B(b), .Y(tm_1));
+  INV u_tm_2 (.A(tm_1), .Y(tm_2));
+endmodule
+"#
+        );
+        Ok(())
     }
     #[test]
     fn tied_nand_uses_an_inverter_only_when_it_meets_the_objective() {
