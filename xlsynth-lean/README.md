@@ -243,7 +243,8 @@ order. `bits[N]` becomes `BitVec N`, arrays become `Vector α n`, and tuples
 become right-nested products ending in `Unit`. For example, a two-field
 tuple value is `(a, b, ())`. `evalPacked` packs the first argument at the
 low end. Within a tuple its last field is least significant, and within an
-array its first element is least significant.
+array its first element is least significant. Every array dimension in the
+selected function and its callees must have positive length.
 
 The exporter supports pure arithmetic (including mixed-width signed and
 unsigned multiply), bitwise operations, comparisons, shifts, reductions,

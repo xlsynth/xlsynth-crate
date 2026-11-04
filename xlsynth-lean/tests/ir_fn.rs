@@ -2,12 +2,14 @@
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::OnceLock;
 
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_lean::{
     LeanError, LeanEvaluator, LeanFunctionInputs, LeanModuleName, export_ir_function,
 };
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::random_inputs::{
@@ -120,7 +122,7 @@ fn evaluates_mixed_signatures_and_repeated_module_names_together() {
     let packages = [
         "package p\ntop fn entry(x: bits[8] id=1) -> bits[8] { ret n: bits[8] = neg(x, id=2) }",
         "package p\ntop fn entry(x: bits[8] id=1) -> bits[8] { ret n: bits[8] = not(x, id=2) }",
-        EMPTY_MAP,
+        "package p\ntop fn entry() -> () { ret t: () = tuple(id=1) }",
         MAP,
         MAP,
     ]
@@ -170,7 +172,6 @@ fn evaluates_word_operations_and_aggregate_interfaces() {
     );
     for ir in [
         MAP,
-        EMPTY_MAP,
         include_str!("fixtures/word_ops.ir"),
         include_str!("fixtures/word_ext.ir"),
     ] {
@@ -178,6 +179,59 @@ fn evaluates_word_operations_and_aggregate_interfaces() {
     }
     for case in interesting_ir_roundtrip_cases() {
         check_differential(case.ir_text);
+    }
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_bitvec_module_uses_xls_signed_division() {
+    let ir = r#"package division
+top fn divide(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret result: bits[8] = sdiv(x, y, id=3)
+}"#;
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let module = LeanModuleName::new("BitVec").unwrap();
+    let function = export_ir_function(&package, None, &module).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let exported = function.write_to(root).unwrap();
+
+    // Import the actual BitVec namespace. The batch evaluator nests it under a
+    // fresh namespace.
+    let mut checks = String::from("import BitVec\n");
+    for (x, y) in [(1, 0), (0xff, 0), (0xf4, 3)] {
+        let args = [x, y].map(|v| IrValue::make_ubits(8, v).unwrap());
+        let FnEvalResult::Success(expected) =
+            eval_fn_in_package(&package, package.get_top_fn().unwrap(), &args)
+        else {
+            panic!("PIR evaluation failed for {args:?}")
+        };
+        writeln!(
+            checks,
+            "#guard (BitVec.eval {x} {y}).toNat == {}",
+            expected.value.to_u64().unwrap()
+        )
+        .unwrap();
+    }
+    let check_file = root.join("Check.lean");
+    std::fs::write(&check_file, checks).unwrap();
+    for source in [root.join("XlsynthLean/IR.lean"), exported, check_file] {
+        let output = Command::new(evaluator().lean_executable())
+            .arg("-o")
+            .arg(source.with_extension("olean"))
+            .arg(&source)
+            .current_dir(root)
+            .env("LEAN_PATH", root)
+            .env_remove("LEAN_SYSROOT")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Lean failed for {}:\n{}\n{}",
+            source.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
@@ -263,4 +317,60 @@ top fn entry(a: (bits[2], bits[2], bits[2], bits[2])[2] id=1) -> bits[2][2] {
   ret result: bits[2][2] = array(v, v, id=6)
 }"#,
     );
+}
+
+#[test]
+fn rejects_zero_length_arrays_in_exported_functions() {
+    let module = LeanModuleName::new("Generated.Function").unwrap();
+    for (text, function, op, id) in [
+        (EMPTY_MAP, "entry", "array", 3),
+        (
+            r#"package nested_param
+top fn entry(x: (bits[4], bits[8][0])[2] id=1) -> () {
+  ret result: () = tuple(id=2)
+}"#,
+            "entry",
+            "param",
+            1,
+        ),
+        (
+            r#"package empty_result
+top fn entry() -> bits[8][0] {
+  ret result: bits[8][0] = array(id=1)
+}"#,
+            "entry",
+            "array",
+            1,
+        ),
+    ] {
+        let package = Parser::new(text).parse_and_validate_package().unwrap();
+        assert!(matches!(
+            export_ir_function(&package, None, &module),
+            Err(LeanError::UnsupportedIr { function: f, op: o, id: i, reason: "zero-length array" })
+                if (f.as_str(), o.as_str(), i) == (function, op, id)
+        ));
+    }
+}
+
+#[test]
+fn checks_unused_nodes_only_in_reachable_functions_for_zero_length_arrays() {
+    let text = r#"package p
+fn child() -> bits[8] {
+  dead: bits[8][0] = array(id=1)
+  ret result: bits[8] = literal(value=0, id=2)
+}
+top fn entry() -> bits[8] {
+  ret result: bits[8] = invoke(to_apply=child, id=3)
+}
+fn clean(x: bits[0][2] id=4) -> () {
+  ret result: () = tuple(id=5)
+}"#;
+    let package = Parser::new(text).parse_and_validate_package().unwrap();
+    let module = LeanModuleName::new("Generated.Function").unwrap();
+    assert!(matches!(
+        export_ir_function(&package, None, &module),
+        Err(LeanError::UnsupportedIr { function, id: 1, reason: "zero-length array", .. })
+            if function == "child"
+    ));
+    export_ir_function(&package, Some("clean"), &module).unwrap();
 }

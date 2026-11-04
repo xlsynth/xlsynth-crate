@@ -2,7 +2,6 @@
 import XlsynthLean.IR
 
 namespace «Generated».«Function»
-open XlsynthLean.IR
 set_option linter.unusedVariables false
 
 def ir_widen (n1 : BitVec 4) : BitVec 8 :=
@@ -16,6 +15,6 @@ def ir_transform (n3 : Vector (BitVec 4) 3) : Vector (BitVec 8) 3 :=
 abbrev eval := ir_transform
 
 def evalPacked (inputs : BitVec 12) : BitVec 24 :=
-  BitVec.ofNat _ (Packed.pack (eval (Packed.unpack (inputs.toNat >>> 0))))
+  BitVec.ofNat _ (_root_.XlsynthLean.IR.Packed.pack (eval (_root_.XlsynthLean.IR.Packed.unpack (inputs.toNat >>> 0))))
 
 end «Generated».«Function»
