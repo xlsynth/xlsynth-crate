@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+
+--- a/xls/dslx/ir_convert/function_converter.cc
++++ b/xls/dslx/ir_convert/function_converter.cc
+@@ -5687,6 +5687,22 @@
+   return absl::OkStatus();
+ }
+
++__attribute__((noinline)) static void CoverUpdateScalar() {
++  asm volatile("" : : "i"(0));
++}
++__attribute__((noinline)) static void CoverUpdateEmpty() {
++  asm volatile("" : : "i"(1));
++}
++__attribute__((noinline)) static void CoverUpdateSingleton() {
++  asm volatile("" : : "i"(2));
++}
++__attribute__((noinline)) static void CoverUpdatePair() {
++  asm volatile("" : : "i"(3));
++}
++__attribute__((noinline)) static void CoverUpdateThreeOrMore() {
++  asm volatile("" : : "i"(4));
++}
++
+ absl::Status FunctionConverter::HandleBuiltinUpdate(const Invocation* node) {
+   XLS_RET_CHECK_EQ(node->args().size(), 3);
+   XLS_ASSIGN_OR_RETURN(BValue arg, Use(node->args()[0]));
+@@ -5696,11 +5712,18 @@
+   if (index.GetType()->IsTuple()) {
+     XLS_ASSIGN_OR_RETURN(xls::TupleType * tuple_type,
+                          index.GetType()->AsTuple());
++    switch (tuple_type->size()) {
++      case 0: CoverUpdateEmpty(); break;
++      case 1: CoverUpdateSingleton(); break;
++      case 2: CoverUpdatePair(); break;
++      default: CoverUpdateThreeOrMore(); break;
++    }
+     SourceInfo loc = ToSourceInfo(node->args()[1]->span());
+     for (int64_t i = 0; i < tuple_type->size(); ++i) {
+       indices.push_back(function_builder_->TupleIndex(index, i, loc));
+     }
+   } else {
++    CoverUpdateScalar();
+     indices.push_back(index);
+   }
+   return DefWithStatus(node,

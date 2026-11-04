@@ -903,6 +903,41 @@ fn v8_preserves_the_v7_reference_for_existing_seed_bytes() -> Result<(), String>
     Ok(())
 }
 
+#[test]
+fn v9_extends_selected_aggregate_chains_by_three_calls() -> Result<(), String> {
+    // One helper and one lane keep the aggregate length at the fifth byte
+    // from the end. The zero-filled scalar decoder produces no changed forms.
+    for (v8, v9) in [
+        (Grammar::MissionV8, Grammar::MissionV9),
+        (Grammar::MissionLocalV8, Grammar::MissionLocalV9),
+    ] {
+        for (draw, old_count, new_count) in [(0, 1, 1), (3, 1, 4), (4, 2, 5), (5, 3, 6), (6, 1, 1)]
+        {
+            let mut bytes = [0; 256];
+            bytes[251] = draw;
+            let old = generate_with_grammar(&bytes, GenerateOptions::default(), v8)?;
+            let new = generate_with_grammar(&bytes, GenerateOptions::default(), v9)?;
+            for (sample, count) in [(&old, old_count), (&new, new_count)] {
+                let sources = sample.sources()?;
+                let calls: Vec<_> = sources
+                    .last()
+                    .unwrap()
+                    .text
+                    .lines()
+                    .filter(|line| line.contains("::update_flow"))
+                    .collect();
+                assert_eq!(calls.len(), count);
+            }
+            if old_count == new_count {
+                assert_eq!(old.sources()?, new.sources()?);
+            } else {
+                check_interpreter_entry(&new);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Compares all tuple fields in the wrapper with independent PIR evaluations.
 fn check_interpreter_entry(sample: &Sample) {
     let reference = sample.expected_ir().unwrap();

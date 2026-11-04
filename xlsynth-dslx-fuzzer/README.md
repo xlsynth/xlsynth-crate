@@ -169,6 +169,16 @@ For the same input bytes, v7 and v8 have identical reference
 IR. Use a converter and DSO with the tuple-index fix in
 [google/xls#5260](https://github.com/google/xls/pull/5260) for v8 campaigns.
 
+`mission-v9` and `mission-local-v9` also generate empty, singleton and
+three-element coordinate tuples. These replace a whole matrix, one row, or one
+cell in a cube, respectively. The scalar reference checks the observed cell
+across both changed and preserved positions. Range loops can discard their
+carry, including when the range is empty or has a single element. Nested
+counted loops can capture both induction variables and runtime operands while
+referencing a named helper and an enum member. About a quarter of aggregate
+length draws add three updates after the original one to three. The extra
+updates keep the original operands and observation.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -229,6 +239,21 @@ LLVM coverage build of the CLI. Set `DSLX_CLI_PROFILE` to an absolute
 `cli-%m.profraw` path so the subprocess writes its own profile. Measure those
 profiles against that CLI binary with `llvm-profdata` and `llvm-cov`.
 
+To measure and guide `update` index arity, apply the
+[optional converter coverpoints](native/update_arity_coverpoints.patch) to
+the XLS checkout used to build the coverage CLI and feedback DSO:
+
+```bash
+git -C /path/to/xls apply /path/to/xlsynth-crate/xlsynth-dslx-fuzzer/native/update_arity_coverpoints.patch
+```
+
+`FunctionConverter::HandleBuiltinUpdate` then counts scalar, empty, singleton,
+pair, and three-or-more coordinates separately. Read the five `CoverUpdate*`
+function counts with `llvm-cov` on the corresponding coverage binary. In a
+campaign with inline sanitizer coverage, the instrumented DSO also exposes
+those paths to libFuzzer. Use the ordinary standalone converter from the same
+revision for the formal comparison. Keep raw profiles separate for each build.
+
 Expand saved input bytes into reviewable files from the repository root:
 
 ```bash
@@ -238,7 +263,7 @@ cargo run -p xlsynth-dslx-fuzzer --example replay -- /path/to/crash-input /path/
 Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
 `--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`,
-`--mission-v8`, `--mission-local-v8`, or
+`--mission-v8`, `--mission-local-v8`, `--mission-v9`, `--mission-local-v9`, or
 `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before

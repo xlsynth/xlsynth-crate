@@ -3,7 +3,7 @@
 //! Bits-valued fragments for range indexing, iteration, and match expressions.
 
 use crate::ast::{BitsType, Width};
-use crate::compound::resize_unsigned;
+use crate::compound::{metadata_literal, resize_unsigned};
 use xlsynth_pir::{BValue, BuilderError, FnBuilder, IrBits, IrValue};
 
 /// A small DSLX range with independently typed endpoints. The host integers
@@ -174,6 +174,100 @@ impl RangeValue {
             let i = self.cast_element(builder, i, width)?;
             let sum = builder.add(acc, y)?;
             acc = builder.xor(sum, i)?;
+        }
+        Ok(acc)
+    }
+
+    pub(crate) fn ignored_carry_dslx(self, ty: BitsType, [x, y, _]: [&str; 3]) -> String {
+        let induction = self.element_type();
+        let lane = ty.to_dslx();
+        let iterable = self.iterable();
+        format!("for (i, _): ({induction}, {lane}) in {iterable} {{ {y} + (i as {lane}) }}({x})")
+    }
+
+    /// An ignored carry leaves only the initial value or the last iteration's
+    /// result observable. Compute it without emitting a counted loop.
+    pub(crate) fn emit_ignored_carry_ir(
+        self,
+        builder: &mut FnBuilder,
+        [initial, captured, _]: [BValue; 3],
+        width: usize,
+    ) -> Result<BValue, BuilderError> {
+        if self.length == 0 {
+            return Ok(initial);
+        }
+        let last = self.start + i32::from(self.length) - 1;
+        let value = builder.literal(self.literal(last)?)?;
+        let value = self.cast_element(builder, value, width)?;
+        builder.add(captured, value)
+    }
+}
+
+pub(crate) const LOOP_BUMP_DECLARATION: &str = r#"
+fn fuzz_loop_bump<S: bool, W: u32>(word: xN[S][W]) -> xN[S][W] {
+    word + (u1:1 as xN[S][W])
+}
+"#;
+
+/// Two counted loops whose inner body uses both indices, a runtime capture,
+/// a named function, and an enum member from its enclosing module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NestedCapture {
+    outer: RangeValue,
+    inner: RangeValue,
+}
+
+impl NestedCapture {
+    /// Keeps both loops live and bounds the scalar unrolling to nine steps.
+    pub fn new(outer: RangeValue, inner: RangeValue) -> Result<Self, String> {
+        if !(1..=3).contains(&outer.len()) || !(1..=3).contains(&inner.len()) {
+            return Err("nested captures require one to three trips in each loop".to_string());
+        }
+        Ok(Self { outer, inner })
+    }
+
+    pub(crate) fn to_dslx(self, ty: BitsType, [x, y, z]: [&str; 3]) -> String {
+        let lane = ty.to_dslx();
+        let outer_type = self.outer.element_type();
+        let outer = self.outer.iterable();
+        let inner_type = self.inner.element_type();
+        let inner = self.inner.iterable();
+        format!(
+            r#"for (i, outer_acc): ({outer_type}, {lane}) in {outer} {{
+        for (j, inner_acc): ({inner_type}, {lane}) in {inner} {{
+            (fuzz_loop_bump(inner_acc) ^ ((i as {lane}) + {y}))
+                + (j as {lane}) + ((FuzzChoice::Third as u2) as {lane})
+        }}(outer_acc ^ {z})
+    }}({x})"#
+        )
+    }
+
+    /// Specializes each induction value at its declared signedness and width.
+    /// The scalar recurrence needs neither function calls nor free variables.
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        [initial, y, z]: [BValue; 3],
+        width: usize,
+    ) -> Result<BValue, BuilderError> {
+        let one = metadata_literal(builder, 1)?;
+        let one = resize_unsigned(builder, one, width)?;
+        let tag = metadata_literal(builder, 2)?;
+        let tag = resize_unsigned(builder, tag, width)?;
+        let mut acc = initial;
+        for i in self.outer.start..self.outer.start + i32::from(self.outer.length) {
+            let outer_index = builder.literal(self.outer.literal(i)?)?;
+            let outer_index = self.outer.cast_element(builder, outer_index, width)?;
+            let outer_term = builder.add(outer_index, y)?;
+            acc = builder.xor(acc, z)?;
+            for j in self.inner.start..self.inner.start + i32::from(self.inner.length) {
+                let inner_index = builder.literal(self.inner.literal(j)?)?;
+                let inner_index = self.inner.cast_element(builder, inner_index, width)?;
+                let bumped = builder.add(acc, one)?;
+                let mixed = builder.xor(bumped, outer_term)?;
+                let step = builder.add(mixed, inner_index)?;
+                acc = builder.add(step, tag)?;
+            }
         }
         Ok(acc)
     }
