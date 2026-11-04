@@ -1,7 +1,8 @@
 # Reduced DSLX converter failures
 
-These programs reproduced on stock XLS v0.61.0. Run from this directory with
-the matching tools on PATH and DSLX_STDLIB_PATH set to the release's stdlib.
+Run from this directory with the matching tools on PATH and DSLX_STDLIB_PATH
+set to their stdlib. The signed-range, signed-loop and enumerate failures
+below reproduced on stock XLS v0.61.0.
 
 - `signed_loop_wide.x` adds the sole induction value −1 to its argument. At
   input zero the DSLX evaluator returns −1, but the emitted 65-bit IR has its
@@ -23,8 +24,16 @@ the matching tools on PATH and DSLX_STDLIB_PATH set to the release's stdlib.
 - `enumerate_width.x` typechecks and converts successfully. The specialized
   function name in the emitted IR contains a colon, and the C++ IR parser
   rejects it.
+- `bound_tuple_update_index.x` binds the index of a two-dimensional array
+  update to a local tuple. The DSLX interpreter agrees with the scalar result
+  on all 32 inputs. The standalone converter at XLS revision `81133e348`
+  aborts in `FunctionConverter::HandleBuiltinUpdate`, passing the tuple as
+  one IR index. Inlining `(row, col)` at the update call converts correctly.
+  With [google/xls#5260](https://github.com/google/xls/pull/5260) applied,
+  both spellings convert to IR equivalent to the scalar specification.
 
 ```sh
+ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --top=main bound_tuple_update_index.x
 dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=dslx-interpreter signed_loop_wide.x
 dslx_interpreter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" --evaluator=ir-interpreter signed_loop_wide.x
 ir_converter_main --dslx_stdlib_path="$DSLX_STDLIB_PATH" signed_loop_narrow.x
