@@ -358,8 +358,8 @@ hashing the input. This exercises Lean name resolution in different namespaces.
 The first eight bytes seed the argument sampler (zero-padded for short inputs).
 Additional bytes, up to a total of 3,072, drive graph generation directly so
 libFuzzer can mutate and shrink the graph. For inputs of eight bytes or fewer,
-the same seed drives `RngEntropy` with a body-node budget sampled from 1 through
-32. Packages include nested arrays/tuples, calls, maps,
+the same seed drives `RngEntropy` with a budget of 1 to 32 body nodes.
+Packages include nested arrays/tuples, calls, maps,
 PIR extensions, zero-width and wide bits. The generator excludes loops,
 events, and partial-product multiplies and only
 generates proven-safe bounds promises. Unexpected export, elaboration,
