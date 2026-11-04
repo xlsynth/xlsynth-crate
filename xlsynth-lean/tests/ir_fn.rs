@@ -104,6 +104,7 @@ fn check_differential(ir: &str) {
     let results = evaluator()
         .eval_ir_function_batch(&f, &inputs)
         .unwrap_or_else(|e| panic!("{e}\n{}", f.lean_source()));
+    assert_eq!(results.len(), inputs.len());
     for (args, actual) in inputs.iter().zip(results) {
         let FnEvalResult::Success(expected) = eval_fn_in_package(&pkg, top, args) else {
             panic!("PIR evaluation failed for {args:?}")
@@ -190,4 +191,76 @@ fn evaluates_a_thousand_shared_additions() {
     }
     ir.push_str("}\n");
     check_differential(&ir);
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn evaluates_wide_nary_operations_and_arrays() {
+    let operands: Vec<_> = (0..2048)
+        .map(|i| if i % 5 < 2 { "x" } else { "y" })
+        .collect();
+    // Concat mixes widths 1 and 2, in bits or in array elements.
+    let concat_len = operands.len() + operands.iter().filter(|&&name| name == "y").count();
+    let operands = operands.join(", ");
+    for (op, x_ty, y_ty, result_ty) in [
+        (
+            "concat",
+            "bits[1]",
+            "bits[2]",
+            format!("bits[{concat_len}]"),
+        ),
+        (
+            "array_concat",
+            "bits[8][1]",
+            "bits[8][2]",
+            format!("bits[8][{concat_len}]"),
+        ),
+        ("nor", "bits[8]", "bits[8]", "bits[8]".into()),
+        ("array", "bits[8]", "bits[8]", "bits[8][2048]".into()),
+    ] {
+        check_differential(&format!(
+            "package wide\ntop fn entry(x: {x_ty} id=1, y: {y_ty} id=2) -> {result_ty} {{\n  ret result: {result_ty} = {op}({operands}, id=3)\n}}"
+        ));
+    }
+    let values = (0..1025)
+        .map(|i| (i % 256).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    check_differential(&format!(
+        "package wide_literal\ntop fn entry() -> bits[8][1025] {{\n  ret result: bits[8][1025] = literal(value=[{values}], id=1)\n}}"
+    ));
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn evaluates_deep_tuple_input_and_output() {
+    let input_ty = ["bits[8]"; 786].join(", ");
+    let output_ty = ["bits[8]"; 201].join(", ");
+    let fields = (0..201)
+        .map(|i| if i % 3 == 0 { "first" } else { "last" })
+        .collect::<Vec<_>>()
+        .join(", ");
+    check_differential(&format!(
+        r#"package deep_tuple
+top fn entry(t: ({input_ty}) id=1) -> ({output_ty}) {{
+  first: bits[8] = tuple_index(t, index=0, id=2)
+  last: bits[8] = tuple_index(t, index=785, id=3)
+  ret result: ({output_ty}) = tuple({fields}, id=4)
+}}"#
+    ));
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn evaluates_array_of_computed_tuple_field() {
+    check_differential(
+        r#"package computed_element
+top fn entry(a: (bits[2], bits[2], bits[2], bits[2])[2] id=1) -> bits[2][2] {
+  x: bits[256] = literal(value=0xabcd, id=2)
+  i: bits[8] = encode(x, id=3)
+  t: (bits[2], bits[2], bits[2], bits[2]) = array_index(a, indices=[i], id=4)
+  v: bits[2] = tuple_index(t, index=3, id=5)
+  ret result: bits[2][2] = array(v, v, id=6)
+}"#,
+    );
 }

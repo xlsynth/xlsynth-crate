@@ -20,11 +20,18 @@ instance : Packed Unit where
   pack _ := 0
   unpack _ := ()
 
+-- Keep the compiler from expanding the pack/unpack call chain for nested products.
+@[noinline, nospecialize] private def packProd (a : Packed α) (b : Packed β) (x : α × β) : Nat :=
+  (a.pack x.1 <<< b.width) ||| b.pack x.2
+
+@[noinline, nospecialize] private def unpackProd (a : Packed α) (b : Packed β) (x : Nat) : α × β :=
+  (a.unpack (x >>> b.width), b.unpack x)
+
 -- The last tuple field and the first array element occupy the low bits.
 instance [a : Packed α] [b : Packed β] : Packed (α × β) where
   width := a.width + b.width
-  pack x := (a.pack x.1 <<< b.width) ||| b.pack x.2
-  unpack x := (a.unpack (x >>> b.width), b.unpack x)
+  pack := packProd a b
+  unpack := unpackProd a b
 
 instance [a : Packed α] : Packed (Vector α n) where
   width := n * a.width

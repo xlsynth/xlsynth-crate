@@ -261,12 +261,50 @@ fn lean_type(ty: &Type) -> String {
     }
 }
 
+/// Preserve operand order while keeping the Lean expression depth logarithmic.
+fn balanced_infix(operands: &[String], separator: &str) -> String {
+    fn emit(out: &mut String, operands: &[String], separator: &str) {
+        match operands {
+            [] => {}
+            [operand] => out.push_str(operand),
+            _ => {
+                let (left, right) = operands.split_at(operands.len() / 2);
+                out.push('(');
+                emit(out, left, separator);
+                out.push_str(separator);
+                emit(out, right, separator);
+                out.push(')');
+            }
+        }
+    }
+
+    let mut expression = String::new();
+    emit(&mut expression, operands, separator);
+    expression
+}
+
 fn tuple(fields: &[String]) -> String {
     if fields.is_empty() {
         "()".into()
     } else {
         format!("({}, ())", fields.join(", "))
     }
+}
+
+/// `Array.toVector` avoids unfolding computed elements in a `#v` size proof.
+/// Explicit append lengths keep size checks local to each leaf.
+fn vector_literal(fields: &[String]) -> String {
+    if fields.len() <= 64 {
+        return format!("#[{}].toVector", fields.join(", "));
+    }
+    let (left, right) = fields.split_at(fields.len() / 2);
+    format!(
+        "(@Vector.append _ {} {} {} {})",
+        left.len(),
+        right.len(),
+        vector_literal(left),
+        vector_literal(right)
+    )
 }
 
 fn literal(value: &IrValue) -> Result<String, LeanError> {
@@ -284,7 +322,7 @@ fn literal(value: &IrValue) -> Result<String, LeanError> {
             if matches!(value.type_(), Type::Tuple(_)) {
                 tuple(&fields)
             } else {
-                format!("#v[{}]", fields.join(", "))
+                vector_literal(&fields)
             }
         }
         Type::Token => unreachable!("token literals were rejected before emission"),
@@ -334,8 +372,8 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
             P::Nil | P::Param => continue,
             P::Literal(v) => literal(v)?,
             P::Tuple(rs) => tuple(&names(rs)),
-            P::Array(rs) => format!("#v[{}]", names(rs).join(", ")),
-            P::ArrayConcat(rs) => names(rs).join(" ++ "),
+            P::Array(rs) => vector_literal(&names(rs)),
+            P::ArrayConcat(rs) => balanced_infix(&names(rs), " ++ "),
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple), ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => indices.iter().fold(name(*array), |base, i| {
                 format!("(arrayIndex {base} {}.toNat)", name(*i))
@@ -391,7 +429,7 @@ fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
                     NaryOp::Xor => " ^^^ ",
                     NaryOp::Concat => " ++ ",
                 };
-                let args = names(rs).join(sep);
+                let args = balanced_infix(&names(rs), sep);
                 if matches!(op, NaryOp::Nand | NaryOp::Nor) {
                     format!("~~~({args})")
                 } else {
