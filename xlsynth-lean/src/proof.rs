@@ -11,6 +11,7 @@ use crate::gate_fn::export_gate_fn_aag;
 use crate::process::{resolve_lean_executable, run_lean_process};
 use crate::support::{
     lean_support_module_paths, lean_support_paths, write_file, write_lean_support,
+    write_proof_support,
 };
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
@@ -313,8 +314,8 @@ fn prepare_empty_work_directory(root: &Path) -> Result<(), LeanError> {
     Ok(())
 }
 
-/// Copies only the fixed artifacts emitted by
-/// `LeanEquivalenceTarget::write_to`.
+/// Stages the prepared circuits and their support files alongside the checker's
+/// proof library.
 fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), LeanError> {
     for relative in lean_support_paths().chain(TARGET_ARTIFACTS.iter().copied()) {
         let source_path = source_root.join(relative);
@@ -325,7 +326,9 @@ fn copy_prepared_target(source_root: &Path, work_root: &Path) -> Result<(), Lean
         })?;
         write_file(work_root, Path::new(relative), &contents)?;
     }
-    Ok(())
+    // The checker supplies its tactics even for targets prepared before they
+    // existed.
+    write_proof_support(work_root)
 }
 
 /// Stages helpers and generates the proof module around the body.
@@ -408,7 +411,9 @@ fn stage_proof_sources(
 
 /// Generates the imports and fixed theorem declaration around a Lean term.
 fn user_proof_source(body: &str, imports: &[LeanModuleName]) -> String {
-    let mut source = String::from("-- SPDX-License-Identifier: Apache-2.0\n\nimport Target\n");
+    let mut source = String::from(
+        "-- SPDX-License-Identifier: Apache-2.0\n\nimport Target\nimport XlsynthLean.Proof\n",
+    );
     for module in imports {
         source.push_str("import ");
         source.push_str(&module.lean_identifier());
