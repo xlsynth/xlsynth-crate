@@ -15,12 +15,14 @@ for building the checker, verifying feedback and oracle isolation, and running
 with it enabled.
 
 Standalone converter campaigns can set `DSLX_FINDINGS_DIR` to keep fuzzing
-after a solver counterexample or an unsuccessful converter exit. Each category
-retains the exact input by SHA-256 and a first diagnostic. The optional
+after a solver counterexample, an unsuccessful converter exit, or a mismatch
+between the emitted top function's signature and the DSLX reference. Each
+category retains the exact input by SHA-256 and a first diagnostic. The optional
 `DSLX_PROOF_RESULTS` ledger records `D` for disproof, `R` for converter
-rejection, `P` for proof, and `I` for a solver limit. Checker errors still stop
-the worker. To reproduce a finding with its full diagnostic, replay the saved
-file with the same grammar and converter and unset `DSLX_FINDINGS_DIR`.
+rejection, `X` for invalid output including a signature mismatch, `P` for
+proof, and `I` for a solver limit. Checker errors still stop the worker. To
+reproduce a finding with its full diagnostic, replay the saved file with the
+same grammar and converter and unset `DSLX_FINDINGS_DIR`.
 
 `fuzz_dslx_converter_contracts` exercises focused properties of the standalone
 C++ converter. Mutations vary builtin map names and module paths, one-hot
@@ -32,5 +34,5 @@ failure condition against independent IR with Bitwuzla. For nested guards
 it also bounds the emitted AND count after equivalence succeeds. Set
 `DSLX_FUZZ_CONVERTER` to the standalone executable. This target uses the
 same retention and replay settings as the semantics target, groups findings
-by property, and adds ledger marks `X` for invalid emitted IR and `G` for
-excessive guard growth.
+by property, and records `X` for emitted IR rejected by the C++ parser and
+`G` for excessive guard growth.
