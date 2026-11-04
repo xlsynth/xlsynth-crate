@@ -203,7 +203,7 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
 }
 
 /// Translates the nodes of one function using the caller's policy for nested
-/// calls. A counted_for body contributes only its value to the accumulator.
+/// calls, including each executed iteration of a counted_for.
 fn translate_nodes<'ir, S: Solver>(
     solver: &mut S,
     inputs: &FnInputs<'ir, S::Term>,
@@ -366,7 +366,7 @@ fn translate_nodes<'ir, S: Solver>(
                     };
                     acc = IrTypedBitVec {
                         ir_type: &node.ty,
-                        bitvec: inline_call(solver, &callee_inputs, &mut Vec::new()),
+                        bitvec: inline_call(solver, &callee_inputs, &mut assertions),
                     };
                 }
 

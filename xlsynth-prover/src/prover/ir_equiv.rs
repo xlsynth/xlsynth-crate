@@ -1128,6 +1128,52 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         assert!(matches!(res, super::EquivResult::Proved));
     }
 
+    /// The loop returns its input unchanged, but an executed iteration can
+    /// fail.
+    pub fn test_counted_for_assertions<S: Solver>(solver_config: &S::Config) {
+        let ir = r#"package p
+            fn body(i: bits[2], acc: bits[2], forbidden: bits[2]) -> bits[2] {
+              token_in: token = after_all(id=4)
+              allowed: bits[1] = ne(i, forbidden, id=5)
+              checked: token = assert(token_in, allowed, message="unexpected index", label="index", id=6)
+              ret value: bits[2] = identity(acc, id=7)
+            }
+            fn three(x: bits[2]) -> bits[2] {
+              middle: bits[2] = literal(value=1, id=9)
+              ret cf: bits[2] = counted_for(x, trip_count=3, stride=1, body=body, invariant_args=[middle], id=10)
+            }
+            fn empty(x: bits[2]) -> bits[2] {
+              first: bits[2] = literal(value=0, id=12)
+              ret cf: bits[2] = counted_for(x, trip_count=0, stride=1, body=body, invariant_args=[first], id=13)
+            }
+            fn identity_fn(x: bits[2]) -> bits[2] {
+              ret value: bits[2] = identity(x, id=15)
+            }"#;
+        let pkg = ir_parser::Parser::new(ir).parse_package().unwrap();
+        let compare = |loop_name| {
+            prove_ir_fn_equiv::<S>(
+                solver_config,
+                &ProverFn::new(pkg.get_fn(loop_name).unwrap(), Some(&pkg)),
+                &ProverFn::new(pkg.get_fn("identity_fn").unwrap(), Some(&pkg)),
+                AssertionSemantics::Never,
+                None,
+                false,
+            )
+        };
+        let EquivResult::Disproved {
+            lhs_output,
+            rhs_output,
+            ..
+        } = compare("three")
+        else {
+            panic!("the middle iteration must fail its assertion");
+        };
+        assert_eq!(lhs_output.value, rhs_output.value);
+        assert_eq!(lhs_output.assertion_violation.unwrap().label, "index");
+        assert!(rhs_output.assertion_violation.is_none());
+        assert!(matches!(compare("empty"), EquivResult::Proved));
+    }
+
     pub fn test_counted_for_stride<S: Solver>(solver_config: &S::Config) {
         // Stride=2 for 3 trips: add 0,2,4
         let ir_pkg_text = r#"
@@ -3008,6 +3054,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_counted_for_basic() {
                 test_utils::test_counted_for_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_counted_for_assertions() {
+                test_utils::test_counted_for_assertions::<$solver_type>($solver_config);
             }
             #[test]
             fn test_counted_for_stride() {

@@ -9,6 +9,7 @@ use crate::ast::{
     BinaryOp, BitsType, Body, Comparison, Fragment, HelperModule, SliceKind, UnaryOp, ValueRef,
     Width,
 };
+use crate::bit_projection::{BitProjection, ProjectionKind};
 use crate::compound::{ArrayOp, BuiltinOp, CompoundOp, LoopKind, PatternOp};
 use crate::constexpr::{ComputedWidth, ConstExpr, ConstInput, ConstantScope, ParametricDefault};
 use crate::imported_const::ExportedConstants;
@@ -19,7 +20,7 @@ use crate::mission_expr::{
     WideningCast,
 };
 use crate::range_match::{ConstMatch, GuardedMatch, NestedCapture, RangeMatch, RangeValue};
-use crate::select_fold::{ArraySelect, CaseArray, NestedFold, SelectKind};
+use crate::select_fold::{ArrayFold, ArraySelect, CaseArray, NestedFold, SelectKind};
 use crate::sum_pattern::{SumComparison, SumPattern, SumShape, SumVariant};
 use crate::tuple_pattern::{BindingContext, TupleElement, TuplePattern};
 use crate::{AggregateOutput, Sample};
@@ -88,6 +89,11 @@ pub enum Grammar {
     MissionV10,
     /// Uses v10 productions with module-local helpers.
     MissionLocalV10,
+    /// Selects in-scope loop results and observes typed bit projections at
+    /// runtime and during parametric specialization.
+    MissionV11,
+    /// Uses v11 productions with module-local helpers.
+    MissionLocalV11,
     /// Replays the signed-range and observation decoder with stdlib imports.
     MissionV2,
     /// Replays the signed-range and observation decoder with local helpers.
@@ -121,7 +127,9 @@ impl Grammar {
                 | Self::MissionV9
                 | Self::MissionLocalV9
                 | Self::MissionV10
+                | Self::MissionV11
                 | Self::MissionLocalV10
+                | Self::MissionLocalV11
         )
     }
 
@@ -137,6 +145,7 @@ impl Grammar {
                 | Self::MissionLocalV8
                 | Self::MissionLocalV9
                 | Self::MissionLocalV10
+                | Self::MissionLocalV11
         )
     }
 
@@ -161,13 +170,21 @@ impl Grammar {
     }
 
     fn uses_v9_productions(self) -> bool {
-        matches!(self, Self::MissionV9 | Self::MissionLocalV9) || self.is_v10()
+        matches!(self, Self::MissionV9 | Self::MissionLocalV9) || self.uses_v10_productions()
     }
 
-    /// Identifies grammars whose ordinary runtime assertions must hold for all
-    /// inputs.
+    /// Includes the match-guard proof contract introduced by v10.
+    pub fn uses_v10_productions(self) -> bool {
+        self.is_v10() || self.uses_v11_productions()
+    }
+
+    /// Identifies the original v10 decoder.
     pub fn is_v10(self) -> bool {
         matches!(self, Self::MissionV10 | Self::MissionLocalV10)
+    }
+
+    fn uses_v11_productions(self) -> bool {
+        matches!(self, Self::MissionV11 | Self::MissionLocalV11)
     }
 }
 
@@ -188,6 +205,8 @@ impl std::str::FromStr for Grammar {
             "mission-local-v8" => Ok(Self::MissionLocalV8),
             "mission-v9" => Ok(Self::MissionV9),
             "mission-local-v9" => Ok(Self::MissionLocalV9),
+            "mission-v11" => Ok(Self::MissionV11),
+            "mission-local-v11" => Ok(Self::MissionLocalV11),
             "mission-v10" => Ok(Self::MissionV10),
             "mission-local-v10" => Ok(Self::MissionLocalV10),
             "mission-v6" => Ok(Self::MissionV6),
@@ -197,7 +216,7 @@ impl std::str::FromStr for Grammar {
             "mission-v1" => Ok(Self::MissionV1),
             "experimental" => Ok(Self::Experimental),
             _ => Err(format!(
-                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v10, mission-local-v10, mission-v9, mission-local-v9, mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
+                "unknown DSLX grammar {name:?}; expected mission[-v3], mission-local[-v3], mission-v11, mission-local-v11, mission-v10, mission-local-v10, mission-v9, mission-local-v9, mission-v8, mission-local-v8, mission-v7, mission-local-v7, mission-v6, mission-local-v6, mission-v5, mission-local-v5, mission-v4, mission-local-v4, mission-v2, mission-local-v2, mission-v1, or experimental"
             )),
         }
     }
@@ -363,7 +382,10 @@ impl Entropy<'_> {
         const CONST_MATCH: usize = 23;
         let call = usize::from(available_modules != 0);
         let draw = usize::from(self.byte());
-        if self.grammar.is_v10() && (136..152).contains(&draw) {
+        if self.grammar.uses_v11_productions() && (112..136).contains(&draw) {
+            return 41 + draw % 2;
+        }
+        if self.grammar.uses_v10_productions() && (136..152).contains(&draw) {
             return 40;
         }
         // In the first helper, selectors for imported types and constants
@@ -498,9 +520,33 @@ impl Entropy<'_> {
                         start_width: widths[self.choose(widths.len())],
                     }
                 }
-                13..=17 | 21..=24 | 26..=35 | 37..=38 => {
+                13..=17 | 21..=24 | 26..=35 | 37..=38 | 41..=42 => {
                     let mut diversify_cube = false;
                     let op = match choice {
+                        41 => {
+                            let length_draw = usize::from(self.byte());
+                            let length = 1 + length_draw % 4;
+                            let bindings = self.choose(3);
+                            let result = self.choose(3 + bindings);
+                            let fold = ArrayFold::new(length, bindings, result)?;
+                            // Exercise guarded effects only in ordinary runtime
+                            // lanes. Other folds remain pure, including calls
+                            // used for parametric specialization.
+                            CompoundOp::ArrayFold(if constants && (length_draw / 4) % 4 == 1 {
+                                fold.with_guarded_assertion()
+                            } else {
+                                fold
+                            })
+                        }
+                        42 => {
+                            let widths = [1, 2, 3, 4, 7, 8, 16, 31, 32, 64, 65];
+                            CompoundOp::BitProjection(BitProjection::new(
+                                ProjectionKind::ALL[self.choose(3)],
+                                widths[self.choose(widths.len())],
+                                self.choose(2) != 0,
+                                [None, Some(UnaryOp::Not), Some(UnaryOp::Neg)][self.choose(3)],
+                            )?)
+                        }
                         13 => {
                             CompoundOp::Builtin(BuiltinOp::ALL[self.choose(BuiltinOp::ALL.len())])
                         }
@@ -577,7 +623,7 @@ impl Entropy<'_> {
                             };
                             CompoundOp::ArrayCast(ArrayCast::new(direction, 2 + self.choose(2))?)
                         }
-                        28 => self.range_match(constants && self.grammar.is_v10())?,
+                        28 => self.range_match(constants && self.grammar.uses_v10_productions())?,
                         29 => {
                             let rows = 2 + self.choose(3);
                             let cols = 2 + self.choose(3);
@@ -592,7 +638,7 @@ impl Entropy<'_> {
                             }
                             if self.grammar.uses_v9_productions() {
                                 let shape_draw = row_draw / rows;
-                                diversify_cube = self.grammar.is_v10()
+                                diversify_cube = self.grammar.uses_v10_productions()
                                     && shape_draw % 4 == 3
                                     && (col_draw / cols) % 4 != 0;
                                 update = update.with_shape(match shape_draw % 4 {
@@ -735,7 +781,10 @@ impl Entropy<'_> {
         }
         // Every concrete lane crosses a module boundary; random helper calls
         // above additionally exercise nested specialization through the DAG.
-        if matches!(ty.width, Width::Concrete(_)) && available_modules != 0 {
+        if matches!(ty.width, Width::Concrete(_))
+            && available_modules != 0
+            && (constants || !self.grammar.uses_v11_productions())
+        {
             let result = if chain {
                 previous_runtime
             } else {
@@ -897,8 +946,9 @@ fn aggregate_output(
     }
     // Reuse the length byte to select a later write that reads the other
     // field as well as its destination, preserving the original write indices.
-    let cross_field_step = (grammar.is_v10() && steps.len() > 1 && (step_draw / 12) % 4 == 2)
-        .then(|| 1 + (step_draw / 48) % (steps.len() - 1));
+    let cross_field_step =
+        (grammar.uses_v10_productions() && steps.len() > 1 && (step_draw / 12) % 4 == 2)
+            .then(|| 1 + (step_draw / 48) % (steps.len() - 1));
     let mut flow = AggregateFlow::new(
         index,
         width,
@@ -1045,6 +1095,22 @@ pub fn generate_with_grammar(
         .collect::<Result<_, _>>()?;
     if grammar.uses_aggregate_flow() {
         sample.aggregate = Some(aggregate_output(data, &sample, grammar)?);
+    }
+    if grammar.uses_v11_productions() {
+        // Every program exposes an ordinary call and a specialization of the
+        // same closed expression. Width, operations and literals come from the
+        // same grammar as other constexpr consumers.
+        // Read from the middle independently so short inputs can still mutate
+        // the observation after the main decoder has exhausted its bytes.
+        let mut observation = Entropy {
+            data,
+            offset: data.len() / 2,
+            grammar,
+        };
+        let lane = observation.choose(sample.lanes.len());
+        let expression =
+            observation.constant_expression(sample.lanes[lane].bits_type(), module_count, false)?;
+        sample = sample.with_specialization_check(expression)?;
     }
     Ok(sample)
 }

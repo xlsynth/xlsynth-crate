@@ -9,7 +9,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use xlsynth_dslx_fuzzer::{GenerateOptions, Grammar, generate_with_grammar};
-use xlsynth_dslx_fuzzer_fuzz::{check_prepared, cli::check_cli, native::NativeChecker};
+use xlsynth_dslx_fuzzer_fuzz::{
+    CheckFailure, check_prepared, cli::classify_cli, native::NativeChecker,
+};
 use xlsynth_prover::prover::types::EquivResult;
 
 /// Process-wide generator, converter, and optional corpus recording settings.
@@ -21,13 +23,17 @@ struct Config {
     cli_profile: Option<PathBuf>,
     proof_results: Option<Mutex<File>>,
     inconclusive_dir: Option<PathBuf>,
+    findings_dir: Option<PathBuf>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
-/// Stores resource-limited inputs by digest, including under concurrent replay.
-fn retain_inconclusive(directory: &Path, data: &[u8]) -> std::io::Result<()> {
-    let path = directory.join(format!("{:x}", Sha256::digest(data)));
+/// Atomically publishes a replay input or the first diagnostic for its class.
+fn retain(directory: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
+    let path = directory.join(name);
+    if path.exists() {
+        return Ok(());
+    }
     let mut unit = tempfile::NamedTempFile::new_in(directory)?;
     unit.write_all(data)?;
     match unit.persist_noclobber(path) {
@@ -76,6 +82,16 @@ impl Config {
         if let Some(directory) = &inconclusive_dir {
             std::fs::create_dir_all(directory).expect("create DSLX_INCONCLUSIVE_DIR");
         }
+        let findings_dir = std::env::var_os("DSLX_FINDINGS_DIR").map(PathBuf::from);
+        if let Some(directory) = &findings_dir {
+            assert!(
+                converter.is_some(),
+                "DSLX_FINDINGS_DIR requires DSLX_FUZZ_CONVERTER"
+            );
+            for kind in ["disproved", "converter-rejected"] {
+                std::fs::create_dir_all(directory.join(kind)).expect("create finding directory");
+            }
+        }
         Self {
             grammar,
             native,
@@ -84,16 +100,17 @@ impl Config {
             cli_profile,
             proof_results,
             inconclusive_dir,
+            findings_dir,
         }
     }
 
-    /// Checks one mutation and records only established proofs or unresolved
-    /// cases.
+    /// Checks one mutation and records its outcome after any requested input
+    /// retention.
     fn check(&self, data: &[u8]) {
         let sample = generate_with_grammar(data, GenerateOptions::default(), self.grammar)
             .unwrap_or_else(|error| panic!("generation failed: {error}"));
         let result = if let Some(converter) = &self.converter {
-            check_cli(
+            classify_cli(
                 &sample,
                 self.grammar,
                 converter,
@@ -115,19 +132,43 @@ impl Config {
                     sample.expected_ir()
                 )
             });
-            check_prepared(&prepared, self.grammar)
-        }
-        .unwrap_or_else(|error| panic!("DSLX semantics check failed: {error}"));
+            check_prepared(&prepared, self.grammar).map_err(CheckFailure::Checker)
+        };
 
         let mark = match result {
-            EquivResult::Proved => b'P',
-            EquivResult::Inconclusive(_) => {
+            Ok(EquivResult::Proved) => b'P',
+            Ok(EquivResult::Inconclusive(_)) => {
                 // A solver limit leaves this sample unresolved; retain it for a
                 // longer replay.
                 if let Some(directory) = &self.inconclusive_dir {
-                    retain_inconclusive(directory, data).expect("save inconclusive input");
+                    retain(directory, &format!("{:x}", Sha256::digest(data)), data)
+                        .expect("save inconclusive input");
                 }
                 b'I'
+            }
+            Err(failure) => {
+                let Some(directory) = &self.findings_dir else {
+                    panic!("DSLX semantics check failed: {}", failure.into_message());
+                };
+                let (kind, mark, message) = match failure {
+                    CheckFailure::Disproved(message) => ("disproved", b'D', message),
+                    CheckFailure::ConverterRejected(message) => {
+                        ("converter-rejected", b'R', message)
+                    }
+                    CheckFailure::Checker(message) => {
+                        panic!("DSLX semantics check failed: {message}")
+                    }
+                };
+                let digest = format!("{:x}", Sha256::digest(data));
+                let directory = directory.join(kind);
+                retain(&directory, &digest, data).expect("save failing input");
+                retain(
+                    &directory,
+                    "first.txt",
+                    format!("{digest}\n{message}").as_bytes(),
+                )
+                .expect("save first diagnostic");
+                mark
             }
             _ => unreachable!("check_prepared reports prover errors and mismatches as failures"),
         };

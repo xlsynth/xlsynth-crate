@@ -144,3 +144,16 @@ For line coverage, replay the resulting corpus with the separate
 checkout and `--constexpr-only` when measuring the paths this checker executes.
 Full replay additionally interprets concrete entry-point arguments. The
 [line measurements](../coverage/RESULTS.md) record the baseline and this replay.
+
+## IR converter audit coverpoints
+
+The production CLI campaign uses a separate full libxls build for in-process
+feedback. On its pinned XLS sources, apply `update_arity_coverpoints.patch`,
+`guard_and_width_slice_coverpoints.patch`, and `semantic_audit_coverpoints.patch`
+in that order. The last patch adds 28 named sanitizer counters across loop
+returns, cast and slice evaluation, pattern binding, conditional activation,
+one-hot priorities, and map lowering. Builtin maps distinguish newly synthesized
+wrappers, reuse of a synthetic wrapper, and reuse of a DSLX-defined function.
+The last case can indicate a mangled-name collision. Set `DSLX_AUDIT_TRACE=1`
+during isolated CLI replay to print hit names on stderr, including before an
+abort. The production CLI remains the source of the IR passed to the prover.

@@ -217,3 +217,85 @@ impl NestedFold {
         Ok([prev, carry, total][self.projection])
     }
 }
+
+/// A counted array fold that can return any type-compatible in-scope value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArrayFold {
+    length: usize,
+    bindings: usize,
+    result: usize,
+    checked: bool,
+}
+
+impl ArrayFold {
+    /// Starts each body with its carry, element and captured word in scope.
+    pub fn new(length: usize, bindings: usize, result: usize) -> Result<Self, String> {
+        if !(1..=4).contains(&length) || bindings > 2 || result >= 3 + bindings {
+            return Err("array fold requires one to four elements and an in-scope result".into());
+        }
+        Ok(Self {
+            length,
+            bindings,
+            result,
+            checked: false,
+        })
+    }
+
+    /// Checks that an iteration-local assertion is activated only on its
+    /// guarded path.
+    pub fn with_guarded_assertion(mut self) -> Self {
+        self.checked = true;
+        self
+    }
+
+    pub(crate) fn has_assertion(self) -> bool {
+        self.checked
+    }
+
+    pub(crate) fn to_dslx(self, ty: BitsType, [initial, first, captured]: [&str; 3]) -> String {
+        let word = ty.to_dslx();
+        let elements = [first, captured]
+            .into_iter()
+            .cycle()
+            .take(self.length)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bindings = [
+            "let sum = acc + element; ",
+            &format!("let mixed = sum ^ {captured}; "),
+        ];
+        let check = if self.checked {
+            "if acc == element { assert_eq(acc, element) } else { () }; "
+        } else {
+            ""
+        };
+        let body = bindings[..self.bindings].join("");
+        let result = ["acc", "element", captured, "sum", "mixed"][self.result];
+        format!(
+            "for (element, acc): ({word}, {word}) in [{elements}] {{ {check}{body}{result} }}({initial})"
+        )
+    }
+
+    /// Unrolls the chosen binding at each iteration independently of IR loop
+    /// lowering.
+    pub(crate) fn emit_ir(
+        self,
+        builder: &mut FnBuilder,
+        [initial, first, captured]: [BValue; 3],
+    ) -> Result<BValue, BuilderError> {
+        let mut acc = initial;
+        for element in [first, captured].into_iter().cycle().take(self.length) {
+            acc = match self.result {
+                0 => acc,
+                1 => element,
+                2 => captured,
+                3 => builder.add(acc, element)?,
+                _ => {
+                    let sum = builder.add(acc, element)?;
+                    builder.xor(sum, captured)?
+                }
+            };
+        }
+        Ok(acc)
+    }
+}

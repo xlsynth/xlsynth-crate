@@ -1,0 +1,271 @@
+// SPDX-License-Identifier: Apache-2.0
+
+--- a/xls/dslx/ir_convert/function_converter.cc
++++ b/xls/dslx/ir_convert/function_converter.cc
+@@ -17,6 +17,8 @@
+ #include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
+ #include <functional>
+ #include <ios>
+ #include <memory>
+@@ -1193,19 +1195,69 @@
+   return pattern->Accept(&destructurer);
+ }
+
++// Each out-of-line wrapper has its own sanitizer counter. Optional tracing
++// also reports hits on converter failures before the LLVM profile is flushed.
++#define DSLX_AUDIT_POINT(name)                               \
++  __attribute__((noinline)) static void CoverAudit##name() { \
++    if (std::getenv("DSLX_AUDIT_TRACE") != nullptr) {        \
++      std::fputs("DUT_AUDIT " #name "\n", stderr);           \
++    }                                                        \
++  }
++DSLX_AUDIT_POINT(AlternateGuardDeep)
++DSLX_AUDIT_POINT(AlternateGuardNested)
++DSLX_AUDIT_POINT(AlternateGuardSingle)
++DSLX_AUDIT_POINT(BitsToNominalEnum)
++DSLX_AUDIT_POINT(BuiltinMapNewWrapper)
++DSLX_AUDIT_POINT(BuiltinMapReuseDslxFunction)
++DSLX_AUDIT_POINT(BuiltinMapReuseWrapper)
++DSLX_AUDIT_POINT(CastArrayToArray)
++DSLX_AUDIT_POINT(LoopBodyReturnMatches)
++DSLX_AUDIT_POINT(LoopBodyReturnMismatch)
++DSLX_AUDIT_POINT(LoopBodyTokenWrapped)
++DSLX_AUDIT_POINT(NamedPayloadFieldReordered)
++DSLX_AUDIT_POINT(OneHotConstantPriority)
++DSLX_AUDIT_POINT(OneHotNonconstantPriority)
++DSLX_AUDIT_POINT(OneHotUntrackedKnownConstexpr)
++DSLX_AUDIT_POINT(OneHotUntrackedOther)
++DSLX_AUDIT_POINT(PatternNameMissing)
++DSLX_AUDIT_POINT(PatternNameResolved)
++DSLX_AUDIT_POINT(RuntimePackSignedTarget)
++DSLX_AUDIT_POINT(RuntimeUnpackSignedElement)
++DSLX_AUDIT_POINT(TokenMapFree)
++DSLX_AUDIT_POINT(TokenMapReceiver)
++#undef DSLX_AUDIT_POINT
++
++static thread_local int audit_alternate_depth = 0;
++
+ absl::Status FunctionConverter::HandleCast(const Cast* node) {
+   XLS_RETURN_IF_ERROR(Visit(node->expr()));
+   XLS_ASSIGN_OR_RETURN(std::unique_ptr<Type> output_type, ResolveType(node));
+   if (auto* to_array_type = dynamic_cast<ArrayType*>(output_type.get());
+       to_array_type != nullptr && !IsArrayOfBitsConstructor(*to_array_type)) {
++    auto input = Use(node->expr());
++    auto elem = GetBitsLike(to_array_type->element_type());
++    if (elem.has_value() && elem->is_signed.GetAsBool().value_or(false)) {
++      CoverAuditRuntimeUnpackSignedElement();
++    }
++    if (input.ok() && input->GetType()->IsArray()) {
++      CoverAuditCastArrayToArray();
++    }
+     return CastToArray(node, *to_array_type);
+   }
+   XLS_ASSIGN_OR_RETURN(std::unique_ptr<Type> input_type,
+                        ResolveType(node->expr()));
+
++  if (dynamic_cast<EnumType*>(output_type.get()) != nullptr &&
++      GetBitsLike(*input_type).has_value()) {
++    CoverAuditBitsToNominalEnum();
++  }
+   // We break out the case where the input type is an array.
+   if (dynamic_cast<ArrayType*>(input_type.get()) != nullptr &&
+       !IsArrayOfBitsConstructor(*input_type)) {
++    auto tgt = GetBitsLike(*output_type);
++    if (tgt.has_value() && tgt->is_signed.GetAsBool().value_or(false)) {
++      CoverAuditRuntimePackSignedTarget();
++    }
+     return CastFromArray(node, *output_type);
+   }
+
+@@ -1948,6 +2000,19 @@
+   XLS_ASSIGN_OR_RETURN(BValue init,
+                        HandleForBody(node, body_converter, trip_count));
+
++  if (implicit_token_data_.has_value()) {
++    CoverAuditLoopBodyTokenWrapped();
++  } else {
++    auto body = body_converter.Use(node->body());
++    auto last = ir_body_builder_ptr->GetLastValue();
++    if (body.ok() && last.ok()) {
++      if (body->node() != last->node()) {
++        CoverAuditLoopBodyReturnMismatch();
++      } else {
++        CoverAuditLoopBodyReturnMatches();
++      }
++    }
++  }
+   // Now the body has been built up, we can get the IR function for it.
+   XLS_ASSIGN_OR_RETURN(xls::Function * ir_body_function,
+                        ir_body_builder_ptr->Build());
+@@ -2087,6 +2152,9 @@
+           const std::optional<int64_t>& source_index =
+               correspondence[active_index];
+           XLS_RET_CHECK(source_index.has_value());
++          if (active_index != *source_index) {
++            CoverAuditNamedPayloadFieldReordered();
++          }
+           return append_condition((*fields)->fields()[*source_index].second,
+                                   payload_member_type);
+         }));
+@@ -2199,6 +2267,11 @@
+             [&](NameRef* n) -> absl::StatusOr<BValue> {
+               // Comparing for equivalence to a (referenced) name.
+               const auto* name_def = std::get<const NameDef*>(n->name_def());
++              if (GetNodeToIr(name_def).has_value()) {
++                CoverAuditPatternNameResolved();
++              } else {
++                CoverAuditPatternNameMissing();
++              }
+               XLS_ASSIGN_OR_RETURN(BValue to_match, Use(name_def));
+               XLS_ASSIGN_OR_RETURN(BValue result, equality(to_match));
+               XLS_RETURN_IF_ERROR(DefAlias(name_def, n));
+@@ -2262,6 +2335,13 @@
+   VLOG(5) << "Mapping with builtin; arg: " << arg_value.GetType()->ToString();
+   auto* array_type = arg_value.GetType()->AsArrayOrDie();
+   std::optional<xls::Function*> f = package()->TryGetFunction(mangled_name);
++  if (!f.has_value()) {
++    CoverAuditBuiltinMapNewWrapper();
++  } else if (package_data_.ir_to_dslx.contains(*f)) {
++    CoverAuditBuiltinMapReuseDslxFunction();
++  } else {
++    CoverAuditBuiltinMapReuseWrapper();
++  }
+   if (!f.has_value()) {
+     FunctionBuilder fb(mangled_name, package());
+
+@@ -2437,6 +2517,11 @@
+     args = {*self_value, arg};
+   }
+   if (is_implicit_token) {
++    if (self != nullptr) {
++      CoverAuditTokenMapReceiver();
++    } else {
++      CoverAuditTokenMapFree();
++    }
+     // add args for token and activation.
+     XLS_RET_CHECK(implicit_token_data_.has_value()) << absl::StreamFormat(
+         "If callee (%s @ %s) requires an implicit token, caller must require "
+@@ -5398,10 +5483,20 @@
+   {
+     ScopedControlPredicate scp(
+         this, [&](const PredicateFun& orig_control_predicate) {
++          ++audit_alternate_depth;
++          if (audit_alternate_depth == 1) {
++            CoverAuditAlternateGuardSingle();
++          } else if (audit_alternate_depth == 2) {
++            CoverAuditAlternateGuardNested();
++          } else {
++            CoverAuditAlternateGuardDeep();
++          }
+           BValue activated = orig_control_predicate();
+           CHECK_EQ(activated.GetType()->AsBitsOrDie()->bit_count(), 1);
+-          return function_builder_->And(orig_control_predicate(),
+-                                        function_builder_->Not(arg0));
++          BValue result = function_builder_->And(orig_control_predicate(),
++                                                 function_builder_->Not(arg0));
++          --audit_alternate_depth;
++          return result;
+         });
+     XLS_RETURN_IF_ERROR(Visit(ToExprNode(node->alternate())));
+   }
+@@ -5560,6 +5655,17 @@
+ absl::Status FunctionConverter::HandleBuiltinOneHot(const Invocation* node) {
+   XLS_RET_CHECK_EQ(node->args().size(), 2);
+   XLS_ASSIGN_OR_RETURN(BValue input, Use(node->args()[0]));
++  auto priority = GetNodeToIr(node->args()[1]);
++  if (priority.has_value() && std::holds_alternative<CValue>(*priority)) {
++    CoverAuditOneHotConstantPriority();
++  } else {
++    CoverAuditOneHotNonconstantPriority();
++    if (current_type_info_->IsKnownConstExpr(node->args()[1])) {
++      CoverAuditOneHotUntrackedKnownConstexpr();
++    } else {
++      CoverAuditOneHotUntrackedOther();
++    }
++  }
+   XLS_ASSIGN_OR_RETURN(Bits lsb_prio, GetConstBits(node->args()[1]));
+   XLS_ASSIGN_OR_RETURN(uint64_t lsb_prio_value, lsb_prio.ToUint64());
+
+--- a/xls/dslx/bytecode/bytecode_interpreter.cc
++++ b/xls/dslx/bytecode/bytecode_interpreter.cc
+@@ -14,6 +14,8 @@
+
+ #include "xls/dslx/bytecode/bytecode_interpreter.h"
+
++#include <cstdio>
++#include <cstdlib>
+ #include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
+@@ -71,6 +73,22 @@
+ #include "xls/ir/format_strings.h"
+
+ namespace xls::dslx {
++// Each out-of-line wrapper has its own sanitizer counter. Optional tracing
++// also reports hits on converter failures before the LLVM profile is flushed.
++#define DSLX_AUDIT_POINT(name)                               \
++  __attribute__((noinline)) static void CoverAudit##name() { \
++    if (std::getenv("DSLX_AUDIT_TRACE") != nullptr) {        \
++      std::fputs("DUT_AUDIT " #name "\n", stderr);           \
++    }                                                        \
++  }
++DSLX_AUDIT_POINT(EvalCastArrayToSignedBits)
++DSLX_AUDIT_POINT(EvalCastBitsToSignedElements)
++DSLX_AUDIT_POINT(EvalWidthSliceStartPastEndSigned)
++DSLX_AUDIT_POINT(EvalWidthSliceStartPastEndUnsigned)
++DSLX_AUDIT_POINT(EvalWidthSliceStartTooWideSigned)
++DSLX_AUDIT_POINT(EvalWidthSliceStartTooWideUnsigned)
++#undef DSLX_AUDIT_POINT
++
+ namespace {
+
+ constexpr std::string_view kOpaqueSemanticSumValue =
+@@ -907,6 +925,9 @@
+       return absl::InvalidArgumentError(
+           "Array types can only be cast to bits.");
+     }
++    if (to_bits_like->is_signed.GetAsBool().value_or(false)) {
++      CoverAuditEvalCastArrayToSignedBits();
++    }
+     XLS_ASSIGN_OR_RETURN(InterpValue converted, from_value.Flatten());
+
+     // Soundness check that the "to" type has the same number of bits as our new
+@@ -963,6 +984,10 @@
+       return absl::InvalidArgumentError(absl::StrFormat(
+           "Cast to array had mismatching bit counts: from %d to %d.",
+           from_bit_count, to_bit_count));
++    }
++    auto elem = GetBitsLike(to_array->element_type());
++    if (elem.has_value() && elem->is_signed.GetAsBool().value_or(false)) {
++      CoverAuditEvalCastBitsToSignedElements();
+     }
+     XLS_ASSIGN_OR_RETURN(InterpValue casted,
+                          CastBitsToArray(from_value, *to_array));
+@@ -1764,6 +1789,11 @@
+   InterpValue oob_value(InterpValue::MakeUBits(width_value, /*value=*/0));
+   XLS_ASSIGN_OR_RETURN(InterpValue start, Pop());
+   if (!start.FitsInUint64()) {
++    if (is_signed) {
++      CoverAuditEvalWidthSliceStartTooWideSigned();
++    } else {
++      CoverAuditEvalWidthSliceStartTooWideUnsigned();
++    }
+     XLS_RETURN_IF_ERROR(Pop().status());
+     stack_.Push(oob_value);
+     return absl::OkStatus();
+@@ -1776,6 +1806,11 @@
+   InterpValue width = InterpValue::MakeUBits(64, width_value);
+
+   if (start_index >= basis_width) {
++    if (is_signed) {
++      CoverAuditEvalWidthSliceStartPastEndSigned();
++    } else {
++      CoverAuditEvalWidthSliceStartPastEndUnsigned();
++    }
+     stack_.Push(oob_value);
+     return absl::OkStatus();
+   }

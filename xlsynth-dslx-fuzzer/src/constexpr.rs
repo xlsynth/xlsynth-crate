@@ -106,31 +106,49 @@ impl ConstExpr {
         prefix: &str,
         modules: &[HelperModule],
     ) -> Result<String, String> {
-        let mut text = self.body.render_const_functions(prefix, modules)?;
         if self.body.needs_const_call() {
-            let ty = self.bits_type().to_dslx();
-            text.push_str(&format!(
-                "\nfn const_{prefix}({prefix}v0: {ty}, {prefix}v1: {ty}) -> {ty} {{\n"
-            ));
-            text.push_str(&self.body.render_bindings(prefix, modules)?);
-            text.push_str(&format!("    {}\n}}\n", self.body.result_name(prefix)));
+            self.render_function(prefix, modules)
+        } else {
+            self.body.render_const_functions(prefix, modules)
         }
+    }
+
+    /// Defines the same ordinary DSLX function used by runtime and constexpr
+    /// calls.
+    pub(crate) fn render_function(
+        &self,
+        prefix: &str,
+        modules: &[HelperModule],
+    ) -> Result<String, String> {
+        let ty = self.bits_type().to_dslx();
+        let mut text = self.body.render_const_functions(prefix, modules)?;
+        text.push_str(&format!(
+            "\nfn const_{prefix}({prefix}v0: {ty}, {prefix}v1: {ty}) -> {ty} {{\n"
+        ));
+        text.push_str(&self.body.render_bindings(prefix, modules)?);
+        text.push_str(&format!("    {}\n}}\n", self.body.result_name(prefix)));
         Ok(text)
+    }
+
+    /// Supplies both arguments exactly as they appear in the constant
+    /// environment.
+    pub(crate) fn call(&self, prefix: &str) -> String {
+        let args = self
+            .inputs
+            .iter()
+            .map(|input| match input {
+                ConstInput::Literal(bits) => bits_literal(self.bits_type(), bits),
+                ConstInput::BitWidth => "N".to_string(),
+            })
+            .collect::<Vec<_>>();
+        format!("const_{prefix}({})", args.join(", "))
     }
 
     /// Renders a block with literal arguments, retaining imported function
     /// calls.
     pub(crate) fn to_dslx(&self, prefix: &str, modules: &[HelperModule]) -> Result<String, String> {
         if self.body.needs_const_call() {
-            let args = self
-                .inputs
-                .iter()
-                .map(|input| match input {
-                    ConstInput::Literal(bits) => bits_literal(self.bits_type(), bits),
-                    ConstInput::BitWidth => "N".to_string(),
-                })
-                .collect::<Vec<_>>();
-            return Ok(format!("const_{prefix}({})", args.join(", ")));
+            return Ok(self.call(prefix));
         }
         let mut result = "{\n".to_string();
         for (index, input) in self.inputs.iter().enumerate() {

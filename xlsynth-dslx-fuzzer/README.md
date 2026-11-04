@@ -189,6 +189,17 @@ The scalar reference uses a logical right shift. Cube writes prefer distinct
 operands on selected draws, and a later aggregate update can read the
 opposite field before writing the selected field.
 
+`mission-v11` and `mission-local-v11` let a counted array loop return its
+accumulator, element, captured operand, or any preceding binding. Selected
+runtime folds check equality between the element and the accumulator only
+on iterations where the two compare equal. The proof checks that the
+converter preserves the guard on each iteration. Bit
+projections vary the width and signedness of a packed array, unpacked element
+or width slice before applying an optional unary operation and casting back
+to the lane. Each program also calls a generated closed expression with the
+same arguments at runtime and in a parametric specialization. Both results are
+returned independently and checked against the same PIR reference.
+
 `prepare` writes modules to a `tempfile` directory, invokes the real DSLX
 converter, and retains both IR programs and all sources after cleanup. Imported
 source paths are remapped to relative paths in the parsed IR file table for
@@ -283,7 +294,7 @@ Pass `--local`, `--mission-v1`, `--mission-v2`, `--mission-local-v2`,
 `--mission-v4`, `--mission-local-v4`, `--mission-v5`, `--mission-local-v5`,
 `--mission-v6`, `--mission-local-v6`, `--mission-v7`, `--mission-local-v7`,
 `--mission-v8`, `--mission-local-v8`, `--mission-v9`, `--mission-local-v9`,
-`--mission-v10`, `--mission-local-v10`, or
+`--mission-v10`, `--mission-local-v10`, `--mission-v11`, `--mission-local-v11`, or
 `--experimental` before the input path for
 those grammars. The output contains each DSLX module, `expected.ir`, and the
 in-process `converted.ir`. Source files and expected IR are written before
