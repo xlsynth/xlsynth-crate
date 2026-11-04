@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: Apache-2.0
+
+extern fn arithmetic::mul_wide(a: u8, b: u8) -> u16;
+
+struct MulAddOut {
+    value: u16,
+    valid: bool,
+}
+
+pub block mul_add(clk, rst, valid_in: bool, a: u8, b: u8, bias: u8) -> MulAddOut {
+    reg product: u16;
+    reg bias_d1: u8;
+    reg valid_d1: bool = false;
+
+    if valid_in {
+        product := arithmetic::mul_wide(a, b);
+        bias_d1 := bias;
+    }
+    valid_d1 := valid_in;
+
+    reg result: u16;
+    reg valid_d2: bool = false;
+    result := product + (bias_d1 as u16);
+    valid_d2 := valid_d1;
+
+    MulAddOut { value: result, valid: valid_d2 }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "xlsynth-bx"
+version = "0.80.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "A DSLX-like frontend for XLS block IR"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth-bx"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlsynth = { path = "../xlsynth", version = "0.80.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.80.0" }
+
+[dev-dependencies]
+xlsynth-codegen = { path = "../xlsynth-codegen", version = "0.80.0" }
+xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.80.0" }

@@ -16,6 +16,7 @@ crates = [
     "xlsynth-lean",
     "xlsynth-aug-opt",
     "xlsynth-codegen",
+    "xlsynth-bx",
     "xlsynth-estimator",
     "xlsynth-mcmc-pir",
     "xlsynth-autocov",
