@@ -953,7 +953,10 @@ It keeps the AIG fixed, without choices or graph rewriting. Shared AND nodes
 are mandatory cut boundaries. When consumers need only one polarity, the mapper
 compares the cover for that polarity with an inverted cover for the opposite
 polarity. When consumers need both, they share one implementation and an inverter.
-At emission, tied or constant cell inputs can simplify a function to a literal
+If the polarity choices change, area mode compares total emitted cell area so
+that inverters shared between consumers are counted once. During cut matching,
+proven wire aliases can expose a constant in either polarity. At emission,
+tied or constant cell inputs can simplify a function to a literal
 or a wire, as with `XOR(x, x)`. The mapper removes cells made unused by these folds.
 Cut search and polarity selection are local heuristics.
 The area report sums the cells in the selected cover and treats constants and

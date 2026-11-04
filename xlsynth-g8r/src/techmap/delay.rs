@@ -5,9 +5,7 @@
 //! sink capacitance, propagated slew and arrival-edge correlation are omitted.
 //! One plan per polarity and fixed shared boundaries make this a heuristic,
 //! not a global optimum or a hard timing constraint.
-use super::area::{
-    AreaMappedNetlist, AreaMappingLibrary, map_cover_candidates, map_gatefn_to_area_netlist,
-};
+use super::area::{AreaMappedNetlist, AreaMappingLibrary, map_cover_candidates};
 use crate::aig::gate::GateFn;
 use crate::liberty_model::Library;
 use anyhow::{Result, ensure};
@@ -48,7 +46,7 @@ pub fn map_gatefn_to_delay_netlist(
     aig: &GateFn,
     library: &DelayMappingLibrary,
 ) -> Result<AreaMappedNetlist> {
-    map_gatefn_to_area_netlist(aig, &library.inner)
+    Ok(map_cover_candidates(aig, &library.inner, false)?.0)
 }
 
 /// Covers from the same delay cut search, with alternative choices of shared
@@ -80,6 +78,7 @@ pub(super) mod tests {
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::liberty_model::{Cell, LibraryBuilder, Pin, PinDirection};
     use crate::liberty_proto::TimingTableKind;
+    use crate::techmap::area::map_gatefn_to_area_netlist;
 
     /// Builds single-output cells with constant Liberty tables for each input
     /// pin.

@@ -15,28 +15,64 @@ enum Fold {
     Inverted(NetIndex),
 }
 
+/// A literal or a signal with an optional inversion, keyed by AIG ID during
+/// planning and by net index during emission.
+#[derive(Clone, Copy)]
+pub(super) enum PinValue<T> {
+    Literal(bool),
+    Signal(T, bool),
+}
+
+impl<T> PinValue<T> {
+    pub(super) fn negate(self) -> Self {
+        match self {
+            Self::Literal(value) => Self::Literal(!value),
+            Self::Signal(id, negated) => Self::Signal(id, !negated),
+        }
+    }
+}
+
+/// Returns the truth-table rows consistent with literal pins and repeated
+/// signals, including signals used in opposite phases.
+pub(super) fn possible_assignments<T: Eq>(
+    n: usize,
+    pin_value: impl Fn(usize) -> PinValue<T>,
+) -> u64 {
+    let mut possible = mask(n);
+    for pin in 0..n {
+        match pin_value(pin) {
+            PinValue::Literal(value) => {
+                let rows = variable(n, pin);
+                possible &= if value { rows } else { !rows };
+            }
+            PinValue::Signal(id, negated) => {
+                for other in 0..pin {
+                    if let PinValue::Signal(other_id, other_negated) = pin_value(other)
+                        && id == other_id
+                    {
+                        let different = variable(n, pin) ^ variable(n, other);
+                        possible &= if negated != other_negated {
+                            different
+                        } else {
+                            !different
+                        };
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    possible
+}
+
 /// Restricts the physical truth table to assignments that the pins can receive.
 fn fold_tied_inputs(table: u64, inputs: &[NetRef]) -> Option<Fold> {
     let n = inputs.len();
-    let mut possible = mask(n);
-    for (pin, input) in inputs.iter().enumerate() {
-        match input {
-            NetRef::Literal(bits) => {
-                let value = variable(n, pin);
-                possible &= if bits.get_bit(0).expect("one-bit constant") {
-                    value
-                } else {
-                    !value
-                };
-            }
-            NetRef::Simple(_) => {
-                if let Some(other) = inputs[..pin].iter().position(|other| other == input) {
-                    possible &= !(variable(n, pin) ^ variable(n, other));
-                }
-            }
-            _ => unreachable!("the mapper only emits scalar wires and literals"),
-        }
-    }
+    let possible = possible_assignments(n, |pin| match &inputs[pin] {
+        NetRef::Simple(net) => PinValue::Signal(*net, false),
+        NetRef::Literal(bits) => PinValue::Literal(bits.get_bit(0).expect("one-bit constant")),
+        _ => unreachable!("the mapper only emits scalar wires and literals"),
+    });
     if possible == mask(n) {
         return None;
     }
@@ -74,12 +110,18 @@ impl Emitter<'_> {
             Fold::Inverted(net) => {
                 let inv = self.cover.lib.inv?;
                 let inverter = &self.cover.lib.cells[inv];
-                if inverter.area > cell.area
-                    || (self.cover.lib.delay_first
-                        && !inputs.iter().zip(&cell.pin_delays).any(|(input, delay)| {
-                            *input == NetRef::Simple(net) && *delay >= inverter.pin_delays[0]
-                        }))
-                {
+                let beneficial = if self.cover.lib.delay_first {
+                    // The latest of the tied pins determines this net's
+                    // contribution to arrival. Use area to
+                    // break ties at the same fixed delay.
+                    inputs.iter().zip(&cell.pin_delays).any(|(input, delay)| {
+                        *input == NetRef::Simple(net)
+                            && (inverter.pin_delays[0], inverter.area) <= (*delay, cell.area)
+                    })
+                } else {
+                    inverter.area <= cell.area
+                };
+                if !beneficial {
                     return None;
                 }
                 self.cell(inv, vec![NetRef::Simple(net)])
