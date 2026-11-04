@@ -5,7 +5,9 @@
 //! sink capacitance, propagated slew and arrival-edge correlation are omitted.
 //! One plan per polarity and fixed shared boundaries make this a heuristic,
 //! not a global optimum or a hard timing constraint.
-use super::area::{AreaMappedNetlist, AreaMappingLibrary, map_gatefn_to_area_netlist};
+use super::area::{
+    AreaMappedNetlist, AreaMappingLibrary, map_cover_candidates, map_gatefn_to_area_netlist,
+};
 use crate::aig::gate::GateFn;
 use crate::liberty_model::Library;
 use anyhow::{Result, ensure};
@@ -47,6 +49,29 @@ pub fn map_gatefn_to_delay_netlist(
     library: &DelayMappingLibrary,
 ) -> Result<AreaMappedNetlist> {
     map_gatefn_to_area_netlist(aig, &library.inner)
+}
+
+/// Covers from the same delay cut search, with alternative choices of shared
+/// boundary polarity for comparison under a load-aware timing model.
+#[derive(Debug)]
+pub struct DelayMappedCandidates {
+    /// Implements the polarity requested by the selected consumers when the
+    /// fixed-delay or area score improves.
+    pub demanded: AreaMappedNetlist,
+    /// Uses the original locally chosen shared phases. Present only when the
+    /// demand pass changed at least one phase.
+    pub local: Option<AreaMappedNetlist>,
+}
+
+/// Emits a second candidate only when its shared phases differ from the
+/// demand-selected cover. Both candidates use the same plans and emission
+/// rules.
+pub fn map_gatefn_to_delay_candidates(
+    aig: &GateFn,
+    library: &DelayMappingLibrary,
+) -> Result<DelayMappedCandidates> {
+    let (demanded, local) = map_cover_candidates(aig, &library.inner, true)?;
+    Ok(DelayMappedCandidates { demanded, local })
 }
 
 #[cfg(test)]

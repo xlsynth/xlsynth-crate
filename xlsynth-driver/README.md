@@ -950,10 +950,14 @@ xlsynth-driver aig-tech-map my_design.aag \
 The `area` strategy matches single-output combinational cells by function and area,
 using both polarities and input-pin permutations on cuts of at most six inputs.
 It keeps the AIG fixed, without choices or graph rewriting. Shared AND nodes
-are mandatory cut boundaries, and opposite polarity demands share an inverter.
-Bounded cuts and local phase selection are heuristics, not globally optimal DAG
-covering. Constants and aliases are ideal wiring; physical tie cells and timing
-optimization are outside this covering policy. The subsequent fanout optimization
+are mandatory cut boundaries. When consumers need only one polarity, the mapper
+compares the cover for that polarity with an inverted cover for the opposite
+polarity. When consumers need both, they share one implementation and an inverter.
+At emission, tied or constant cell inputs can simplify a function to a literal
+or a wire, as with `XOR(x, x)`. The mapper removes cells made unused by these folds.
+Cut search and polarity selection are local heuristics.
+The area report sums the cells in the selected cover and treats constants and
+aliases as ideal wiring. The subsequent fanout optimization
 requires timing tables; use `--fanout-opt=false` for raw area mapping without them.
 Cells with unsupported function syntax or semantics are excluded from area
 mapping, and all excluded cells are listed in the optional JSON summary.
@@ -977,7 +981,11 @@ for delay mode; enable it explicitly with `--fanout-opt=true`.
 Delay mode follows covering (and optional fanout optimization) with bounded
 area recovery using the native resizer. It substitutes cheaper equivalent cells
 without increasing the boundary delay reached before recovery, and allows no
-area growth. It does not repeat the timing-search phase or change the cover.
+area growth. If consumer demands change a shared polarity, the mapper runs the
+enabled timing stages on both covers and selects the lower final output arrival,
+using area to break ties. Both covers reuse the same cut search. An explicit
+recovery evaluation budget is shared between them. The JSON optimization reports
+describe the selected cover.
 Use `--area-recovery=false` for the original raw delay cover, or combine it with
 `--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
 by default for area mode and unsupported for nand2.
@@ -985,8 +993,9 @@ by default for area mode and unsupported for nand2.
 - `--area-recovery[=true|false]`: default true for delay, false otherwise.
 - `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
 - `--area-recovery-evaluation-budget <COUNT>`: propagation visits across all
-  recovery rounds; default `max(100000, 8 * N)` for N mapped instances after
-  fanout optimization. Zero permits no search work. A budget stop retains
+  recovery rounds. The default is `max(100000, 8 * N)` per evaluated cover,
+  where N is its instance count after fanout optimization. Zero permits no
+  search work. A budget stop retains
   completed, verified substitutions; it does not imply convergence.
 - `--wire-capacitance-constant-ff <VALUE>`,
   `--wire-capacitance-per-sink-ff <VALUE>`: default 0 each. Both post-mapping
