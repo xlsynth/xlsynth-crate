@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 use xlsynth_g8r::aig_serdes::g8r::parse_g8r;
 use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
+use xlsynth_g8r::netlist::io::read_gv_from_path;
 use xlsynth_g8r::prove_gate_fn_equiv_sat::CADICAL_CONFIG_ENV;
 use xlsynth_pir::IrBits;
 
@@ -100,6 +101,10 @@ const SPLIT: &str = r#"[
 
 const BITWUZLA_PLAN: &str = "solver bitwuzla: behavioral XLS IR vs. mapped cells\n";
 const CADICAL_PLAN: &str = "solver cadical: gatified reference vs. mapped cells\n";
+const CLOCK_GATE_LIB: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../xlsynth-g8r/tests/data/clock_gate.lib"
+);
 const STITCH_SOLVERS: &[(&str, &str)] = &[
     ("cadical", CADICAL_PLAN),
     #[cfg(feature = "has-bitwuzla")]
@@ -428,13 +433,9 @@ flop_outputs = false
 input_valid_signal = "vin"
 output_valid_signal = "vout""#,
     )?;
-    let liberty = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../xlsynth-g8r/tests/data/clock_gate.lib"
-    );
     let import = driver(
         dir.path(),
-        &["lib2proto", "--output", "cells.textproto", liberty],
+        &["lib2proto", "--output", "cells.textproto", CLOCK_GATE_LIB],
     )?;
     assert!(
         import.status.success(),
@@ -453,6 +454,100 @@ output_valid_signal = "vout""#,
             String::from_utf8(proof.stderr).unwrap(),
             format!("stage pipe_cycle0: 1 proved leaf\nstage pipe_cycle1: 1 proved leaf\n{plan}")
         );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_mapping_extracts_and_proves_a_stitched_enable_bank() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path();
+    fs::write(
+        root.join("pipe.x"),
+        r#"import stitch;
+type Bank = stitch::Enable<u4>;
+fn pipe_cycle0(en: bool, x: u4, y: u4) -> Bank {
+    Bank { enabled: en, data: x & y }
+}
+fn pipe_cycle1(bank: Bank) -> u4 {
+    if bank.enabled { bank.data } else { u4:0 }
+}"#,
+    )?;
+    fs::write(
+        root.join("pipe.toml"),
+        SPEC.replace("flop_outputs = true", "flop_outputs = false"),
+    )?;
+    for args in [
+        &["lib2proto", "--output", "cells.textproto", CLOCK_GATE_LIB][..],
+        &[
+            "dslx-stitch-g8r-pipeline",
+            "--spec",
+            "pipe.toml",
+            "--bin-out",
+            "pipe.g8rbin",
+        ],
+    ] {
+        let output = driver(root, args)?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for (args, icg_count) in [
+        (&[][..], 1),
+        (&["--mapper", "native", "--clock-gating=false"][..], 0),
+    ] {
+        let mapped = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(root)
+            .env("XLSYNTH_ABC_PATH", root.join("absent-abc"))
+            .args([
+                "g8r2gv",
+                "pipe.g8rbin",
+                "--liberty-proto",
+                "cells.textproto",
+                "-o",
+                "pipe.gv",
+            ])
+            .args(args)
+            .output()?;
+        anyhow::ensure!(
+            mapped.status.success(),
+            "{}",
+            String::from_utf8_lossy(&mapped.stderr)
+        );
+        let gv = read_gv_from_path(&root.join("pipe.gv"))?;
+        let instances = &gv.modules[0].instances;
+        let gates: Vec<_> = instances
+            .iter()
+            .filter(|cell| gv.interner.resolve(cell.type_name) == Some("ICG"))
+            .collect();
+        assert_eq!(gates.len(), icg_count);
+        for gate in gates {
+            let (_, gated_clock) = gate
+                .connections
+                .iter()
+                .find(|(pin, _)| gv.interner.resolve(*pin) == Some("GCLK"))
+                .unwrap();
+            let gated_flops = instances
+                .iter()
+                .filter(|ff| {
+                    gv.interner.resolve(ff.type_name) == Some("DFF")
+                        && ff.connections.iter().any(|(pin, net)| {
+                            gv.interner.resolve(*pin) == Some("CLK") && net == gated_clock
+                        })
+                })
+                .count();
+            assert_eq!(gated_flops, 4);
+        }
+        for &(solver, _) in STITCH_SOLVERS {
+            let proof = stage_command(root, &["--solver", solver]).output()?;
+            anyhow::ensure!(
+                proof.status.success(),
+                "{}",
+                String::from_utf8_lossy(&proof.stderr)
+            );
+        }
     }
     Ok(())
 }

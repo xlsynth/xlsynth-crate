@@ -267,6 +267,14 @@ let plan = cells.map_registers(&legalized, &RegisterCellSelection::SmallestArea)
 // Or use RegisterCellSelection::FixedCell("DFF".to_string()).
 ```
 
+## Native sequential area mapping
+
+`netlist::sequential_mapping::map_sequential_to_area_netlist` maps a
+`SequentialGateFn` to a flat `ParsedNetlist` using the g8r area mapper for
+combinational logic. It takes one normalized Liberty library and the same
+`SequentialMappingOptions` used for register cleanup, FF selection, and ICG
+extraction in the ABC flow. In the driver, `g8r2gv design.g8r --liberty-proto cells.proto` selects this native flow.
+
 ## Direct ABC sequential mapping
 
 `netlist::abc::AbcMappingContext` maps a `SequentialGateFn` to a complete flat

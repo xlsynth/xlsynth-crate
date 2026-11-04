@@ -2,6 +2,11 @@
 
 //! Native sequential mapping policy and shared load-enable recognition.
 
+pub(crate) mod assembly;
+mod native;
+
+pub use native::map_sequential_to_area_netlist;
+
 use std::collections::BTreeMap;
 
 use crate::aig::get_summary_stats::get_aig_cone_stats;

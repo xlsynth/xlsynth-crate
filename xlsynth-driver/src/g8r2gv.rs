@@ -7,14 +7,21 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
+use clap::builder::ArgPredicate;
+use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::liberty::io_defaults::{default_output_load_ff, resolve_reference_buffer};
 use xlsynth_g8r::liberty::load::load_library_from_path;
+use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::abc::{
-    AbcIoConstraints, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics, AbcToolchain,
+    AbcIoConstraints, AbcMappedDesign, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics,
+    AbcToolchain,
 };
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
-use xlsynth_g8r::netlist::sequential_mapping::SequentialMappingOptions;
+use xlsynth_g8r::netlist::sequential_mapping::{
+    SequentialMappingOptions, map_sequential_to_area_netlist,
+};
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
@@ -23,17 +30,21 @@ use crate::mapped_netlist_output::{
     output_arg, output_paths_alias, path_aliases_stream, reset_regular_output, write_stdout,
 };
 
-/// Defines the thin CLI surface for direct ABC/native sequential mapping.
+/// Defines the CLI for native or ABC combinational mapping and native register
+/// mapping.
 pub fn command() -> Command {
     Command::new("g8r2gv")
-        .about("Maps a .g8r or .g8rbin design to a gate-level netlist using ABC and native register mapping, without Yosys")
+        .about("Maps a .g8r or .g8rbin design to a gate-level netlist with native or ABC combinational mapping")
         .arg(output_arg())
         .arg(format_arg())
         .arg(Arg::new("g8r_input_file").required(true).index(1).help("Input .g8r or .g8rbin design"))
-        .arg(Arg::new("liberty").long("liberty").value_name("PATH").required(true).action(ArgAction::Append)
+        .arg(Arg::new("mapper").long("mapper").value_name("MAPPER").value_parser(["native", "abc"])
+            .default_value_if("liberty", ArgPredicate::IsPresent, "abc").default_value("native")
+            .help("Combinational mapper: native area mapping by default, ABC when raw --liberty is supplied"))
+        .arg(Arg::new("liberty").long("liberty").value_name("PATH").required_if_eq("mapper", "abc").action(ArgAction::Append)
             .help("Raw uncompressed Liberty file for ABC; repeat in loading order. The first one or two files must provide the usable combinational library"))
         .arg(Arg::new("liberty-proto").long("liberty-proto").value_name("PATH").required(true)
-            .help("Matching Liberty proto (.proto, .textproto, optionally .gz) for native register mapping and IO defaults"))
+            .help("Liberty proto (.proto, .textproto, optionally .gz) for native combinational and register mapping, or matching ABC library metadata"))
         .arg(Arg::new("abc-path").long("abc-path").value_name("PATH")
             .help("ABC executable; defaults to XLSYNTH_ABC_PATH or abc on PATH"))
         .arg(Arg::new("abc-script").long("abc-script").value_name("PATH")
@@ -190,16 +201,13 @@ fn write_sidecar(
     Ok(file.write_all(bytes)?)
 }
 
-/// Checks sidecar destinations and writes them in order before the netlist.
-fn write_outputs(
+/// Checks and writes the ABC sidecars before the netlist.
+fn write_abc_sidecars(
     matches: &ArgMatches,
     output_path: &Path,
-    pb_stderr: Option<&same_file::Handle>,
-    bytes: &[u8],
+    netlist: &NetlistOutput,
     diagnostics: &AbcRunDiagnostics,
 ) -> anyhow::Result<()> {
-    let netlist = NetlistOutput::open(output_path, pb_stderr)
-        .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
     for flag in ["diagnostics-out", "abc-stdout-out", "abc-stderr-out"] {
         let Some(path) = matches.get_one::<String>(flag).map(Path::new) else {
             continue;
@@ -230,7 +238,7 @@ fn write_outputs(
             Path::new(path),
             format!("{json}\n").as_bytes(),
             "diagnostics-out",
-            &netlist,
+            netlist,
         )
         .with_context(|| format!("writing ABC diagnostics '{path}'"))?;
     }
@@ -239,26 +247,91 @@ fn write_outputs(
         ("abc-stderr-out", &diagnostics.stderr),
     ] {
         if let Some(path) = matches.get_one::<String>(flag) {
-            write_sidecar(Path::new(path), log.as_bytes(), flag, &netlist)
+            write_sidecar(Path::new(path), log.as_bytes(), flag, netlist)
                 .with_context(|| format!("writing --{flag} '{path}'"))?;
         }
     }
-    netlist
-        .write(output_path, bytes, pb_stderr)
-        .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
+    Ok(())
 }
 
-/// Loads inputs, resolves independent IO overrides, and emits the mapped
-/// netlist.
+/// Maps the design with the selected backend and emits the requested format.
 pub fn handle(matches: &ArgMatches) -> Result<(), String> {
     let output_path = matches.get_one::<PathBuf>("output").unwrap();
     let format = Format::from_matches(matches, output_path);
     let pb_stderr = format
         .check_output_stderr(output_path)
         .map_err(|e| format!("{e:#}"))?;
+    let native = matches.get_one::<String>("mapper").unwrap() == "native";
+    if native
+        && let Some(flag) = [
+            "liberty",
+            "abc-path",
+            "abc-script",
+            "driving-cell",
+            "output-load-ff",
+            "timeout-seconds",
+            "diagnostics-out",
+            "abc-stdout-out",
+            "abc-stderr-out",
+        ]
+        .into_iter()
+        .find(|flag| matches.value_source(flag) == Some(ValueSource::CommandLine))
+    {
+        return Err(format!(
+            "--{flag} requires the ABC mapper (--mapper abc with --liberty)"
+        ));
+    }
     let design = crate::g8r_cli::load_netlist_design(matches)?;
     let library_path = matches.get_one::<String>("liberty-proto").unwrap();
     let library = load_library_from_path(Path::new(library_path)).map_err(|e| e.to_string())?;
+    let mut sequential_options = SequentialMappingOptions {
+        cleanup_registers: matches.get_flag("cleanup-registers"),
+        ..Default::default()
+    };
+    if !matches.get_flag("clock-gating") {
+        sequential_options.clock_gating = None;
+    }
+    if let Some(gating) = &mut sequential_options.clock_gating {
+        if let Some(min_flops) = matches.get_one::<NonZeroUsize>("clock-gate-min-flops") {
+            gating.min_flops = min_flops.get();
+        }
+        if let Some(max_depth) = matches.get_one::<usize>("clock-gate-max-enable-depth") {
+            gating.max_enable_depth = *max_depth;
+        }
+    }
+    if let Some(cell) = matches.get_one::<String>("register-cell") {
+        sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
+    }
+    let (mapped, diagnostics) = if native {
+        let mapped = map_sequential_to_area_netlist(&design, &library, &sequential_options)
+            .map_err(|e| format!("{e:#}"))?;
+        (mapped, None)
+    } else {
+        let mapped = map_with_abc(matches, &design, library, &sequential_options, format)?;
+        (mapped.netlist, Some(mapped.diagnostics))
+    };
+    let bytes = format.encode(&mapped).map_err(|e| format!("{e:#}"))?;
+    let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
+        .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))
+        .map_err(|e| format!("{e:#}"))?;
+    if let Some(diagnostics) = diagnostics {
+        write_abc_sidecars(matches, output_path, &netlist, &diagnostics)
+            .map_err(|e| format!("{e:#}"))?;
+    }
+    netlist
+        .write(output_path, &bytes, pb_stderr.as_ref())
+        .with_context(|| format!("writing mapped netlist '{}'", output_path.display()))
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Resolves ABC's IO constraints and toolchain, then maps the design.
+fn map_with_abc(
+    matches: &ArgMatches,
+    design: &SequentialGateFn,
+    library: Library,
+    sequential_options: &SequentialMappingOptions,
+    format: Format,
+) -> Result<AbcMappedDesign, String> {
     // Resolve only omitted fields: explicit overrides must not require the
     // corresponding proto defaults (or capacitance units) to be valid.
     let driving_cell = match matches.get_one::<String>("driving-cell") {
@@ -278,24 +351,6 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         abc_options.script = std::fs::read_to_string(path)
             .map_err(|e| format!("reading ABC script '{path}': {e}"))?;
     }
-    let mut sequential_options = SequentialMappingOptions {
-        cleanup_registers: matches.get_flag("cleanup-registers"),
-        ..Default::default()
-    };
-    if !matches.get_flag("clock-gating") {
-        sequential_options.clock_gating = None;
-    }
-    if let Some(gating) = &mut sequential_options.clock_gating {
-        if let Some(min_flops) = matches.get_one::<NonZeroUsize>("clock-gate-min-flops") {
-            gating.min_flops = min_flops.get();
-        }
-        if let Some(max_depth) = matches.get_one::<usize>("clock-gate-max-enable-depth") {
-            gating.max_enable_depth = *max_depth;
-        }
-    }
-    if let Some(cell) = matches.get_one::<String>("register-cell") {
-        sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
-    }
     let toolchain = match matches.get_one::<String>("abc-path") {
         Some(path) => AbcToolchain::new(path),
         None => AbcToolchain::from_env(),
@@ -308,22 +363,11 @@ pub fn handle(matches: &ArgMatches) -> Result<(), String> {
         .collect::<Vec<_>>();
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
-    let mapped = match format {
-        Format::Gv => context.map_sequential(&design, &sequential_options, &abc_options),
-        Format::Pb => context.map_sequential_structural(&design, &sequential_options, &abc_options),
+    match format {
+        Format::Gv => context.map_sequential(design, sequential_options, &abc_options),
+        Format::Pb => context.map_sequential_structural(design, sequential_options, &abc_options),
     }
-    .map_err(|e| e.to_string())?;
-    let output = format
-        .encode(&mapped.netlist)
-        .map_err(|e| format!("{e:#}"))?;
-    write_outputs(
-        matches,
-        output_path,
-        pb_stderr.as_ref(),
-        &output,
-        &mapped.diagnostics,
-    )
-    .map_err(|e| format!("{e:#}"))
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

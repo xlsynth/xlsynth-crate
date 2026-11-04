@@ -1471,11 +1471,12 @@ xlsynth-driver gv-stats --netlist resized.gv \
 
 ### `g8r2gv`: G8R to mapped gate-level netlist
 
-Maps a `.g8r` or `.g8rbin` design to a complete flat gate-level netlist
-using standalone ABC for combinational logic and native physical
-flip-flop mapping. Supports combinational and sequential designs, including
-explicit synchronous reset/enable controls (legalized before mapping). No Yosys
-is invoked. ABC buffers and resizes combinational cells; FFs are not resized.
+Maps a `.g8r` or `.g8rbin` design to a flat gate-level netlist. With
+`--liberty-proto` alone, g8r maps the combinational logic using its area
+mapper. Supplying raw `--liberty` files selects standalone ABC for that logic.
+ABC's default speed flow also buffers and resizes combinational cells.
+Both paths use g8r to legalize synchronous reset and enable controls, select
+physical flip-flops and clock gates, and assemble the netlist.
 
 Existing direct input-to-register and register-to-output connections remain
 wires, without added buffers or inverters. FFs are selected per bit by minimum
@@ -1493,21 +1494,24 @@ This requires a Liberty proto with a certified low-transparent ICG. Libraries
 without a usable ICG, including older role-only protos, use feedback muxes.
 Use `--clock-gating=false` to generate an ungated baseline.
 
+- `--mapper <native|abc>` – select the combinational mapper. Defaults to
+  `native` with the Liberty proto alone, or `abc` when `--liberty` is supplied.
+- `--liberty-proto <PATH>` – required normalized library for cell selection.
+  Accepts binary or text proto, optionally gzip-compressed.
 - `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
   this flag for split libraries, in loading order. The first one or two files
   must together supply a usable combinational library, including buffers and
   inverters; remaining files are merged with `read_lib -m`.
-- `--liberty-proto <PATH>` – required matching normalized library for native FF
-  mapping and IO defaults; accepts binary/text proto, optionally gzip-compressed.
-  Raw/proto functional and timing consistency is the caller's responsibility.
+  The raw libraries must match the normalized library used for FF selection
+  and ABC I/O defaults.
 - `--abc-path <PATH>` – ABC executable; defaults to `XLSYNTH_ABC_PATH`, then
   `abc` on PATH.
 - `--abc-script <PATH>` – override the default speed flow's optimization/mapping
   passes. The wrapper supplies library/input/constraint loading and final
   Verilog export. The trusted script must preserve the combinational boundary
   and leave a mapped network in ABC's main workspace (`&put` after GIA commands).
-- `--driving-cell <CELL>` – override the proto's `reference_buffer_cell`.
-- `--output-load-ff <FF>` – override the output load **in femtofarads**. Otherwise
+- `--driving-cell <CELL>` – override ABC's input driver, which defaults to the proto's `reference_buffer_cell`.
+- `--output-load-ff <FF>` – override ABC's output load **in femtofarads**. Otherwise
   use the proto's `default_output_load`, converted from library capacitance units.
   Each override is independent; missing/invalid defaults are errors only when
   needed. The resolved driver/load must be valid. There is no unconstrained mode.
@@ -1537,7 +1541,7 @@ Use `--clock-gating=false` to generate an ungated baseline.
   pipe or with shell redirection, use `--netlist-format pb`. The protobuf
   includes physical flip-flops and their connections. Keep stderr separate from
   the protobuf destination.
-- `--diagnostics-out <PATH>` – write deterministic successful-run JSON metadata,
+- `--diagnostics-out <PATH>` – write deterministic successful-run ABC metadata,
   including the executable/version, raw Liberty paths, resolved constraints, and
   full ABC script, but excluding raw tool logs. Failures are reported on stderr.
 - `--abc-stdout-out <PATH>`, `--abc-stderr-out <PATH>` – optionally save ABC's
@@ -1545,14 +1549,16 @@ Use `--clock-gating=false` to generate an ungated baseline.
   can contain nondeterministic timings and memory usage. The diagnostics and raw
   logs must use destinations separate from the netlist, including redirected stdout.
 
-ABC uses global driver/load constraints, including at register Q/D boundaries;
-these are not per-register clock-to-Q/setup constraints or actual D-pin loads.
+Raw Liberty, driver/load overrides, the process timeout, script, diagnostics
+and raw logs apply only to the ABC mapper. ABC uses global driver/load
+constraints, including at register Q/D boundaries.
 Use `gv-stats` with a matching timing-enabled proto for final registered timing.
 The mapper omits zero-width ports from the flat netlist in both output formats.
 
 ```bash
 xlsynth-driver ir2g8r pipeline.ir --top main > pipeline.g8r
-xlsynth-driver g8r2gv pipeline.g8r \
+xlsynth-driver g8r2gv pipeline.g8r --liberty-proto /path/to/cells.proto -o native.gv
+xlsynth-driver g8r2gv pipeline.g8r --mapper abc \
   --liberty /path/to/buffers.lib --liberty /path/to/logic.lib \
   --liberty /path/to/registers.lib \
   --liberty-proto /path/to/cells.proto \
@@ -4130,20 +4136,18 @@ direction. Each plain `tran` terminal must be one bit. The Liberty proto
 must unambiguously describe the pins, functions, and FF clock edges of the
 instantiated cells.
 
-Run these commands from the example directory with a matching cell library and
-Liberty proto.
+Run these commands from the example directory with a Liberty proto.
 
 ```shell
 xlsynth-driver dslx-stitch-g8r-pipeline --spec muladd.stitch.toml \
   --bin-out muladd.g8rbin > muladd.g8r
-xlsynth-driver g8r2gv muladd.g8rbin --liberty cells.lib \
-  --liberty-proto cells.proto > muladd.gv
+xlsynth-driver g8r2gv muladd.g8rbin --liberty-proto cells.proto > muladd.gv
 xlsynth-driver stitch-equiv --spec muladd.stitch.toml \
   --netlist muladd.gv --liberty-proto cells.proto
 ```
 
-For split libraries such as ASAP7, repeat the mapper's `--liberty` flag and use
-a matching proto as described under `g8r2gv`. A netlist from synthesis of
+For split libraries such as ASAP7, combine the Liberty files into one proto
+using `lib2proto`. A netlist from synthesis of
 `dslx-stitch-pipeline --spec muladd.stitch.toml` can be checked the same way.
 
 - `--spec <PATH>` selects the DSLX stitch spec.
