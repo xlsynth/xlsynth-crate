@@ -324,12 +324,22 @@ fn preserves_profile_presence_and_integer_precision() -> Result<(), Box<dyn Erro
     write_case(directory.path(), "sample", INPUT, SHIFT)?;
     let corpus = ir_snippet_qor::load_from_dir(directory.path())?;
     assert_eq!(corpus.profile.canonical_options.mul_adder_mapping, None);
+    assert!(
+        corpus
+            .profile
+            .canonical_options
+            .cut_db_enable_large_cone_bottom_up_rewrite
+    );
 
     // False and zero must survive decoding even for options whose serde
     // defaults are true or nonzero. Large integer seeds must not pass
     // through an f64.
     let profile = PROFILE
         .replace("  fold: true", "  fold: false")
+        .replace(
+            "  cut_db_enable_large_cone_rewrite: true",
+            "  cut_db_enable_large_cone_rewrite: true\n  cut_db_enable_large_cone_bottom_up_rewrite: false",
+        )
         .replace(
             "  enable_formal_array_alias_analysis: true",
             "  enable_formal_array_alias_analysis: false",
@@ -351,6 +361,7 @@ fn preserves_profile_presence_and_integer_precision() -> Result<(), Box<dyn Erro
         .profile
         .canonical_options;
     assert!(!options.fold);
+    assert!(!options.cut_db_enable_large_cone_bottom_up_rewrite);
     assert!(!options.enable_formal_array_alias_analysis);
     assert_eq!(options.cadical_terminate_limit, 0);
     assert_eq!(options.toggle_sample_seed, u64::MAX);

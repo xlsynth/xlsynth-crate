@@ -217,6 +217,11 @@ impl DynamicStructuralHash {
         self.live_and_count
     }
 
+    /// Whether each live signed AND operand pair names just one physical gate.
+    pub(crate) fn has_unique_and_keys(&self) -> bool {
+        self.by_key.buckets.len() == self.live_and_count
+    }
+
     /// Returns the active use count of `node`, including output bits and fanin
     /// edges. Repeated fanin edges such as `x & x` count twice.
     pub fn use_count(&self, node: AigRef) -> usize {

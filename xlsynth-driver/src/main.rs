@@ -529,6 +529,10 @@ impl AppExt for clap::Command {
                 "cut-db-enable-large-cone-rewrite",
                 "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",
             )
+            .add_bool_arg(
+                "cut-db-enable-large-cone-bottom-up-rewrite",
+                "Run bottom-up area recovery after top-down large-cone rewriting (default: true)",
+            )
             .arg(
                 clap::Arg::new("cut_db_rewrite_mode")
                     .long("cut-db-rewrite-mode")

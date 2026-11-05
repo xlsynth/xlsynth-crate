@@ -204,13 +204,16 @@ pub struct Options {
     /// recompute rounds.
     pub cut_db_rewrite_max_iterations: usize,
 
-    /// Maximum number of cuts kept per node during cut enumeration. If set to
-    /// `0`, cut enumeration is unbounded (not recommended for CLI use).
+    /// Maximum cuts retained per node, including the unit cut. Zero removes
+    /// this overall limit. Bottom-up large-cone rewriting also limits cuts by
+    /// width.
     pub cut_db_rewrite_max_cuts_per_node: usize,
 
     /// Whether to run large-cone cut-db rewrite phases after the 4-input
     /// phases.
     pub cut_db_enable_large_cone_rewrite: bool,
+    /// Also search bottom-up cuts during large-cone area recovery.
+    pub cut_db_enable_large_cone_bottom_up_rewrite: bool,
 
     /// Cut-db QoR policy: delay, balanced, or area.
     pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
@@ -253,6 +256,9 @@ pub struct CanonicalG8rOptions {
     #[serde(default = "default_cut_db_rewrite")]
     pub cut_db_rewrite: bool,
     pub cut_db_enable_large_cone_rewrite: bool,
+    /// Also search bottom-up cuts during large-cone area recovery.
+    #[serde(default = "default_cut_db_rewrite")]
+    pub cut_db_enable_large_cone_bottom_up_rewrite: bool,
     pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
     pub toggle_sample_count: usize,
     pub toggle_sample_seed: u64,
@@ -284,6 +290,7 @@ impl Default for CanonicalG8rOptions {
             graph_logical_effort_beta2: 0.0,
             cut_db_rewrite: true,
             cut_db_enable_large_cone_rewrite: true,
+            cut_db_enable_large_cone_bottom_up_rewrite: true,
             cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode::default(),
             toggle_sample_count: 0,
             toggle_sample_seed: 0,
@@ -308,6 +315,8 @@ impl CanonicalG8rOptions {
             cut_db_rewrite_max_cuts_per_node:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
             cut_db_enable_large_cone_rewrite: self.cut_db_enable_large_cone_rewrite,
+            cut_db_enable_large_cone_bottom_up_rewrite: self
+                .cut_db_enable_large_cone_bottom_up_rewrite,
             cut_db_rewrite_mode: self.cut_db_rewrite_mode,
         }
     }
@@ -358,6 +367,8 @@ impl CanonicalG8rOptions {
             cut_db_rewrite_max_cuts_per_node:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
             cut_db_enable_large_cone_rewrite: self.cut_db_enable_large_cone_rewrite,
+            cut_db_enable_large_cone_bottom_up_rewrite: self
+                .cut_db_enable_large_cone_bottom_up_rewrite,
             cut_db_rewrite_mode: self.cut_db_rewrite_mode,
             prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
         }
@@ -376,6 +387,8 @@ impl From<&Options> for GateFnOptimizeOptions {
             cut_db_rewrite_max_iterations: options.cut_db_rewrite_max_iterations,
             cut_db_rewrite_max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
             cut_db_enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
+            cut_db_enable_large_cone_bottom_up_rewrite: options
+                .cut_db_enable_large_cone_bottom_up_rewrite,
             cut_db_rewrite_mode: options.cut_db_rewrite_mode,
         }
     }
@@ -1038,6 +1051,31 @@ mod tests {
         assert_eq!(
             process.cadical_terminate_limit,
             DEFAULT_CADICAL_TERMINATE_LIMIT
+        );
+    }
+
+    #[test]
+    fn effective_cut_rewrite_defaults_on_and_preserves_an_explicit_opt_out() {
+        let default = CanonicalG8rOptions::default();
+        assert!(default.cut_db_enable_large_cone_bottom_up_rewrite);
+        let mut legacy = serde_json::to_value(&default).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("cut_db_enable_large_cone_bottom_up_rewrite");
+        assert_eq!(
+            serde_json::from_value::<CanonicalG8rOptions>(legacy).unwrap(),
+            default
+        );
+
+        let disabled = CanonicalG8rOptions {
+            cut_db_enable_large_cone_bottom_up_rewrite: false,
+            ..default
+        };
+        assert_eq!(
+            serde_json::from_value::<CanonicalG8rOptions>(serde_json::to_value(&disabled).unwrap())
+                .unwrap(),
+            disabled
         );
     }
 

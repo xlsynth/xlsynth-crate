@@ -213,6 +213,11 @@ pub(crate) fn parse_gate_fn_optimize_options(matches: &ArgMatches) -> GateFnOpti
             "cut-db-enable-large-cone-rewrite",
             defaults.cut_db_enable_large_cone_rewrite,
         ),
+        cut_db_enable_large_cone_bottom_up_rewrite: parse_bool(
+            matches,
+            "cut-db-enable-large-cone-bottom-up-rewrite",
+            defaults.cut_db_enable_large_cone_bottom_up_rewrite,
+        ),
         cut_db_rewrite_mode: parse_cut_db_rewrite_mode_or_exit(matches),
     }
 }
@@ -322,6 +327,11 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         graph_logical_effort_beta2,
         cut_db_rewrite,
         cut_db_enable_large_cone_rewrite,
+        cut_db_enable_large_cone_bottom_up_rewrite: parse_bool(
+            matches,
+            "cut-db-enable-large-cone-bottom-up-rewrite",
+            defaults.cut_db_enable_large_cone_bottom_up_rewrite,
+        ),
         cut_db_rewrite_mode,
         max_fraig_sim_samples,
         gate_formal_backend,
@@ -345,4 +355,39 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         emit_independent_op_stats,
         prepared_ir_out,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::AppExt;
+    use clap::Command;
+
+    #[test]
+    fn effective_cut_rewrite_defaults_on_and_accepts_an_explicit_opt_out() {
+        for (flag, expected) in [
+            (None, true),
+            (
+                Some("--cut-db-enable-large-cone-bottom-up-rewrite=false"),
+                false,
+            ),
+            (
+                Some("--cut-db-enable-large-cone-bottom-up-rewrite=true"),
+                true,
+            ),
+        ] {
+            let matches = Command::new("ir2g8r")
+                .add_g8r_lowering_flags()
+                .try_get_matches_from(["ir2g8r"].into_iter().chain(flag))
+                .unwrap();
+            let options = super::parse_g8r_cli_options(&matches);
+            assert_eq!(options.cut_db_enable_large_cone_bottom_up_rewrite, expected);
+
+            let matches = Command::new("g8r-optimize")
+                .add_g8r_optimization_flags()
+                .try_get_matches_from(["g8r-optimize"].into_iter().chain(flag))
+                .unwrap();
+            let options = super::parse_gate_fn_optimize_options(&matches);
+            assert_eq!(options.cut_db_enable_large_cone_bottom_up_rewrite, expected);
+        }
+    }
 }

@@ -2,17 +2,21 @@
 
 //! Bounded large-cone construction for cut-db rewriting.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::aig::dynamic_depth::DynamicDepthState;
 use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 
 use super::{
-    ConstructedLargeConeCandidates, LargeConeCandidate, LargeConeCandidateStats, Replacement,
-    ReplacementImpl, collect_internal_and_nodes_under_cut, collect_mffc_nodes_under_cut,
-    live_forward_depth,
+    ConstructedLargeConeCandidates, CutMffc, LargeConeCandidate, LargeConeCandidateStats,
+    Replacement, ReplacementImpl, collect_mffc_nodes_under_cut, live_forward_depth,
 };
+
+mod cut_truth;
+mod effective_cuts;
+pub(super) use cut_truth::CutEvaluator;
+pub(super) use effective_cuts::EffectiveCuts;
 
 const LARGE_CONE_MAX_LEAVES: usize = 8;
 const LARGE_TRUTH_TABLE_WORDS: usize = 4;
@@ -263,6 +267,8 @@ fn factored_depth_from_inputs(
     node_depths[expr.root.0]
 }
 
+/// A packed truth table in assignment order. Bit i of an assignment is the
+/// value of input i. Bits past the last assignment are always zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct LargeTruthTable {
     nvars: usize,
@@ -322,30 +328,31 @@ impl LargeTruthTable {
         }
     }
 
-    pub(super) fn const1(nvars: usize) -> Self {
-        Self::assert_supported_nvars(nvars);
-        let mut out = Self {
-            nvars,
-            words: [u64::MAX; LARGE_TRUTH_TABLE_WORDS],
-        };
-        out.mask_unused_bits();
-        out
+    /// Constructs a table from consecutive groups of 64 assignments.
+    fn from_words(nvars: usize, mut word: impl FnMut(usize) -> u64) -> Self {
+        let mut table = Self::const0(nvars);
+        let count = Self::word_count(nvars);
+        for (block, dst) in table.words[..count].iter_mut().enumerate() {
+            *dst = word(block);
+        }
+        table.words[count - 1] &= Self::unused_high_mask(nvars);
+        table
+    }
+
+    /// Returns a full block of truth values for one input variable.
+    fn variable_word(var: usize, block: usize) -> u64 {
+        if var < Self::WITHIN_WORD_VARIABLES {
+            Self::VARIABLE_ONES[var]
+        } else if block & (1 << (var - Self::WITHIN_WORD_VARIABLES)) == 0 {
+            0
+        } else {
+            u64::MAX
+        }
     }
 
     fn var(nvars: usize, index: usize) -> Self {
         debug_assert!(index < nvars);
-        let mut out = Self::const0(nvars);
-        let active = &mut out.words[..Self::word_count(nvars)];
-        if index < Self::WITHIN_WORD_VARIABLES {
-            // One repeated pattern per word; only narrow tables need trimming.
-            active.fill(Self::VARIABLE_ONES[index] & Self::unused_high_mask(nvars));
-        } else {
-            let stride = 1 << (index - Self::WITHIN_WORD_VARIABLES);
-            for (word, value) in active.iter_mut().enumerate() {
-                *value = if word & stride == 0 { 0 } else { u64::MAX };
-            }
-        }
-        out
+        Self::from_words(nvars, |block| Self::variable_word(index, block))
     }
 
     fn mask_unused_bits(&mut self) {
@@ -465,6 +472,13 @@ impl LargeTruthTable {
         words
             .chunks_exact(stride * 2)
             .any(|group| group[..stride] != group[stride..])
+    }
+
+    /// Number of boundary inputs that can change the function's value.
+    fn effective_input_count(&self) -> usize {
+        (0..self.nvars)
+            .filter(|&var| self.depends_on_var(var))
+            .count()
     }
 
     fn topmost_support_var_with(&self, other: &Self, upper_var: usize) -> Option<usize> {
@@ -1507,79 +1521,25 @@ fn find_reconvergent_cone(
     Some(leaves.into_iter().map(positive_operand).collect())
 }
 
-fn collapse_cone_truth(g: &GateFn, root: AigRef, leaves: &[AigOperand]) -> LargeTruthTable {
-    let nvars = leaves.len();
-    assert!(
-        nvars <= LARGE_CONE_MAX_LEAVES,
-        "large-cone truth collapse got {} leaves for root {:?}, exceeding max {}",
-        nvars,
-        root,
-        LARGE_CONE_MAX_LEAVES
-    );
-
-    let mut boundary = BTreeMap::new();
-    for (i, leaf) in leaves.iter().enumerate() {
-        assert!(
-            boundary.insert(leaf.node, i).is_none(),
-            "large-cone truth collapse got duplicate boundary leaf {:?} for root {:?}",
-            leaf.node,
-            root
-        );
-    }
-
-    fn eval_operand(
-        g: &GateFn,
-        root: AigRef,
-        op: AigOperand,
-        nvars: usize,
-        boundary: &BTreeMap<AigRef, usize>,
-        memo: &mut BTreeMap<AigRef, LargeTruthTable>,
-    ) -> LargeTruthTable {
-        let mut tt = eval_node(g, root, op.node, nvars, boundary, memo);
-        if op.negated {
-            tt = tt.not();
-        }
-        tt
-    }
-
-    fn eval_node(
-        g: &GateFn,
-        root: AigRef,
-        node: AigRef,
-        nvars: usize,
-        boundary: &BTreeMap<AigRef, usize>,
-        memo: &mut BTreeMap<AigRef, LargeTruthTable>,
-    ) -> LargeTruthTable {
-        if let Some(index) = boundary.get(&node) {
-            return LargeTruthTable::var(nvars, *index);
-        }
-        if let Some(tt) = memo.get(&node) {
-            return tt.clone();
-        }
-        let tt = match &g.gates[node.id] {
-            AigNode::Input { .. } => panic!(
-                "large-cone truth collapse reached unbound input {:?} under root {:?}",
-                node, root
-            ),
-            AigNode::Literal { value, .. } => {
-                if *value {
-                    LargeTruthTable::const1(nvars)
-                } else {
-                    LargeTruthTable::const0(nvars)
-                }
-            }
-            AigNode::And2 { a, b, .. } => {
-                let a_tt = eval_operand(g, root, *a, nvars, boundary, memo);
-                let b_tt = eval_operand(g, root, *b, nvars, boundary, memo);
-                a_tt.and(&b_tt)
-            }
-        };
-        memo.insert(node, tt.clone());
-        tt
-    }
-
-    eval_node(g, root, root, nvars, &boundary, &mut BTreeMap::new())
+/// Truth and distinct interior AND count computed together for a retained cut.
+#[derive(Clone, Copy)]
+struct ConeTruth {
+    table: LargeTruthTable,
+    enclosed: usize,
 }
+
+/// Effective-cut measurements stay with their ordered boundary until factoring.
+struct MeasuredCut {
+    cone: ConeTruth,
+    removable: usize,
+}
+
+struct FactorInput {
+    leaves: Vec<AigOperand>,
+    measured: Option<MeasuredCut>,
+}
+
+type FactorInputs = smallvec::SmallVec<[FactorInput; effective_cuts::MAX_FACTORED]>;
 
 /// Constructs large-cone candidate replacements for `root`.
 ///
@@ -1587,97 +1547,89 @@ fn collapse_cone_truth(g: &GateFn, root: AigRef, leaves: &[AigOperand]) -> Large
 /// and derives replacement SOP variants. Costing and acceptance are handled by
 /// the caller so delay and area modes can tune those policies independently.
 pub(super) fn construct_large_cone_candidate_replacements_for_root(
-    g: &GateFn,
     root: AigRef,
+    state: &DynamicStructuralHash,
     depths: &[usize],
-    use_counts: &[usize],
-    candidate_evals: &mut usize,
+    effective: Option<&mut EffectiveCuts>,
+    top_down_evaluator: &mut CutEvaluator,
     stats: &mut LargeConeCandidateStats,
-    structural_hash_state: &DynamicStructuralHash,
-    sop_memo: &mut SopMemo,
+    memo: &mut SopMemo,
 ) -> ConstructedLargeConeCandidates {
-    let mut cands = Vec::new();
-    let mut candidates_considered = 0usize;
-
-    let Some(leaf_ops) = find_reconvergent_cone(g, root, depths, use_counts) else {
-        stats.rejected_no_cone += 1;
-        return ConstructedLargeConeCandidates {
-            candidates: cands,
-            candidates_considered,
-        };
+    let g = state.gate_fn();
+    let inputs: FactorInputs = match effective {
+        Some(cuts) => cuts.select(root, state, depths),
+        None => find_reconvergent_cone(g, root, depths, state.use_counts())
+            .into_iter()
+            .map(|leaves| FactorInput {
+                leaves,
+                measured: None,
+            })
+            .collect(),
     };
-    stats.cones_built += 1;
-    stats.cone_leaves_sum += leaf_ops.len();
-    stats.cone_leaves_max = stats.cone_leaves_max.max(leaf_ops.len());
-    let internal_node_count = collect_internal_and_nodes_under_cut(g, root, &leaf_ops).len();
-    stats.cone_internal_sum += internal_node_count;
-    stats.cone_internal_max = stats.cone_internal_max.max(internal_node_count);
-    let mffc_nodes = collect_mffc_nodes_under_cut(structural_hash_state, root, &leaf_ops);
-    if mffc_nodes.is_empty() {
-        stats.rejected_empty_mffc += 1;
-        return ConstructedLargeConeCandidates {
-            candidates: cands,
-            candidates_considered,
-        };
+    let mut cands = Vec::new();
+    let mut candidates_considered = 0;
+    if inputs.is_empty() {
+        stats.rejected_no_cone += 1;
     }
-    stats.cone_mffc_sum += mffc_nodes.len();
-    stats.cone_mffc_max = stats.cone_mffc_max.max(mffc_nodes.len());
-
-    let tt = collapse_cone_truth(g, root, &leaf_ops);
-
-    candidates_considered += 1;
-    let leaf_depths: Vec<usize> = leaf_ops.iter().map(|leaf| depths[leaf.node.id]).collect();
-    let sops = sop_memo.replacements_for(&tt, &leaf_depths);
-    if sops.is_empty() {
-        stats.rejected_sop_failed += 1;
-        return ConstructedLargeConeCandidates {
-            candidates: cands,
-            candidates_considered,
+    for FactorInput {
+        leaves: leaf_ops,
+        measured,
+    } in inputs
+    {
+        stats.cones_built += 1;
+        stats.cone_leaves_sum += leaf_ops.len();
+        stats.cone_leaves_max = stats.cone_leaves_max.max(leaf_ops.len());
+        let (cone, mffc) = match measured {
+            Some(cut) => (cut.cone, CutMffc::Count(cut.removable)),
+            None => (
+                top_down_evaluator.collapse(g, root, &leaf_ops),
+                CutMffc::Members(collect_mffc_nodes_under_cut(state, root, &leaf_ops)),
+            ),
         };
-    }
-    *candidate_evals += sops.len();
-    stats.sop_variants_sum += sops.len();
-    stats.sop_variants_max = stats.sop_variants_max.max(sops.len());
+        stats.record_enclosed(cone.enclosed);
+        let removable = mffc.len();
+        if removable == 0 {
+            stats.rejected_empty_mffc += 1;
+            continue;
+        }
+        stats.cone_mffc_sum += removable;
+        stats.cone_mffc_max = stats.cone_mffc_max.max(removable);
+        candidates_considered += 1;
+        let leaf_depths: Vec<usize> = leaf_ops.iter().map(|leaf| depths[leaf.node.id]).collect();
+        let sops = memo.replacements_for(&cone.table, &leaf_depths);
+        if sops.is_empty() {
+            stats.rejected_sop_failed += 1;
+            continue;
+        }
+        stats.sop_variants_sum += sops.len();
+        stats.sop_variants_max = stats.sop_variants_max.max(sops.len());
 
-    for (variant_order, sop) in sops.into_iter().enumerate() {
-        let raw_and_count = estimate_factored_and_count(&sop.factored);
-        let implementation = ReplacementImpl::Sop(sop);
-        let new_root_depth = match &implementation {
-            ReplacementImpl::Fragment { .. } => unreachable!("large-cone rewrites use SOPs"),
-            ReplacementImpl::Sop(sop) => sop_depth_from_depths(&leaf_ops, sop, depths),
-        };
-        cands.push(LargeConeCandidate {
-            replacement: Replacement {
-                root,
-                leaf_ops: leaf_ops.clone(),
-                score_depth: new_root_depth,
-                score_ands: raw_and_count,
-                raw_score_ands: raw_and_count,
-                structural_hash_only_area_win: false,
-                implementation,
-            },
-            mffc_nodes: mffc_nodes.clone(),
-            new_root_depth,
-            raw_and_count,
-            variant_order,
-        });
+        for (variant_order, sop) in sops.into_iter().enumerate() {
+            let raw_and_count = estimate_factored_and_count(&sop.factored);
+            let new_root_depth = sop_depth_from_depths(&leaf_ops, &sop, depths);
+            cands.push(LargeConeCandidate {
+                replacement: Replacement {
+                    root,
+                    leaf_ops: leaf_ops.clone(),
+                    score_depth: new_root_depth,
+                    score_ands: raw_and_count,
+                    raw_score_ands: raw_and_count,
+                    structural_hash_only_area_win: false,
+                    implementation: ReplacementImpl::Sop(sop),
+                },
+                mffc: mffc.clone(),
+                new_root_depth,
+                raw_and_count,
+                variant_order,
+            });
+        }
     }
-
     cands.sort_by(|a, b| {
-        (
-            a.new_root_depth,
-            a.raw_and_count,
-            a.replacement.root.id,
-            &a.replacement.leaf_ops,
-            a.variant_order,
-        )
-            .cmp(&(
-                b.new_root_depth,
-                b.raw_and_count,
-                b.replacement.root.id,
-                &b.replacement.leaf_ops,
-                b.variant_order,
-            ))
+        a.new_root_depth
+            .cmp(&b.new_root_depth)
+            .then_with(|| a.raw_and_count.cmp(&b.raw_and_count))
+            .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
+            .then_with(|| a.variant_order.cmp(&b.variant_order))
     });
 
     ConstructedLargeConeCandidates {
@@ -1714,7 +1666,7 @@ mod tests {
             }
             for truth in [
                 dense,
-                LargeTruthTable::const1(nvars),
+                LargeTruthTable::const0(nvars).not(),
                 LargeTruthTable::var(nvars, nvars - 1),
             ] {
                 for var in 0..nvars {
@@ -1940,4 +1892,11 @@ mod tests {
             "expected both delay-aware and balanced AND4 shapes; got depths {depths:?}"
         );
     }
+}
+#[cfg(test)]
+pub(super) fn sop_replacements_for_test(
+    truth: &LargeTruthTable,
+    leaf_depths: &[usize],
+) -> Vec<SopReplacement> {
+    SopMemo::default().replacements_for(truth, leaf_depths)
 }

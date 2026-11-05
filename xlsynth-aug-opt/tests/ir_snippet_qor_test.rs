@@ -85,6 +85,42 @@ fn assert_within_limits(cost: &MeasuredCost, limits: &Limits, tolerance: f64, co
     );
 }
 
+/// The default area search improves on the top-down-only mixed-shift mapping.
+#[test]
+fn effective_cuts_reduce_area_on_mixed_arithmetic_variable_shift() {
+    let mut corpus = ir_snippet_qor::load().unwrap();
+    // This scalar shift has no array accesses to disambiguate.
+    corpus
+        .profile
+        .canonical_options
+        .enable_formal_array_alias_analysis = false;
+    let case = corpus
+        .cases
+        .iter()
+        .find(|case| case.name == "mixed_arithmetic_variable_shift")
+        .unwrap();
+    assert!(
+        corpus
+            .profile
+            .canonical_options
+            .cut_db_enable_large_cone_bottom_up_rewrite
+    );
+    let bottom_up = measure_cost(&case.text, &case.original, &corpus.profile).unwrap();
+    corpus
+        .profile
+        .canonical_options
+        .cut_db_enable_large_cone_bottom_up_rewrite = false;
+    let top_down = measure_cost(&case.text, &case.original, &corpus.profile).unwrap();
+    assert!(
+        bottom_up.and_nodes < top_down.and_nodes,
+        "{top_down:?} -> {bottom_up:?}"
+    );
+    assert!(
+        bottom_up.depth <= top_down.depth,
+        "{top_down:?} -> {bottom_up:?}"
+    );
+}
+
 /// Checks generic snippets across fixed and optimized mapping pipelines.
 #[test]
 fn pipeline_corpus_respects_equivalence_and_qor_limits() {

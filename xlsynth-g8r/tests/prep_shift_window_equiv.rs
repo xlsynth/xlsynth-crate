@@ -132,6 +132,6 @@ fn bounded_shift_fixture_improves_native_aig_without_fraig() {
         },
     )
     .delay;
-    assert_eq!((stats.and_nodes, stats.max_depth), (19, 6));
-    assert!((le - 22.079368399158987).abs() < 1e-8, "graph LE: {le}");
+    assert_eq!((stats.and_nodes, stats.max_depth), (15, 5));
+    assert!((le - 18.304872930770117).abs() < 1e-8, "graph LE: {le}");
 }

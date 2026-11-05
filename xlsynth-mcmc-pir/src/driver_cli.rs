@@ -334,6 +334,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("cut_db_enable_large_cone_bottom_up_rewrite")
+                .long("cut-db-enable-large-cone-bottom-up-rewrite")
+                .value_name("BOOL")
+                .help("Run bottom-up area recovery after top-down large-cone rewriting (default: true).")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("toggle_sample_count")
                 .long("toggle-sample-count")
                 .value_name("N")
@@ -594,6 +602,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .unwrap_or(defaults.graph_logical_effort_beta2),
         cut_db_rewrite: parse_cli_bool(matches, "cut_db_rewrite", defaults.cut_db_rewrite),
         cut_db_enable_large_cone_rewrite: defaults.cut_db_enable_large_cone_rewrite,
+        cut_db_enable_large_cone_bottom_up_rewrite: parse_cli_bool(
+            matches,
+            "cut_db_enable_large_cone_bottom_up_rewrite",
+            defaults.cut_db_enable_large_cone_bottom_up_rewrite,
+        ),
         cut_db_rewrite_mode: defaults.cut_db_rewrite_mode,
         toggle_sample_count: matches
             .get_one::<usize>("toggle_sample_count")
@@ -1948,6 +1961,58 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             ],
         };
         (origin_pkg, artifact)
+    }
+
+    #[test]
+    fn durable_lineage_versions_preserve_the_bottom_up_settings() {
+        let (pkg, mut artifact) = minimize_test_artifact();
+        let run_dir = tempdir().unwrap();
+        let replay_setting = || {
+            crate::read_pir_mcmc_artifact_dir(run_dir.path())
+                .unwrap()
+                .artifact
+                .run_options
+                .canonical_g8r_options
+                .cut_db_enable_large_cone_bottom_up_rewrite
+        };
+        let path = run_dir.path().join("winning-lineage/manifest.json");
+        for enabled in [true, false] {
+            artifact
+                .run_options
+                .canonical_g8r_options
+                .cut_db_enable_large_cone_bottom_up_rewrite = enabled;
+            write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            assert_eq!(manifest["schema_version"], 5);
+            assert_eq!(replay_setting(), enabled);
+
+            manifest["schema_version"] = 4.into();
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert_eq!(replay_setting(), enabled);
+        }
+
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let options = manifest["run_options"]["canonical_g8r_options"]
+            .as_object_mut()
+            .unwrap();
+        assert_eq!(
+            options.remove("cut_db_enable_large_cone_bottom_up_rewrite"),
+            Some(false.into())
+        );
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(!replay_setting());
+
+        manifest["schema_version"] = 5.into();
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let err = crate::read_pir_mcmc_artifact_dir(run_dir.path())
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("missing cut_db_enable_large_cone_bottom_up_rewrite")
+        );
     }
 
     #[test]

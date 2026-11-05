@@ -4,7 +4,7 @@
 
 sha256: "5de89033bc82d370937c1eb16abab3419e29efe5f275553b964940cf27bc99df"
 pipeline {
-  fixed_limits { and_nodes_max: 106 graph_le_max: 62.47689514192739 depth_max: 14 }
-  pir_only_limits { and_nodes_max: 106 graph_le_max: 62.47689514192739 depth_max: 14 }
-  sandwich_limits { and_nodes_max: 106 graph_le_max: 62.47689514192739 depth_max: 14 }
+  fixed_limits { and_nodes_max: 101 graph_le_max: 63.10137923851723 depth_max: 14 }
+  pir_only_limits { and_nodes_max: 101 graph_le_max: 63.10137923851723 depth_max: 14 }
+  sandwich_limits { and_nodes_max: 101 graph_le_max: 63.10137923851723 depth_max: 14 }
 }

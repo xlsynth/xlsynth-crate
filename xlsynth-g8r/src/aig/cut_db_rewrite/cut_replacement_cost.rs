@@ -10,11 +10,14 @@ use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef};
 use crate::cut_db::fragment::{FragmentNode, GateFnFragment, Lit};
 
-use super::large_cone::{FactoredExpr, FactoredExprNode, SopReplacement};
+use super::large_cone::{FactoredExprNode, SopReplacement};
 use super::{
     Replacement, ReplacementImpl, apply_replacement_to_dynamic_hash,
     cleanup_dangling_new_dynamic_hash_nodes,
 };
+
+mod effective_pricing;
+pub(super) use effective_pricing::{AreaCost, EffectiveCutPricing, price_area_candidate};
 
 /// Summary of a replacement that was materialized into the dynamic AIG.
 #[derive(Debug, Clone)]
@@ -36,6 +39,10 @@ pub(super) struct ReplacementGateCountDiff {
     pub(super) after_live_ands: usize,
     /// `before_live_ands - after_live_ands`; positive means area decreased.
     pub(super) live_and_delta: isize,
+    /// For positive gain, whether all requested live gates survive actual
+    /// materialization. None means the caller needs to materialize a trial to
+    /// determine this.
+    pub(super) protected_live: Option<bool>,
 }
 
 /// Returns the exact live-AND count delta for replacing `replacement.root`.
@@ -47,21 +54,27 @@ pub(super) fn gate_count_diff_for_replacement(
     state: &DynamicStructuralHash,
     replacement: &Replacement,
 ) -> Result<Option<ReplacementGateCountDiff>, String> {
+    gate_count_diff_with_protected(state, replacement, &[])
+}
+
+/// Prices a replacement and, where possible, certifies whether protected gates
+/// survive. The caller supplies sorted physical gate IDs known to be live.
+pub(super) fn gate_count_diff_with_protected(
+    state: &DynamicStructuralHash,
+    replacement: &Replacement,
+    protected: &[AigRef],
+) -> Result<Option<ReplacementGateCountDiff>, String> {
+    debug_assert!(protected.is_sorted());
+    debug_assert!(protected.iter().all(|&node| state.is_live(node)));
     if !state.is_live(replacement.root) {
         return Ok(None);
     }
-    let mut overlay = VirtualCostOverlay::new(state);
+    let tracking_root = (!protected.is_empty()).then_some(replacement.root);
+    let mut overlay = VirtualCostOverlay::new(state, tracking_root);
     let replacement_op = overlay.instantiate_replacement(replacement)?;
-    overlay.replace_node_with_operand(replacement.root, replacement_op)?;
-    overlay.cleanup_dangling_virtual_nodes()?;
-
-    let before_live_ands = state.live_and_count();
-    let after_live_ands = overlay.after_live_and_count();
-    Ok(Some(ReplacementGateCountDiff {
-        before_live_ands,
-        after_live_ands,
-        live_and_delta: before_live_ands as isize - after_live_ands as isize,
-    }))
+    overlay
+        .finish_cost(replacement, replacement_op, protected)
+        .map(Some)
 }
 
 /// Applies a replacement to the real dynamic hash state.
@@ -115,6 +128,8 @@ struct VirtualAnd {
 }
 
 struct VirtualCostOverlay<'a> {
+    // Cleared when a physical rewrite could delete different gate IDs.
+    tracking_root: Option<AigRef>,
     state: &'a DynamicStructuralHash,
     base_len: usize,
     use_count_deltas: BTreeMap<AigRef, isize>,
@@ -129,9 +144,10 @@ struct VirtualCostOverlay<'a> {
 }
 
 impl<'a> VirtualCostOverlay<'a> {
-    fn new(state: &'a DynamicStructuralHash) -> Self {
+    fn new(state: &'a DynamicStructuralHash, tracking_root: Option<AigRef>) -> Self {
         let base_len = state.gate_fn().gates.len();
         Self {
+            tracking_root,
             state,
             base_len,
             use_count_deltas: BTreeMap::new(),
@@ -143,6 +159,39 @@ impl<'a> VirtualCostOverlay<'a> {
             output_replacements: BTreeMap::new(),
             deleted: BTreeSet::new(),
         }
+    }
+
+    fn finish_cost(
+        &mut self,
+        replacement: &Replacement,
+        replacement_op: AigOperand,
+        protected: &[AigRef],
+    ) -> Result<ReplacementGateCountDiff, String> {
+        self.replace_node_with_operand(replacement.root, replacement_op)?;
+        self.cleanup_dangling_virtual_nodes()?;
+
+        let before_live_ands = self.state.live_and_count();
+        let after_live_ands = self.after_live_and_count();
+        // In the merge-free case a valid cut and its virtual implementation
+        // remove the same original gate IDs as a committed replacement.
+        let protected_live = (after_live_ands < before_live_ands
+            && self.tracking_root.is_some()
+            && replacement
+                .leaf_ops
+                .iter()
+                .all(|op| op.node != replacement.root && self.state.is_live(op.node)))
+        .then(|| {
+            !self
+                .deleted
+                .iter()
+                .any(|node| protected.binary_search(node).is_ok())
+        });
+        Ok(ReplacementGateCountDiff {
+            protected_live,
+            before_live_ands,
+            after_live_ands,
+            live_and_delta: before_live_ands as isize - after_live_ands as isize,
+        })
     }
 
     fn instantiate_replacement(&mut self, replacement: &Replacement) -> Result<AigOperand, String> {
@@ -188,18 +237,18 @@ impl<'a> VirtualCostOverlay<'a> {
         sop: &SopReplacement,
         leaf_ops: &[AigOperand],
     ) -> Result<AigOperand, String> {
-        let mut output = self.instantiate_factored_expr(&sop.factored, leaf_ops)?;
-        if sop.output_negated {
-            output = output.negate();
-        }
-        Ok(output)
+        Ok(self
+            .instantiate_sop_until(sop, leaf_ops, |_| false)?
+            .expect("unrestricted SOP construction always finishes"))
     }
 
-    fn instantiate_factored_expr(
+    fn instantiate_sop_until(
         &mut self,
-        expr: &FactoredExpr,
+        sop: &SopReplacement,
         leaf_ops: &[AigOperand],
-    ) -> Result<AigOperand, String> {
+        stop: impl Fn(usize) -> bool,
+    ) -> Result<Option<AigOperand>, String> {
+        let expr = &sop.factored;
         let mut ops = Vec::with_capacity(expr.nodes().len());
         for node in expr.nodes().iter().copied() {
             let op = match node {
@@ -215,9 +264,17 @@ impl<'a> VirtualCostOverlay<'a> {
                 FactoredExprNode::And { lhs, rhs } => self.add_and(ops[lhs.0], ops[rhs.0])?,
                 FactoredExprNode::Or { lhs, rhs } => self.add_or_binary(ops[lhs.0], ops[rhs.0])?,
             };
+            if stop(self.virtual_ands.len()) {
+                return Ok(None);
+            }
             ops.push(op);
         }
-        Ok(ops[expr.root().0])
+        let output = ops[expr.root().0];
+        Ok(Some(if sop.output_negated {
+            output.negate()
+        } else {
+            output
+        }))
     }
 
     fn replace_node_with_operand(
@@ -263,6 +320,9 @@ impl<'a> VirtualCostOverlay<'a> {
                 let key = AndKey::new(new_a, new_b);
                 if let Some(existing) = self.lookup_existing_and(key, Some(fanout)) {
                     self.rewritten_children.insert(fanout, (new_a, new_b));
+                    // Physical rewrites consult updated fanouts and recheck
+                    // queued representatives.
+                    self.tracking_root = None;
                     queue.push_back((fanout, existing));
                 } else {
                     self.rewritten_children.insert(fanout, (new_a, new_b));
@@ -309,6 +369,11 @@ impl<'a> VirtualCostOverlay<'a> {
             }
         });
         if let Some(existing) = existing {
+            // Physical construction excludes the original root from its
+            // lookups.
+            if self.tracking_root == Some(existing.node) {
+                self.tracking_root = None;
+            }
             return Ok(existing);
         }
 
@@ -733,3 +798,6 @@ mod tests {
         assert_eq!(diff.live_and_delta, 0);
     }
 }
+
+#[cfg(test)]
+mod protected_tests;

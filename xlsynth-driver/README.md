@@ -1365,6 +1365,7 @@ combinational transition logic is lowered into the stored transition function.
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
   - `--cut-db-rewrite=<BOOL>` – when `true`, run the cut-db rewrite stages after FRAIG and reassociation. Default `true`; when `false`, the cut-db mode and large-cone settings have no effect.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
+  - `--cut-db-enable-large-cone-bottom-up-rewrite=<BOOL>` – run bottom-up area recovery after the top-down large-cone rewriter. Defaults to `true` when large-cone rewriting is enabled. Set to `false` to run only the top-down large-cone phases.
   - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
   - `--top <TOP>` – override the selected function or block. If the IR package
     has no declared top, it may be omitted only when the package contains
@@ -1428,6 +1429,7 @@ rewriting.
   termination-check budget. Default `1000`; `0` is unlimited.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – enable large-cone cut-DB
   phases. Default `true`.
+- `--cut-db-enable-large-cone-bottom-up-rewrite=<BOOL>` – run bottom-up area recovery after the top-down large-cone rewriter. Defaults to `true` when large-cone rewriting is enabled. Set to `false` to run only the top-down large-cone phases.
 - `--cut-db-rewrite-mode=<delay|balanced|area>` – select the cut-DB QoR
   policy. Default `delay`.
 
@@ -2298,7 +2300,7 @@ This subcommand is the user-facing CLI for PIR MCMC optimization.
   - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress|g8r-post-and-nodes|g8r-post-and-nodes-times-depth|g8r-post-and-nodes-times-depth-times-toggles|g8r-post-le-graph|g8r-post-le-graph-times-and-nodes|g8r-post-le-graph-times-product|g8r-post-weighted-switching|g8r-post-and-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
   - `--extension-costing-mode <preserve|desugar>` – controls how PIR extension ops are projected before XLS optimization and g8r costing (default: `preserve`). Use `desugar` when the run should score and record best artifacts through standard non-extension XLS IR, which is more source-grounded for DSLX follow-up.
   - `--g8r-postprocess-program <PATH>` – external postprocessor for the `g8r-post-*` metric family. It is invoked as `<PATH> <input.aig> --output-path <output.aig>`, where the input is binary AIGER and the output may be ASCII or binary AIGER. Diagnostics should go to stderr.
-  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--track-pir-node-ids`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--enable-formal-array-alias-analysis`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--cut-db-rewrite`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
+  - Gate-lowering flags are shared with `ir2g8r` / `ir2gates`, with the same defaults: `--fold`, `--hash`, `--track-pir-node-ids`, `--enable-rewrite-carry-out`, `--enable-rewrite-prio-encode`, `--enable-rewrite-nary-add`, `--enable-rewrite-mask-low`, `--enable-formal-array-alias-analysis`, `--unsafe-gatify-gate-operation`, `--adder-mapping`, `--mul-adder-mapping`, `--fraig`, `--reassociation`, `--cut-db-rewrite`, `--cut-db-enable-large-cone-bottom-up-rewrite`, `--max-fraig-sim-samples`, `--gate-formal-backend`, `--cadical-terminate-limit`, `--compute-graph-logical-effort`, `--graph-logical-effort-beta1`, `--graph-logical-effort-beta2`, `--toggle-sample-count`, and `--toggle-seed`.
   - `--verify-origin-alignment` – rerun the exact scored origin package through the external canonical flow (`ir2g8r`, optional postprocessor, then `aig-stats`) and compare it with the in-process MCMC origin score. It writes that `scored.ir`, the exact commands, plus `raw.*`, `post.*`, and `comparison.json` artifacts under `<output>/origin-alignment/`.
   - `--max-delay <LEVELS>` – optional hard cap on gate depth for gate-based objectives. It applies to raw `g8r_depth` for `g8r-*` metrics and postprocessed depth for `g8r-post-*` metrics. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
   - `--max-area <GATES>` – optional hard cap on gate count for gate-based objectives. It applies to raw `g8r_nodes` for `g8r-*` metrics and postprocessed AND-node count for `g8r-post-*` metrics.
@@ -2385,6 +2387,9 @@ not emit `winning-lineage/`.
 
 Loads the `winning-lineage/` provenance artifact from a previous `ir-mcmc-opt` output
 directory and emits minimized witness artifacts to a separate directory.
+Schema 5 records whether bottom-up area rewriting was enabled when the run scored
+its circuits. For schema 4 manifests that omit this setting, the minimizer
+disables the bottom-up pass.
 
 - Required:
   - `<run_dir>` - prior `ir-mcmc-opt` output directory containing `winning-lineage/`.
@@ -3013,6 +3018,7 @@ Supported flags include the common gate-optimization controls:
 - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
 - `--cut-db-rewrite=<BOOL>` – when `true`, run the cut-db rewrite stages after FRAIG and reassociation. Default `true`; when `false`, the cut-db mode and large-cone settings have no effect.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
+- `--cut-db-enable-large-cone-bottom-up-rewrite=<BOOL>` – run bottom-up area recovery after the top-down large-cone rewriter. Defaults to `true` when large-cone rewriting is enabled. Set to `false` to run only the top-down large-cone phases.
 - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
