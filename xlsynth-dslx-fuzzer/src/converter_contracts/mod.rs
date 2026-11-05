@@ -19,7 +19,7 @@ pub struct ContractCase {
 }
 
 impl ContractCase {
-    fn single(family: &'static str, text: String, expected_ir: String) -> Self {
+    pub(crate) fn single(family: &'static str, text: String, expected_ir: String) -> Self {
         Self {
             family,
             modules: vec![SourceModule {

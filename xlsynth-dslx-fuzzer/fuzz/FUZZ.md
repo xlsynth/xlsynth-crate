@@ -36,3 +36,25 @@ it also bounds the emitted AND count after equivalence succeeds. Set
 same retention and replay settings as the semantics target, groups findings
 by property, and records `X` for emitted IR rejected by the C++ parser and
 `G` for excessive guard growth.
+
+Set `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v1` on
+`fuzz_dslx_converter_contracts` to use a separate byte grammar for lexical
+shadowing in specialization arguments and type dimensions, explicit builtin
+parameters, decode width boundaries, assertion result types, effectful struct
+updates and array lengths, and discarded assertions in module constants.
+The grammar also embeds the existing focused families. Keep its corpus in a
+separate directory and set the same variable when replaying a retained input.
+Leaving it unset selects the original eight-family encoding.
+
+The target proves values and assertion conditions against independent IR and
+compares the exact top signature. Trace cases additionally run the standalone
+CLI's emitted IR through the JIT at Boolean input true and count events.
+The effectful struct-base and array-size families use DSLX bytecode's observed
+evaluation behavior as the reference. A discrepancy in those families
+identifies a difference between execution paths. For failing module
+constants, normal constexpr rejection satisfies the property, unexpected
+acceptance records `X`, and a crash or unrelated diagnostic records `R`.
+
+Standalone generic workers collect in-process C++ coverage after a successful
+CLI conversion, including on a disproof or a public signature mismatch.
+The primary CLI finding takes precedence over a secondary feedback error.
