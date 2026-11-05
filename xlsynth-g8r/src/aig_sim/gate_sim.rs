@@ -192,11 +192,10 @@ impl<'a> PreparedGateSim<'a> {
         self.output_bindings
             .iter()
             .map(|bindings| {
-                let bits_lsb_first = bindings
-                    .iter()
-                    .map(|binding| (self.values[binding.node_id] ^ u8::from(binding.negated)) != 0)
-                    .collect::<Vec<bool>>();
-                IrBits::from_lsb_is_0(&bits_lsb_first)
+                IrBits::from_lsb_fn(bindings.len(), |bit_index| {
+                    let binding = &bindings[bit_index];
+                    (self.values[binding.node_id] ^ u8::from(binding.negated)) != 0
+                })
             })
             .collect()
     }

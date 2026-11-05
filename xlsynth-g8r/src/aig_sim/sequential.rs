@@ -74,10 +74,10 @@ impl SequentialState {
 pub struct SequentialTrace {
     external_inputs: Vec<Vec<IrBits>>,
     external_outputs: Vec<Vec<IrBits>>,
-    register_outputs: Vec<Vec<IrBits>>,
-    register_inputs: Vec<Vec<IrBits>>,
+    /// Initial state followed by the state committed at each active edge.
+    register_states: Vec<SequentialState>,
+    /// External inputs and pre-edge Q values in transition-input order.
     transition_inputs: Vec<Vec<IrBits>>,
-    final_state: SequentialState,
 }
 
 impl SequentialTrace {
@@ -93,7 +93,9 @@ impl SequentialTrace {
 
     /// Returns the state after the final simulated clock edge.
     pub fn final_state(&self) -> &SequentialState {
-        &self.final_state
+        self.register_states
+            .last()
+            .expect("trace has initial state")
     }
 }
 
@@ -189,6 +191,7 @@ pub(crate) struct SequentialSimulator<'a> {
 struct SimulatedCycle {
     transition_inputs: Vec<IrBits>,
     external_outputs: Vec<IrBits>,
+    pre_edge_state: SequentialState,
 }
 
 impl<'a> SequentialSimulator<'a> {
@@ -250,13 +253,17 @@ impl<'a> SequentialSimulator<'a> {
             })
             .collect::<Vec<_>>();
 
-        self.state = SequentialState {
-            values: next_register_values,
-        };
+        let pre_edge_state = std::mem::replace(
+            &mut self.state,
+            SequentialState {
+                values: next_register_values,
+            },
+        );
         self.cycle += 1;
         Ok(SimulatedCycle {
             transition_inputs,
             external_outputs: visible_outputs,
+            pre_edge_state,
         })
     }
 }
@@ -272,25 +279,22 @@ pub fn simulate(
 ) -> Result<SequentialTrace, String> {
     let mut simulator = SequentialSimulator::new(design, initial_state)?;
     let mut external_outputs = Vec::with_capacity(external_inputs.len());
-    let mut register_outputs = Vec::with_capacity(external_inputs.len());
-    let mut register_inputs = Vec::with_capacity(external_inputs.len());
+    let mut register_states = Vec::with_capacity(external_inputs.len() + 1);
     let mut transition_inputs_trace = Vec::with_capacity(external_inputs.len());
 
     for cycle_inputs in external_inputs {
-        register_outputs.push(simulator.state.values.clone());
         let cycle = simulator.step_with_bindings(cycle_inputs)?;
         transition_inputs_trace.push(cycle.transition_inputs);
         external_outputs.push(cycle.external_outputs);
-        register_inputs.push(simulator.state.values.clone());
+        register_states.push(cycle.pre_edge_state);
     }
+    register_states.push(simulator.state);
 
     Ok(SequentialTrace {
         external_inputs: external_inputs.to_vec(),
         external_outputs,
-        register_outputs,
-        register_inputs,
+        register_states,
         transition_inputs: transition_inputs_trace,
-        final_state: simulator.state,
     })
 }
 
@@ -439,7 +443,7 @@ pub(crate) fn build_clocked_phase_inputs(
         let post_edge_inputs = bind_transition_inputs(
             design,
             &trace.external_inputs[cycle_index],
-            &trace.register_inputs[cycle_index],
+            trace.register_states[cycle_index + 1].values(),
         )?;
         phase_inputs.push(SequentialSettledPhaseInput {
             transition_inputs: post_edge_inputs.clone(),
@@ -563,8 +567,7 @@ fn validate_trace_shape(design: &SequentialGateFn, trace: &SequentialTrace) -> R
     for (name, observed) in [
         ("external inputs", trace.external_inputs.len()),
         ("external outputs", trace.external_outputs.len()),
-        ("register outputs", trace.register_outputs.len()),
-        ("register inputs", trace.register_inputs.len()),
+        ("register inputs", trace.register_states.len() - 1),
     ] {
         if observed != cycle_count {
             return Err(format!(
@@ -573,22 +576,12 @@ fn validate_trace_shape(design: &SequentialGateFn, trace: &SequentialTrace) -> R
             ));
         }
     }
-    for (cycle_index, values) in trace.register_outputs.iter().enumerate() {
-        if values.len() != design.registers.len() {
-            return Err(format!(
-                "sequential trace register outputs at cycle {} have {} values, expected {}",
-                cycle_index + 1,
-                values.len(),
-                design.registers.len()
-            ));
-        }
-    }
-    for (cycle_index, values) in trace.register_inputs.iter().enumerate() {
-        if values.len() != design.registers.len() {
+    for (cycle_index, state) in trace.register_states[1..].iter().enumerate() {
+        if state.values.len() != design.registers.len() {
             return Err(format!(
                 "sequential trace register inputs at cycle {} have {} values, expected {}",
                 cycle_index + 1,
-                values.len(),
+                state.values.len(),
                 design.registers.len()
             ));
         }
@@ -718,10 +711,23 @@ mod tests {
             vec![vec![bits(1, 1)], vec![bits(1, 0)]]
         );
         assert_eq!(
-            trace.register_inputs,
-            vec![vec![bits(1, 0)], vec![bits(1, 0)]]
+            trace
+                .register_states
+                .iter()
+                .map(|s| s.values())
+                .collect::<Vec<_>>(),
+            vec![vec![bits(1, 1)], vec![bits(1, 0)], vec![bits(1, 0)]]
         );
-        assert_eq!(trace.final_state.values(), &[bits(1, 0)]);
+        assert_eq!(trace.final_state().values(), &[bits(1, 0)]);
+    }
+
+    #[test]
+    fn simulation_without_cycles_retains_initial_state() {
+        let design = accumulator_design();
+        let initial = SequentialState::from_register_values(&design, vec![bits(1, 1)]).unwrap();
+        let trace = simulate(&design, &[], initial).unwrap();
+        assert!(trace.external_outputs().is_empty());
+        assert_eq!(trace.final_state().values(), &[bits(1, 1)]);
     }
 
     #[test]

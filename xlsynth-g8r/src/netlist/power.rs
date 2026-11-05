@@ -979,10 +979,6 @@ pub fn analyze_sequential_dynamic_power(
         return Err("ICG power analysis requires a rising-edge root clock".to_string());
     }
     let phase_inputs = build_clocked_phase_inputs(&model.sequential_gate_fn, trace)?;
-    let batch_inputs = phase_inputs
-        .iter()
-        .map(|phase| phase.transition_inputs.clone())
-        .collect::<Vec<_>>();
     let clock_values = phase_inputs
         .iter()
         .map(|phase| {
@@ -1002,6 +998,10 @@ pub fn analyze_sequential_dynamic_power(
             },
             SequentialSettledPhase::PostInactiveEdge => PowerTransitionKind::InactiveClockEdge,
         })
+        .collect::<Vec<_>>();
+    let batch_inputs = phase_inputs
+        .into_iter()
+        .map(|phase| phase.transition_inputs)
         .collect::<Vec<_>>();
 
     let mut topology = build_topology(
@@ -1074,8 +1074,8 @@ pub fn analyze_sequential_dynamic_power(
         + clock_switching_energy
         + cell_output_switching_energy
         + cell_internal_energy;
-    let cycle_count = phase_inputs.len() / 3;
-    let phase_transition_count = phase_inputs.len() - 1;
+    let cycle_count = batch_inputs.len() / 3;
+    let phase_transition_count = transition_kinds.len();
     let instances = build_instance_reports(
         &power_model,
         library,
