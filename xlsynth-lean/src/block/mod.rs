@@ -7,10 +7,11 @@ use std::collections::BTreeSet;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod bx;
+mod helper_types;
 mod raw;
 mod readable;
 mod source_types;
-pub use bx::{CompiledBx, compile_bx};
+pub use bx::{CompiledBx, compile_bx, compile_bx_with_dslx};
 
 pub use raw::{LeanBlockBundle, emit};
 pub(crate) use raw::{identifier, record_value};

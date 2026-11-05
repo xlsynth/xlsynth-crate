@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+xlsynth = { path = "../xlsynth", version = "0.80.0" }
 xlsynth-bx = { path = "../xlsynth-bx", version = "0.80.0" }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.80.0" }
 xlsynth-ir-value = { path = "../xlsynth-ir-value", version = "0.80.0" }
@@ -23,7 +24,6 @@ tempfile = "3.20"
 thiserror.workspace = true
 
 [dev-dependencies]
-xlsynth = { path = "../xlsynth", version = "0.80.0" }
 pretty_assertions = "1.4.1"
 
 [lib]

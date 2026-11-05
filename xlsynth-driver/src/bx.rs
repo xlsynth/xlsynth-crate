@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command, value_parser};
+use xlsynth::dslx;
 use xlsynth_bx::{ImportOptions, ResetBehavior, compile_with_options, empty_package};
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
+use xlsynth_lean::block;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
@@ -82,6 +84,13 @@ pub fn bx2ir_command() -> Command {
 
 pub fn bx2lean_command() -> Command {
     add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
+        .arg(
+            Arg::new("link-dslx")
+                .long("link-dslx")
+                .value_name("MODULE.x")
+                .conflicts_with("link-ir")
+                .help("Compile a DSLX module to implement BX extern functions and retain their declared types"),
+        )
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
@@ -187,7 +196,19 @@ pub fn bx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<(
 /// Generate and validate the complete model before creating its output
 /// directory.
 pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
-    let compiled = with_bx_input(matches, config, xlsynth_lean::block::compile_bx)?;
+    let compiled = with_bx_input(matches, config, |source, package, reset, imports| {
+        let Some(path) = matches.get_one::<String>("link-dslx") else {
+            return block::compile_bx(source, package, reset, imports);
+        };
+        let dslx_source = fs::read_to_string(path)
+            .with_context(|| format!("reading linked DSLX module '{path}'"))?;
+        let name = xlsynth::dslx_path_to_module_name(Path::new(path))?;
+        let mut import_data =
+            dslx::ImportData::new(imports.dslx_stdlib_path, &imports.additional_search_paths);
+        let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
+            .with_context(|| format!("checking linked DSLX module '{path}'"))?;
+        block::compile_bx_with_dslx(source, module, reset, imports)
+    })?;
     let top = matches.get_one::<String>("top").map(String::as_str);
     let bundle = compiled.emit_readable(top)?;
     let directory = matches
