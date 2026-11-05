@@ -1063,6 +1063,50 @@ block b(clk, x: u8) -> u8 { x + x }"#,
 }
 
 #[test]
+fn bx2lean_links_externs_from_a_checked_dslx_module() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::create_dir(root.join("modules"))?;
+    fs::write(
+        root.join("modules/packet.x"),
+        "pub struct Packet { octet: u8, tag: u8 }",
+    )?;
+    fs::write(
+        root.join("math.x"),
+        "import packet; pub fn second(request: packet::Packet) -> u8 { request.tag }",
+    )?;
+    fs::write(
+        root.join("design.bx"),
+        r#"extern fn math::second(request: (u8, u8)) -> u8;
+block delay(clk, x: u8, y: u8) -> u8 {
+    reg q: u8;
+    q := math::second((x, y));
+    q
+}"#,
+    )?;
+    let args = [
+        "bx2lean",
+        "design.bx",
+        "--link-dslx=math.x",
+        "--dslx-path=modules",
+        "--output-dir=model",
+    ];
+    assert!(stdout(root, &args)?.is_empty());
+    let types = fs::read_to_string(root.join("model/ReadableTypes.lean"))?;
+    for field in ["octet", "tag"] {
+        assert!(types.contains(field), "missing DSLX field {field}: {types}");
+    }
+    let both = driver(root, &[&args[..], &["--link-ir=saved.ir"]].concat())?;
+    assert_eq!(both.status.code(), Some(2));
+    let error = String::from_utf8(both.stderr)?;
+    assert!(
+        error.contains("--link-ir") && error.contains("--link-dslx"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn mapped_protobuf_matches_the_staged_pipeline_with_synchronous_reset_and_enable() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();

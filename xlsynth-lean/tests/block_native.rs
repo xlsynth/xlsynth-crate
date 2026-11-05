@@ -7,6 +7,7 @@ mod block_project;
 
 use std::{fs, path::Path};
 
+use anyhow::Result;
 use xlsynth_lean::block::{LeanBlockBundle, compile_bx, emit, select_block};
 use xlsynth_pir::ir_parser::Parser;
 
@@ -82,7 +83,9 @@ import ReadableCorrespondence
 open XlsReadable
 example (q : State) (x : Input) :
     (observe q x).1.zebra = x.left ∧ (observe q x).1.apple = x.right ∧
-    (observe q x).2 = x.left := ⟨rfl, rfl, rfl⟩
+    (observe q x).2 = x.left := by
+  rcases x with ⟨left, right⟩
+  cases left <;> cases right <;> exact ⟨rfl, rfl, rfl⟩
 example (q : XlsBlock.State) (x : XlsBlock.Input) :
     (XlsBlock.observe q x).pair = (x.left, x.right, ()) ∧
     (XlsBlock.observe q x).selected = x.left := ⟨rfl, rfl⟩
@@ -297,6 +300,202 @@ private def initial : State := { count := 7 }
         .into(),
     ));
     check_bundle(bundle, "nested prelinked calls across a register update");
+}
+
+fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<LeanBlockBundle> {
+    let mut imports = xlsynth::dslx::ImportData::new(None, paths);
+    let module = xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)?;
+    xlsynth_lean::block::compile_bx_with_dslx(bx, module, Default::default(), &Default::default())?
+        .emit_readable(None)
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn linked_field_order_uses_the_checked_helper() {
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module = xlsynth::dslx::parse_and_typecheck(
+        include_str!("fixtures/bx_field_order/picker.x"),
+        "picker.x",
+        "picker",
+        &mut imports,
+    )
+    .unwrap();
+    let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        include_str!("fixtures/bx_field_order/field_order.bx"),
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let mut bundle = compiled.emit_readable(None).unwrap();
+    bundle.files.push((
+        "FieldOrder.lean".into(),
+        include_str!("fixtures/bx_field_order/FieldOrder.lean").into(),
+    ));
+    bundle.files.push((
+        "NamedFields.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) :
+    (observe q x).1.zebra = x.left ∧ (observe q x).1.apple = x.right ∧
+    (observe q x).2 = x.left := by
+  rcases x with ⟨left, right⟩
+  cases left <;> cases right <;> exact ⟨rfl, rfl, rfl⟩
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "BX fields and an unoptimized linked DSLX projection",
+    );
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn nested_helper_calls() {
+    let modules = tempfile::tempdir().unwrap();
+    fs::write(
+        modules.path().join("left_side.x"),
+        r#"
+pub struct Packet { base: u8, delta: u4 }
+pub fn advance(command: Packet) -> Packet {
+    Packet { base: command.base + signex(command.delta, command.base), ..command }
+}
+"#,
+    )
+    .unwrap();
+    let source = r#"
+import left_side as foreign;
+struct Packet { left: u8, right: u4 }
+fn advance(request: foreign::Packet, previous: u8) -> u8 {
+    foreign::advance(request).base + previous
+}
+fn machine(packet: Packet, count: u8) -> (u8, u8) {
+    let request = foreign::Packet { base: packet.left, delta: packet.right };
+    (count, advance(request, count))
+}
+"#;
+    let bx = r#"
+struct Packet { left: u8, right: u4 }
+extern fn machine::machine(packet: Packet, count: u8) -> (u8, u8);
+block pipeline(clk, packet: Packet) -> u8 {
+    reg count: u8 = 0;
+    let result = machine::machine(packet, count);
+    count := result.1;
+    result.0
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[modules.path()]).unwrap();
+    let (_, model) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap();
+    for helper in ["left_side::advance", "machine::advance"] {
+        assert!(model.contains(&format!("_root_.XlsReadable.Helpers.«{helper}»")));
+    }
+    bundle.files.push((
+        "CheckCalls.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := { rst := false, packet := { left := 13, right := 5 } }
+private def initial : State := { count := 7 }
+#guard (Helpers.«left_side::advance» (command := { base := 13, delta := 5 })).base == 18
+#guard observe initial stimulus == 7
+#guard (step initial stimulus).count == 25
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "nested calls across a register update");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn computed_enum_dispatch_in_checked_helper() {
+    for (control, choose, subject) in [
+        (
+            "use_new: bool",
+            "if use_new { incoming } else { sender }",
+            "chosen",
+        ),
+        (
+            "mode: u2",
+            "match mode { u2:0 => incoming, u2:1 => sender, _ => Sender::C }",
+            "chosen",
+        ),
+        (
+            "use_new: bool",
+            "if use_new { incoming } else { sender }",
+            "sender",
+        ),
+    ] {
+        let control_name = control.split_once(':').unwrap().0;
+        let source = format!(
+            r#"
+enum Sender : u2 {{ A = 0, B = 1, C = 2 }}
+fn route({control}, incoming: Sender, a: bool, b: bool, c: bool,
+         sender: Sender) -> (bool, Sender) {{
+    let chosen = {choose};
+    let payload = match {subject} {{ Sender::A => a, Sender::B => b, _ => c }};
+    (payload, chosen)
+}}
+"#
+        );
+        let bx = format!(
+            r#"
+extern fn machine::route({control}, incoming: u2, a: bool, b: bool, c: bool, sender: u2) -> (bool, u2);
+block router(clk, {control}, incoming: u2, a: bool, b: bool, c: bool) -> bool {{
+    reg sender: u2 = 0;
+    let pair = machine::route({control_name}, incoming, a, b, c, sender);
+    sender := pair.1;
+    pair.0
+}}
+"#
+        );
+        let bundle = checked_helper_bundle(&bx, &source, &[]).unwrap();
+        let readable = &bundle
+            .files
+            .iter()
+            .find(|(name, _)| name == "ReadableGenerated.lean")
+            .unwrap()
+            .1;
+        assert!(readable.contains("| .«A» =>") && readable.contains("| .«B» =>"));
+        check_bundle(bundle, choose);
+    }
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn independent_enum_inputs_pass_through_symbolically() {
+    let source = r#"
+enum Tag : u2 { A = 0, B = 1, C = 2 }
+fn pass(a: Tag, b: Tag, c: Tag, d: Tag, e: Tag,
+        f: Tag, g: Tag, h: Tag, i: Tag, j: Tag)
+        -> (Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag, Tag) {
+    (a, b, c, d, e, f, g, h, i, j)
+}
+"#;
+    let bx = r#"
+extern fn machine::pass(a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j: u2)
+    -> (u2, u2, u2, u2, u2, u2, u2, u2, u2, u2);
+block tags(clk, a: u2, b: u2, c: u2, d: u2, e: u2, f: u2, g: u2, h: u2, i: u2, j: u2)
+    -> (u2, u2, u2, u2, u2, u2, u2, u2, u2, u2) {
+    machine::pass(a, b, c, d, e, f, g, h, i, j)
+}
+"#;
+    let bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    let (_, correspondence) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableCorrespondence.lean")
+        .unwrap();
+    // Fail before asking Lean to elaborate 4^10 combinations of the inputs.
+    assert!(
+        !correspondence.contains("all_goals cases"),
+        "pass-through correspondence splits independent enum inputs"
+    );
+    check_bundle(bundle, "ten independent enum inputs");
 }
 
 /// Elaborate every generated file in dependency order with the requested Lean.
