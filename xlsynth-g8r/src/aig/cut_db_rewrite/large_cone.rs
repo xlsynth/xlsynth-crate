@@ -119,10 +119,10 @@ impl DenseCubeSet {
     }
 }
 
-#[derive(Debug, Clone)]
+/// A candidate circuit derived from a Boolean sum of products (an OR of AND
+/// terms). For example, factoring `(a & b) | (a & c)` gives `a & (b | c)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::aig) struct SopReplacement {
-    pub(in crate::aig) nvars: usize,
-    pub(in crate::aig) cubes: Vec<SopCube>,
     pub(in crate::aig) factored: FactoredExpr,
     pub(in crate::aig) output_negated: bool,
     pub(in crate::aig) kind: SopVariantKind,
@@ -270,6 +270,20 @@ pub(super) struct LargeTruthTable {
 }
 
 impl LargeTruthTable {
+    /// The low six bits of an assignment select a bit within a 64-bit word.
+    /// Higher bits select the word, where those input variables are constant.
+    const WITHIN_WORD_VARIABLES: usize = u64::BITS.ilog2() as usize;
+
+    // A set bit marks an assignment where the corresponding variable is one.
+    const VARIABLE_ONES: [u64; Self::WITHIN_WORD_VARIABLES] = [
+        0xaaaa_aaaa_aaaa_aaaa,
+        0xcccc_cccc_cccc_cccc,
+        0xf0f0_f0f0_f0f0_f0f0,
+        0xff00_ff00_ff00_ff00,
+        0xffff_0000_ffff_0000,
+        0xffff_ffff_0000_0000,
+    ];
+
     fn assert_supported_nvars(nvars: usize) {
         assert!(
             nvars <= LARGE_CONE_MAX_LEAVES,
@@ -319,10 +333,16 @@ impl LargeTruthTable {
     }
 
     fn var(nvars: usize, index: usize) -> Self {
+        debug_assert!(index < nvars);
         let mut out = Self::const0(nvars);
-        for assignment in 0..Self::bit_count(nvars) {
-            if ((assignment >> index) & 1) != 0 {
-                out.set_bit(assignment, true);
+        let active = &mut out.words[..Self::word_count(nvars)];
+        if index < Self::WITHIN_WORD_VARIABLES {
+            // One repeated pattern per word; only narrow tables need trimming.
+            active.fill(Self::VARIABLE_ONES[index] & Self::unused_high_mask(nvars));
+        } else {
+            let stride = 1 << (index - Self::WITHIN_WORD_VARIABLES);
+            for (word, value) in active.iter_mut().enumerate() {
+                *value = if word & stride == 0 { 0 } else { u64::MAX };
             }
         }
         out
@@ -345,6 +365,7 @@ impl LargeTruthTable {
         ((self.words[assignment / 64] >> (assignment % 64)) & 1) != 0
     }
 
+    #[cfg(test)]
     pub(super) fn set_bit(&mut self, assignment: usize, value: bool) {
         debug_assert!(assignment < Self::bit_count(self.nvars));
         let word = &mut self.words[assignment / 64];
@@ -404,38 +425,51 @@ impl LargeTruthTable {
         out
     }
 
+    /// Fix one input while keeping the original row numbering. Fixing input
+    /// zero to false, for example, copies each even row to its odd neighbor.
+    /// For the low six inputs, operate within a word. Higher inputs select
+    /// whole words.
     fn cofactor_fixed(&self, var: usize, value: bool) -> Self {
         debug_assert!(var < self.nvars);
         let mut out = Self::const0(self.nvars);
-        let bit = 1usize << var;
-        for assignment in 0..Self::bit_count(self.nvars) {
-            let source = if value {
-                assignment | bit
-            } else {
-                assignment & !bit
-            };
-            out.set_bit(assignment, self.get_bit(source));
+        let inputs = self.active_words();
+        let outputs = &mut out.words[..inputs.len()];
+        if var < Self::WITHIN_WORD_VARIABLES {
+            let stride = 1 << var;
+            let zero_mask = !Self::VARIABLE_ONES[var];
+            for (dst, &src) in outputs.iter_mut().zip(inputs) {
+                let low = (if value { src >> stride } else { src }) & zero_mask;
+                *dst = low | (low << stride);
+            }
+        } else {
+            let stride = 1 << (var - Self::WITHIN_WORD_VARIABLES);
+            let offset = if value { stride } else { 0 };
+            for (word, dst) in outputs.iter_mut().enumerate() {
+                *dst = inputs[(word & !stride) | offset];
+            }
         }
         out
     }
 
     fn depends_on_var(&self, var: usize) -> bool {
         debug_assert!(var < self.nvars);
-        let bit = 1usize << var;
-        for assignment in 0..Self::bit_count(self.nvars) {
-            if (assignment & bit) != 0 {
-                continue;
-            }
-            if self.get_bit(assignment) != self.get_bit(assignment | bit) {
-                return true;
-            }
+        let words = self.active_words();
+        if var < Self::WITHIN_WORD_VARIABLES {
+            let stride = 1 << var;
+            let zero_mask = !Self::VARIABLE_ONES[var];
+            return words
+                .iter()
+                .any(|&word| (word ^ (word >> stride)) & zero_mask != 0);
         }
-        false
+        let stride = 1 << (var - Self::WITHIN_WORD_VARIABLES);
+        words
+            .chunks_exact(stride * 2)
+            .any(|group| group[..stride] != group[stride..])
     }
 
-    fn topmost_support_var_with(&self, other: &Self) -> Option<usize> {
+    fn topmost_support_var_with(&self, other: &Self, upper_var: usize) -> Option<usize> {
         debug_assert_eq!(self.nvars, other.nvars);
-        (0..self.nvars)
+        (0..upper_var)
             .rev()
             .find(|var| self.depends_on_var(*var) || other.depends_on_var(*var))
     }
@@ -644,20 +678,6 @@ fn merge_adjacent_implicant_cubes(
     newly_merged
 }
 
-#[derive(Debug, Clone)]
-struct IsopResult {
-    cubes: Vec<SopCube>,
-    realized: LargeTruthTable,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct IsopKey {
-    on: LargeTruthTable,
-    on_dc: LargeTruthTable,
-}
-
-type IsopMemo = HashMap<IsopKey, Option<IsopResult>>;
-
 fn add_literal_to_cube(cube: SopCube, var: usize, negated: bool) -> SopCube {
     let bit = 1u16 << var;
     let value_mask = if negated {
@@ -682,95 +702,67 @@ fn truth_from_cofactored_results(
     low.and(&not_var_tt).or(&high.and(&var_tt))
 }
 
-/// Computes an ISOP cover using the same recursive decomposition shape as ABC's
-/// `Kit_TruthIsop`, without external don't-cares at the top level.
+/// Appends the cubes for this subproblem, with its ancestor literals attached,
+/// and returns the realized truth needed by the sibling subproblems.
 fn isop_rec(
     on: LargeTruthTable,
     on_dc: LargeTruthTable,
-    memo: &mut IsopMemo,
-) -> Option<IsopResult> {
+    upper_var: usize,
+    prefix: SopCube,
+    cubes: &mut Vec<SopCube>,
+) -> Option<LargeTruthTable> {
     debug_assert_eq!(on.nvars, on_dc.nvars);
     debug_assert!(on.sharp(&on_dc).is_const0());
-
-    let key = IsopKey { on, on_dc };
-    if let Some(result) = memo.get(&key) {
-        return result.clone();
-    }
-
-    let result = isop_rec_uncached(on, on_dc, memo);
-    memo.insert(key, result.clone());
-    result
-}
-
-fn isop_rec_uncached(
-    on: LargeTruthTable,
-    on_dc: LargeTruthTable,
-    memo: &mut IsopMemo,
-) -> Option<IsopResult> {
     if on.is_const0() {
-        return Some(IsopResult {
-            cubes: Vec::new(),
-            realized: LargeTruthTable::const0(on.nvars),
-        });
+        return Some(on);
     }
     if on_dc.is_const1() {
-        return Some(IsopResult {
-            cubes: vec![SopCube {
-                care_mask: 0,
-                value_mask: 0,
-            }],
-            realized: LargeTruthTable::const1(on.nvars),
-        });
+        if cubes.len() == SOP_MAX_CUBES_DURING_MERGE {
+            return None;
+        }
+        cubes.push(prefix);
+        return Some(on_dc);
     }
 
-    let var = on.topmost_support_var_with(&on_dc)?;
+    // Both cofactors and all Boolean combinations below are independent of
+    // this split and the higher variables. Keep the original split order.
+    let var = on.topmost_support_var_with(&on_dc, upper_var)?;
     let on0 = on.cofactor_fixed(var, false);
     let on1 = on.cofactor_fixed(var, true);
     let on_dc0 = on_dc.cofactor_fixed(var, false);
     let on_dc1 = on_dc.cofactor_fixed(var, true);
-
-    let res0 = isop_rec(on0.sharp(&on_dc1), on_dc0, memo)?;
-    let res1 = isop_rec(on1.sharp(&on_dc0), on_dc1, memo)?;
-    let res2_on = on0.sharp(&res0.realized).or(&on1.sharp(&res1.realized));
-    let res2_dc = on_dc0.and(&on_dc1);
-    let res2 = isop_rec(res2_on, res2_dc, memo)?;
-
-    let cube_count = res0.cubes.len() + res1.cubes.len() + res2.cubes.len();
-    if cube_count > SOP_MAX_CUBES_DURING_MERGE {
-        return None;
-    }
-
-    let mut cubes = Vec::with_capacity(cube_count);
-    cubes.extend(
-        res0.cubes
-            .iter()
-            .copied()
-            .map(|cube| add_literal_to_cube(cube, var, true)),
-    );
-    cubes.extend(
-        res1.cubes
-            .iter()
-            .copied()
-            .map(|cube| add_literal_to_cube(cube, var, false)),
-    );
-    cubes.extend(res2.cubes.iter().copied());
-
-    let low = res0.realized.or(&res2.realized);
-    let high = res1.realized.or(&res2.realized);
-    Some(IsopResult {
+    let low = isop_rec(
+        on0.sharp(&on_dc1),
+        on_dc0,
+        var,
+        add_literal_to_cube(prefix, var, true),
         cubes,
-        realized: truth_from_cofactored_results(&low, &high, var),
-    })
+    )?;
+    let high = isop_rec(
+        on1.sharp(&on_dc0),
+        on_dc1,
+        var,
+        add_literal_to_cube(prefix, var, false),
+        cubes,
+    )?;
+    let shared = isop_rec(
+        on0.sharp(&low).or(&on1.sharp(&high)),
+        on_dc0.and(&on_dc1),
+        var,
+        prefix,
+        cubes,
+    )?;
+    Some(shared.or(&truth_from_cofactored_results(&low, &high, var)))
 }
 
 fn derive_isop_cover_for_target(target: &LargeTruthTable) -> Option<Vec<SopCube>> {
-    let mut memo = IsopMemo::new();
-    let result = isop_rec(*target, *target, &mut memo)?;
-    let cubes = normalize_sop_cubes(&result.cubes);
-    if cubes.len() > SOP_MAX_CUBES_DURING_MERGE {
-        return None;
-    }
-    Some(cubes)
+    let mut cubes = Vec::new();
+    let prefix = SopCube {
+        care_mask: 0,
+        value_mask: 0,
+    };
+    isop_rec(*target, *target, target.nvars, prefix, &mut cubes)?;
+    Some(normalize_sop_cubes(&cubes))
 }
 
 #[derive(Debug)]
@@ -849,21 +841,29 @@ impl FactoredExprBuilder {
     }
 
     fn finish(self, root: FactoredExprId) -> FactoredExpr {
+        // A node is appended only after its children. Once we reach an ID in
+        // this reverse walk, all parents that could make it live were visited.
         let mut reachable = vec![false; self.nodes.len()];
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            if reachable[id.0] {
-                continue;
+        reachable[root.0] = true;
+        let mut live_count = 0;
+        for id in (0..=root.0).rev() {
+            if reachable[id] {
+                live_count += 1;
+                if let Some((lhs, rhs)) = self.nodes[id].children() {
+                    reachable[lhs.0] = true;
+                    reachable[rhs.0] = true;
+                }
             }
-            reachable[id.0] = true;
-            if let Some((lhs, rhs)) = self.nodes[id.0].children() {
-                stack.push(lhs);
-                stack.push(rhs);
-            }
+        }
+        if live_count == self.nodes.len() {
+            return FactoredExpr {
+                nodes: self.nodes,
+                root,
+            };
         }
 
         let mut old_to_new = vec![None; self.nodes.len()];
-        let mut nodes = Vec::with_capacity(reachable.iter().filter(|live| **live).count());
+        let mut nodes = Vec::with_capacity(live_count);
         for (old_index, node) in self.nodes.iter().copied().enumerate() {
             if !reachable[old_index] {
                 continue;
@@ -1169,15 +1169,14 @@ fn factor_sop_cubes_inner(
     cubes: &[SopCube],
     nvars: usize,
 ) -> FactoredExprId {
-    let cubes = normalize_sop_cubes(cubes);
     if cubes.is_empty() {
         return builder.const_expr(false);
     }
-    if cubes.iter().any(|cube| cube.care_mask == 0) {
-        return builder.const_expr(true);
+    if let [cube] = cubes {
+        return cube_product_expr(builder, *cube, nvars);
     }
 
-    let common = common_literals(&cubes, nvars);
+    let common = common_literals(cubes, nvars);
     if !common.is_empty() {
         let common_exprs: Vec<FactoredExprId> = common
             .iter()
@@ -1193,10 +1192,10 @@ fn factor_sop_cubes_inner(
         return builder.expr_and(common_expr, residual_expr);
     }
 
-    if let Some(common) = choose_factoring_cube(&cubes) {
+    if let Some(common) = choose_factoring_cube(cubes) {
         let mut quotient = Vec::new();
         let mut remainder = Vec::new();
-        for cube in &cubes {
+        for cube in cubes {
             if cube_contains_common(*cube, common) {
                 quotient.push(remove_common_cube(*cube, common));
             } else {
@@ -1213,10 +1212,10 @@ fn factor_sop_cubes_inner(
         return builder.expr_or(factored, remainder_expr);
     }
 
-    if let Some((var, negated)) = choose_factoring_literal(&cubes, nvars) {
+    if let Some((var, negated)) = choose_factoring_literal(cubes, nvars) {
         let mut quotient = Vec::new();
         let mut remainder = Vec::new();
-        for cube in &cubes {
+        for cube in cubes {
             if literal_in_cube(*cube, var) == Some(negated) {
                 quotient.push(remove_literal_from_cube(*cube, var));
             } else {
@@ -1234,7 +1233,7 @@ fn factor_sop_cubes_inner(
     }
 
     let mut terms = Vec::with_capacity(cubes.len());
-    for cube in &cubes {
+    for cube in cubes {
         terms.push(cube_product_expr(builder, *cube, nvars));
     }
     expr_or_balanced(builder, &terms)
@@ -1242,31 +1241,12 @@ fn factor_sop_cubes_inner(
 
 fn factor_sop_cubes(cubes: &[SopCube], nvars: usize) -> FactoredExpr {
     let mut builder = FactoredExprBuilder::default();
-    let root = factor_sop_cubes_inner(&mut builder, cubes, nvars);
+    // Each recursive branch keeps a subsequence of this sorted cover. A
+    // quotient removes exactly the same fixed bits from each of its cubes,
+    // preserving their order, distinctness, and subsumption relationships.
+    let normalized = normalize_sop_cubes(cubes);
+    let root = factor_sop_cubes_inner(&mut builder, &normalized, nvars);
     builder.finish(root)
-}
-
-#[derive(Debug, Default)]
-pub(super) struct SopCoverMemo {
-    covers: HashMap<LargeTruthTable, Option<Vec<SopCube>>>,
-}
-
-impl SopCoverMemo {
-    fn cover_for(&mut self, target: &LargeTruthTable) -> Option<Vec<SopCube>> {
-        if let Some(cached) = self.covers.get(target) {
-            return cached.clone();
-        }
-        let cover = derive_sop_cover_for_target_uncached(target);
-        self.covers.insert(*target, cover.clone());
-        cover
-    }
-}
-
-fn derive_sop_cover_for_target(
-    target: &LargeTruthTable,
-    memo: &mut SopCoverMemo,
-) -> Option<Vec<SopCube>> {
-    memo.cover_for(target)
 }
 
 fn derive_sop_cover_for_target_uncached(target: &LargeTruthTable) -> Option<Vec<SopCube>> {
@@ -1322,109 +1302,112 @@ fn derive_sop_cover_for_target_uncached(target: &LargeTruthTable) -> Option<Vec<
     ))
 }
 
-fn same_sop_replacement_shape(lhs: &SopReplacement, rhs: &SopReplacement) -> bool {
-    lhs.nvars == rhs.nvars
-        && lhs.cubes == rhs.cubes
-        && lhs.factored == rhs.factored
-        && lhs.output_negated == rhs.output_negated
+type SopVariantKey = (
+    LargeTruthTable,
+    smallvec::SmallVec<[usize; LARGE_CONE_MAX_LEAVES]>,
+);
+
+/// Reuse covers by truth and completed expressions by truth and ordered input
+/// depths across cuts in this rewrite. The caller evaluates each expression
+/// against its current graph.
+#[derive(Debug, Default)]
+pub(super) struct SopMemo {
+    covers: HashMap<LargeTruthTable, Option<Vec<SopCube>>>,
+    variants: HashMap<SopVariantKey, Vec<SopReplacement>>,
+    cached_variant_nodes: usize,
 }
 
-fn push_sop_variant(
-    out: &mut Vec<SopReplacement>,
-    nvars: usize,
-    cubes: &[SopCube],
-    factored: FactoredExpr,
-    output_negated: bool,
-    kind: SopVariantKind,
-) {
-    let replacement = SopReplacement {
-        nvars,
-        cubes: cubes.to_vec(),
-        factored,
-        output_negated,
-        kind,
-    };
-    if !out
-        .iter()
-        .any(|existing| same_sop_replacement_shape(existing, &replacement))
-    {
-        out.push(replacement);
-    }
-}
+impl SopMemo {
+    const MAX_ENTRIES: usize = 512;
+    // Account for expression nodes across all entries so one larger shape can
+    // be reused while the cache stays within the same memory budget.
+    const MAX_CACHED_NODES: usize = 128 * 1024;
 
-fn append_sop_replacements_for_target(
-    out: &mut Vec<SopReplacement>,
-    cover_memo: &mut SopCoverMemo,
-    target: &LargeTruthTable,
-    output_negated: bool,
-    leaf_depths: &[usize],
-) {
-    let Some(cubes) = derive_sop_cover_for_target(target, cover_memo) else {
-        return;
-    };
+    fn replacements_for(
+        &mut self,
+        truth: &LargeTruthTable,
+        leaf_depths: &[usize],
+    ) -> Vec<SopReplacement> {
+        debug_assert_eq!(leaf_depths.len(), truth.nvars);
+        let key = (*truth, smallvec::SmallVec::from_slice(leaf_depths));
+        if let Some(variants) = self.variants.get(&key) {
+            return variants.clone();
+        }
 
-    let nvars = target.nvars;
-    let flat = flat_sop_expr(&cubes, nvars);
-    push_sop_variant(
-        out,
-        nvars,
-        &cubes,
-        flat,
-        output_negated,
-        SopVariantKind::Flat,
-    );
-
-    let arrival_balanced = arrival_balanced_sop_expr(&cubes, nvars, leaf_depths);
-    push_sop_variant(
-        out,
-        nvars,
-        &cubes,
-        arrival_balanced,
-        output_negated,
-        SopVariantKind::ArrivalBalanced,
-    );
-
-    let factored = factor_sop_cubes(&cubes, nvars);
-    push_sop_variant(
-        out,
-        nvars,
-        &cubes,
-        factored,
-        output_negated,
-        SopVariantKind::Factored,
-    );
-}
-
-#[cfg(test)]
-pub(super) fn derive_sop_replacements(
-    tt: &LargeTruthTable,
-    leaf_depths: &[usize],
-) -> Vec<SopReplacement> {
-    let mut cover_memo = SopCoverMemo::default();
-    derive_sop_replacements_with_memo(tt, leaf_depths, &mut cover_memo)
-}
-
-fn derive_sop_replacements_with_memo(
-    tt: &LargeTruthTable,
-    leaf_depths: &[usize],
-    cover_memo: &mut SopCoverMemo,
-) -> Vec<SopReplacement> {
-    debug_assert!(tt.nvars <= 16);
-    debug_assert_eq!(leaf_depths.len(), tt.nvars);
-
-    let mut out = Vec::new();
-    let ones = tt.count_ones();
-    let bit_count = LargeTruthTable::bit_count(tt.nvars);
-
-    if ones <= bit_count - ones {
-        append_sop_replacements_for_target(&mut out, cover_memo, tt, false, leaf_depths);
-        append_sop_replacements_for_target(&mut out, cover_memo, &tt.not(), true, leaf_depths);
-    } else {
-        append_sop_replacements_for_target(&mut out, cover_memo, &tt.not(), true, leaf_depths);
-        append_sop_replacements_for_target(&mut out, cover_memo, tt, false, leaf_depths);
+        let variants = self.build_replacements(truth, leaf_depths);
+        let nodes: usize = variants.iter().map(|sop| sop.factored.nodes.len()).sum();
+        if nodes <= Self::MAX_CACHED_NODES {
+            if self.variants.len() >= Self::MAX_ENTRIES
+                || self.cached_variant_nodes + nodes > Self::MAX_CACHED_NODES
+            {
+                self.variants.clear();
+                self.cached_variant_nodes = 0;
+            }
+            self.variants.insert(key, variants.clone());
+            self.cached_variant_nodes += nodes;
+        }
+        variants
     }
 
-    out
+    fn build_replacements(
+        &mut self,
+        truth: &LargeTruthTable,
+        leaf_depths: &[usize],
+    ) -> Vec<SopReplacement> {
+        let mut out = Vec::new();
+        let complement = truth.not();
+        let ones = truth.count_ones();
+        let phases = if ones <= LargeTruthTable::bit_count(truth.nvars) - ones {
+            [(truth, false), (&complement, true)]
+        } else {
+            [(&complement, true), (truth, false)]
+        };
+        for (target, output_negated) in phases {
+            self.append_polarity(&mut out, target, output_negated, leaf_depths);
+        }
+        out
+    }
+
+    fn append_polarity(
+        &mut self,
+        out: &mut Vec<SopReplacement>,
+        target: &LargeTruthTable,
+        output_negated: bool,
+        leaf_depths: &[usize],
+    ) {
+        let Some(cubes) = self
+            .covers
+            .entry(*target)
+            .or_insert_with_key(derive_sop_cover_for_target_uncached)
+            .as_deref()
+        else {
+            return;
+        };
+        let nvars = target.nvars;
+        // Only this polarity's variants share the same target and cover. Retain
+        // the first builder for each distinct expression, in the original
+        // order.
+        let phase_start = out.len();
+        for (kind, factored) in [
+            (SopVariantKind::Flat, flat_sop_expr(cubes, nvars)),
+            (
+                SopVariantKind::ArrivalBalanced,
+                arrival_balanced_sop_expr(cubes, nvars, leaf_depths),
+            ),
+            (SopVariantKind::Factored, factor_sop_cubes(cubes, nvars)),
+        ] {
+            if out[phase_start..]
+                .iter()
+                .all(|sop| sop.factored != factored)
+            {
+                out.push(SopReplacement {
+                    factored,
+                    output_negated,
+                    kind,
+                });
+            }
+        }
+    }
 }
 
 fn positive_operand(node: AigRef) -> AigOperand {
@@ -1611,7 +1594,7 @@ pub(super) fn construct_large_cone_candidate_replacements_for_root(
     candidate_evals: &mut usize,
     stats: &mut LargeConeCandidateStats,
     structural_hash_state: &DynamicStructuralHash,
-    sop_cover_memo: &mut SopCoverMemo,
+    sop_memo: &mut SopMemo,
 ) -> ConstructedLargeConeCandidates {
     let mut cands = Vec::new();
     let mut candidates_considered = 0usize;
@@ -1644,7 +1627,7 @@ pub(super) fn construct_large_cone_candidate_replacements_for_root(
 
     candidates_considered += 1;
     let leaf_depths: Vec<usize> = leaf_ops.iter().map(|leaf| depths[leaf.node.id]).collect();
-    let sops = derive_sop_replacements_with_memo(&tt, &leaf_depths, sop_cover_memo);
+    let sops = sop_memo.replacements_for(&tt, &leaf_depths);
     if sops.is_empty() {
         stats.rejected_sop_failed += 1;
         return ConstructedLargeConeCandidates {
@@ -1709,6 +1692,47 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn packed_variable_tables_match_each_assignment_and_padding() {
+        for nvars in 1..=LARGE_CONE_MAX_LEAVES {
+            for var in 0..nvars {
+                let mut expected = LargeTruthTable::const0(nvars);
+                for row in 0..LargeTruthTable::bit_count(nvars) {
+                    expected.set_bit(row, (row >> var) & 1 != 0);
+                }
+                assert_eq!(LargeTruthTable::var(nvars, var), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_cofactors_and_dependence_match_assignment_pairs() {
+        for nvars in 1..=LARGE_CONE_MAX_LEAVES {
+            let mut dense = LargeTruthTable::const0(nvars);
+            for row in 0..LargeTruthTable::bit_count(nvars) {
+                dense.set_bit(row, (row.wrapping_mul(7919) % 149) < 75);
+            }
+            for truth in [
+                dense,
+                LargeTruthTable::const1(nvars),
+                LargeTruthTable::var(nvars, nvars - 1),
+            ] {
+                for var in 0..nvars {
+                    let mut low = LargeTruthTable::const0(nvars);
+                    let mut high = LargeTruthTable::const0(nvars);
+                    let bit = 1 << var;
+                    for row in 0..LargeTruthTable::bit_count(nvars) {
+                        low.set_bit(row, truth.get_bit(row & !bit));
+                        high.set_bit(row, truth.get_bit(row | bit));
+                    }
+                    assert_eq!(truth.cofactor_fixed(var, false), low);
+                    assert_eq!(truth.cofactor_fixed(var, true), high);
+                    assert_eq!(truth.depends_on_var(var), low != high);
+                }
+            }
+        }
+    }
+
     fn eval_factored_expr(expr: &FactoredExpr, assignment: usize) -> bool {
         let mut values = Vec::with_capacity(expr.nodes().len());
         for node in expr.nodes().iter().copied() {
@@ -1749,6 +1773,42 @@ mod tests {
     }
 
     #[test]
+    fn isop_emits_low_high_and_shared_cubes_in_order() {
+        // The high input is absent and the upper bound includes two don't-care
+        // assignments per three-input slice.
+        let mut on = LargeTruthTable::const0(4);
+        on.words[0] = 0xc9c9;
+        let mut on_dc = LargeTruthTable::const0(4);
+        on_dc.words[0] = 0xebeb;
+        let mut cubes = Vec::new();
+        let prefix = SopCube {
+            care_mask: 0,
+            value_mask: 0,
+        };
+        let realized = isop_rec(on, on_dc, 4, prefix, &mut cubes).unwrap();
+        assert_eq!(realized, on_dc);
+        let masks: Vec<_> = cubes.iter().map(|c| (c.care_mask, c.value_mask)).collect();
+        assert_eq!(masks, [(0b110, 0), (0b110, 0b110), (1, 1)]);
+    }
+
+    #[test]
+    fn finish_compacts_unused_nodes_before_and_after_the_root() {
+        let mut builder = FactoredExprBuilder::default();
+        let a = builder.literal_expr(0, false);
+        let unused = builder.literal_expr(1, false);
+        builder.expr_or(a, unused);
+        let b = builder.literal_expr(2, false);
+        let root = builder.expr_and(a, b);
+        builder.expr_or(root, unused);
+
+        let mut minimal = FactoredExprBuilder::default();
+        let a = minimal.literal_expr(0, false);
+        let b = minimal.literal_expr(2, false);
+        let and = minimal.expr_and(a, b);
+        assert_eq!(builder.finish(root), minimal.finish(and));
+    }
+
+    #[test]
     fn test_sop_replacement_variants_preserve_truth_table() {
         let mut tt = LargeTruthTable::const0(3);
         for assignment in 0..LargeTruthTable::bit_count(3) {
@@ -1758,7 +1818,7 @@ mod tests {
             tt.set_bit(assignment, a && (b || c));
         }
 
-        let variants = derive_sop_replacements(&tt, &[2, 0, 0]);
+        let variants = SopMemo::default().replacements_for(&tt, &[2, 0, 0]);
         assert!(
             variants.len() > 1,
             "expected multiple SOP construction variants; got {variants:?}"
@@ -1788,7 +1848,7 @@ mod tests {
                 tt.set_bit(assignment, ((mask >> assignment) & 1) != 0);
             }
 
-            let variants = derive_sop_replacements(&tt, &[0, 0, 0]);
+            let variants = SopMemo::default().replacements_for(&tt, &[0, 0, 0]);
             assert!(
                 !variants.is_empty(),
                 "expected at least one SOP variant for mask={mask:#04x}"
@@ -1806,6 +1866,61 @@ mod tests {
     }
 
     #[test]
+    fn large_variants_share_the_cache_node_budget() {
+        let mut parity = LargeTruthTable::const0(8);
+        for a in 0..256usize {
+            parity.set_bit(a, a.count_ones() % 2 != 0);
+        }
+        let mut memo = SopMemo::default();
+        let expected = memo.replacements_for(&parity, &[0; 8]);
+        let nodes = expected
+            .iter()
+            .map(|sop| sop.factored.nodes.len())
+            .sum::<usize>();
+        let fit = SopMemo::MAX_CACHED_NODES / nodes;
+        assert!((1..SopMemo::MAX_ENTRIES).contains(&fit));
+        assert_eq!(memo.cached_variant_nodes, nodes);
+        assert_eq!(memo.replacements_for(&parity, &[0; 8]), expected);
+        assert_eq!(memo.cached_variant_nodes, nodes);
+
+        // Shifting all input arrivals leaves the balanced shape unchanged
+        // but produces a distinct memo key with the same node count.
+        for arrival in 1..fit {
+            assert_eq!(memo.replacements_for(&parity, &[arrival; 8]), expected);
+        }
+        assert_eq!(memo.variants.len(), fit);
+        assert_eq!(memo.cached_variant_nodes, fit * nodes);
+        assert_eq!(memo.replacements_for(&parity, &[fit; 8]), expected);
+        assert_eq!(memo.variants.len(), 1);
+        assert_eq!(memo.cached_variant_nodes, nodes);
+    }
+
+    #[test]
+    fn memoized_sop_variants_preserve_order_shape_and_polarity() {
+        let mut tt = LargeTruthTable::const0(4);
+        tt.set_bit(15, true);
+        let left_late = [10, 9, 0, 0];
+        let right_late = [0, 0, 9, 10];
+        let mut memo = SopMemo::default();
+
+        let expected = |truth: &LargeTruthTable, depths: &[usize]| {
+            SopMemo::default().build_replacements(truth, depths)
+        };
+        assert_ne!(expected(&tt, &left_late), expected(&tt, &right_late));
+        for _ in 0..2 {
+            for truth in [tt, tt.not()] {
+                for depths in [&left_late, &right_late] {
+                    assert_eq!(
+                        memo.replacements_for(&truth, depths),
+                        expected(&truth, depths),
+                    );
+                }
+            }
+        }
+        assert_eq!(memo.variants.len(), 4);
+    }
+
+    #[test]
     fn test_arrival_balanced_sop_variant_can_reduce_depth() {
         let mut tt = LargeTruthTable::const0(4);
         for assignment in 0..LargeTruthTable::bit_count(4) {
@@ -1813,7 +1928,7 @@ mod tests {
         }
 
         let leaf_depths = [10, 9, 0, 0];
-        let variants = derive_sop_replacements(&tt, &leaf_depths);
+        let variants = SopMemo::default().replacements_for(&tt, &leaf_depths);
         let depths: BTreeSet<usize> = variants
             .iter()
             .filter(|sop| !sop.output_negated)

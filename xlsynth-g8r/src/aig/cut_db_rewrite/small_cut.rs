@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! 4-input cut enumeration and cut-db candidate construction.
+//! Enumerate cuts with at most four distinct input signals and look up their
+//! truth tables in the small-circuit database.
 
 use std::time::Instant;
 
@@ -20,6 +21,7 @@ const EMPTY_LEAF_OPERAND: AigOperand = AigOperand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct LeafSet {
     len: u8,
+    signature: u32,
     leaves: [AigOperand; 4],
 }
 
@@ -27,6 +29,7 @@ impl LeafSet {
     fn empty() -> Self {
         Self {
             len: 0,
+            signature: 0,
             leaves: [EMPTY_LEAF_OPERAND; 4],
         }
     }
@@ -34,6 +37,7 @@ impl LeafSet {
     fn singleton(leaf: AigOperand) -> Self {
         let mut out = Self::empty();
         out.leaves[0] = leaf;
+        out.signature = 1 << (leaf.node.id % u32::BITS as usize);
         out.len = 1;
         out
     }
@@ -46,59 +50,48 @@ impl LeafSet {
         &self.leaves[..self.len()]
     }
 
-    fn iter(&self) -> impl Iterator<Item = &AigOperand> {
-        self.as_slice().iter()
-    }
-
     pub(super) fn to_vec(self) -> Vec<AigOperand> {
         self.as_slice().to_vec()
     }
 
-    fn union(lhs: Self, rhs: Self) -> Option<Self> {
-        let lhs = lhs.as_slice();
-        let rhs = rhs.as_slice();
-        let mut out = [EMPTY_LEAF_OPERAND; 4];
-        let mut out_len = 0usize;
-        let mut i = 0usize;
-        let mut j = 0usize;
-        while i < lhs.len() || j < rhs.len() {
-            let next = if i == lhs.len() {
-                let value = rhs[j];
-                j += 1;
-                value
-            } else if j == rhs.len() {
-                let value = lhs[i];
-                i += 1;
-                value
-            } else if lhs[i] < rhs[j] {
-                let value = lhs[i];
-                i += 1;
-                value
-            } else if rhs[j] < lhs[i] {
-                let value = rhs[j];
-                j += 1;
-                value
-            } else {
-                let value = lhs[i];
-                i += 1;
-                j += 1;
-                value
-            };
+    /// Join two boundaries once, recording the slots needed to embed both
+    /// child truth tables. For `{a,c}` and `{b,c}`, the merged inputs are
+    /// `{a,b,c}` and the child slots are `{0,2}` and `{1,2}`.
+    fn union(&self, other: &Self) -> Option<(Self, u8, u8)> {
+        // Five set bits prove there are at least five distinct leaves. IDs
+        // that share a signature bit still get the exact merge below.
+        let signature = self.signature | other.signature;
+        if signature.count_ones() > 4 {
+            return None;
+        }
+        let (mut left, mut right) = (self.as_slice(), other.as_slice());
+        let mut union = Self::empty();
+        union.signature = signature;
+        let (mut left_slots, mut right_slots) = (0, 0);
 
-            if out_len != 0 && out[out_len - 1] == next {
-                continue;
-            }
-            if out_len == out.len() {
+        while !left.is_empty() || !right.is_empty() {
+            if union.len() == 4 {
                 return None;
             }
-            out[out_len] = next;
-            out_len += 1;
+            let (leaf, from_left, from_right) = match (left.first(), right.first()) {
+                (Some(a), Some(b)) => (*a.min(b), a <= b, b <= a),
+                (Some(a), None) => (*a, true, false),
+                (None, Some(b)) => (*b, false, true),
+                (None, None) => unreachable!(),
+            };
+            let slot = 1 << union.len();
+            if from_left {
+                left_slots |= slot;
+                left = &left[1..];
+            }
+            if from_right {
+                right_slots |= slot;
+                right = &right[1..];
+            }
+            union.leaves[union.len()] = leaf;
+            union.len += 1;
         }
-
-        Some(Self {
-            len: out_len as u8,
-            leaves: out,
-        })
+        Some((union, left_slots, right_slots))
     }
 }
 
@@ -129,8 +122,18 @@ fn push_unique_cut(cuts: &mut Vec<Cut>, cut: Cut) -> bool {
     }
 }
 
-fn union_cut_leaves(lhs: LeafSet, rhs: LeafSet) -> Option<LeafSet> {
-    LeafSet::union(lhs, rhs)
+impl Cut {
+    fn join_and(&self, rhs: &Self, lhs_negated: bool, rhs_negated: bool) -> Option<Self> {
+        let (leaves, lhs_slots, rhs_slots) = self.leaves.union(&rhs.leaves)?;
+        let lhs_tt = self.tt.embed_inputs(lhs_slots);
+        let rhs_tt = rhs.tt.embed_inputs(rhs_slots);
+        let lhs_tt = if lhs_negated { lhs_tt.not() } else { lhs_tt };
+        let rhs_tt = if rhs_negated { rhs_tt.not() } else { rhs_tt };
+        Some(Self {
+            leaves,
+            tt: lhs_tt.and(rhs_tt),
+        })
+    }
 }
 
 fn sort_and_prune_cuts(mut cuts: Vec<Cut>, max_cuts_per_node: usize) -> Vec<Cut> {
@@ -140,41 +143,6 @@ fn sort_and_prune_cuts(mut cuts: Vec<Cut>, max_cuts_per_node: usize) -> Vec<Cut>
         cuts.truncate(max_cuts_per_node);
     }
     cuts
-}
-
-fn negate_tt(tt: TruthTable16) -> TruthTable16 {
-    tt.not()
-}
-
-/// Remaps `tt` from `old_leaves` order into the larger `union_leaves` order.
-fn embed_tt_into_union(
-    tt: TruthTable16,
-    old_leaves: LeafSet,
-    union_leaves: LeafSet,
-) -> TruthTable16 {
-    if old_leaves.len() == 0 {
-        return tt;
-    }
-    let mut map: [usize; 4] = [0; 4];
-    for (i, leaf) in old_leaves.iter().enumerate() {
-        let j = union_leaves
-            .as_slice()
-            .binary_search(leaf)
-            .expect("old leaf must appear in union");
-        map[i] = j;
-    }
-    let old_len = old_leaves.len();
-    let mut out = TruthTable16::const0();
-    for assign in 0u8..16 {
-        let mut old_assign: u8 = 0;
-        for i in 0..old_len {
-            let bit = ((assign >> map[i]) & 1) != 0;
-            old_assign |= (bit as u8) << i;
-        }
-        let bit = tt.get_bit(old_assign);
-        out.set_bit(assign, bit);
-    }
-    out
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -247,17 +215,10 @@ impl CutEnumerator {
             .as_slice()
     }
 
-    fn cuts_for_operand_from_memo(&self, op: AigOperand) -> Vec<Cut> {
-        let mut cuts = self.memo[op.node.id]
-            .as_ref()
+    fn memoized_cuts(&self, node: AigRef) -> &[Cut] {
+        self.memo[node.id]
+            .as_deref()
             .expect("operand cuts should be computed before parent")
-            .clone();
-        if op.negated {
-            for c in &mut cuts {
-                c.tt = negate_tt(c.tt);
-            }
-        }
-        cuts
     }
 
     fn ensure_cuts_for_node(&mut self, g: &GateFn, root: AigRef) {
@@ -343,23 +304,14 @@ impl CutEnumerator {
         };
 
         if let Some((a, b)) = node_kind {
-            let a_cuts = self.cuts_for_operand_from_memo(a);
-            let b_cuts = self.cuts_for_operand_from_memo(b);
-            'pairs: for ca in &a_cuts {
-                for cb in &b_cuts {
-                    let Some(union_leaves) = union_cut_leaves(ca.leaves, cb.leaves) else {
+            let a_cuts = self.memoized_cuts(a.node);
+            let b_cuts = self.memoized_cuts(b.node);
+            'pairs: for ca in a_cuts {
+                for cb in b_cuts {
+                    let Some(merged) = ca.join_and(cb, a.negated, b.negated) else {
                         continue;
                     };
-                    let ca_tt = embed_tt_into_union(ca.tt, ca.leaves, union_leaves);
-                    let cb_tt = embed_tt_into_union(cb.tt, cb.leaves, union_leaves);
-                    let tt = ca_tt.and(cb_tt);
-                    push_unique_cut(
-                        &mut cuts,
-                        Cut {
-                            leaves: union_leaves,
-                            tt,
-                        },
-                    );
+                    push_unique_cut(&mut cuts, merged);
                     if self.max_cuts_per_node != 0 && cuts.len() >= self.max_cuts_per_node {
                         self.stats.truncated_nodes += 1;
                         break 'pairs;
@@ -434,4 +386,77 @@ pub(super) fn choose_candidate_replacements_for_root(
     });
     cands.truncate(16);
     cands
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn joined_cuts_match_scalar_projection_on_overlaps_and_signature_collisions() {
+        // 1, 33 and 65 share a signature bit. Both polarities of node 1
+        // are distinct physical operands in the sorted union.
+        let operands = [
+            (1, false),
+            (1, true),
+            (2, false),
+            (33, false),
+            (34, false),
+            (65, true),
+        ]
+        .map(|(id, negated)| AigOperand {
+            node: AigRef { id },
+            negated,
+        });
+        let mut cuts = Vec::new();
+        for mask in 0..1u8 << operands.len() {
+            if mask.count_ones() > 4 {
+                continue;
+            }
+            let mut leaves = LeafSet::empty();
+            for (i, leaf) in operands.iter().enumerate() {
+                if mask & (1 << i) != 0 {
+                    leaves.leaves[leaves.len()] = *leaf;
+                    leaves.len += 1;
+                    leaves.signature |= LeafSet::singleton(*leaf).signature;
+                }
+            }
+            let tt = if mask == 0 {
+                TruthTable16::const0()
+            } else {
+                TruthTable16(0xd913u16.rotate_left(mask as u32))
+            };
+            cuts.push(Cut { leaves, tt });
+        }
+        for lhs in &cuts {
+            for rhs in &cuts {
+                let mut expected = lhs.leaves.to_vec();
+                expected.extend_from_slice(rhs.leaves.as_slice());
+                expected.sort();
+                expected.dedup();
+                if expected.len() > 4 {
+                    assert!(lhs.join_and(rhs, false, false).is_none());
+                    continue;
+                }
+                let eval = |cut: &Cut, row: u8| {
+                    let mut index = 0;
+                    for (i, leaf) in cut.leaves.as_slice().iter().enumerate() {
+                        let slot = expected.iter().position(|other| other == leaf).unwrap();
+                        index |= ((row >> slot) & 1) << i;
+                    }
+                    cut.tt.get_bit(index)
+                };
+                for (a, b) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let merged = lhs.join_and(rhs, a, b).unwrap();
+                    assert_eq!(merged.leaves.as_slice(), expected.as_slice());
+                    for row in 0..16 {
+                        assert_eq!(
+                            merged.tt.get_bit(row),
+                            (eval(lhs, row) ^ a) && (eval(rhs, row) ^ b)
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

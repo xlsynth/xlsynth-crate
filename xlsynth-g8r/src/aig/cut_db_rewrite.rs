@@ -37,7 +37,7 @@ mod small_cut;
 
 use self::cut_replacement_cost::{gate_count_diff_for_replacement, materialize_replacement};
 use self::large_cone::{
-    FactoredExpr, FactoredExprNode, SopCoverMemo, SopReplacement, SopVariantKind,
+    FactoredExpr, FactoredExprNode, SopMemo, SopReplacement, SopVariantKind,
     construct_large_cone_candidate_replacements_for_root, sop_depth_from_inputs,
 };
 use self::small_cut::{CutEnumerationStats, CutEnumerator, choose_candidate_replacements_for_root};
@@ -904,6 +904,26 @@ struct RootAreaCandidates {
     candidates_considered: usize,
 }
 
+impl RootAreaCandidates {
+    /// Return candidates in the order the caller should try them. A stable
+    /// sort preserves generation order when all six priorities tie.
+    fn ranked(mut candidates: Vec<AreaCandidate>, candidates_considered: usize) -> Self {
+        candidates.sort_by(|a, b| {
+            b.area_gain
+                .cmp(&a.area_gain)
+                .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
+                .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
+                .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
+                .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
+                .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
+        });
+        Self {
+            candidates,
+            candidates_considered,
+        }
+    }
+}
+
 struct ConstructedLargeConeCandidates {
     candidates: Vec<LargeConeCandidate>,
     candidates_considered: usize,
@@ -1067,20 +1087,7 @@ fn choose_area_candidate_replacements_for_root(
         }
     }
 
-    cands.sort_by(|a, b| {
-        b.area_gain
-            .cmp(&a.area_gain)
-            .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-            .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-            .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-            .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-            .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-    });
-
-    RootAreaCandidates {
-        candidates: cands,
-        candidates_considered,
-    }
+    RootAreaCandidates::ranked(cands, candidates_considered)
 }
 
 /// Applies depth and exact area-cost acceptance to already-constructed
@@ -1153,20 +1160,7 @@ fn cost_large_cone_area_candidates_for_root(
         });
     }
 
-    cands.sort_by(|a, b| {
-        b.area_gain
-            .cmp(&a.area_gain)
-            .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-            .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-            .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-            .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-            .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-    });
-
-    RootAreaCandidates {
-        candidates: cands,
-        candidates_considered: constructed.candidates_considered,
-    }
+    RootAreaCandidates::ranked(cands, constructed.candidates_considered)
 }
 
 fn filter_large_cone_depth_candidates_for_root(
@@ -1731,18 +1725,7 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
             };
             candidates_considered += root_result.candidates_considered;
             area_candidate_count += root_result.candidates.len();
-            let mut root_candidates = root_result.candidates;
-            root_candidates.sort_by(|a, b| {
-                b.area_gain
-                    .cmp(&a.area_gain)
-                    .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-                    .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-                    .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-                    .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-                    .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-            });
-
-            if let Some(cand) = root_candidates.into_iter().next() {
+            if let Some(cand) = root_result.candidates.into_iter().next() {
                 let first_new_id = structural_hash_state.gate_fn().gates.len();
                 debug_assert_eq!(
                     structural_hash_state.live_and_count(),
@@ -1949,7 +1932,7 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
 
 fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) -> GateFn {
     let mut cur = g.clone();
-    let mut sop_cover_memo = SopCoverMemo::default();
+    let mut sop_memo = SopMemo::default();
 
     {
         let t_iter0 = Instant::now();
@@ -2021,7 +2004,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                 &mut candidate_evals,
                 &mut candidate_stats,
                 &structural_hash_state,
-                &mut sop_cover_memo,
+                &mut sop_memo,
             );
             large_candidate_count += constructed.candidates.len();
             let root_result = filter_large_cone_depth_candidates_for_root(
@@ -2229,7 +2212,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
 fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateFn {
     let mut cur = g.clone();
     let mut iter: usize = 0;
-    let mut sop_cover_memo = SopCoverMemo::default();
+    let mut sop_memo = SopMemo::default();
 
     loop {
         if opts.max_iterations != 0 && iter >= opts.max_iterations {
@@ -2320,7 +2303,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                 &mut candidate_evals,
                 &mut candidate_stats,
                 &structural_hash_state,
-                &mut sop_cover_memo,
+                &mut sop_memo,
             );
             let root_result = cost_large_cone_area_candidates_for_root(
                 constructed,
@@ -2333,18 +2316,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             );
             candidates_considered += root_result.candidates_considered;
             area_candidate_count += root_result.candidates.len();
-            let mut root_candidates = root_result.candidates;
-            root_candidates.sort_by(|a, b| {
-                b.area_gain
-                    .cmp(&a.area_gain)
-                    .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-                    .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-                    .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-                    .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-                    .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-            });
-
-            for cand in root_candidates {
+            for cand in root_result.candidates {
                 debug_assert_eq!(
                     structural_hash_state.live_and_count(),
                     cand.before_live_and_count,
