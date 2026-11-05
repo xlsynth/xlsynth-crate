@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+package map_example
+
+fn widen(x: bits[4] id=1) -> bits[8] {
+  ret sign_ext.2: bits[8] = sign_ext(x, new_bit_count=8, id=2)
+}
+
+top fn transform(a: bits[4][3] id=3) -> bits[8][3] {
+  ret map.4: bits[8][3] = map(a, to_apply=widen, id=4)
+}

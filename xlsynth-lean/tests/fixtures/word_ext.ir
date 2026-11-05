@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+package extensions
+
+top fn extensions(a: bits[8] id=1, b: bits[8] id=2, en: bits[1] id=3) -> (bits[1], bits[4], bits[5], (bits[9], bits[4]), bits[13], bits[7]) {
+  carry: bits[1] = ext_carry_out(a, b, en, id=4)
+  prio: bits[4] = ext_prio_encode(a, lsb_prio=false, id=5)
+  count: bits[5] = ext_clz(b, offset=3, new_bit_count=5, id=6)
+  norm: (bits[9], bits[4]) = ext_normalize_left(a, shift_offset=1, normalized_bit_count=9, clz_bit_count=4, id=7)
+  mask: bits[13] = ext_mask_low(b, id=8)
+  sum: bits[7] = ext_nary_add(a, b, en, signed=[true, false, false], negated=[false, true, false], id=9)
+  ret result: (bits[1], bits[4], bits[5], (bits[9], bits[4]), bits[13], bits[7]) = tuple(carry, prio, count, norm, mask, sum, id=10)
+}

@@ -24,6 +24,17 @@ impl fmt::Display for InterfaceDirection {
 /// Error returned while exporting, evaluating, or checking a proof in Lean.
 #[derive(Debug, thiserror::Error)]
 pub enum LeanError {
+    #[error("invalid IR function: {0}")]
+    InvalidIr(String),
+
+    #[error("unsupported Lean translation in function {function:?} at {op} id={id}: {reason}")]
+    UnsupportedIr {
+        function: String,
+        op: String,
+        id: usize,
+        reason: &'static str,
+    },
+
     #[error("invalid Lean module name: {0}")]
     InvalidModuleName(String),
 

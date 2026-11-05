@@ -1,8 +1,9 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports combinational `GateFn` graphs to Lean, evaluates them
-through Lean, and checks user-supplied Lean equivalence proofs. Evaluation
-returns the computed output values to Rust. Native `.g8r` and `.g8rbin` files
+`xlsynth-lean` exports pure XLS IR functions and combinational `GateFn` graphs
+to executable Lean. Both exporters can evaluate batches of inputs and return
+typed results to Rust. The gate exporter also supports user-supplied Lean
+equivalence proofs. Native `.g8r` and `.g8rbin` files
 can be loaded with the existing `xlsynth-g8r` reader before calling this crate.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
@@ -233,6 +234,37 @@ update so `include_str` reads the current `.aag` contents. Proof modules can
 then import the module and use its `circuit` directly. Native g8r files remain
 the stored source artifacts.
 
+## Word-level IR functions
+
+`export_ir_function(&package, top, &module_name)` exports a PIR package entry
+as a `LeanFunction`. `write_to` writes its Lean source, companion IR module,
+and toolchain pin. The generated `eval` accepts arguments in XLS signature
+order. `bits[N]` becomes `BitVec N`, arrays become `Vector α n`, and tuples
+become right-nested products ending in `Unit`. For example, a two-field
+tuple value is `(a, b, ())`. `evalPacked` packs the first argument at the
+low end. Within a tuple its last field is least significant, and within an
+array its first element is least significant. Every array dimension in the
+selected function and its callees must have positive length.
+
+The exporter supports pure arithmetic (including mixed-width signed and
+unsigned multiply), bitwise operations, comparisons, shifts, reductions,
+slices and updates, extensions, encoding/decoding, ordinary, priority and
+one-hot selects, gates, tuples, arrays, `invoke`, and fixed-array `map`.
+PIR extension operations use the existing desugaring pass. Loop, token,
+event, block, and partial-product (`smulp`, `umulp`) operations are outside
+the supported function fragment. Array reads clamp, slices repeat the final
+element, and out-of-range writes preserve the array. For operations marked
+`assumed_in_bounds`, equivalence to a successful PIR evaluation assumes
+the promised bounds.
+
+Use `LeanEvaluator::eval_ir_function_batch(&function, &argument_lists)` to
+compile the standalone module written by `LeanFunction::write_to`. A runner
+imports that module and evaluates all argument lists in one request, returning
+one typed `IrValue` per case. `LeanEvaluator::eval_ir_functions` accepts a slice of
+`LeanFunctionInputs { function, input_cases }` and runs all functions in one
+Lean invocation. Each function has its own namespace and may have a different
+signature. Results follow function order, then input order.
+
 ## Validation
 
 Rust export tests run normally:
@@ -246,6 +278,13 @@ Lean integration tests are explicitly enabled with a toolchain path:
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
   cargo test -p xlsynth-lean --test lean_eval -- --ignored
+```
+
+Run the real Lean word-level evaluation tests with the same toolchain:
+
+```sh
+XLSYNTH_LEAN=/path/to/lean/bin/lean \
+  cargo test -p xlsynth-lean --test ir_fn -- --include-ignored
 ```
 
 Proof integration tests use the same explicit toolchain configuration:

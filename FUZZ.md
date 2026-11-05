@@ -346,6 +346,32 @@ Primarily tests:
 - Aggregate input/output flattening stays aligned between PIR and g8r evaluation
 - Broad concrete-value equivalence at higher throughput than formal proof
 
+### xlsynth-lean/fuzz/fuzz_targets/fuzz_ir_fn_lean_eval.rs
+
+Generates pure, acyclic PIR packages, exports their selected function directly
+to word-level Lean, and compares every typed output with `eval_fn_in_package`
+on the original package. Each fuzz input checks one exported function with
+32 argument sets. The fuzzer imports the generated module using a name
+selected from `Generated.Function`, `BitVec`, `Vector`, and `Nat.Generated` by
+hashing the input. This exercises Lean name resolution in different namespaces.
+
+The first eight bytes seed the argument sampler (zero-padded for short inputs).
+Additional bytes, up to a total of 3,072, drive graph generation directly so
+libFuzzer can mutate and shrink the graph. For inputs of eight bytes or fewer,
+the same seed drives `RngEntropy` with a budget of 1 to 32 body nodes.
+Packages include nested arrays/tuples, calls, maps,
+PIR extensions, zero-width and wide bits. The generator excludes loops,
+events, and partial-product multiplies and only
+generates proven-safe bounds promises. Unexpected export, elaboration,
+execution, or value discrepancies fail the sample. The external Lean
+executable is required at startup.
+
+```bash
+XLSYNTH_LEAN=/path/to/lean/bin/lean cargo fuzz run \
+  --fuzz-dir xlsynth-lean/fuzz --features external-lean --sanitizer none \
+  fuzz_ir_fn_lean_eval -- -timeout=45 -max_len=3072
+```
+
 ### xlsynth-lean/fuzz/fuzz_targets/fuzz_gate_fn_lean_eval.rs
 
 Differentially evaluates bounded, directly generated combinational `GateFn`s
