@@ -148,12 +148,25 @@ Full replay additionally interprets concrete entry-point arguments. The
 ## IR converter audit coverpoints
 
 The production CLI campaign uses a separate full libxls build for in-process
-feedback. On its pinned XLS sources, apply `update_arity_coverpoints.patch`,
-`guard_and_width_slice_coverpoints.patch`, and `semantic_audit_coverpoints.patch`
-in that order. The last patch adds 28 named sanitizer counters across loop
+feedback. On its pinned XLS sources with the explicit loop return from #5262,
+apply `update_arity_coverpoints.patch`, `guard_and_width_slice_coverpoints.patch`,
+`semantic_audit_coverpoints.patch`, and `audit_v1_coverpoints.patch` in that
+order. The third patch adds 28 named sanitizer counters across loop
 returns, cast and slice evaluation, pattern binding, conditional activation,
 one-hot priorities, and map lowering. Builtin maps distinguish newly synthesized
 wrappers, reuse of a synthetic wrapper, and reuse of a DSLX-defined function.
 The last case can indicate a mangled-name collision. Set `DSLX_AUDIT_TRACE=1`
 during isolated CLI replay to print hit names on stderr, including before an
 abort. The production CLI remains the source of the IR passed to the prover.
+
+The fourth patch adds 11 counters for the audit-v1 grammar. The lexical binding
+counter fires when insertion finds an existing name with a different constexpr
+value. Decode counters distinguish a fully spelled call, a result width equal
+to the input domain, and a result width beyond it. An assertion counter records
+`assert_fmt!` lowering. Effect counters observe an inline call to a
+token-requiring function used as an `array_size` operand or a struct-update
+base. The latter counts zero, one and multiple inherited fields separately.
+The constexpr block counters record a skipped wildcard call and a skipped let
+whose right-hand side lacks a known constexpr value. The focused checker
+determines whether the observed path changes the value, type, event count or
+acceptance of the program.

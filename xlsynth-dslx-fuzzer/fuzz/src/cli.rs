@@ -3,7 +3,8 @@
 //! Checks the standalone converter's stdout against the independent reference.
 
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Command, Output};
+use xlsynth_dslx_fuzzer::audit_contracts::AuditCase;
 use xlsynth_dslx_fuzzer::converter_contracts::ContractCase;
 use xlsynth_dslx_fuzzer::{Grammar, PreparedSample, Sample, SourceModule};
 use xlsynth_pir::ir::{NaryOp, NodePayload};
@@ -46,9 +47,14 @@ pub fn classify_cli(
         profile,
         false,
     )?;
-    let result = classify_prepared(&prepared, grammar)?;
-    native_feedback(&prepared, stdlib, directory.path(), native)?;
-    Ok(result)
+    let verdict = classify_prepared(&prepared, grammar);
+    // A successfully converted counterexample supplies useful mutation edges.
+    // Preserve the primary CLI finding if secondary feedback also returns an
+    // error.
+    let feedback = native_feedback(&prepared, stdlib, directory.path(), native);
+    let outcome = verdict?;
+    feedback?;
+    Ok(outcome)
 }
 
 /// Compares a focused program with its independent reference, including the
@@ -57,6 +63,53 @@ pub fn check_contract(
     case: ContractCase,
     converter: &Path,
     stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    check_semantic_contract(case, converter, stdlib, None)
+}
+
+/// Checks the observation associated with an audit-v1 case.
+pub fn check_audit(
+    case: AuditCase,
+    converter: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    match case {
+        AuditCase::Semantic(case) => check_contract(case, converter, stdlib),
+        AuditCase::Traces { case, expected } => {
+            check_semantic_contract(case, converter, stdlib, Some(expected))
+        }
+        AuditCase::ConstexprFailure { modules } => {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let output = run_converter(&modules, converter, stdlib, directory.path(), None, true)?;
+            if output.status.success() {
+                return Err(CheckFailure::InvalidOutput(format!(
+                    "Converter accepted a module constant containing a failing assertion\n{modules:#?}"
+                )));
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // A crash, a syntax error or an unrelated rejection cannot satisfy
+            // the contract.
+            let unresolved_block = stderr.contains("No constexpr value found for node")
+                && stderr.contains("(StatementBlock)");
+            let assertion_failure = stderr
+                .lines()
+                .any(|line| line.contains("FailureError") && line.contains("audit_const_assert"));
+            if output.status.code() == Some(1) && (unresolved_block || assertion_failure) {
+                Ok(EquivResult::Proved)
+            } else {
+                Err(rejection(&output, &modules))
+            }
+        }
+    }
+}
+
+/// Proves the public interface and, for event contracts, observes the CLI's IR
+/// at a fixed input.
+fn check_semantic_contract(
+    case: ContractCase,
+    converter: &Path,
+    stdlib: &Path,
+    expected_traces: Option<usize>,
 ) -> Result<EquivResult, CheckFailure> {
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let prepared = convert_modules(
@@ -68,16 +121,28 @@ pub fn check_contract(
         None,
         true,
     )?;
-    xlsynth::IrPackage::parse_ir(&prepared.converted_ir, None).map_err(|error| {
+    let package = xlsynth::IrPackage::parse_ir(&prepared.converted_ir, None).map_err(|error| {
         CheckFailure::InvalidOutput(format!(
             "C++ IR parser rejected converter output: {error}\n{prepared:#?}"
         ))
     })?;
-    let result = classify_with_assertions(&prepared, AssertionSemantics::Same);
-    // CLI rejections are returned before this point. Successful conversions,
-    // including wrong-value cases, can feed in-process native counters.
-    native_feedback(&prepared, stdlib, directory.path(), None)?;
-    let outcome = result?;
+    let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same);
+    let feedback = native_feedback(&prepared, stdlib, directory.path(), None);
+    let outcome = verdict?;
+    if let Some(expected) = expected_traces {
+        let top = package
+            .get_function(&prepared.converted_top)
+            .map_err(|e| e.to_string())?;
+        let jit = xlsynth::IrFunctionJit::new(&top).map_err(|e| e.to_string())?;
+        let input = xlsynth::XlsIrValue::make_ubits(1, 1).map_err(|e| e.to_string())?;
+        let events = jit.run(&[input]).map_err(|e| e.to_string())?;
+        if events.trace_messages.len() != expected || !events.assert_messages.is_empty() {
+            return Err(CheckFailure::Disproved(format!(
+                "At x=true DSLX bytecode expects {expected} traces and no assertions; CLI IR produced traces {:?} and assertions {:?}\n{prepared:#?}",
+                events.trace_messages, events.assert_messages
+            )));
+        }
+    }
     if let (EquivResult::Proved, Some(limit)) = (&outcome, case.max_and_nodes) {
         let package = Parser::new(&prepared.converted_ir)
             .parse_package()
@@ -94,6 +159,7 @@ pub fn check_contract(
             )));
         }
     }
+    feedback?;
     Ok(outcome)
 }
 
@@ -106,7 +172,38 @@ fn convert_modules(
     profile: Option<&Path>,
     emit_assert: bool,
 ) -> Result<PreparedSample, CheckFailure> {
-    for module in &modules {
+    let output = run_converter(&modules, converter, stdlib, directory, profile, emit_assert)?;
+    if !output.status.success() {
+        return Err(rejection(&output, &modules));
+    }
+    Ok(PreparedSample {
+        modules,
+        expected_ir,
+        converted_ir: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
+        converted_top: xlsynth::mangle_dslx_name("sample", "main")
+            .map_err(|error| error.to_string())?,
+    })
+}
+
+fn rejection(output: &Output, modules: &[SourceModule]) -> CheckFailure {
+    CheckFailure::ConverterRejected(format!(
+        "ir_converter_main failed ({}): {}\n{modules:#?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+/// Writes a sample into its own import directory and captures the standalone
+/// DUT's verdict.
+fn run_converter(
+    modules: &[SourceModule],
+    converter: &Path,
+    stdlib: &Path,
+    directory: &Path,
+    profile: Option<&Path>,
+    emit_assert: bool,
+) -> Result<Output, CheckFailure> {
+    for module in modules {
         let stem = Path::new(&module.name);
         if !stem
             .components()
@@ -136,22 +233,11 @@ fn convert_modules(
     if let Some(profile) = profile {
         command.env("LLVM_PROFILE_FILE", profile);
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("could not execute {}: {error}", converter.display()))?;
-    if !output.status.success() {
-        return Err(CheckFailure::ConverterRejected(format!(
-            "ir_converter_main failed ({}): {}\n{modules:#?}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )));
-    }
-    Ok(PreparedSample {
-        modules,
-        expected_ir,
-        converted_ir: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
-        converted_top: xlsynth::mangle_dslx_name("sample", "main")
-            .map_err(|error| error.to_string())?,
+    command.output().map_err(|error| {
+        CheckFailure::Checker(format!(
+            "could not execute {}: {error}",
+            converter.display()
+        ))
     })
 }
 

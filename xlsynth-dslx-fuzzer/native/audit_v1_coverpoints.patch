@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: Apache-2.0
+
+--- a/xls/dslx/ir_convert/function_converter.cc
++++ b/xls/dslx/ir_convert/function_converter.cc
+@@ -1225,9 +1225,29 @@
+ DSLX_AUDIT_POINT(RuntimeUnpackSignedElement)
+ DSLX_AUDIT_POINT(TokenMapFree)
+ DSLX_AUDIT_POINT(TokenMapReceiver)
++DSLX_AUDIT_POINT(ArraySizeTokenCall)
++DSLX_AUDIT_POINT(DecodeAtInputDomain)
++DSLX_AUDIT_POINT(DecodeFullySpelled)
++DSLX_AUDIT_POINT(DecodeOutputBeyondDomain)
++DSLX_AUDIT_POINT(FormatAssertion)
++DSLX_AUDIT_POINT(SplatTokenCallMultipleInherited)
++DSLX_AUDIT_POINT(SplatTokenCallOneInherited)
++DSLX_AUDIT_POINT(SplatTokenCallZeroInherited)
+ #undef DSLX_AUDIT_POINT
+
+ static thread_local int audit_alternate_depth = 0;
++
++// Restrict effect probes to an inline DSLX call whose resolved callee can emit
++// a token. A name referring to an already evaluated call is a separate control.
++static bool IsAuditTokenCall(const Expr* expr, const TypeInfo& type_info) {
++  auto* call = dynamic_cast<const Invocation*>(expr);
++  if (call == nullptr) {
++    return false;
++  }
++  auto data = type_info.GetInvocationData(call);
++  return data.has_value() && data->callee() != nullptr &&
++         type_info.GetRequiresImplicitToken(*data->callee()).value_or(false);
++}
+
+ absl::Status FunctionConverter::HandleCast(const Cast* node) {
+   XLS_RETURN_IF_ERROR(Visit(node->expr()));
+@@ -2900,6 +2920,7 @@
+       << "(), but no implicit token is present for caller @ "
+       << node->span().ToString(file_table());
+   if (node->macro() == "assert_fmt!") {
++    CoverAuditFormatAssertion();
+     XLS_RETURN_IF_ERROR(Visit(node->condition().value()));
+     XLS_ASSIGN_OR_RETURN(BValue predicate, Use(node->condition().value()));
+
+@@ -5090,6 +5111,16 @@
+   XLS_ASSIGN_OR_RETURN(TypeDefinition type_definition,
+                        ToTypeDefinition(node->struct_ref()));
+   XLS_ASSIGN_OR_RETURN(StructDefBase * def, DerefStructOrProc(type_definition));
++  if (IsAuditTokenCall(node->splatted(), *current_type_info_)) {
++    const size_t inherited = def->members().size() - updates.size();
++    if (inherited == 0) {
++      CoverAuditSplatTokenCallZeroInherited();
++    } else if (inherited == 1) {
++      CoverAuditSplatTokenCallOneInherited();
++    } else {
++      CoverAuditSplatTokenCallMultipleInherited();
++    }
++  }
+   std::vector<BValue> members;
+   for (int64_t i = 0; i < def->members().size(); ++i) {
+     const std::string& k = def->GetMemberName(i);
+@@ -5507,6 +5538,9 @@
+
+ absl::Status FunctionConverter::HandleBuiltinArraySize(const Invocation* node) {
+   XLS_RET_CHECK_EQ(node->args().size(), 1);
++  if (IsAuditTokenCall(node->args()[0], *current_type_info_)) {
++    CoverAuditArraySizeTokenCall();
++  }
+   // All array sizes are constexpr since they're based on known types.
+   XLS_ASSIGN_OR_RETURN(InterpValue iv, current_type_info_->GetConstExpr(node));
+   XLS_ASSIGN_OR_RETURN(Value v, iv.ConvertToIr());
+@@ -5615,6 +5649,9 @@
+
+ absl::Status FunctionConverter::HandleBuiltinDecode(const Invocation* node) {
+   XLS_RET_CHECK_EQ(node->args().size(), 1);
++  if (node->explicit_parametrics().size() > 1) {
++    CoverAuditDecodeFullySpelled();
++  }
+   XLS_RET_CHECK_EQ(node->explicit_parametrics().size(), 1);
+   XLS_ASSIGN_OR_RETURN(BValue input, Use(node->args()[0]));
+   XLS_ASSIGN_OR_RETURN(
+@@ -5622,6 +5659,18 @@
+       ResolveTypeToIr(ToAstNode(node->explicit_parametrics()[0])));
+   XLS_RET_CHECK(return_type->IsBits());
+   const int64_t width = return_type->AsBitsOrDie()->bit_count();
++
++  if (input.GetType()->IsBits()) {
++    const int64_t input_width = input.GetType()->AsBitsOrDie()->bit_count();
++    if (input_width < 63) {
++      const int64_t domain = int64_t{1} << input_width;
++      if (width > domain) {
++        CoverAuditDecodeOutputBeyondDomain();
++      } else if (width == domain) {
++        CoverAuditDecodeAtInputDomain();
++      }
++    }
++  }
+
+   Def(node, [&](const SourceInfo& loc) {
+     return function_builder_->Decode(input, width, loc);
+--- a/xls/dslx/constexpr_evaluator.cc
++++ b/xls/dslx/constexpr_evaluator.cc
+@@ -16,6 +16,8 @@
+
+ #include <algorithm>
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -65,6 +67,17 @@
+ namespace xls::dslx {
+ namespace {
+
++#define DSLX_AUDIT_POINT(name)                               \
++  __attribute__((noinline)) static void CoverAudit##name() { \
++    if (std::getenv("DSLX_AUDIT_TRACE") != nullptr) {        \
++      std::fputs("DUT_AUDIT " #name "\n", stderr);           \
++    }                                                        \
++  }
++DSLX_AUDIT_POINT(LexicalBindingConflict)
++DSLX_AUDIT_POINT(ConstexprSkippedWildcardCall)
++DSLX_AUDIT_POINT(ConstexprSkippedLetUnresolved)
++#undef DSLX_AUDIT_POINT
++
+ // Creates a stack trace for an interpreter error, starting with the top (most
+ // immediate) frame. The input is a call frame vector in bottom-to-top order,
+ // plus a span string indicating the DSLX node being evaluated when the error
+@@ -228,6 +241,16 @@
+   Expr* last_expr = nullptr;
+   for (Statement* stmt : expr->statements()) {
+     if (!std::holds_alternative<Expr*>(stmt->wrapped())) {
++      if (std::holds_alternative<Let*>(stmt->wrapped())) {
++        Let* binding = std::get<Let*>(stmt->wrapped());
++        if (IsWildcardLeaf(binding->pattern()) &&
++            dynamic_cast<Invocation*>(binding->rhs()) != nullptr) {
++          CoverAuditConstexprSkippedWildcardCall();
++        }
++        if (!type_info_->IsKnownConstExpr(binding->rhs())) {
++          CoverAuditConstexprSkippedLetUnresolved();
++        }
++      }
+       continue;
+     }
+     Expr* body_expr = std::get<Expr*>(stmt->wrapped());
+@@ -718,7 +741,10 @@
+     absl::StatusOr<InterpValue> const_expr =
+         type_info->GetConstExpr(target_def);
+     if (const_expr.ok()) {
+-      env.insert({name, const_expr.value()});
++      auto [it, inserted] = env.insert({name, const_expr.value()});
++      if (!inserted && it->second != *const_expr) {
++        CoverAuditLexicalBindingConflict();
++      }
+     } else {
+       non_constexpr.insert(sample_ref);
+     }

@@ -81,26 +81,27 @@
      return CastFromArray(node, *output_type);
    }
 
-@@ -1948,6 +2000,19 @@
-   XLS_ASSIGN_OR_RETURN(BValue init,
-                        HandleForBody(node, body_converter, trip_count));
+@@ -1926,6 +1978,20 @@
 
+   // Convert the for-loop body block into its IR (function) form.
+   XLS_ASSIGN_OR_RETURN(BValue body_result, body_converter.HandleForBody(node));
 +  if (implicit_token_data_.has_value()) {
 +    CoverAuditLoopBodyTokenWrapped();
 +  } else {
-+    auto body = body_converter.Use(node->body());
++    // Compare the DSLX result with the former Build() fallback to count
++    // executions of the repaired path. BuildWithReturnValue uses body_result.
 +    auto last = ir_body_builder_ptr->GetLastValue();
-+    if (body.ok() && last.ok()) {
-+      if (body->node() != last->node()) {
++    if (last.ok()) {
++      if (body_result.node() != last->node()) {
 +        CoverAuditLoopBodyReturnMismatch();
 +      } else {
 +        CoverAuditLoopBodyReturnMatches();
 +      }
 +    }
 +  }
-   // Now the body has been built up, we can get the IR function for it.
    XLS_ASSIGN_OR_RETURN(xls::Function * ir_body_function,
-                        ir_body_builder_ptr->Build());
+                        ir_body_builder_ptr->BuildWithReturnValue(body_result));
+
 @@ -2087,6 +2152,9 @@
            const std::optional<int64_t>& source_index =
                correspondence[active_index];
