@@ -77,6 +77,7 @@ impl DslxLink {
             entry: root,
         };
         catalogue.collect_helpers()?;
+        catalogue.add_loop_bodies(block, interface);
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -663,6 +664,97 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
+    /// A concrete DSLX type alone does not retain a struct's parametric
+    /// arguments. Read the declared type of an operand at the actual caller;
+    /// a shared body can use it only when every call supplies the same type.
+    fn declared_loop_operands<'a>(
+        &self,
+        block: &'a BlockContext<'_>,
+        inputs: &BTreeMap<String, SourceType>,
+        registers: &BTreeMap<String, SourceType>,
+    ) -> BTreeMap<(&'a str, usize), Option<SourceType>> {
+        let mut operands = BTreeMap::new();
+        let callers = std::iter::once((&block.graph.graph, None))
+            .chain(block.helpers.iter().map(|&f| (&f.graph, Some(f))));
+        for (graph, caller) in callers {
+            for node in &graph.nodes {
+                let ir::NodePayload::CountedFor {
+                    body,
+                    init,
+                    invariant_args,
+                    ..
+                } = &node.payload
+                else {
+                    continue;
+                };
+                // Position zero is the iteration counter. The remaining
+                // parameters receive the initial accumulator and the captures.
+                for (index, arg) in std::iter::once(init).chain(invariant_args).enumerate() {
+                    let ty = match &graph.get_node(*arg).payload {
+                        ir::NodePayload::InputPort { name, .. } => inputs.get(name),
+                        ir::NodePayload::RegisterRead { register } => registers.get(register),
+                        ir::NodePayload::Param => caller.and_then(|f| {
+                            let signature = self.helpers.get(&f.name)?;
+                            Some(&signature.params.get(f.param_index(*arg)?)?.1)
+                        }),
+                        _ => None,
+                    };
+                    operands
+                        .entry((body.as_str(), index + 1))
+                        .and_modify(|prior: &mut Option<SourceType>| {
+                            if prior.as_ref() != ty {
+                                *prior = None;
+                            }
+                        })
+                        .or_insert_with(|| ty.cloned());
+                }
+            }
+        }
+        operands
+    }
+
+    /// Give compiler-generated loop bodies ordinary readable definitions. An IR
+    /// argument can take its caller's declared type. Otherwise it keeps its
+    /// structural representation, with no invented record or enum names.
+    fn add_loop_bodies(&mut self, block: &BlockContext<'_>, interface: &StatefulInterface) {
+        let operands = self.declared_loop_operands(block, &interface.inputs, &interface.registers);
+        for function in &block.helpers {
+            if !self.reachable.contains(function.name.as_str())
+                || !operands.contains_key(&(function.name.as_str(), 1))
+            {
+                continue;
+            }
+            let params = function
+                .param_nodes()
+                .enumerate()
+                .map(|(index, node)| {
+                    let ty = if index == 0 {
+                        let ir::Type::Bits(width) = node.ty else {
+                            return None;
+                        };
+                        SourceType::Bits { width }
+                    } else {
+                        operands
+                            .get(&(function.name.as_str(), index))
+                            .and_then(Clone::clone)
+                            .or_else(|| structural_type(&node.ty))?
+                    };
+                    Some((node.param_name().to_owned(), ty))
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(params) = params {
+                self.helpers.insert(
+                    function.name.clone(),
+                    HelperSignature {
+                        name: function.name.clone(),
+                        result: params[1].1.clone(),
+                        params,
+                    },
+                );
+            }
+        }
+    }
+
     fn with_declaration_owner<T>(
         &mut self,
         module: dslx::Module,
@@ -719,5 +811,23 @@ impl Catalogue<'_> {
             params,
             result,
         })
+    }
+}
+
+fn structural_type(ty: &ir::Type) -> Option<SourceType> {
+    match ty {
+        ir::Type::Bits(1) => Some(SourceType::Bool),
+        ir::Type::Bits(width) => Some(SourceType::Bits { width: *width }),
+        ir::Type::Tuple(items) => Some(SourceType::Tuple {
+            members: items
+                .iter()
+                .map(|item| structural_type(item))
+                .collect::<Option<_>>()?,
+        }),
+        ir::Type::Array(array) => Some(SourceType::Array {
+            element: Box::new(structural_type(&array.element_type)?),
+            size: array.element_count,
+        }),
+        ir::Type::Token => None,
     }
 }

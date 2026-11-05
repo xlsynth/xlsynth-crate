@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0
+
+struct Write { valid: bool, data: u8 }
+struct Slot { write: Write }
+struct Pool { slots: Slot[3], status: (u5, u8) }
+extern fn machine::machine(pool: Pool, mode: u2, count: u8) -> u8;
+block loop_counter(clk, pool: Pool, mode: u2) -> u8 {
+    reg count: u8 = 0;
+    count := machine::machine(pool, mode, count);
+    count
+}
