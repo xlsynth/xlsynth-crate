@@ -67,6 +67,24 @@ pub fn block_package_to_sequential_gate_fn(
         .legalize_register_controls()
 }
 
+/// Optimizes and lowers the selected block using BX clock inheritance.
+/// Each registered instance uses the top clock regardless of its local port
+/// name.
+pub fn optimize_and_lower_bx_block(
+    package: &ir::Package,
+    gatify_options: GatifyOptions,
+) -> Result<SequentialGateFn, String> {
+    let top = selected_block_name(package)?;
+    let optimized = xlsynth::optimize_ir_text(&package.to_string(), &top)
+        .map_err(|e| format!("optimizing block '{top}': {e}"))?;
+    let mut package = Parser::new(&optimized)
+        .parse_xls_package()
+        .map_err(|e| format!("reading optimized block '{top}': {e}"))?;
+    package.set_top_block(&top)?;
+    lower_block_package_with_clock_policy(&package, gatify_options, ChildClock::Inherited)?
+        .legalize_register_controls()
+}
+
 /// Lowers a flattened block, then legalizes its synchronous register controls.
 pub fn lower_block_to_sequential_gate_fn(
     block: &Block,
@@ -96,11 +114,27 @@ pub fn block_package_to_sequential_gate_fn_with_controls(
     package: &ir::Package,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
+    lower_block_package_with_clock_policy(package, gatify_options, ChildClock::MatchingName)
+}
+
+/// Specifies how a registered child's clock is associated with the top clock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildClock {
+    MatchingName,
+    Inherited,
+}
+
+/// Validates the hierarchy's clock and reset metadata before flattening it.
+fn lower_block_package_with_clock_policy(
+    package: &ir::Package,
+    gatify_options: GatifyOptions,
+    child_clock: ChildClock,
+) -> Result<SequentialGateFn, String> {
     ir_verify::verify_package(package)
         .map_err(|e| format!("block2sequential: input package validation failed: {e}"))?;
 
     let top_name = selected_block_name(package)?;
-    validate_hierarchical_sequential_metadata(package, &top_name)?;
+    validate_hierarchical_sequential_metadata(package, &top_name, child_clock)?;
     let mut inlined_package = package.clone();
     inlined_package.top = Some((top_name, MemberType::Block));
     inline_all_blocks_in_package(&mut inlined_package)
@@ -190,6 +224,7 @@ fn selected_block_name(package: &ir::Package) -> Result<String, String> {
 fn validate_hierarchical_sequential_metadata(
     package: &ir::Package,
     top_name: &str,
+    child_clock: ChildClock,
 ) -> Result<(), String> {
     let top_block = get_block(package, top_name)?;
     let mut has_registers_memo = BTreeMap::new();
@@ -199,6 +234,7 @@ fn validate_hierarchical_sequential_metadata(
         top_name,
         top_name,
         top_block,
+        child_clock,
         &mut has_registers_memo,
         &mut has_reset_writes_memo,
     )
@@ -209,6 +245,7 @@ fn validate_instantiated_sequential_metadata(
     block_name: &str,
     path: &str,
     top_block: &Block,
+    clock_policy: ChildClock,
     has_registers_memo: &mut BTreeMap<String, bool>,
     has_reset_writes_memo: &mut BTreeMap<String, bool>,
 ) -> Result<(), String> {
@@ -220,12 +257,17 @@ fn validate_instantiated_sequential_metadata(
         if subtree_has_registers(package, &instantiation.block, has_registers_memo)? {
             if let Some(child_clock) = child_block.clock_port_name() {
                 match top_block.clock_port_name() {
-                    Some(top_clock) if child_clock == top_clock => {}
-                    Some(top_clock) => {
+                    Some(top_clock)
+                        if clock_policy == ChildClock::MatchingName && child_clock != top_clock =>
+                    {
                         return Err(format!(
                             "block2sequential: registered instantiated block '{}' at '{}' declares clock '{}' incompatible with top clock '{}'",
                             instantiation.block, child_path, child_clock, top_clock
                         ));
+                    }
+                    Some(_) => {
+                        // The names match or the caller established clock
+                        // inheritance.
                     }
                     None => {
                         return Err(format!(
@@ -269,6 +311,7 @@ fn validate_instantiated_sequential_metadata(
             &instantiation.block,
             &child_path,
             top_block,
+            clock_policy,
             has_registers_memo,
             has_reset_writes_memo,
         )?;

@@ -111,7 +111,7 @@ fn select_ir2g8r_member(
     Ok((package, name, member_type))
 }
 
-fn block_gatify_options(options: &CanonicalG8rOptions) -> GatifyOptions {
+pub(crate) fn block_gatify_options(options: &CanonicalG8rOptions) -> GatifyOptions {
     GatifyOptions {
         fold: options.fold,
         hash: options.hash,

@@ -1,0 +1,13 @@
+package arithmetic
+
+file_number 0 "arithmetic.x"
+
+fn __arithmetic__twice(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2, pos=[(0,0,28)])
+}
+
+top block doubler(clk: clock, x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=3)
+  invoke.4: bits[8] = invoke(x, to_apply=__arithmetic__twice, id=4)
+  out: () = output_port(invoke.4, name=out, id=5)
+}

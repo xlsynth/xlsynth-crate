@@ -432,6 +432,97 @@ xlsynth-driver gv2block \
   --liberty_proto ~/asap7.proto > ~/my_netlist.block.ir
 ```
 
+### `bx2ir`: BX to Block IR
+
+Compiles a `.bx` file to an XLS block IR package on stdout. A BX pipeline
+declares the registers between stages and can call DSLX functions for the
+combinational work. For example, this `mul_inc.bx` captures a product on one
+clock edge and the incremented product on the next.
+
+```text
+import std;
+
+block mul_inc(clk, a: u8, b: u8) -> u16 {
+    reg product: u16;
+    reg result: u16;
+    product := std::umul(a, b);
+    result := product + u16:1;
+    result
+}
+```
+
+```shell
+xlsynth-driver bx2ir mul_inc.bx > mul_inc.ir
+xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
+```
+
+- `--top <BLOCK>` selects a block in the emitted package. A BX file with one
+  block selects it automatically. A file with multiple blocks selects its
+  unique `pub block`, or requires `--top` if that choice is ambiguous.
+- `--link-ir <PACKAGE>` supplies an existing XLS IR package for `extern fn`
+  and `extern block` declarations. By default, compilation starts with an
+  empty package named after the BX file stem, or `design` if the stem cannot
+  serve as an IR package name. DSLX source imports use `import` and the module
+  search path.
+- `--dslx-path 'dir1;dir2'` sets the DSLX module search directories in order,
+  overriding the directories from the toolchain configuration. To import
+  a module next to the BX source, include its directory in the search path.
+- `--dslx-stdlib-path <DIR>` overrides the toolchain's DSLX standard library
+  directory. The default uses the configured directory or the bundled library.
+- `--reset-active-low[=true|false]` selects active-low reset for the block
+  hierarchy. Defaults to `false` (active-high). The bare flag enables it.
+- `--reset-asynchronous[=true|false]` selects asynchronous reset for the
+  block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
+
+### `bx2gv`: BX to mapped gate-level netlist
+
+Maps a `.bx` design to Liberty cells. The command compiles the selected BX
+block, runs the XLS optimizer in process to inline DSLX calls, and lowers
+the optimized block to sequential g8r. It then uses the same mapper as a
+stitched DSLX pipeline. Linked blocks inherit the BX clock even when their
+clock ports have different names. Register load enables and synchronous
+register resets are supported. Blocks with asynchronous register resets can emit RTL through
+`bx2ir` and `block2sv`.
+
+To map the two-stage multiplier above using the native mapper, supply a
+normalized Liberty library containing combinational cells and flip-flops.
+
+```shell
+xlsynth-driver bx2gv mul_inc.bx --liberty-proto cells.proto -o mul_inc.gv
+```
+
+For a binary GV netlist protobuf, use a `.pb` output path. Specify
+`--netlist-format=pb` when writing protobuf to stdout or to a filename
+with another suffix.
+
+```shell
+xlsynth-driver bx2gv mul_inc.bx --liberty-proto cells.proto -o mul_inc.pb
+xlsynth-driver bx2gv mul_inc.bx --liberty-proto cells.proto --netlist-format=pb > mul_inc.protobin
+```
+
+- `--top`, `--link-ir`, `--dslx-path`, `--dslx-stdlib-path`,
+  `--reset-active-low`, and `--reset-asynchronous` use the same inputs and
+  defaults as [`bx2ir`](#bx2ir-bx-to-block-ir).
+- `--liberty-proto <PATH>` supplies the required normalized library.
+  `--mapper <native|abc>` defaults to `native` with the proto alone.
+  Supplying raw `--liberty <PATH>` files selects ABC for combinational mapping.
+- `-o, --output <PATH>` writes the mapped netlist to a file. The default is
+  gate-level Verilog on stdout. `.pb` and `.proto` filenames select
+  protobuf, and `--netlist-format <gv|pb>` overrides the filename.
+- Register cleanup, clock-gate extraction, ABC settings, and diagnostics use
+  the options documented for [`g8r2gv`](#g8r2gv-g8r-to-mapped-gate-level-netlist).
+
+To inspect the optimized block IR and the g8r for this multiplier, run the
+steps individually. The standalone `ir2g8r` step requires registered child
+blocks with explicit clock ports to use the top block's clock port name.
+
+```shell
+xlsynth-driver bx2ir mul_inc.bx > mul_inc.ir
+xlsynth-driver ir2opt mul_inc.ir --top mul_inc > mul_inc.opt.ir
+xlsynth-driver ir2g8r mul_inc.opt.ir > mul_inc.g8r
+xlsynth-driver g8r2gv mul_inc.g8r --liberty-proto cells.proto -o mul_inc.gv
+```
+
 ### `block2fn`: Block IR to PIR function package
 
 Inlines blocks and converts the resulting Block IR into a PIR package that contains a single top function. The following steps are performed:
@@ -4299,6 +4390,9 @@ result and each successive parameter receives the next slice. Both formats use
 the same stage order, pipeline name, and valid/reset settings.
 The generated text goes to stdout and diagnostics go to stderr.
 
+When a `.bx` file declares the pipeline registers and wiring, compile it
+with [`bx2ir`](#bx2ir-bx-to-block-ir).
+
 To gate individual interstage register banks, import the built-in DSLX module
 `stitch`. A bank can be the whole stage result or a direct member of its
 outer struct or tuple. The payload can have an aggregate type. A bank inside
@@ -4455,6 +4549,9 @@ binary `.g8rbin` encoding.
 
 The native pipeline honors the same proved `stitch::Enable<T>` interstage
 register banks as the RTL and block-IR outputs.
+
+To map a pipeline whose register boundaries are declared in a `.bx` file,
+use [`bx2gv`](#bx2gv-bx-to-mapped-gate-level-netlist).
 
 Stage selection follows `dslx-stitch-pipeline`: use `--dslx_top=<NAME>` to
 discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use
