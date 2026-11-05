@@ -1,10 +1,11 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports pure XLS IR functions and combinational `GateFn` graphs
-to executable Lean. Both exporters can evaluate batches of inputs and return
-typed results to Rust. The gate exporter also supports user-supplied Lean
-equivalence proofs. Native `.g8r` and `.g8rbin` files
-can be loaded with the existing `xlsynth-g8r` reader before calling this crate.
+`xlsynth-lean` exports pure XLS IR functions, combinational `GateFn` graphs and
+stateful XLS blocks to executable Lean. The function and gate exporters can
+evaluate batches and return typed results to Rust. The gate exporter also
+checks user-supplied equivalence proofs. The block exporter accepts block IR or
+BX source. With BX source it also emits a typed interface and correspondence
+proofs.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
 does not require Lean to be installed.
@@ -52,9 +53,85 @@ def eval (inputs : BitVec 3) : BitVec 1 :=
 ```
 
 The native file loader requires a clockless, register-free design for this
-combinational API. Stateful XLS block IR uses the separate API below.
+combinational API. Use the block IR API below for stateful models.
 
-### Interface and graph contract
+## Export XLS block IR
+
+```rust
+use xlsynth_lean::block;
+
+let selected = block::select_block(&package, None)?;
+let generated_lean = block::emit(&package, selected)?;
+```
+
+Pass a verified `xlsynth_pir::ir::Package` to `select_block`. Supply a block
+name to select it explicitly, or omit the name to select the declared top
+or the sole block. `emit` uses the package's source locations and the selected
+block to produce a self-contained Lean module in namespace `XlsBlock`.
+When starting from saved IR text, run native XLS verification and typed PIR
+validation on that text before selecting the block, as in the `export_block`
+example.
+
+The generated `eval` takes arbitrary old registers and current inputs and
+returns outputs, next registers, and assertion results. Outputs read old
+registers; all register writes commit together. For example, if `a` is written
+from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
+`(a = 2, b = 1)`. An output driven by `a` still observes `1` on that edge.
+`reset` activates the declared reset input for one ordinary clock edge. It
+does not invent initial values for registers without reset values.
+
+The supported subset includes exact-width bits, nested tuples, tokens,
+registers, synchronous resets, assertions, bitwise operations, addition,
+equality, concatenation, slicing, sign extension, one-hot encoding, and
+ordinary, priority, and bits-valued one-hot selection. Unsupported nodes,
+arrays, zero-width bits, block instances, and asynchronous resets return
+contextual errors. Parsing can succeed for operations that emission rejects.
+Every assertion remains an observable result, including disconnected ones;
+assertions never constrain the model's input or old-state domain.
+
+### Compile a BX block
+
+BX declares each register, its reset value, the data inputs and the output
+ports. For example, this block exposes its old count on output and increments
+it on each clock unless reset is asserted.
+
+```
+pub block counter(clk, rst, take: bool) -> u8 {
+    reg count: u8 = 0;
+    if take { count := count + u8:1; }
+    count
+}
+```
+
+```rust
+use xlsynth_lean::block::compile_bx;
+
+let compiled = compile_bx(&source, xlsynth_bx::empty_package("counter"),
+                          Default::default(), &Default::default())?;
+let bundle = compiled.emit_readable(None)?;
+```
+
+The readable interface preserves unsigned bits, Boolean fields, positional
+tuples and named BX structs. A struct result exposes its fields as output
+ports in BX declaration order. One output becomes the value of `observe q x`;
+several outputs become a Lean product in port order. The register and port
+types come from checked declarations, and every equation comes from the linked
+block. Internal bindings can be renamed without changing these public fields.
+
+`LeanBlockBundle::files` contains these five files in dependency order:
+
+1. `Generated.lean` - the exact raw emission of the lowered block.
+1. `ReadableTypes.lean` - source types and total physical codecs.
+1. `ReadableGenerated.lean` - executable equations with source names and types.
+1. `ReadableRepresentation.lean` - state and result conversions.
+1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+
+Callers choose where to write the files and must compile the generated Lean
+sources to check their proofs. The readable evaluator executes its own graph
+equations; it does not call the raw evaluator. This library does not run block
+simulations or orchestrate application-specific property proofs.
+
+## GateFn interface and graph contract
 
 Inputs and outputs are flattened in port-list order, then least-significant bit
 first within each port. The bundle retains every port name and width, including
@@ -70,24 +147,6 @@ indices. It requires:
 
 Input bindings determine input identity; the name and bit-index metadata on an
 input node do not affect evaluation. Invalid graphs return `LeanError` values.
-
-## Export XLS block IR
-
-```rust
-let block = xlsynth_lean::block::select_block(&package, None)?;
-let lean_source = xlsynth_lean::block::emit(&package, block)?;
-```
-
-`emit` takes a verified `xlsynth_pir::ir::Package` and a block borrowed from
-it. If you already have the block, pass it directly. Otherwise, `select_block`
-accepts a block name, or selects the package top when given `None`. A package
-without a top must contain exactly one block for automatic selection.
-`emit` returns a self-contained Lean module and does not run Lean.
-
-The generated clock step preserves old-state outputs, simultaneous register
-writes, reset precedence and source assertions. Unsupported operations and
-asynchronous resets return errors. The supported subset covers the arbiter and
-operator-control examples; it is not a general XLS translator.
 
 ## Evaluate through Lean
 
@@ -291,12 +350,16 @@ Rust export tests run normally:
 cargo test -p xlsynth-lean
 ```
 
-Lean integration tests are explicitly enabled with a toolchain path:
+Lean integration tests for gate evaluation and readable block correspondence
+are explicitly enabled with a toolchain path:
 
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test lean_eval -- --ignored
+  cargo test -p xlsynth-lean --test lean_eval --test block_native -- --ignored
 ```
+
+The block tests check BX field order for every input, both in the readable
+interface and across a BX constructor and a separately compiled DSLX selector.
 
 Run the real Lean word-level evaluation tests with the same toolchain:
 

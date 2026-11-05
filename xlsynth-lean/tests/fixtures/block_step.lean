@@ -10,25 +10,25 @@ namespace XlsBlock
 
 structure State where
   Constructors.mk ::
-  «a» : BitVec 2
-  «b» : BitVec 2
+  «a» : _root_.BitVec 2
+  «b» : _root_.BitVec 2
   deriving Repr
 
 structure Input where
   Constructors.mk ::
-  «rst» : BitVec 1
-  «en» : BitVec 1
+  «rst» : _root_.BitVec 1
+  «en» : _root_.BitVec 1
   deriving Repr
 
 structure Output where
   Constructors.mk ::
-  «out» : BitVec 2
+  «out» : _root_.BitVec 2
   deriving Repr
 
 structure Assertions where
   Constructors.mk ::
   -- id=6; label=enable; message=enable expected
-  «checked» : Bool
+  «checked» : _root_.Bool
   deriving Repr
 
 structure Evaluation where
