@@ -75,6 +75,37 @@ Fuzz runs use four workers by default. CI retains its `-max_total_time=5` overri
 campaigns. Optional external-tool targets still require explicit selection and
 their runtime prerequisites.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_expr_eval_equiv.rs
+
+Generates typed expressions in the common BX and DSLX syntax, including
+arithmetic, shifts, casts, packed slices, conditionals, arrays, and tuples.
+Each expression becomes both a combinational BX block and a DSLX function.
+The target evaluates the lowered BX block with PIR and the compiled DSLX
+function with the native XLS IR interpreter on four shared argument vectors.
+It also evaluates a BX register reset initializer with the first vector bound
+to constants.
+Unexpected rejection or differing values can expose errors in parsing, type
+inference, lowering, or constant folding.
+
+Run the target from `xlsynth-bx`.
+
+```shell
+cargo +nightly fuzz run fuzz_bx_dslx_expr_eval_equiv --sanitizer none
+```
+
+To replay a finding, pass the saved artifact path immediately after the target
+name. The same bytes reproduce the expression and its argument sets.
+
+Directed BX regression tests use the same expression evaluator. They use the
+bundled DSLX frontend by default. To compare against a particular XLS
+checkout, run the frontend tests with its converter and standard library.
+
+```shell
+BX_DSLX_IR_CONVERTER=/path/to/xls/bazel-bin/xls/dslx/ir_convert/ir_converter_main \
+DSLX_STDLIB_PATH=/path/to/xls/xls/dslx/stdlib \
+cargo test -p xlsynth-bx --test frontend packed_slice
+```
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset

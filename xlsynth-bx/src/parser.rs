@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use crate::ast::{
     BinaryOp, Block, Expr, ExternBlock, ExternFn, Import, Module, Param, Stmt, StructDef, Type,
-    UnaryOp,
+    UnaryOp, WidthSliceType,
 };
 
 /// A borrowed spelling and byte offset in the original UTF-8 input.
@@ -14,6 +14,7 @@ use crate::ast::{
 struct Token<'s> {
     text: &'s str,
     start: usize,
+    character: Option<u8>,
 }
 
 fn diagnostic(source: &str, offset: usize, message: &str) -> String {
@@ -56,6 +57,7 @@ pub(crate) fn is_identifier(text: &str) -> bool {
             | "bits"
             | "uN"
             | "sN"
+            | "xN"
     );
     is_identifier_word(text) && !keyword && fixed_width(text).is_none()
 }
@@ -84,11 +86,26 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
             i += end + 4;
             continue;
         }
-        if identifier_start(b) || b.is_ascii_digit() {
+        let negative_number = b == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit);
+        let mut character = None;
+        if identifier_start(b) {
             i += 1;
             while i < bytes.len() && (identifier_start(bytes[i]) || bytes[i].is_ascii_digit()) {
                 i += 1;
             }
+        } else if b.is_ascii_digit() || negative_number {
+            let magnitude = rest.strip_prefix('-').unwrap_or(rest);
+            let (digits, radix) = radix_digits(magnitude);
+            let digit_count = digits
+                .chars()
+                .take_while(|c| c.is_digit(radix) || (radix != 10 && *c == '_'))
+                .count();
+            i += rest.len() - digits.len() + digit_count;
+        } else if b == b'\'' {
+            let (value, len) = scan_character(rest)
+                .ok_or_else(|| diagnostic(source, start, "invalid byte character literal"))?;
+            character = Some(value);
+            i += len;
         } else if b == b'"' {
             let end = rest[1..]
                 .find(['"', '\n', '\r'])
@@ -99,6 +116,7 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
             }
             i += 1;
         } else if rest.starts_with(":=")
+            || rest.starts_with("+:")
             || rest.starts_with("::")
             || rest.starts_with("->")
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
@@ -112,13 +130,43 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
         tokens.push(Token {
             text: &source[start..i],
             start,
+            character,
         });
     }
     tokens.push(Token {
         text: "",
         start: source.len(),
+        character: None,
     });
     Ok(tokens)
+}
+
+/// Decode one DSLX byte character and return its value and token length.
+fn scan_character(source: &str) -> Option<(u8, usize)> {
+    match source.as_bytes() {
+        [b'\'', b'\\', b'x', _, _, b'\'', ..] => {
+            let digits = source.get(3..5)?;
+            if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some((u8::from_str_radix(digits, 16).ok()?, 6))
+        }
+        [b'\'', b'\\', escaped, b'\'', ..] => {
+            let value = match escaped {
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'0' => 0,
+                b'\\' | b'\'' | b'"' => *escaped,
+                _ => return None,
+            };
+            Some((value, 4))
+        }
+        [b'\'', value, b'\'', ..] if value.is_ascii() && !matches!(value, b'\n' | b'\\') => {
+            Some((*value, 3))
+        }
+        _ => None,
+    }
 }
 
 /// Parse a source module. Syntax diagnostics carry one-based line and column.
@@ -164,11 +212,24 @@ struct Body {
 struct ParsedExpr {
     value: Expr,
     height: usize,
+    spelling: ExprSpelling,
+}
+
+/// Source distinctions needed for DSLX postfix and comparison precedence.
+#[derive(Clone, Copy, PartialEq)]
+enum ExprSpelling {
+    Ordinary,
+    Parenthesized,
+    AnnotatedLiteral,
 }
 
 impl ParsedExpr {
     fn leaf(value: Expr) -> Self {
-        Self { value, height: 1 }
+        Self {
+            value,
+            height: 1,
+            spelling: ExprSpelling::Ordinary,
+        }
     }
 }
 
@@ -440,6 +501,52 @@ impl<'s> Parser<'s> {
         Ok(self.parsed_ty()?.value)
     }
 
+    /// Parse a slice result annotation, retaining any expressions that set its
+    /// signedness or width. Return their maximum height for the enclosing
+    /// slice.
+    fn width_slice_type(&mut self) -> Result<(WidthSliceType, usize), String> {
+        let spelling = self.peek(0);
+        if !matches!(spelling, "bits" | "uN" | "sN" | "xN") {
+            if let Some(digits) = fixed_width(spelling)
+                && !matches!(digits.parse::<u8>(), Ok(1..=64))
+            {
+                let bit_type = if spelling.starts_with('s') {
+                    "sN"
+                } else {
+                    "uN"
+                };
+                return Err(self.error(&format!("use '{bit_type}[{digits}]' for this slice width")));
+            }
+            // DSLX treats parentheses in a type annotation as tuple syntax,
+            // including a single parenthesized member.
+            let ty = if self.eat("(") {
+                Type::Tuple(self.list(")", Self::ty)?)
+            } else {
+                self.ty()?
+            };
+            return Ok((WidthSliceType::Concrete(ty), 0));
+        }
+        self.pos += 1;
+        let signed = if spelling == "xN" {
+            self.expect("[")?;
+            let expr = self.expr()?;
+            self.expect("]")?;
+            expr
+        } else {
+            ParsedExpr::leaf(Expr::Bool(spelling == "sN"))
+        };
+        self.expect("[")?;
+        let bit_count = self.expr()?;
+        self.expect("]")?;
+        Ok((
+            WidthSliceType::Bits {
+                signed: Box::new(signed.value),
+                bit_count: Box::new(bit_count.value),
+            },
+            signed.height.max(bit_count.height),
+        ))
+    }
+
     fn parsed_ty(&mut self) -> Result<ParsedType, String> {
         let mut ty = self.type_atom()?;
         while self.eat("[") {
@@ -461,12 +568,13 @@ impl<'s> Parser<'s> {
     fn dimension(&mut self) -> Result<usize, String> {
         let text = self.peek(0);
         if !text.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            return Err(self.error("expected a concrete decimal size"));
+            return Err(self.error("expected a concrete nonnegative size"));
         }
-        let size = text
-            .replace('_', "")
-            .parse::<usize>()
-            .map_err(|_| self.error("expected a concrete decimal size that fits usize"))?;
+        let text = normalized_integer(text)
+            .ok_or_else(|| self.error("expected a concrete nonnegative size"))?;
+        let (digits, radix) = radix_digits(&text);
+        let size = usize::from_str_radix(digits, radix)
+            .map_err(|_| self.error("expected a concrete nonnegative size that fits usize"))?;
         self.pos += 1;
         Ok(size)
     }
@@ -485,15 +593,25 @@ impl<'s> Parser<'s> {
         let spelling = self.peek(0);
         let value = if self.eat("bool") {
             Type::Bool
-        } else if matches!(spelling, "bits" | "uN" | "sN") {
+        } else if matches!(spelling, "bits" | "uN" | "sN" | "xN") {
             self.pos += 1;
+            let signed = if spelling == "xN" {
+                self.expect("[")?;
+                let signed = match self.peek(0) {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(self.error("expected a concrete boolean signedness")),
+                };
+                self.pos += 1;
+                self.expect("]")?;
+                signed
+            } else {
+                spelling == "sN"
+            };
             self.expect("[")?;
             let width = self.dimension()?;
             self.expect("]")?;
-            Type::Bits {
-                signed: spelling == "sN",
-                width,
-            }
+            Type::Bits { signed, width }
         } else if let Some(digits) = fixed_width(spelling) {
             let width = digits
                 .parse::<usize>()
@@ -688,6 +806,7 @@ impl<'s> Parser<'s> {
         Ok(ParsedExpr {
             value,
             height: child_height + 1,
+            spelling: ExprSpelling::Ordinary,
         })
     }
 
@@ -721,10 +840,12 @@ impl<'s> Parser<'s> {
     ) -> Result<ParsedExpr, String> {
         loop {
             if self.eat(".") {
-                let name = if decimal(self.peek(0)) {
-                    let index = self.peek(0).to_owned();
-                    self.pos += 1;
-                    index
+                let name = if number_token(self.peek(0)) {
+                    let offset = self.tokens[self.pos].start;
+                    let index = u32::try_from(self.dimension()?).map_err(|_| {
+                        diagnostic(self.source, offset, "tuple index must fit in u32")
+                    })?;
+                    index.to_string()
                 } else {
                     self.ident()?
                 };
@@ -735,16 +856,8 @@ impl<'s> Parser<'s> {
                         name,
                     },
                 )?;
-            } else if self.eat("[") {
-                let index = self.expr()?;
-                self.expect("]")?;
-                left = self.compose(
-                    left.height.max(index.height),
-                    Expr::Index {
-                        value: Box::new(left.value),
-                        index: Box::new(index.value),
-                    },
-                )?;
+            } else if self.peek(0) == "[" {
+                left = self.subscript(left)?;
             } else if min <= 10 && self.eat("as") {
                 let ty = self.ty()?;
                 left = self.compose(
@@ -760,6 +873,12 @@ impl<'s> Parser<'s> {
                 else {
                     return Ok(left);
                 };
+                if op.is_comparison()
+                    && left.spelling != ExprSpelling::Parenthesized
+                    && matches!(left.value, Expr::Binary { op: prev, .. } if prev.is_comparison())
+                {
+                    return Err(self.error("comparison operators cannot be chained"));
+                }
                 self.pos += 1;
                 let right = self.expr_at(op.precedence() + 1, allow_struct)?;
                 left = self.compose(
@@ -774,6 +893,39 @@ impl<'s> Parser<'s> {
         }
     }
 
+    /// Distinguish array indexing from a packed width slice after parsing the
+    /// offset expression shared by both.
+    fn subscript(&mut self, left: ParsedExpr) -> Result<ParsedExpr, String> {
+        let needs_parens = left.spelling == ExprSpelling::AnnotatedLiteral
+            || (left.spelling != ExprSpelling::Parenthesized
+                && matches!(left.value, Expr::If { .. }));
+        self.expect("[")?;
+        let subscript = self.expr()?;
+        let mut height = left.height.max(subscript.height);
+        let value = Box::new(left.value);
+        let expr = if self.eat("+:") {
+            if needs_parens {
+                return Err(
+                    self.error("parenthesize a typed literal or conditional before slicing")
+                );
+            }
+            let (width, type_height) = self.width_slice_type()?;
+            height = height.max(type_height);
+            Expr::WidthSlice {
+                value,
+                start: Box::new(subscript.value),
+                width,
+            }
+        } else {
+            Expr::Index {
+                value,
+                index: Box::new(subscript.value),
+            }
+        };
+        self.expect("]")?;
+        self.compose(height, expr)
+    }
+
     fn atom(&mut self, allow_struct: bool) -> Result<ParsedExpr, String> {
         let text = self.peek(0);
         if self.eat("[") {
@@ -781,9 +933,11 @@ impl<'s> Parser<'s> {
             return self.aggregate(items, Expr::Array);
         }
         if self.eat("(") {
-            return self.parenthesized(Self::expr, |parser, fields| {
+            let mut expr = self.parenthesized(Self::expr, |parser, fields| {
                 parser.aggregate(fields, Expr::Tuple)
-            });
+            })?;
+            expr.spelling = ExprSpelling::Parenthesized;
+            return Ok(expr);
         }
         if self.eat("if") {
             return self.if_expr();
@@ -802,14 +956,13 @@ impl<'s> Parser<'s> {
                 },
             );
         }
-        if matches!(text, "bits" | "uN" | "sN" | "bool") || fixed_width(text).is_some() {
+        if starts_bit_type(text) {
             let ty = self.ty()?;
             self.expect(":")?;
-            let negative = self.eat("-");
-            return self.literal(Some(ty), negative);
+            return self.annotated_literal(ty);
         }
-        if text.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            return self.literal(None, false);
+        if number_token(text) || self.tokens[self.pos].character.is_some() {
+            return self.literal(None);
         }
         let name = self.name_or_function_path()?;
         if self.eat("(") {
@@ -833,33 +986,52 @@ impl<'s> Parser<'s> {
         Ok(ParsedExpr::leaf(Expr::Name(name)))
     }
 
+    /// Parse a literal term after a type annotation. Parentheses group the
+    /// literal, and the outermost annotation supplies its final type.
+    fn annotated_literal(&mut self, ty: Type) -> Result<ParsedExpr, String> {
+        if self.eat("(") {
+            let literal = self.nested(|parser| parser.annotated_literal(ty))?;
+            self.expect(")")?;
+            return Ok(literal);
+        }
+        if starts_bit_type(self.peek(0)) {
+            self.ty()?;
+            self.expect(":")?;
+            return self.nested(|parser| parser.annotated_literal(ty));
+        }
+        self.literal(Some(ty))
+    }
+
     /// Preserve arbitrary-width numbers as text for checking against their
     /// type.
-    fn literal(&mut self, ty: Option<Type>, negative: bool) -> Result<ParsedExpr, String> {
-        if !self
-            .peek(0)
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_digit)
-        {
-            return Err(self.error("expected an integer literal"));
-        }
-        let mut text = self.peek(0).replace('_', "");
-        let (digits, radix) = if let Some(s) = text.strip_prefix("0x") {
-            (s, 16)
-        } else if let Some(s) = text.strip_prefix("0b") {
-            (s, 2)
+    fn literal(&mut self, ty: Option<Type>) -> Result<ParsedExpr, String> {
+        let annotated = ty.is_some();
+        let (ty, text) = if let Some(byte) = self.tokens[self.pos].character {
+            let ty = ty.unwrap_or(Type::Bits {
+                signed: false,
+                width: 8,
+            });
+            if !matches!(ty, Type::Bits { width: 8.., .. }) {
+                return Err(self.error("a character literal requires at least eight bits"));
+            }
+            (Some(ty), format!("0x{byte:02x}"))
+        } else if matches!(self.peek(0), "true" | "false") {
+            if !matches!(ty, Some(Type::Bool | Type::Bits { width: 1.., .. })) {
+                return Err(self.error("a boolean literal requires at least one bit"));
+            }
+            let bit = if self.peek(0) == "true" { "0b1" } else { "0b0" };
+            (ty, bit.to_owned())
         } else {
-            (text.as_str(), 10)
+            let text = normalized_integer(self.peek(0))
+                .ok_or_else(|| self.error("expected an integer literal"))?;
+            (ty, text)
         };
-        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-            return Err(self.error("expected an integer literal"));
-        }
         self.pos += 1;
-        if negative {
-            text.insert(0, '-');
+        let mut expr = ParsedExpr::leaf(Expr::Literal { ty, text });
+        if annotated {
+            expr.spelling = ExprSpelling::AnnotatedLiteral;
         }
-        Ok(ParsedExpr::leaf(Expr::Literal { ty, text }))
+        Ok(expr)
     }
 }
 
@@ -874,11 +1046,51 @@ impl Body {
 }
 
 fn decimal(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+    !text.is_empty()
+        && (text.len() == 1 || !text.starts_with('0'))
+        && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Check the DSLX radix and separator rules before removing separators.
+fn normalized_integer(spelling: &str) -> Option<String> {
+    let magnitude = spelling.strip_prefix('-').unwrap_or(spelling);
+    let (digits, radix) = radix_digits(magnitude);
+    if radix == 10 {
+        return decimal(digits).then(|| spelling.to_owned());
+    }
+    if !digits.chars().any(|c| c.is_digit(radix))
+        || !digits.chars().all(|c| c == '_' || c.is_digit(radix))
+    {
+        return None;
+    }
+    Some(spelling.replace('_', ""))
+}
+
+/// Split an unsigned literal magnitude into digits and its DSLX radix.
+pub(crate) fn radix_digits(magnitude: &str) -> (&str, u32) {
+    if let Some(digits) = magnitude.strip_prefix("0x") {
+        (digits, 16)
+    } else if let Some(digits) = magnitude.strip_prefix("0b") {
+        (digits, 2)
+    } else {
+        (magnitude, 10)
+    }
+}
+
+fn number_token(text: &str) -> bool {
+    text.strip_prefix('-')
+        .unwrap_or(text)
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit)
 }
 
 fn fixed_width(spelling: &str) -> Option<&str> {
     spelling.strip_prefix(['u', 's']).filter(|s| decimal(s))
+}
+
+fn starts_bit_type(spelling: &str) -> bool {
+    matches!(spelling, "bits" | "uN" | "sN" | "xN" | "bool") || fixed_width(spelling).is_some()
 }
 
 #[cfg(test)]
@@ -1131,6 +1343,161 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
     }
 
     #[test]
+    fn packed_slices_follow_array_indexing_and_take_an_offset_expression() {
+        let module = parse_module(
+            "block b(clk, words: u16[2], i: u1, offset: u4) -> u8 { words[i][offset + u4:1+:uN[8]] }",
+        )
+        .unwrap();
+        let Expr::WidthSlice {
+            value,
+            start,
+            width,
+        } = &module.blocks[0].output
+        else {
+            panic!("expected width slice");
+        };
+        assert!(matches!(value.as_ref(), Expr::Index { .. }));
+        assert!(matches!(
+            start.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+        assert_eq!(
+            *width,
+            WidthSliceType::Bits {
+                signed: Box::new(Expr::Bool(false)),
+                bit_count: Box::new(Expr::Literal {
+                    ty: None,
+                    text: "8".into()
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn negative_number_tokens_are_distinct_from_unary_negation() {
+        let module = parse_module(
+            "block b(clk, x: u8) -> (u1, u1, u1) { (x[-0+:u1], x[- 0+:u1], x[-(0)+:u1]) }",
+        )
+        .unwrap();
+        let Expr::Tuple(items) = &module.blocks[0].output else {
+            panic!("expected tuple of slices");
+        };
+        let starts: Vec<_> = items
+            .iter()
+            .map(|expr| {
+                let Expr::WidthSlice { start, .. } = expr else {
+                    panic!("expected slice");
+                };
+                start.as_ref()
+            })
+            .collect();
+        assert!(matches!(starts[0], Expr::Literal { ty: None, text } if text == "-0"));
+        for expr in &starts[1..] {
+            assert!(matches!(
+                expr,
+                Expr::Unary {
+                    op: UnaryOp::Neg,
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_parametric_slice_types_and_parenthesized_sources() {
+        let module = parse_module(
+            r#"block b(clk, en: bool, x: xN[false][0x10]) -> (u4, s4) {
+                ((if en { x } else { u16:0 })[0+:bits[0b100]],
+                 (u8:0xff)[1+:xN[!false][2 + 2]])
+            }"#,
+        )
+        .unwrap();
+        let Expr::Tuple(items) = &module.blocks[0].output else {
+            panic!("expected tuple");
+        };
+        assert!(
+            matches!(&items[0], Expr::WidthSlice { value, .. } if matches!(value.as_ref(), Expr::If { .. }))
+        );
+        let Expr::WidthSlice {
+            width: WidthSliceType::Bits { signed, bit_count },
+            ..
+        } = &items[1]
+        else {
+            panic!("expected parametric slice type");
+        };
+        assert!(matches!(
+            signed.as_ref(),
+            Expr::Unary {
+                op: UnaryOp::Not,
+                ..
+            }
+        ));
+        assert!(matches!(
+            bit_count.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn annotations_take_parenthesized_literal_terms() {
+        for (offset, text) in [
+            ("u8:((2))", "2"),
+            ("u8:('a')", "0x61"),
+            ("u8:(false)", "0b0"),
+            ("u8:(u3:65)", "65"),
+        ] {
+            let source = format!("block b(clk, x: u8) -> u1 {{ x[{offset}+:u1] }}");
+            let module = parse_module(&source).unwrap();
+            let Expr::WidthSlice { start, .. } = &module.blocks[0].output else {
+                panic!("expected width slice");
+            };
+            assert_eq!(
+                start.as_ref(),
+                &Expr::Literal {
+                    ty: Some(Type::Bits {
+                        signed: false,
+                        width: 8,
+                    }),
+                    text: text.into(),
+                }
+            );
+        }
+        for expr in [
+            "x[u8:(x)+:u1]",
+            "x[u8:(1 + 1)+:u1]",
+            "x[u8:(- 1)+:u1]",
+            "x[u8:(2,)+:u1]",
+            "u8:(2)[0+:u1]",
+        ] {
+            let source = format!("block b(clk, x: u8) -> u1 {{ {expr} }}");
+            assert!(parse_module(&source).is_err(), "{source}");
+        }
+        assert!(parse_module("block b(clk) -> u1 { (u8:(2))[0+:u1] }").is_ok());
+    }
+
+    #[test]
+    fn tuple_projections_use_unsigned_u32_literal_indices() {
+        for spelling in ["1", "0x_01_", "0b_0__1_"] {
+            let source = format!("block b(clk, pair: (u8, u8)) -> u8 {{ pair.{spelling} }}");
+            let module = parse_module(&source).unwrap();
+            assert!(
+                matches!(&module.blocks[0].output, Expr::Field { name, .. } if name == "1"),
+                "{spelling}"
+            );
+        }
+        for spelling in ["-0", "-1", "01", "0b2", "0x__", "0x1_0000_0000", "'a'"] {
+            let source = format!("block b(clk, pair: (u8, u8)) -> u8 {{ pair.{spelling} }}");
+            assert!(parse_module(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
     fn groups_casts_and_operators_like_dslx() {
         let module =
             parse_module("block b(clk, x: s8, y: u16, z: u16) -> u16 { -x as u16 + y * z }")
@@ -1152,6 +1519,92 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
     }
 
     #[test]
+    fn slice_numbers_follow_dslx_radix_and_separator_rules() {
+        for literal in ["0", "19", "0x_f__f_", "0b_10__1_"] {
+            let source = format!("block b(clk, x: uN[{literal}]) -> u1 {{ x[{literal}+:u1] }}");
+            assert!(parse_module(&source).is_ok(), "{source}");
+        }
+        // The keyword after a decimal or binary literal starts a new token.
+        for offset in ["1as u8", "0b1as u8"] {
+            let source = format!("block b(clk, x: u8) -> u1 {{ x[{offset}+:u1] }}");
+            assert!(parse_module(&source).is_ok(), "{source}");
+        }
+        for literal in [
+            "00", "08", "1_0", "0_1", "0x__", "0b_", "0o10", "0B1", "0X8",
+        ] {
+            for source in [
+                format!("block b(clk, x: u8) -> u1 {{ x[{literal}+:u1] }}"),
+                format!("block b(clk, x: uN[{literal}]) -> u1 {{ x[0+:u1] }}"),
+            ] {
+                assert!(parse_module(&source).is_err(), "{source}");
+            }
+        }
+        assert!(fixed_width("u08").is_none());
+    }
+
+    #[test]
+    fn byte_characters_preserve_dslx_escapes_and_intrinsic_width() {
+        for (spelling, byte) in [
+            ("'A'", 65),
+            ("'''", 39),
+            (r"'\0'", 0),
+            (r"'\t'", 9),
+            (r"'\n'", 10),
+            (r"'\r'", 13),
+            (r"'\\'", 92),
+            (r"'\''", 39),
+            (r#"'\"'"#, 34),
+            (r"'\xff'", 255),
+        ] {
+            let source = format!("block b(clk, x: u8) -> u1 {{ x[{spelling}+:u1] }}");
+            let module = parse_module(&source).unwrap();
+            let Expr::WidthSlice { start, .. } = &module.blocks[0].output else {
+                panic!("expected slice");
+            };
+            assert_eq!(
+                start.as_ref(),
+                &Expr::Literal {
+                    ty: Some(Type::Bits {
+                        signed: false,
+                        width: 8
+                    }),
+                    text: format!("0x{byte:02x}"),
+                }
+            );
+        }
+        assert!(parse_module("block b(clk) -> u1 { 'A'[0+:u1] }").is_ok());
+        assert!(parse_module("block b(clk, x: u8) -> u4 { x[0+:uN[u32:'\\x04']] }").is_ok());
+        for invalid in [
+            "''",
+            "'ab'",
+            "'é'",
+            "'\n'",
+            r"'\a'",
+            r"'\u{41}'",
+            r"'\xF'",
+            r"'\x123'",
+            r"u7:'\0'",
+            "u8:'A'[0+:u1]",
+        ] {
+            let source = format!("block b(clk) -> u8 {{ {invalid} }}");
+            assert!(parse_module(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn comparison_chains_in_offsets_require_parentheses() {
+        for (offset, accepted) in [
+            ("1 == 1 == 1", false),
+            ("1 == (1) == 1", false),
+            ("(1 == 1) == 1", true),
+            ("1 == (1 == 1)", true),
+        ] {
+            let source = format!("block b(clk, x: u8) -> u1 {{ x[{offset}+:u1] }}");
+            assert_eq!(parse_module(&source).is_ok(), accepted, "{source}");
+        }
+    }
+
+    #[test]
     fn malformed_source_has_a_location() {
         assert_eq!(
             parse_module("block b(clk) -> u8 {\n  u8:0x\n}").unwrap_err(),
@@ -1167,6 +1620,12 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
             "extern fn f() -> u8 = \"missing close",
             "pub extern fn f() -> u8;",
             "block b(clk, x: u8[2]) -> u8 { x[] }",
+            "block b(clk, x: u8) -> u4 { x[+:u4] }",
+            "block b(clk, x: u8) -> u4 { x[0+:] }",
+            "block b(clk, x: u8) -> u4 { x[0+:4] }",
+            "block b(clk, x: u8, offset: u8) -> u4 { x[offset-1+:u4] }",
+            "block b(clk) -> u4 { u8:0xd9[6+:u4] }",
+            "block b(clk, x: u8) -> u4 { if true { x } else { x }[0+:u4] }",
             "block b(clk, x: u8[_8]) -> u8 { x[u1:0] }",
             "block b(clk) -> u8 { u8:_42 }",
             "block b(clk) -> u8 {",

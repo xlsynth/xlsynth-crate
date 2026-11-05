@@ -5,10 +5,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use xlsynth_pir::IrValue;
+use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 
 use crate::ImportOptions;
-use crate::ast::{BinaryOp, Block, Expr, ExternFn, Module, Param, Stmt, StructDef, Type};
+use crate::ast::{
+    BinaryOp, Block, Expr, ExternFn, Module, Param, Stmt, StructDef, Type, WidthSliceType,
+};
 use crate::dslx_import::ImportResolver;
+use crate::infer_literal::{
+    ArrayElementHint, ContextOperands, InferredBindings, OperandHint, array_element_hint,
+    binding_widths, check_inferred_signed_width, context_operands, has_common_bit_type,
+    has_concrete_element_type, minimum_type, operand_hint,
+};
 pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -63,6 +71,19 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
             name: "out".into(),
             ty: result.clone(),
         }]),
+    }
+}
+
+/// Aggregate constructors share member types with the other operand or branch.
+fn has_aggregate_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Array(_) | Expr::Tuple(_) => true,
+        Expr::If {
+            then_value,
+            else_value,
+            ..
+        } => has_aggregate_literal(then_value) || has_aggregate_literal(else_value),
+        _ => false,
     }
 }
 
@@ -473,6 +494,10 @@ struct BlockChecker<'a, 'm> {
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
     constants: BTreeMap<String, IrValue>,
+    /// Bindings whose entire initializer depends only on compile-time inputs.
+    constexpr_names: BTreeSet<String>,
+    /// Minimum widths of unannotated bindings and their aggregate members.
+    inferred_bindings: InferredBindings,
     regs: BTreeMap<String, Type>,
     writes: BTreeSet<String>,
     instances: BTreeMap<String, &'a BlockInterface<'m>>,
@@ -514,6 +539,8 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             reserved_hardware_names,
             values: BTreeMap::new(),
             constants: BTreeMap::new(),
+            constexpr_names: BTreeSet::new(),
+            inferred_bindings: BTreeMap::new(),
             regs: BTreeMap::new(),
             writes: BTreeSet::new(),
             instances: BTreeMap::new(),
@@ -736,11 +763,15 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                         value,
                     }
                 }
-                Stmt::Let { name, ty, value } => {
+                Stmt::Let {
+                    name,
+                    ty,
+                    value: initializer,
+                } => {
                     if let Some(t) = ty {
                         self.decls.validate_type(t)?;
                     }
-                    let value = if let Expr::Call { name: target, args } = value
+                    let value = if let Expr::Call { name: target, args } = initializer
                         && let Some(child) = self.decls.blocks.get(target.as_str())
                     {
                         if conditional {
@@ -750,13 +781,25 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                         }
                         self.block_call(name, target, child, args, ty.as_ref())
                     } else {
-                        self.expr(value, ty.as_ref())
+                        match ty {
+                            Some(ty) => self.expr(initializer, Some(ty)),
+                            None => self.inferred_expr(initializer),
+                        }
                     }
                     .map_err(|e| format!("let '{name}': {e}"))?;
                     declare(&mut self.names, name)?;
                     self.values.insert(name.clone(), value.ty.clone());
+                    if value.has_constant_inputs(&self.constexpr_names) {
+                        self.constexpr_names.insert(name.clone());
+                    }
                     if let Some(v) = value.constant(&self.constants) {
                         self.constants.insert(name.clone(), v);
+                    }
+                    if ty.is_none()
+                        && let Some(minimum) =
+                            binding_widths(initializer, &value.ty, &self.inferred_bindings)?
+                    {
+                        self.inferred_bindings.insert(name.clone(), minimum);
                     }
                     if conditional {
                         locals.push(name);
@@ -801,6 +844,8 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             self.names.remove(name);
             self.values.remove(name);
             self.constants.remove(name);
+            self.constexpr_names.remove(name);
+            self.inferred_bindings.remove(name);
         }
         Ok(())
     }
@@ -808,6 +853,17 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Propagate expected types to literals, aggregate members, and pure call
     /// arguments.
     fn expr(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
+        let value = self.expr_in_group(expr, expected)?;
+        if expected.is_none() {
+            check_inferred_signed_width(&[expr], &value.ty)?;
+        }
+        Ok(value)
+    }
+
+    /// Check one member of a group of expressions that share their result
+    /// type. The enclosing group checks its complete prefix of unsized
+    /// literals.
+    fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let (ty, kind) = match expr {
             Expr::Name(name) => {
                 let ty = self
@@ -850,7 +906,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 let values = items
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| self.expr(v, hints.map(|ts| &ts[i])))
+                    .map(|(i, value)| match hints {
+                        Some(types) => self.expr(value, Some(&types[i])),
+                        None => self.inferred_expr(value),
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 (
                     Type::Tuple(values.iter().map(|v| v.ty.clone()).collect()),
@@ -871,16 +930,17 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     Some(other) => return Err(format!("expected {other}, got an array")),
                     None => None,
                 };
-                if let Some((first, rest)) = items.split_first() {
-                    let first = self.expr(first, hint)?;
-                    let element = first.ty.clone();
-                    let mut values = vec![first];
-                    for item in rest {
-                        values.push(self.expr(item, Some(&element))?);
-                    }
+                if !items.is_empty() {
+                    let values = match hint {
+                        Some(element) => items
+                            .iter()
+                            .map(|item| self.expr(item, Some(element)))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        None => self.unify_values(&items.iter().collect::<Vec<_>>())?,
+                    };
                     (
                         Type::Array {
-                            element: Box::new(element),
+                            element: Box::new(values[0].ty.clone()),
                             size: items.len(),
                         },
                         K::Array(values),
@@ -909,12 +969,42 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 if *size == 0 {
                     return Err("cannot index an empty array".into());
                 }
-                let index = self.unsigned_index(index)?;
+                let index = self.unsigned_index(index, Some(32))?;
                 (
                     element.as_ref().clone(),
                     K::Index {
                         value: Box::new(array),
                         index: Box::new(index),
+                    },
+                )
+            }
+            Expr::WidthSlice {
+                value,
+                start,
+                width,
+            } => {
+                let value = self.inferred_expr(value)?;
+                let Some((false, source_width)) = bits(&value.ty) else {
+                    return Err(format!(
+                        "width slice requires an unsigned bit value, got {}",
+                        value.ty
+                    ));
+                };
+                let ty = self.slice_result_type(width)?;
+                let Some((_, result_width)) = bits(&ty) else {
+                    return Err(format!("width slice requires a bit result type, got {ty}"));
+                };
+                if result_width > source_width {
+                    return Err(format!(
+                        "slice width {result_width} exceeds input width {source_width}"
+                    ));
+                }
+                let start = self.unsigned_index(start, Some(source_width))?;
+                (
+                    ty,
+                    K::WidthSlice {
+                        value: Box::new(value),
+                        start: Box::new(start),
                     },
                 )
             }
@@ -999,10 +1089,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             Expr::Call { name, args } => self.function_call(name, args)?,
             Expr::Cast { value, ty } => {
                 self.decls.validate_type(ty)?;
-                let v = self.expr(
-                    value,
-                    matches!(value.as_ref(), Expr::Literal { ty: None, .. }).then_some(ty),
-                )?;
+                let v = self.inferred_expr(value)?;
                 if bits(&v.ty).is_none() || bits(ty).is_none() {
                     return Err(format!("cast from {} to {ty} requires bit types", v.ty));
                 }
@@ -1025,7 +1112,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 )
             }
             Expr::Unary { op, value } => {
-                let v = self.expr(value, expected)?;
+                let v = self.expr_in_group(value, expected)?;
                 if bits(&v.ty).is_none() {
                     return Err(format!("invalid unary '{op}' for {}", v.ty));
                 }
@@ -1048,6 +1135,134 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             self.decls.validate_type(&ty)?;
         }
         Ok(TypedExpr { ty, kind })
+    }
+
+    /// Check values against a common type, including the corresponding
+    /// members of nested aggregate literals. Keep the resulting values in
+    /// source order and reuse the expression that supplied a concrete type.
+    fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        let first_has_type = has_concrete_element_type(items[0])?;
+        if !first_has_type && items.iter().any(|item| matches!(item, Expr::If { .. })) {
+            // Every conditional branch contributes to the same element type.
+            let mut branches = Vec::new();
+            let mut conditions = Vec::new();
+            for item in items {
+                if let Expr::If {
+                    condition,
+                    then_value,
+                    else_value,
+                } = item
+                {
+                    conditions.push(Some(self.expr(condition, Some(&Type::Bool))?));
+                    branches.extend([then_value.as_ref(), else_value.as_ref()]);
+                } else {
+                    conditions.push(None);
+                    branches.push(*item);
+                }
+            }
+            let mut branches = self.unify_values(&branches)?.into_iter();
+            return Ok(conditions
+                .into_iter()
+                .map(|condition| {
+                    let value = branches.next().expect("one value per item");
+                    match condition {
+                        None => value,
+                        Some(condition) => TypedExpr {
+                            ty: value.ty.clone(),
+                            kind: K::If {
+                                condition: Box::new(condition),
+                                then_value: Box::new(value),
+                                else_value: Box::new(
+                                    branches.next().expect("two branches per conditional"),
+                                ),
+                            },
+                        },
+                    }
+                })
+                .collect());
+        }
+        if !first_has_type
+            && let Expr::Tuple(first) = items[0]
+            && let Some(tuples) = items
+                .iter()
+                .map(|item| match item {
+                    Expr::Tuple(fields) if fields.len() == first.len() => Some(fields),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut values = vec![Vec::with_capacity(first.len()); tuples.len()];
+            let mut types = Vec::with_capacity(first.len());
+            for i in 0..first.len() {
+                let fields: Vec<_> = tuples.iter().map(|tuple| &tuple[i]).collect();
+                let fields = self.unify_values(&fields)?;
+                types.push(fields[0].ty.clone());
+                for (tuple, field) in values.iter_mut().zip(fields) {
+                    tuple.push(field);
+                }
+            }
+            let ty = Type::Tuple(types);
+            return Ok(values
+                .into_iter()
+                .map(|fields| TypedExpr {
+                    ty: ty.clone(),
+                    kind: K::Tuple(fields),
+                })
+                .collect());
+        }
+        if !first_has_type
+            && let Expr::Array(first) = items[0]
+            && let Some(arrays) = items
+                .iter()
+                .map(|item| match item {
+                    Expr::Array(elements) if elements.len() == first.len() => Some(elements),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        {
+            let fields: Vec<_> = arrays.into_iter().flatten().collect();
+            if fields.is_empty() {
+                return Err("empty array literal requires an array type".into());
+            }
+            let fields = self.unify_values(&fields)?;
+            let ty = Type::Array {
+                element: Box::new(fields[0].ty.clone()),
+                size: first.len(),
+            };
+            let mut fields = fields.into_iter();
+            return Ok(items
+                .iter()
+                .map(|_| TypedExpr {
+                    ty: ty.clone(),
+                    kind: K::Array(fields.by_ref().take(first.len()).collect()),
+                })
+                .collect());
+        }
+        let hint = if first_has_type {
+            ArrayElementHint::FromElement(0)
+        } else {
+            array_element_hint(items)?
+        };
+        match hint {
+            ArrayElementHint::Minimum(ty) => items
+                .iter()
+                .map(|item| self.expr(item, Some(&ty)))
+                .collect(),
+            ArrayElementHint::FromElement(i) => {
+                let element = self.expr(items[i], None)?;
+                let ty = &element.ty;
+                let mut values = Vec::with_capacity(items.len());
+                for item in &items[..i] {
+                    values.push(self.expr(item, Some(ty))?);
+                }
+                let ty = element.ty.clone();
+                values.push(element);
+                for item in &items[i + 1..] {
+                    values.push(self.expr(item, Some(&ty))?);
+                }
+                Ok(values)
+            }
+        }
     }
 
     /// Resolve either a concrete extern declaration or an imported DSLX
@@ -1103,39 +1318,183 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         ))
     }
 
-    /// Infer an unannotated integer from the opposite operand when no result
-    /// type is available.
+    /// Check a dimension's operands at the widths used by DSLX constexpr
+    /// evaluation.
+    fn dimension_expr(&mut self, expr: &Expr, context_width: usize) -> Result<TypedExpr, String> {
+        match expr {
+            Expr::If {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                // The chosen branch's physical width is preserved when it
+                // becomes an operand of further constexpr arithmetic.
+                let condition = self.expr(condition, Some(&Type::Bool))?;
+                let select_then = condition
+                    .constant(&self.constants)
+                    .ok_or("slice type dimension must be a compile-time constant")?
+                    .to_bool()
+                    .map_err(|e| e.to_string())?;
+                let then_value = self.dimension_expr(then_value, context_width)?;
+                let else_value = self.dimension_expr(else_value, context_width)?;
+                let ty = if select_then {
+                    &then_value.ty
+                } else {
+                    &else_value.ty
+                };
+                Ok(TypedExpr {
+                    ty: ty.clone(),
+                    kind: K::If {
+                        condition: Box::new(condition),
+                        then_value: Box::new(then_value),
+                        else_value: Box::new(else_value),
+                    },
+                })
+            }
+            Expr::Unary { op, value } => {
+                let value = self.dimension_expr(value, context_width)?;
+                Ok(TypedExpr {
+                    ty: value.ty.clone(),
+                    kind: K::Unary {
+                        op: *op,
+                        value: Box::new(value),
+                    },
+                })
+            }
+            Expr::Binary { op, left, right }
+                if has_common_bit_type(*op) || matches!(op, BinaryOp::Shl | BinaryOp::Shr) =>
+            {
+                let left = self.dimension_expr(left, context_width)?;
+                let right = if has_common_bit_type(*op) {
+                    let right = self.dimension_expr(right, context_width)?;
+                    if !compatible(&left.ty, &right.ty) {
+                        return Err(format!(
+                            "'{op}' in slice dimension requires matching operand types, got {} and {}",
+                            left.ty, right.ty
+                        ));
+                    }
+                    right
+                } else {
+                    // DSLX checks the shift against the dimension's required
+                    // type, then evaluates it on the selected physical bits.
+                    self.shift_distance(right, context_width)?
+                };
+                Ok(TypedExpr {
+                    ty: left.ty.clone(),
+                    kind: K::Binary {
+                        op: *op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                })
+            }
+            _ => {
+                let operands = context_operands(expr, &self.inferred_bindings, context_width)?;
+                let context = Type::Bits {
+                    signed: false,
+                    width: context_width,
+                };
+                self.expr(
+                    expr,
+                    (operands != ContextOperands::Bound).then_some(&context),
+                )
+            }
+        }
+    }
+
+    /// Evaluate an unsigned DSLX type dimension under its required bit width.
+    fn slice_dimension(&mut self, expr: &Expr, context_width: usize) -> Result<usize, String> {
+        let dimension = self.dimension_expr(expr, context_width)?;
+        if !dimension.has_constant_inputs(&self.constexpr_names) {
+            return Err("slice type dimension must be a compile-time constant".into());
+        }
+        let value = dimension
+            .constant(&self.constants)
+            .ok_or("slice type dimension must be a compile-time constant")?;
+        ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+            .ok_or("slice type dimension does not fit usize".into())
+    }
+
+    /// Resolve the bit type after `+:`, including constant width and signedness
+    /// expressions.
+    fn slice_result_type(&mut self, width: &WidthSliceType) -> Result<Type, String> {
+        match width {
+            WidthSliceType::Concrete(ty) => Ok(ty.clone()),
+            WidthSliceType::Bits { signed, bit_count } => Ok(Type::Bits {
+                signed: self.slice_dimension(signed, 1)? != 0,
+                width: self.slice_dimension(bit_count, 32)?,
+            }),
+        }
+    }
+
+    /// In a self-determined expression, bare numbers take the smallest common
+    /// type that fits.
+    fn inferred_expr(&mut self, expr: &Expr) -> Result<TypedExpr, String> {
+        let minimum = minimum_type(expr)?;
+        self.expr(expr, minimum.as_ref())
+    }
+
+    /// Unify same-type operands using the result context, an explicit operand,
+    /// or their minimum widths.
     fn pair(
         &mut self,
         left: &Expr,
         right: &Expr,
         expected: Option<&Type>,
     ) -> Result<(TypedExpr, TypedExpr), String> {
-        if expected.is_none() && matches!(left, Expr::Literal { ty: None, .. }) {
-            let r = self.expr(right, None)?;
-            let l = self.expr(left, Some(&r.ty))?;
+        if expected.is_none() && (has_aggregate_literal(left) || has_aggregate_literal(right)) {
+            let [left, right] = self
+                .unify_values(&[left, right])?
+                .try_into()
+                .expect("one typed expression per operand");
+            return Ok((left, right));
+        }
+        if expected.is_none()
+            && let OperandHint::FromRight(common) = operand_hint(left, right)?
+        {
+            let r = self.expr_in_group(right, common.as_ref())?;
+            let l = self.expr_in_group(left, Some(&r.ty))?;
             return Ok((l, r));
         }
-        let l = self.expr(left, expected)?;
-        let r = self.expr(right, Some(&l.ty))?;
+        let l = self.expr_in_group(left, expected)?;
+        let r = self.expr_in_group(right, Some(&l.ty))?;
         Ok((l, r))
     }
 
-    /// Type-check a shift distance or array index, defaulting a bare literal to
-    /// u32.
-    fn unsigned_index(&mut self, expr: &Expr) -> Result<TypedExpr, String> {
-        let hint = Type::Bits {
-            signed: false,
-            width: 32,
+    /// Use the index context's standard width only when all its operands are
+    /// unsized.
+    fn unsigned_index(
+        &mut self,
+        expr: &Expr,
+        standard_width: Option<usize>,
+    ) -> Result<TypedExpr, String> {
+        let hint = match standard_width {
+            Some(width) => {
+                let operands = context_operands(expr, &self.inferred_bindings, width)?;
+                (operands == ContextOperands::Inline).then_some(Type::Bits {
+                    signed: false,
+                    width,
+                })
+            }
+            None => minimum_type(expr)?,
         };
-        let v = self.expr(
-            expr,
-            matches!(expr, Expr::Literal { ty: None, .. }).then_some(&hint),
-        )?;
+        let v = self.expr(expr, hint.as_ref())?;
         if !bits(&v.ty).is_some_and(|(s, _)| !s) {
             return Err(format!("expected unsigned index, got {}", v.ty));
         }
         Ok(v)
+    }
+
+    /// Check the independently typed shift distance against the left operand.
+    fn shift_distance(&mut self, right: &Expr, width: usize) -> Result<TypedExpr, String> {
+        let right = self.unsigned_index(right, None)?;
+        if let K::Literal(value) = &right.kind
+            && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+                .is_none_or(|shift| shift > width)
+        {
+            return Err(format!("literal shift amount exceeds input width {width}"));
+        }
+        Ok(right)
     }
 
     /// Select operator signatures before lowering erases signedness and nominal
@@ -1149,16 +1508,15 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     ) -> Result<(Type, K), String> {
         let (ty, l, r) = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
-                let l = self.expr(left, expected)?;
-                let r = self.unsigned_index(right)?;
-                if bits(&l.ty).is_none() {
-                    return Err(format!("'{op}' requires a bit value"));
-                }
+                let l = self.expr_in_group(left, expected)?;
+                let (_, width) =
+                    bits(&l.ty).ok_or_else(|| format!("'{op}' requires a bit value"))?;
+                let r = self.shift_distance(right, width)?;
                 (l.ty.clone(), l, r)
             }
             BinaryOp::Concat => {
-                let l = self.expr(left, None)?;
-                let r = self.expr(right, None)?;
+                let l = self.inferred_expr(left)?;
+                let r = self.inferred_expr(right)?;
                 let (Some((false, left_width)), Some((false, right_width))) =
                     (bits(&l.ty), bits(&r.ty))
                 else {
@@ -1184,6 +1542,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             | BinaryOp::Gt
             | BinaryOp::Ge => {
                 let (l, r) = self.pair(left, right, None)?;
+                check_inferred_signed_width(&[left, right], &l.ty)?;
                 if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) && bits(&l.ty).is_none() {
                     return Err(format!("comparison '{op}' requires bit operands"));
                 }

@@ -12,6 +12,7 @@ documentation = "https://docs.rs/xlsynth-bx"
 workspace = true
 
 [dependencies]
+num-bigint = "0.4.6"
 xlsynth = { path = "../xlsynth", version = "0.80.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.80.0" }
 

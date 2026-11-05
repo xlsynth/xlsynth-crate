@@ -577,6 +577,12 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 let index = self.expr(index)?;
                 self.builder.array_index(value, index)
             }
+            TypedExprKind::WidthSlice { value, start } => {
+                let value = self.expr(value)?;
+                let start = self.expr(start)?;
+                let width = self.layouts.lower(&expr.ty)?.bit_count();
+                self.builder.dynamic_bit_slice(value, start, width)
+            }
             TypedExprKind::Tuple(fields) => {
                 let fields = fields
                     .iter()
