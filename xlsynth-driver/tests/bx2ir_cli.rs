@@ -980,6 +980,66 @@ block delay(clk, x: u8) -> u8 {
 }
 
 #[test]
+fn bx2lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::write(
+        root.join("design.bx"),
+        r#"pub block passthrough(clk, x: u8) -> u8 { x }
+struct Outputs { seen: u8, valid: bool }
+block counter(clk, rst, x: u8) -> Outputs {
+    reg count: u8 = 0;
+    count := x;
+    Outputs { seen: count, valid: true }
+}"#,
+    )?;
+    let options = ["design.bx", "--top=counter", "--reset-active-low"];
+    let args = [&["bx2lean"][..], &options, &["--output-dir=lean"]].concat();
+    assert!(stdout(root, &args)?.is_empty());
+    let mut files = fs::read_dir(root.join("lean"))?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.sort();
+    assert_eq!(
+        files,
+        [
+            "Generated.lean",
+            "ReadableCorrespondence.lean",
+            "ReadableGenerated.lean",
+            "ReadableRepresentation.lean",
+            "ReadableTypes.lean",
+        ]
+    );
+    fs::write(
+        root.join("saved.ir"),
+        stdout(root, &[&["bx2ir"][..], &options].concat())?,
+    )?;
+    assert_eq!(
+        fs::read_to_string(root.join("lean/Generated.lean"))?,
+        stdout(root, &["block2lean", "saved.ir"])?
+    );
+    fs::write(root.join("lean/Generated.lean"), "keep")?;
+    assert!(!driver(root, &args)?.status.success());
+    assert_eq!(
+        fs::read_to_string(root.join("lean/Generated.lean"))?,
+        "keep"
+    );
+    let missing = driver(
+        root,
+        &[
+            "bx2lean",
+            "design.bx",
+            "--top=unknown",
+            "--output-dir=missing",
+        ],
+    )?;
+    assert!(!missing.status.success());
+    assert!(String::from_utf8(missing.stderr)?.contains("unknown"));
+    assert!(!root.join("missing").try_exists()?);
+    Ok(())
+}
+
+#[test]
 fn ambiguous_and_missing_top_fail_without_emitting_ir() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();

@@ -180,6 +180,18 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
+pub fn bx2lean_command() -> Command {
+    add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
+        .arg(
+            Arg::new("output-dir")
+                .long("output-dir")
+                .value_name("NEW_DIR")
+                .value_parser(value_parser!(PathBuf))
+                .required(true)
+                .help("Create a new directory for the five Lean modules"),
+        )
+}
+
 pub fn bx2gv_command() -> Command {
     g8r2gv::add_mapping_args(
         add_bx_args(
@@ -296,14 +308,23 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
             &mut package,
             matches.get_one::<String>("top").map(String::as_str),
         )?;
-        for warning in checked.warnings() {
-            eprintln!("{}", warning.display_with_root(input.path));
-        }
-        if input.warnings_as_errors && !checked.warnings().is_empty() {
-            bail!("BX warnings treated as errors");
-        }
+        report_warnings(input.path, input.warnings_as_errors, checked.warnings())?;
         Ok(package)
     })
+}
+
+fn report_warnings(
+    path: &Path,
+    warnings_as_errors: bool,
+    warnings: &[xlsynth_bx::BxWarning],
+) -> Result<()> {
+    for warning in warnings {
+        eprintln!("{}", warning.display_with_root(path));
+    }
+    if warnings_as_errors && !warnings.is_empty() {
+        bail!("BX warnings treated as errors");
+    }
+    Ok(())
 }
 
 pub fn bx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
@@ -599,6 +620,35 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
         }
         Ok(())
     })
+}
+
+/// Generate and validate the complete model before creating its output
+/// directory.
+pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+    let compiled = with_bx_input(matches, config, |input| {
+        let reset = ResetBehavior {
+            active_low: input.active_low,
+            asynchronous: matches.get_flag("reset-asynchronous"),
+        };
+        let compiled =
+            xlsynth_lean::block::compile_bx(&input.source, input.package, reset, &input.imports)
+                .with_context(|| input.path.display().to_string())?;
+        report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;
+        Ok(compiled)
+    })?;
+    let top = matches.get_one::<String>("top").map(String::as_str);
+    let bundle = compiled.emit_readable(top)?;
+    let directory = matches
+        .get_one::<PathBuf>("output-dir")
+        .expect("clap requires NEW_DIR");
+    fs::create_dir(directory)
+        .with_context(|| format!("creating new output directory '{}'", directory.display()))?;
+    for (name, text) in bundle.files {
+        let path = directory.join(name);
+        fs::write(&path, text)
+            .with_context(|| format!("writing generated Lean module '{}'", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Optimizes the selected BX block and maps its sequential design to the

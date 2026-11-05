@@ -46,6 +46,7 @@ mod aig_tech_map;
 mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
+mod block2lean;
 mod block2sv;
 mod bx;
 mod common;
@@ -951,6 +952,7 @@ fn main() {
                 )
         )
         .subcommand(bx::bx2ir_command())
+        .subcommand(bx::bx2lean_command())
         .subcommand(bx::bx2gv_command())
         .subcommand(bx::bx_test_command())
         .subcommand(bx::bx_prove_quickcheck_command())
@@ -2089,6 +2091,23 @@ fn main() {
                         .help("Comma-separated output port names to drop")
                         .required(false)
                         .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("block2lean")
+                .about("Converts an XLS block IR package to Lean without invoking Lean")
+                .arg(Arg::new("input_file").value_name("INPUT_FILE").required(true))
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("NAME")
+                        .help("Select a block, overriding the package top"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Write to a file instead of stdout"),
                 ),
         )
         .subcommand(
@@ -4110,6 +4129,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx2ir", subm)) => {
             if let Err(error) = bx::bx2ir(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2ir"), vec![]);
+            }
+        }
+        Some(("bx2lean", subm)) => {
+            if let Err(error) = bx::bx2lean(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx2lean"), vec![]);
+            }
+        }
+        Some(("block2lean", subm)) => {
+            if let Err(error) = block2lean::handle_block2lean(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("block2lean"), vec![]);
             }
         }
         Some(("bx2gv", subm)) => {

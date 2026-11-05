@@ -35,6 +35,11 @@ pub fn compile_bx(
 }
 
 impl CompiledBx {
+    /// BX diagnostics collected while checking this compilation.
+    pub fn warnings(&self) -> &[xlsynth_bx::BxWarning] {
+        self.checked.warnings()
+    }
+
     /// The exact lowered package used for both raw and readable equations.
     pub fn package(&self) -> &ir::Package {
         &self.package
