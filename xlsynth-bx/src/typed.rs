@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
-use xlsynth_pir::{IrBits, IrValue, ir_value_utils::ir_bits_to_usize};
+use std::collections::{BTreeMap, BTreeSet};
+use xlsynth_pir::{
+    IrBits, IrValue,
+    ir_value_utils::{ir_bits_to_usize, ir_bits_to_usize_in_range},
+};
 
 use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
 use crate::dslx_import::{ImportedCall, ResolvedImports};
@@ -106,6 +109,10 @@ pub enum TypedExprKind {
         value: Box<TypedExpr>,
         index: Box<TypedExpr>,
     },
+    WidthSlice {
+        value: Box<TypedExpr>,
+        start: Box<TypedExpr>,
+    },
     TupleIndex {
         value: Box<TypedExpr>,
         index: usize,
@@ -152,6 +159,45 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
 }
 
 impl TypedExpr {
+    /// A DSLX type dimension must have constant inputs in every branch, even
+    /// when its value could be folded by selecting just one branch.
+    pub(super) fn has_constant_inputs(&self, names: &BTreeSet<String>) -> bool {
+        match &self.kind {
+            K::Name(name) => names.contains(name),
+            K::Literal(_) => true,
+            K::InstanceOutput { .. } => false,
+            K::Tuple(items)
+            | K::Array(items)
+            | K::Call { args: items, .. }
+            | K::ImportedCall { args: items, .. } => {
+                items.iter().all(|item| item.has_constant_inputs(names))
+            }
+            K::TupleIndex { value, .. } | K::Cast { value } | K::Unary { value, .. } => {
+                value.has_constant_inputs(names)
+            }
+            K::Index {
+                value: left,
+                index: right,
+            }
+            | K::WidthSlice {
+                value: left,
+                start: right,
+            }
+            | K::Binary { left, right, .. } => {
+                left.has_constant_inputs(names) && right.has_constant_inputs(names)
+            }
+            K::If {
+                condition,
+                then_value,
+                else_value,
+            } => {
+                condition.has_constant_inputs(names)
+                    && then_value.has_constant_inputs(names)
+                    && else_value.has_constant_inputs(names)
+            }
+        }
+    }
+
     /// Evaluate register reset constants, allowing prior constant let bindings.
     pub(super) fn constant(&self, names: &BTreeMap<String, IrValue>) -> Option<IrValue> {
         match &self.kind {
@@ -175,6 +221,20 @@ impl TypedExpr {
                 let last = array.get_element_count().ok()?.checked_sub(1)?;
                 let i = ir_bits_to_usize(index.constant(names)?.as_bits().ok()?).unwrap_or(last);
                 array.get_element(i.min(last)).ok()
+            }
+            K::WidthSlice { value, start } => {
+                let value = value.constant(names)?;
+                let source = value.as_bits().ok()?;
+                let start = start.constant(names)?;
+                let width = bits(&self.ty)?.1;
+                let slice = match ir_bits_to_usize_in_range(
+                    start.as_bits().ok()?,
+                    source.get_bit_count(),
+                ) {
+                    Some(offset) => source.width_slice(offset as i64, width as i64),
+                    None => IrBits::zero(width),
+                };
+                Some(IrValue::Bits(slice))
             }
             K::TupleIndex { value, index } => value.constant(names)?.get_element(*index).ok(),
             K::Call { .. } | K::ImportedCall { .. } | K::InstanceOutput { .. } => None,

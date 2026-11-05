@@ -1,6 +1,8 @@
 # xlsynth-bx
 
-BX describes clocked hardware with DSLX-style value expressions. The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. DSLX functions can supply combinational logic through a module import or a prelinked `extern fn` declaration.
+BX describes clocked hardware using blocks, registers, and explicit wiring. Its value language aims to implement a subset of DSLX with the same syntax, type inference, and evaluation rules. For the shared language, see the [DSLX reference manual](https://google.github.io/xls/dslx_reference/).
+
+The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. DSLX functions can supply combinational logic through a module import or a prelinked `extern fn` declaration.
 
 ```text
 extern fn math::transform(x: u8) -> u16;
@@ -20,6 +22,8 @@ pub block transform_pipe(clk, rst, valid_in: bool, x: u8) -> ResultPorts {
     ResultPorts { data: data_q, valid: valid_q }
 }
 ```
+
+BX supports concrete bit types, booleans, tuples, named structs, and fixed-size arrays. Its expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
 ## Compile and link
 
@@ -130,7 +134,7 @@ Use the same call syntax for a BX block defined anywhere in the module. An `exte
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 
-BX currently accepts concrete bit widths, booleans, tuples, named structs, and fixed-size arrays. Expressions support arithmetic, comparisons, bitwise and logical operations, shifts, unsigned bit concatenation, bit casts, field selection, array indexing, and value-producing `if` expressions. The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separately compiled DSLX multiplier, and load enables.
+The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separately compiled DSLX multiplier, and load enables.
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
 

@@ -1,0 +1,23 @@
+[package]
+name = "xlsynth-bx-fuzz"
+version = "0.80.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xlsynth = { path = "../../xlsynth", version = "0.80.0" }
+xlsynth-bx = { path = "..", version = "0.80.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.80.0" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_bx_dslx_expr_eval_equiv"
+path = "fuzz_targets/fuzz_bx_dslx_expr_eval_equiv.rs"
+test = false
+doc = false

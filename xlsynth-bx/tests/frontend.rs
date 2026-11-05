@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "support/directed_expr_eval.rs"]
+mod directed_expr_eval;
+#[path = "support/expr_eval.rs"]
+mod expr_eval;
+
 use std::path::Path;
+
+use directed_expr_eval::{assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx};
+use expr_eval::ExpressionEvaluator;
 
 use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, parse_module};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{Block, MemberType, NodePayload, Unop};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
@@ -366,4 +375,380 @@ fn wrapper(x: bits[1] id=3) -> bits[1] {
         err,
         "cannot lift effectful IR function 'observed' into BX because it contains 'cover'"
     );
+}
+
+#[test]
+fn signed_operand_unifies_prior_literal_widths_in_source_order() {
+    assert_expr_rejected_by_both("y: s4", "bool", "(2 ^ 0x8) == y");
+    assert_expr_matches_dslx(
+        "y: s4",
+        "bool",
+        "y == (2 ^ 0x8)",
+        [(
+            vec![IrValue::make_ubits(4, 10).unwrap()],
+            IrValue::bool(true),
+        )],
+    );
+    for body in [
+        "let a = 2 ^ (0x8 + y); a",
+        "let a = (2 ^ 0x8) + y; a",
+        "let a = 2 ^ ((0x8 + -1) + y); a",
+    ] {
+        assert_expr_rejected_by_both("y: s4", "s4", body);
+    }
+    for (body, expected) in [
+        ("2 ^ (0x8 + y)", 11),
+        ("let a: s4 = 2 ^ (0x8 + y); a", 11),
+        ("let a = 2 ^ (y + 0x8); a", 11),
+        ("let a = -1 + (2 ^ (0x8 + y)); a", 10),
+        ("let a = 0x8 + y; a", 9),
+    ] {
+        assert_expr_matches_dslx(
+            "y: s4",
+            "s4",
+            body,
+            [(
+                vec![IrValue::make_ubits(4, 1).unwrap()],
+                IrValue::make_ubits(4, expected).unwrap(),
+            )],
+        );
+    }
+}
+
+#[test]
+fn packed_slices_extract_lsb_first_and_zero_fill_past_the_end() {
+    let body = r#"
+    let word = words[1];
+    (word[offset+:u4], word[u8:16+:uN[80]], word[64+:s4] as s8)
+"#;
+    let words =
+        IrValue::parse_typed("[bits[96]:0, bits[96]:0xc000_00cd_0000_0000_0000_009b]").unwrap();
+    let cases = [
+        ("0", 0xb),
+        ("1", 0xd),
+        ("94", 3),
+        ("96", 0),
+        ("0x1_0000_0000_0000_0000", 0),
+    ]
+    .map(|(offset, expected_nibble)| {
+        let offset = IrValue::parse_typed(&format!("bits[96]:{offset}")).unwrap();
+        let expected = format!(
+            "(bits[4]:{expected_nibble}, bits[80]:0xc000_00cd_0000_0000_0000, bits[8]:0xfd)"
+        );
+        (
+            vec![words.clone(), offset],
+            IrValue::parse_typed(&expected).unwrap(),
+        )
+    });
+    assert_expr_matches_dslx(
+        "words: uN[96][2], offset: uN[96]",
+        "(u4, uN[80], s8)",
+        body,
+        cases,
+    );
+}
+
+#[test]
+fn packed_slice_operand_inference_matches_dslx() {
+    let inputs = "x: u8, i: u3, flag: bool";
+    let args = vec![
+        IrValue::make_ubits(8, 0x3a).unwrap(),
+        IrValue::make_ubits(3, 2).unwrap(),
+        IrValue::bool(true),
+    ];
+    for (expr, result, expected) in [
+        ("0b100111[2+:u3]", "u3", "bits[3]:1"),
+        ("0[0+:bits[0]]", "bits[0]", "bits[0]:0"),
+        ("x[i+:bits[0]]", "bits[0]", "bits[0]:0"),
+        ("x[flag+:bool]", "bool", "bits[1]:1"),
+        ("x[u8:true+:u1]", "u1", "bits[1]:1"),
+        ("x[u3:(1)+:u1]", "u1", "bits[1]:1"),
+        ("x[(u3:1, u3:2).0x0+:u1]", "u1", "bits[1]:1"),
+        ("(x[0+:u3],)", "(u3,)", "(bits[3]:2)"),
+        (r"x['\x01'+:u1]", "u1", "bits[1]:1"),
+        ("x[-(1)+:u1]", "u1", "bits[1]:0"),
+        ("x[i + -(1)+:u1]", "u1", "bits[1]:1"),
+        ("flag[i + 6+:u1]", "u1", "bits[1]:1"),
+        ("x[(i >> 3)+:u2]", "u2", "bits[2]:2"),
+        ("x[(i >> (2 + 2))+:u2]", "u2", "bits[2]:2"),
+        ("x[i ++ 1+:u1]", "u1", "bits[1]:1"),
+        ("x[(1 < 2)+:u1]", "u1", "bits[1]:1"),
+        ("x[([1] == [3])+:u1]", "u1", "bits[1]:0"),
+        ("x[((1, x) == (3, x))+:u1]", "u1", "bits[1]:0"),
+        ("x[(7 as u2)+:u1]", "u1", "bits[1]:1"),
+        ("x[if flag { 4 } else { i }+:u3]", "u3", "bits[3]:3"),
+    ] {
+        assert_expr_matches_dslx(
+            inputs,
+            result,
+            expr,
+            [(args.clone(), IrValue::parse_typed(expected).unwrap())],
+        );
+    }
+}
+
+#[test]
+fn packed_slices_infer_literal_types_in_aggregate_projections() {
+    let body = r#"
+        let offsets = [1, 2];
+        let pair = (1, 2);
+        let mixed = [(1, u2:1), (i, 2)];
+        let nested = [[1, 2], [4, 5]];
+        (x[offsets[0]+:u1], x[pair.0+:u1], [1, 2][1][0+:u2],
+         (1, 2).1[0+:u2], [1, i][0][0+:u3], [i, 1][1][0+:u3],
+         mixed[0].0[0+:u3], mixed[1].1[0+:u2], nested[0][0][0+:u3])
+    "#;
+    let expected = IrValue::parse_typed(
+        "(bits[1]:1, bits[1]:1, bits[2]:2, bits[2]:2, bits[3]:1, bits[3]:1, bits[3]:1, bits[2]:2, bits[3]:1)",
+    )
+    .unwrap();
+    assert_expr_matches_dslx(
+        "x: u8, i: u3",
+        "(u1, u1, u2, u2, u3, u3, u3, u2, u3)",
+        body,
+        [(
+            vec![
+                IrValue::make_ubits(8, 2).unwrap(),
+                IrValue::make_ubits(3, 3).unwrap(),
+            ],
+            expected,
+        )],
+    );
+}
+
+#[test]
+fn packed_slice_dimensions_retain_projected_literal_widths() {
+    let body = r#"
+        let widths = ([1, 2], (u32:2, 3));
+        let pair = widths.1;
+        let two = widths.0[1];
+        (x[0+:uN[(1, 2).0]], x[0+:uN[[1, 2][1]]], x[0+:uN[pair.0]],
+         x[0+:uN[pair.1]], x[0+:uN[two]], x[0+:xN[(0, 1).0][1]])
+    "#;
+    assert_expr_matches_dslx(
+        "x: u8",
+        "(u1, u2, u2, u3, u2, u1)",
+        body,
+        [(
+            vec![IrValue::make_ubits(8, 7).unwrap()],
+            IrValue::parse_typed(
+                "(bits[1]:1, bits[2]:3, bits[2]:3, bits[3]:7, bits[2]:3, bits[1]:1)",
+            )
+            .unwrap(),
+        )],
+    );
+    for expr in [
+        "x[0+:uN[(u1:1, 2).0]]",
+        "let a = [1, u3:2]; x[0+:uN[a[0]]]",
+        "let a: (u1, u2) = (1, 2); x[0+:uN[a.0]]",
+        "x[0+:uN[(1, 2).0 + 0]]",
+        "true[[1, 2][0]+:u1]",
+    ] {
+        assert_expr_rejected_by_both("x: u8", "u1", expr);
+    }
+}
+
+#[test]
+fn packed_slice_infers_a_common_type_for_aggregate_branches() {
+    let body = r#"
+        let t = if flag { (1, 1) } else { (3, 3) };
+        let a = [(if flag { [1] } else { [1] }), [i]];
+        ((if flag { [1] } else { [3] })[0][0+:u2],
+         t.0[0+:u2], (if flag { [1] } else { [i] })[0][0+:u2],
+         (if flag { [1] } else { if flag { [3] } else { [5] } })[0][0+:u3],
+         x[0+:uN[(if true { (1, 2) } else { (3, 2) }).1]], a[0][0][0+:u2])
+    "#;
+    let cases = [
+        (
+            true,
+            "(bits[2]:1, bits[2]:1, bits[2]:1, bits[3]:1, bits[2]:2, bits[2]:1)",
+        ),
+        (
+            false,
+            "(bits[2]:3, bits[2]:3, bits[2]:2, bits[3]:5, bits[2]:2, bits[2]:1)",
+        ),
+    ]
+    .map(|(flag, expected)| {
+        (
+            vec![
+                IrValue::bool(flag),
+                IrValue::make_ubits(3, 6).unwrap(),
+                IrValue::make_ubits(8, 2).unwrap(),
+            ],
+            IrValue::parse_typed(expected).unwrap(),
+        )
+    });
+    assert_expr_matches_dslx(
+        "flag: bool, i: u3, x: u8",
+        "(u2, u2, u2, u3, u2, u2)",
+        body,
+        cases,
+    );
+}
+
+#[test]
+fn packed_slice_width_spellings_match_dslx_at_the_shorthand_boundary() {
+    let x = IrValue::make_ubits(84, 1).unwrap();
+    let expected =
+        IrValue::parse_typed("(bits[64]:1, bits[64]:1, bits[84]:1, bits[65]:1, bits[0]:0)")
+            .unwrap();
+    assert_expr_matches_dslx(
+        "x: uN[84]",
+        "(uN[64], sN[64], uN[84], sN[65], uN[0])",
+        "(x[0+:u64], x[0+:s64], x[0+:uN[84]], x[0+:sN[65]], x[0+:uN[0]])",
+        [(vec![x], expected)],
+    );
+}
+
+#[test]
+fn packed_slice_constexpr_widths_and_signedness_match_dslx() {
+    let body = r#"
+    let width = u32:4;
+    let inferred_width = 4;
+    let two_bits = 3;
+    (
+        x[0+:bits[0x4]],
+        x[0+:uN[2 + 2]],
+        x[0+:sN[width]] as s8,
+        x[0+:xN[!false][inferred_width]] as s8,
+        x[0+:xN[u1:0][4]] as u8,
+        x[0+:uN[two_bits + two_bits]],
+        x[0+:uN[if true { two_bits } else { 4 }]],
+        x[0+:uN[(if false { two_bits } else { 4 }) + 0]],
+        x[0+:uN[two_bits >> u4:3]],
+    )
+"#;
+    let x = IrValue::make_ubits(8, 0xba).unwrap();
+    let expected = IrValue::parse_typed(
+        "(bits[4]:10, bits[4]:10, bits[8]:0xfa, bits[8]:0xfa, bits[8]:10, bits[2]:2, bits[3]:2, bits[4]:10, bits[0]:0)",
+    )
+    .unwrap();
+    assert_expr_matches_dslx(
+        "x: u8",
+        "(u4, u4, s8, s8, u8, u2, u3, u4, uN[0])",
+        body,
+        [(vec![x], expected)],
+    );
+}
+
+#[test]
+fn packed_slices_fold_in_register_resets() {
+    let declarations = "let seed = uN[96]:0xd9; let offset = u3:1;";
+    let result = "(u4, u4, u4, u4)";
+    let initializer = r#"(
+        seed[-(1 - 6)+:u4],
+        seed[(6 + 1) + offset+:u4],
+        (u8:0xd9)[6+:u4],
+        seed[0x1_0000_0000_0000_0000+:u4],
+    )"#;
+    let evaluator = ExpressionEvaluator::compile(
+        "",
+        result,
+        &format!("{declarations} {initializer}"),
+        compile_dslx,
+    )
+    .unwrap();
+    let actual = evaluator.compare(&[]).unwrap();
+    assert_eq!(
+        actual,
+        IrValue::parse_typed("(bits[4]:6, bits[4]:9, bits[4]:3, bits[4]:0)").unwrap(),
+    );
+    evaluator
+        .compare_reset(&[], result, declarations, initializer, &actual)
+        .unwrap();
+}
+
+#[test]
+fn packed_slices_require_unsigned_operands_and_a_bit_result_that_fits_the_source() {
+    for (inputs, expr, result) in [
+        ("x: s8", "x[0+:u4]", "u4"),
+        ("x: u8, i: s4", "x[i+:u4]", "u4"),
+        ("x: u8", "x[-1+:u4]", "u4"),
+        ("x: u8", "x[uN[0]:false+:u1]", "u1"),
+        ("x: u8", "x[1 == 1 == 1+:u1]", "u1"),
+        ("x: u8, i: u3", "x[i + -1+:u1]", "u1"),
+        ("flag: bool, i: u3", "flag[6 + i+:u1]", "u1"),
+        (
+            "flag: bool",
+            "let n = if flag { 3 } else { 2 }; flag[n+:u1]",
+            "u1",
+        ),
+        ("flag: bool, x: u8", "let p = (3, x); flag[p.0+:u1]", "u1"),
+        (
+            "flag: bool",
+            "let a = [1, 2]; let n = a[flag]; flag[n+:u1]",
+            "u1",
+        ),
+        ("x: u8", "x[256+:u1]", "u1"),
+        ("x: u8", "0x07[0+:u4]", "u4"),
+        ("x: u8", "0[0+:u1]", "u1"),
+        ("x: u8[2]", "x[0+:u4]", "u4"),
+        ("x: u8, i: u4[2]", "x[i+:u4]", "u4"),
+        ("x: u8", "x[0+:u4[1]]", "u4[1]"),
+        ("x: u8, width: u32", "x[0+:uN[width]]", "u4"),
+        ("x: u8", "x[0+:uN[u3:4]]", "u4"),
+        ("x: u8", "let a = 3; x[0+:uN[a - 2]]", "u1"),
+        (
+            "x: u8",
+            "let a = 3; x[0+:uN[(if true { a } else { 4 }) + 0]]",
+            "u3",
+        ),
+        ("x: u8, flag: bool", "x[0+:xN[flag][4]]", "s4"),
+        ("x: u8", "x[0+:xN[u2:1][4]]", "s4"),
+        ("x: u8", "x[0+:(u1)]", "u1"),
+        ("x: u8", "u8:0xd9[6+:u4]", "u4"),
+        ("x: u8, i: u3", "x[(i >> 4)+:u2]", "u2"),
+        ("x: uN[84]", "x[0+:u65]", "uN[65]"),
+        ("x: uN[84]", "x[0+:s65]", "sN[65]"),
+        ("x: uN[84]", "x[0+:u84]", "uN[84]"),
+        ("x: u8", "x[0+:u0]", "uN[0]"),
+        ("x: u8", "x[0+:s0]", "sN[0]"),
+        ("x: u8", "x[0+:u9]", "u9"),
+    ] {
+        assert_expr_rejected_by_both(inputs, result, expr);
+    }
+}
+
+#[test]
+fn packed_slice_dimensions_check_runtime_inputs_in_untaken_branches() {
+    for (inputs, body, result) in [
+        (
+            "x: u8, width: u32",
+            "x[0+:uN[if true { 1 } else { width }]]",
+            "u1",
+        ),
+        (
+            "x: u8, width: u32",
+            "let w = if true { u32:1 } else { width }; let n = w; x[0+:uN[n]]",
+            "u1",
+        ),
+        (
+            "x: u8, flag: bool",
+            "x[0+:xN[if false { flag } else { false }][1]]",
+            "u1",
+        ),
+    ] {
+        if std::env::var_os("BX_DSLX_IR_CONVERTER").is_some() {
+            assert_expr_rejected_by_both(inputs, result, body);
+        } else {
+            // libxls v0.61.0 folds these branches. Current DSLX requires all
+            // inputs to a type dimension to be constexpr. Move these cases to
+            // the common rejection matrix when the bundled frontend catches up.
+            let source = format!("block invalid(clk, {inputs}) -> {result} {{ {body} }}");
+            assert!(
+                check_module(&parse_module(&source).unwrap()).is_err(),
+                "{source}"
+            );
+            assert!(compile_dslx(inputs, result, body).is_ok(), "{body}");
+        }
+    }
+}
+
+#[test]
+fn packed_slice_rejects_inconsistent_widths_in_a_let_bound_start() {
+    // The DSLX converter aborts when lowering the inferred u3 and u8 operands
+    // of this addition. BX should diagnose the mismatch during type checking.
+    let source = "block invalid(clk, x: u8) -> u1 { let a = 7; x[a + 1+:u1] }";
+    let parsed = parse_module(source).unwrap();
+    assert!(check_module(&parsed).is_err());
 }

@@ -48,6 +48,13 @@ operator_enum! {
 }
 
 impl BinaryOp {
+    pub(crate) fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Eq | Self::Ne | Self::Lt | Self::Le | Self::Gt | Self::Ge
+        )
+    }
+
     /// DSLX operator precedence, with larger numbers binding more tightly.
     pub(crate) fn precedence(self) -> u8 {
         match self {
@@ -133,6 +140,12 @@ pub enum Expr {
         value: Box<Expr>,
         index: Box<Expr>,
     },
+    /// A packed slice with a bit offset and a statically declared result type.
+    WidthSlice {
+        value: Box<Expr>,
+        start: Box<Expr>,
+        width: WidthSliceType,
+    },
     Call {
         /// A function name (including qualified imported or extern functions),
         /// or a block name when the call initializes a let binding.
@@ -156,6 +169,17 @@ pub enum Expr {
         condition: Box<Expr>,
         then_value: Box<Expr>,
         else_value: Box<Expr>,
+    },
+}
+
+/// The result type in `value[start+:type]`, before resolving its constant
+/// parameters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WidthSliceType {
+    Concrete(Type),
+    Bits {
+        signed: Box<Expr>,
+        bit_count: Box<Expr>,
     },
 }
 
