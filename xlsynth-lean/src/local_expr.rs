@@ -82,7 +82,7 @@ pub(crate) fn write_elaboration_limits<'a>(
 }
 
 /// Preserve operand order while keeping the Lean expression depth logarithmic.
-fn balanced_infix(operands: &[String], separator: &str) -> String {
+pub(crate) fn balanced_infix(operands: &[String], separator: &str) -> String {
     fn emit(out: &mut String, operands: &[String], separator: &str) {
         match operands {
             [] => {}

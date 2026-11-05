@@ -21,6 +21,18 @@ use crate::block::BlockContext;
 use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_elaboration_limits};
 use crate::support::write_file;
 
+/// Five Lean source files relating readable execution to the raw block model.
+///
+/// Emission does not run Lean; callers must elaborate the generated proofs.
+pub struct LeanBlockBundle {
+    /// File names and UTF-8 source in dependency order.
+    ///
+    /// The order is `Generated.lean`, `ReadableTypes.lean`,
+    /// `ReadableGenerated.lean`, `ReadableRepresentation.lean`, then
+    /// `ReadableCorrespondence.lean`.
+    pub files: Vec<(String, String)>,
+}
+
 /// Emit a verified XLS block in the `XlsBlock` namespace.
 /// The returned source imports `XlsynthLean.IR`. Use [`write_to`] to
 /// write a named model into a Lean project that supplies this import.
@@ -47,7 +59,7 @@ use crate::support::write_file;
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
-    emit_in_namespace(package, block, "XlsBlock")
+    emit_with_context(&BlockContext::new(package, block)?, "XlsBlock")
 }
 
 /// Write the generated block under `root`. The project supplies its
@@ -60,15 +72,17 @@ pub fn write_to(
     module_name: &LeanModuleName,
     root: &Path,
 ) -> Result<PathBuf> {
-    let source = emit_in_namespace(package, block, &module_name.lean_identifier())?;
+    let source = emit_with_context(
+        &BlockContext::new(package, block)?,
+        &module_name.lean_identifier(),
+    )?;
     let path = module_name.source_path();
     write_file(root, &path, source.as_bytes())?;
     Ok(root.join(path))
 }
 
-fn emit_in_namespace(package: &ir::Package, block: &ir::Block, namespace: &str) -> Result<String> {
-    let block = BlockContext::new(package, block)?;
-    emit_block(&block, namespace).with_context(|| {
+pub(super) fn emit_with_context(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
+    emit_block(block, namespace).with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -171,19 +185,29 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             .output_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
-    source.push_str(&structure_header("Assertions"));
+    let assertion_fields: Vec<_> = assertions
+        .iter()
+        .map(|reference| ir::node_textual_id(graph, *reference))
+        .collect();
+    source.push_str(&checked_structure_header(
+        "Assertions",
+        assertion_fields.iter().map(String::as_str),
+    )?);
+    let mut fields = RecordFields::default();
     for reference in &assertions {
         let node = graph.get_node(*reference);
         if let NodePayload::Assert { label, message, .. } = &node.payload {
-            let field = ir::node_textual_id(graph, *reference);
-            validate_lean_member("Assertions", &field)?;
             writeln!(
                 source,
-                "  -- id={}; label={}; message={}\n  {} : _root_.Bool",
+                "  -- id={}; label={}; message={}",
                 node.text_id,
                 comment(label),
-                comment(message),
-                identifier(&field)?
+                comment(message)
+            )?;
+            fields.write(
+                &mut source,
+                &identifier(&ir::node_textual_id(graph, *reference))?,
+                "_root_.Bool",
             )?;
         }
     }
@@ -302,8 +326,8 @@ pub(crate) fn lean_type(ty: &Type) -> Result<String> {
     Ok(LocalRenderer::Block.lean_type(ty))
 }
 
-/// Lean 4.34.1 generates these declarations in the same namespace as field
-/// projections. Quoting a source name preserves its spelling and the collision.
+/// Lean generates these declarations for every structure and inductive type.
+/// Quoting a source name preserves its spelling but does not prevent a clash.
 pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
     ensure!(
         !matches!(
@@ -322,9 +346,46 @@ pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-/// Keep the constructor in a separate namespace so a field can be named `mk`.
+/// Keep the constructor in a separate namespace so every source field keeps its
+/// name.
 pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
+}
+
+pub(super) fn checked_structure_header<'a>(
+    name: &str,
+    fields: impl Iterator<Item = &'a str>,
+) -> Result<String> {
+    for field in fields {
+        validate_lean_member(name, field)?;
+    }
+    Ok(structure_header(name))
+}
+
+/// Track the field scope of one Lean structure declaration.
+#[derive(Default)]
+pub(super) struct RecordFields {
+    shadows_root: bool,
+}
+
+impl RecordFields {
+    /// Lean elaborates a field type in the scope of preceding fields. Even the
+    /// root qualifier can be captured if a field itself is named `_root_`.
+    /// All hardware field types are independent of earlier field values.
+    pub(super) fn write(
+        &mut self,
+        out: &mut String,
+        field: &str,
+        rooted_type: &str,
+    ) -> std::fmt::Result {
+        if self.shadows_root {
+            writeln!(out, "  {field} : (by clear «_root_»; exact {rooted_type})")?;
+        } else {
+            writeln!(out, "  {field} : {rooted_type}")?;
+        }
+        self.shadows_root |= field == "«_root_»";
+        Ok(())
+    }
 }
 
 /// Declare fields in caller order, retaining names through Lean quotation.
@@ -332,14 +393,14 @@ fn record_type<'a>(
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
-    let mut source = structure_header(name);
+    let fields: Vec<_> = fields.collect();
+    let mut source = checked_structure_header(name, fields.iter().map(|(field, _)| *field))?;
+    let mut scope = RecordFields::default();
     for (field, ty) in fields {
-        validate_lean_member(name, field)?;
-        writeln!(
-            source,
-            "  {} : {}",
-            identifier(field).with_context(|| format!("{name} field {field}"))?,
-            lean_type(ty).with_context(|| format!("{name} field {field}"))?
+        scope.write(
+            &mut source,
+            &identifier(field).with_context(|| format!("{name} field {field}"))?,
+            &lean_type(ty).with_context(|| format!("{name} field {field}"))?,
         )?;
     }
     source.push_str("  deriving Repr\n\n");
