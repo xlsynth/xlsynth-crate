@@ -12,7 +12,7 @@ documentation = "https://docs.rs/xlsynth-lean"
 workspace = true
 
 [features]
-dslx-loop-bindings = ["xlsynth/dslx-loop-bindings"]
+dslx-loop-bindings = ["xlsynth/dslx-loop-bindings", "xlsynth-bx/dslx-loop-bindings"]
 
 [dependencies]
 anyhow = "1"

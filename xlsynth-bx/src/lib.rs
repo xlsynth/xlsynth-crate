@@ -71,6 +71,10 @@ pub struct LinkedImport {
     pub module: dslx::TypecheckedModule,
     /// Each original IR function symbol and its actual destination symbol.
     pub symbols: BTreeMap<String, String>,
+    /// Bindings for retained functions, in the destination package's symbol
+    /// and node ID space. Populated by the loop-binding compilation entry.
+    #[cfg(feature = "dslx-loop-bindings")]
+    pub loop_bindings: Vec<dslx::LoopBinding>,
 }
 
 /// A written DSLX struct reference resolved by the same import graph as BX.
@@ -101,6 +105,51 @@ pub fn compile_with_source(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledModule, String> {
+    compile_with_imports(source, package, reset, options, |module| {
+        let text = module.to_ir_text().map_err(|e| e.to_string())?;
+        Ok((
+            text,
+            LinkedImport {
+                module,
+                symbols: BTreeMap::new(),
+                #[cfg(feature = "dslx-loop-bindings")]
+                loop_bindings: Vec::new(),
+            },
+        ))
+    })
+}
+
+/// Compile with source declarations and the checked DSLX loop bindings
+/// produced by the very same conversion that supplied each imported body.
+#[cfg(feature = "dslx-loop-bindings")]
+pub fn compile_with_source_and_loop_bindings(
+    source: &str,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledModule, String> {
+    compile_with_imports(source, package, reset, options, |module| {
+        let (text, loop_bindings) = module
+            .convert_to_ir_text_with_loop_bindings()
+            .map_err(|e| e.to_string())?;
+        Ok((
+            text,
+            LinkedImport {
+                module,
+                symbols: BTreeMap::new(),
+                loop_bindings,
+            },
+        ))
+    })
+}
+
+fn compile_with_imports(
+    source: &str,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+    convert: impl Fn(dslx::TypecheckedModule) -> Result<(String, LinkedImport), String>,
+) -> Result<CompiledModule, String> {
     let mut modules = Vec::new();
     let mut imported_structs = BTreeMap::new();
     let mut imported_modules = BTreeSet::new();
@@ -108,7 +157,11 @@ pub fn compile_with_source(
     let checked = check::check_with_imports(
         &source,
         options,
-        |m| modules.push(m),
+        |m| {
+            let (ir, import) = convert(m)?;
+            modules.push(import);
+            Ok(ir)
+        },
         |s, modules| {
             imported_structs = s.into_sources();
             imported_modules = modules;
@@ -116,13 +169,30 @@ pub fn compile_with_source(
     )?;
     let mut modules = modules.into_iter();
     let mut imports = Vec::new();
-    let package = lower::lower_with_imports(&checked, package, reset, |linked| {
-        let module = modules.next().expect("one checked module per linked batch");
-        let symbols: BTreeMap<_, _> = linked
+    let package = lower::lower_with_imports(&checked, package, reset, |linked, _node_id_base| {
+        let mut import = modules.next().expect("one checked module per linked batch");
+        import.symbols = linked
             .into_iter()
             .map(|(old, new)| (old, new.name))
             .collect();
-        imports.push(LinkedImport { module, symbols });
+        #[cfg(feature = "dslx-loop-bindings")]
+        {
+            // The converter also visits unretained functions. Only linked
+            // functions have a destination in this package.
+            import
+                .loop_bindings
+                .retain(|b| import.symbols.contains_key(&b.ir_function));
+            for b in &mut import.loop_bindings {
+                b.ir_function = import.symbols[&b.ir_function].clone();
+                b.ir_node_id = usize::try_from(b.ir_node_id)
+                    .ok()
+                    .and_then(|id| id.checked_add(_node_id_base))
+                    .and_then(|id| i64::try_from(id).ok())
+                    .ok_or("imported loop binding node ID exceeds the available ID space")?;
+            }
+        }
+        imports.push(import);
+        Ok(())
     })?;
     Ok(CompiledModule {
         source,

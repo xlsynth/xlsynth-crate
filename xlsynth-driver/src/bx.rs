@@ -104,7 +104,6 @@ pub fn bx2lean_command() -> Command {
         Arg::new("readable-loop-names")
             .long("readable-loop-names")
             .action(clap::ArgAction::SetTrue)
-            .requires("link-dslx")
             .help("Use checked DSLX loop bindings to name locals in the readable model"),
     );
     command
@@ -214,6 +213,12 @@ pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
         .context("BX input requires a UTF-8 module name")?;
     let compiled = with_bx_input(matches, config, |source, package, reset, imports| {
         let Some(path) = matches.get_one::<String>("link-dslx") else {
+            #[cfg(feature = "dslx-loop-bindings")]
+            if matches.get_flag("readable-loop-names") {
+                return block::compile_bx_with_loop_bindings(
+                    bx_name, source, package, reset, imports,
+                );
+            }
             return block::compile_bx(bx_name, source, package, reset, imports);
         };
         let dslx_source = fs::read_to_string(path)
@@ -225,7 +230,9 @@ pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
             .with_context(|| format!("checking linked DSLX module '{path}'"))?;
         #[cfg(feature = "dslx-loop-bindings")]
         if matches.get_flag("readable-loop-names") {
-            return block::compile_bx_with_dslx_loop_bindings(bx_name, source, module, reset, imports);
+            return block::compile_bx_with_dslx_loop_bindings(
+                bx_name, source, module, reset, imports,
+            );
         }
         block::compile_bx_with_dslx(bx_name, source, module, reset, imports)
     })?;

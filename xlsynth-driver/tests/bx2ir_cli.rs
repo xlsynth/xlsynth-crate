@@ -390,6 +390,30 @@ block delay(clk, xs: u8[3]) -> u8 {
                 .any(|line| line.trim_start().starts_with("let «lane» : ")),
             "{source}"
         );
+        fs::write(
+            root.join("import.bx"),
+            "use sum; block lanes(clk, xs: u8[3]) -> u8 { sum::sum_lanes(xs) }",
+        )?;
+        assert!(
+            stdout(
+                root,
+                &[
+                    "bx2lean",
+                    "import.bx",
+                    "--dslx-path=.",
+                    "--readable-loop-names",
+                    "--output-dir=imported"
+                ]
+            )?
+            .is_empty()
+        );
+        let source = fs::read_to_string(root.join("imported/ReadableGenerated.lean"))?;
+        assert!(
+            source
+                .lines()
+                .any(|line| line.trim_start().starts_with("let «lane» : ")),
+            "{source}"
+        );
     }
     Ok(())
 }

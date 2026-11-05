@@ -11,9 +11,9 @@ mod helper_types;
 mod raw;
 mod readable;
 mod source_types;
-#[cfg(feature = "dslx-loop-bindings")]
-pub use bx::compile_bx_with_dslx_loop_bindings;
 pub use bx::{CompiledBx, compile_bx, compile_bx_with_dslx};
+#[cfg(feature = "dslx-loop-bindings")]
+pub use bx::{compile_bx_with_dslx_loop_bindings, compile_bx_with_loop_bindings};
 
 pub use raw::{LeanBlockBundle, emit};
 pub(crate) use raw::{identifier, source_record_value};

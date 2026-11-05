@@ -35,7 +35,7 @@ impl DslxLink {
             module: import.module,
             symbols: import.symbols,
             #[cfg(feature = "dslx-loop-bindings")]
-            bindings: Vec::new(),
+            bindings: import.loop_bindings,
         }
     }
 

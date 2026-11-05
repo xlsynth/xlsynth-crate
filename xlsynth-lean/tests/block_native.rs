@@ -1479,11 +1479,102 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     .unwrap()
 }
 
+#[cfg(feature = "dslx-loop-bindings")]
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_import_loop_names_follow_rebased_nodes_and_function_symbols() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::write(
+        root.path().join("sum.x"),
+        r#"
+pub fn lanes(xs: u8[3]) -> u8 {
+    for (lane, total) in u32:1..u32:3 { total + xs[lane] }(u8:0)
+}
+"#,
+    )?;
+    let source = "use sum; block rows(clk, xs: u8[3]) -> u8 { sum::lanes(xs) }";
+    let imports = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let plain = compile_bx(
+        "rows",
+        source,
+        xlsynth_bx::empty_package("plain"),
+        Default::default(),
+        &imports,
+    )?;
+    fn loop_body(compiled: &xlsynth_lean::block::CompiledBx) -> &str {
+        compiled
+            .package()
+            .members
+            .iter()
+            .flat_map(|m| &m.graph().nodes)
+            .find_map(|n| match &n.payload {
+                xlsynth_pir::ir::NodePayload::CountedFor { body, .. } => Some(body.as_str()),
+                _ => None,
+            })
+            .unwrap()
+    }
+    let body = loop_body(&plain);
+    let reserved = format!(
+        "package occupied\nfn {body}(a: bits[8] id=500) -> bits[8] {{ ret n: bits[8] = not(a, id=501) }}"
+    );
+    let compiled = xlsynth_lean::block::compile_bx_with_loop_bindings(
+        "rows",
+        source,
+        Parser::new(&reserved).parse_and_validate_package()?,
+        Default::default(),
+        &imports,
+    )?;
+    let linked = loop_body(&compiled);
+    assert_ne!(linked, body);
+    assert!(
+        compiled
+            .package()
+            .get_fn(linked)
+            .unwrap()
+            .param_nodes()
+            .all(|p| p.text_id > 501)
+    );
+    let mut bundle = compiled.emit_readable(None)?;
+    let model = &bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap()
+        .1;
+    let (_, body) = model
+        .split_once(&format!("def Helpers.«{linked}»"))
+        .unwrap();
+    let body = body.split("\n\n").next().unwrap();
+    assert!(
+        body.lines()
+            .any(|l| l.trim_start().starts_with("let «lane» :")
+                && l.contains("BitVec.add «xls_iteration»")),
+        "{body}"
+    );
+    bundle.files.push((
+        "CheckImport.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+#guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "imported nonzero loop with colliding IDs and symbol",
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {
     let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
-        "design",
+        "counter",
         include_str!("fixtures/bx_loop_bindings/counter.bx"),
         checked_nonzero_range(),
         Default::default(),
@@ -1504,6 +1595,7 @@ fn nonzero_range_without_loop_records() {
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn loop_keeps_the_source_index_and_captured_record_fields() {
     let mut bundle = xlsynth_lean::block::compile_bx_with_dslx_loop_bindings(
+        "counter",
         include_str!("fixtures/bx_loop_bindings/counter.bx"),
         checked_nonzero_range(),
         Default::default(),
@@ -1544,13 +1636,13 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
     }));
     assert!(body.contains(".«valid»"));
     let checks = r#"import ReadableCorrespondence
-open XlsReadable XlsSource
-private def pool : «packets::Pool<5>» := { status := (3, 4), slots := #v[
+open XlsReadable
+private def pool : packets.«Pool<5>» := { status := (3, 4), slots := #v[
   {write := {valid := true, data := 11}},
   {write := {valid := false, data := 19}},
   {write := {valid := true, data := 23}}] }
 #guard Helpers.«____machine__fold_counted_for_0_body»
-  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := «packets::Mode».Run) == 30
+  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := packets.Mode.Run) == 30
 "#;
     bundle
         .files
@@ -1590,6 +1682,7 @@ block sum(clk, rst, first: u8, other: u8) -> u8 {
     let module =
         xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
     let mut bundle = xlsynth_lean::block::compile_bx_with_dslx_loop_bindings(
+        "sum",
         bx,
         module,
         Default::default(),
@@ -1602,7 +1695,7 @@ block sum(clk, rst, first: u8, other: u8) -> u8 {
         "Captures.lean".into(),
         r#"import ReadableCorrespondence
 open XlsReadable
-variable (first : XlsSource.«machine::Tagged<1>») (other : XlsSource.«machine::Tagged<2>»)
+variable (first : machine.«Tagged<1>») (other : machine.«Tagged<2>»)
 #check Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := first) (other := other)
 #check_failure Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := other) (other := first)
 "#

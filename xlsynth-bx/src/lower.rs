@@ -33,14 +33,14 @@ pub fn lower_module(
     package: Package,
     reset: ResetBehavior,
 ) -> Result<Package, String> {
-    lower_with_imports(module, package, reset, |_| {})
+    lower_with_imports(module, package, reset, |_, _| Ok(()))
 }
 
 pub(crate) fn lower_with_imports(
     module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
-    mut on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
+    mut on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>, usize) -> Result<(), String>,
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
@@ -53,14 +53,14 @@ pub(crate) fn lower_with_imports(
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
     for batch in &module.imports.batches {
-        let (indices, symbols) = link_imported_functions(
+        let link = link_imported_functions(
             &mut package,
             batch.package.clone(),
             &batch.roots,
             &block_names,
         )?;
-        on_import(symbols);
-        for (&id, index) in batch.call_ids.iter().zip(indices) {
+        on_import(link.symbols, link.node_id_base)?;
+        for (&id, index) in batch.call_ids.iter().zip(link.roots) {
             let call = &module.imports.calls[id];
             let PackageMember::Function(function) = &package.members[index] else {
                 unreachable!("imported roots are function members")

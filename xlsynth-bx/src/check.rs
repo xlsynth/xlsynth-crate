@@ -517,13 +517,18 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    check_with_imports(module, options, |_| {}, |_, _| {})
+    check_with_imports(
+        module,
+        options,
+        |m| m.to_ir_text().map_err(|e| e.to_string()),
+        |_, _| {},
+    )
 }
 
 pub(crate) fn check_with_imports(
     module: &Module,
     options: &ImportOptions<'_>,
-    on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
+    convert_import: impl FnMut(xlsynth::dslx::TypecheckedModule) -> Result<String, String>,
     on_sources: impl FnOnce(crate::import_structs::ImportedStructs, BTreeSet<String>),
 ) -> Result<CheckedModule, String> {
     let mut names = BTreeSet::new();
@@ -684,7 +689,7 @@ pub(crate) fn check_with_imports(
         structs: structs.definitions,
         externs,
         extern_blocks,
-        imports: resolver.finish(on_import, on_sources)?,
+        imports: resolver.finish(convert_import, on_sources)?,
         blocks,
     })
 }
