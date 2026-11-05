@@ -131,6 +131,12 @@ unchanged. For a locally constructed array, the readable model uses named
 fields when the operand types agree or a checked destination supplies the
 element type. Without that information it uses the physical tuple projections.
 
+For a BX `use` of a DSLX function, readable emission takes parameter names
+and types from the same checked DSLX compilation that supplied the function's
+IR, including concrete parametric calls. The BX linker records the final
+symbol of each imported function so a collision in the destination package
+does not change which declaration supplies its Lean interface.
+
 `LeanBlockBundle::files` contains these five files in dependency order:
 
 1. `Generated.lean` - the exact raw emission of the lowered block.

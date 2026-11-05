@@ -41,7 +41,8 @@ pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
+use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
 /// Search paths for BX and DSLX imports and their dependencies.
@@ -131,4 +132,50 @@ pub fn empty_package(name: impl Into<String>) -> Package {
         members: Vec::new(),
         top: None,
     }
+}
+
+/// One DSLX compilation used for BX imports. The synthetic entry module calls
+/// the selected DSLX specializations. Its type information owns their original
+/// declarations, even if the source files change after BX compilation.
+pub struct LinkedImport {
+    pub module: dslx::TypecheckedModule,
+    /// Each original IR function symbol and its actual destination symbol.
+    pub symbols: BTreeMap<String, String>,
+}
+
+/// The checked source and its linked hardware, with the import graphs that
+/// produced its callable IR functions.
+pub struct CompiledModule {
+    pub checked: CheckedModule,
+    pub package: Package,
+    pub imports: Vec<LinkedImport>,
+}
+
+/// Compile BX while retaining the source graph for each linked DSLX import.
+pub fn compile_with_source(
+    source: &str,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledModule, String> {
+    let mut modules = Vec::new();
+    let (source, libraries) = bx_import::read(source, options)?;
+    let checked =
+        check::check_sources_with_tests(&source, libraries, options, None, |m| modules.push(m))
+            .map_err(bx_import::diagnostic)?;
+    let mut modules = modules.into_iter();
+    let mut imports = Vec::new();
+    let package = lower::lower_with_imports(&checked, package, reset, |linked| {
+        let module = modules.next().expect("one checked module per linked batch");
+        let symbols: BTreeMap<_, _> = linked
+            .into_iter()
+            .map(|(old, new)| (old, new.name))
+            .collect();
+        imports.push(LinkedImport { module, symbols });
+    })?;
+    Ok(CompiledModule {
+        checked,
+        package,
+        imports,
+    })
 }
