@@ -23,6 +23,81 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
 }
 
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_imports_keep_source_fields_through_linker_renames() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("picker.x");
+    fs::write(
+        &path,
+        r#"
+pub type Byte = u8;
+pub struct Packet { zebra: Byte, apple: u8 }
+fn first(original: Packet) -> u8 {
+    let result = for (_i, carry): (u32, Packet) in u32:0..u32:2 {
+        Packet { zebra: carry.zebra, apple: carry.apple + u8:1 }
+    }(original);
+    result.zebra
+}
+pub fn pick(actual: Packet) -> u8 { first(actual) }
+pub fn id<N: u32>(argument: uN[N]) -> uN[N] { argument }
+"#,
+    )?;
+    // Preoccupy the names of both the entry and its private callee. Matching
+    // either declaration to its original symbol would type the wrong graph.
+    let linked = Parser::new(
+        r#"package chips
+fn __picker__pick(other: bits[8] id=1) -> bits[8] { ret c: bits[8] = not(other, id=2) }
+fn __picker__first(other: bits[8] id=3) -> bits[8] { ret c: bits[8] = not(other, id=4) }
+"#,
+    )
+    .parse_and_validate_package()?;
+    let compiled = compile_bx(
+        r#"
+use picker;
+block probe(clk, packet: picker::Packet, flag: bool) -> (u8, bool) {
+    (picker::id(picker::pick(packet)), picker::id(flag))
+}
+"#,
+        linked,
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    fs::write(path, "the original source is no longer available")?;
+    let mut bundle = compiled.emit_readable(None)?;
+    let executable = &bundle
+        .files
+        .iter()
+        .find(|(file, _)| file == "ReadableGenerated.lean")
+        .unwrap()
+        .1;
+    for (name, parameter) in [
+        ("pick", "actual"),
+        ("first", "original"),
+        ("id<8>", "argument"),
+        ("id<1>", "argument"),
+    ] {
+        assert!(
+            executable.contains(&format!("def Helpers.«picker::{name}» («{parameter}»")),
+            "{executable}"
+        );
+    }
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "ordinary BX imports and renamed linked functions");
+    Ok(())
+}
+
 // Inline the external DSLX function with XLS so the straight-line raw
 // exporter sees its field projection in the same graph as the BX constructor.
 #[test]

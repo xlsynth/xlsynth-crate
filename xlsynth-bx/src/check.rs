@@ -1798,7 +1798,7 @@ pub(crate) fn check_sources(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    check_sources_with_tests(root, imports, options, None)
+    check_sources_with_tests(root, imports, options, None, |_| {})
 }
 
 /// Elaborate test-only harnesses before draining the shared specialization
@@ -1808,6 +1808,7 @@ pub(crate) fn check_sources_with_tests(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
     mut tests: Option<&mut crate::test_runner::TestSuite>,
+    on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
 ) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
     let module = linked.map_or(root, |l| &l.module);
@@ -2294,15 +2295,16 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
+    let used = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
         let calls = checked.retain_reachable_dependencies();
         if linked.is_some() {
             checked.restore_extern_names();
         }
-        resolver.finish_with_calls(Some(&calls))?
+        Some(calls)
     } else {
-        resolver.finish()?
+        None
     };
+    checked.imports = resolver.finish_with_calls(used.as_ref(), on_import)?;
     Ok(checked)
 }
 
