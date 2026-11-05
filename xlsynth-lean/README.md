@@ -1,10 +1,11 @@
 # xlsynth-lean
 
-`xlsynth-lean` exports pure XLS IR functions and combinational `GateFn` graphs
-to executable Lean. Both exporters can evaluate batches of inputs and return
-typed results to Rust. The gate exporter also supports user-supplied Lean
-equivalence proofs. Native `.g8r` and `.g8rbin` files
-can be loaded with the existing `xlsynth-g8r` reader before calling this crate.
+`xlsynth-lean` exports pure XLS IR functions, combinational `GateFn` graphs and
+stateful XLS blocks to executable Lean. The function and gate exporters can
+evaluate batches and return typed results to Rust. The gate exporter also
+checks user-supplied equivalence proofs. The block exporter accepts block IR or
+BX source. With BX source it also emits a typed interface and correspondence
+proofs.
 
 The companion Lean library is tested with Lean 4.34.1. Building the Rust crate
 does not require Lean to be installed.
@@ -52,24 +53,7 @@ def eval (inputs : BitVec 3) : BitVec 1 :=
 ```
 
 The native file loader requires a clockless, register-free design for this
-combinational API. Stateful XLS block IR uses the separate API below.
-
-### Interface and graph contract
-
-Inputs and outputs are flattened in port-list order, then least-significant bit
-first within each port. The bundle retains every port name and width, including
-zero-width ports, so Rust evaluation results can be regrouped into the original
-`Vec<IrBits>` interface.
-
-The exporter accepts arbitrary node storage order and literal nodes at arbitrary
-indices. It requires:
-
-- All references to be in bounds and the complete graph to be acyclic.
-- Every input bit to bind a unique, non-negated `AigNode::Input`.
-- Every stored input node to be bound by the `GateFn` interface.
-
-Input bindings determine input identity; the name and bit-index metadata on an
-input node do not affect evaluation. Invalid graphs return `LeanError` values.
+combinational API. Use the block IR API below for stateful models.
 
 ## Export XLS block IR
 
@@ -97,6 +81,80 @@ writes, reset precedence and source assertions. Blocks use the function
 emitter's translation of PIR types, literals and local operations, including
 one-hot selection over tuples and arrays. Block emission reports an error for
 unsupported operations, including function calls, and for asynchronous resets.
+
+When starting from saved IR text, run native XLS verification and typed PIR
+validation on that text before selecting the block, as in the `export_block`
+example.
+
+The generated `eval` takes arbitrary old registers and current inputs and
+returns outputs, next registers, and assertion results. Outputs read old
+registers; all register writes commit together. For example, if `a` is written
+from `b` and `b` from `a`, an old state `(a = 1, b = 2)` produces next state
+`(a = 2, b = 1)`. An output driven by `a` still observes `1` on that edge.
+`reset` activates the declared reset input for one ordinary clock edge. It
+does not invent initial values for registers without reset values.
+
+Every assertion remains an observable result, including disconnected ones;
+assertions never constrain the model's input or old-state domain.
+
+### Compile a BX block
+
+BX declares each register, its reset value, the data inputs and the output
+ports. For example, this block exposes its old count on output and increments
+it on each clock unless reset is asserted.
+
+```
+pub block counter(clk, rst, take: bool) -> u8 {
+    reg count: u8 = 0;
+    if take { count := count + u8:1; }
+    count
+}
+```
+
+```rust
+use xlsynth_lean::block::compile_bx;
+
+let compiled = compile_bx(&source, xlsynth_bx::empty_package("counter"),
+                          Default::default(), &Default::default())?;
+let bundle = compiled.emit_readable(None)?;
+```
+
+The readable interface preserves unsigned bits, Boolean fields, positional
+tuples and named BX structs. A struct result exposes its fields as output
+ports in BX declaration order. One output becomes the value of `observe q x`;
+several outputs become a Lean product in port order. The register and port
+types come from checked declarations, and every equation comes from the linked
+block. Internal bindings can be renamed without changing these public fields.
+
+`LeanBlockBundle::files` contains these five files in dependency order:
+
+1. `Generated.lean` - the exact raw emission of the lowered block.
+1. `ReadableTypes.lean` - source types and total physical codecs.
+1. `ReadableGenerated.lean` - executable equations with source names and types.
+1. `ReadableRepresentation.lean` - state and result conversions.
+1. `ReadableCorrespondence.lean` - proofs relating both models and their traces.
+
+Callers choose where to write the files and must compile the generated Lean
+sources to check their proofs. The readable evaluator executes its own graph
+equations; it does not call the raw evaluator. This library does not run block
+simulations or orchestrate application-specific property proofs.
+
+## GateFn interface and graph contract
+
+Inputs and outputs are flattened in port-list order, then least-significant bit
+first within each port. The bundle retains every port name and width, including
+zero-width ports, so Rust evaluation results can be regrouped into the original
+`Vec<IrBits>` interface.
+
+The exporter accepts arbitrary node storage order and literal nodes at arbitrary
+indices. It requires:
+
+- All references to be in bounds and the complete graph to be acyclic.
+- Every input bit to bind a unique, non-negated `AigNode::Input`.
+- Every stored input node to be bound by the `GateFn` interface.
+
+Input bindings determine input identity; the name and bit-index metadata on an
+input node do not affect evaluation. Invalid graphs return `LeanError` values.
 
 ## Evaluate through Lean
 
@@ -402,6 +460,8 @@ and set `XLSYNTH_LEAN` to the executable from the [pinned toolchain](lean/lean-t
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
   cargo test -p xlsynth-lean --features lean-tests
 ```
+
+The block tests check BX field order across a BX constructor and a separately compiled DSLX selector.
 
 Ubuntu 24.04 CI runs this suite with the official Linux x86-64 Lean release.
 When updating `lean/lean-toolchain`, update the [release checksum](../scripts/lean_linux_x64.sha256) to match.

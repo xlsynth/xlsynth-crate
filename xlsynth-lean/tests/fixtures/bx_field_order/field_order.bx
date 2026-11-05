@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
+struct Pair { zebra: u1, apple: u1 }
+extern fn picker::zebra(p: Pair) -> u1;
+
+struct Ports { pair: Pair, selected: u1 }
+pub block field_order(clk, left: u1, right: u1) -> Ports {
+    let pair = Pair { apple: right, zebra: left };
+    Ports { selected: picker::zebra(pair), pair: pair }
+}
