@@ -17,7 +17,15 @@ use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
 use crate::check::{
     CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind, output_ports,
 };
+use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
+
+/// Destination package indices for explicitly declared externs and inferred
+/// imported DSLX specializations.
+struct LinkedFunctions {
+    externs: BTreeMap<String, usize>,
+    imported: BTreeMap<usize, usize>,
+}
 
 /// Links every extern and appends verified blocks in child-before-parent order.
 pub fn lower_module(
@@ -27,8 +35,37 @@ pub fn lower_module(
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
-    let functions = link_externs(module, &package, &mut layouts)?;
+    let externs = link_externs(module, &package, &mut layouts)?;
     check_extern_blocks(module, &package, &mut layouts, reset)?;
+    let block_names = module
+        .blocks
+        .iter()
+        .map(|block| block.name.clone())
+        .collect::<Vec<_>>();
+    let mut imported = BTreeMap::new();
+    for batch in &module.imports.batches {
+        let indices = link_imported_functions(
+            &mut package,
+            batch.package.clone(),
+            &batch.roots,
+            &block_names,
+        )?;
+        for (&id, index) in batch.call_ids.iter().zip(indices) {
+            let call = &module.imports.calls[id];
+            let PackageMember::Function(function) = &package.members[index] else {
+                unreachable!("imported roots are function members")
+            };
+            check_signature(
+                &format!("{}::{}", call.module, call.function),
+                call.args.iter(),
+                &call.result,
+                function,
+                &mut layouts,
+            )?;
+            imported.insert(id, index);
+        }
+    }
+    let functions = LinkedFunctions { externs, imported };
     for block in &module.blocks {
         let builder = LowerBlock::build(
             block,
@@ -189,35 +226,13 @@ fn link_externs(
         let PackageMember::Function(function) = &package.members[index] else {
             unreachable!("symbol table contains only function indices")
         };
-        let params = declaration
-            .params
-            .iter()
-            .map(|param| layouts.lower(&param.ty))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        let result = layouts
-            .lower(&declaration.result)
-            .map_err(|error| error.to_string())?;
-        if params
-            .iter()
-            .ne(function.param_nodes().map(|node| &node.ty))
-            || result != function.ret_ty
-        {
-            let expected = params
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let actual = function
-                .param_nodes()
-                .map(|param| param.ty.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(format!(
-                "extern fn '{}' expects ({expected}) -> {result}, but linked IR function '{}' has ({actual}) -> {}",
-                declaration.name, function.name, function.ret_ty
-            ));
-        }
+        check_signature(
+            &format!("extern fn '{name}'"),
+            declaration.params.iter().map(|param| &param.ty),
+            &declaration.result,
+            function,
+            layouts,
+        )?;
         bindings.insert(declaration.name.clone(), index);
     }
     // Both select arms can run. Check reachable bodies for effects, including
@@ -231,24 +246,7 @@ fn link_externs(
         let PackageMember::Function(function) = &package.members[index] else {
             unreachable!("reachable function indices come from the symbol table")
         };
-        if function.ffi_proto().is_some() {
-            return Err(format!(
-                "cannot lift IR function '{}' with a foreign implementation into BX",
-                function.name
-            ));
-        }
-        for node in &function.nodes {
-            if matches!(
-                node.payload,
-                NodePayload::Assert { .. } | NodePayload::Trace { .. } | NodePayload::Cover { .. }
-            ) {
-                return Err(format!(
-                    "cannot lift effectful IR function '{}' into BX because it contains '{}'",
-                    function.name,
-                    node.payload.get_operator()
-                ));
-            }
-        }
+        check_function_purity(function)?;
         for callee in external_function_references(function) {
             pending.push(
                 *symbols
@@ -258,6 +256,66 @@ fn link_externs(
         }
     }
     Ok(bindings)
+}
+
+/// Checks that a resolved IR function has the argument and result layouts
+/// used to type-check the BX call.
+fn check_signature<'a>(
+    source: &str,
+    params: impl Iterator<Item = &'a Type>,
+    result: &Type,
+    function: &ir::Fn,
+    layouts: &mut Layouts,
+) -> Result<(), String> {
+    let params = params
+        .map(|ty| layouts.lower(ty))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let result = layouts.lower(result).map_err(|error| error.to_string())?;
+    if params
+        .iter()
+        .ne(function.param_nodes().map(|node| &node.ty))
+        || result != function.ret_ty
+    {
+        let expected = params
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let actual = function
+            .param_nodes()
+            .map(|node| node.ty.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{source} expects ({expected}) -> {result}, but linked IR function '{}' has ({actual}) -> {}",
+            function.name, function.ret_ty
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects effects even on dead nodes because both arms of a BX select can run.
+pub(crate) fn check_function_purity(function: &ir::Fn) -> Result<(), String> {
+    if function.ffi_proto().is_some() {
+        return Err(format!(
+            "cannot lift IR function '{}' with a foreign implementation into BX",
+            function.name
+        ));
+    }
+    for node in &function.nodes {
+        if matches!(
+            node.payload,
+            NodePayload::Assert { .. } | NodePayload::Trace { .. } | NodePayload::Cover { .. }
+        ) {
+            return Err(format!(
+                "cannot lift effectful IR function '{}' into BX because it contains '{}'",
+                function.name,
+                node.payload.get_operator()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A BX register and the physical reset signal it uses, if any.
@@ -271,7 +329,7 @@ struct Register {
 struct LowerBlock<'a, 'defs> {
     builder: BlockBuilder,
     package: &'a Package,
-    functions: &'a BTreeMap<String, usize>,
+    functions: &'a LinkedFunctions,
     layouts: &'a mut Layouts<'defs>,
     values: BTreeMap<String, BValue>,
     tuple_elements: HashMap<BValue, Vec<BValue>>,
@@ -285,7 +343,7 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
     fn build(
         block: &CheckedBlock,
         package: &'a Package,
-        functions: &'a BTreeMap<String, usize>,
+        functions: &'a LinkedFunctions,
         layouts: &'a mut Layouts<'defs>,
         structs: &[StructDef],
         reset_behavior: ResetBehavior,
@@ -484,6 +542,18 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
         Ok(())
     }
 
+    /// Invokes a linked function with the lowered BX arguments in source order.
+    fn invoke(&mut self, index: usize, args: &[TypedExpr]) -> Result<BValue, BuilderError> {
+        let args = args
+            .iter()
+            .map(|arg| self.expr(arg))
+            .collect::<Result<Vec<_>, _>>()?;
+        let PackageMember::Function(function) = &self.package.members[index] else {
+            unreachable!("linked calls refer to function members")
+        };
+        self.builder.invoke(function, &args)
+    }
+
     /// Lowers a checked expression at the current instant, without inserting
     /// registers.
     fn expr(&mut self, expr: &TypedExpr) -> Result<BValue, BuilderError> {
@@ -523,16 +593,9 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
             TypedExprKind::InstanceOutput { instance, port } => self
                 .builder
                 .instantiation_output(self.instances[instance], port),
-            TypedExprKind::Call { name, args } => {
-                let args = args
-                    .iter()
-                    .map(|arg| self.expr(arg))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let PackageMember::Function(function) = &self.package.members[self.functions[name]]
-                else {
-                    unreachable!("linked externs always refer to function members")
-                };
-                self.builder.invoke(function, &args)
+            TypedExprKind::Call { name, args } => self.invoke(self.functions.externs[name], args),
+            TypedExprKind::ImportedCall { id, args } => {
+                self.invoke(self.functions.imported[id], args)
             }
             TypedExprKind::Unary { op, value } => {
                 let value = self.expr(value)?;

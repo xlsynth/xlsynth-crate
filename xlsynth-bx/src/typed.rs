@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use xlsynth_pir::{IrBits, IrValue, ir_value_utils::ir_bits_to_usize};
 
 use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
+use crate::dslx_import::{ImportedCall, ResolvedImports};
 use TypedExprKind as K;
 
 /// A module with concrete signatures, single drivers, and an acyclic instance
@@ -13,6 +14,7 @@ pub struct CheckedModule {
     pub(crate) structs: Vec<StructDef>,
     pub(crate) externs: Vec<ExternFn>,
     pub(crate) extern_blocks: Vec<ExternBlock>,
+    pub(crate) imports: ResolvedImports,
     pub(crate) blocks: Vec<CheckedBlock>,
 }
 
@@ -26,6 +28,11 @@ impl CheckedModule {
     /// Clocked block interfaces that must be supplied by the linked IR package.
     pub fn extern_blocks(&self) -> &[ExternBlock] {
         &self.extern_blocks
+    }
+    /// Concrete DSLX specializations, indexed by
+    /// [`TypedExprKind::ImportedCall`].
+    pub fn imported_calls(&self) -> &[ImportedCall] {
+        &self.imports.calls
     }
     /// Blocks in dependency order, with child definitions preceding their
     /// parents.
@@ -107,6 +114,12 @@ pub enum TypedExprKind {
         name: String,
         args: Vec<TypedExpr>,
     },
+    /// A concrete imported DSLX function specialization.
+    ImportedCall {
+        /// Index of the specialization in [`CheckedModule::imported_calls`].
+        id: usize,
+        args: Vec<TypedExpr>,
+    },
     Unary {
         op: UnaryOp,
         value: Box<TypedExpr>,
@@ -164,7 +177,7 @@ impl TypedExpr {
                 array.get_element(i.min(last)).ok()
             }
             K::TupleIndex { value, index } => value.constant(names)?.get_element(*index).ok(),
-            K::Call { .. } | K::InstanceOutput { .. } => None,
+            K::Call { .. } | K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
             K::If {
                 condition,
                 then_value,

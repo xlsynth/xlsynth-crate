@@ -3984,6 +3984,13 @@ impl Parser {
         self.parse_package_header_with_file_paths(FilePathSyntax::XlsDump)
     }
 
+    /// Parses functions and blocks from a libxls package dump, reading source
+    /// paths verbatim and preserving FFI declarations and invokes as written.
+    pub fn parse_xls_package(&mut self) -> Result<ir::Package, ParseError> {
+        let package = self.parse_xls_package_header()?;
+        self.parse_package_members(package, FilePathSyntax::XlsDump)
+    }
+
     fn parse_package_header_with_file_paths(
         &mut self,
         syntax: FilePathSyntax,
@@ -4021,7 +4028,16 @@ impl Parser {
     /// Parses declarations and invokes as written so callers can inspect FFI
     /// before lifting.
     pub fn parse_package_preserving_ffi_invokes(&mut self) -> Result<ir::Package, ParseError> {
-        let mut package = self.parse_package_header_with_file_paths(FilePathSyntax::Pir)?;
+        let package = self.parse_package_header_with_file_paths(FilePathSyntax::Pir)?;
+        self.parse_package_members(package, FilePathSyntax::Pir)
+    }
+
+    /// Reads the declarations following a previously parsed package header.
+    fn parse_package_members(
+        &mut self,
+        mut package: ir::Package,
+        file_path_syntax: FilePathSyntax,
+    ) -> Result<ir::Package, ParseError> {
         log::debug!("parse_package: {}", package.name);
         while !self.at_eof() {
             let outer_attrs = self.parse_outer_attributes()?;
@@ -4068,7 +4084,7 @@ impl Parser {
                         "attributes are not supported on file_number declarations".to_string(),
                     ));
                 }
-                self.parse_file_number(&mut package.file_table, FilePathSyntax::Pir)?;
+                self.parse_file_number(&mut package.file_table, file_path_syntax)?;
             } else {
                 return Err(ParseError::new(format!(
                     "expected top, fn, block, or file_number, got {:?}; rest: {:?}",
@@ -4413,6 +4429,8 @@ fn f() -> bits[1] {
         let function = parser.parse_function_declaration().unwrap();
         pkg.members.push(PackageMember::Function(function));
         let emitted = pkg.to_string();
+        let complete = Parser::new(&dump).parse_xls_package().unwrap();
+        assert_eq!(complete.to_string(), emitted);
         let pir = Parser::new(&emitted).parse_package().unwrap();
         assert_eq!(pir.file_table.id_to_path, pkg.file_table.id_to_path);
         let reparsed = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();

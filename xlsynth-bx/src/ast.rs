@@ -134,8 +134,8 @@ pub enum Expr {
         index: Box<Expr>,
     },
     Call {
-        /// An extern function's canonical source name, or a block name when
-        /// the call is the initializer of a let binding.
+        /// A function name (including qualified imported or extern functions),
+        /// or a block name when the call initializes a let binding.
         name: String,
         args: Vec<Expr>,
     },
@@ -205,9 +205,31 @@ pub struct Block {
     pub output: Expr,
 }
 
+/// A DSLX module imported under a local qualifier for function calls.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Import {
+    /// The full DSLX import subject, with components separated by dots.
+    pub subject: String,
+    /// The explicit local name following `as`, when present.
+    pub alias: Option<String>,
+}
+
+impl Import {
+    /// The qualifier in `qualifier::function(...)`. DSLX defaults this to the
+    /// final component of the import subject.
+    pub fn binding(&self) -> &str {
+        self.alias.as_deref().unwrap_or_else(|| {
+            self.subject
+                .rsplit_once('.')
+                .map_or(self.subject.as_str(), |(_, last)| last)
+        })
+    }
+}
+
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    pub imports: Vec<Import>,
     pub structs: Vec<StructDef>,
     pub externs: Vec<ExternFn>,
     pub extern_blocks: Vec<ExternBlock>,
