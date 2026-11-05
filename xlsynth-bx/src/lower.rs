@@ -30,8 +30,17 @@ struct LinkedFunctions {
 /// Links every extern and appends verified blocks in child-before-parent order.
 pub fn lower_module(
     module: &CheckedModule,
+    package: Package,
+    reset: ResetBehavior,
+) -> Result<Package, String> {
+    lower_with_imports(module, package, reset, |_| {})
+}
+
+pub(crate) fn lower_with_imports(
+    module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
+    mut on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
@@ -44,12 +53,13 @@ pub fn lower_module(
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
     for batch in &module.imports.batches {
-        let indices = link_imported_functions(
+        let (indices, symbols) = link_imported_functions(
             &mut package,
             batch.package.clone(),
             &batch.roots,
             &block_names,
         )?;
+        on_import(symbols);
         for (&id, index) in batch.call_ids.iter().zip(indices) {
             let call = &module.imports.calls[id];
             let PackageMember::Function(function) = &package.members[index] else {

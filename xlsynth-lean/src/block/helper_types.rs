@@ -24,10 +24,17 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// these functions.
 pub(super) struct DslxLink {
     module: dslx::TypecheckedModule,
-    symbols: BTreeSet<String>,
+    symbols: BTreeMap<String, String>,
 }
 
 impl DslxLink {
+    pub(super) fn from_import(import: xlsynth_bx::LinkedImport) -> Self {
+        Self {
+            module: import.module,
+            symbols: import.symbols,
+        }
+    }
+
     pub(super) fn compile(module: dslx::TypecheckedModule) -> Result<(ir::Package, Self)> {
         let text = module
             .to_ir_text()
@@ -39,7 +46,9 @@ impl DslxLink {
             .members
             .iter()
             .filter_map(|member| match member {
-                ir::PackageMember::Function(function) => Some(function.name.clone()),
+                ir::PackageMember::Function(function) => {
+                    Some((function.name.clone(), function.name.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -52,11 +61,12 @@ impl DslxLink {
         declarations: &mut Vec<TypeDecl>,
         interface: &mut StatefulInterface,
     ) -> Result<()> {
-        let reachable = block
-            .helpers
+        let linked: BTreeSet<_> = block.helpers.iter().map(|f| f.name.as_str()).collect();
+        let reachable = self
+            .symbols
             .iter()
-            .filter(|f| self.symbols.contains(&f.name))
-            .map(|f| f.name.as_str())
+            .filter(|(_, destination)| linked.contains(destination.as_str()))
+            .map(|(original, _)| original.as_str())
             .collect::<BTreeSet<_>>();
         if reachable.is_empty() {
             return Ok(());
@@ -76,7 +86,21 @@ impl DslxLink {
             entry: root,
         };
         catalogue.collect_helpers()?;
+        catalogue.helpers = catalogue
+            .helpers
+            .into_iter()
+            .map(|(original, sig)| (self.symbols[&original].clone(), sig))
+            .collect();
+        // From this point all call edges (including generated loop bodies)
+        // come from the destination package.
+        catalogue.reachable = self
+            .symbols
+            .values()
+            .map(String::as_str)
+            .filter(|destination| linked.contains(destination))
+            .collect();
         catalogue.add_loop_bodies(block, interface);
+        merge_declarations(declarations, catalogue.declarations)?;
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -86,23 +110,58 @@ impl DslxLink {
                 );
                 for ((name, ty), param) in sig.params.iter().zip(&function.params) {
                     ensure!(
-                        source_shape(ty, &catalogue.declarations)? == function.get_node(*param).ty,
+                        source_shape(ty, declarations)? == function.get_node(*param).ty,
                         "type of linked helper {} parameter {name}",
                         function.name
                     );
                 }
                 ensure!(
-                    source_shape(&sig.result, &catalogue.declarations)? == function.ret_ty,
+                    source_shape(&sig.result, declarations)? == function.ret_ty,
                     "result of linked helper {}",
                     function.name
                 );
             }
         }
-        declarations.extend(catalogue.declarations);
         interface.helpers.extend(catalogue.helpers);
         Ok(())
     }
 }
+
+/// BX reflects imported structs into concrete port types and erases aliases.
+/// Keep the checked DSLX spelling, with its dependencies before its users.
+fn merge_declarations(prior: &mut Vec<TypeDecl>, mut incoming: Vec<TypeDecl>) -> Result<()> {
+    for decl in prior.iter() {
+        if let Some(new) = incoming.iter().find(|d| d.name() == decl.name())
+            && new != decl
+        {
+            let fields =
+                |decl: &TypeDecl, types: &[TypeDecl]| -> Result<Vec<(String, SourceType)>> {
+                    let TypeDecl::Struct { fields, .. } = decl else {
+                        bail!("conflicting declarations for linked type {}", decl.name())
+                    };
+                    fields
+                        .iter()
+                        .map(|field| {
+                            Ok((
+                                field.name.clone(),
+                                super::source_types::resolve_aliases(&field.source_type, types)?,
+                            ))
+                        })
+                        .collect()
+                };
+            ensure!(
+                fields(decl, prior)? == fields(new, &incoming)?,
+                "conflicting fields in linked type {}",
+                new.name()
+            );
+        }
+    }
+    let names: BTreeSet<_> = incoming.iter().map(|d| d.name().to_owned()).collect();
+    incoming.extend(prior.drain(..).filter(|d| !names.contains(d.name())));
+    *prior = incoming;
+    Ok(())
+}
+
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
     entry: ModuleContext,
