@@ -15,8 +15,21 @@ use xlsynth_g8r::prove_gate_fn_equiv_sat::DEFAULT_CADICAL_TERMINATE_LIMIT;
 /// Loads a netlist input and applies the shared clock, boundary-flop, and name
 /// flags.
 pub(crate) fn load_netlist_design(matches: &ArgMatches) -> Result<SequentialGateFn, String> {
+    apply_netlist_options(matches, read_netlist_design(matches)?)
+}
+
+/// Reads the input design before applying command-line changes to its
+/// interface.
+pub(crate) fn read_netlist_design(matches: &ArgMatches) -> Result<SequentialGateFn, String> {
     let path = matches.get_one::<String>("g8r_input_file").unwrap();
-    let mut design = load_sequential_gate_fn_from_path(Path::new(path))?;
+    load_sequential_gate_fn_from_path(Path::new(path))
+}
+
+/// Applies the requested clock, boundary flops, and module name to a design.
+pub(crate) fn apply_netlist_options(
+    matches: &ArgMatches,
+    mut design: SequentialGateFn,
+) -> Result<SequentialGateFn, String> {
     if let Some(name) = matches.get_one::<String>("add-clk-port") {
         let requested = ClockPort { name: name.clone() };
         match &design.clock {

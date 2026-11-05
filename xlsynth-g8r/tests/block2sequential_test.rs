@@ -5,13 +5,43 @@ use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::{
     block_ir_to_sequential_gate_fn, block_ir_to_sequential_gate_fn_with_controls,
+    optimize_and_lower_bx_block,
 };
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_pir::IrBits;
+use xlsynth_pir::ir_parser::{Parser, parse_xls_ir_package};
 
 fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
     block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled())
         .expect("block lowering should succeed")
+}
+
+#[test]
+fn optimized_block_preserves_quoted_source_filenames() {
+    let source = r#"package example
+
+file_number 0 """quoted"directory\design.x"""
+
+top block capture(clk: clock, x: bits[1], out: bits[1]) {
+  reg q(bits[1])
+  x: bits[1] = input_port(name=x, id=1)
+  value: bits[1] = not(x, id=2, pos=[(0,1,2)])
+  register_write.3: () = register_write(value, register=q, id=3)
+  saved: bits[1] = register_read(register=q, id=4)
+  out: () = output_port(saved, name=out, id=5)
+}
+"#;
+    let package = parse_xls_ir_package(source).unwrap();
+    let optimized = xlsynth::optimize_ir_text(&package.to_string(), "capture").unwrap();
+    let optimized = Parser::new(&optimized).parse_xls_package().unwrap();
+    assert_eq!(
+        optimized.file_table.id_to_path,
+        package.file_table.id_to_path
+    );
+
+    let design = optimize_and_lower_bx_block(&package, GatifyOptions::all_opts_disabled()).unwrap();
+    assert_eq!(design.name, "capture");
+    assert_eq!(design.registers[0].name, "q");
 }
 
 #[test]

@@ -72,6 +72,17 @@ block mul_pipe(clk, a: u8, b: u5, cap: u13) -> u13 {
 
 For this example, place a public `clamp(x: u13, cap: u13) -> u13` function in `dslx/ip/arithmetic.x` and pass `dslx` as a search directory.
 
+```shell
+xlsynth-driver bx2ir mul_pipe.bx --dslx-path dslx > mul_pipe.ir
+xlsynth-driver block2sv mul_pipe.ir > mul_pipe.sv
+```
+
+To map the same block to library cells, supply a normalized Liberty library.
+
+```shell
+xlsynth-driver bx2gv mul_pipe.bx --dslx-path dslx --liberty-proto cells.proto -o mul_pipe.gv
+```
+
 ```rust,no_run
 use std::path::Path;
 use xlsynth_bx::{compile_with_options, empty_package, ImportOptions, ResetBehavior};

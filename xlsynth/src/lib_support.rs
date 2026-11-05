@@ -338,7 +338,8 @@ pub(crate) fn xls_parse_ir_package(
     ir: &str,
     filename: Option<&str>,
 ) -> Result<crate::ir_package::IrPackage, XlsynthError> {
-    let ir_cstring = CString::new(ir).unwrap();
+    let ir_cstring = CString::new(ir)
+        .map_err(|_| XlsynthError("IR source contains an embedded NUL byte".to_string()))?;
     let (_filename_cstr, filename_ptr) = optional_cstring_and_ptr(filename);
     let mut xls_package_out: *mut CIrPackage = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_parse_ir_package, ir_cstring.as_ptr(), filename_ptr; xls_package_out)?;
@@ -675,9 +676,13 @@ pub(crate) fn xls_interpret_function(
     Ok(XlsIrValue { ptr: result_out })
 }
 
-pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthError> {
-    let ir = CString::new(ir).unwrap();
-    let top = CString::new(top).unwrap();
+/// Optimizes XLS IR source for the named top and returns the native XLS dump.
+/// The dump writes source filenames verbatim between double quotes.
+pub fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthError> {
+    let ir =
+        CString::new(ir).map_err(|_| XlsynthError("IR source contains a NUL byte".to_string()))?;
+    let top = CString::new(top)
+        .map_err(|_| XlsynthError("IR top name contains a NUL byte".to_string()))?;
     let mut ir_out: *mut std::os::raw::c_char = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_optimize_ir, ir.as_ptr(), top.as_ptr(); ir_out)?;
     let ir_str = unsafe { c_str_to_rust(ir_out) };

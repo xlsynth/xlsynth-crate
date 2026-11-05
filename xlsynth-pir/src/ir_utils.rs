@@ -1436,7 +1436,7 @@ pub fn is_valid_identifier_name(s: &str) -> bool {
 
 /// XLS package names may contain dots after the first character and may be
 /// keywords. The bare boolean literals are separate tokens.
-pub(crate) fn is_valid_package_name(name: &str) -> bool {
+pub fn is_valid_package_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()

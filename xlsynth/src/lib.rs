@@ -16,10 +16,10 @@ use std::os::raw::c_char;
 
 use ir_package::ScheduleAndCodegenResult;
 pub use ir_value::XlsIrBits;
+pub use lib_support::xls_optimize_ir as optimize_ir_text;
 use lib_support::xls_schedule_and_codegen_package;
 use lib_support::{
     c_str_to_rust, c_str_to_rust_no_dealloc, xls_mangle_dslx_name, xls_mangle_dslx_name_full,
-    xls_optimize_ir,
 };
 
 pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
@@ -254,7 +254,7 @@ pub fn convert_dslx_to_ir(
 /// Optimizes an IR package -- this produces a new IR package with the optimized
 /// IR contents.
 pub fn optimize_ir(ir: &IrPackage, top: &str) -> Result<IrPackage, XlsynthError> {
-    let ir_text = xls_optimize_ir(&ir.to_string(), top)?;
+    let ir_text = optimize_ir_text(&ir.to_string(), top)?;
     IrPackage::parse_ir(&ir_text, ir.filename())
 }
 

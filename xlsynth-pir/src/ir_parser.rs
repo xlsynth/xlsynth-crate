@@ -33,6 +33,37 @@ pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, Pars
     parser.parse_package()
 }
 
+/// Parses external XLS source or a native package dump into PIR, preserving FFI
+/// invokes. Libxls resolves source syntax such as implicit node IDs.
+pub fn parse_xls_ir_package(source: &str) -> Result<ir::Package, ParseError> {
+    let (package, dump_files) = match xlsynth::IrPackage::parse_ir(source, None) {
+        Ok(package) => (package, None),
+        Err(error) => {
+            // DumpIr can emit unescaped quotes in source filenames. Requote
+            // its leading file table, keeping the member text for libxls to
+            // parse and validate just as it would for ordinary source.
+            let source_error = || ParseError::new(error.to_string());
+            let mut dump = Parser::new(source);
+            let header = dump
+                .parse_xls_package_header()
+                .map_err(|_| source_error())?;
+            if header.file_table.id_to_path.is_empty() {
+                return Err(source_error());
+            }
+            let mut quoted = header.to_string();
+            quoted.extend(&dump.chars[dump.offset..]);
+            let package =
+                xlsynth::IrPackage::parse_ir(&quoted, None).map_err(|_| source_error())?;
+            (package, Some(header.file_table))
+        }
+    };
+    let mut package = Parser::new(&package.to_string()).parse_xls_package()?;
+    if let Some(files) = dump_files {
+        package.file_table = files;
+    }
+    Ok(package)
+}
+
 /// Parses a package from `path` and verifies the resulting IR.
 pub fn parse_and_verify_path_to_package(
     path: &std::path::Path,
@@ -4431,6 +4462,10 @@ fn f() -> bits[1] {
         let emitted = pkg.to_string();
         let complete = Parser::new(&dump).parse_xls_package().unwrap();
         assert_eq!(complete.to_string(), emitted);
+        for input in [source, dump.as_str(), emitted.as_str()] {
+            let package = parse_xls_ir_package(input).unwrap();
+            assert_eq!(package.to_string(), emitted);
+        }
         let pir = Parser::new(&emitted).parse_package().unwrap();
         assert_eq!(pir.file_table.id_to_path, pkg.file_table.id_to_path);
         let reparsed = xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
@@ -4442,6 +4477,22 @@ fn f() -> bits[1] {
         let dump = "package p\n\nfile_number 0 \"a\"b.x\n\nfn f() -> bits[1] {}\n";
         let err = Parser::new(dump).parse_xls_package_header().unwrap_err();
         assert_eq!(err.msg, "unterminated file_number path in XLS dump");
+        assert!(parse_xls_ir_package(dump).is_err());
+    }
+
+    #[test]
+    fn external_xls_ir_preserves_member_errors_after_the_file_table() {
+        let source = r#"package p
+
+file_number 0 "C:\tmp\foo.x"
+
+top block broken(clk: clock) { not_an_ir_node }
+"#;
+        let expected = xlsynth::IrPackage::parse_ir(source, None)
+            .err()
+            .expect("malformed block must fail to parse");
+        let actual = parse_xls_ir_package(source).unwrap_err();
+        assert_eq!(actual.msg, expected.to_string());
     }
 
     #[test]

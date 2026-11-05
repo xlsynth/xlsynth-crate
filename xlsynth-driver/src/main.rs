@@ -47,6 +47,7 @@ mod aig_toggle_hotspots;
 mod blif2g8r;
 mod block2fn;
 mod block2sv;
+mod bx;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -937,6 +938,8 @@ fn main() {
                     "Convert test procs/functions to IR",
                 )
         )
+        .subcommand(bx::bx2ir_command())
+        .subcommand(bx::bx2gv_command())
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx-show")
@@ -4085,6 +4088,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
+        }
+        Some(("bx2ir", subm)) => {
+            if let Err(error) = bx::bx2ir(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx2ir"), vec![]);
+            }
+        }
+        Some(("bx2gv", subm)) => {
+            if let Err(error) = bx::bx2gv(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx2gv"), vec![]);
+            }
         }
         #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {
