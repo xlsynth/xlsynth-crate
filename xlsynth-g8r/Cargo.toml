@@ -120,6 +120,10 @@ name = "netlist_parse_bench"
 harness = false
 
 [[bench]]
+name = "gv_eval_sequential_bench"
+harness = false
+
+[[bench]]
 name = "cut_db_load_bench"
 harness = false
 
