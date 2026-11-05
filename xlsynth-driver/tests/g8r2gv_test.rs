@@ -6,7 +6,6 @@ use std::ffi::OsStr;
 use std::fmt::Write;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -22,7 +21,7 @@ use xlsynth_g8r::netlist::io::read_gv_from_str;
 use xlsynth_g8r::test_utils::{interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case};
 use xlsynth_test_helpers::compare_golden_text;
 
-/// Configures a fake ABC with the correct scalar interface, not a logic oracle.
+/// Writes the Liberty fixtures and returns the protobuf library.
 fn fixture(dir: &Path) -> anyhow::Result<Library> {
     let raw = dir.join("cells.lib");
     std::fs::write(
@@ -46,32 +45,6 @@ fn fixture(dir: &Path) -> anyhow::Result<Library> {
     library.default_output_load = Some(0.004);
     let library = library_to_proto(library)?;
     std::fs::write(dir.join("cells.proto"), library.encode_to_vec())?;
-    let abc = dir.join("fake abc");
-    std::fs::write(
-        &abc,
-        r#"#!/bin/sh
-if [ "$2" = "-c" ]; then echo 'fake ABC'; exit 0; fi
-test "$1" = '-s' && test "$2" = '-f' && test "$3" = 'map.abc' || exit 2
-test -s transition.aig && test -s timing.constr && test -f library_0.lib || exit 3
-read -r magic m inputs l outputs a < transition.aig
-printf '%s' "${XLSYNTH_TEST_ABC_STDOUT-}"
-printf '%s' "${XLSYNTH_TEST_ABC_STDERR-}" >&2
-exec > mapped.v
-printf 'module mapped('
-sep=''
-i=0
-while [ "$i" -lt "$inputs" ]; do printf '%si%s' "$sep" "$i"; sep=','; i=$((i+1)); done
-i=0
-while [ "$i" -lt "$outputs" ]; do printf '%so%s' "$sep" "$i"; sep=','; i=$((i+1)); done
-printf ');\n'
-i=0
-while [ "$i" -lt "$inputs" ]; do printf 'input i%s;\n' "$i"; i=$((i+1)); done
-i=0
-while [ "$i" -lt "$outputs" ]; do printf "output o%s; assign o%s=1'b0;\n" "$i" "$i"; i=$((i+1)); done
-printf 'endmodule\n'
-"#,
-    )?;
-    std::fs::set_permissions(&abc, std::fs::Permissions::from_mode(0o755))?;
     Ok(library)
 }
 
@@ -86,7 +59,7 @@ fn command(dir: &Path, input: &Path) -> Command {
         .arg("--liberty-proto")
         .arg(dir.join("cells.proto"))
         .arg("--abc-path")
-        .arg(dir.join("fake abc"))
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/fake_abc.py"))
         .env("NO_COLOR", "1")
         .env_remove("RUST_LOG");
     command

@@ -311,6 +311,20 @@ pub(super) fn path_aliases_stream(
     stream: &same_file::Handle,
     #[cfg_attr(not(unix), allow(unused_variables))] stream_paths: &[&str],
 ) -> Result<bool> {
+    // On macOS, concurrent stat calls on /dev/fd entries can return EBADF
+    // even for live descriptors. Compare the inherited handles directly for
+    // the standard device names, including when stdout and stderr are merged.
+    #[cfg(target_os = "macos")]
+    if let Some(name) = path.to_str() {
+        let device = match name {
+            "/dev/stdout" | "/dev/fd/1" => Some(same_file::Handle::stdout()?),
+            "/dev/stderr" | "/dev/fd/2" => Some(same_file::Handle::stderr()?),
+            _ => None,
+        };
+        if let Some(device) = device {
+            return Ok(device == *stream || stream_paths.contains(&name));
+        }
+    }
     let Some(metadata) = metadata_if_exists(path)? else {
         return Ok(false);
     };
@@ -336,12 +350,33 @@ mod tests {
     use super::PendingOutput;
     #[cfg(target_os = "linux")]
     use super::output_paths_alias;
+    #[cfg(target_os = "macos")]
+    use super::path_aliases_stream;
     use std::fs;
     use std::io::{Seek, SeekFrom, Write};
     #[cfg(target_os = "linux")]
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::symlink;
+    #[cfg(target_os = "macos")]
+    use std::path::Path;
     use std::path::PathBuf;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn standard_device_names_match_by_descriptor_identity() -> anyhow::Result<()> {
+        for (stream, names) in [
+            (same_file::Handle::stdout()?, ["/dev/stdout", "/dev/fd/1"]),
+            (same_file::Handle::stderr()?, ["/dev/stderr", "/dev/fd/2"]),
+        ] {
+            // No alternate paths: the device name must match the open file
+            // itself even when stat and fstat report different devices.
+            let duplicate = same_file::Handle::from_file(stream.as_file().try_clone()?)?;
+            for name in names {
+                assert!(path_aliases_stream(Path::new(name), &duplicate, &[])?);
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn replacing_a_regular_output_rewinds_its_open_descriptor() -> anyhow::Result<()> {
