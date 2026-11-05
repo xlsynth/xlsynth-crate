@@ -81,9 +81,17 @@ pub(super) enum SourceType {
 /// They pair each entry in `outputs` with the IR output port at the same index
 /// when constructing the result or converting it between readable and raw Lean.
 pub(super) struct StatefulInterface {
+    pub(super) helpers: BTreeMap<String, HelperSignature>,
     pub(super) inputs: BTreeMap<String, SourceType>,
     pub(super) registers: BTreeMap<String, SourceType>,
     pub(super) outputs: Vec<SourceType>,
+}
+
+/// Source name and declared parameter and return types of a linked IR function.
+pub(super) struct HelperSignature {
+    pub(super) name: String,
+    pub(super) params: Vec<SourceType>,
+    pub(super) result: SourceType,
 }
 
 /// Resolve a name within the collected leaf declarations, rejecting unknowns.
