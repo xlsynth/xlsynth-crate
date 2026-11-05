@@ -1133,7 +1133,8 @@ impl Body {
     }
 }
 
-fn decimal(text: &str) -> bool {
+/// DSLX decimal digits have no leading zero unless the entire spelling is `0`.
+fn is_canonical_decimal(text: &str) -> bool {
     !text.is_empty()
         && (text.len() == 1 || !text.starts_with('0'))
         && text.bytes().all(|b| b.is_ascii_digit())
@@ -1144,7 +1145,7 @@ fn normalized_integer(spelling: &str) -> Option<String> {
     let magnitude = spelling.strip_prefix('-').unwrap_or(spelling);
     let (digits, radix) = radix_digits(magnitude);
     if radix == 10 {
-        return decimal(digits).then(|| spelling.to_owned());
+        return is_canonical_decimal(digits).then(|| spelling.to_owned());
     }
     if !digits.chars().any(|c| c.is_digit(radix))
         || !digits.chars().all(|c| c == '_' || c.is_digit(radix))
@@ -1176,7 +1177,7 @@ fn number_token(text: &str) -> bool {
 /// DSLX reserves only u1 through u64 and s1 through s64 as bit type keywords.
 fn fixed_width(spelling: &str) -> Option<usize> {
     let digits = spelling.strip_prefix(['u', 's'])?;
-    if digits.len() > 2 || !decimal(digits) {
+    if digits.len() > 2 || !is_canonical_decimal(digits) {
         return None;
     }
     digits.parse().ok().filter(|width| (1..=64).contains(width))
@@ -1185,7 +1186,7 @@ fn fixed_width(spelling: &str) -> Option<usize> {
 /// A migration hint for an unresolved zero-width or wide bit shorthand.
 pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
     let digits = spelling.strip_prefix(['u', 's'])?;
-    (decimal(digits) && fixed_width(spelling).is_none())
+    (is_canonical_decimal(digits) && fixed_width(spelling).is_none())
         .then(|| format!("use '{}N[{digits}]' for this bit width", &spelling[..1]))
 }
 

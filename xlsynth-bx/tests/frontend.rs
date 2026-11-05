@@ -618,6 +618,7 @@ fn bit_width_shorthand_requires_a_canonical_width_from_one_to_sixty_four() {
         ("", "sN[65]", "s65:-1"),
         ("", "s64", "s64:s65:1"),
         ("x: u1", "u1", "let y: u01 = x; y"),
+        ("x: s1", "s1", "let y: s01 = x; y"),
         ("x: u64", "s64", "x[0+:s064]"),
     ] {
         assert_expr_rejected_by_both(params, result, body);
@@ -643,6 +644,32 @@ fn bit_width_shorthand_requires_a_canonical_width_from_one_to_sixty_four() {
             .unwrap(),
         )],
     );
+}
+
+#[test]
+fn leading_zero_bit_type_spellings_resolve_to_declared_structs()
+-> Result<(), Box<dyn std::error::Error>> {
+    let declarations = r#"struct u01 { value: u8 }
+struct s01 { inner: u01 }"#;
+    let body = r#"let y: u01 = u01 { value: x };
+let z: s01 = s01 { inner: y };
+z.inner.value"#;
+    let bx = format!(
+        "{declarations}\n{}",
+        expr_eval::bx_source("x: u8", "u8", body)
+    );
+    let dslx = format!(
+        "{declarations}\n{}",
+        expr_eval::dslx_source("x: u8", "u8", body)
+    );
+    let evaluator = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx, &[]),
+    )?;
+    let x = IrValue::make_ubits(8, 42)?;
+    assert_eq!(evaluator.compare(std::slice::from_ref(&x))?, x);
+    Ok(())
 }
 
 #[test]
