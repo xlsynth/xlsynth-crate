@@ -19,6 +19,11 @@ pub(super) struct Dispatch<'a> {
 }
 
 impl Dispatch<'_> {
+    fn arm_index(&self, encoding: u64) -> Option<usize> {
+        self.comparisons.iter().position(|test| match test {
+            Comparison::LiteralFirst(n) | Comparison::LiteralLast(n) => *n == encoding,
+        })
+    }
     /// List arm binders in priority order, followed by the default binder.
     fn arguments(&self) -> String {
         (0..self.comparisons.len())
@@ -55,10 +60,16 @@ impl Dispatch<'_> {
 }
 
 impl Presentation<'_> {
+    pub(super) fn enum_dispatch_name(&self, id: usize) -> String {
+        match self.helper_index {
+            Some(index) => format!("helper_{index}_node_{id}"),
+            None => format!("node_{id}"),
+        }
+    }
     /// Associate each recognized enum priority selection with its IR text ID.
     fn enum_dispatches(&self) -> Result<Vec<(usize, Dispatch<'_>)>> {
         let mut dispatches = Vec::new();
-        for node in &self.block().graph.nodes {
+        for node in &self.graph.nodes {
             if let NodePayload::PrioritySel {
                 selector,
                 default: Some(_),
@@ -77,19 +88,16 @@ impl Presentation<'_> {
     pub(super) fn enum_dispatch_definitions(&self) -> Result<String> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {
+            let name = self.enum_dispatch_name(id);
             let ty = identifier(dispatch.name)?;
             writeln!(
                 out,
-                "def EnumDispatch.node_{id} {{α : Type}} (s : XlsSource.{ty}) ({} : α) : α :=\n  match s with",
+                "def EnumDispatch.{name} {{α : Type}} (s : XlsSource.{ty}) ({} : α) : α :=\n  match s with",
                 dispatch.arguments()
             )?;
             for (member, encoding) in self.enum_cases(dispatch.name)? {
                 let arm = dispatch
-                    .comparisons
-                    .iter()
-                    .position(|test| match test {
-                        Comparison::LiteralFirst(n) | Comparison::LiteralLast(n) => *n == encoding,
-                    })
+                    .arm_index(encoding)
                     .map_or_else(|| "fallback".into(), |i| format!("arm{i}"));
                 writeln!(out, "  | .{} => {arm}", identifier(&member)?)?;
             }
@@ -105,10 +113,11 @@ impl Presentation<'_> {
         for (id, dispatch) in self.enum_dispatches()? {
             let ty = identifier(dispatch.name)?;
             let args = dispatch.arguments();
-            let rule = format!("node_{id}_priority");
+            let name = self.enum_dispatch_name(id);
+            let rule = format!("{name}_priority");
             writeln!(
                 out,
-                "private theorem {rule} {{α : Type}} (s : XlsSource.{ty}) ({args} : α) :\n    EnumDispatch.node_{id} s {args} =\n      (let bits := XlsCodec.{ty}.encode s\n       {}) := by\n  cases s <;> rfl\n",
+                "private theorem {rule} {{α : Type}} (s : XlsSource.{ty}) ({args} : α) :\n    EnumDispatch.{name} s {args} =\n      (let bits := XlsCodec.{ty}.encode s\n       {}) := by\n  cases s <;> rfl\n",
                 dispatch.physical_selection()
             )?;
             // Normalize the shared IR priority selector to the same conditional
