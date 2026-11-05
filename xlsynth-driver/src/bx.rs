@@ -16,7 +16,7 @@ use crate::common::write_stdout;
 use crate::toolchain_config::{ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path};
 use crate::{g8r2gv, ir2gates};
 
-/// Adds the source, linking, and reset options shared by both BX commands.
+/// Adds the source, linking, and reset options shared by the BX commands.
 fn add_bx_args(command: Command) -> Command {
     let mut command = command
         .arg(
@@ -80,6 +80,18 @@ pub fn bx2ir_command() -> Command {
     add_bx_args(Command::new("bx2ir").about("Compiles BX source to an XLS block IR package"))
 }
 
+pub fn bx2lean_command() -> Command {
+    add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
+        .arg(
+            Arg::new("output-dir")
+                .long("output-dir")
+                .value_name("NEW_DIR")
+                .value_parser(value_parser!(PathBuf))
+                .required(true)
+                .help("Create a new directory for the five Lean modules"),
+        )
+}
+
 pub fn bx2gv_command() -> Command {
     g8r2gv::add_mapping_args(add_bx_args(
         Command::new("bx2gv")
@@ -114,9 +126,13 @@ fn select_top(package: &mut Package, requested: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Reads the source and optional link package and compiles them with the
-/// selected top.
-fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<Package> {
+/// Supplies the chosen BX compiler with the same source, link package and
+/// import paths for each command.
+fn with_bx_input<T>(
+    matches: &ArgMatches,
+    config: &Option<ToolchainConfig>,
+    compile: impl FnOnce(&str, Package, ResetBehavior, &ImportOptions<'_>) -> Result<T>,
+) -> Result<T> {
     let path = matches
         .get_one::<PathBuf>("input")
         .expect("clap requires BX_FILE");
@@ -149,8 +165,13 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
         active_low: matches.get_flag("reset-active-low"),
         asynchronous: matches.get_flag("reset-asynchronous"),
     };
-    let mut package = compile_with_options(&source, package, reset, &imports)
-        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
+    compile(&source, package, reset, &imports).with_context(|| path.display().to_string())
+}
+
+fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<Package> {
+    let mut package = with_bx_input(matches, config, |source, package, reset, imports| {
+        compile_with_options(source, package, reset, imports).map_err(anyhow::Error::msg)
+    })?;
     select_top(
         &mut package,
         matches.get_one::<String>("top").map(String::as_str),
@@ -160,6 +181,25 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
 
 pub fn bx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     write_stdout(&compile_input(matches, config)?.to_string());
+    Ok(())
+}
+
+/// Generate and validate the complete model before creating its output
+/// directory.
+pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+    let compiled = with_bx_input(matches, config, xlsynth_lean::block::compile_bx)?;
+    let top = matches.get_one::<String>("top").map(String::as_str);
+    let bundle = compiled.emit_readable(top)?;
+    let directory = matches
+        .get_one::<PathBuf>("output-dir")
+        .expect("clap requires NEW_DIR");
+    fs::create_dir(directory)
+        .with_context(|| format!("creating new output directory '{}'", directory.display()))?;
+    for (name, text) in bundle.files {
+        let path = directory.join(name);
+        fs::write(&path, text)
+            .with_context(|| format!("writing generated Lean module '{}'", path.display()))?;
+    }
     Ok(())
 }
 
