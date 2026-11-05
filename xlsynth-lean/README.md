@@ -452,7 +452,7 @@ Run the Rust-only tests with
 cargo test -p xlsynth-lean
 ```
 
-To also run the AIG and XLS IR evaluation and proof tests, enable `lean-tests`
+To also run the AIG, XLS IR and block trace evaluation and proof tests, enable `lean-tests`
 and set `XLSYNTH_LEAN` to the executable from the [pinned toolchain](lean/lean-toolchain).
 
 ```sh
@@ -475,4 +475,19 @@ XLSYNTH_LEAN=/path/to/lean/bin/lean \
     -- -max_total_time=300
 ```
 
-See the repository's `FUZZ.md` for the target's coverage and failure diagnostics.
+For a stateful block, `LeanEvaluator::eval_block_trace` takes an initial register
+state and one input vector per clock. Each result contains the outputs observed
+on that clock and the register values carried into the next clock. Ports and
+registers use declaration order. This evaluator accepts bit-vector ports and
+registers.
+
+To compare generated block traces against the PIR interpreter, run:
+
+```sh
+XLSYNTH_LEAN=/path/to/lean/bin/lean \
+  cargo fuzz run --fuzz-dir xlsynth-lean/fuzz \
+    --features external-lean --sanitizer none fuzz_block_lean_eval \
+    -- -max_total_time=300
+```
+
+See the repository's `FUZZ.md` for fuzz target coverage and failure diagnostics.
