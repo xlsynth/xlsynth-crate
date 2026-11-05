@@ -204,7 +204,6 @@ pub fn bx_to_lean_command() -> Command {
         Arg::new("readable-loop-names")
             .long("readable-loop-names")
             .action(clap::ArgAction::SetTrue)
-            .requires("link-dslx")
             .help("Use checked DSLX loop bindings to name locals in the readable model"),
     );
     command
@@ -672,7 +671,14 @@ pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Res
             };
             compile(bx_name, &input.source, module, reset, &input.imports)
         } else {
-            block::compile_bx(bx_name, &input.source, input.package, reset, &input.imports)
+            let compile = block::compile_bx;
+            #[cfg(feature = "dslx-loop-bindings")]
+            let compile = if matches.get_flag("readable-loop-names") {
+                block::compile_bx_with_loop_bindings
+            } else {
+                compile
+            };
+            compile(bx_name, &input.source, input.package, reset, &input.imports)
         }
         .with_context(|| input.path.display().to_string())?;
         report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;

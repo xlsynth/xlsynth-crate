@@ -24,6 +24,7 @@ use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
 use crate::typed::CheckedEnum;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
+pub(crate) use enum_conversion::ConversionProbe;
 pub(crate) use outline_graph::DslxSourceLoader;
 use outline_graph::{DeclId, ImportFeatures, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
@@ -70,7 +71,6 @@ impl ImportNames {
 #[derive(Default)]
 pub(crate) struct CapturedSources {
     pub(crate) types: WrittenTypes,
-    pub(crate) names: Option<ImportNames>,
     pub(crate) modules: BTreeSet<String>,
 }
 
@@ -571,10 +571,18 @@ impl ImportedStructs {
         ))
     }
 
+    pub(crate) fn import_names(&self) -> ImportNames {
+        ImportNames(
+            self.files
+                .as_ref()
+                .expect("DSLX batch has a source snapshot")
+                .clone(),
+        )
+    }
+
     pub(crate) fn take_sources(&mut self) -> CapturedSources {
         CapturedSources {
             types: self.written_types.take().unwrap_or_default(),
-            names: self.files.clone().map(ImportNames),
             modules: self.graph.sources().map(|s| s.subject.clone()).collect(),
         }
     }

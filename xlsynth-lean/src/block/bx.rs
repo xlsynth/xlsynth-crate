@@ -41,29 +41,25 @@ pub fn compile_bx(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    let xlsynth_bx::CompiledModule {
-        checked,
-        source,
-        package,
-        imports,
-        imported_structs,
-        imported_modules,
-        ..
-    } = xlsynth_bx::compile_with_source(source, package, reset, options)
+    let compiled = xlsynth_bx::compile_with_source(source, package, reset, options)
         .map_err(anyhow::Error::msg)?;
-    Ok(CompiledBx {
-        checked,
-        module_name: module_name.to_owned(),
-        imported_modules,
-        imported_structs,
-        source,
-        package,
-        dslx: None,
-        imports: imports
-            .into_iter()
-            .map(super::helper_types::DslxLink::from_import)
-            .collect(),
-    })
+    Ok(CompiledBx::from_bx(module_name, compiled, None))
+}
+
+/// Compile BX and retain checked loop bindings for the DSLX functions it
+/// imports.
+#[cfg(feature = "dslx-loop-bindings")]
+pub fn compile_bx_with_loop_bindings(
+    module_name: &str,
+    source: &str,
+    package: ir::Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
+    let compiled =
+        xlsynth_bx::compile_with_source_and_loop_bindings(source, package, reset, options)
+            .map_err(anyhow::Error::msg)?;
+    Ok(CompiledBx::from_bx(module_name, compiled, None))
 }
 
 /// Link the IR produced from this checked DSLX module and retain its source
@@ -75,13 +71,10 @@ pub fn compile_bx_with_dslx(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    compile_bx_link(
-        module_name,
-        source,
-        super::helper_types::DslxLink::compile(module)?,
-        reset,
-        options,
-    )
+    let (package, link) = super::helper_types::DslxLink::compile(module)?;
+    let compiled = xlsynth_bx::compile_with_source(source, package, reset, options)
+        .map_err(anyhow::Error::msg)?;
+    Ok(CompiledBx::from_bx(module_name, compiled, Some(link)))
 }
 
 /// Link checked DSLX while recording loop binding names and types.
@@ -93,27 +86,11 @@ pub fn compile_bx_with_dslx_loop_bindings(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    compile_bx_link(
-        module_name,
-        source,
-        super::helper_types::DslxLink::compile_with_bindings(module)?,
-        reset,
-        options,
-    )
-}
-
-fn compile_bx_link(
-    module_name: &str,
-    source: &str,
-    (package, link): (ir::Package, super::helper_types::DslxLink),
-    reset: ResetBehavior,
-    options: &ImportOptions<'_>,
-) -> Result<CompiledBx> {
-    let compiled = compile_bx(module_name, source, package, reset, options)?;
-    Ok(CompiledBx {
-        dslx: Some(link),
-        ..compiled
-    })
+    let (package, link) = super::helper_types::DslxLink::compile_with_bindings(module)?;
+    let compiled =
+        xlsynth_bx::compile_with_source_and_loop_bindings(source, package, reset, options)
+            .map_err(anyhow::Error::msg)?;
+    Ok(CompiledBx::from_bx(module_name, compiled, Some(link)))
 }
 
 impl CompiledBx {
@@ -142,6 +119,27 @@ impl CompiledBx {
     /// BX diagnostics collected while checking this compilation.
     pub fn warnings(&self) -> &[xlsynth_bx::BxWarning] {
         self.checked.warnings()
+    }
+
+    fn from_bx(
+        module_name: &str,
+        compiled: xlsynth_bx::CompiledModule,
+        dslx: Option<super::helper_types::DslxLink>,
+    ) -> Self {
+        Self {
+            checked: compiled.checked,
+            module_name: module_name.to_owned(),
+            imported_modules: compiled.imported_modules,
+            imported_structs: compiled.imported_structs,
+            source: compiled.source,
+            package: compiled.package,
+            dslx,
+            imports: compiled
+                .imports
+                .into_iter()
+                .map(super::helper_types::DslxLink::from_import)
+                .collect(),
+        }
     }
 
     /// The exact lowered package used for both raw and readable equations.

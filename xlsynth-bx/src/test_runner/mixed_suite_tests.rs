@@ -63,7 +63,7 @@ fn clocked_lowering_depends_on_reachable_functions_with_discards() -> Result<(),
             imports,
             &options,
             Some(&mut suite),
-            |_| {},
+            |batch| batch.plain_ir(),
             None,
         )?;
         assert!(checked.functions_with_test_discards.contains("keep"));
