@@ -836,6 +836,7 @@ impl TryFrom<&Quickcheck> for ModuleMember {
     }
 }
 
+#[derive(Clone)]
 pub struct Module {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxModule,

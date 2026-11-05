@@ -13,7 +13,6 @@ use xlsynth_pir::ir;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum TypeDecl {
     /// An unsigned two-bit enum with distinct named physical encodings.
-    #[expect(dead_code, reason = "BX has no native enum declaration")]
     Enum {
         name: String,
         width: usize,
@@ -26,7 +25,6 @@ pub(super) enum TypeDecl {
         fields: Vec<StructField>,
     },
     /// A named reference to a supported type, retaining alias-chain identity.
-    #[expect(dead_code, reason = "BX has no native alias declaration")]
     Alias { name: String, target: SourceType },
 }
 
@@ -99,7 +97,7 @@ pub(super) struct StatefulInterface {
 /// both the IR parameter list and every invoke's operands in arity and order.
 pub(super) struct HelperSignature {
     pub(super) name: String,
-    pub(super) params: Vec<SourceType>,
+    pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }
 
