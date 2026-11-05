@@ -12,6 +12,7 @@ mod source_types;
 pub use bx::{CompiledBx, compile_bx};
 
 pub use raw::{LeanBlockBundle, emit};
+pub(crate) use raw::{identifier, record_value};
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {
