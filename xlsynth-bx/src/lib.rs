@@ -6,6 +6,7 @@ pub mod ast;
 pub mod check;
 mod dslx_import;
 mod import_link;
+mod import_structs;
 mod infer_literal;
 mod layout;
 pub mod lower;

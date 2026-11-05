@@ -30,8 +30,8 @@ fn run_block(package: &Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
 }
 
 #[test]
-fn ordered_roots_select_the_body_and_aliases_share_one_specialization() -> Result<(), Box<dyn Error>>
-{
+fn ordered_roots_select_the_body_and_qualified_and_direct_calls_share_one_specialization()
+-> Result<(), Box<dyn Error>> {
     let first = tempdir()?;
     let second = tempdir()?;
     write_module(
@@ -46,9 +46,9 @@ fn ordered_roots_select_the_body_and_aliases_share_one_specialization() -> Resul
     )?;
     let module = parse_module(
         r#"
-import device.logic;
-import device.logic as again;
-block tags(clk, x: u8) -> (u8, u8) { (logic::tag(x), again::tag(x)) }
+use device::logic;
+use device::logic::tag;
+block tags(clk, x: u8) -> (u8, u8) { (logic::tag(x), tag(x)) }
 "#,
     )?;
     for (paths, expected) in [
@@ -97,12 +97,12 @@ fn score(x: bits[8] id=1) -> bits[8] { ret n: bits[8] = not(x, id=2) }"#,
     )
     .parse_and_verify_package()?;
     let source = r#"
-import a.b;
-import a_b;
-import acm_random as rng;
+use a::b;
+use a_b;
+use acm_random::rng_deterministic_seed;
 extern fn score(x: u8) -> u8;
 block results(clk, x: u8) -> (u8, u8, u8, u32) {
-    (b::score(x), a_b::score(x), score(x), rng::rng_deterministic_seed())
+    (b::score(x), a_b::score(x), score(x), rng_deterministic_seed())
 }
 "#;
     let options = ImportOptions {
@@ -140,10 +140,9 @@ pub fn checked_score(x: u8) -> u8 { if x == u8:0 { fail!("zero", x) } else { sco
         dslx_stdlib_path: None,
         additional_search_paths: vec![root.path()],
     };
-    let source = "import fabric.stage as unit; block b(clk, x: u8) -> u8 { unit::score(x) }";
+    let source = "use fabric::stage; block b(clk, x: u8) -> u8 { stage::score(x) }";
     let checked = check_module_with_options(&parse_module(source)?, &options)?;
-    let effectful =
-        "import fabric.stage as unit; block b(clk, x: u8) -> u8 { unit::checked_score(x) }";
+    let effectful = "use fabric::stage; block b(clk, x: u8) -> u8 { stage::checked_score(x) }";
     let error = compile_with_options(
         effectful,
         empty_package("effects"),
@@ -182,8 +181,7 @@ fn an_unused_missing_import_fails_during_checking() -> Result<(), Box<dyn Error>
         dslx_stdlib_path: None,
         additional_search_paths: vec![root.path()],
     };
-    let module =
-        parse_module("import test.missing_probe as unused; block b(clk, x: u8) -> u8 { x }")?;
+    let module = parse_module("use test::missing_probe; block b(clk, x: u8) -> u8 { x }")?;
     let error = check_module_with_options(&module, &options).unwrap_err();
     assert!(error.contains("missing_probe"), "{error}");
     Ok(())
@@ -202,7 +200,7 @@ fn stdlib_override_supplies_the_body_and_its_portable_source_path() -> Result<()
         additional_search_paths: Vec::new(),
     };
     let source = r#"
-import acm_random;
+use acm_random;
 block seed(clk, x: u8) -> u32 { acm_random::rng_deterministic_seed() + (x as u32) }
 "#;
     let package = compile_with_options(

@@ -48,6 +48,7 @@ pub enum ModuleMemberKind {
     Use = 15,
     ProcAlias = 16,
     FuzzTestFunction = 17,
+    SumDef = 18,
 }
 
 impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
@@ -71,6 +72,7 @@ impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
             15 => ModuleMemberKind::Use,
             16 => ModuleMemberKind::ProcAlias,
             17 => ModuleMemberKind::FuzzTestFunction,
+            18 => ModuleMemberKind::SumDef,
             _ => panic!("Unknown module member kind: {}", kind),
         };
         assert_eq!(result as i32, kind);

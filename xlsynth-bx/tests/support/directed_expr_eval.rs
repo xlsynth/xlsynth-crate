@@ -3,13 +3,15 @@
 //! Directed BX expression tests can select an external DSLX compiler. The
 //! fuzz target always uses the pinned in-process compiler.
 
-use std::{env, fs, path::Path, process::Command};
+use std::{env, ffi::OsStr, fs, path::Path, process::Command};
 use tempfile::tempdir;
 use xlsynth::{IrFunction, IrPackage};
 use xlsynth_bx::{check_module, parse_module};
 use xlsynth_pir::IrValue;
 
-use super::expr_eval::{ExpressionEvaluator, bx_source, compile_bundled_dslx, dslx_source};
+use super::expr_eval::{
+    ExpressionEvaluator, bx_source, compile_bundled_dslx, compile_bundled_module, dslx_source,
+};
 
 /// Compile with the selected reference. Only ordinary source rejection by
 /// the external compiler returns Err; a broken tool or invalid IR fails the
@@ -18,13 +20,34 @@ pub fn compile_dslx(params: &str, result: &str, body: &str) -> Result<IrFunction
     let Some(converter) = env::var_os("BX_DSLX_IR_CONVERTER") else {
         return compile_bundled_dslx(params, result, body);
     };
-    let converter = Path::new(&converter);
+    compile_external(&converter, &dslx_source(params, result, body), &[])
+}
+
+/// Compile a complete reference module, allowing its imports to come from a
+/// fixture.
+pub fn compile_dslx_module(source: &str, paths: &[&Path]) -> Result<IrFunction, String> {
+    match env::var_os("BX_DSLX_IR_CONVERTER") {
+        Some(converter) => compile_external(&converter, source, paths),
+        None => compile_bundled_module(source, paths),
+    }
+}
+
+fn compile_external(
+    converter: &OsStr,
+    source: &str,
+    paths: &[&Path],
+) -> Result<IrFunction, String> {
+    let converter = Path::new(converter);
     let dir = tempdir().expect("create DSLX reference directory");
     let path = dir.path().join("expr_eval.x");
-    let source = dslx_source(params, result, body);
-    fs::write(&path, &source).expect("write DSLX reference source");
+    fs::write(&path, source).expect("write DSLX reference source");
     let mut command = Command::new(converter);
     command.arg("--warnings_as_errors=false");
+    if !paths.is_empty() {
+        command
+            .arg("--dslx_path")
+            .arg(env::join_paths(paths).expect("valid DSLX import paths"));
+    }
     if let Some(stdlib) = env::var_os("DSLX_STDLIB_PATH") {
         assert!(
             Path::new(&stdlib).is_dir(),
