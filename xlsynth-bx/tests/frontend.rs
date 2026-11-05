@@ -4,13 +4,19 @@
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]
 mod expr_eval;
+#[path = "frontend/imported_structs.rs"]
+mod imported_structs;
 
 use std::path::Path;
 
-use directed_expr_eval::{assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx};
+use directed_expr_eval::{
+    assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx, compile_dslx_module,
+};
 use expr_eval::ExpressionEvaluator;
 
-use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, parse_module};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_module, compile, empty_package, parse_module,
+};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::{Block, MemberType, NodePayload, Unop};
@@ -598,6 +604,109 @@ fn packed_slice_width_spellings_match_dslx_at_the_shorthand_boundary() {
         "(x[0+:u64], x[0+:s64], x[0+:uN[84]], x[0+:sN[65]], x[0+:uN[0]])",
         [(vec![x], expected)],
     );
+}
+
+#[test]
+fn bit_width_shorthand_requires_a_canonical_width_from_one_to_sixty_four() {
+    for (params, result, body) in [
+        ("x: u65", "uN[65]", "x"),
+        ("x: sN[84]", "s84", "x"),
+        ("x: (u8, s0)[2]", "sN[0]", "x[0].1"),
+        ("x: uN[84]", "uN[84]", "let y: u84 = x; y"),
+        ("x: s1", "sN[65]", "x as s65"),
+        ("", "uN[0]", "u0:0"),
+        ("", "sN[65]", "s65:-1"),
+        ("", "s64", "s64:s65:1"),
+        ("x: u1", "u1", "let y: u01 = x; y"),
+        ("x: u64", "s64", "x[0+:s064]"),
+    ] {
+        assert_expr_rejected_by_both(params, result, body);
+    }
+
+    assert_expr_matches_dslx(
+        "x: s1, y: u64, z: uN[0]",
+        "(u1, s64, sN[65], uN[84], sN[0])",
+        r#"
+        let sign: s64 = x as s64;
+        let wide: sN[65] = sign as sN[65];
+        (u1:1, sign, wide, y as uN[84], z as sN[0])
+        "#,
+        [(
+            vec![
+                IrValue::bool(true),
+                IrValue::make_ubits(64, u64::MAX).unwrap(),
+                IrValue::make_ubits(0, 0).unwrap(),
+            ],
+            IrValue::parse_typed(
+                "(bits[1]:1, bits[64]:0xffffffffffffffff, bits[65]:0x1ffffffffffffffff, bits[84]:0xffffffffffffffff, bits[0]:0)",
+            )
+            .unwrap(),
+        )],
+    );
+}
+
+#[test]
+fn register_struct_and_extern_bit_widths_match_dslx_annotations() {
+    for (bx, dslx) in [
+        (
+            "block sample(clk, x: sN[65]) -> sN[65] { reg q: WIDTH; q := x; q }",
+            "fn sample(x: sN[65]) -> sN[65] { let q: WIDTH = x; q }",
+        ),
+        (
+            "struct S { words: WIDTH[2] } block sample(clk, x: S) -> sN[65] { x.words[0] }",
+            "struct S { words: WIDTH[2] } fn sample(x: S) -> sN[65] { x.words[0] }",
+        ),
+        (
+            "extern fn echo(x: WIDTH) -> sN[65]; block sample(clk, x: sN[65]) -> sN[65] { echo(x) }",
+            "fn echo(x: WIDTH) -> sN[65] { x } fn sample(x: sN[65]) -> sN[65] { echo(x) }",
+        ),
+        (
+            "extern block echo(clk, x: sN[65]) -> WIDTH; block sample(clk, x: sN[65]) -> sN[65] { inst e: echo; e.x := x; e.out }",
+            "fn echo(x: sN[65]) -> WIDTH { x } fn sample(x: sN[65]) -> sN[65] { echo(x) }",
+        ),
+    ] {
+        for (width, accepted) in [("s65", false), ("sN[65]", true)] {
+            let bx = bx.replace("WIDTH", width);
+            let dslx = dslx.replace("WIDTH", width);
+            let checked = parse_module(&bx).and_then(|module| check_module(&module));
+            assert_eq!(checked.is_ok(), accepted, "{bx}\n{:?}", checked.err());
+            let reference = compile_dslx_module(&dslx, &[]);
+            assert_eq!(reference.is_ok(), accepted, "{dslx}\n{:?}", reference.err());
+        }
+    }
+}
+
+#[test]
+fn identifiers_outside_the_bit_width_shorthand_range_match_dslx()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(
+        root.path().join("s65.x"),
+        "pub fn u0(a: u8, b: u8) -> u8 { a + b }",
+    )?;
+    let declaration = "struct u84 { s0: u8 }";
+    let body = "let s065: u84 = u84 { s0: u65 }; s65::u0(s065.s0, s0)";
+    let params = "u65: u8, s0: u8";
+    let bx = format!(
+        "use s65;\n{declaration}\n{}",
+        expr_eval::bx_source(params, "u8", body)
+    );
+    let dslx = format!(
+        "import s65;\n{declaration}\n{}",
+        expr_eval::dslx_source(params, "u8", body)
+    );
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let evaluator = ExpressionEvaluator::compile_block(
+        &bx,
+        &options,
+        compile_dslx_module(&dslx, &[root.path()]),
+    )?;
+    let result = evaluator.compare(&[IrValue::make_ubits(8, 5)?, IrValue::make_ubits(8, 7)?])?;
+    assert_eq!(result, IrValue::make_ubits(8, 12)?);
+    Ok(())
 }
 
 #[test]

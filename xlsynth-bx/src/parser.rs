@@ -5,9 +5,12 @@
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Import, Module, Param, Stmt, StructDef, Type,
-    UnaryOp, WidthSliceType,
+    BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type, UnaryOp,
+    UsePath, WidthSliceType,
 };
+
+/// Bound recursive syntax, including DSLX use trees generated from a BX AST.
+pub(crate) const MAX_SYNTAX_DEPTH: usize = 64;
 
 /// A borrowed spelling and byte offset in the original UTF-8 input.
 #[derive(Clone, Copy)]
@@ -28,19 +31,69 @@ fn identifier_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
 }
 
-/// A single identifier word safe to pass to the DSLX parser. DSLX validates
-/// its own keywords in import subjects and qualified function names.
+fn dslx_identifier_tail(b: u8) -> bool {
+    identifier_start(b) || b.is_ascii_digit() || matches!(b, b'!' | b'\'')
+}
+
+/// DSLX struct and field names can contain primes and exclamation marks.
+pub(crate) fn is_dslx_member_name(text: &str) -> bool {
+    let mut bytes = text.bytes();
+    bytes.next().is_some_and(identifier_start) && bytes.all(dslx_identifier_tail)
+}
+
+/// Identifier words used for local BX names and generated function symbols.
 pub(crate) fn is_identifier_word(text: &str) -> bool {
     let mut bytes = text.bytes();
     bytes.next().is_some_and(identifier_start)
         && bytes.all(|b| identifier_start(b) || b.is_ascii_digit())
 }
 
+/// Path components are identifier tokens in the DSLX `use` grammar.
+pub(crate) fn is_use_identifier(text: &str) -> bool {
+    is_dslx_member_name(text)
+        && fixed_width(text).is_none()
+        && !matches!(
+            text,
+            "as" | "const"
+                | "else"
+                | "enum"
+                | "false"
+                | "fn"
+                | "for"
+                | "if"
+                | "impl"
+                | "import"
+                | "in"
+                | "out"
+                | "let"
+                | "match"
+                | "pub"
+                | "proc"
+                | "self"
+                | "struct"
+                | "trait"
+                | "true"
+                | "type"
+                | "unroll_for!"
+                | "use"
+                | "mut"
+                | "bits"
+                | "token"
+                | "uN"
+                | "sN"
+                | "xN"
+                | "bool"
+                | "chan"
+                | "Self"
+        )
+}
+
 /// A local BX binding may use any identifier word other than reserved syntax.
 pub(crate) fn is_identifier(text: &str) -> bool {
     let keyword = matches!(
         text,
-        "pub"
+        "use"
+            | "pub"
             | "block"
             | "struct"
             | "extern"
@@ -59,7 +112,10 @@ pub(crate) fn is_identifier(text: &str) -> bool {
             | "sN"
             | "xN"
     );
-    is_identifier_word(text) && !keyword && fixed_width(text).is_none()
+    is_identifier_word(text)
+        && !text.contains(['!', '\''])
+        && !keyword
+        && fixed_width(text).is_none()
 }
 
 /// Tokenize source without interpreting integer widths or values.
@@ -90,7 +146,12 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
         let mut character = None;
         if identifier_start(b) {
             i += 1;
-            while i < bytes.len() && (identifier_start(bytes[i]) || bytes[i].is_ascii_digit()) {
+            while i < bytes.len() && dslx_identifier_tail(bytes[i]) {
+                // Keep `a!=b` as inequality, and `a.field!==b` as equality
+                // on the DSLX field named `field!`.
+                if bytes[i..].starts_with(b"!=") && !bytes[i..].starts_with(b"!==") {
+                    break;
+                }
                 i += 1;
             }
         } else if b.is_ascii_digit() || negative_number {
@@ -250,8 +311,8 @@ impl<'s> Parser<'s> {
         &mut self,
         parse: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        if self.depth >= 64 {
-            return Err(self.error("syntax nesting exceeds 64 levels"));
+        if self.depth >= MAX_SYNTAX_DEPTH {
+            return Err(self.error(&format!("syntax nesting exceeds {MAX_SYNTAX_DEPTH} levels")));
         }
         self.depth += 1;
         let result = parse(self);
@@ -310,7 +371,7 @@ impl<'s> Parser<'s> {
 
     fn module(&mut self) -> Result<Module, String> {
         let mut module = Module::default();
-        let mut import_bindings = BTreeSet::new();
+        let mut use_bindings = BTreeSet::new();
         while !self.peek(0).is_empty() {
             let public = self.eat("pub");
             if self.eat("block") {
@@ -326,17 +387,12 @@ impl<'s> Parser<'s> {
                 });
             } else if public {
                 return Err(self.error("expected block or struct after pub"));
-            } else if self.eat("import") {
-                let offset = self.tokens[self.pos].start;
-                let import = self.import()?;
-                if !import_bindings.insert(import.binding().to_owned()) {
-                    return Err(diagnostic(
-                        self.source,
-                        offset,
-                        &format!("duplicate import binding '{}'", import.binding()),
-                    ));
-                }
-                module.imports.push(import);
+            } else if self.eat("use") {
+                self.use_tree(&mut Vec::new(), &mut module.uses, &mut use_bindings)?;
+                self.expect(";")?;
+            } else if self.peek(0) == "import" {
+                return Err(self
+                    .error("replace `import` with `use` and separate path components with `::`"));
             } else if self.eat("extern") {
                 if self.eat("fn") {
                     module.externs.push(self.extern_fn()?);
@@ -348,46 +404,60 @@ impl<'s> Parser<'s> {
                     return Err(self.error("expected fn or block after extern"));
                 }
             } else {
-                return Err(self.error("expected a block, struct, extern, or import declaration"));
+                return Err(self.error("expected a block, struct, extern, or use declaration"));
             }
         }
         Ok(module)
     }
 
-    /// Read a dotted DSLX import subject and its optional local binding.
-    fn import(&mut self) -> Result<Import, String> {
-        let mut subject = self.take_identifier(is_identifier_word)?;
-        while self.eat(".") {
-            subject.push('.');
-            subject.push_str(&self.take_identifier(is_identifier_word)?);
-        }
-        let alias = if self.eat("as") {
-            Some(self.ident()?)
-        } else {
-            None
-        };
-        let import = Import { subject, alias };
-        if !is_identifier(import.binding()) {
-            return Err(self.error(&format!(
-                "import '{}' requires an alias that is a BX identifier",
-                import.subject
-            )));
-        }
-        self.expect(";")?;
-        Ok(import)
+    /// Flatten one DSLX use tree, retaining each full path and its leaf
+    /// binding.
+    fn use_tree(
+        &mut self,
+        prefix: &mut Vec<String>,
+        paths: &mut Vec<UsePath>,
+        bindings: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        self.nested(|parser| {
+            let offset = parser.tokens[parser.pos].start;
+            let name = parser.take_identifier(is_use_identifier)?;
+            let has_children = parser.eat("::");
+            if !has_children && !bindings.insert(name.clone()) {
+                return Err(diagnostic(
+                    parser.source,
+                    offset,
+                    &format!("duplicate use binding '{name}'"),
+                ));
+            }
+            prefix.push(name);
+            if !has_children {
+                paths.push(UsePath {
+                    components: prefix.clone(),
+                });
+            } else if parser.eat("{") {
+                loop {
+                    parser.use_tree(prefix, paths, bindings)?;
+                    if parser.eat("}") {
+                        break;
+                    }
+                    parser.expect(",")?;
+                }
+            } else {
+                parser.use_tree(prefix, paths, bindings)?;
+            }
+            prefix.pop();
+            Ok(())
+        })
     }
 
-    /// A module qualifier is permitted only on a function declaration or call.
-    fn name_or_function_path(&mut self) -> Result<String, String> {
-        let head = self.ident()?;
+    /// Parse a local name or a member of an imported DSLX module.
+    fn name_or_qualified_member(&mut self) -> Result<String, String> {
+        let head = self.take_identifier(|word| is_identifier(word) || is_use_identifier(word))?;
         if !self.eat("::") {
             return Ok(head);
         }
-        let function = self.take_identifier(is_identifier_word)?;
-        if self.peek(0) != "(" {
-            return Err(self.error("expected '(' after module-qualified function name"));
-        }
-        Ok(format!("{head}::{function}"))
+        let member = self.take_identifier(is_dslx_member_name)?;
+        Ok(format!("{head}::{member}"))
     }
 
     /// Parse comma-separated items, allowing an empty list and a trailing
@@ -418,7 +488,10 @@ impl<'s> Parser<'s> {
     }
 
     fn extern_fn(&mut self) -> Result<ExternFn, String> {
-        let name = self.name_or_function_path()?;
+        if !is_identifier(self.peek(0)) {
+            return Err(self.error("expected a BX identifier for the extern function"));
+        }
+        let name = self.name_or_qualified_member()?;
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
         self.expect("->")?;
@@ -507,16 +580,6 @@ impl<'s> Parser<'s> {
     fn width_slice_type(&mut self) -> Result<(WidthSliceType, usize), String> {
         let spelling = self.peek(0);
         if !matches!(spelling, "bits" | "uN" | "sN" | "xN") {
-            if let Some(digits) = fixed_width(spelling)
-                && !matches!(digits.parse::<u8>(), Ok(1..=64))
-            {
-                let bit_type = if spelling.starts_with('s') {
-                    "sN"
-                } else {
-                    "uN"
-                };
-                return Err(self.error(&format!("use '{bit_type}[{digits}]' for this slice width")));
-            }
             // DSLX treats parentheses in a type annotation as tuple syntax,
             // including a single parenthesized member.
             let ty = if self.eat("(") {
@@ -612,10 +675,11 @@ impl<'s> Parser<'s> {
             let width = self.dimension()?;
             self.expect("]")?;
             Type::Bits { signed, width }
-        } else if let Some(digits) = fixed_width(spelling) {
-            let width = digits
-                .parse::<usize>()
-                .map_err(|_| self.error("bit width is too large"))?;
+        } else if !self.dslx_type_display
+            && let Some(width) = fixed_width(spelling)
+        {
+            // Native DSLX bits display as uN[W] or sN[W]. A displayed name
+            // such as u84 can instead denote an enum declared by DSLX.
             self.pos += 1;
             Type::Bits {
                 signed: spelling.starts_with('s'),
@@ -624,7 +688,7 @@ impl<'s> Parser<'s> {
         } else if self.dslx_type_display {
             return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
         } else {
-            Type::Named(self.ident()?)
+            Type::Named(self.name_or_qualified_member()?)
         };
         Ok(ParsedType { value, depth: 0 })
     }
@@ -663,7 +727,10 @@ impl<'s> Parser<'s> {
     fn body(&mut self) -> Result<Body, String> {
         let mut statements = Vec::new();
         while !self.eat("}") {
-            if self.eat("reg") {
+            // A DSLX use leaf can be named reg or inst. A following name
+            // distinguishes a hardware declaration from a call or constructor.
+            if self.peek(0) == "reg" && is_identifier(self.peek(1)) {
+                self.pos += 1;
                 let param = self.param()?;
                 let reset = if self.eat("=") {
                     Some(self.expr()?.value)
@@ -688,7 +755,8 @@ impl<'s> Parser<'s> {
                     ty,
                     value: self.expr()?.value,
                 });
-            } else if self.eat("inst") {
+            } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
+                self.pos += 1;
                 let name = self.ident()?;
                 self.expect(":")?;
                 statements.push(Stmt::Inst {
@@ -847,7 +915,7 @@ impl<'s> Parser<'s> {
                     })?;
                     index.to_string()
                 } else {
-                    self.ident()?
+                    self.take_identifier(is_dslx_member_name)?
                 };
                 left = self.compose(
                     left.height,
@@ -956,7 +1024,7 @@ impl<'s> Parser<'s> {
                 },
             );
         }
-        if starts_bit_type(text) {
+        if self.starts_bit_literal()? {
             let ty = self.ty()?;
             self.expect(":")?;
             return self.annotated_literal(ty);
@@ -964,7 +1032,7 @@ impl<'s> Parser<'s> {
         if number_token(text) || self.tokens[self.pos].character.is_some() {
             return self.literal(None);
         }
-        let name = self.name_or_function_path()?;
+        let name = self.name_or_qualified_member()?;
         if self.eat("(") {
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
@@ -972,7 +1040,7 @@ impl<'s> Parser<'s> {
         if allow_struct && self.eat("{") {
             let mut height = 0;
             let fields = self.list("}", |parser| {
-                let field = parser.ident()?;
+                let field = parser.take_identifier(is_dslx_member_name)?;
                 let value = if parser.eat(":") {
                     parser.expr()?
                 } else {
@@ -983,7 +1051,27 @@ impl<'s> Parser<'s> {
             })?;
             return self.compose(height, Expr::Struct { name, fields });
         }
+        if name.contains("::") {
+            return Err(
+                self.error("expected a call or struct literal after a module-qualified name")
+            );
+        }
         Ok(ParsedExpr::leaf(Expr::Name(name)))
+    }
+
+    /// Recognize a bit literal's annotation and suggest the DSLX spelling
+    /// when a formerly accepted shorthand is followed by a colon.
+    fn starts_bit_literal(&self) -> Result<bool, String> {
+        let name = self.peek(0);
+        if matches!(name, "bits" | "uN" | "sN" | "xN" | "bool") || fixed_width(name).is_some() {
+            return Ok(true);
+        }
+        if self.peek(1) == ":"
+            && let Some(hint) = explicit_width_hint(name)
+        {
+            return Err(self.error(&hint));
+        }
+        Ok(false)
     }
 
     /// Parse a literal term after a type annotation. Parentheses group the
@@ -994,7 +1082,7 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             return Ok(literal);
         }
-        if starts_bit_type(self.peek(0)) {
+        if self.starts_bit_literal()? {
             self.ty()?;
             self.expect(":")?;
             return self.nested(|parser| parser.annotated_literal(ty));
@@ -1085,12 +1173,20 @@ fn number_token(text: &str) -> bool {
         .is_some_and(u8::is_ascii_digit)
 }
 
-fn fixed_width(spelling: &str) -> Option<&str> {
-    spelling.strip_prefix(['u', 's']).filter(|s| decimal(s))
+/// DSLX reserves only u1 through u64 and s1 through s64 as bit type keywords.
+fn fixed_width(spelling: &str) -> Option<usize> {
+    let digits = spelling.strip_prefix(['u', 's'])?;
+    if digits.len() > 2 || !decimal(digits) {
+        return None;
+    }
+    digits.parse().ok().filter(|width| (1..=64).contains(width))
 }
 
-fn starts_bit_type(spelling: &str) -> bool {
-    matches!(spelling, "bits" | "uN" | "sN" | "xN" | "bool") || fixed_width(spelling).is_some()
+/// A migration hint for an unresolved zero-width or wide bit shorthand.
+pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
+    let digits = spelling.strip_prefix(['u', 's'])?;
+    (decimal(digits) && fixed_width(spelling).is_none())
+        .then(|| format!("use '{}N[{digits}]' for this bit width", &spelling[..1]))
 }
 
 #[cfg(test)]
@@ -1098,57 +1194,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn imports_are_contextual_and_bind_the_alias_or_last_path_component() {
-        let src = "block import(clk, import: u8) -> u8 { import }";
-        assert!(parse_module(src).unwrap().imports.is_empty());
-        let module = parse_module(&format!(
-            "{src} import std; import vendor.math; import vendor.math as m;"
-        ))
-        .unwrap();
+    fn use_trees_bind_each_leaf_and_preserve_its_full_path() {
+        let module =
+            parse_module("use std; use device::{math::{mac, Header'}, constants::BIAS, timing};")
+                .unwrap();
+        let paths: Vec<_> = module
+            .uses
+            .iter()
+            .map(|path| (path.components.join("::"), path.binding().unwrap()))
+            .collect();
         assert_eq!(
-            module
-                .imports
-                .iter()
-                .map(|i| (i.subject.as_str(), i.binding(), i.alias.as_deref()))
-                .collect::<Vec<_>>(),
+            paths,
             [
-                ("std", "std", None),
-                ("vendor.math", "math", None),
-                ("vendor.math", "m", Some("m"))
-            ],
+                ("std".into(), "std"),
+                ("device::math::mac".into(), "mac"),
+                ("device::math::Header'".into(), "Header'"),
+                ("device::constants::BIAS".into(), "BIAS"),
+                ("device::timing".into(), "timing"),
+            ]
         );
+    }
+
+    #[test]
+    fn use_declarations_reject_ambiguous_bindings_and_invalid_trees() {
         for (source, error) in [
-            ("import std; import std;", "duplicate import binding 'std'"),
-            (
-                "import a.math; import b.math;",
-                "duplicate import binding 'math'",
-            ),
-            (
-                "import std as s; import vendor.s;",
-                "duplicate import binding 's'",
-            ),
-            ("import vendor..math;", "expected identifier"),
-            ("import vendor.math as ;", "expected identifier"),
-            ("import vendor::math;", "expected ';'"),
-            ("import ip.reg;", "requires an alias"),
-            ("import math as inst;", "expected identifier"),
-            ("import std", "expected ';'"),
-            ("pub import std;", "expected block or struct after pub"),
+            ("use std; use std;", "duplicate use binding 'std'"),
+            ("use a::math; use b::math;", "duplicate use binding 'math'"),
+            ("use a::{b::item, c::item};", "duplicate use binding 'item'"),
+            ("use {foo, bar};", "expected identifier"),
+            ("use a::{};", "expected identifier"),
+            ("use a::{b,};", "expected identifier"),
+            ("use a::{b c};", "expected ','"),
+            ("use a::{b", "expected ','"),
+            ("use a::;", "expected identifier"),
+            ("use ::a;", "expected identifier"),
+            ("use a::*;", "expected identifier"),
+            ("use foo.bar;", "expected ';'"),
+            ("use foo as f;", "expected ';'"),
+            ("use lib::fn;", "expected identifier"),
+            ("use lib::u64;", "expected identifier"),
+            ("use std", "expected ';'"),
+            ("pub use std;", "expected block or struct after pub"),
+            ("import a.b;", "replace `import` with `use`"),
         ] {
             assert!(
                 parse_module(source).unwrap_err().contains(error),
                 "{source}"
             );
         }
+        let deep = format!("use {}leaf;", "a::".repeat(64));
+        assert!(parse_module(&deep).unwrap_err().contains("syntax nesting"));
     }
 
     #[test]
-    fn qualified_dslx_names_can_use_bx_keywords() {
-        let module =
-            parse_module("import ip.reg as r; block b(clk, x: u8) -> u8 { r::block(x) }").unwrap();
-        assert_eq!(module.imports[0].subject, "ip.reg");
-        assert_eq!(module.imports[0].binding(), "r");
-        assert!(matches!(&module.blocks[0].output, Expr::Call { name, .. } if name == "r::block"));
+    fn uses_can_bind_dslx_identifiers_that_are_special_to_bx() {
+        let module = parse_module(
+            r#"
+use ip::reg;
+use packet::{Header', inst};
+block b(clk, x: u8) -> u8 { reg::block(x) }
+block h(clk, x: u8) -> Header' { Header' { field: x } }
+block i(clk, x: u8) -> u8 { inst(x) }
+"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&module.blocks[0].output, Expr::Call { name, .. } if name == "reg::block")
+        );
+        assert!(matches!(&module.blocks[1].output, Expr::Struct { name, .. } if name == "Header'"));
+        assert!(matches!(&module.blocks[2].output, Expr::Call { name, .. } if name == "inst"));
+        // The removed declaration keyword is still available as a BX name.
+        assert!(parse_module("block import(clk, import: u8) -> u8 { import }").is_ok());
     }
 
     #[test]
@@ -1175,6 +1291,7 @@ mod tests {
         );
         for invalid in [
             "(uN[8], Ordering)[3]",
+            "(u84, uN[8])",
             "uN[8] extra",
             "uN[10000000]",
             "uN[8][10000000]",
@@ -1288,7 +1405,7 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
     }
 
     #[test]
-    fn rejects_malformed_or_non_function_qualifications() {
+    fn rejects_malformed_paths_qualified_values_and_qualified_declarations() {
         for name in [
             "::mul_wide",
             "arithmetic::",
@@ -1303,7 +1420,6 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
         }
         for source in [
             "block b(clk) -> u8 { arithmetic::value }",
-            "block b(clk) -> u8 { arithmetic::Payload { x: u8:0 } }",
             "struct arithmetic::Payload { x: u8 }",
         ] {
             assert!(parse_module(source).is_err(), "{source}");

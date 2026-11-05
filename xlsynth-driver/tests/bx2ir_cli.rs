@@ -46,10 +46,10 @@ fn imported_dslx_logic_runs_at_the_bx_register_boundary() -> Result<()> {
     )?;
     fs::write(
         root.join("design.bx"),
-        r#"import arithmetic;
+        r#"use arithmetic::increment;
 block registered_sum(clk, x: u8) -> u8 {
     reg q: u8;
-    q := arithmetic::increment(x);
+    q := increment(x);
     q
 }"#,
     )?;
@@ -82,6 +82,30 @@ block registered_sum(clk, x: u8) -> u8 {
 }
 
 #[test]
+fn inferred_dslx_struct_can_share_its_name_with_functions_and_constants() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::write(root.join("wire.x"), "pub struct Leaf { z: u8 }")?;
+    fs::write(
+        root.join("factory.x"),
+        "import wire; pub fn make(x: u8) -> (wire::Leaf,) { (wire::Leaf { z: x },) }",
+    )?;
+    fs::write(
+        root.join("design.bx"),
+        "use decoy; use factory; block b(clk, x: u8) -> u8 { factory::make(x).0.z }",
+    )?;
+    // The generated type probe for decoy::Leaf fails. The subsequent probe
+    // for wire::Leaf must still see an intact DSLX inference graph.
+    for decoy in ["pub fn Leaf(x: u8) -> u8 { x }", "pub const Leaf = u32:2;"] {
+        fs::write(root.join("decoy.x"), decoy)?;
+        let ir = stdout(root, &["bx2ir", "design.bx"])?;
+        let package = Parser::new(&ir).parse_and_verify_package()?;
+        assert!(package.get_fn("__factory__make").is_some());
+    }
+    Ok(())
+}
+
+#[test]
 fn dslx_path_replaces_the_configured_import_directories() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
@@ -99,7 +123,7 @@ dslx_path = ["configured"]
     )?;
     fs::write(
         root.join("math_pipe.bx"),
-        r#"import custom_math;
+        r#"use custom_math;
 block math_pipe(clk, x: u8) -> u8 { custom_math::twice(x) }"#,
     )?;
 
@@ -232,7 +256,7 @@ fn mapped_protobuf_matches_the_staged_pipeline_with_synchronous_reset_and_enable
     )?;
     fs::write(
         root.join("pipeline.bx"),
-        r#"import math;
+        r#"use math;
 block pipeline(clk, rst, x: u2, en: bool) -> u2 {
     reg q: u2 = 0;
     if en { q := math::invert(x); }

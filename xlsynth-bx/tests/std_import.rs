@@ -16,13 +16,14 @@ fn __std__umul__5_8_13(a: bits[8] id=1, b: bits[5] id=2) -> bits[13] {
   ret literal.3: bits[13] = literal(value=17, id=3, pos=[(0,0,0)])
 }"#;
     let bx = r#"
-import std;
+use std;
+use std::{umul, smul};
 extern fn supplied(a: u8, b: u5) -> u13 = "__std__umul__5_8_13";
 
 struct Results { saved: u13, wide: u20, negative: bool, pow2: bool, caller: u13 }
 block products(clk, rst, valid: bool, a: u8, b: u5, c: u12) -> Results {
-    let product = std::umul(a, b);
-    let signed_product = std::smul(a as s8, b as s5);
+    let product = umul(a, b);
+    let signed_product = smul(a as s8, b as s5);
     reg q: u13 = u13:0;
     if valid { q := product; }
     Results {
@@ -103,7 +104,7 @@ block products(clk, rst, valid: bool, a: u8, b: u5, c: u12) -> Results {
 #[test]
 fn aggregate_and_wide_results_survive_separate_checking_and_lowering() {
     let source = r#"
-import std;
+use std;
 block indices(clk, xs: (sN[80],)[2]) -> (u32, (sN[80],))[2] {
     std::enumerate(xs)
 }
@@ -149,8 +150,7 @@ fn invalid_imported_calls_report_the_function_and_the_reason() {
             "literal '3' requires a concrete bit type",
         ),
     ] {
-        let bx =
-            format!("import std; block b(clk, x: u8) -> u8 {{ let unused = {expression}; x }}");
+        let bx = format!("use std; block b(clk, x: u8) -> u8 {{ let unused = {expression}; x }}");
         let error = check_module(&parse_module(&bx).unwrap()).unwrap_err();
         assert!(error.contains(callee) && error.contains(reason), "{error}");
     }

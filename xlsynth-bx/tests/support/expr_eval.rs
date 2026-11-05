@@ -6,10 +6,13 @@ use std::path::Path;
 
 use xlsynth::{DslxConvertOptions, IrFunction, convert_dslx_to_ir};
 use xlsynth_bx::ast::{Param, Type};
-use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, lower_module, parse_module};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_module_with_options, compile, empty_package, lower_module,
+    parse_module,
+};
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::ir::Fn;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir::{Fn, Package};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::libxls_bridge::{value_from_libxls, value_to_libxls};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
@@ -30,13 +33,17 @@ pub fn dslx_source(params: &str, result: &str, body: &str) -> String {
 
 /// Compile the reference expression using the workspace's pinned DSLX frontend.
 pub fn compile_bundled_dslx(params: &str, result: &str, body: &str) -> Result<IrFunction, String> {
-    let function = dslx_source(params, result, body);
-    let package = convert_dslx_to_ir(
-        &function,
-        Path::new("expr_eval.x"),
-        &DslxConvertOptions::default(),
-    )
-    .map_err(|e| e.to_string())?;
+    compile_bundled_module(&dslx_source(params, result, body), &[])
+}
+
+/// Compile a reference function with the same module search paths used by BX.
+pub fn compile_bundled_module(source: &str, paths: &[&Path]) -> Result<IrFunction, String> {
+    let options = DslxConvertOptions {
+        additional_search_paths: paths.to_vec(),
+        ..Default::default()
+    };
+    let package = convert_dslx_to_ir(source, Path::new("expr_eval.x"), &options)
+        .map_err(|e| e.to_string())?;
     package
         .ir
         .get_function("__expr_eval__sample")
@@ -47,8 +54,9 @@ pub fn compile_bundled_dslx(params: &str, result: &str, body: &str) -> Result<Ir
 pub struct ExpressionEvaluator {
     pub bx: Fn,
     dslx: IrFunction,
+    package: Package,
     params: Vec<Param>,
-    singleton_tuple_result: bool,
+    singleton_aggregate_result: bool,
 }
 
 impl ExpressionEvaluator {
@@ -59,9 +67,22 @@ impl ExpressionEvaluator {
         body: &str,
         compile_dslx: fn(&str, &str, &str) -> Result<IrFunction, String>,
     ) -> Result<Self, String> {
-        let block = bx_source(params, result, body);
-        let checked = parse_module(&block).and_then(|module| check_module(&module));
-        let reference = compile_dslx(params, result, body);
+        Self::compile_block(
+            &bx_source(params, result, body),
+            &ImportOptions::default(),
+            compile_dslx(params, result, body),
+        )
+    }
+
+    /// Compile a block and its imports alongside an independently compiled
+    /// reference.
+    pub fn compile_block(
+        block: &str,
+        options: &ImportOptions,
+        reference: Result<IrFunction, String>,
+    ) -> Result<Self, String> {
+        let checked =
+            parse_module(block).and_then(|module| check_module_with_options(&module, options));
         let (checked, dslx) = match (checked, reference) {
             (Ok(checked), Ok(reference)) => (checked, reference),
             (bx, dslx) => {
@@ -86,12 +107,18 @@ impl ExpressionEvaluator {
         let block = package.get_block("sample").ok_or("BX block is missing")?;
         let bx = combinational_block_to_fn(block)
             .map_err(|error| format!("BX block projection failed: {error}"))?;
-        let signature = &checked.blocks()[0];
+        let signature = checked
+            .blocks()
+            .iter()
+            .find(|block| block.name == "sample")
+            .ok_or("checked BX sample block is missing")?;
         Ok(Self {
             bx,
             dslx,
             params: signature.params.clone(),
-            singleton_tuple_result: matches!(&signature.result, Type::Tuple(fields) if fields.len() == 1),
+            singleton_aggregate_result: block.output_ports().count() == 1
+                && matches!(&signature.result, Type::Tuple(_) | Type::Named(_)),
+            package,
         })
     }
 
@@ -108,12 +135,13 @@ impl ExpressionEvaluator {
             .dslx
             .interpret(&reference_args)
             .map_err(|error| format!("DSLX evaluation failed on {}: {error}", inputs()))?;
-        let FnEvalResult::Success(result) = eval_fn(&self.bx, args) else {
+        let FnEvalResult::Success(result) = eval_fn_in_package(&self.package, &self.bx, args)
+        else {
             return Err(format!("BX evaluation failed on {}", inputs()));
         };
         // A block with a single output port projects to its driving value;
-        // preserve the enclosing tuple when the source declared one.
-        let actual = if self.singleton_tuple_result {
+        // preserve the enclosing tuple for a one-element tuple or struct.
+        let actual = if self.singleton_aggregate_result {
             IrValue::make_tuple(&[result.value])
         } else {
             result.value

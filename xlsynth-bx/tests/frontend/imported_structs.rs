@@ -1,0 +1,608 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{error::Error, fs, io, path::Path};
+
+use tempfile::{TempDir, tempdir};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_module_with_options, empty_package, lower_module,
+    parse_module,
+};
+use xlsynth_pir::IrValue;
+use xlsynth_pir::libxls_bridge::value_to_libxls;
+
+use super::directed_expr_eval::compile_dslx_module;
+use super::expr_eval::{ExpressionEvaluator, bx_source, compile_bundled_module, dslx_source};
+
+/// Install the declarations used on both sides of each import boundary test.
+fn struct_modules() -> io::Result<TempDir> {
+    let root = tempdir()?;
+    fs::create_dir(root.path().join("fabric"))?;
+    fs::write(
+        root.path().join("fabric/wire.x"),
+        r#"
+pub struct Header { first: u8, second: u8, bias: s4 }
+pub struct Frame { headers: Header[2] }
+pub struct Holder { reg: u8 }
+pub struct Wrapped { value: Holder }
+struct Private { field: u8 }
+pub struct Sized<N: u32> { data: uN[N] }
+pub fn sized(x: u8) -> Sized<u32:8> { Sized<u32:8> { data: x } }
+"#,
+    )?;
+    fs::write(
+        root.path().join("facade.x"),
+        r#"
+import fabric.wire;
+pub type Header = wire::Header;
+pub fn swap(h: Header) -> Header { Header { second: h.first, first: h.second, bias: h.bias } }
+pub fn echo(f: wire::Frame) -> wire::Frame { f }
+pub fn reverse(h: Header[2]) -> Header[2] { [h[u32:1], h[u32:0]] }
+"#,
+    )?;
+    fs::write(
+        root.path().join("factory.x"),
+        r#"
+import fabric.wire;
+import other;
+pub fn make(x: u8) -> wire::Header { wire::Header { first: x, second: x + u8:1, bias: s4:-2 } }
+pub fn second(h: wire::Header) -> u8 { h.second }
+pub fn pair(x: u8) -> (wire::Header, (other::Header, u8)) {
+    (make(x), (other::Header { first: x, second: u8:42, bias: s4:0 }, x))
+}
+pub fn other_second(h: other::Header) -> u8 { h.second }
+"#,
+    )?;
+    fs::write(
+        root.path().join("other.x"),
+        "pub struct Header { first: u8, second: u8, bias: s4 }",
+    )?;
+    Ok(root)
+}
+
+/// Compare the same expression through BX and DSLX with equivalent bindings.
+fn struct_expression(
+    root: &Path,
+    bx_declarations: &str,
+    dslx_declarations: &str,
+    params: &str,
+    result: &str,
+    body: &str,
+) -> Result<ExpressionEvaluator, String> {
+    let reference = format!("{dslx_declarations}\n{}", dslx_source(params, result, body));
+    let source = format!("{bx_declarations}\n{}", bx_source(params, result, body));
+    let options = ImportOptions {
+        additional_search_paths: vec![root],
+        ..Default::default()
+    };
+    ExpressionEvaluator::compile_block(&source, &options, compile_dslx_module(&reference, &[root]))
+}
+
+#[test]
+fn cross_module_struct_aliases_preserve_field_order_and_signedness() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let expr = struct_expression(
+        root.path(),
+        r#"
+use fabric::wire;
+use facade;
+struct Local { data: facade::Header }
+"#,
+        r#"
+import fabric.wire;
+import facade;
+struct Local { data: facade::Header }
+"#,
+        "x: u8",
+        "(u8, u8, s16)",
+        r#"
+let h: facade::Header = wire::Header { second: x + u8:1, bias: s4:-2, first: x };
+let local = Local { data: facade::swap(h) };
+let y: facade::Header = local.data;
+let frame = wire::Frame { headers: [h, y] };
+let echoed = facade::echo(frame);
+let reversed = facade::reverse(echoed.headers);
+(reversed[u32:0].first, reversed[u32:0].second, reversed[u32:0].bias as s16)
+"#,
+    )?;
+    for x in [0u8, 127, 255] {
+        let actual = expr.compare(&[IrValue::make_ubits(8, u64::from(x))?])?;
+        assert_eq!(
+            actual,
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(8, u64::from(x.wrapping_add(1)))?,
+                IrValue::make_ubits(8, u64::from(x))?,
+                IrValue::make_sbits(16, -2)?,
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn grouped_use_binds_nested_modules_public_functions_and_struct_aliases()
+-> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let source = r#"
+use fabric::{wire, wire::Frame};
+use facade::{Header, swap, echo};
+block sample(clk, x: u8) -> u8 {
+    let h: Header = wire::Header { first: x, second: x + u8:1, bias: s4:-1 };
+    let f = Frame { headers: [h, swap(h)] };
+    echo(f).headers[u32:1].first
+}"#;
+    let reference = r#"
+import fabric.wire;
+import facade;
+fn sample(x: u8) -> u8 {
+    let h: facade::Header = wire::Header { first: x, second: x + u8:1, bias: s4:-1 };
+    let f = wire::Frame { headers: [h, facade::swap(h)] };
+    facade::echo(f).headers[u32:1].first
+}"#;
+    let paths = [root.path()];
+    let options = ImportOptions {
+        additional_search_paths: paths.to_vec(),
+        ..Default::default()
+    };
+    let expr = ExpressionEvaluator::compile_block(
+        source,
+        &options,
+        compile_dslx_module(reference, &paths),
+    )?;
+    assert_eq!(
+        expr.compare(&[IrValue::make_ubits(8, 12)?])?,
+        IrValue::make_ubits(8, 13)?
+    );
+    Ok(())
+}
+
+#[test]
+fn local_values_shadow_use_bindings_in_declaration_order() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let paths = [root.path()];
+    let options = ImportOptions {
+        additional_search_paths: paths.to_vec(),
+        ..Default::default()
+    };
+    let used_wire = ("use fabric::wire;", "import fabric.wire;");
+    // Both frontends call the same DSLX function. The reference gives it a
+    // callable local name so a value binding can shadow it.
+    let used_swap = (
+        "use fabric::wire; use facade::swap;",
+        r#"
+import fabric.wire;
+import facade;
+fn swap(h: wire::Header) -> wire::Header { facade::swap(h) }
+"#,
+    );
+    let input = IrValue::parse_typed("(bits[8]:3, bits[8]:2, bits[4]:0)")?;
+    let control = struct_expression(
+        root.path(),
+        used_swap.0,
+        used_swap.1,
+        "h: wire::Header",
+        "u8",
+        "swap(h).second",
+    )?;
+    assert_eq!(
+        control.compare(std::slice::from_ref(&input))?,
+        IrValue::make_ubits(8, 3)?
+    );
+    for ((bx_decl, dslx_decl), params, body) in [
+        (used_wire, "wire: u8, h: wire::Header", "h.first"),
+        (
+            used_wire,
+            "x: u8",
+            "let wire = x; wire::Header { first: x, second: x, bias: s4:0 }.first",
+        ),
+        (
+            used_swap,
+            "h: wire::Header",
+            "let swap = h.first; swap(h).second",
+        ),
+    ] {
+        let source = format!("{bx_decl}\n{}", bx_source(params, "u8", body));
+        let reference = format!("{dslx_decl}\n{}", dslx_source(params, "u8", body));
+        assert!(
+            check_module_with_options(&parse_module(&source)?, &options).is_err(),
+            "{source}"
+        );
+        assert!(
+            compile_dslx_module(&reference, &paths).is_err(),
+            "{reference}"
+        );
+    }
+    let expr = struct_expression(
+        root.path(),
+        used_wire.0,
+        used_wire.1,
+        "h: wire::Header, wire: u8",
+        "u8",
+        "h.first + wire",
+    )?;
+    assert_eq!(
+        expr.compare(&[
+            IrValue::parse_typed("(bits[8]:3, bits[8]:2, bits[4]:0)")?,
+            IrValue::make_ubits(8, 1)?
+        ])?,
+        IrValue::make_ubits(8, 4)?,
+    );
+    let expr = struct_expression(
+        root.path(),
+        used_swap.0,
+        used_swap.1,
+        "x: u8",
+        "u8",
+        "let swap = x; swap",
+    )?;
+    let x = IrValue::make_ubits(8, 37)?;
+    assert_eq!(expr.compare(std::slice::from_ref(&x))?, x);
+    Ok(())
+}
+
+#[test]
+fn grouped_struct_type_bindings_match_native_dslx_use() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let decls = "use fabric::wire::{Header, Frame};";
+    let body = "let h: Header = frame.headers[u32:1]; h.second";
+    let source = format!("{decls}\n{}", bx_source("frame: Frame", "u8", body));
+    let reference = format!(
+        "#![feature(use_syntax)]\n{decls}\n{}",
+        dslx_source("frame: Frame", "u8", body)
+    );
+    let paths = [root.path()];
+    let options = ImportOptions {
+        additional_search_paths: paths.to_vec(),
+        ..Default::default()
+    };
+    // The pinned frontend resolves nominal use bindings in type annotations.
+    // The checkout's v2 converter reports this annotation as unimplemented.
+    let expr = ExpressionEvaluator::compile_block(
+        &source,
+        &options,
+        compile_bundled_module(&reference, &paths),
+    )?;
+    let frame = IrValue::make_tuple(&[IrValue::parse_typed(
+        "[(bits[8]:1, bits[8]:2, bits[4]:0), (bits[8]:3, bits[8]:4, bits[4]:0)]",
+    )?]);
+    assert_eq!(expr.compare(&[frame])?, IrValue::make_ubits(8, 4)?);
+    Ok(())
+}
+
+#[test]
+fn a_dslx_field_can_use_a_bx_keyword() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let expr = struct_expression(
+        root.path(),
+        "use fabric::wire;",
+        "import fabric.wire;",
+        "h: wire::Holder",
+        "wire::Wrapped",
+        "wire::Wrapped { value: wire::Holder { reg: h.reg + u8:1 } }",
+    )?;
+    let h = IrValue::make_tuple(&[IrValue::make_ubits(8, 6)?]);
+    assert_eq!(
+        expr.compare(&[h])?,
+        IrValue::make_tuple(&[IrValue::make_tuple(&[IrValue::make_ubits(8, 7)?])])
+    );
+
+    // A struct result exposes its fields as physical XLS IR port names.
+    let reference = format!(
+        "import fabric.wire;\n{}",
+        dslx_source("h: wire::Holder", "wire::Holder", "h")
+    );
+    compile_dslx_module(&reference, &[root.path()])?;
+    let bx = format!(
+        "use fabric::wire;\n{}",
+        bx_source("h: wire::Holder", "wire::Holder", "h")
+    );
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    assert_eq!(
+        check_module_with_options(&parse_module(&bx)?, &options).unwrap_err(),
+        "block 'sample': output port 'reg' is not a valid XLS IR identifier"
+    );
+    Ok(())
+}
+
+#[test]
+fn pinned_dslx_v1_inferred_struct_result_through_a_use_tree() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::create_dir(root.path().join("device"))?;
+    fs::write(
+        root.path().join("device/fields'.x"),
+        "pub struct Item { data: u8 } pub struct Extra' { tag: bool }",
+    )?;
+    fs::write(
+        root.path().join("device/constants.x"),
+        "pub const BIAS = u8:1;",
+    )?;
+    fs::write(
+        root.path().join("factory.x"),
+        r#"#![feature(type_inference_v1)]
+#![feature(use_syntax)]
+use device::{fields'::{Extra', Item}, constants::BIAS};
+type Alias = Item;
+pub fn make(_x: u8) -> Alias { zero!<Alias>() }
+pub fn read(item: Alias) -> u8 { item.data + BIAS }"#,
+    )?;
+    let body = "let item = factory::make(x); factory::read(item) + x";
+    let reference = format!("import factory;\n{}", dslx_source("x: u8", "u8", body));
+    let source = format!("use factory;\n{}", bx_source("x: u8", "u8", body));
+    let paths = [root.path()];
+    let options = ImportOptions {
+        additional_search_paths: paths.to_vec(),
+        ..Default::default()
+    };
+    // The pinned frontend supports nominal use bindings with type inference
+    // v1. The v2-only converter reports this annotation as unimplemented.
+    let dslx = compile_bundled_module(&reference, &paths);
+    let expr = ExpressionEvaluator::compile_block(&source, &options, dslx)?;
+    assert_eq!(
+        expr.compare(&[IrValue::make_ubits(8, 17)?])?,
+        IrValue::make_ubits(8, 18)?
+    );
+    Ok(())
+}
+
+#[test]
+fn inferred_struct_result_keeps_its_transitive_definition() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let expr = struct_expression(
+        root.path(),
+        "use factory;",
+        "import factory;",
+        "x: u8",
+        "u8",
+        "let h = factory::make(x); factory::second(h)",
+    )?;
+    assert_eq!(
+        expr.compare(&[IrValue::make_ubits(8, 7)?])?,
+        IrValue::make_ubits(8, 8)?
+    );
+    Ok(())
+}
+
+#[test]
+fn inferred_nested_tuples_keep_same_named_structs_distinct() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let expr = struct_expression(
+        root.path(),
+        "use factory;",
+        "import factory;",
+        "x: u8",
+        "(u8, u8)",
+        "let p = factory::pair(x); let r = p.1; (factory::second(p.0), factory::other_second(r.0))",
+    )?;
+    assert_eq!(
+        expr.compare(&[IrValue::make_ubits(8, 7)?])?,
+        IrValue::make_tuple(&[IrValue::make_ubits(8, 8)?, IrValue::make_ubits(8, 42)?])
+    );
+    Ok(())
+}
+
+#[test]
+fn struct_registers_keep_the_checked_dslx_layout_after_sources_are_removed()
+-> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let init = "wire::Header { bias: s4:-2, second: u8:9, first: u8:3 }";
+    let source = format!(
+        r#"
+use fabric::wire;
+use facade;
+block capture(clk, rst, input: wire::Header) -> facade::Header {{
+    reg saved: facade::Header = {init};
+    saved := facade::swap(input);
+    saved
+}}
+"#
+    );
+    let checked = check_module_with_options(
+        &parse_module(&source)?,
+        &ImportOptions {
+            additional_search_paths: vec![root.path()],
+            ..Default::default()
+        },
+    )?;
+    let reference = format!("import fabric.wire; fn sample() -> wire::Header {{ {init} }}");
+    let expected = compile_dslx_module(&reference, &[root.path()])?.interpret(&[])?;
+    root.close()?;
+    let package = lower_module(&checked, empty_package("test"), ResetBehavior::default())?;
+    let block = package.get_block("capture").ok_or("missing block")?;
+    let reset = block.registers[0]
+        .reset_value
+        .as_ref()
+        .ok_or("missing reset")?;
+    assert_eq!(value_to_libxls(reset)?, expected);
+    assert_eq!(
+        block
+            .output_ports()
+            .map(|p| block.port_name(p))
+            .collect::<Vec<_>>(),
+        ["first", "second", "bias"]
+    );
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    Ok(())
+}
+
+#[test]
+fn public_structs_preserve_private_nested_values() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("wire.x"),
+        r#"
+struct Leaf { x: u8 }
+struct Internal { pair: (Leaf, bool) }
+pub struct Outer { inner: Internal }
+pub fn echo(s: Outer) -> Outer { s }
+pub fn read(value: Internal) -> u8 { value.pair.0.x }
+"#,
+    )?;
+    let outer = IrValue::parse_typed("((((bits[8]:42), bits[1]:1)))")?;
+    for (result, body, expected) in [
+        ("wire::Outer", "wire::echo(s)", outer.clone()),
+        (
+            "u8",
+            "wire::echo(s).inner.pair.0.x",
+            IrValue::make_ubits(8, 42)?,
+        ),
+    ] {
+        let expr = struct_expression(
+            root.path(),
+            "use wire;",
+            "import wire;",
+            "s: wire::Outer",
+            result,
+            body,
+        )?;
+        assert_eq!(expr.compare(std::slice::from_ref(&outer))?, expected);
+    }
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let private = parse_module("use wire; block b(clk, s: wire::Internal) -> u8 { s.pair.0.x }")?;
+    assert!(check_module_with_options(&private, &options).is_err());
+    let call =
+        parse_module("use wire; block b(clk, s: wire::Outer) -> u8 { wire::read(s.inner) }")?;
+    assert_eq!(
+        check_module_with_options(&call, &options).unwrap_err(),
+        "block 'b': result: cannot pass DSLX struct 'Internal' to an imported function without a public type name"
+    );
+
+    fs::write(
+        root.path().join("wire.x"),
+        r#"
+struct Leaf { x: u8 }
+struct Internal { pair: (Leaf, bool) }
+pub type Payload = Internal;
+pub struct Outer { inner: Internal }
+pub fn read(value: Internal) -> u8 { value.pair.0.x }
+"#,
+    )?;
+    let expr = struct_expression(
+        root.path(),
+        "use wire;",
+        "import wire;",
+        "s: wire::Outer",
+        "u8",
+        "let p: wire::Payload = s.inner; wire::read(p)",
+    )?;
+    assert_eq!(expr.compare(&[outer])?, IrValue::make_ubits(8, 42)?);
+    Ok(())
+}
+
+#[test]
+fn both_frontends_reject_private_names_and_layout_compatible_impostors()
+-> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let local = (
+        "use facade; struct Header { first: u8, second: u8, bias: s4 }",
+        "import facade; struct Header { first: u8, second: u8, bias: s4 }",
+    );
+    let imported = (
+        "use fabric::wire; use other; use facade;",
+        "import fabric.wire; import other; import facade;",
+    );
+    for ((bx_decls, dslx_decls), params, expr) in [
+        (imported, "h: other::Header", "facade::swap(h).first"),
+        (
+            imported,
+            "h: other::Header",
+            "let y: wire::Header = h; y.first",
+        ),
+        (local, "h: Header", "facade::swap(h).first"),
+        (
+            ("use factory;", "import factory;"),
+            "x: u8",
+            "let p = factory::pair(x); let r = p.1; factory::second(r.0)",
+        ),
+        (
+            ("use fabric::wire;", "import fabric.wire;"),
+            "h: wire::Private",
+            "h.field",
+        ),
+    ] {
+        let bx = format!("{bx_decls}\n{}", bx_source(params, "u8", expr));
+        let dslx = format!("{dslx_decls}\n{}", dslx_source(params, "u8", expr));
+        assert!(
+            check_module_with_options(&parse_module(&bx)?, &options).is_err(),
+            "{bx}"
+        );
+        assert!(
+            compile_dslx_module(&dslx, &[root.path()]).is_err(),
+            "{dslx}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn parametric_struct_specializations_are_outside_the_bx_import_subset() -> Result<(), Box<dyn Error>>
+{
+    let root = struct_modules()?;
+    let body = "wire::sized(x).data";
+    let reference = format!("import fabric.wire;\n{}", dslx_source("x: u8", "u8", body));
+    compile_dslx_module(&reference, &[root.path()])?;
+    let bx = format!("use fabric::wire;\n{}", bx_source("x: u8", "u8", body));
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    assert!(
+        check_module_with_options(&parse_module(&bx)?, &options).is_err(),
+        "{bx}"
+    );
+    Ok(())
+}
+
+#[test]
+fn dslx_struct_and_field_names_preserve_apostrophes_and_bangs() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("wire.x"),
+        r#"
+enum Event { Idle, Data(u8), }
+pub struct Header' { tag': u8, tag!: u8 }
+pub fn read(h: Header') -> u8 { h.tag' - h.tag! }
+"#,
+    )?;
+    let expr = struct_expression(
+        root.path(),
+        "use wire;",
+        "import wire;",
+        "x: u8",
+        "u8",
+        "let h: wire::Header' = wire::Header' { tag!: u8:1, tag': x }; wire::read(h) + h.tag!",
+    )?;
+    let x = IrValue::make_ubits(8, 19)?;
+    assert_eq!(expr.compare(std::slice::from_ref(&x))?, x);
+    Ok(())
+}
+
+#[test]
+fn bang_field_followed_by_equality_matches_dslx() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(root.path().join("wire.x"), "pub struct Item { flag!: u8 }")?;
+    let expr = struct_expression(
+        root.path(),
+        "use wire;",
+        "import wire;",
+        "s: wire::Item, y: u8",
+        "bool",
+        "s.flag!==y",
+    )?;
+    let s = IrValue::make_tuple(&[IrValue::make_ubits(8, 3)?]);
+    for (y, equal) in [(3, true), (4, false)] {
+        assert_eq!(
+            expr.compare(&[s.clone(), IrValue::make_ubits(8, y)?])?,
+            IrValue::bool(equal)
+        );
+    }
+    Ok(())
+}

@@ -9,7 +9,8 @@ use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternFn, Module, Param, Stmt, StructDef, Type, WidthSliceType,
+    BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type,
+    WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -17,6 +18,7 @@ use crate::infer_literal::{
     binding_widths, check_inferred_signed_width, context_operands, has_common_bit_type,
     has_concrete_element_type, minimum_type, operand_hint,
 };
+use crate::parser::explicit_width_hint;
 pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -51,6 +53,17 @@ impl fmt::Display for Type {
     }
 }
 
+/// Add a bit-width spelling hint only after nominal name resolution fails.
+fn unknown_declaration(kind: &str, name: &str) -> String {
+    let error = format!("unknown {kind} '{name}'");
+    if kind == "struct"
+        && let Some(hint) = explicit_width_hint(name)
+    {
+        return format!("{error} ({hint})");
+    }
+    error
+}
+
 /// Choose the physical output ports from the source result's outermost type.
 pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<Param>, String> {
     match result {
@@ -58,7 +71,7 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
             .iter()
             .find(|s| s.name == *name)
             .map(|s| s.fields.clone())
-            .ok_or_else(|| format!("unknown struct '{name}'")),
+            .ok_or_else(|| unknown_declaration("struct", name)),
         Type::Tuple(items) => Ok(items
             .iter()
             .enumerate()
@@ -110,9 +123,9 @@ fn compatible(a: &Type, b: &Type) -> bool {
 
 /// Data arguments, output wires, and reset requirement of a local or linked
 /// child.
-struct BlockInterface<'a> {
-    params: &'a [Param],
-    result: &'a Type,
+struct BlockInterface {
+    params: Vec<Param>,
+    result: Type,
     outputs: Vec<Param>,
     requires_reset: bool,
 }
@@ -120,18 +133,111 @@ struct BlockInterface<'a> {
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
-    imports: BTreeMap<&'a str, &'a str>,
-    struct_list: &'a [StructDef],
-    structs: BTreeMap<&'a str, &'a StructDef>,
-    struct_shapes: BTreeMap<&'a str, TypeShape>,
     externs: BTreeMap<&'a str, &'a ExternFn>,
-    blocks: BTreeMap<&'a str, BlockInterface<'a>>,
+    blocks: BTreeMap<&'a str, BlockInterface>,
+}
+
+/// Checked BX and imported DSLX structs, with cached sizes for layout
+/// validation.
+#[derive(Default)]
+struct StructTable {
+    definitions: Vec<StructDef>,
+    indices: BTreeMap<String, (usize, TypeShape)>,
+    imported_count: usize,
+}
+
+/// Look up a DSLX module member in the source scope. Block-local values
+/// shadow the module qualifier or the directly bound member.
+fn lookup_use(
+    name: &str,
+    resolver: &ImportResolver,
+    scope: Option<&BTreeSet<String>>,
+) -> Result<Option<(String, String)>, String> {
+    let member = resolver.lookup(name)?;
+    let binding = name.split_once("::").map_or(name, |(head, _)| head);
+    if member.is_some() && scope.is_some_and(|scope| scope.contains(binding)) {
+        return Err(format!("'{binding}' names a local value here"));
+    }
+    Ok(member)
+}
+
+/// Copy a source type into the checked module, resolving qualified names as
+/// we go. Bound the walk before cloning any recursive types from AST callers.
+fn resolve_type(
+    ty: &Type,
+    scope: Option<&BTreeSet<String>>,
+    resolver: &mut ImportResolver,
+    remaining: usize,
+) -> Result<Type, String> {
+    match ty {
+        Type::Named(name) => {
+            if let Some((subject, member)) = lookup_use(name, resolver, scope)? {
+                resolver.resolve_named(&subject, &member)
+            } else if let Some((qualifier, _)) = name.split_once("::") {
+                Err(format!("unknown use binding '{qualifier}' in '{name}'"))
+            } else {
+                Ok(ty.clone())
+            }
+        }
+        Type::Array { element, size } => Ok(Type::Array {
+            element: Box::new(resolve_type(
+                element,
+                scope,
+                resolver,
+                child_type_budget(remaining)?,
+            )?),
+            size: *size,
+        }),
+        Type::Tuple(items) => {
+            let child_budget = child_type_budget(remaining)?;
+            items
+                .iter()
+                .map(|item| resolve_type(item, scope, resolver, child_budget))
+                .collect::<Result<_, _>>()
+                .map(Type::Tuple)
+        }
+        Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
+    }
+}
+
+/// Resolve struct fields in the enclosing module scope.
+fn resolve_fields(params: &[Param], resolver: &mut ImportResolver) -> Result<Vec<Param>, String> {
+    params
+        .iter()
+        .map(|p| {
+            Ok(Param {
+                name: p.name.clone(),
+                ty: resolve_type(&p.ty, None, resolver, MAX_ELABORATION_DEPTH)?,
+            })
+        })
+        .collect()
+}
+
+/// A parameter name enters scope before its type annotation and remains
+/// visible in later parameters and the result type.
+fn resolve_signature<'a>(
+    params: &[Param],
+    result: &Type,
+    timing_ports: impl IntoIterator<Item = &'a String>,
+    resolver: &mut ImportResolver,
+) -> Result<(Vec<Param>, Type), String> {
+    let mut scope: BTreeSet<_> = timing_ports.into_iter().cloned().collect();
+    let mut resolved = Vec::with_capacity(params.len());
+    for p in params {
+        scope.insert(p.name.clone());
+        resolved.push(Param {
+            name: p.name.clone(),
+            ty: resolve_type(&p.ty, Some(&scope), resolver, MAX_ELABORATION_DEPTH)?,
+        });
+    }
+    let result = resolve_type(result, Some(&scope), resolver, MAX_ELABORATION_DEPTH)?;
+    Ok((resolved, result))
 }
 
 /// Apply BX's concrete layout budget to a value type with no named
 /// declarations.
 pub(crate) fn validate_structural_type(ty: &Type) -> Result<(), String> {
-    Declarations::default().validate_type(ty)
+    StructTable::default().validate_type(ty)
 }
 
 fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
@@ -142,13 +248,17 @@ fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
     }
 }
 
-/// Collect named type dependencies before computing layouts in dependency
-/// order.
+/// Collect BX dependencies. Imported layouts are registered before local
+/// structs.
 fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
         match ty {
-            Type::Named(name) => result.push(name),
+            Type::Named(name) => {
+                if !name.contains("::") {
+                    result.push(name);
+                }
+            }
             Type::Array { element, .. } => pending.push(element),
             Type::Tuple(fields) => pending.extend(fields.iter().rev()),
             Type::Bool | Type::Bits { .. } => { /* Primitive types have no dependencies. */ }
@@ -160,10 +270,10 @@ fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
 /// A bit type costs its width (at least one), and an aggregate costs one plus
 /// the sum of its members' costs. This accounts for aggregate storage even
 /// when its packed width is zero. An empty array still stores its element type.
-const MAX_TYPE_SIZE: usize = 1 << 20;
+pub(crate) const MAX_TYPE_SIZE: usize = 1 << 20;
 
 /// Bound recursion in downstream layout construction and hierarchy elaboration.
-const MAX_ELABORATION_DEPTH: usize = 64;
+pub(crate) const MAX_ELABORATION_DEPTH: usize = 64;
 
 /// Storage cost and maximum aggregate nesting of a fully expanded source type.
 #[derive(Clone, Copy)]
@@ -180,23 +290,32 @@ impl<'a> Declarations<'a> {
         name: &'a str,
         clock: &str,
         reset: Option<&str>,
-        params: &'a [Param],
-        result: &'a Type,
+        params: Vec<Param>,
+        result: Type,
+        structs: &StructTable,
     ) -> Result<(), String> {
         let mut ports = BTreeSet::new();
         declare(&mut ports, clock)?;
         if let Some(reset) = reset {
             declare(&mut ports, reset)?;
         }
-        for p in params {
+        for p in &params {
             declare(&mut ports, &p.name)?;
-            self.validate_type(&p.ty)
+            structs
+                .validate_type(&p.ty)
                 .map_err(|e| format!("input '{}': {e}", p.name))?;
         }
-        self.validate_type(result)
+        structs
+            .validate_type(&result)
             .map_err(|e| format!("result: {e}"))?;
-        let outputs = output_ports(result, self.struct_list)?;
+        let outputs = output_ports(&result, &structs.definitions)?;
         for output in &outputs {
+            if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
+                return Err(format!(
+                    "output port '{}' is not a valid XLS IR identifier",
+                    output.name
+                ));
+            }
             declare(&mut ports, &output.name)?;
         }
         self.blocks.insert(
@@ -209,6 +328,39 @@ impl<'a> Declarations<'a> {
             },
         );
         Ok(())
+    }
+}
+
+impl StructTable {
+    /// Validate a definition after its dependencies and index it for field
+    /// selection.
+    fn index(&mut self, index: usize) -> Result<(), String> {
+        let def = &self.definitions[index];
+        let shape = self
+            .aggregate_shape(def.fields.iter().map(|p| &p.ty), MAX_ELABORATION_DEPTH)
+            .map_err(|e| format!("struct '{}': {e}", def.name))?;
+        self.indices.insert(def.name.clone(), (index, shape));
+        Ok(())
+    }
+
+    /// Import newly reflected definitions in dependency order. A call can
+    /// introduce a type even when the BX source has no explicit annotation
+    /// for its result.
+    fn update_imports(&mut self, resolver: &ImportResolver) -> Result<(), String> {
+        for def in &resolver.struct_defs()[self.imported_count..] {
+            let index = self.definitions.len();
+            self.definitions.push(def.clone());
+            self.index(index)?;
+            self.imported_count += 1;
+        }
+        Ok(())
+    }
+
+    fn definition(&self, name: &str) -> Result<&StructDef, String> {
+        self.indices
+            .get(name)
+            .map(|(i, _)| &self.definitions[*i])
+            .ok_or_else(|| unknown_declaration("struct", name))
     }
 
     fn validate_type(&self, ty: &Type) -> Result<(), String> {
@@ -232,10 +384,11 @@ impl<'a> Declarations<'a> {
                     depth: child.depth + 1,
                 }
             }
-            Type::Named(name) => *self
-                .struct_shapes
+            Type::Named(name) => self
+                .indices
                 .get(name.as_str())
-                .ok_or_else(|| format!("unknown struct '{name}'"))?,
+                .map(|(_, shape)| *shape)
+                .ok_or_else(|| unknown_declaration("struct", name))?,
         };
         if shape.depth > remaining {
             return Err(format!(
@@ -324,7 +477,7 @@ fn dependency_order<'a>(
         for dep in &graph[i].1 {
             let next = *indices
                 .get(dep)
-                .ok_or_else(|| format!("unknown {kind} '{dep}' in '{}'", graph[i].0))?;
+                .ok_or_else(|| format!("{} in '{}'", unknown_declaration(kind, dep), graph[i].0))?;
             let child_depth = visit(next, kind, graph, indices, status, order, remaining - 1)?;
             depth = depth.max(child_depth + 1);
         }
@@ -364,81 +517,126 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    let mut imports = BTreeMap::new();
-    for import in &module.imports {
-        let binding = import.binding();
-        if imports.insert(binding, import.subject.as_str()).is_some() {
-            return Err(format!("duplicate import binding '{binding}'"));
-        }
-    }
     let mut names = BTreeSet::new();
-    let mut struct_graph = Vec::new();
-    for s in &module.structs {
-        declare(&mut names, &s.name)?;
-        let mut fields = BTreeSet::new();
-        let mut deps = Vec::new();
-        for f in &s.fields {
-            declare(&mut fields, &f.name).map_err(|e| format!("struct '{}': {e}", s.name))?;
-            type_deps(&f.ty, &mut deps);
+    for path in &module.uses {
+        let name = path.binding().ok_or("empty DSLX use path")?;
+        if !names.insert(name.to_owned()) {
+            return Err(format!("duplicate use binding '{name}'"));
         }
-        struct_graph.push((s.name.as_str(), deps));
-    }
-    let struct_order = dependency_order("struct", &struct_graph)?;
-    let mut declarations = Declarations {
-        imports,
-        struct_list: &module.structs,
-        struct_shapes: BTreeMap::new(),
-        structs: module
-            .structs
-            .iter()
-            .map(|s| (s.name.as_str(), s))
-            .collect(),
-        externs: module
-            .externs
-            .iter()
-            .map(|f| (f.name.as_str(), f))
-            .collect(),
-        blocks: BTreeMap::new(),
-    };
-    for index in struct_order {
-        let s = &module.structs[index];
-        let shape = declarations
-            .aggregate_shape(s.fields.iter().map(|f| &f.ty), MAX_ELABORATION_DEPTH)
-            .map_err(|e| format!("struct '{}': {e}", s.name))?;
-        declarations.struct_shapes.insert(&s.name, shape);
     }
     for f in &module.externs {
-        if let Some((binding, _)) = f.name.split_once("::")
-            && declarations.imports.contains_key(binding)
+        if let Some((qualifier, _)) = f.name.split_once("::")
+            && names.contains(qualifier)
         {
             return Err(format!(
-                "extern fn '{}' conflicts with imported namespace '{binding}'",
+                "extern fn '{}' conflicts with use binding '{qualifier}'",
                 f.name
             ));
         }
+    }
+    let mut resolver = ImportResolver::new(&module.uses, options)?;
+    let mut structs = StructTable::default();
+    for def in &module.structs {
+        declare(&mut names, &def.name)?;
+        if def.name.contains("::") {
+            return Err(format!(
+                "BX struct '{}' must have an unqualified name",
+                def.name
+            ));
+        }
+        let mut fields = BTreeSet::new();
+        for field in &def.fields {
+            declare(&mut fields, &field.name).map_err(|e| format!("struct '{}': {e}", def.name))?;
+        }
+        structs.definitions.push(StructDef {
+            name: def.name.clone(),
+            public: def.public,
+            fields: resolve_fields(&def.fields, &mut resolver)?,
+        });
+    }
+    let mut struct_graph = Vec::new();
+    for def in &structs.definitions {
+        let mut deps = Vec::new();
+        for field in &def.fields {
+            type_deps(&field.ty, &mut deps);
+        }
+        struct_graph.push((def.name.as_str(), deps));
+    }
+    let struct_order = dependency_order("struct", &struct_graph)?;
+    structs.update_imports(&resolver)?;
+    for index in struct_order {
+        structs.index(index)?;
+    }
+
+    let mut externs = Vec::with_capacity(module.externs.len());
+    for f in &module.externs {
+        let (params, result) = resolve_signature(&f.params, &f.result, [], &mut resolver)?;
+        externs.push(ExternFn {
+            name: f.name.clone(),
+            params,
+            result,
+            symbol: f.symbol.clone(),
+        });
+    }
+    structs.update_imports(&resolver)?;
+    let mut declarations = Declarations {
+        externs: externs.iter().map(|f| (f.name.as_str(), f)).collect(),
+        blocks: BTreeMap::new(),
+    };
+    for f in &externs {
         declare(&mut names, &f.name)?;
         let mut params = BTreeSet::new();
         for p in &f.params {
-            declare(&mut params, &p.name).map_err(|e| format!("extern '{}': {e}", f.name))?;
-            declarations
+            declare(&mut params, &p.name)?;
+            structs
                 .validate_type(&p.ty)
                 .map_err(|e| format!("extern '{}', parameter '{}': {e}", f.name, p.name))?;
         }
-        declarations
+        structs
             .validate_type(&f.result)
             .map_err(|e| format!("extern '{}' result: {e}", f.name))?;
     }
     for b in &module.blocks {
         declare(&mut names, &b.name)?;
+        let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
+        let (params, result) =
+            resolve_signature(&b.params, &b.result, timing_ports, &mut resolver)?;
+        structs.update_imports(&resolver)?;
         declarations
-            .add_block(&b.name, &b.clock, b.reset.as_deref(), &b.params, &b.result)
+            .add_block(
+                &b.name,
+                &b.clock,
+                b.reset.as_deref(),
+                params,
+                result,
+                &structs,
+            )
             .map_err(|e| format!("block '{}': {e}", b.name))?;
     }
+    let mut extern_blocks = Vec::with_capacity(module.extern_blocks.len());
     for b in &module.extern_blocks {
         declare(&mut names, &b.name)?;
+        let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
+        let (params, result) =
+            resolve_signature(&b.params, &b.result, timing_ports, &mut resolver)?;
+        structs.update_imports(&resolver)?;
         declarations
-            .add_block(&b.name, &b.clock, b.reset.as_deref(), &b.params, &b.result)
+            .add_block(
+                &b.name,
+                &b.clock,
+                b.reset.as_deref(),
+                params.clone(),
+                result.clone(),
+                &structs,
+            )
             .map_err(|e| format!("extern block '{}': {e}", b.name))?;
+        extern_blocks.push(ExternBlock {
+            name: b.name.clone(),
+            clock: b.clock.clone(),
+            reset: b.reset.clone(),
+            params,
+            result,
+        });
     }
     let mut block_graph = Vec::new();
     for b in &module.blocks {
@@ -465,19 +663,18 @@ pub fn check_module_with_options(
             .map(|b| (b.name.as_str(), Vec::new())),
     );
     let mut blocks = Vec::new();
-    let mut resolver = ImportResolver::new(&module.imports, options)?;
     for index in dependency_order("block", &block_graph)? {
         if let Some(block) = module.blocks.get(index) {
             blocks.push(
-                BlockChecker::check(&declarations, block, &mut resolver)
+                BlockChecker::check(&declarations, block, &mut resolver, &mut structs)
                     .map_err(|e| format!("block '{}': {e}", block.name))?,
             );
         }
     }
     Ok(CheckedModule {
-        structs: module.structs.clone(),
-        externs: module.externs.clone(),
-        extern_blocks: module.extern_blocks.clone(),
+        structs: structs.definitions,
+        externs,
+        extern_blocks,
         imports: resolver.finish()?,
         blocks,
     })
@@ -487,6 +684,7 @@ pub fn check_module_with_options(
 /// block.
 struct BlockChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
+    structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
     block: &'m Block,
     names: BTreeSet<String>,
@@ -500,7 +698,7 @@ struct BlockChecker<'a, 'm> {
     inferred_bindings: InferredBindings,
     regs: BTreeMap<String, Type>,
     writes: BTreeSet<String>,
-    instances: BTreeMap<String, &'a BlockInterface<'m>>,
+    instances: BTreeMap<String, &'a BlockInterface>,
     connections: BTreeSet<(String, String)>,
     statements: Vec<CheckedStmt>,
 }
@@ -512,8 +710,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         decls: &'a Declarations<'m>,
         block: &'m Block,
         resolver: &'a mut ImportResolver,
+        structs: &'a mut StructTable,
     ) -> Result<CheckedBlock, String> {
-        let outputs = decls.blocks[block.name.as_str()]
+        let interface = &decls.blocks[block.name.as_str()];
+        let outputs = interface
             .outputs
             .iter()
             .map(|p| p.name.clone())
@@ -532,6 +732,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         }));
         let mut c = Self {
             decls,
+            structs,
             resolver,
             block,
             names: BTreeSet::new(),
@@ -552,7 +753,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             c.hardware_name(rst)?;
             c.values.insert(rst.clone(), Type::Bool);
         }
-        for p in &block.params {
+        for p in &interface.params {
             c.hardware_name(&p.name)?;
             c.values.insert(p.name.clone(), p.ty.clone());
         }
@@ -574,25 +775,38 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
         }
         for (name, child) in &c.instances {
-            for p in child.params {
+            for p in &child.params {
                 if !c.connections.contains(&(name.clone(), p.name.clone())) {
                     return Err(format!("instance input '{name}.{}' has no driver", p.name));
                 }
             }
         }
         let output = c
-            .expr(&block.output, Some(&block.result))
+            .expr(&block.output, Some(&interface.result))
             .map_err(|e| format!("result: {e}"))?;
         Ok(CheckedBlock {
             name: block.name.clone(),
             public: block.public,
             clock: block.clock.clone(),
             reset: block.reset.clone(),
-            params: block.params.clone(),
-            result: block.result.clone(),
+            params: interface.params.clone(),
+            result: interface.result.clone(),
             statements: c.statements,
             output,
         })
+    }
+
+    /// Resolve a type written in a block body and register its concrete fields.
+    fn source_type(&mut self, source: &Type) -> Result<Type, String> {
+        let ty = resolve_type(
+            source,
+            Some(&self.names),
+            self.resolver,
+            MAX_ELABORATION_DEPTH,
+        )?;
+        self.structs.update_imports(self.resolver)?;
+        self.structs.validate_type(&ty)?;
+        Ok(ty)
     }
 
     fn hardware_name(&mut self, name: &str) -> Result<(), String> {
@@ -606,7 +820,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         &self,
         name: &str,
         target: &str,
-        child: &BlockInterface<'_>,
+        child: &BlockInterface,
     ) -> Result<(), String> {
         if child.requires_reset && self.block.reset.is_none() {
             return Err(format!(
@@ -637,13 +851,13 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         &mut self,
         binding: &str,
         target: &str,
-        child: &BlockInterface<'_>,
+        child: &BlockInterface,
         args: &[Expr],
         expected: Option<&Type>,
     ) -> Result<TypedExpr, String> {
         self.check_child_reset(binding, target, child)?;
         if let Some(ty) = expected
-            && !compatible(ty, child.result)
+            && !compatible(ty, &child.result)
         {
             return Err(format!("expected {ty}, got {}", child.result));
         }
@@ -659,7 +873,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             name: instance.clone(),
             block: target.to_owned(),
         });
-        for (arg, param) in args.iter().zip(child.params) {
+        for (arg, param) in args.iter().zip(&child.params) {
             let value = self
                 .expr(arg, Some(&param.ty))
                 .map_err(|e| format!("input '{}', call to block '{target}': {e}", param.name))?;
@@ -697,8 +911,8 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     if conditional {
                         return Err(format!("conditional declaration of register '{name}'"));
                     }
+                    let ty = self.source_type(ty)?;
                     self.hardware_name(name)?;
-                    self.decls.validate_type(ty)?;
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
@@ -708,7 +922,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                                 ));
                             }
                             let value = self
-                                .expr(expr, Some(ty))
+                                .expr(expr, Some(&ty))
                                 .map_err(|e| format!("reset of register '{name}': {e}"))?;
                             Some(value.constant(&self.constants).ok_or_else(|| {
                                 format!(
@@ -768,9 +982,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     ty,
                     value: initializer,
                 } => {
-                    if let Some(t) = ty {
-                        self.decls.validate_type(t)?;
-                    }
+                    let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
                     let value = if let Expr::Call { name: target, args } = initializer
                         && let Some(child) = self.decls.blocks.get(target.as_str())
                     {
@@ -781,7 +993,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                         }
                         self.block_call(name, target, child, args, ty.as_ref())
                     } else {
-                        match ty {
+                        match &ty {
                             Some(ty) => self.expr(initializer, Some(ty)),
                             None => self.inferred_expr(initializer),
                         }
@@ -880,7 +1092,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     .ok_or_else(|| format!("literal '{text}' requires a concrete bit type"))?;
                 let (signed, width) =
                     bits(ty).ok_or_else(|| format!("integer literal cannot have type {ty}"))?;
-                self.decls.validate_type(ty)?;
+                self.structs.validate_type(ty)?;
                 if !signed && text.starts_with('-') {
                     return Err(format!("negative literal '{text}' has unsigned type {ty}"));
                 }
@@ -948,7 +1160,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 } else {
                     let element = hint
                         .ok_or_else(|| "empty array literal requires an array type".to_owned())?;
-                    let mut layouts = crate::layout::Layouts::new(self.decls.struct_list);
+                    let mut layouts = crate::layout::Layouts::new(&self.structs.definitions);
                     let element_ir = layouts.lower(element).map_err(|e| e.to_string())?;
                     let empty =
                         IrValue::make_array_typed(element_ir, &[]).map_err(|e| e.to_string())?;
@@ -1009,11 +1221,11 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 )
             }
             Expr::Struct { name, fields } => {
-                let s = self
-                    .decls
-                    .structs
-                    .get(name.as_str())
-                    .ok_or_else(|| format!("unknown struct '{name}'"))?;
+                let ty = self.source_type(&Type::Named(name.clone()))?;
+                let Type::Named(canonical) = &ty else {
+                    return Err(format!("'{name}' is not a struct"));
+                };
+                let members = self.structs.definition(canonical)?.fields.clone();
                 let mut supplied = BTreeMap::new();
                 for (field, value) in fields {
                     if supplied.insert(field.as_str(), value).is_some() {
@@ -1021,7 +1233,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     }
                 }
                 let mut values = Vec::new();
-                for p in &s.fields {
+                for p in &members {
                     let v = supplied
                         .remove(p.name.as_str())
                         .ok_or_else(|| format!("missing field '{name}.{}'", p.name))?;
@@ -1033,7 +1245,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 if let Some(field) = supplied.keys().next() {
                     return Err(format!("unknown field '{name}.{field}'"));
                 }
-                (Type::Named(name.clone()), K::Tuple(values))
+                (ty, K::Tuple(values))
             }
             Expr::Field { value, name } => {
                 if let Expr::Name(instance) = value.as_ref()
@@ -1067,7 +1279,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                             )
                         }
                         Type::Named(s) => {
-                            let fields = &self.decls.structs[s.as_str()].fields;
+                            let fields = &self.structs.definition(s)?.fields;
                             let (i, p) = fields
                                 .iter()
                                 .enumerate()
@@ -1088,7 +1300,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
             Expr::Call { name, args } => self.function_call(name, args)?,
             Expr::Cast { value, ty } => {
-                self.decls.validate_type(ty)?;
+                self.structs.validate_type(ty)?;
                 let v = self.inferred_expr(value)?;
                 if bits(&v.ty).is_none() || bits(ty).is_none() {
                     return Err(format!("cast from {} to {ty} requires bit types", v.ty));
@@ -1132,7 +1344,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             return Err(format!("expected {expected}, got {ty}"));
         }
         if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
-            self.decls.validate_type(&ty)?;
+            self.structs.validate_type(&ty)?;
         }
         Ok(TypedExpr { ty, kind })
     }
@@ -1268,9 +1480,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Resolve either a concrete extern declaration or an imported DSLX
     /// specialization inferred from its actual argument types.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
-        if let Some((binding, function)) = name.split_once("::")
-            && let Some(&subject) = self.decls.imports.get(binding)
-        {
+        if let Some((subject, function)) = lookup_use(name, self.resolver, Some(&self.names))? {
             let args = args
                 .iter()
                 .enumerate()
@@ -1280,8 +1490,9 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let types = args.iter().map(|arg| arg.ty.clone()).collect();
-            let (id, ty) = self.resolver.resolve(subject, function, types)?;
-            self.decls.validate_type(&ty)?;
+            let (id, ty) = self.resolver.resolve(&subject, &function, types)?;
+            self.structs.update_imports(self.resolver)?;
+            self.structs.validate_type(&ty)?;
             return Ok((ty, K::ImportedCall { id, args }));
         }
         if self.decls.blocks.contains_key(name) {
@@ -1419,7 +1630,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// expressions.
     fn slice_result_type(&mut self, width: &WidthSliceType) -> Result<Type, String> {
         match width {
-            WidthSliceType::Concrete(ty) => Ok(ty.clone()),
+            WidthSliceType::Concrete(ty) => self.source_type(ty),
             WidthSliceType::Bits { signed, bit_count } => Ok(Type::Bits {
                 signed: self.slice_dimension(signed, 1)? != 0,
                 width: self.slice_dimension(bit_count, 32)?,
@@ -1532,7 +1743,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     signed: false,
                     width,
                 };
-                self.decls.validate_type(&ty)?;
+                self.structs.validate_type(&ty)?;
                 (ty, l, r)
             }
             BinaryOp::Eq
@@ -1581,36 +1792,39 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
 #[cfg(test)]
 mod tests {
     use super::{CheckedStmt, MAX_ELABORATION_DEPTH, check_module};
+    use crate::ast::Type;
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
 
     #[test]
-    fn qualified_extern_conflicts_only_with_an_import_bound_to_its_namespace() {
+    fn qualified_extern_conflicts_only_with_its_bound_qualifier() {
         let decl = "extern fn math::id(x: u8) -> u8;";
         let body = "block b(clk, x: u8) -> u8 { math::id(x) }";
-        let module = parse_module(&format!("import std as other; {decl} {body}")).unwrap();
+        let module = parse_module(&format!("use std; {decl} {body}")).unwrap();
         assert!(check_module(&module).unwrap().imported_calls().is_empty());
         for source in [
-            format!("import vendor.math; {decl}"),
-            format!("{decl} import std as math;"),
+            format!("use vendor::math; {decl}"),
+            format!("{decl} use vendor::math;"),
         ] {
             let module = parse_module(&source).unwrap();
             assert_eq!(
                 check_module(&module).unwrap_err(),
-                "extern fn 'math::id' conflicts with imported namespace 'math'"
+                "extern fn 'math::id' conflicts with use binding 'math'"
             );
         }
     }
 
     #[test]
-    fn checker_validates_import_bindings_on_programmatically_constructed_modules() {
-        let mut module = parse_module("import first.math; import second.math as m;").unwrap();
-        module.imports[1].alias = None;
+    fn checker_validates_use_bindings_on_programmatically_constructed_modules() {
+        let mut module = parse_module("use std;").unwrap();
+        module.uses.push(module.uses[0].clone());
         assert_eq!(
             check_module(&module).unwrap_err(),
-            "duplicate import binding 'math'"
+            "duplicate use binding 'std'"
         );
+        module.uses[1].components.clear();
+        assert_eq!(check_module(&module).unwrap_err(), "empty DSLX use path");
     }
 
     #[test]
@@ -1769,7 +1983,7 @@ block wrap(clk, x: u8) -> u8 {
 
     #[test]
     fn type_sizes_include_zero_width_members_and_are_checked_before_materialization() {
-        for ty in ["uN[18446744073709551615]", "u0[1048576]", "u16[65536]"] {
+        for ty in ["uN[18446744073709551615]", "uN[0][1048576]", "u16[65536]"] {
             let source = format!("block sized(clk, x: {ty}) -> bool {{ false }}");
             assert!(
                 parse_module(&source)
@@ -1803,6 +2017,28 @@ block wrap(clk, x: u8) -> u8 {
                 }
             }
         }
+    }
+
+    #[test]
+    fn type_resolution_bounds_deep_programmatic_ports_before_copying() {
+        let mut module = parse_module("block probe(clk, x: u1) -> u1 { u1:0 }").unwrap();
+        let input = &mut module.blocks[0].params[0].ty;
+        for _ in 0..16_384 {
+            *input = Type::Array {
+                element: Box::new(std::mem::replace(input, Type::Bool)),
+                size: 1,
+            };
+        }
+        let result = check_module(&module);
+        // Unwrap the synthetic deep tree iteratively on the test thread too.
+        let input = &mut module.blocks[0].params[0].ty;
+        while let Type::Array { element, .. } = std::mem::replace(input, Type::Bool) {
+            *input = *element;
+        }
+        assert_eq!(
+            result.unwrap_err(),
+            "expanded type nesting exceeds 64 levels"
+        );
     }
 
     #[test]

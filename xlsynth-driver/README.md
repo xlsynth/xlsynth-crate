@@ -440,7 +440,7 @@ combinational work. For example, this `mul_inc.bx` captures a product on one
 clock edge and the incremented product on the next.
 
 ```text
-import std;
+use std;
 
 block mul_inc(clk, a: u8, b: u8) -> u16 {
     reg product: u16;
@@ -462,8 +462,8 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--link-ir <PACKAGE>` supplies an existing XLS IR package for `extern fn`
   and `extern block` declarations. By default, compilation starts with an
   empty package named after the BX file stem, or `design` if the stem cannot
-  serve as an IR package name. DSLX source imports use `import` and the module
-  search path.
+  serve as an IR package name. BX `use` declarations resolve DSLX source on
+  the module search path.
 - `--dslx-path 'dir1;dir2'` sets the DSLX module search directories in order,
   overriding the directories from the toolchain configuration. To import
   a module next to the BX source, include its directory in the search path.
