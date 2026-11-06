@@ -42,6 +42,47 @@ use self::large_cone::{
 };
 use self::small_cut::{CutEnumerationStats, CutEnumerator, choose_candidate_replacements_for_root};
 
+/// Walk pending fanins, then return the parent once both fanins are cached.
+enum FaninStep {
+    Visit(AigRef),
+    Ready(AigRef),
+}
+
+/// Reusable postorder worklist for populating a cut cache one root at a time.
+#[derive(Default)]
+struct CutFaninWalk {
+    pending: Vec<FaninStep>,
+}
+
+impl CutFaninWalk {
+    fn start(&mut self, root: AigRef) {
+        self.pending.clear();
+        self.pending.push(FaninStep::Visit(root));
+    }
+
+    /// Cache each returned node before calling again. This lets reconvergent
+    /// paths and repeated fanins stop at the first completed visit.
+    fn next_ready(&mut self, g: &GateFn, is_cached: impl Fn(AigRef) -> bool) -> Option<AigRef> {
+        while let Some(step) = self.pending.pop() {
+            let node = match step {
+                FaninStep::Ready(node) => return Some(node),
+                FaninStep::Visit(node) => node,
+            };
+            if is_cached(node) {
+                continue;
+            }
+            if let AigNode::And2 { a, b, .. } = &g.gates[node.id] {
+                self.pending.push(FaninStep::Ready(node));
+                self.pending.push(FaninStep::Visit(b.node));
+                self.pending.push(FaninStep::Visit(a.node));
+            } else {
+                return Some(node);
+            }
+        }
+        None
+    }
+}
+
 /// Reusable dense set for append-only AIG node identifiers.
 #[derive(Debug)]
 struct DenseAigRefSet {
@@ -2675,6 +2716,36 @@ mod tests {
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::use_count::get_id_to_use_count;
     use xlsynth_pir::IrBits;
+
+    #[test]
+    fn cut_fanin_walk_prunes_cached_cones_and_visits_shared_fanins_once() {
+        let mut gb = GateBuilder::new("cache-walk".into(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".into(), 1).get_lsb(0);
+        let b = *gb.add_input("b".into(), 1).get_lsb(0);
+        let c = *gb.add_input("c".into(), 1).get_lsb(0);
+        let cached = gb.add_and_binary(c, c);
+        let shared = gb.add_and_binary(a, b);
+        let twice = gb.add_and_binary(shared, shared.negate());
+        let right = gb.add_and_binary(cached, shared);
+        let root = gb.add_and_binary(twice, right);
+        gb.add_output("out".into(), crate::aig::AigBitVector::from_bit(root));
+        let g = gb.build();
+
+        let mut walk = CutFaninWalk::default();
+        let mut memo = BTreeSet::from([cached.node]);
+        let mut visited = Vec::new();
+        walk.start(root.node);
+        while let Some(node) = walk.next_ready(&g, |n| memo.contains(&n)) {
+            memo.insert(node);
+            visited.push(node);
+        }
+        assert_eq!(
+            visited,
+            [a, b, shared, twice, right, root].map(|op| op.node)
+        );
+        walk.start(root.node);
+        assert_eq!(walk.next_ready(&g, |n| memo.contains(&n)), None);
+    }
 
     fn live_and_count_from_use_counts(
         g: &GateFn,
