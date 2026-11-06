@@ -504,6 +504,12 @@ xlsynth-driver bx2lean counter.bx --output-dir lean
 - `--link-ir`, `--dslx-path`, and `--dslx-stdlib-path` resolve externs and
   DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). The selected block
   and the functions it calls must use operations supported by the Lean emitter.
+- `--link-dslx <MODULE.x>` takes a DSLX source file in place of `--link-ir`.
+  It compiles the checked module to implement BX extern functions and uses
+  the same checked declarations to name helper arguments, result types, and
+  record fields in Lean. For example, a block declaring
+  `extern fn arithmetic::twice(x: u8) -> u8;` can link the implementation
+  with `--link-dslx arithmetic.x`.
 - Reset defaults to synchronous and active-high. Use `--reset-active-low` to
   change polarity. The clock-step model rejects asynchronous register resets.
 
