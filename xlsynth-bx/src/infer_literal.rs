@@ -384,33 +384,6 @@ pub(crate) fn context_operands(
     Ok(ContextOperands::Explicit)
 }
 
-/// The operand supplying a pair's type, with a common minimum for two unsized
-/// operands.
-#[derive(Debug, PartialEq)]
-pub(crate) enum OperandHint {
-    FromLeft,
-    FromRight(Option<Type>),
-}
-
-/// Select a type for a same-type operand pair in one walk of its unsized
-/// literals.
-pub(crate) fn operand_hint(
-    left: &Expr,
-    right: &Expr,
-    locals: Option<WidthLookup<'_>>,
-) -> Result<OperandHint, String> {
-    let mut minimum = None;
-    if !collect_minimum(left, locals, &mut minimum)? {
-        return Ok(OperandHint::FromLeft);
-    }
-    let hint = if collect_minimum(right, locals, &mut minimum)? {
-        minimum.map(Minimum::inferred_type).transpose()?
-    } else {
-        None
-    };
-    Ok(OperandHint::FromRight(hint))
-}
-
 /// Check the accumulated literal minimum against the first concrete signed
 /// operand. Once two unsized literals have unified, their minimum loses the
 /// radix prefix that lets an individual hex or binary literal spell a sign bit.
@@ -435,10 +408,12 @@ pub(crate) fn check_inferred_signed_width(exprs: &[&Expr], ty: &Type) -> Result<
     Ok(())
 }
 
-/// Which type to apply to a sequence of array elements.
-pub(crate) enum ArrayElementHint {
+/// The expression supplying a group's type, or the minimum type of its
+/// literals.
+#[derive(Debug, PartialEq)]
+pub(crate) enum CommonTypeHint {
     Minimum(Type),
-    FromElement(usize),
+    FromExpr(usize),
 }
 
 /// Whether this element's type is fully specified without any of its array
@@ -477,23 +452,23 @@ pub(crate) fn has_concrete_element_type(
 /// Merge unsized element constraints, or identify an element whose type can
 /// determine the others. A concrete aggregate can also type a literal array
 /// or tuple that precedes it.
-pub(crate) fn array_element_hint(
+pub(crate) fn common_type_hint(
     items: &[&Expr],
     locals: Option<WidthLookup<'_>>,
-) -> Result<ArrayElementHint, String> {
+) -> Result<CommonTypeHint, String> {
     let mut minimum = None;
     let mut constructor = None;
     for (i, expr) in items.iter().enumerate() {
         if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
             constructor.get_or_insert(i);
         } else if !collect_minimum(expr, locals, &mut minimum)? {
-            return Ok(ArrayElementHint::FromElement(i));
+            return Ok(CommonTypeHint::FromExpr(i));
         }
     }
     if let Some(i) = constructor {
-        return Ok(ArrayElementHint::FromElement(i));
+        return Ok(CommonTypeHint::FromExpr(i));
     }
-    Ok(ArrayElementHint::Minimum(
+    Ok(CommonTypeHint::Minimum(
         minimum
             .ok_or("cannot infer an empty array's element type")?
             .inferred_type()?,
@@ -502,7 +477,7 @@ pub(crate) fn array_element_hint(
 
 #[cfg(test)]
 mod tests {
-    use super::{OperandHint, minimum_type, operand_hint};
+    use super::{CommonTypeHint, common_type_hint, minimum_type};
     use crate::ast::{Expr, Type};
 
     #[test]
@@ -530,11 +505,11 @@ mod tests {
         }
         for (text, width) in [("255", 9), ("0xff", 8), ("0b11111111", 8)] {
             assert_eq!(
-                operand_hint(&literal(text), &literal("-1"), None).unwrap(),
-                OperandHint::FromRight(Some(Type::Bits {
+                common_type_hint(&[&literal(text), &literal("-1")], None).unwrap(),
+                CommonTypeHint::Minimum(Type::Bits {
                     signed: true,
                     width
-                })),
+                }),
                 "{text} and -1"
             );
         }
