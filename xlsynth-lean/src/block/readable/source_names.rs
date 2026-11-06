@@ -8,18 +8,21 @@ use std::fmt::Write;
 use super::{SourceType, identifier, lean, product_type};
 use crate::block::source_types::{StructField, TypeDecl};
 
+const STD_RESERVED_ROOTS: &[&str] = include!("std_roots.rs");
+
 pub(super) fn declaring_name<'a>(bx_namespace: &'a str, name: &'a str) -> (&'a str, &'a str) {
     name.split_once("::").unwrap_or((bx_namespace, name))
 }
 
 pub(super) fn module_identifier(module: &str) -> Result<String> {
-    match module {
-        // The model already declares names such as XlsBlock.State. Keep
-        // these modules distinct even when a source type has the same name.
-        "XlsBlock" | "XlsReadable" | "XlsCodec" | "_root_" => {
-            identifier(&format!("source:{module}"))
-        }
-        _ => identifier(module),
+    // Keep source declarations distinct from the model and from every root
+    // that already owns declarations after `import Std`.
+    if matches!(module, "XlsBlock" | "XlsReadable" | "XlsCodec" | "_root_")
+        || STD_RESERVED_ROOTS.binary_search(&module).is_ok()
+    {
+        identifier(&format!("source:{module}"))
+    } else {
+        identifier(module)
     }
 }
 
