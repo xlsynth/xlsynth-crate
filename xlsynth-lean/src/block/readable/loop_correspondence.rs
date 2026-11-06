@@ -168,7 +168,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             let codec = format!("XlsCodec.{name}");
             rules.extend(codec_round_trip_rules(&name));
             rules.extend(
-                declaration_functions(decl, &name)?
+                declaration_functions(&self.bx_namespace, decl, &name)?
                     .into_iter()
                     .map(|f| format!("apply_ite {f}")),
             );

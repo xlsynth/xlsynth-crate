@@ -112,7 +112,7 @@ pub block counter(clk, take: bool) -> u8 {
 ```rust
 use xlsynth_lean::block::compile_bx;
 
-let compiled = compile_bx(&source, xlsynth_bx::empty_package("counter"),
+let compiled = compile_bx("counter", &source, xlsynth_bx::empty_package("counter"),
                           Default::default(), &Default::default())?;
 let bundle = compiled.emit_readable(None)?;
 ```
@@ -123,6 +123,15 @@ ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
 types come from checked declarations, and every equation comes from the linked
 block. Internal bindings can be renamed without changing these public fields.
+
+Lean types use the declaring source module as their namespace. For example,
+`bus::Packet` from `bus.x` is `bus.Packet` even when another module imports it.
+If `bus.bx` declares a second `Packet`, its type is `«bx:bus».Packet`.
+Supply the BX module name as the first argument to `compile_bx`. A DSLX or BX
+field such as `recOn` retains its proof-facing spelling, so `p.recOn` reads the
+source field. For a struct with such a collision, use positional construction
+and pattern matching, for example `(⟨41, true⟩ : bus.Packet)` for two fields
+declared in that order.
 
 For a BX `use` of a DSLX function, readable emission takes parameter names
 and types from the same checked DSLX compilation that supplied the function's

@@ -89,9 +89,15 @@ pub fn checked_bundle(case: &Case) -> Result<CheckedCase> {
     let bx = format!(
         "extern fn machine::g({parameters}) -> {result_type};\nblock sample(clk, {parameters}) -> {result_type} {{ machine::g({arguments}) }}"
     );
-    let mut bundle = compile_bx_with_dslx(&bx, checked, Default::default(), &Default::default())?
-        .emit_readable(None)
-        .with_context(|| format!("emit generated caller:\n{source}"))?;
+    let mut bundle = compile_bx_with_dslx(
+        "design",
+        &bx,
+        checked,
+        Default::default(),
+        &Default::default(),
+    )?
+    .emit_readable(None)
+    .with_context(|| format!("emit generated caller:\n{source}"))?;
     // This differential check executes the model. Correspondence proofs have
     // separate tests and can exhaust Lean's recursion budget on large literals.
     bundle.files.retain(|(name, _)| {

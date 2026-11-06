@@ -19,6 +19,7 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 /// A checked BX module and its linked block IR, from the same compilation.
 pub struct CompiledBx {
     checked: CheckedModule,
+    module_name: String,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
     source: Module,
     pub(super) package: ir::Package,
@@ -30,6 +31,7 @@ pub struct CompiledBx {
 /// package. The package may already contain functions or blocks used by BX
 /// externs.
 pub fn compile_bx(
+    module_name: &str,
     source: &str,
     package: ir::Package,
     reset: ResetBehavior,
@@ -46,6 +48,7 @@ pub fn compile_bx(
         .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
         checked,
+        module_name: module_name.to_owned(),
         imported_structs,
         source,
         package,
@@ -60,13 +63,14 @@ pub fn compile_bx(
 /// Link the IR produced from this checked DSLX module and retain its source
 /// types for calls from the BX block.
 pub fn compile_bx_with_dslx(
+    module_name: &str,
     source: &str,
     module: xlsynth::dslx::TypecheckedModule,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
     let (package, link) = super::helper_types::DslxLink::compile(module)?;
-    let compiled = compile_bx(source, package, reset, options)?;
+    let compiled = compile_bx(module_name, source, package, reset, options)?;
     Ok(CompiledBx {
         dslx: Some(link),
         ..compiled
@@ -291,6 +295,7 @@ impl CompiledBx {
         Ok((
             declarations,
             StatefulInterface {
+                bx_module: self.module_name.clone(),
                 inputs,
                 registers,
                 outputs,
@@ -413,6 +418,7 @@ mod tests {
     #[test]
     fn readable_interface_uses_concrete_bx_types() -> Result<()> {
         let compiled = compile_bx(
+            "example",
             r#"
 type Byte = u8;
 const WIDTH = u32:8;
@@ -445,6 +451,7 @@ block nested(clk, x: Wrap<Byte>) -> (Byte, Wrap<Byte>) {
             "pub struct Packet { data: u8 } pub type First = Packet; pub type Second = Packet;",
         )?;
         let compiled = compile_bx(
+            "example",
             r#"
 use ops;
 const COUNT = u32:2;
@@ -488,6 +495,7 @@ block demo(clk, p: Envelope) -> Pair { p.items[u32:0] }
     #[test]
     fn equal_width_output_reordering_is_rejected() {
         let mut compiled = compile_bx(
+            "example",
             "struct Ports { zebra: u8, apple: u8 } block pair(clk, x: u8) -> Ports { Ports { apple: u8:42, zebra: x } }",
             xlsynth_bx::empty_package("example"),
             Default::default(),

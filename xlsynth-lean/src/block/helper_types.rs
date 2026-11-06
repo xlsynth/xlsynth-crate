@@ -261,6 +261,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         },
     ];
     let mut interface = StatefulInterface {
+        bx_module: "machine".into(),
         inputs: Default::default(),
         outputs: Default::default(),
         registers: Default::default(),

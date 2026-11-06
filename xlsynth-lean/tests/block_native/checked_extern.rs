@@ -43,6 +43,7 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
              block circuit(clk, x: Pair) -> u8 {{ {owner}::step(x) }}"
         );
         let compiled = compile_bx_with_dslx(
+            "design",
             &bx,
             checked.clone(),
             Default::default(),
@@ -60,7 +61,7 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
             .find(|line| line.starts_with(&format!("def Helpers.«{owner}::step»")))
             .unwrap();
         assert!(
-            signature.contains(&format!("«{owner}::Request»")),
+            signature.contains(&format!("«{owner}».«Request»")),
             "{signature}"
         );
         assert!(!executable.contains(&format!("Helpers.«{other}::step»")));
