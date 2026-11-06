@@ -23,6 +23,30 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<()> {
+    for module in ["Circuit", "Nat"] {
+        let mut bundle = compile_bx(
+            module,
+            "struct succ { value: u8 } block demo(clk, p: succ) -> u8 { p.value }",
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &Default::default(),
+        )?
+        .emit_readable(None)?;
+        if module == "Circuit" {
+            bundle.files.push((
+                "SourceName.lean".into(),
+                "import ReadableGenerated\nexample (x : XlsReadable.Input) : Circuit.succ := x.p\n"
+                    .into(),
+            ));
+        }
+        check_bundle(bundle, module);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
