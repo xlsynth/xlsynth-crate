@@ -10,6 +10,7 @@ use super::{AigNode, AigOperand, AigRef, ConeTruth, CutEvaluator, GateFn, LargeT
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
+use std::ops::Range;
 
 // Only consider caching when the root lies this many levels above the latest
 // leaf.
@@ -39,34 +40,57 @@ struct SavedWalk {
     slots: Vec<Slot>,
 }
 
-impl SavedWalk {
-    fn contains(&self, first: usize, end: usize, node: AigRef) -> bool {
-        self.order
-            .get(&node)
-            .is_some_and(|i| (first..=end).contains(i))
+/// A cache hit on the requested boundary. Its ANDs occupy exactly one range
+/// in the saved postorder, so counting and membership use the same gates.
+struct CachedCone<'a> {
+    root: AigRef,
+    table: &'a LargeTruthTable,
+    order: &'a FxHashMap<AigRef, usize>,
+    ands: Range<usize>,
+}
+
+impl CachedCone<'_> {
+    fn and_count(&self) -> usize {
+        self.ands.len()
     }
 
+    fn contains_and(&self, node: AigRef) -> bool {
+        self.order.get(&node).is_some_and(|i| self.ands.contains(i))
+    }
+
+    fn measurement(&self) -> ConeTruth {
+        ConeTruth {
+            table: *self.table,
+            enclosed: self.and_count(),
+        }
+    }
+}
+
+impl SavedWalk {
     /// The measured truth table can be reused if every reached leaf is still
     /// in its old position and any new boundary wire lies outside this cone.
-    fn on_basis(&self, end: usize, leaves: &[AigOperand]) -> Option<ConeTruth> {
+    fn on_basis(&self, root: AigRef, leaves: &[AigOperand]) -> Option<CachedCone<'_>> {
+        let end = *self.order.get(&root)?;
         let slot = &self.slots[end];
-        if slot.first != slot.suffix || end + 1 - slot.first < MIN_SPAN {
+        let ands = slot.first..end + 1;
+        if slot.first != slot.suffix || ands.len() < MIN_SPAN {
             return None;
         }
         if leaves.len() != self.leaves.len() {
             return None;
         }
+        let cone = CachedCone {
+            root,
+            table: &slot.table,
+            order: &self.order,
+            ands,
+        };
         for (i, (new, old)) in leaves.iter().zip(&self.leaves).enumerate() {
-            if new.node != old.node
-                && (slot.used & (1 << i) != 0 || self.contains(slot.first, end, new.node))
-            {
+            if new.node != old.node && (slot.used & (1 << i) != 0 || cone.contains_and(new.node)) {
                 return None;
             }
         }
-        Some(ConeTruth {
-            table: slot.table,
-            enclosed: end + 1 - slot.first,
-        })
+        Some(cone)
     }
 }
 
@@ -87,11 +111,11 @@ impl ConeCache {
         self.slots = 0;
     }
 
-    fn find(&self, node: AigRef, leaves: &[AigOperand]) -> Option<(usize, usize, ConeTruth)> {
-        self.walks.iter().enumerate().rev().find_map(|(i, walk)| {
-            let end = *walk.order.get(&node)?;
-            Some((i, end, walk.on_basis(end, leaves)?))
-        })
+    fn find(&self, node: AigRef, leaves: &[AigOperand]) -> Option<CachedCone<'_>> {
+        self.walks
+            .iter()
+            .rev()
+            .find_map(|walk| walk.on_basis(node, leaves))
     }
 }
 
@@ -113,36 +137,16 @@ impl CutEvaluator {
             return cone;
         }
         if !cache.walks.is_empty() && !leaves.iter().any(|leaf| leaf.node == root) {
-            if let Some((_, _, cone)) = cache.find(root, leaves) {
-                return cone;
+            if let Some(cone) = cache.find(root, leaves) {
+                return cone.measurement();
             }
             if let AigNode::And2 { a, b, .. } = g.gates[root.id] {
                 for child in [a.node, b.node] {
                     if leaves.iter().any(|leaf| leaf.node == child) {
                         continue;
                     }
-                    if let Some((i, end, cone)) = cache.find(child, leaves) {
-                        let mut boundary =
-                            SmallVec::<[AigOperand; LARGE_CONE_MAX_LEAVES + 1]>::from_slice(leaves);
-                        boundary.push(child.into());
-                        let literal = self.prepare(g, root, &boundary);
-                        let width = leaves.len();
-                        let walk = &cache.walks[i];
-                        let outside = self
-                            .touched
-                            .iter()
-                            .filter(|&&id| {
-                                (self.local[id] - 1) / 2 > width + 1
-                                    && !walk.contains(walk.slots[end].first, end, AigRef { id })
-                            })
-                            .count();
-                        let table = LargeTruthTable::from_words(width, |block| {
-                            self.word::<true>(width, block, literal, cone.table.words[block])
-                        });
-                        return ConeTruth {
-                            table,
-                            enclosed: cone.enclosed + outside,
-                        };
+                    if let Some(cone) = cache.find(child, leaves) {
+                        return self.collapse_with_cached_fanin(g, root, leaves, cone);
                     }
                 }
             }
@@ -161,6 +165,41 @@ impl CutEvaluator {
         self.save_subcones(cache, g.gates.len(), leaves)
     }
 
+    /// Stop the walk at the cached fanin and supply its truth there. The other
+    /// fanin may reach inside the saved cone, so count only additional ANDs.
+    fn collapse_with_cached_fanin(
+        &mut self,
+        g: &GateFn,
+        root: AigRef,
+        leaves: &[AigOperand],
+        fanin: CachedCone<'_>,
+    ) -> ConeTruth {
+        let mut boundary = SmallVec::<[AigOperand; LARGE_CONE_MAX_LEAVES + 1]>::from_slice(leaves);
+        boundary.push(fanin.root.into());
+        let literal = self.prepare(g, root, &boundary);
+        let additional = self
+            .and_positions(boundary.len())
+            .filter(|&(node, _)| !fanin.contains_and(node))
+            .count();
+        let width = leaves.len();
+        let table = LargeTruthTable::from_words(width, |block| {
+            self.word::<true>(width, block, literal, fanin.table.words[block])
+        });
+        ConeTruth {
+            table,
+            enclosed: fanin.and_count() + additional,
+        }
+    }
+
+    /// Map each interior AND to its position in the prepared postorder.
+    fn and_positions(&self, boundary_width: usize) -> impl Iterator<Item = (AigRef, usize)> + '_ {
+        let first_and = 1 + boundary_width;
+        self.touched.iter().filter_map(move |&id| {
+            let slot = (self.local[id] - 1) / 2;
+            slot.checked_sub(first_and).map(|i| (AigRef { id }, i))
+        })
+    }
+
     fn save_subcones(
         &mut self,
         cache: &mut ConeCache,
@@ -175,14 +214,7 @@ impl CutEvaluator {
             cache.slots -= oldest.slots.len();
         }
         let mut slots: Vec<Slot> = Vec::with_capacity(count);
-        let order = self
-            .touched
-            .iter()
-            .filter_map(|&id| {
-                let slot = (self.local[id] - 1) / 2;
-                (slot >= base).then(|| (AigRef { id }, slot - base))
-            })
-            .collect();
+        let order = self.and_positions(width).collect();
         for (i, &[a, b]) in self.ands.iter().enumerate() {
             let mut first = i;
             let mut suffix = i;
