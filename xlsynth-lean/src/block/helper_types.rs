@@ -131,9 +131,9 @@ impl DslxLink {
             .map(String::as_str)
             .filter(|destination| linked.contains(destination))
             .collect();
-        merge_declarations(
-            declarations,
-            std::mem::take(&mut catalogue.declarations),
+        catalogue.declarations = merge_declarations(
+            std::mem::take(declarations),
+            catalogue.declarations,
             interface,
         )?;
         catalogue.add_loop_bodies(block, interface);
@@ -144,6 +144,8 @@ impl DslxLink {
             &interface.inputs,
             &interface.registers,
         )?;
+        // Loop bindings can introduce local types absent from any signature.
+        *declarations = catalogue.declarations;
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -173,14 +175,13 @@ impl DslxLink {
 /// BX reflects imported structs into concrete port types and erases aliases.
 /// Keep the checked DSLX spelling, with its dependencies before its users.
 fn merge_declarations(
-    prior: &mut Vec<TypeDecl>,
-    incoming: Vec<TypeDecl>,
+    prior: Vec<TypeDecl>,
+    mut merged: Vec<TypeDecl>,
     interface: &mut StatefulInterface,
-) -> Result<()> {
+) -> Result<Vec<TypeDecl>> {
     let mut replaced = Vec::new();
-    let mut merged = incoming;
     let mut aliases = BTreeSet::new();
-    for decl in prior.drain(..) {
+    for decl in prior {
         if let Some(index) = merged.iter().position(|d| d.name() == decl.name()) {
             if decl != merged[index] {
                 if matches!(decl, TypeDecl::Struct { .. })
@@ -240,6 +241,9 @@ fn merge_declarations(
                 restore_alias(ty, &aliases);
             }
             restore_alias(&mut sig.result, &aliases);
+            for (_, ty) in sig.node_bindings.values_mut() {
+                restore_alias(ty, &aliases);
+            }
         }
     }
     for (old, index) in replaced {
@@ -274,8 +278,7 @@ fn merge_declarations(
             new.name()
         );
     }
-    *prior = merged;
-    Ok(())
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -291,7 +294,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
             })
             .collect(),
     };
-    let mut reflected = vec![record("Alias", ["zebra", "apple"])];
+    let reflected = vec![record("Alias", ["zebra", "apple"])];
     let checked = vec![
         record("Packet", ["apple", "zebra"]),
         TypeDecl::Alias {
@@ -308,7 +311,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         registers: Default::default(),
         helpers: Default::default(),
     };
-    let error = merge_declarations(&mut reflected, checked, &mut interface).unwrap_err();
+    let error = merge_declarations(reflected, checked, &mut interface).unwrap_err();
     assert_eq!(error.to_string(), "conflicting fields in linked type Alias");
 }
 
