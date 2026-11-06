@@ -474,6 +474,54 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
   block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
 
+### `bx2lean`: BX to raw and readable Lean
+
+Generate a clock-step model from a BX block. Proofs can use its declared
+register, input, and output field names. For example, this block outputs the
+old value of `count`, then captures `x` on the clock edge unless reset is active.
+
+```text
+struct Outputs { seen: u8, valid: bool }
+block counter(clk, rst, x: u8) -> Outputs {
+    reg count: u8 = 0;
+    count := x;
+    Outputs { seen: count, valid: true }
+}
+```
+
+```shell
+xlsynth-driver bx2lean counter.bx --output-dir lean
+```
+
+- `--output-dir <NEW_DIR>` is required. Its parent must exist and the directory
+  itself must be new. The command generates the complete model before creating
+  the directory. It writes `Generated.lean`, `ReadableTypes.lean`,
+  `ReadableGenerated.lean`, `ReadableRepresentation.lean`, and
+  `ReadableCorrespondence.lean`. To check the generated correspondence proof,
+  compile the files with Lean in that order.
+- `--top <BLOCK>` selects a BX-defined block. The default is the sole block or
+  the unique public block. If several blocks qualify, specify the name.
+- `--link-ir`, `--dslx-path`, and `--dslx-stdlib-path` resolve externs and
+  DSLX imports as in [`bx2ir`](#bx2ir-bx-to-block-ir). The selected block
+  and the functions it calls must use operations supported by the Lean emitter.
+- Reset defaults to synchronous and active-high. Use `--reset-active-low` to
+  change polarity. The clock-step model rejects asynchronous register resets.
+
+### `block2lean`: Block IR to Lean
+
+Generate a raw Lean clock-step model for a block in a saved XLS IR package.
+The model evaluates outputs and simultaneous register updates from current
+inputs and old register values. Assertions are reported as results.
+
+```shell
+xlsynth-driver block2lean counter.ir --top counter --output Generated.lean
+```
+
+- `--top <NAME>` selects a block, overriding the declared package top. Without
+  a top, a package containing exactly one block selects it automatically.
+- `--output <FILE>` writes the model to a file after successful generation.
+  The default is stdout.
+
 ### `bx2gv`: BX to mapped gate-level netlist
 
 Maps a `.bx` design to Liberty cells. The command compiles the selected BX
