@@ -21,7 +21,7 @@ mod proof;
 mod support;
 
 pub use error::{InterfaceDirection, LeanError};
-pub use evaluate::{LeanEvaluator, LeanFunctionInputs};
+pub use evaluate::{BlockCycleResult, LeanEvaluator, LeanFunctionInputs};
 pub use gate_fn::{
     CircuitInterface, CircuitPort, LeanCircuitBundle, LeanExportOptions, LeanModuleName,
     WrittenLeanCircuit, export_gate_fn,

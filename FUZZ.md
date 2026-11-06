@@ -429,6 +429,21 @@ XLSYNTH_LEAN=/path/to/lean cargo fuzz run \
   fuzz_gate_fn_lean_eval -- -timeout=30 -max_len=2048
 ```
 
+### xlsynth-lean/fuzz/fuzz_targets/fuzz_block_lean_eval.rs
+
+Generates a sequential PIR block with positive-width bit-vector ports and
+registers, synchronous reset, and optional load enables. The fuzz bytes
+determine the block, initial registers, and eight clocks of inputs. The first
+and fifth clocks assert reset using the generated polarity. On every clock the
+target compares every Lean output and next register against the independent
+PIR cycle evaluator, including outputs computed from the state before reset.
+
+```bash
+XLSYNTH_LEAN=/path/to/lean cargo fuzz run \
+  --fuzz-dir xlsynth-lean/fuzz --features external-lean --sanitizer none \
+  fuzz_block_lean_eval -- -timeout=30 -max_len=2048
+```
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_g8r_formal.rs
 
 Generates random gatify-supported PIR functions with up to 64 generated nodes,
