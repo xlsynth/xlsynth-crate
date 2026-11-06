@@ -27,6 +27,53 @@ fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertion
     pretty_assertions::assert_eq!(source, golden);
 }
 
+// Each field becomes a projection in the Lean structure's namespace.
+// Report the owning field when Lean would generate the same declaration.
+#[test]
+fn raw_emission_rejects_field_names_used_by_lean() {
+    let check = |ir: String, owner: &str, field: &str| {
+        let package = package(&ir);
+        let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
+        assert_eq!(
+            error.root_cause().to_string(),
+            format!("cannot emit {owner}.{field}: Lean generates a declaration with this name")
+        );
+    };
+    for field in [
+        "rec",
+        "recOn",
+        "casesOn",
+        "noConfusion",
+        "noConfusionType",
+        "ctorIdx",
+        "_sizeOf_1",
+        "_sizeOf_inst",
+    ] {
+        let ir = format!(
+            "package ports\n\ntop block ports({field}: bits[1], out: bits[1]) {{
+  {field}: bits[1] = input_port(name={field}, id=1)
+  out: () = output_port({field}, name=out, id=2)
+}}"
+        );
+        check(ir, "Input", field);
+    }
+    check(
+        BLOCK
+            .replace("reg b(", "reg rec(")
+            .replace("register=b", "register=rec"),
+        "State",
+        "rec",
+    );
+    check(
+        BLOCK
+            .replace("out:", "rec:")
+            .replace("name=out", "name=rec"),
+        "Output",
+        "rec",
+    );
+    check(BLOCK.replace("checked:", "rec:"), "Assertions", "rec");
+}
+
 // A port named mk must remain distinct from the constructor and from ports
 // with trailing underscores when proofs construct and observe an input.
 #[test]
@@ -35,20 +82,21 @@ fn qualified_constructors_preserve_port_projections() {
     let package = package(
         r#"package ports
 
-top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], result: bits[1]) {
+top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], rec_: bits[1], result: bits[1]) {
   mk: bits[1] = input_port(name=mk, id=1)
   mk_: bits[1] = input_port(name=mk_, id=2)
   mk__: bits[1] = input_port(name=mk__, id=3)
-  result: () = output_port(mk_, name=result, id=4)
+  rec_: bits[1] = input_port(name=rec_, id=4)
+  result: () = output_port(mk_, name=result, id=5)
 }"#,
     );
     let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
     source.push_str(
         r#"
 open XlsBlock
-example (a b c : BitVec 1) :
-    let x := Input.Constructors.mk a b c
-    (x.mk, x.mk_, x.mk__) = (a, b, c) := rfl
+example (a b c d : BitVec 1) :
+    let x := Input.Constructors.mk a b c d
+    (x.mk, x.mk_, x.mk__, x.rec_) = (a, b, c, d) := rfl
 example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
 #check State.Constructors.mk
 #check Output.Constructors.mk
