@@ -96,4 +96,5 @@ message CanonicalG8rOptions {
   required string cut_db_rewrite_mode = 23;
   required uint64 toggle_sample_count = 24;
   required uint64 toggle_sample_seed = 25;
+  optional bool cut_db_enable_large_cone_bottom_up_rewrite = 27;
 }

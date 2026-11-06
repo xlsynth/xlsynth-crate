@@ -2,6 +2,6 @@
 sha256: "0d17380939a4b51414369431d49492f9ed83e397bb621918a18a9cff39d75334"
 predicate_simplification {
   expected_simplifications: 0
-  pir_limits { and_nodes_max: 1054 graph_le_max: 93.08776073873531 depth_max: 18 }
-  sandwich_limits { and_nodes_max: 1054 graph_le_max: 93.08776073873531 depth_max: 18 }
+  pir_limits { and_nodes_max: 1037 graph_le_max: 93.66057510625905 depth_max: 18 }
+  sandwich_limits { and_nodes_max: 1037 graph_le_max: 93.66057510625905 depth_max: 18 }
 }

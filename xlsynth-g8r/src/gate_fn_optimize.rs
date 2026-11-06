@@ -31,6 +31,8 @@ pub struct GateFnOptimizeOptions {
     pub cut_db_rewrite_max_iterations: usize,
     pub cut_db_rewrite_max_cuts_per_node: usize,
     pub cut_db_enable_large_cone_rewrite: bool,
+    /// Also search bottom-up cuts during large-cone area recovery.
+    pub cut_db_enable_large_cone_bottom_up_rewrite: bool,
     pub cut_db_rewrite_mode: CutDbRewriteMode,
 }
 
@@ -49,6 +51,7 @@ impl GateFnOptimizeOptions {
             cut_db_rewrite_max_cuts_per_node:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
             cut_db_enable_large_cone_rewrite: true,
+            cut_db_enable_large_cone_bottom_up_rewrite: false,
             cut_db_rewrite_mode: CutDbRewriteMode::default(),
         }
     }
@@ -60,6 +63,7 @@ impl Default for GateFnOptimizeOptions {
             fraig: true,
             reassociation: true,
             cut_db: Some(CutDb::load_default()),
+            cut_db_enable_large_cone_bottom_up_rewrite: true,
             ..Self::all_disabled()
         }
     }
@@ -137,6 +141,8 @@ pub fn optimize_gate_fn(
                 verify_area_costing: false,
                 verify_delay_costing: false,
                 enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
+                enable_large_cone_bottom_up_rewrite: options
+                    .cut_db_enable_large_cone_bottom_up_rewrite,
                 mode: options.cut_db_rewrite_mode,
             },
         );

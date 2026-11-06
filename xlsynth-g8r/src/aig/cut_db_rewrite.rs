@@ -19,7 +19,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Instant;
 
-use smallvec::SmallVec;
+use rustc_hash::FxHashMap;
 
 use crate::aig::dce::dce;
 use crate::aig::dynamic_depth::DynamicDepthState;
@@ -37,7 +37,7 @@ mod small_cut;
 
 use self::cut_replacement_cost::{gate_count_diff_for_replacement, materialize_replacement};
 use self::large_cone::{
-    FactoredExpr, FactoredExprNode, SopCoverMemo, SopReplacement, SopVariantKind,
+    FactoredExpr, FactoredExprNode, SopMemo, SopReplacement, SopVariantKind,
     construct_large_cone_candidate_replacements_for_root, sop_depth_from_inputs,
 };
 use self::small_cut::{CutEnumerationStats, CutEnumerator, choose_candidate_replacements_for_root};
@@ -208,8 +208,9 @@ impl Default for CutDbRewriteMode {
 pub struct RewriteOptions {
     /// Maximum number of cuts retained at each node during enumeration.
     ///
-    /// This bounds local search breadth. If set to `0`, no per-node cut limit
-    /// is applied, which can be expensive on large graphs.
+    /// The count includes the unit cut. Zero removes this overall limit.
+    /// Bottom-up large-cone rewriting also retains at most two non-unit cuts
+    /// per width.
     pub max_cuts_per_node: usize,
     /// Maximum number of outer rewrite iterations to run.
     ///
@@ -225,6 +226,9 @@ pub struct RewriteOptions {
     /// If true, run the large-cone depth/area refactor phases after the
     /// 4-input cut-db phases.
     pub enable_large_cone_rewrite: bool,
+    /// After top-down area recovery, also factor bottom-up cuts ranked by
+    /// removable ANDs per effective input. Requires large-cone rewriting.
+    pub enable_large_cone_bottom_up_rewrite: bool,
     /// Cut-db QoR policy: delay, balanced, or area.
     pub mode: CutDbRewriteMode,
 }
@@ -244,6 +248,7 @@ impl Default for RewriteOptions {
             verify_area_costing: false,
             verify_delay_costing: false,
             enable_large_cone_rewrite: true,
+            enable_large_cone_bottom_up_rewrite: true,
             mode: CutDbRewriteMode::Delay,
         }
     }
@@ -270,9 +275,47 @@ pub(super) struct Replacement {
 }
 
 #[derive(Debug, Clone)]
+enum CutMffc {
+    Members(BTreeSet<AigRef>),
+    /// Effective-cut selection already measured removability in this root
+    /// visit.
+    Count(usize),
+}
+
+impl CutMffc {
+    fn len(&self) -> usize {
+        match self {
+            Self::Members(nodes) => nodes.len(),
+            Self::Count(count) => *count,
+        }
+    }
+
+    /// Called before the winning edit, while its boundary and live uses still
+    /// describe the graph that was scored. Keep the collector's sorted ID
+    /// order.
+    fn extend_invalidation(
+        &self,
+        invalidated: &mut DenseAigRefSet,
+        state: &DynamicStructuralHash,
+        replacement: &Replacement,
+    ) {
+        match self {
+            Self::Members(nodes) => invalidated.extend(nodes.iter().copied()),
+            Self::Count(count) => {
+                let nodes =
+                    collect_mffc_nodes_under_cut(state, replacement.root, &replacement.leaf_ops);
+                debug_assert_eq!(nodes.len(), *count);
+                invalidated.extend(nodes);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct AreaCandidate {
     replacement: Replacement,
-    mffc_nodes: BTreeSet<AigRef>,
+    protected_live: Option<bool>,
+    mffc: CutMffc,
     area_gain: usize,
     before_live_and_count: usize,
     after_live_and_count: usize,
@@ -280,10 +323,33 @@ struct AreaCandidate {
     slack_consumed: usize,
 }
 
+impl AreaCandidate {
+    /// Check this candidate against the round's protected gate IDs. A cost
+    /// certificate settles the result directly. Otherwise, apply the rewrite
+    /// to a trial graph and inspect the protected nodes there.
+    fn preserves_protected_nodes(
+        &self,
+        state: &DynamicStructuralHash,
+        protected: &[AigRef],
+    ) -> bool {
+        if protected.is_empty() {
+            return true;
+        }
+        if let Some(all_live) = self.protected_live {
+            return all_live;
+        }
+        let mut trial = state.clone();
+        match materialize_replacement(&mut trial, &self.replacement) {
+            Ok(Some(_)) => protected.iter().all(|&node| trial.is_live(node)),
+            Ok(None) | Err(_) => false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct LargeConeCandidate {
     replacement: Replacement,
-    mffc_nodes: BTreeSet<AigRef>,
+    mffc: CutMffc,
     new_root_depth: usize,
     raw_and_count: usize,
     variant_order: usize,
@@ -311,6 +377,13 @@ struct LargeConeCandidateStats {
     sop_variants_max: usize,
     viable_candidates: usize,
     viable_structural_hash_only_area_win: usize,
+}
+
+impl LargeConeCandidateStats {
+    fn record_enclosed(&mut self, count: usize) {
+        self.cone_internal_sum += count;
+        self.cone_internal_max = self.cone_internal_max.max(count);
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -778,93 +851,55 @@ fn collect_replacement_depth_changed_nodes(
     dirty_nodes.sort_by_id();
 }
 
+/// Collect ANDs that lose their last use when the root is replaced and the cut
+/// leaves are kept live.
 fn collect_mffc_nodes_under_cut(
     state: &DynamicStructuralHash,
     root: AigRef,
     leaf_ops: &[AigOperand],
 ) -> BTreeSet<AigRef> {
-    struct SparseRefCounts<'a> {
-        state: &'a DynamicStructuralHash,
-        overrides: SmallVec<[(AigRef, usize); 16]>,
-    }
+    collect_mffc_nodes_under_cut_up_to(state, root, leaf_ops, usize::MAX)
+}
 
-    impl<'a> SparseRefCounts<'a> {
-        fn new(state: &'a DynamicStructuralHash) -> Self {
-            Self {
-                state,
-                overrides: SmallVec::new(),
-            }
-        }
-
-        fn get(&self, node: AigRef) -> usize {
-            self.overrides
-                .iter()
-                .find_map(|(candidate, value)| (*candidate == node).then_some(*value))
-                .unwrap_or_else(|| self.state.use_count(node))
-        }
-
-        fn set(&mut self, node: AigRef, value: usize) {
-            if let Some((_, existing)) = self
-                .overrides
-                .iter_mut()
-                .find(|(candidate, _)| *candidate == node)
-            {
-                *existing = value;
-                return;
-            }
-            self.overrides.push((node, value));
-        }
-
-        fn decrement(&mut self, node: AigRef) -> Option<usize> {
-            let refs = self.get(node);
-            if refs == 0 {
-                return None;
-            }
-            let updated = refs - 1;
-            self.set(node, updated);
-            Some(updated)
-        }
-    }
-
-    fn deref_nodes(
-        g: &GateFn,
-        root: AigRef,
-        boundary: &BTreeSet<AigRef>,
-        refs: &mut SparseRefCounts<'_>,
-        removable: &mut BTreeSet<AigRef>,
-    ) {
-        let mut stack = vec![root];
-        while let Some(node) = stack.pop() {
-            if boundary.contains(&node) {
-                continue;
-            }
-            let Some(updated_refs) = refs.decrement(node) else {
-                continue;
-            };
-            if updated_refs != 0 {
-                continue;
-            }
-            let AigNode::And2 { a, b, .. } = &g.gates[node.id] else {
-                continue;
-            };
-            removable.insert(node);
-            stack.push(a.node);
-            stack.push(b.node);
-        }
-    }
-
+fn collect_mffc_nodes_under_cut_up_to(
+    state: &DynamicStructuralHash,
+    root: AigRef,
+    leaf_ops: &[AigOperand],
+    limit: usize,
+) -> BTreeSet<AigRef> {
     let g = state.gate_fn();
     let boundary: BTreeSet<AigRef> = leaf_ops.iter().map(|op| op.node).collect();
     let mut removable = BTreeSet::new();
-    if boundary.contains(&root) || state.use_count(root) == 0 {
+    if state.use_count(root) == 0 {
         return removable;
     }
 
-    let mut refs = SparseRefCounts::new(state);
-    // Replacing `root` rewires all of its fanouts to the replacement, so model
-    // the dereference as a single use regardless of current fanout count.
-    refs.set(root, 1);
-    deref_nodes(g, root, &boundary, &mut refs, &mut removable);
+    // Replacing the root redirects all its uses. Track released uses only for
+    // shared fanins. Removing x & x, for example, releases two uses of x.
+    let mut released = FxHashMap::default();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if boundary.contains(&node) {
+            continue;
+        }
+        let AigNode::And2 { a, b, .. } = &g.gates[node.id] else {
+            continue;
+        };
+        let uses = state.use_count(node);
+        if node != root && uses > 1 {
+            let count = released.entry(node).or_insert(0usize);
+            *count += 1;
+            if *count < uses {
+                continue;
+            }
+        }
+        removable.insert(node);
+        if removable.len() == limit {
+            break;
+        }
+        stack.push(a.node);
+        stack.push(b.node);
+    }
     removable
 }
 
@@ -902,6 +937,26 @@ fn collect_internal_and_nodes_under_cut(
 struct RootAreaCandidates {
     candidates: Vec<AreaCandidate>,
     candidates_considered: usize,
+}
+
+impl RootAreaCandidates {
+    /// Return candidates in the order the caller should try them. A stable
+    /// sort preserves generation order when all six priorities tie.
+    fn ranked(mut candidates: Vec<AreaCandidate>, candidates_considered: usize) -> Self {
+        candidates.sort_by(|a, b| {
+            b.area_gain
+                .cmp(&a.area_gain)
+                .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
+                .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
+                .then_with(|| b.mffc.len().cmp(&a.mffc.len()))
+                .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
+                .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
+        });
+        Self {
+            candidates,
+            candidates_considered,
+        }
+    }
 }
 
 struct ConstructedLargeConeCandidates {
@@ -1056,8 +1111,9 @@ fn choose_area_candidate_replacements_for_root(
                 root,
             ));
             cands.push(AreaCandidate {
+                protected_live: None,
                 replacement,
-                mffc_nodes: mffc_nodes.clone(),
+                mffc: CutMffc::Members(mffc_nodes.clone()),
                 area_gain,
                 before_live_and_count: cost.before_live_ands,
                 after_live_and_count: cost.after_live_ands,
@@ -1067,46 +1123,31 @@ fn choose_area_candidate_replacements_for_root(
         }
     }
 
-    cands.sort_by(|a, b| {
-        b.area_gain
-            .cmp(&a.area_gain)
-            .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-            .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-            .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-            .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-            .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-    });
-
-    RootAreaCandidates {
-        candidates: cands,
-        candidates_considered,
-    }
+    RootAreaCandidates::ranked(cands, candidates_considered)
 }
 
 /// Applies depth and exact area-cost acceptance to already-constructed
 /// large-cone candidates.
 fn cost_large_cone_area_candidates_for_root(
     constructed: ConstructedLargeConeCandidates,
+    search: LargeConeSearch,
     root_depth: usize,
     root_backward_depth: usize,
     output_depth_cap: usize,
     allow_depth_increase: bool,
+    protected: &[AigRef],
     stats: &mut LargeConeCandidateStats,
     structural_hash_state: &DynamicStructuralHash,
 ) -> RootAreaCandidates {
     let mut cands = Vec::new();
 
+    let mut effective_pricing = (search == LargeConeSearch::EffectiveCuts).then(|| {
+        cut_replacement_cost::EffectiveCutPricing::new(root_depth, &constructed.candidates)
+    });
     for cand in constructed.candidates {
-        let LargeConeCandidate {
-            mut replacement,
-            mffc_nodes,
-            new_root_depth,
-            raw_and_count,
-            variant_order: _,
-        } = cand;
         if !allow_depth_increase
             && !replacement_preserves_output_depth(
-                new_root_depth,
+                cand.new_root_depth,
                 root_backward_depth,
                 output_depth_cap,
             )
@@ -1115,36 +1156,47 @@ fn cost_large_cone_area_candidates_for_root(
             continue;
         }
 
-        let Some(cost) = (match gate_count_diff_for_replacement(structural_hash_state, &replacement)
-        {
-            Ok(cost) => cost,
+        let cost = match cut_replacement_cost::price_area_candidate(
+            structural_hash_state,
+            &cand,
+            protected,
+            effective_pricing.as_mut(),
+        ) {
+            Ok(cut_replacement_cost::AreaCost::Profitable(cost)) => cost,
+            Ok(cut_replacement_cost::AreaCost::NoAreaGain) => {
+                stats.rejected_no_area_gain += 1;
+                continue;
+            }
+            Ok(cut_replacement_cost::AreaCost::Unavailable) => continue,
             Err(e) => {
                 log::debug!(
                     "cut-db large-cone exact cost rejected candidate root={:?}: {}",
-                    replacement.root,
+                    cand.replacement.root,
                     e
                 );
                 continue;
             }
-        }) else {
-            continue;
         };
-        if cost.live_and_delta <= 0 {
-            stats.rejected_no_area_gain += 1;
-            continue;
-        }
+        let LargeConeCandidate {
+            mut replacement,
+            mffc,
+            new_root_depth,
+            raw_and_count,
+            variant_order: _,
+        } = cand;
 
         let area_gain = cost.live_and_delta as usize;
-        let structural_hash_only_area_win = mffc_nodes.len() <= raw_and_count && area_gain > 0;
+        let structural_hash_only_area_win = mffc.len() <= raw_and_count && area_gain > 0;
         if structural_hash_only_area_win {
             stats.viable_structural_hash_only_area_win += 1;
         }
-        replacement.score_ands = mffc_nodes.len().saturating_sub(area_gain);
+        replacement.score_ands = mffc.len().saturating_sub(area_gain);
         replacement.structural_hash_only_area_win = structural_hash_only_area_win;
         let slack_consumed = new_root_depth.saturating_sub(root_depth);
         cands.push(AreaCandidate {
+            protected_live: cost.protected_live,
             replacement,
-            mffc_nodes,
+            mffc,
             area_gain,
             before_live_and_count: cost.before_live_ands,
             after_live_and_count: cost.after_live_ands,
@@ -1153,20 +1205,7 @@ fn cost_large_cone_area_candidates_for_root(
         });
     }
 
-    cands.sort_by(|a, b| {
-        b.area_gain
-            .cmp(&a.area_gain)
-            .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-            .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-            .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-            .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-            .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-    });
-
-    RootAreaCandidates {
-        candidates: cands,
-        candidates_considered: constructed.candidates_considered,
-    }
+    RootAreaCandidates::ranked(cands, constructed.candidates_considered)
 }
 
 fn filter_large_cone_depth_candidates_for_root(
@@ -1731,18 +1770,7 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
             };
             candidates_considered += root_result.candidates_considered;
             area_candidate_count += root_result.candidates.len();
-            let mut root_candidates = root_result.candidates;
-            root_candidates.sort_by(|a, b| {
-                b.area_gain
-                    .cmp(&a.area_gain)
-                    .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-                    .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-                    .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-                    .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-                    .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-            });
-
-            if let Some(cand) = root_candidates.into_iter().next() {
+            if let Some(cand) = root_result.candidates.into_iter().next() {
                 let first_new_id = structural_hash_state.gate_fn().gates.len();
                 debug_assert_eq!(
                     structural_hash_state.live_and_count(),
@@ -1775,7 +1803,11 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
                 for leaf in &cand.replacement.leaf_ops {
                     invalidated_cut_nodes.insert(leaf.node);
                 }
-                invalidated_cut_nodes.extend(cand.mffc_nodes.iter().copied());
+                cand.mffc.extend_invalidation(
+                    &mut invalidated_cut_nodes,
+                    &structural_hash_state,
+                    &cand.replacement,
+                );
                 let replacement = cand.replacement.clone();
                 let materialized =
                     materialize_replacement(&mut structural_hash_state, &replacement)
@@ -1949,9 +1981,10 @@ fn rewrite_gatefn_area_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions)
 
 fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) -> GateFn {
     let mut cur = g.clone();
-    let mut sop_cover_memo = SopCoverMemo::default();
+    let mut sop_memo = SopMemo::default();
 
     {
+        let mut top_down_evaluator = large_cone::CutEvaluator::default();
         let t_iter0 = Instant::now();
         let t0 = Instant::now();
         let mut structural_hash_state = DynamicStructuralHash::new(cur)
@@ -1987,7 +2020,6 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
             ..LargeConeCandidateStats::default()
         };
         let mut candidates_considered = 0usize;
-        let mut candidate_evals = 0usize;
         let mut large_candidate_count = 0usize;
         let mut accepted_count = 0usize;
         let mut selected_raw_score_ands = 0usize;
@@ -2014,14 +2046,13 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
             let root_depth = live_forward_depth(&depth_state, &structural_hash_state, root);
 
             let constructed = construct_large_cone_candidate_replacements_for_root(
-                structural_hash_state.gate_fn(),
                 root,
-                depth_state.forward_depths(),
-                structural_hash_state.use_counts(),
-                &mut candidate_evals,
-                &mut candidate_stats,
                 &structural_hash_state,
-                &mut sop_cover_memo,
+                depth_state.forward_depths(),
+                None,
+                &mut top_down_evaluator,
+                &mut candidate_stats,
+                &mut sop_memo,
             );
             large_candidate_count += constructed.candidates.len();
             let root_result = filter_large_cone_depth_candidates_for_root(
@@ -2048,7 +2079,11 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
                 for leaf in &cand.replacement.leaf_ops {
                     invalidated_nodes.insert(leaf.node);
                 }
-                invalidated_nodes.extend(cand.mffc_nodes.iter().copied());
+                cand.mffc.extend_invalidation(
+                    &mut invalidated_nodes,
+                    &structural_hash_state,
+                    &cand.replacement,
+                );
                 let materialized = match materialize_replacement(
                     &mut structural_hash_state,
                     &cand.replacement,
@@ -2177,7 +2212,7 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
             initial_critical_roots,
             candidate_stats.roots_visited,
             candidates_considered,
-            candidate_evals,
+            candidate_stats.sop_variants_sum,
             accepted_count,
             before_live_and_count,
             after_live_and_count,
@@ -2226,10 +2261,25 @@ fn rewrite_gatefn_large_cone_depth_refactor(g: &GateFn, opts: RewriteOptions) ->
     cur
 }
 
-fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateFn {
+/// Boundary discovery used by this invocation of the large-cone area rewriter.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LargeConeSearch {
+    /// Open the boundary gate that introduces the fewest new leaves, keeping
+    /// the width budget available for further expansion along this path.
+    TopDown,
+    /// Combine boundaries retained at the two inputs. Reconvergent paths can
+    /// share leaves that a single greedy expansion would miss.
+    EffectiveCuts,
+}
+
+fn rewrite_gatefn_large_cone_refactor(
+    g: &GateFn,
+    opts: RewriteOptions,
+    search: LargeConeSearch,
+) -> GateFn {
     let mut cur = g.clone();
     let mut iter: usize = 0;
-    let mut sop_cover_memo = SopCoverMemo::default();
+    let mut sop_memo = SopMemo::default();
 
     loop {
         if opts.max_iterations != 0 && iter >= opts.max_iterations {
@@ -2268,6 +2318,25 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
 
         let t_phase = Instant::now();
         let mut roots = structural_hash_state.live_and_nodes();
+        // DCE between rounds renumbers gates. Keep the cut lists and protected
+        // gate IDs within the round that defines those IDs.
+        let mut top_down_evaluator = large_cone::CutEvaluator::default();
+        let mut cuts = (search == LargeConeSearch::EffectiveCuts)
+            .then(|| large_cone::EffectiveCuts::new(opts.max_cuts_per_node));
+        // Live roots arrive in gate-ID order, which the protected lookup uses.
+        let protected: Vec<_> = if cuts.is_some() {
+            roots
+                .iter()
+                .copied()
+                .filter(|node| {
+                    structural_hash_state.gate_fn().gates[node.id]
+                        .get_tags()
+                        .is_some_and(|tags| !tags.is_empty())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         roots.sort_by(|a, b| {
             depth_state.forward_depths()[b.id]
                 .cmp(&depth_state.forward_depths()[a.id])
@@ -2282,7 +2351,6 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
         let mut pending_roots = DenseAigRefMembership::from_nodes(roots.iter().copied());
         let mut root_queue: VecDeque<AigRef> = roots.into();
         let mut candidates_considered = 0usize;
-        let mut candidate_evals = 0usize;
         let mut area_candidate_count = 0usize;
         let mut accepted_count = 0usize;
         let mut fanout_cone_nodes = DenseAigRefSet::default();
@@ -2312,39 +2380,45 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                 continue;
             };
 
+            if !protected.is_empty()
+                && structural_hash_state.gate_fn().gates[root.id]
+                    .get_tags()
+                    .is_some_and(|tags| !tags.is_empty())
+            {
+                continue;
+            }
+            if cuts
+                .as_mut()
+                .is_some_and(|cuts| cuts.cannot_save_singleton(&structural_hash_state, root))
+            {
+                continue;
+            }
             let constructed = construct_large_cone_candidate_replacements_for_root(
-                structural_hash_state.gate_fn(),
                 root,
-                depth_state.forward_depths(),
-                structural_hash_state.use_counts(),
-                &mut candidate_evals,
-                &mut candidate_stats,
                 &structural_hash_state,
-                &mut sop_cover_memo,
+                depth_state.forward_depths(),
+                cuts.as_mut(),
+                &mut top_down_evaluator,
+                &mut candidate_stats,
+                &mut sop_memo,
             );
             let root_result = cost_large_cone_area_candidates_for_root(
                 constructed,
+                search,
                 depth_state.forward_depths()[root.id],
                 root_backward_depth,
                 cur_output_node_depth,
                 opts.mode.allows_area_depth_increase(),
+                &protected,
                 &mut candidate_stats,
                 &structural_hash_state,
             );
             candidates_considered += root_result.candidates_considered;
             area_candidate_count += root_result.candidates.len();
-            let mut root_candidates = root_result.candidates;
-            root_candidates.sort_by(|a, b| {
-                b.area_gain
-                    .cmp(&a.area_gain)
-                    .then_with(|| a.slack_consumed.cmp(&b.slack_consumed))
-                    .then_with(|| a.new_root_depth.cmp(&b.new_root_depth))
-                    .then_with(|| b.mffc_nodes.len().cmp(&a.mffc_nodes.len()))
-                    .then_with(|| a.replacement.root.id.cmp(&b.replacement.root.id))
-                    .then_with(|| a.replacement.leaf_ops.cmp(&b.replacement.leaf_ops))
-            });
-
-            for cand in root_candidates {
+            for cand in root_result.candidates {
+                if !cand.preserves_protected_nodes(&structural_hash_state, &protected) {
+                    continue;
+                }
                 debug_assert_eq!(
                     structural_hash_state.live_and_count(),
                     cand.before_live_and_count,
@@ -2383,7 +2457,11 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                 for leaf in &cand.replacement.leaf_ops {
                     invalidated_nodes.insert(leaf.node);
                 }
-                invalidated_nodes.extend(cand.mffc_nodes.iter().copied());
+                cand.mffc.extend_invalidation(
+                    &mut invalidated_nodes,
+                    &structural_hash_state,
+                    &cand.replacement,
+                );
                 let replacement = cand.replacement.clone();
                 let materialized =
                     materialize_replacement(&mut structural_hash_state, &replacement)
@@ -2424,6 +2502,11 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
                         after_output_node_depth <= cur_output_node_depth,
                         "cut-db large-cone rewrite unexpectedly increased live output depth from {cur_output_node_depth} to {after_output_node_depth}"
                     );
+                }
+                if let Some(cuts) = &mut cuts {
+                    // Rewired users, including cascading strash merges, belong
+                    // to the old fanout cone. Invalidate before the next query.
+                    cuts.invalidate(invalidated_nodes.iter().chain(new_nodes_and_fanouts.iter()));
                 }
                 accepted_count += 1;
 
@@ -2502,7 +2585,7 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
             rebuild_ms,
             area_candidate_count,
             candidates_considered,
-            candidate_evals,
+            candidate_stats.sop_variants_sum,
             accepted_count,
             live_and_count,
             after_live_and_count,
@@ -2552,8 +2635,9 @@ fn rewrite_gatefn_large_cone_refactor(g: &GateFn, opts: RewriteOptions) -> GateF
     cur
 }
 
-/// Performs iterative depth and area rewriting with small cuts before large
-/// cones.
+/// Run the enabled depth rewrites, then recover area. In the large-cone area
+/// phase the top-down search runs first. The bottom-up search sees that
+/// rewritten graph and can find different cuts by combining fanin boundaries.
 pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) -> GateFn {
     let cleaned_input = dce(g);
     let depth_rewritten = if opts.mode.enables_depth_rewrite() {
@@ -2570,7 +2654,13 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         depth_rewritten
     };
     let area_rewritten = rewrite_gatefn_area_with_cut_db(&large_depth_rewritten, db, opts);
-    rewrite_gatefn_large_cone_refactor(&area_rewritten, opts)
+    let large_area_rewritten =
+        rewrite_gatefn_large_cone_refactor(&area_rewritten, opts, LargeConeSearch::TopDown);
+    // With just the unit cut, the bottom-up phase cannot look through a gate.
+    if !opts.enable_large_cone_bottom_up_rewrite || opts.max_cuts_per_node == 1 {
+        return large_area_rewritten;
+    }
+    rewrite_gatefn_large_cone_refactor(&large_area_rewritten, opts, LargeConeSearch::EffectiveCuts)
 }
 
 #[cfg(test)]
@@ -2594,6 +2684,51 @@ mod tests {
             .keys()
             .filter(|node| matches!(g.gates[node.id], AigNode::And2 { .. }))
             .count()
+    }
+
+    #[test]
+    fn deep_mffc_members_match_output_reachability() {
+        let mut gb = GateBuilder::new("shared_diamonds".into(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".into(), 1).get_lsb(0);
+        let b = *gb.add_input("b".into(), 1).get_lsb(0);
+        let mut root = a;
+        let mut stages = Vec::new();
+        for _ in 0..256 {
+            let left = gb.add_and_binary(root, b);
+            let right = gb.add_and_binary(root.negate(), a);
+            let join = gb.add_and_binary(left, right.negate());
+            root = gb.add_and_binary(join, join);
+            stages.push(root);
+        }
+        gb.add_output(
+            "out".into(),
+            crate::aig::AigBitVector::from_lsb_is_index_0(&[stages[31], root, root.negate()]),
+        );
+        let state = DynamicStructuralHash::new(gb.build()).unwrap();
+        let graph = state.gate_fn();
+        for root in [stages[15], stages[127], stages[255]] {
+            for leaves in [&[][..], &[a, b], &[stages[7], stages[63]]] {
+                // Make the cut leaves observable and disconnect the root's
+                // fanins. The remaining reachable ANDs are precisely those
+                // outside its MFFC.
+                let mut trial = graph.clone();
+                trial.gates[root.node.id] = graph.gates[0].clone();
+                trial.outputs.push(crate::aig::gate::Output {
+                    name: "leaves".into(),
+                    bit_vector: crate::aig::AigBitVector::from_lsb_is_index_0(leaves),
+                });
+                let reached = get_id_to_use_count(&trial);
+                let expected = state
+                    .live_and_nodes()
+                    .into_iter()
+                    .filter(|node| *node == root.node || !reached.contains_key(node))
+                    .collect();
+                assert_eq!(
+                    collect_mffc_nodes_under_cut(&state, root.node, leaves),
+                    expected
+                );
+            }
+        }
     }
 
     fn make_balanced_and4_frag() -> GateFnFragment {
@@ -3047,6 +3182,7 @@ mod tests {
                 verify_delay_costing: true,
                 ..RewriteOptions::default()
             },
+            LargeConeSearch::TopDown,
         );
 
         let after_counts = get_id_to_use_count(&rewritten);
@@ -3074,6 +3210,84 @@ mod tests {
                 "assignment={:05b}",
                 assignment
             );
+        }
+    }
+
+    #[test]
+    fn effective_cut_can_span_a_deep_narrow_interior() {
+        let mut gb = GateBuilder::new("deep_effective_cut".into(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".into(), 1).get_lsb(0);
+        let b = *gb.add_input("b".into(), 1).get_lsb(0);
+        let mut root = a;
+        let mut outputs = Vec::new();
+        for i in 0..20_000 {
+            root = gb.add_and_binary(root, b);
+            outputs.push(root);
+            if i + 1 < 20_000 {
+                // Only the final root is eligible. Pin its ancestors so the
+                // test exercises a long cut with a one-gate removable cone.
+                gb.add_tag(root.node, "pin".into());
+            }
+        }
+        gb.add_output(
+            "chain".into(),
+            crate::aig::AigBitVector::from_lsb_is_index_0(&outputs),
+        );
+        let original = gb.build();
+        assert_eq!(and_node_count(&original), 20_000);
+        let rewritten = rewrite_gatefn_large_cone_refactor(
+            &original,
+            RewriteOptions {
+                max_iterations: 1,
+                ..RewriteOptions::default()
+            },
+            LargeConeSearch::EffectiveCuts,
+        );
+        assert_eq!(and_node_count(&rewritten), 19_999);
+    }
+
+    #[test]
+    fn effective_cuts_respect_tagged_roots_and_the_cut_budget() {
+        for (tagged, max_cuts_per_node, expected_ands) in
+            [(false, 1, 3), (false, 64, 2), (false, 0, 2), (true, 64, 3)]
+        {
+            let mut gb =
+                GateBuilder::new("effective_cut".to_string(), GateBuilderOptions::no_opt());
+            let a = *gb.add_input("a".to_string(), 1).get_lsb(0);
+            let b = *gb.add_input("b".to_string(), 1).get_lsb(0);
+            let c = *gb.add_input("c".to_string(), 1).get_lsb(0);
+            let ab = gb.add_and_binary(a, b);
+            let ac = gb.add_and_binary(a, c);
+            let root = gb.add_and_binary(ab, ac);
+            if tagged {
+                gb.add_tag(root.node, "keep".to_string());
+            }
+            gb.add_output("out".to_string(), root.into());
+            let g = gb.build();
+            let rewritten = rewrite_gatefn_large_cone_refactor(
+                &g,
+                RewriteOptions {
+                    max_cuts_per_node,
+                    ..RewriteOptions::default()
+                },
+                LargeConeSearch::EffectiveCuts,
+            );
+            assert_eq!(and_node_count(&rewritten), expected_ands);
+            if tagged {
+                let output = rewritten.outputs[0].bit_vector.get_lsb(0);
+                assert!(
+                    rewritten.gates[output.node.id]
+                        .get_tags()
+                        .is_some_and(|tags| tags.iter().any(|tag| tag == "keep"))
+                );
+            }
+            for bits in 0..8 {
+                let inputs = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0];
+                assert_eq!(
+                    eval_single_output_bit(&rewritten, &inputs),
+                    inputs.into_iter().all(|v| v)
+                );
+            }
         }
     }
 
@@ -3124,5 +3338,62 @@ mod tests {
                 assignment
             );
         }
+    }
+
+    #[test]
+    fn deferred_winner_collects_sorted_members_before_rewiring() {
+        let mut g = GateBuilder::new("deferred_mffc".into(), GateBuilderOptions::no_opt());
+        let a = *g.add_input("a".into(), 1).get_lsb(0);
+        let b = *g.add_input("b".into(), 1).get_lsb(0);
+        let shared = g.add_and_binary(a, b);
+        let x = g.add_and_binary(shared, shared);
+        let y = g.add_and_binary(x, x);
+        let root = g.add_and_binary(y, y);
+        g.add_output(
+            "keep_shared".into(),
+            crate::aig::AigBitVector::from_bit(shared),
+        );
+        g.add_output(
+            "out".into(),
+            crate::aig::AigBitVector::from_bit(root.negate()),
+        );
+        let mut state = DynamicStructuralHash::new(g.build()).unwrap();
+
+        let depths = DynamicDepthState::new(&state).unwrap();
+        let built = construct_large_cone_candidate_replacements_for_root(
+            root.node,
+            &state,
+            depths.forward_depths(),
+            Some(&mut large_cone::EffectiveCuts::default()),
+            &mut large_cone::CutEvaluator::default(),
+            &mut LargeConeCandidateStats::default(),
+            &mut SopMemo::default(),
+        );
+        let candidate = built
+            .candidates
+            .iter()
+            .find(|candidate| candidate.replacement.leaf_ops == [a, b])
+            .expect("the primary input cut factors to the shared AND")
+            .clone();
+        assert!(matches!(candidate.mffc, CutMffc::Count(3)));
+
+        let repl = &candidate.replacement;
+        let members = collect_mffc_nodes_under_cut(&state, repl.root, &repl.leaf_ops);
+        assert_eq!(members, BTreeSet::from([x.node, y.node, root.node]));
+        let invalidation = |mffc: &CutMffc| {
+            let mut invalidated = DenseAigRefSet::default();
+            invalidated.insert(root.node);
+            mffc.extend_invalidation(&mut invalidated, &state, repl);
+            invalidated
+        };
+        let deferred = invalidation(&candidate.mffc);
+        let eager = invalidation(&CutMffc::Members(members));
+        assert_eq!(deferred.as_slice(), eager.as_slice());
+        assert_eq!(deferred.as_slice(), &[root.node, x.node, y.node]);
+
+        let applied = materialize_replacement(&mut state, repl).unwrap().unwrap();
+        assert_eq!(applied.replacement_op, shared);
+        assert!(deferred.iter().all(|node| !state.is_live(node)));
+        assert!(state.is_live(shared.node));
     }
 }

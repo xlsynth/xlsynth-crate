@@ -108,6 +108,10 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     graph_logical_effort_beta2: f64,
 
+    /// Run bottom-up area recovery using cuts ranked by effective input count.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    cut_db_enable_large_cone_bottom_up_rewrite: bool,
+
     /// Cut-db rewrite mode: delay, balanced, or area.
     #[arg(
         long = "cut-db-rewrite-mode",
@@ -167,6 +171,7 @@ fn main() {
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
         cut_db_enable_large_cone_rewrite: true,
+        cut_db_enable_large_cone_bottom_up_rewrite: args.cut_db_enable_large_cone_bottom_up_rewrite,
         cut_db_rewrite_mode,
         prepared_ir_out: None,
     };

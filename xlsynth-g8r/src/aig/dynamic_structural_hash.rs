@@ -4,11 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct LocalAndKey {
     lhs: AigOperand,
     rhs: AigOperand,
@@ -25,6 +26,21 @@ impl LocalAndKey {
 }
 
 type LocalAndBucket = SmallVec<[AigRef; 2]>;
+
+/// Finds a physical AND by its signed input pair. The order in each duplicate
+/// bucket determines which actual gate is reused when several gates match.
+#[derive(Clone, Default)]
+struct LocalAndIndex {
+    buckets: FxHashMap<LocalAndKey, LocalAndBucket>,
+}
+
+impl std::fmt::Debug for LocalAndIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep diagnostics in key order without ordering hot lookups.
+        self.buckets.iter().collect::<BTreeMap<_, _>>().fmt(f)
+    }
+}
+
 const FANOUT_INLINE_CAPACITY: usize = 4;
 
 type FanoutSmallVec = SmallVec<[AigRef; FANOUT_INLINE_CAPACITY]>;
@@ -123,7 +139,7 @@ pub struct DynamicStructuralHash {
     fanouts: Vec<FanoutBucket>,
     output_uses: Vec<usize>,
     use_counts: Vec<usize>,
-    by_key: BTreeMap<LocalAndKey, LocalAndBucket>,
+    by_key: LocalAndIndex,
     live_and_count: usize,
 }
 
@@ -199,6 +215,11 @@ impl DynamicStructuralHash {
     /// Returns the number of active AND nodes.
     pub fn live_and_count(&self) -> usize {
         self.live_and_count
+    }
+
+    /// Whether each live signed AND operand pair names just one physical gate.
+    pub(crate) fn has_unique_and_keys(&self) -> bool {
+        self.by_key.buckets.len() == self.live_and_count
     }
 
     /// Returns the active use count of `node`, including output bits and fanin
@@ -597,7 +618,7 @@ impl DynamicStructuralHash {
     where
         F: FnMut(AigRef) -> bool,
     {
-        self.by_key.get(&key).and_then(|nodes| {
+        self.by_key.buckets.get(&key).and_then(|nodes| {
             nodes
                 .iter()
                 .copied()
@@ -636,8 +657,13 @@ impl DynamicStructuralHash {
             return Ok(());
         }
         let (a, b) = self.and_operands(node)?;
-        let inserted =
-            insert_bucket_node(self.by_key.entry(LocalAndKey::new(a, b)).or_default(), node);
+        let inserted = insert_bucket_node(
+            self.by_key
+                .buckets
+                .entry(LocalAndKey::new(a, b))
+                .or_default(),
+            node,
+        );
         if !inserted {
             return Err(format!("node {:?} is already in local strash table", node));
         }
@@ -650,14 +676,14 @@ impl DynamicStructuralHash {
         }
         let (a, b) = self.and_operands(node)?;
         let key = LocalAndKey::new(a, b);
-        let Some(bucket) = self.by_key.get_mut(&key) else {
+        let Some(bucket) = self.by_key.buckets.get_mut(&key) else {
             return Err(format!("local strash bucket missing for {:?}", node));
         };
         if !remove_bucket_node(bucket, node) {
             return Err(format!("local strash entry missing for {:?}", node));
         }
         if bucket.is_empty() {
-            self.by_key.remove(&key);
+            self.by_key.buckets.remove(&key);
         }
         Ok(())
     }
@@ -668,12 +694,12 @@ impl DynamicStructuralHash {
         }
         let (a, b) = self.and_operands(node)?;
         let key = LocalAndKey::new(a, b);
-        let Some(bucket) = self.by_key.get_mut(&key) else {
+        let Some(bucket) = self.by_key.buckets.get_mut(&key) else {
             return Ok(());
         };
         remove_bucket_node(bucket, node);
         if bucket.is_empty() {
-            self.by_key.remove(&key);
+            self.by_key.buckets.remove(&key);
         }
         Ok(())
     }
@@ -915,7 +941,7 @@ fn build_dynamic_structural_hash(
     let mut fanouts = vec![FanoutBucket::default(); g.gates.len()];
     let mut output_uses = vec![0usize; g.gates.len()];
     let mut use_counts = vec![0usize; g.gates.len()];
-    let mut by_key: BTreeMap<LocalAndKey, LocalAndBucket> = BTreeMap::new();
+    let mut by_key = LocalAndIndex::default();
     let mut live_and_count = 0usize;
     for (id, node) in g.gates.iter().enumerate() {
         if !live[id] {
@@ -931,7 +957,7 @@ fn build_dynamic_structural_hash(
             use_counts[b.node.id] += 1;
             live_and_count += 1;
             insert_bucket_node(
-                by_key.entry(LocalAndKey::new(*a, *b)).or_default(),
+                by_key.buckets.entry(LocalAndKey::new(*a, *b)).or_default(),
                 node_ref,
             );
         }
@@ -980,15 +1006,13 @@ fn fanout_vectors_equivalent(lhs: &[FanoutBucket], rhs: &[FanoutBucket]) -> bool
             .all(|(lhs_bucket, rhs_bucket)| lhs_bucket.contents_equal(rhs_bucket))
 }
 
-fn by_key_maps_equivalent(
-    lhs: &BTreeMap<LocalAndKey, LocalAndBucket>,
-    rhs: &BTreeMap<LocalAndKey, LocalAndBucket>,
-) -> bool {
-    if lhs.len() != rhs.len() {
+fn by_key_maps_equivalent(lhs: &LocalAndIndex, rhs: &LocalAndIndex) -> bool {
+    if lhs.buckets.len() != rhs.buckets.len() {
         return false;
     }
-    lhs.iter().all(|(key, lhs_bucket)| {
-        rhs.get(key)
+    lhs.buckets.iter().all(|(key, lhs_bucket)| {
+        rhs.buckets
+            .get(key)
             .is_some_and(|rhs_bucket| bucket_contents_equal(lhs_bucket, rhs_bucket))
     })
 }
@@ -1343,6 +1367,70 @@ mod tests {
             ab_b,
             "output should be redirected through the cascade"
         );
+        state.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn duplicate_bucket_order_selects_the_physical_output_of_a_cascade() {
+        let mut gb = GateBuilder::new("duplicate_order".to_string(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *gb.add_input("b".to_string(), 1).get_lsb(0);
+        let c = *gb.add_input("c".to_string(), 1).get_lsb(0);
+        let d = *gb.add_input("d".to_string(), 1).get_lsb(0);
+        gb.add_output("o".to_string(), AigBitVector::from_bit(d));
+        let mut state = DynamicStructuralHash::new(gb.build()).unwrap();
+
+        let not_a = a.negate();
+        let first = state.add_and(not_a, b).unwrap();
+        let second = state
+            .add_and_with_pir_node_ids_excluding(b, not_a, &[], &BTreeSet::from([first.node]))
+            .unwrap();
+        let last = state
+            .add_and_with_pir_node_ids_excluding(
+                not_a,
+                b,
+                &[],
+                &BTreeSet::from([first.node, second.node]),
+            )
+            .unwrap();
+        let via_second = state.add_and(second, d).unwrap();
+        let via_last = state.add_and(last, d).unwrap();
+        let edited = state.add_and(not_a, c).unwrap();
+        let downstream = state.add_and(edited, d).unwrap();
+        state.move_output_edge(0, 0, downstream.negate()).unwrap();
+        assert_eq!(state.lookup_and(b, not_a), Some(first));
+
+        // Removing the first entry moves the last entry into its slot.
+        state.delete_node(first.node).unwrap();
+        let mut visited = Vec::new();
+        assert_eq!(
+            state.lookup_and_excluding_predicate(b, not_a, |node| {
+                visited.push(node);
+                true
+            }),
+            None
+        );
+        assert_eq!(visited, [last.node, second.node]);
+        assert_eq!(state.lookup_and(not_a, b), Some(last));
+        assert_eq!(
+            state.lookup_and_excluding(b, not_a, &BTreeSet::from([last.node])),
+            Some(second)
+        );
+        assert_eq!(state.lookup_and(a, b), None);
+
+        // The c -> b edit merges edited into last, then downstream into
+        // via_last.
+        state.move_fanin_edge(edited.node, 1, b).unwrap();
+        assert_eq!(
+            *state.gate_fn().outputs[0].bit_vector.get_lsb(0),
+            via_last.negate()
+        );
+        for live in [second, last, via_second, via_last] {
+            assert!(state.is_live(live.node));
+        }
+        for dead in [first, edited, downstream] {
+            assert!(!state.is_live(dead.node));
+        }
         state.check_invariants().unwrap();
     }
 

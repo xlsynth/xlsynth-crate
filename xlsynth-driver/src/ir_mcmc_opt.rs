@@ -114,6 +114,10 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         options.graph_logical_effort_beta2.to_string(),
         "--cut-db-rewrite".to_string(),
         bool_arg(options.cut_db_rewrite),
+        "--cut-db-enable-large-cone-rewrite".to_string(),
+        bool_arg(options.cut_db_enable_large_cone_rewrite),
+        "--cut-db-enable-large-cone-bottom-up-rewrite".to_string(),
+        bool_arg(options.cut_db_enable_large_cone_bottom_up_rewrite),
         "--toggle-sample-count".to_string(),
         options.toggle_sample_count.to_string(),
         "--toggle-seed".to_string(),
@@ -455,5 +459,27 @@ pub fn handle_ir_mcmc_opt(matches: &ArgMatches) {
                 .join("origin-alignment")
                 .display()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn origin_alignment_forwards_the_large_cone_choices() {
+        for enabled in [false, true] {
+            let options = CanonicalG8rOptions {
+                cut_db_enable_large_cone_bottom_up_rewrite: enabled,
+                ..Default::default()
+            };
+            let args = canonical_g8r_flag_args(&options);
+            let flag = "--cut-db-enable-large-cone-bottom-up-rewrite";
+            let expected = bool_arg(enabled);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == flag && pair[1] == expected)
+            );
+        }
     }
 }

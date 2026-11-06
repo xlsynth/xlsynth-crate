@@ -9,8 +9,8 @@ sha256: "3600abeca16c279eeb14d990358edf710170cdaed1386f3a39a2ac574fbb8854"
 shift {
   require_improvement: false
   limits {
-    and_nodes_max: 250
-    graph_le_max: 88.2386727203077
+    and_nodes_max: 246
+    graph_le_max: 89.05072292701992
     depth_max: 17
   }
 }

@@ -1750,7 +1750,9 @@ struct PirMcmcArtifactRunOutput {
 const PIR_MCMC_ARTIFACT_DIR_NAME: &str = "winning-lineage";
 const PIR_MCMC_ARTIFACT_MANIFEST_FILE: &str = "manifest.json";
 const PIR_MCMC_ARTIFACT_STATES_DIR_NAME: &str = "states";
-const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 4;
+// A reader that predates bottom-up rewriting would ignore the option in
+// a v4 manifest and could report a different gate cost for the same witness.
+const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 5;
 
 /// Durable PIR MCMC artifact loaded from a run directory.
 pub struct LoadedPirMcmcArtifact {
@@ -2994,15 +2996,32 @@ pub fn read_pir_mcmc_artifact_dir(run_dir: &Path) -> Result<LoadedPirMcmcArtifac
                 manifest_path.display()
             )
         })? as u32;
-    if schema_version != PIR_MCMC_ARTIFACT_SCHEMA_VERSION {
+    if !matches!(schema_version, 4 | PIR_MCMC_ARTIFACT_SCHEMA_VERSION) {
         return Err(anyhow::anyhow!(
-            "unsupported PIR MCMC artifact schema version {}; expected {}",
+            "unsupported PIR MCMC artifact schema version {}; expected 4 or {}",
             schema_version,
             PIR_MCMC_ARTIFACT_SCHEMA_VERSION
         ));
     }
-    let manifest: PersistedPirMcmcArtifactManifest = serde_json::from_str(&manifest_text)
+    let mut manifest: PersistedPirMcmcArtifactManifest = serde_json::from_str(&manifest_text)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", manifest_path.display(), e))?;
+    if manifest_value
+        .pointer("/run_options/canonical_g8r_options/cut_db_enable_large_cone_bottom_up_rewrite")
+        .is_none()
+    {
+        if schema_version != 4 {
+            anyhow::bail!(
+                "{} is missing cut_db_enable_large_cone_bottom_up_rewrite",
+                manifest_path.display()
+            );
+        }
+        // Version 4 lineages without this setting used only the top-down
+        // search.
+        manifest
+            .run_options
+            .canonical_g8r_options
+            .cut_db_enable_large_cone_bottom_up_rewrite = false;
+    }
 
     let top_fn_name = manifest.top_fn_name.clone();
     let (package_template, origin_fn) =
