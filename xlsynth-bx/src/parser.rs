@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use crate::ast::{
     BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type, UnaryOp,
-    UsePath, WidthSliceType,
+    UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -206,6 +206,7 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
             || rest.starts_with("+:")
             || rest.starts_with("::")
             || rest.starts_with("->")
+            || (dialect == Dialect::Bx && rest.starts_with(".."))
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
         {
             i += 2;
@@ -790,18 +791,7 @@ impl<'s> Parser<'s> {
                     reset,
                 });
             } else if self.eat("let") {
-                let name = self.ident()?;
-                let ty = if self.eat(":") {
-                    Some(self.ty()?)
-                } else {
-                    None
-                };
-                self.expect("=")?;
-                statements.push(Stmt::Let {
-                    name,
-                    ty,
-                    value: self.expr()?.value,
-                });
+                statements.push(self.let_stmt()?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
                 self.pos += 1;
                 let name = self.ident()?;
@@ -866,6 +856,27 @@ impl<'s> Parser<'s> {
         })
     }
 
+    /// Parse a simple let after its keyword, retaining the initializer's
+    /// height for bindings that belong to an enclosing expression.
+    fn let_stmt(&mut self) -> Result<(Stmt, usize), String> {
+        let name = self.ident()?;
+        let ty = if self.eat(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect("=")?;
+        let value = self.expr()?;
+        Ok((
+            Stmt::Let {
+                name,
+                ty,
+                value: value.value,
+            },
+            value.height,
+        ))
+    }
+
     fn expr(&mut self) -> Result<ParsedExpr, String> {
         self.expr_at(0, true)
     }
@@ -884,6 +895,67 @@ impl<'s> Parser<'s> {
         self.expect("}")?;
         self.expect("else")?;
         self.if_tail(condition, then_value)
+    }
+
+    /// Parse the binders, range, iteration body, and initial accumulator of
+    /// a DSLX-style unrolled fold.
+    fn unroll_for(&mut self) -> Result<ParsedExpr, String> {
+        self.expect("(")?;
+        let index = self.ident()?;
+        self.expect(",")?;
+        let accumulator_offset = self.tokens[self.pos].start;
+        let accumulator = self.ident()?;
+        if index == accumulator && index != "_" {
+            return Err(diagnostic(
+                self.source,
+                accumulator_offset,
+                &format!("duplicate loop binding '{accumulator}'"),
+            ));
+        }
+        self.eat(",");
+        self.expect(")")?;
+        let annotation = if self.eat(":") {
+            self.expect("(")?;
+            let index_ty = self.ty()?;
+            self.expect(",")?;
+            let accumulator_ty = self.ty()?;
+            self.eat(",");
+            self.expect(")")?;
+            Some((index_ty, accumulator_ty))
+        } else {
+            None
+        };
+        self.expect("in")?;
+        let start = self.expr()?;
+        self.expect("..")?;
+        let limit = self.expr_at(0, false)?;
+        self.expect("{")?;
+        let mut body = Vec::new();
+        let mut height = start.height.max(limit.height);
+        while self.eat("let") {
+            let (stmt, initializer_height) = self.let_stmt()?;
+            self.expect(";")?;
+            height = height.max(initializer_height);
+            body.push(stmt);
+        }
+        let result = self.expr()?;
+        self.expect("}")?;
+        self.expect("(")?;
+        let seed = self.expr()?;
+        self.expect(")")?;
+        self.compose(
+            height.max(result.height).max(seed.height),
+            Expr::UnrollFor(Box::new(UnrollFor {
+                index,
+                accumulator,
+                annotation,
+                start: start.value,
+                limit: limit.value,
+                body,
+                result: result.value,
+                seed: seed.value,
+            })),
+        )
     }
 
     fn if_tail(
@@ -1056,6 +1128,17 @@ impl<'s> Parser<'s> {
         }
         if self.eat("if") {
             return self.if_expr();
+        }
+        if self.eat("unroll_for!") {
+            return self.unroll_for();
+        }
+        if text == "zero!" && self.peek(1) == "<" {
+            self.pos += 2;
+            let ty = self.ty()?;
+            self.expect(">")?;
+            self.expect("(")?;
+            self.expect(")")?;
+            return Ok(ParsedExpr::leaf(Expr::Zero(ty)));
         }
         if self.eat("true") || self.eat("false") {
             return Ok(ParsedExpr::leaf(Expr::Bool(text == "true")));
@@ -1503,6 +1586,101 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
         };
         assert!(
             matches!(&values[..], [Expr::Index { value, .. }] if matches!(value.as_ref(), Expr::Index { .. }))
+        );
+    }
+
+    #[test]
+    fn parses_annotated_and_nested_unrolls_with_aggregate_seeds() {
+        let module = parse_module(
+            r#"
+            block fold(clk, bounds: (u8, u8)) -> u8[2] {
+                unroll_for! (_, acc): (u8, u8[2]) in bounds.0..bounds.1 {
+                    let value: u8 = unroll_for! (i, sum) in 0..2 { sum + i }(u8:0);
+                    update(acc, u32:0, value)
+                }(zero!<u8[2]>())
+            }
+            "#,
+        )
+        .unwrap();
+        let Expr::UnrollFor(fold) = &module.blocks[0].output else {
+            panic!("expected outer fold");
+        };
+        let byte = Type::Bits {
+            signed: false,
+            width: 8,
+        };
+        let array = &module.blocks[0].result;
+        assert_eq!(fold.index, "_");
+        assert_eq!(fold.accumulator, "acc");
+        assert_eq!(fold.annotation, Some((byte.clone(), array.clone())));
+        assert!(matches!(&fold.start, Expr::Field { name, .. } if name == "0"));
+        assert!(matches!(&fold.limit, Expr::Field { name, .. } if name == "1"));
+        let [
+            Stmt::Let {
+                name,
+                ty,
+                value: Expr::UnrollFor(inner),
+            },
+        ] = &fold.body[..]
+        else {
+            panic!("expected a let initialized with the inner fold");
+        };
+        assert_eq!(name, "value");
+        assert_eq!(ty, &Some(byte));
+        assert_eq!(inner.index, "i");
+        assert_eq!(inner.accumulator, "sum");
+        assert_eq!(inner.annotation, None);
+        assert!(
+            matches!(&fold.result, Expr::Call { name, args } if name == "update" && args.len() == 3)
+        );
+        assert_eq!(fold.seed, Expr::Zero(array.clone()));
+    }
+
+    #[test]
+    fn duplicate_unroll_binders_are_invalid_even_in_a_zero_trip_body() {
+        let source = r#"block b(clk) -> u8 {
+  unroll_for! (_, _) in u32:0..u32:0 {
+    unroll_for! (i, i) in u32:0..u32:1 { u8:1 }(u8:0)
+  }(u8:0)
+}"#;
+        assert_eq!(
+            parse_module(source).unwrap_err(),
+            "3:21: duplicate loop binding 'i'"
+        );
+        assert!(parse_module(&source.replace("(i, i)", "(_, _)")).is_ok());
+    }
+
+    #[test]
+    fn rejects_malformed_folds_and_zeros() {
+        for expr in [
+            "0..2",
+            "unroll_for! (i) in 0..2 { i }(0)",
+            "unroll_for! (i, a): (u32,) in 0..2 { a }(0)",
+            "unroll_for! (i, a) in 0..=2 { a }(0)",
+            "unroll_for! (i, a) in 0 . . 2 { a }(0)",
+            "unroll_for! (i, a) in 0..2 { a := 0; a }(0)",
+            "unroll_for! (i, a) in 0..2 { reg r: u32; r }(0)",
+            "unroll_for! (i, a) in 0..2 { let x = a; }(0)",
+            "unroll_for! (i, a) in 0..2 { a }",
+            "zero!<>()",
+            "zero!<u32>",
+            "zero!<u32>(1)",
+        ] {
+            let source = format!("block b(clk) -> u32 {{ {expr} }}");
+            assert!(parse_module(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn unroll_height_includes_each_let_initializer() {
+        let source = format!(
+            "block b(clk) -> u32 {{ unroll_for! (i, a) in 0..1 {{ let x = {}i; a }}(0) }}",
+            "i + ".repeat(MAX_SYNTAX_DEPTH - 1),
+        );
+        assert!(
+            parse_module(&source)
+                .unwrap_err()
+                .contains("expression tree exceeds")
         );
     }
 

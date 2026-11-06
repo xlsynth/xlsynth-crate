@@ -53,7 +53,7 @@ impl fmt::Display for Bits {
 /// input.
 struct Generator<'a> {
     data: &'a [u8],
-    variables: Vec<(&'static str, Bits)>,
+    variables: Vec<(String, Bits)>,
     inferred_slice_width: Option<usize>,
     nodes_left: usize,
 }
@@ -109,9 +109,9 @@ impl Generator<'_> {
             let value = self.literal(ty, true);
             return format!("({ty}:{value})");
         }
-        let (name, variable_ty) = self.variables[selector % self.variables.len()];
-        if ty == variable_ty {
-            name.to_owned()
+        let (name, variable_ty) = &self.variables[selector % self.variables.len()];
+        if ty == *variable_ty {
+            name.clone()
         } else {
             format!("({name} as {ty})")
         }
@@ -120,6 +120,85 @@ impl Generator<'_> {
     fn expr(&mut self, ty: Bits, depth: u8) -> String {
         let opcode = self.byte();
         self.with_opcode(ty, depth, opcode)
+    }
+
+    /// Generate a fold over a small constant range. Its seed and body use the
+    /// surrounding value grammar, including enclosing loop variables.
+    fn fold(&mut self, ty: Bits, depth: u8, array: bool) -> String {
+        let magnitude = i16::from(self.byte() % 4);
+        let count = i16::from(self.byte() % 4);
+        let flags = self.byte();
+        let index_ty = Bits {
+            signed: flags & 0x80 != 0,
+            width: [32, 4, 16, 65][usize::from(flags >> 5) % 4],
+        };
+        let start = if index_ty.signed {
+            -magnitude
+        } else {
+            magnitude
+        };
+        let limit = if flags & 1 == 0 {
+            format!("{index_ty}:{}", start + count)
+        } else {
+            format!("({index_ty}:{start} + {index_ty}:{count})")
+        };
+        let acc_type = if array {
+            format!("{ty}[2]")
+        } else {
+            ty.to_string()
+        };
+        let annotation = if flags & 2 == 0 {
+            format!(": ({index_ty}, {acc_type})")
+        } else {
+            String::new()
+        };
+        let seed = if flags & 4 != 0 {
+            format!("zero!<{acc_type}>()")
+        } else if array {
+            format!("[{}, {}]", self.expr(ty, depth), self.expr(ty, depth))
+        } else {
+            self.expr(ty, depth)
+        };
+        // Depth decreases on recursion, giving nested loops distinct binders.
+        let idx = format!("idx_{depth}");
+        let acc = format!("acc_{depth}");
+        let locals_start = self.variables.len();
+        self.variables.push((idx.clone(), index_ty));
+        let slot = format!("({idx} as u32) % u32:2");
+        let (current, mut bindings) = if array {
+            let item = format!("item_{depth}");
+            let read = format!("let {item} = {acc}[{slot}]; ");
+            (item, read)
+        } else {
+            (acc.clone(), String::new())
+        };
+        self.variables.push((current.clone(), ty));
+        let mut term = self.expr(ty, depth);
+        if flags & 8 != 0 {
+            let local = format!("term_{depth}");
+            let hint = if flags & 16 == 0 {
+                format!(": {ty}")
+            } else {
+                String::new()
+            };
+            bindings.push_str(&format!("let {local}{hint} = {term}; "));
+            term = local;
+        }
+        let result = match self.byte() % 4 {
+            0 => term,
+            1 => format!("({current} + {term})"),
+            2 => format!("(({idx} as {ty}) - ({current} ^ {term}))"),
+            _ => format!("(({current} * {term}) - ({idx} as {ty}))"),
+        };
+        self.variables.truncate(locals_start);
+        let result = if array {
+            format!("update({acc}, {slot}, {result})")
+        } else {
+            result
+        };
+        format!(
+            "(unroll_for! ({idx}, {acc}){annotation} in {index_ty}:{start}..{limit} {{ {bindings}{result} }}({seed}))"
+        )
     }
 
     /// Produce a fixed-width slice with either a dynamic or a constant offset.
@@ -270,7 +349,7 @@ impl Generator<'_> {
                 let right = self.expr(if field == 1 { ty } else { other }, child_depth);
                 format!("({left}, {right}).{field}")
             }
-            _ => self.leaf(ty),
+            _ => self.fold(ty, child_depth, false),
         }
     }
 }
@@ -289,10 +368,10 @@ pub fn generate(data: &[u8]) -> ExpressionSample {
     let y = Bits::from_byte(generator.byte());
     let offset = Bits::unsigned(Bits::from_byte(generator.byte()).width);
     generator.variables.extend([
-        ("x", x),
-        ("y", y),
-        ("offset", offset),
-        ("flag", Bits::unsigned(1)),
+        ("x".into(), x),
+        ("y".into(), y),
+        ("offset".into(), offset),
+        ("flag".into(), Bits::unsigned(1)),
     ]);
     let params = format!("x: {x}, y: {y}, offset: {offset}, flag: bool");
 
@@ -306,10 +385,15 @@ pub fn generate(data: &[u8]) -> ExpressionSample {
         } else {
             format!("let v: {binding_ty} = {initializer}; ")
         };
-        generator.variables.push(("v", binding_ty));
+        generator.variables.push(("v".into(), binding_ty));
     }
-    let first = generator.with_opcode(result, 5, root_op);
+    let first = if shape & 7 == 5 {
+        generator.fold(result, 3, true)
+    } else {
+        generator.with_opcode(result, 5, root_op)
+    };
     let (result_type, expression) = match shape & 7 {
+        5 => (format!("{result}[2]"), first),
         6 => {
             let second_ty = Bits::from_byte(generator.byte());
             let second = generator.expr(second_ty, 4);

@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "frontend/array_update.rs"]
+mod array_update;
 #[path = "support/directed_expr_eval.rs"]
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]
 mod expr_eval;
 #[path = "frontend/imported_structs.rs"]
 mod imported_structs;
+#[path = "frontend/unroll_for.rs"]
+mod unroll_for;
 
 use std::path::Path;
 

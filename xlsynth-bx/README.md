@@ -144,6 +144,42 @@ Use the same call syntax for a BX block defined anywhere in the module. An `exte
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 
+### Replicating child blocks
+
+`unroll_for!` folds a half-open integer range at compile time. The initializer
+after the body supplies the first accumulator. Each iteration binds the current
+index and accumulator, evaluates its local lets, and supplies the body result
+to the next iteration. An empty range returns the initializer. BX must be
+able to evaluate both bounds at compile time using literals, prior constant
+lets, and its built-in value operations. The accumulator and the other values
+used in the body can depend on input ports.
+
+```text
+block delay(clk, rst, enable: bool, x: u8) -> u8 {
+    reg q: u8 = u8:0;
+    if enable { q := x; }
+    q
+}
+
+pub block delay_array(clk, rst, enables: bool[4], xs: u8[4]) -> u8[4] {
+    let outputs = unroll_for! (i, acc): (u32, u8[4]) in u32:0..u32:4 {
+        let element = delay(enables[i], xs[i]);
+        update(acc, i, element)
+    }(zero!<u8[4]>());
+    outputs
+}
+```
+
+This block elaborates four independently enabled instances named `element_0`
+through `element_3`. Nested loops append one iteration ordinal per level.
+BX disambiguates generated names that collide with other declarations.
+An unconditional let initializer or block result can elaborate children in
+its loop body. Pure loops can also appear inside other value expressions.
+`zero!<T>()` supplies an all-zero value of a concrete type and
+`update(array, index, value)` returns an array with one element replaced.
+BX bounds total unrolling work per block, accounting for nested iterations
+and materialized constant aggregates.
+
 The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separately compiled DSLX multiplier, and load enables.
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.

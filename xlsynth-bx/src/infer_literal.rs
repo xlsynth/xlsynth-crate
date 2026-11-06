@@ -19,6 +19,8 @@ struct Minimum {
     /// An inline literal takes its width from the use site. A bound value
     /// retains the width at which it was evaluated.
     has_inline_literal: bool,
+    /// An unannotated fold with an unsized seed needs a concrete use site.
+    needs_concrete_type: bool,
 }
 
 /// A path in an aggregate type. All array elements share the same type.
@@ -32,9 +34,70 @@ enum Member {
 #[derive(Default)]
 pub(crate) struct BindingWidths(BTreeMap<Vec<Member>, Type>);
 
+impl BindingWidths {
+    /// The inferred scalar type of a range element before use-site constraints.
+    pub(crate) fn scalar(ty: Type) -> Self {
+        Self(BTreeMap::from([(Vec::new(), ty)]))
+    }
+}
+
 pub(crate) type InferredBindings = BTreeMap<String, BindingWidths>;
 
+/// Minimum annotations visible to a type-inference operation. In ordinary
+/// expressions, only values local to an unrolled iteration are retyped
+/// at use sites. Type dimensions also consult preceding outer let bindings.
+#[derive(Clone, Copy)]
+pub(crate) struct WidthLookup<'a> {
+    widths: &'a InferredBindings,
+    locals: Option<&'a BTreeMap<String, crate::typed::TypedExpr>>,
+}
+
+impl<'a> WidthLookup<'a> {
+    pub(crate) fn loop_locals(
+        widths: &'a InferredBindings,
+        locals: &'a BTreeMap<String, crate::typed::TypedExpr>,
+    ) -> Self {
+        Self {
+            widths,
+            locals: Some(locals),
+        }
+    }
+
+    fn all(widths: &'a InferredBindings) -> Self {
+        Self {
+            widths,
+            locals: None,
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&BindingWidths> {
+        if self.locals.is_some_and(|locals| !locals.contains_key(name)) {
+            return None;
+        }
+        self.widths.get(name)
+    }
+
+    /// Determine whether this use selects an implicitly typed bound value.
+    pub(crate) fn is_inferred_reference(self, expr: &Expr) -> Result<bool, String> {
+        match expr {
+            Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. } => {
+                collect_projected(expr, &[], self, &mut None)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
 impl Minimum {
+    fn inferred_type(self) -> Result<Type, String> {
+        if self.needs_concrete_type {
+            return Err(
+                "unroll_for! with an implicit seed needs a concrete accumulator type".into(),
+            );
+        }
+        Ok(self.into_type())
+    }
+
     fn into_type(self) -> Type {
         Type::Bits {
             signed: self.signed,
@@ -59,6 +122,7 @@ impl Minimum {
             signed,
             has_prefix: radix != 10,
             has_inline_literal: true,
+            needs_concrete_type: false,
         })
     }
 
@@ -75,6 +139,7 @@ impl Minimum {
             // Only individual literals carry a radix prefix.
             has_prefix: false,
             has_inline_literal: self.has_inline_literal || other.has_inline_literal,
+            needs_concrete_type: self.needs_concrete_type || other.needs_concrete_type,
         }
     }
 }
@@ -98,11 +163,22 @@ pub(crate) fn has_common_bit_type(op: BinaryOp) -> bool {
 /// along a same-type edge takes precedence over minimum-width inference.
 fn collect_minimum(
     expr: &Expr,
-    bindings: Option<&InferredBindings>,
+    bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
 ) -> Result<bool, String> {
     let next = match expr {
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
+        Expr::UnrollFor(fold) if fold.annotation.is_none() => {
+            let mut seed = None;
+            if !collect_minimum(&fold.seed, None, &mut seed)? {
+                return Ok(false);
+            }
+            let Some(mut seed) = seed else {
+                return Ok(false);
+            };
+            seed.needs_concrete_type = true;
+            seed
+        }
         Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. } => {
             let Some(bindings) = bindings else {
                 return Ok(false);
@@ -151,7 +227,7 @@ fn collect_minimum(
 pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
     let mut minimum = None;
     if collect_minimum(expr, None, &mut minimum)? {
-        Ok(minimum.map(Minimum::into_type))
+        minimum.map(Minimum::inferred_type).transpose()
     } else {
         Ok(None)
     }
@@ -162,7 +238,7 @@ pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
 fn collect_projected(
     expr: &Expr,
     path: &[Member],
-    bindings: &InferredBindings,
+    bindings: WidthLookup<'_>,
     minimum: &mut Option<Minimum>,
 ) -> Result<bool, String> {
     match (expr, path.split_first()) {
@@ -179,6 +255,7 @@ fn collect_projected(
                 width,
                 has_prefix: false,
                 has_inline_literal: false,
+                needs_concrete_type: false,
             };
             *minimum = Some(match minimum.take() {
                 Some(previous) => previous.merge(next),
@@ -254,7 +331,7 @@ pub(crate) fn binding_widths(
             }
             Type::Bits { .. } | Type::Bool => {
                 let mut minimum = None;
-                if collect_projected(expr, path, bindings, &mut minimum)?
+                if collect_projected(expr, path, WidthLookup::all(bindings), &mut minimum)?
                     && let Some(minimum) = minimum
                 {
                     out.0.insert(path.clone(), minimum.into_type());
@@ -288,7 +365,7 @@ pub(crate) fn context_operands(
     width: usize,
 ) -> Result<ContextOperands, String> {
     let mut minimum = None;
-    let all_inferred = collect_minimum(expr, Some(bindings), &mut minimum)?;
+    let all_inferred = collect_minimum(expr, Some(WidthLookup::all(bindings)), &mut minimum)?;
     if let Some(minimum) = minimum {
         if minimum.signed || minimum.width > width {
             return Err(format!(
@@ -317,13 +394,17 @@ pub(crate) enum OperandHint {
 
 /// Select a type for a same-type operand pair in one walk of its unsized
 /// literals.
-pub(crate) fn operand_hint(left: &Expr, right: &Expr) -> Result<OperandHint, String> {
+pub(crate) fn operand_hint(
+    left: &Expr,
+    right: &Expr,
+    locals: Option<WidthLookup<'_>>,
+) -> Result<OperandHint, String> {
     let mut minimum = None;
-    if !collect_minimum(left, None, &mut minimum)? {
+    if !collect_minimum(left, locals, &mut minimum)? {
         return Ok(OperandHint::FromLeft);
     }
-    let hint = if collect_minimum(right, None, &mut minimum)? {
-        minimum.map(Minimum::into_type)
+    let hint = if collect_minimum(right, locals, &mut minimum)? {
+        minimum.map(Minimum::inferred_type).transpose()?
     } else {
         None
     };
@@ -362,16 +443,20 @@ pub(crate) enum ArrayElementHint {
 
 /// Whether this element's type is fully specified without any of its array
 /// siblings. In that case checking the elements in source order suffices.
-pub(crate) fn has_concrete_element_type(expr: &Expr) -> Result<bool, String> {
+pub(crate) fn has_concrete_element_type(
+    expr: &Expr,
+    locals: Option<WidthLookup<'_>>,
+) -> Result<bool, String> {
     match expr {
         Expr::If {
             then_value,
             else_value,
             ..
-        } => Ok(has_concrete_element_type(then_value)? || has_concrete_element_type(else_value)?),
+        } => Ok(has_concrete_element_type(then_value, locals)?
+            || has_concrete_element_type(else_value, locals)?),
         Expr::Tuple(fields) => {
             for field in fields {
-                if !has_concrete_element_type(field)? {
+                if !has_concrete_element_type(field, locals)? {
                     return Ok(false);
                 }
             }
@@ -379,26 +464,29 @@ pub(crate) fn has_concrete_element_type(expr: &Expr) -> Result<bool, String> {
         }
         Expr::Array(elements) => {
             for element in elements {
-                if has_concrete_element_type(element)? {
+                if has_concrete_element_type(element, locals)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        _ => Ok(minimum_type(expr)?.is_none()),
+        _ => Ok(!collect_minimum(expr, locals, &mut None)?),
     }
 }
 
 /// Merge unsized element constraints, or identify an element whose type can
 /// determine the others. A concrete aggregate can also type a literal array
 /// or tuple that precedes it.
-pub(crate) fn array_element_hint(items: &[&Expr]) -> Result<ArrayElementHint, String> {
+pub(crate) fn array_element_hint(
+    items: &[&Expr],
+    locals: Option<WidthLookup<'_>>,
+) -> Result<ArrayElementHint, String> {
     let mut minimum = None;
     let mut constructor = None;
     for (i, expr) in items.iter().enumerate() {
         if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
             constructor.get_or_insert(i);
-        } else if !collect_minimum(expr, None, &mut minimum)? {
+        } else if !collect_minimum(expr, locals, &mut minimum)? {
             return Ok(ArrayElementHint::FromElement(i));
         }
     }
@@ -408,7 +496,7 @@ pub(crate) fn array_element_hint(items: &[&Expr]) -> Result<ArrayElementHint, St
     Ok(ArrayElementHint::Minimum(
         minimum
             .ok_or("cannot infer an empty array's element type")?
-            .into_type(),
+            .inferred_type()?,
     ))
 }
 
@@ -442,7 +530,7 @@ mod tests {
         }
         for (text, width) in [("255", 9), ("0xff", 8), ("0b11111111", 8)] {
             assert_eq!(
-                operand_hint(&literal(text), &literal("-1")).unwrap(),
+                operand_hint(&literal(text), &literal("-1"), None).unwrap(),
                 OperandHint::FromRight(Some(Type::Bits {
                     signed: true,
                     width

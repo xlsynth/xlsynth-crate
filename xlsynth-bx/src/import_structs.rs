@@ -217,6 +217,10 @@ impl ImportedStructs {
         self.graph.has_module(subject)
     }
 
+    pub(crate) fn has_public_member(&self, subject: &str, member: &str) -> bool {
+        self.graph.has_public_member(subject, member)
+    }
+
     #[cfg(test)]
     pub(crate) fn type_witnesses(&self) -> usize {
         self.type_witnesses

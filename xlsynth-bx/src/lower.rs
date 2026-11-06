@@ -577,6 +577,16 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 let index = self.expr(index)?;
                 self.builder.array_index(value, index)
             }
+            TypedExprKind::ArrayUpdate {
+                array,
+                index,
+                replacement,
+            } => {
+                let array = self.expr(array)?;
+                let index = self.expr(index)?;
+                let replacement = self.expr(replacement)?;
+                self.builder.array_update(array, replacement, &[index])
+            }
             TypedExprKind::WidthSlice { value, start } => {
                 let value = self.expr(value)?;
                 let start = self.expr(start)?;

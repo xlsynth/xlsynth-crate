@@ -3,8 +3,10 @@
 mod eval;
 mod generator;
 mod module_graph;
+mod unroll_types;
 
 pub use module_graph::check_module_graph;
+pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible
 /// inputs.

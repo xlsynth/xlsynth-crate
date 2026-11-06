@@ -2,8 +2,10 @@
 
 use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, parse_module};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::ir::NodePayload;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 #[test]
 fn two_call_bindings_create_the_same_hardware_as_two_explicit_instances() {
@@ -52,6 +54,166 @@ block delay(clk, rst, x: u8, en: bool) -> u8 {
     );
     xlsynth::IrPackage::parse_ir(&actual.to_string(), None).unwrap();
     emit_system_verilog(&actual, &BlockCodegenOptions::default()).unwrap();
+}
+
+#[test]
+fn unrolled_and_explicit_delay_arrays_agree_across_cycles() {
+    let source = r#"
+pub block delay_array(clk, rst, data: u8[4], enable: bool[4]) -> u8[4] {
+    unroll_for! (i, values): (u32, u8[4]) in u32:0..u32:4 {
+        let element = delay(data[i], enable[i]);
+        update(values, i, element)
+    }(zero!<u8[4]>())
+}
+
+block explicit_array(clk, rst, data: u8[4], enable: bool[4]) -> u8[4] {
+    inst a: delay;
+    inst b: delay;
+    inst c: delay;
+    inst d: delay;
+    a.data := data[0]; a.enable := enable[0];
+    b.data := data[1]; b.enable := enable[1];
+    c.data := data[2]; c.enable := enable[2];
+    d.data := data[3]; d.enable := enable[3];
+    [a.out, b.out, c.out, d.out]
+}
+block delay(clk, rst, data: u8, enable: bool) -> u8 {
+    reg saved: u8 = 0;
+    if enable { saved := data; }
+    saved
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let parent = package.get_block("delay_array").unwrap();
+    assert_eq!(
+        parent
+            .instantiations
+            .iter()
+            .map(|inst| inst.name.as_str())
+            .collect::<Vec<_>>(),
+        ["element_0", "element_1", "element_2", "element_3"]
+    );
+    let [unrolled, explicit] = ["delay_array", "explicit_array"].map(|top| {
+        // Vastly simulates one sequential module, so inline the clocked
+        // children.
+        let mut flat = package.clone();
+        flat.set_top_block(top).unwrap();
+        inline_all_blocks_in_package(&mut flat).unwrap();
+        let rtl = emit_system_verilog(&flat, &BlockCodegenOptions::default()).unwrap();
+        let module = compile_pipeline_module(&rtl.system_verilog).unwrap();
+        let mut runner = FixtureRunner::new(&module).unwrap();
+        let ports = runner.port_bindings();
+        let data = ports.input("data").unwrap();
+        let enable = ports.input("enable").unwrap();
+        let rst = ports.input("rst").unwrap();
+        [
+            (0x4433_2211, 0b1111, 1),
+            (0x4433_2211, 0b1111, 0),
+            (0x8877_6655, 0b0101, 0),
+            (0xccbb_aa99, 0b1010, 0),
+            (0xffff_ffff, 0b0000, 0),
+            (0x1234_5678, 0b1111, 1),
+            (0xefcd_ab89, 0b0010, 0),
+        ]
+        .map(|(input, enables, reset)| {
+            let edge = runner
+                .step_cycle_with_drive(&mut [], |drive| {
+                    drive.set_u64(&data, input)?;
+                    drive.set_u64(&enable, enables)?;
+                    drive.set_u64(&rst, reset)
+                })
+                .unwrap();
+            edge.outputs["out"]
+                .to_u64_if_known()
+                .expect("known output after reset")
+        })
+    });
+    assert_eq!(unrolled, explicit);
+    assert_eq!(
+        explicit,
+        [
+            0,
+            0x4433_2211,
+            0x4477_2255,
+            0xcc77_aa55,
+            0xcc77_aa55,
+            0,
+            0x0000_ab00
+        ]
+    );
+}
+
+#[test]
+fn nested_unroll_instance_names_avoid_outer_bindings_and_skip_empty_ranges() {
+    let source = r#"
+pub block parent(clk, element_1_0: u8) -> u8 {
+    let result = unroll_for! (_, a) in u32:2..u32:4 {
+        unroll_for! (_, b) in u32:5..u32:7 {
+            let element = echo(b);
+            element
+        }(a)
+    }(element_1_0);
+    let element_0_0 = echo(result);
+    unroll_for! (_, a) in u32:3..u32:3 {
+        let skipped = echo(a);
+        skipped
+    }(element_0_0)
+}
+block echo(clk, x: u8) -> u8 { x }
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let parent = package.get_block("parent").unwrap();
+    assert_eq!(
+        parent
+            .instantiations
+            .iter()
+            .map(|inst| inst.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "element_0_0_1",
+            "element_0_1",
+            "element_1_0_1",
+            "element_1_1",
+            "element_0_0"
+        ]
+    );
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+}
+
+#[test]
+fn unrolled_block_calls_reject_conditional_hardware_and_cycles() {
+    for (body, reason) in [
+        (
+            r#"if enable {
+            unroll_for! (_, a) in u32:0..u32:1 { let element = echo(a); element }(x)
+        } else { x }"#,
+            "unconditional",
+        ),
+        (
+            r#"unroll_for! (_, a) in u32:0..u32:1 {
+            let element = parent(a, enable);
+            element
+        }(x)"#,
+            "recursive block dependency",
+        ),
+        (
+            r#"inst loopback: echo;
+        let result = unroll_for! (_, a) in u32:0..u32:1 {
+            let element = echo(a);
+            element
+        }(loopback.out);
+        loopback.x := result;
+        result"#,
+            "combinational cycle",
+        ),
+    ] {
+        let source = format!(
+            "pub block parent(clk, x: u8, enable: bool) -> u8 {{ {body} }}\nblock echo(clk, x: u8) -> u8 {{ x }}"
+        );
+        let error =
+            compile(&source, empty_package("design"), ResetBehavior::default()).unwrap_err();
+        assert!(error.contains(reason), "{body}: {error}");
+    }
 }
 
 #[test]

@@ -79,6 +79,9 @@ their runtime prerequisites.
 
 Generates typed expressions in the common BX and DSLX syntax, including
 arithmetic, shifts, casts, packed slices, conditionals, arrays, and tuples.
+It also generates `unroll_for!` folds with constant ranges, optional binder
+annotations, loop-local lets, and scalar or array accumulators. Seeds can use
+the block inputs or `zero!`, and array folds read and update successive values.
 Each expression becomes both a combinational BX block and a DSLX function.
 The target evaluates the lowered BX block with PIR and the compiled DSLX
 function with the native XLS IR interpreter on four shared argument vectors.
@@ -105,6 +108,16 @@ BX_DSLX_IR_CONVERTER=/path/to/xls/bazel-bin/xls/dslx/ir_convert/ir_converter_mai
 DSLX_STDLIB_PATH=/path/to/xls/xls/dslx/stdlib \
 cargo test -p xlsynth-bx --test frontend packed_slice
 ```
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs
+
+Compares the inferred type of an unannotated BX binding to native DSLX
+constant metadata for scalar and array folds, including signedness and widths
+above 64. Separate rejection cases vary the range, binder annotation and body
+result to detect acceptance of runtime bounds, reversed ranges, or incompatible
+types.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_unroll_types --sanitizer none`.
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
