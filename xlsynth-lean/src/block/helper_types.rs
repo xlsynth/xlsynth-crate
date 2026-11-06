@@ -183,12 +183,18 @@ impl Catalogue<'_> {
     /// Resolve each reference in the declaring module's type environment.
     fn source_type(
         &mut self,
-        annotation: &dslx::TypeAnnotation,
+        annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> Result<SourceType> {
-        let definition = annotation
-            .to_type_ref_type_annotation()
-            .map(|reference| reference.get_type_ref().get_type_definition());
+        let reference = annotation.and_then(dslx::TypeAnnotation::to_type_ref_type_annotation);
+        let definition = reference
+            .as_ref()
+            .map(|r| r.get_type_ref().get_type_definition());
+        let record = ty
+            .is_struct()
+            .then(|| ty.get_struct_def())
+            .transpose()?
+            .filter(|definition| definition.is_parametric());
         if let Some(external) = definition
             .as_ref()
             .and_then(dslx::TypeDefinition::to_colon_ref)
@@ -215,7 +221,15 @@ impl Catalogue<'_> {
                     qualifier,
                 },
             );
-            let result = self.nominal_reference(&external.get_attr());
+            let local = external.get_attr();
+            let result = if let Some(record) = record.filter(|r| {
+                r.get_identifier() == local
+                    && r.get_owner_module().get_name() == self.context.qualifier
+            }) {
+                self.concrete_record(&record, ty)
+            } else {
+                self.nominal_reference(&local)
+            };
             self.context = previous;
             result
         } else if let Some(alias) = definition
@@ -224,32 +238,37 @@ impl Catalogue<'_> {
         {
             let name = alias.get_identifier();
             self.nominal_reference(&name)
-        } else if let Some(elements) = annotation.tuple_members() {
+        } else if let Some(elements) = annotation.and_then(dslx::TypeAnnotation::tuple_members) {
+            let concrete = ty
+                .get_tuple_members()
+                .context("expected checked tuple type")?;
+            ensure!(elements.len() == concrete.len(), "tuple arity mismatch");
             let members = elements
                 .iter()
+                .zip(&concrete)
                 .enumerate()
-                .map(|(index, element)| {
-                    self.annotation_type(element)
+                .map(|(index, (element, checked))| {
+                    self.source_type(Some(element), checked)
                         .with_context(|| format!("tuple member {index}"))
                 })
                 .collect::<Result<_>>()?;
             Ok(SourceType::Tuple { members })
-        } else if ty.is_enum() {
-            let name = ty
-                .get_enum_def()
-                .context("resolving enum declaration")?
-                .get_identifier();
-            self.nominal_reference(&name)
-        } else if ty.is_struct() {
-            let definition = ty
-                .get_struct_def()
-                .context("resolving struct declaration")?;
-            let name = definition.get_identifier();
-            ensure!(
-                !definition.is_parametric(),
-                "parametric source struct {name} is unsupported; use a concrete non-parametric declaration"
-            );
-            self.nominal_reference(&name)
+        } else if let Some(elements) = ty.get_tuple_members() {
+            // A specialized type parameter has checked members but no written
+            // tuple.
+            let members = elements
+                .iter()
+                .map(|member| self.source_type(None, member))
+                .collect::<Result<_>>()?;
+            Ok(SourceType::Tuple { members })
+        } else if ty.is_enum() || ty.is_struct() {
+            if let Some(record) = record {
+                self.concrete_record(&record, ty)
+            } else if ty.is_struct() {
+                self.nominal_reference(&ty.get_struct_def()?.get_identifier())
+            } else {
+                self.nominal_reference(&ty.get_enum_def()?.get_identifier())
+            }
         } else if let Some((signed, width)) = ty.is_bits_like() {
             ensure!(
                 !signed,
@@ -273,13 +292,59 @@ impl Catalogue<'_> {
         }
     }
 
+    /// A specialization reuses the declared field names with their checked
+    /// concrete types. Two uses can spell the same specialization differently.
+    fn concrete_record(&mut self, record: &dslx::StructDef, ty: &dslx::Type) -> Result<SourceType> {
+        let base = self.qualified_name(&record.get_identifier());
+        // A binding can distinguish two DSLX types without changing any field.
+        let bindings: BTreeMap<_, _> = ty
+            .get_struct_parametric_env()
+            .with_context(|| format!("getting checked parametric bindings for {base}"))?
+            .bindings()
+            .into_iter()
+            .collect();
+        let arguments = record
+            .parametric_bindings()
+            .iter()
+            .map(|binding| {
+                let id = binding.get_identifier();
+                let value = bindings
+                    .get(&id)
+                    .with_context(|| format!("missing checked binding {id} for {base}"))?;
+                value
+                    .convert_to_ir()?
+                    .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::UnsignedDecimal)
+                    .with_context(|| format!("rendering checked binding {id} for {base}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let name = format!("{base}<{}>", arguments.join(","));
+        if self.declarations.iter().any(|decl| decl.name() == name) {
+            return Ok(SourceType::Struct { name });
+        }
+        let fields = (0..record.get_member_count())
+            .map(|i| {
+                let member = record.get_member(i);
+                Ok(StructField {
+                    name: member.get_name(),
+                    source_type: self
+                        .source_type(Some(&member.get_type()), &ty.get_struct_member_type(i))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.add(TypeDecl::Struct {
+            name: name.clone(),
+            fields,
+        })?;
+        Ok(SourceType::Struct { name })
+    }
+
     fn annotation_type(&mut self, annotation: &dslx::TypeAnnotation) -> Result<SourceType> {
         let ty = self
             .context
             .type_info
             .get_type_for_type_annotation(annotation)
             .context("source annotation has no concrete type")?;
-        self.source_type(annotation, &ty)
+        self.source_type(Some(annotation), &ty)
     }
 }
 
@@ -351,7 +416,7 @@ impl BridgeBuilder for Catalogue<'_> {
                     Ok(StructField {
                         name: member.name.clone(),
                         source_type: self
-                            .source_type(&member.type_annotation, &member.concrete_type)
+                            .source_type(Some(&member.type_annotation), &member.concrete_type)
                             .with_context(|| format!("source field {name}.{}", member.name))?,
                     })
                 })
@@ -372,7 +437,7 @@ impl BridgeBuilder for Catalogue<'_> {
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError> {
         let result = self
-            .source_type(annotation, ty)
+            .source_type(Some(annotation), ty)
             .with_context(|| format!("source alias {name}"))
             .and_then(|target| {
                 self.add(TypeDecl::Alias {
@@ -405,7 +470,11 @@ impl BridgeBuilder for Catalogue<'_> {
         return_annotation: Option<&dslx::TypeAnnotation>,
         _return_type: Option<&dslx::Type>,
     ) -> Result<(), XlsynthError> {
-        if let Ok(signature) = self.helper_signature(name, params, return_annotation) {
+        if let Ok(signature) = self.helper_signature(
+            name,
+            params.iter().map(|p| (p.name.as_str(), &p.type_annotation)),
+            return_annotation,
+        ) {
             // Key by the IR symbol so a function of the same name in an import
             // cannot acquire a local function's source types.
             let symbol = xlsynth::mangle_dslx_name(&self.context.module.get_name(), name)?;
@@ -477,21 +546,102 @@ impl Catalogue<'_> {
                         qualifier: name,
                     }
                 };
+                if callee.get_parametric_binding_count() != 0 {
+                    self.collect_specializations(&owner.type_info, &callee_owner, &callee)?;
+                }
                 pending.insert(key, (callee_owner, callee));
             }
         }
         self.context = root;
         Ok(())
     }
-    fn helper_signature(
+
+    /// Instantiations belong to the module containing the invocation. The
+    /// derived type information, on the other hand, describes the callee.
+    fn collect_specializations(
+        &mut self,
+        invoker: &dslx::TypeInfo,
+        owner: &ModuleContext,
+        function: &dslx::Function,
+    ) -> Result<()> {
+        let instances = invoker
+            .get_unique_invocation_callee_data(function)
+            .context("reading checked DSLX invocations")?;
+        let bindings = function.parametric_bindings();
+        let params: Vec<_> = (0..function.get_param_count())
+            .map(|i| {
+                let param = function.get_param(i);
+                (param.get_name(), param.get_type_annotation())
+            })
+            .collect();
+        let returns = function.get_return_type();
+        let keys: Vec<_> = bindings.iter().map(|b| b.get_identifier()).collect();
+        let free_keys: Vec<_> = bindings
+            .iter()
+            .zip(&keys)
+            .filter(|(binding, _)| binding.get_expr().is_none())
+            .map(|(_, key)| key.as_str())
+            .collect();
+        for index in 0..instances.len() {
+            let instance = instances.get(index).context("missing checked invocation")?;
+            let env = instance
+                .callee_bindings()
+                .context("missing callee bindings")?;
+            let symbol = xlsynth::mangle_dslx_name_with_env(
+                &owner.module.get_name(),
+                &function.get_identifier(),
+                xlsynth::DslxCallingConvention::Typical,
+                &free_keys,
+                Some(&env),
+                None,
+            )?;
+            if self.helpers.contains_key(&symbol) || !self.reachable.contains(symbol.as_str()) {
+                continue;
+            }
+            let type_info = instance
+                .derived_type_info()
+                .context("missing specialized callee type information")?;
+            self.context = ModuleContext {
+                type_info,
+                ..owner.clone()
+            };
+            let values: BTreeMap<_, _> = env.bindings().into_iter().collect();
+            let arguments = keys
+                .iter()
+                .map(|name| {
+                    let value = values
+                        .get(name)
+                        .with_context(|| format!("missing binding for {name}"))?;
+                    // Type arguments have DSLX spellings but no IR value.
+                    Ok(match value.convert_to_ir() {
+                        Ok(bits) => bits.to_string_fmt_no_prefix(
+                            xlsynth::ir_value::IrFormatPreference::UnsignedDecimal,
+                        )?,
+                        Err(_) => value.to_text().replace(", ", ","),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let name = format!("{}<{}>", function.get_identifier(), arguments.join(","));
+            // As with ordinary helpers, an unrepresentable source type can
+            // still execute through the raw IR signature.
+            if let Ok(signature) = self.helper_signature(
+                &name,
+                params.iter().map(|(name, ty)| (name.as_str(), ty)),
+                returns.as_ref(),
+            ) {
+                self.helpers.insert(symbol, signature);
+            }
+        }
+        Ok(())
+    }
+    fn helper_signature<'a>(
         &mut self,
         name: &str,
-        params: &[FunctionParamData],
+        params: impl Iterator<Item = (&'a str, &'a dslx::TypeAnnotation)>,
         return_annotation: Option<&dslx::TypeAnnotation>,
     ) -> Result<HelperSignature> {
         let params = params
-            .iter()
-            .map(|p| Ok((p.name.clone(), self.annotation_type(&p.type_annotation)?)))
+            .map(|(name, ty)| Ok((name.to_owned(), self.annotation_type(ty)?)))
             .collect::<Result<_>>()?;
         let result = match return_annotation {
             Some(annotation) => self.annotation_type(annotation)?,

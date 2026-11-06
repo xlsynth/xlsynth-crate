@@ -1220,6 +1220,7 @@ unsafe extern "C" {
     ) -> *mut CDslxExpr;
 
     // -- StructDef
+    pub fn xls_dslx_struct_def_get_module(def: *mut CDslxStructDef) -> *mut CDslxModule;
 
     pub fn xls_dslx_struct_def_get_identifier(
         struct_def: *const CDslxStructDef,
@@ -1413,6 +1414,12 @@ unsafe extern "C" {
     pub fn xls_dslx_type_is_enum(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_struct(type_: *const CDslxType) -> bool;
     pub fn xls_dslx_type_is_array(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_is_tuple(type_: *const CDslxType) -> bool;
+    pub fn xls_dslx_type_tuple_get_member_count(type_: *const CDslxType) -> i64;
+    pub fn xls_dslx_type_tuple_get_member_type(
+        type_: *const CDslxType,
+        index: i64,
+    ) -> *const CDslxType;
 
     pub fn xls_dslx_type_dim_is_parametric(dim: *const CDslxTypeDim) -> bool;
     pub fn xls_dslx_type_dim_get_as_bool(
@@ -1430,6 +1437,11 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
 
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+    pub fn xls_dslx_type_get_struct_parametric_env(
+        ty: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        env_out: *mut *mut CDslxParametricEnv,
+    ) -> bool;
     pub fn xls_dslx_type_struct_get_member_count(ty: *const CDslxType) -> i64;
     pub fn xls_dslx_type_struct_get_member_type(ty: *const CDslxType, index: i64)
     -> *mut CDslxType;
