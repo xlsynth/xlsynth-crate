@@ -1361,8 +1361,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             && (self.decls.functions.contains_key("zero!")
                                 || self.resolver.lookup("zero!")?.is_some())
                     }
-                    // BX blocks have historically used the intrinsic even when
-                    // an import has this name. Only a new local definition overrides it.
+                    // Only a local function can override zero! in a BX block.
                     BodyKind::Block { .. } => {
                         self.decls.functions.get("zero!").is_some_and(|f| f.local)
                     }
