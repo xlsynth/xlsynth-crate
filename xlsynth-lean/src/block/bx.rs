@@ -144,6 +144,7 @@ impl CompiledBx {
                 inputs,
                 registers,
                 outputs,
+                helpers: Default::default(),
             },
         ))
     }

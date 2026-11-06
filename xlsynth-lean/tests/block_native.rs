@@ -201,6 +201,57 @@ top block flags(en: bits[1], BitVec: bits[1], other: bits[1]) {
     );
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn prelinked_helpers_drive_a_bx_register() {
+    let source = r#"
+fn sum_fields(left: u8, right: u8) -> u8 { left + right }
+fn advance(left: u8, right: u8, previous: u8) -> u8 { sum_fields(left, right) + previous }
+"#;
+    let ir =
+        xlsynth::convert_dslx_to_ir(source, Path::new("machine.x"), &Default::default()).unwrap();
+    let package = Parser::new(&ir.ir.to_string())
+        .parse_and_validate_package()
+        .unwrap();
+    let bx = r#"
+extern fn machine::advance(left: u8, right: u8, previous: u8) -> u8;
+block pipeline(clk, rst, left: u8, right: u8) -> u8 {
+    reg count: u8 = 0;
+    count := machine::advance(left, right, count);
+    count
+}
+"#;
+    let mut bundle =
+        xlsynth_lean::block::compile_bx(bx, package, Default::default(), &Default::default())
+            .unwrap()
+            .emit_readable(None)
+            .unwrap();
+    let model = &bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "Generated.lean")
+        .unwrap()
+        .1;
+    for helper in ["__machine__sum_fields", "__machine__advance"] {
+        assert!(
+            model.contains(&format!("_root_.XlsBlock.Helpers.«{helper}»")),
+            "{model}"
+        );
+    }
+    bundle.files.push((
+        "CheckCalls.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def stimulus : Input := { rst := false, left := 13, right := 5 }
+private def initial : State := { count := 7 }
+#guard observe initial stimulus == 7
+#guard (step initial stimulus).count == 25
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "nested prelinked calls across a register update");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")
