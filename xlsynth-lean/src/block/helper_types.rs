@@ -5,7 +5,7 @@ use super::{
     BlockContext,
     source_types::{
         EnumMember, HelperSignature, SourceType, StatefulInterface, StructField, TypeDecl,
-        source_shape,
+        resolve_aliases, source_shape,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -100,8 +100,12 @@ impl DslxLink {
             .map(String::as_str)
             .filter(|destination| linked.contains(destination))
             .collect();
+        merge_declarations(
+            declarations,
+            std::mem::take(&mut catalogue.declarations),
+            interface,
+        )?;
         catalogue.add_loop_bodies(block, interface);
-        merge_declarations(declarations, catalogue.declarations)?;
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -130,37 +134,143 @@ impl DslxLink {
 
 /// BX reflects imported structs into concrete port types and erases aliases.
 /// Keep the checked DSLX spelling, with its dependencies before its users.
-fn merge_declarations(prior: &mut Vec<TypeDecl>, mut incoming: Vec<TypeDecl>) -> Result<()> {
-    for decl in prior.iter() {
-        if let Some(new) = incoming.iter().find(|d| d.name() == decl.name())
-            && new != decl
-        {
-            let fields =
-                |decl: &TypeDecl, types: &[TypeDecl]| -> Result<Vec<(String, SourceType)>> {
-                    let TypeDecl::Struct { fields, .. } = decl else {
-                        bail!("conflicting declarations for linked type {}", decl.name())
-                    };
-                    fields
-                        .iter()
-                        .map(|field| {
-                            Ok((
-                                field.name.clone(),
-                                super::source_types::resolve_aliases(&field.source_type, types)?,
-                            ))
-                        })
-                        .collect()
-                };
-            ensure!(
-                fields(decl, prior)? == fields(new, &incoming)?,
-                "conflicting fields in linked type {}",
-                new.name()
-            );
+fn merge_declarations(
+    prior: &mut Vec<TypeDecl>,
+    incoming: Vec<TypeDecl>,
+    interface: &mut StatefulInterface,
+) -> Result<()> {
+    let mut replaced = Vec::new();
+    let mut merged = incoming;
+    let mut aliases = BTreeSet::new();
+    for decl in prior.drain(..) {
+        if let Some(index) = merged.iter().position(|d| d.name() == decl.name()) {
+            if decl != merged[index] {
+                if matches!(decl, TypeDecl::Struct { .. })
+                    && matches!(merged[index], TypeDecl::Alias { .. })
+                {
+                    aliases.insert(decl.name().to_owned());
+                }
+                replaced.push((decl, index));
+            }
+        } else {
+            merged.push(decl);
         }
     }
-    let names: BTreeSet<_> = incoming.iter().map(|d| d.name().to_owned()).collect();
-    incoming.extend(prior.drain(..).filter(|d| !names.contains(d.name())));
-    *prior = incoming;
+    // BX can refer to the imported spelling inside another record or aggregate.
+    // Keep that spelling, but use its checked declaration kind throughout.
+    fn restore_alias(ty: &mut SourceType, aliases: &BTreeSet<String>) {
+        match ty {
+            SourceType::Struct { name } if aliases.contains(name) => {
+                *ty = SourceType::Alias {
+                    name: std::mem::take(name),
+                };
+            }
+            SourceType::Tuple { members } => {
+                for ty in members {
+                    restore_alias(ty, aliases);
+                }
+            }
+            SourceType::Array { element, .. } => restore_alias(element, aliases),
+            _ => {}
+        }
+    }
+    if !aliases.is_empty() {
+        for decl in merged
+            .iter_mut()
+            .chain(replaced.iter_mut().map(|(decl, _)| decl))
+        {
+            match decl {
+                TypeDecl::Struct { fields, .. } => {
+                    for field in fields {
+                        restore_alias(&mut field.source_type, &aliases);
+                    }
+                }
+                TypeDecl::Alias { target, .. } => restore_alias(target, &aliases),
+                TypeDecl::Enum { .. } => {}
+            }
+        }
+        for ty in interface
+            .inputs
+            .values_mut()
+            .chain(interface.registers.values_mut())
+            .chain(&mut interface.outputs)
+        {
+            restore_alias(ty, &aliases);
+        }
+        for sig in interface.helpers.values_mut() {
+            for (_, ty) in &mut sig.params {
+                restore_alias(ty, &aliases);
+            }
+            restore_alias(&mut sig.result, &aliases);
+        }
+    }
+    for (old, index) in replaced {
+        let new = &merged[index];
+        let mut target = new;
+        if let TypeDecl::Alias { target: ty, .. } = new
+            && let SourceType::Struct { name } = resolve_aliases(ty, &merged)?
+        {
+            target = merged
+                .iter()
+                .find(|d| d.name() == name)
+                .with_context(|| format!("unknown linked struct {name}"))?;
+        }
+        let (
+            TypeDecl::Struct {
+                fields: old_fields, ..
+            },
+            TypeDecl::Struct { fields, .. },
+        ) = (&old, target)
+        else {
+            bail!("conflicting declarations for linked type {}", new.name());
+        };
+        let normalized = |fields: &[StructField]| -> Result<Vec<_>> {
+            fields
+                .iter()
+                .map(|f| Ok((f.name.clone(), resolve_aliases(&f.source_type, &merged)?)))
+                .collect()
+        };
+        ensure!(
+            normalized(old_fields)? == normalized(fields)?,
+            "conflicting fields in linked type {}",
+            new.name()
+        );
+    }
+    *prior = merged;
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn linked_struct_alias_rejects_reordered_equal_width_fields() {
+    let record = |name: &str, field_names: [&str; 2]| TypeDecl::Struct {
+        name: name.into(),
+        fields: field_names
+            .into_iter()
+            .map(|name| StructField {
+                name: name.into(),
+                source_type: SourceType::Bits { width: 8 },
+            })
+            .collect(),
+    };
+    let mut reflected = vec![record("Alias", ["zebra", "apple"])];
+    let checked = vec![
+        record("Packet", ["apple", "zebra"]),
+        TypeDecl::Alias {
+            name: "Alias".into(),
+            target: SourceType::Struct {
+                name: "Packet".into(),
+            },
+        },
+    ];
+    let mut interface = StatefulInterface {
+        inputs: Default::default(),
+        outputs: Default::default(),
+        registers: Default::default(),
+        helpers: Default::default(),
+    };
+    let error = merge_declarations(&mut reflected, checked, &mut interface).unwrap_err();
+    assert_eq!(error.to_string(), "conflicting fields in linked type Alias");
 }
 
 /// Declarations collected in source order from the native DSLX type checker.
