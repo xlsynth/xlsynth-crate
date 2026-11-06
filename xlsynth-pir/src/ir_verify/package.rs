@@ -2,13 +2,13 @@
 
 //! Package-context portions of PIR verification.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
     NodeRef, Package, PackageMember, Type,
 };
-use crate::ir_deduce::deduce_result_type_with_registers;
+use crate::ir_deduce::deduce_graph_result_type;
 use crate::ir_utils::operands;
 
 /// Errors that can arise during validation of XLS IR structures.
@@ -694,9 +694,13 @@ impl std::fmt::Display for InstantiationPortDirection {
 /// function (if set) exists, and all contained functions are valid.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
+    let mut functions = HashMap::new();
     for member in &p.members {
         let (name, member_type) = match member {
-            PackageMember::Function(f) => (f.name.clone(), MemberType::Function),
+            PackageMember::Function(f) => {
+                functions.insert(f.name.as_str(), f);
+                (f.name.clone(), MemberType::Function)
+            }
             PackageMember::Block(block) => (block.name.clone(), MemberType::Block),
         };
         if !names.insert((name.clone(), member_type)) {
@@ -710,13 +714,22 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
-    for (idx, member) in p.members.iter().enumerate() {
-        match member {
-            PackageMember::Function(f) => validate_fn(f, p)?,
-            PackageMember::Block(block) => validate_block(block, p, idx)?,
+    // Forward references can use any function in the package. Check parameter
+    // indices before any caller reads them, once for this immutable snapshot.
+    for member in &p.members {
+        if let PackageMember::Function(f) = member {
+            validate_fn_signature(f)?;
         }
     }
-    validate_function_call_graph(p)?;
+    let resolve = |name: &str| functions.get(name).copied();
+    let lookup = CalleeLookup::Verified(&resolve);
+    for (idx, member) in p.members.iter().enumerate() {
+        match member {
+            PackageMember::Function(f) => validate_fn_body_with(f, Some(lookup))?,
+            PackageMember::Block(block) => validate_block_with(block, p, idx, lookup)?,
+        }
+    }
+    validate_function_call_graph(p, &functions)?;
 
     // Enforce package-wide uniqueness of node text ids (including parameter
     // nodes).
@@ -743,13 +756,17 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     Ok(())
 }
 
-fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
+fn validate_function_call_graph(
+    p: &Package,
+    functions: &HashMap<&str, &Fn>,
+) -> Result<(), ValidationError> {
     fn visit(
-        p: &Package,
-        function_name: &str,
+        functions: &HashMap<&str, &Fn>,
+        function: &Fn,
         visited: &mut HashSet<String>,
         active: &mut Vec<String>,
     ) -> Result<(), ValidationError> {
+        let function_name = function.name.as_str();
         if let Some(cycle_start) = active.iter().position(|name| name == function_name) {
             let mut cycle = active[cycle_start..].to_vec();
             cycle.push(function_name.to_string());
@@ -759,9 +776,6 @@ fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
             return Ok(());
         }
         active.push(function_name.to_string());
-        let function = p
-            .get_fn(function_name)
-            .expect("callee existence is validated before call-graph traversal");
         let mut callees = std::collections::BTreeSet::new();
         for node in &function.nodes {
             match &node.payload {
@@ -777,7 +791,7 @@ fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
             }
         }
         for callee in callees {
-            visit(p, callee, visited, active)?;
+            visit(functions, functions[callee], visited, active)?;
         }
         active.pop();
         visited.insert(function_name.to_string());
@@ -789,7 +803,7 @@ fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
         let PackageMember::Function(function) = member else {
             continue;
         };
-        visit(p, &function.name, &mut visited, &mut Vec::new())?;
+        visit(functions, function, &mut visited, &mut Vec::new())?;
     }
     Ok(())
 }
@@ -798,23 +812,33 @@ fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
     validate_fn_with(
         f,
-        Some(parent),
-        |name: &str| parent.get_fn(name).map(|callee| callee.ret_ty.clone()),
-        |_register| None,
-        None,
-        false,
+        Some(CalleeLookup::Unverified(&|name| parent.get_fn(name))),
     )
 }
 
 /// Verifies a function whose contract does not depend on other package members.
 pub(super) fn validate_standalone_fn(f: &Fn) -> Result<(), ValidationError> {
-    validate_fn_with(f, None, |_name: &str| None, |_register| None, None, false)
+    validate_fn_with(f, None)
 }
 
 pub fn validate_block(
     f: &Block,
     parent: &Package,
     member_index: usize,
+) -> Result<(), ValidationError> {
+    validate_block_with(
+        f,
+        parent,
+        member_index,
+        CalleeLookup::Unverified(&|name| parent.get_fn(name)),
+    )
+}
+
+fn validate_block_with(
+    f: &Block,
+    parent: &Package,
+    member_index: usize,
+    lookup: CalleeLookup<'_, '_>,
 ) -> Result<(), ValidationError> {
     validate_block_ports(f)?;
     validate_block_resources(f)?;
@@ -844,8 +868,7 @@ pub fn validate_block(
     let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
     validate_graph_with(
         f,
-        Some(parent),
-        |name: &str| parent.get_fn(name).map(|callee| callee.ret_ty.clone()),
+        Some(lookup),
         |register| {
             f.registers
                 .iter()
@@ -1146,29 +1169,38 @@ pub(super) fn validate_fn_signature(f: &Fn) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validates a function within the context of its parent package, using a
-/// dependency-injected resolver for callee return types.
-pub(crate) fn validate_fn_with<F, R>(
+type ResolveCallee<'a, 'pkg> = &'a dyn std::ops::Fn(&str) -> Option<&'pkg Fn>;
+
+/// A verified resolver refers only to functions whose parameter indices have
+/// been checked in this package snapshot.
+#[derive(Clone, Copy)]
+pub(crate) enum CalleeLookup<'a, 'pkg> {
+    Verified(ResolveCallee<'a, 'pkg>),
+    Unverified(ResolveCallee<'a, 'pkg>),
+}
+
+impl<'pkg> CalleeLookup<'_, 'pkg> {
+    fn get(self, name: &str) -> Option<&'pkg Fn> {
+        match self {
+            Self::Verified(resolve) | Self::Unverified(resolve) => resolve(name),
+        }
+    }
+}
+
+/// Verify a function against already available callees, or in isolation.
+pub(crate) fn validate_fn_with(
     f: &Fn,
-    parent: Option<&Package>,
-    callee_ret_type_resolver: F,
-    register_type_resolver: R,
-    instantiation_info: Option<&std::collections::HashMap<String, InstantiationInfo>>,
-    allow_registers: bool,
-) -> Result<(), ValidationError>
-where
-    F: std::ops::Fn(&str) -> Option<Type>,
-    R: std::ops::Fn(&str) -> Option<Type>,
-{
+    lookup: Option<CalleeLookup<'_, '_>>,
+) -> Result<(), ValidationError> {
     validate_fn_signature(f)?;
-    validate_graph_with(
-        f,
-        parent,
-        callee_ret_type_resolver,
-        register_type_resolver,
-        instantiation_info,
-        allow_registers,
-    )?;
+    validate_fn_body_with(f, lookup)
+}
+
+fn validate_fn_body_with(
+    f: &Fn,
+    lookup: Option<CalleeLookup<'_, '_>>,
+) -> Result<(), ValidationError> {
+    validate_graph_with(f, lookup, |_register| None, None, false)?;
     let ret_node_ref = f
         .ret_node_ref
         .ok_or_else(|| ValidationError::MissingReturnNode(f.name.clone()))?;
@@ -1188,16 +1220,14 @@ where
     Ok(())
 }
 
-fn validate_graph_with<F, R>(
+fn validate_graph_with<R>(
     f: &NodeGraph,
-    parent: Option<&Package>,
-    callee_ret_type_resolver: F,
+    lookup: Option<CalleeLookup<'_, '_>>,
     register_type_resolver: R,
     instantiation_info: Option<&std::collections::HashMap<String, InstantiationInfo>>,
     allow_registers: bool,
 ) -> Result<(), ValidationError>
 where
-    F: std::ops::Fn(&str) -> Option<Type>,
     R: std::ops::Fn(&str) -> Option<Type>,
 {
     // Track IDs of all non-Nil nodes, including parameters.
@@ -1304,20 +1334,22 @@ where
         // Validate cross-package references.
         match &node.payload {
             NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                let Some(parent) = parent else {
+                let Some(lookup) = lookup else {
                     return Err(ValidationError::RequiresPackageContext {
                         func: f.name.clone(),
                         node_index: i,
                         op: node.payload.get_operator().to_string(),
                     });
                 };
-                let Some(callee) = parent.get_fn(to_apply) else {
+                let Some(callee) = lookup.get(to_apply) else {
                     return Err(ValidationError::UnknownCallee {
                         func: f.name.clone(),
                         callee: to_apply.clone(),
                     });
                 };
-                if checked_callees.insert(callee.name.as_str()) {
+                if matches!(lookup, CalleeLookup::Unverified(_))
+                    && checked_callees.insert(callee.name.as_str())
+                {
                     validate_fn_signature(callee)?;
                 }
                 let argument_types = match &node.payload {
@@ -1371,20 +1403,22 @@ where
                 body,
                 invariant_args,
             } => {
-                let Some(parent) = parent else {
+                let Some(lookup) = lookup else {
                     return Err(ValidationError::RequiresPackageContext {
                         func: f.name.clone(),
                         node_index: i,
                         op: node.payload.get_operator().to_string(),
                     });
                 };
-                let Some(body_fn) = parent.get_fn(body) else {
+                let Some(body_fn) = lookup.get(body) else {
                     return Err(ValidationError::UnknownCallee {
                         func: f.name.clone(),
                         callee: body.clone(),
                     });
                 };
-                if checked_callees.insert(body_fn.name.as_str()) {
+                if matches!(lookup, CalleeLookup::Unverified(_))
+                    && checked_callees.insert(body_fn.name.as_str())
+                {
                     validate_fn_signature(body_fn)?;
                 }
                 let expected_param_count = 2 + invariant_args.len();
@@ -1736,15 +1770,14 @@ where
         })?;
 
         // After structural checks, ensure deduced node type matches declared.
-        let op_refs = operands(&node.payload);
-        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
-        for nr in op_refs.iter() {
-            op_types.push(f.get_node(*nr).ty.clone());
-        }
-        match deduce_result_type_with_registers(
+        match deduce_graph_result_type(
+            f,
             &node.payload,
-            &op_types,
-            |callee| callee_ret_type_resolver(callee),
+            |callee| {
+                lookup
+                    .and_then(|lookup| lookup.get(callee))
+                    .map(|f| f.ret_ty.clone())
+            },
             |register| register_type_resolver(register),
         ) {
             Ok(Some(deduced)) => {

@@ -109,6 +109,62 @@ DSLX_STDLIB_PATH=/path/to/xls/xls/dslx/stdlib \
 cargo test -p xlsynth-bx --test frontend packed_slice
 ```
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_calls.rs
+
+Generates functions with identical definitions in BX and DSLX, including
+names that overlap hardware keywords, local bindings, signed and arbitrary-width
+arithmetic, and scalar or aggregate results. A BX block invokes the generated
+function directly or through nested calls that compute it on different argument
+expressions and select between the results. The target compares source
+acceptance with native DSLX parsing and typechecking. On four shared vectors
+it compares the BX block's PIR evaluation with both the compiled DSLX function
+in the XLS IR interpreter and calls to that function in DSLX's own interpreter.
+The pinned DSLX API exposes the latter through constexpr metadata. The harness
+binds each invocation to a module constant with the exact concrete arguments.
+Invalid calls exercise missing, extra, and incompatible arguments. Signed slice
+starts stay within the source word for bytecode comparison. In the pinned DSLX
+interpreter, an out-of-range signed slice produces unsigned zero, which can
+cause a subsequent signed arithmetic operation to fail. The expression hardware
+target continues to generate unrestricted slice starts.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_calls --sanitizer none`.
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_syntax.rs
+
+Varies function declaration order, nested singleton tuple signatures, implicit
+argument widths across scalar, array, and tuple parameters, builtin shadowing,
+tuple destructuring, branch-local bindings, and the spelling of identifiers
+ending in `!` next to an operator. It also varies comment delimiters and
+parentheses around conditionals followed by tuple or array indexing.
+Generated `zero!<T>()` calls resolve to the builtin, to a local
+`fn zero!()` returning a generated nonzero value, or to a value binding that
+makes the call invalid. It compares native DSLX source acceptance and
+interpreter results with BX. It also checks both hardware IR evaluations for
+modules whose DSLX names survive the pinned converter's IR text roundtrip.
+The generator projects unsized hex literals through tuples and arrays in
+scalar and aggregate call arguments, return expressions, and bindings. It also
+checks radix retention through aliases and tuple destructuring. Comparisons,
+branches, and array elements place a bound literal before or after the operand
+that supplies its signed type. For example, passing `(0xff,).0` to
+an `s8` parameter preserves the eight input bits in both native evaluators.
+When that callee widens its parameter to `s16`, pinned DSLX bytecode returns
+255 and the native hardware IR sign-extends it to −1.
+For a dynamic array read or update beyond the end, the target checks the
+native DSLX bounds error. It compares both hardware evaluations, where reads
+clamp to the final element, and checks that an out-of-bounds update returns
+the original array.
+
+The syntax target invokes `$XLSYNTH_TOOLS/dslx_interpreter_main` with
+`--evaluator=dslx-interpreter --compare=none --warnings_as_errors=false` and the
+bundled DSLX standard library path. It batches in-range assertions in one DSLX
+unit test and verifies the native index error separately for each out-of-range
+input. Point `XLSYNTH_TOOLS` at the tools from the release pinned by the
+checkout. From `xlsynth-bx`, run:
+
+```shell
+XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_function_syntax --sanitizer none
+```
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs
 
 Compares the inferred type of an unannotated BX binding to native DSLX

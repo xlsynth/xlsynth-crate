@@ -7,8 +7,8 @@ use std::path::Path;
 use xlsynth::{DslxConvertOptions, IrFunction, convert_dslx_to_ir};
 use xlsynth_bx::ast::{Param, Type};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module_with_options, compile, empty_package, lower_module,
-    parse_module,
+    CheckedModule, ImportOptions, ResetBehavior, check_module_with_options, compile, empty_package,
+    lower_module, parse_module,
 };
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::{Fn, Package};
@@ -50,13 +50,94 @@ pub fn compile_bundled_module(source: &str, paths: &[&Path]) -> Result<IrFunctio
         .map_err(|e| e.to_string())
 }
 
-/// A BX block projected to a PIR function and its native DSLX reference.
-pub struct ExpressionEvaluator {
-    pub bx: Fn,
-    dslx: IrFunction,
+/// The BX block projected to a function, together with its local callees.
+pub struct BlockEvaluator {
+    pub function: Fn,
     package: Package,
-    params: Vec<Param>,
+    pub params: Vec<Param>,
     singleton_aggregate_result: bool,
+}
+
+impl BlockEvaluator {
+    /// Lower the checked block and project its data interface for evaluation.
+    pub fn lower(checked: &CheckedModule, block: &str) -> Result<Self, String> {
+        let package = lower_module(
+            checked,
+            empty_package("expr_eval"),
+            ResetBehavior::default(),
+        )
+        .map_err(|error| format!("BX lowering failed: {error}\n{block}"))?;
+        #[cfg(test)]
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None)
+            .map_err(|error| format!("BX emitted invalid IR: {error}\n{block}"))?;
+        let block = package.get_block("sample").ok_or("BX block is missing")?;
+        let bx = combinational_block_to_fn(block)
+            .map_err(|error| format!("BX block projection failed: {error}"))?;
+        let signature = checked
+            .blocks()
+            .iter()
+            .find(|block| block.name == "sample")
+            .ok_or("checked BX sample block is missing")?;
+        Ok(Self {
+            function: bx,
+            params: signature.params.clone(),
+            singleton_aggregate_result: block.output_ports().count() == 1
+                && matches!(&signature.result, Type::Tuple(_) | Type::Named(_)),
+            package,
+        })
+    }
+
+    /// Evaluate the projected block and restore its source-level result shape.
+    pub fn evaluate(&self, args: &[IrValue]) -> Result<IrValue, String> {
+        let FnEvalResult::Success(result) = eval_fn_in_package(&self.package, &self.function, args)
+        else {
+            return Err(format!(
+                "BX evaluation failed on {}",
+                IrValue::make_tuple(args)
+            ));
+        };
+        // A block with a single output port projects to its driving value;
+        // preserve the enclosing tuple for a one-element tuple or struct.
+        let actual = if self.singleton_aggregate_result {
+            IrValue::make_tuple(&[result.value])
+        } else {
+            result.value
+        };
+        Ok(actual)
+    }
+
+    /// Compare the block result with an independently lowered XLS IR function.
+    pub fn compare_ir(&self, dslx: &IrFunction, args: &[IrValue]) -> Result<IrValue, String> {
+        let inputs = || IrValue::make_tuple(args);
+        let reference_args = args
+            .iter()
+            .map(value_to_libxls)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Cannot pass {} to DSLX: {error}", inputs()))?;
+        let expected = dslx
+            .interpret(&reference_args)
+            .map_err(|error| format!("DSLX evaluation failed on {}: {error}", inputs()))?;
+        let actual = self.evaluate(args)?;
+        let expected = value_from_libxls(&expected, &actual.type_()).map_err(|error| {
+            format!(
+                "Input {}: BX returned {actual}, DSLX returned {expected}: {error}",
+                inputs()
+            )
+        })?;
+        if actual != expected {
+            return Err(format!(
+                "Input {}: BX returned {actual}, DSLX returned {expected}",
+                inputs()
+            ));
+        }
+        Ok(expected)
+    }
+}
+
+/// A compiled BX block and its native DSLX reference.
+pub struct ExpressionEvaluator {
+    pub bx: BlockEvaluator,
+    dslx: IrFunction,
 }
 
 impl ExpressionEvaluator {
@@ -95,70 +176,14 @@ impl ExpressionEvaluator {
                 ));
             }
         };
-        let package = lower_module(
-            &checked,
-            empty_package("expr_eval"),
-            ResetBehavior::default(),
-        )
-        .map_err(|error| format!("BX lowering failed: {error}\n{block}"))?;
-        #[cfg(test)]
-        xlsynth::IrPackage::parse_ir(&package.to_string(), None)
-            .map_err(|error| format!("BX emitted invalid IR: {error}\n{block}"))?;
-        let block = package.get_block("sample").ok_or("BX block is missing")?;
-        let bx = combinational_block_to_fn(block)
-            .map_err(|error| format!("BX block projection failed: {error}"))?;
-        let signature = checked
-            .blocks()
-            .iter()
-            .find(|block| block.name == "sample")
-            .ok_or("checked BX sample block is missing")?;
         Ok(Self {
-            bx,
+            bx: BlockEvaluator::lower(&checked, block)?,
             dslx,
-            params: signature.params.clone(),
-            singleton_aggregate_result: block.output_ports().count() == 1
-                && matches!(&signature.result, Type::Tuple(_) | Type::Named(_)),
-            package,
         })
     }
 
-    /// Run the same inputs in the PIR and native XLS interpreters and return
-    /// their common typed value, or a counterexample.
     pub fn compare(&self, args: &[IrValue]) -> Result<IrValue, String> {
-        let inputs = || IrValue::make_tuple(args);
-        let reference_args = args
-            .iter()
-            .map(value_to_libxls)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Cannot pass {} to DSLX: {error}", inputs()))?;
-        let expected = self
-            .dslx
-            .interpret(&reference_args)
-            .map_err(|error| format!("DSLX evaluation failed on {}: {error}", inputs()))?;
-        let FnEvalResult::Success(result) = eval_fn_in_package(&self.package, &self.bx, args)
-        else {
-            return Err(format!("BX evaluation failed on {}", inputs()));
-        };
-        // A block with a single output port projects to its driving value;
-        // preserve the enclosing tuple for a one-element tuple or struct.
-        let actual = if self.singleton_aggregate_result {
-            IrValue::make_tuple(&[result.value])
-        } else {
-            result.value
-        };
-        let expected = value_from_libxls(&expected, &actual.type_()).map_err(|error| {
-            format!(
-                "Input {}: BX returned {actual}, DSLX returned {expected}: {error}",
-                inputs()
-            )
-        })?;
-        if actual != expected {
-            return Err(format!(
-                "Input {}: BX returned {actual}, DSLX returned {expected}",
-                inputs()
-            ));
-        }
-        Ok(expected)
+        self.bx.compare_ir(&self.dslx, args)
     }
 
     /// Evaluate a BX reset initializer with scalar inputs bound to their exact
@@ -172,6 +197,7 @@ impl ExpressionEvaluator {
         expected: &IrValue,
     ) -> Result<(), String> {
         let inputs = self
+            .bx
             .params
             .iter()
             .zip(args)

@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::IrValue;
 use crate::ir::{self, Binop, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
-use crate::ir_deduce::deduce_result_type;
+use crate::ir_deduce::deduce_graph_result_type;
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_fn_ids_in_place};
-use crate::ir_utils::{is_valid_identifier_name, is_valid_package_name, operands};
+use crate::ir_utils::{is_valid_identifier_name, is_valid_package_name};
 use crate::ir_verify::{
-    verify_function, verify_function_in_package, verify_function_signature,
+    CalleeLookup, validate_fn_with, verify_function, verify_function_signature,
     verify_node_xls_semantics, verify_package,
 };
 
@@ -80,6 +80,11 @@ mod sealed {
     }
 }
 
+/// Sealed interface bound for code emitting operations common to both builders.
+pub trait BuilderState: sealed::State {}
+
+impl<S: sealed::State> BuilderState for S {}
+
 /// The function interface carried by a checked builder.
 #[doc(hidden)]
 #[derive(Default)]
@@ -113,7 +118,7 @@ pub type FnBuilder = Builder<FunctionState>;
 ///
 /// Construct this through [`FnBuilder`] or [`BlockBuilder`]. Its graph and
 /// interface stay together; neither is exposed for unchecked mutation.
-pub struct Builder<S: sealed::State> {
+pub struct Builder<S: BuilderState> {
     id: usize,
     graph: ir::NodeGraph,
     names: HashMap<String, NodeRef>,
@@ -257,11 +262,7 @@ impl<S: sealed::State> Builder<S> {
         payload: NodePayload,
         explicit_type: Option<Type>,
     ) -> Result<BValue, BuilderError> {
-        let operand_types: Vec<Type> = operands(&payload)
-            .iter()
-            .map(|node| self.graph.get_node_ty(*node).clone())
-            .collect();
-        let deduced = deduce_result_type(&payload, &operand_types)
+        let deduced = deduce_graph_result_type(&self.graph, &payload, |_| None, |_| None)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         let ty = match (explicit_type, deduced) {
             (Some(explicit), Some(deduced)) if explicit != deduced => {
@@ -349,9 +350,12 @@ impl<S: sealed::State> Builder<S> {
 
     /// Resolves every signature supplied to a call against its destination
     /// package.
-    fn check_callees(&self, package: &ir::Package) -> Result<(), BuilderError> {
+    fn check_callees<'p>(
+        &self,
+        lookup: impl Fn(&str) -> Option<&'p ir::Fn>,
+    ) -> Result<(), BuilderError> {
         for (name, expected) in &self.callees {
-            let actual = package.get_fn(name).ok_or_else(|| {
+            let actual = lookup(name).ok_or_else(|| {
                 BuilderError::InvalidOperation(format!("callee '{name}' is missing from package"))
             })?;
             if actual.get_type() != *expected {
@@ -369,20 +373,18 @@ impl<S: sealed::State> Builder<S> {
         check_name(&callee.name)?;
         verify_function_signature(callee)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        if callee.name == self.graph.name {
+        self.check_callee_type(&callee.name, &callee.get_type())
+    }
+
+    fn check_callee_type(&self, name: &str, ty: &ir::FunctionType) -> Result<(), BuilderError> {
+        if name == self.graph.name {
             return Err(BuilderError::InvalidOperation(format!(
-                "recursive reference to '{}' is not allowed",
-                callee.name
+                "recursive reference to '{name}' is not allowed"
             )));
         }
-        if self
-            .callees
-            .get(&callee.name)
-            .is_some_and(|known| *known != callee.get_type())
-        {
+        if self.callees.get(name).is_some_and(|known| known != ty) {
             return Err(BuilderError::InvalidOperation(format!(
-                "conflicting signatures supplied for callee '{}'",
-                callee.name
+                "conflicting signatures supplied for callee '{name}'"
             )));
         }
         Ok(())
@@ -391,25 +393,32 @@ impl<S: sealed::State> Builder<S> {
     /// Invokes a function using its typed signature, resolving its name at
     /// build.
     pub fn invoke(&mut self, callee: &ir::Fn, args: &[BValue]) -> Result<BValue, BuilderError> {
-        self.check_callee(callee)?;
+        self.invoke_with_signature(&InvokeSignature::from_function(callee)?, args)
+    }
+
+    /// Emit an invocation using a previously checked signature. Insertion
+    /// still resolves the named callee in the destination package.
+    pub fn invoke_with_signature(
+        &mut self,
+        callee: &InvokeSignature,
+        args: &[BValue],
+    ) -> Result<BValue, BuilderError> {
+        self.check_callee_type(&callee.name, &callee.ty)?;
         let args = self.nodes(args)?;
-        if args.len() != callee.params.len() {
+        if args.len() != callee.ty.param_types.len() {
             return Err(BuilderError::InvalidOperation(format!(
                 "callee '{}' expects {} arguments, got {}",
                 callee.name,
-                callee.params.len(),
+                callee.ty.param_types.len(),
                 args.len()
             )));
         }
-        for (arg, param) in args.iter().zip(callee.param_nodes()) {
+        for (index, (arg, param_ty)) in args.iter().zip(&callee.ty.param_types).enumerate() {
             let actual = self.graph.get_node_ty(*arg);
-            if actual != &param.ty {
+            if actual != param_ty {
                 return Err(BuilderError::InvalidOperation(format!(
-                    "argument '{}' of '{}' requires {}, got {}",
-                    param.param_name(),
-                    callee.name,
-                    param.ty,
-                    actual
+                    "argument '{}' of '{}' requires {param_ty}, got {actual}",
+                    callee.param_names[index], callee.name
                 )));
             }
         }
@@ -418,11 +427,11 @@ impl<S: sealed::State> Builder<S> {
                 to_apply: callee.name.clone(),
                 operands: args,
             },
-            Some(callee.ret_ty.clone()),
+            Some(callee.ty.return_type.clone()),
         )?;
         self.callees
             .entry(callee.name.clone())
-            .or_insert_with(|| callee.get_type());
+            .or_insert_with(|| callee.ty.clone());
         Ok(value)
     }
 
@@ -1003,11 +1012,25 @@ impl Builder<FunctionState> {
         }
         verify_package(package)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        self.check_callees(package)?;
+        self.finish_for_package(
+            return_value,
+            |name| package.get_fn(name),
+            package_max_emitted_node_id(package),
+        )
+    }
+
+    /// Verify the new body against existing callees and allocate its node IDs
+    /// above the highest ID already present.
+    fn finish_for_package<'p>(
+        self,
+        return_value: BValue,
+        lookup: impl Fn(&str) -> Option<&'p ir::Fn>,
+        base: usize,
+    ) -> Result<ir::Fn, BuilderError> {
+        self.check_callees(&lookup)?;
         let mut function = self.into_function(return_value)?;
-        verify_function_in_package(&function, package)
+        validate_fn_with(&function, Some(CalleeLookup::Verified(&lookup)))
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
-        let base = package_max_emitted_node_id(package);
         rebase_fn_ids_in_place(&mut function, base)
             .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
         Ok(function)
@@ -1025,6 +1048,96 @@ impl Builder<FunctionState> {
         let function = self.build_in_package(return_value, package)?;
         package.members.push(ir::PackageMember::Function(function));
         Ok(())
+    }
+}
+
+/// The name and parameter/result types of a checked IR function, reusable
+/// across invocation sites without visiting the callee's body again.
+pub struct InvokeSignature {
+    name: String,
+    ty: ir::FunctionType,
+    param_names: Vec<String>,
+}
+
+impl InvokeSignature {
+    /// Validates the parameter nodes before copying their names and types.
+    pub fn from_function(f: &ir::Fn) -> Result<Self, BuilderError> {
+        check_name(&f.name)?;
+        verify_function_signature(f).map_err(|e| BuilderError::InvalidOperation(e.to_string()))?;
+        Ok(Self {
+            name: f.name.clone(),
+            ty: f.get_type(),
+            param_names: f.param_nodes().map(|n| n.param_name().to_owned()).collect(),
+        })
+    }
+}
+
+/// Appends functions in callee-before-caller order, checking the destination
+/// once and maintaining its name and node-ID indices across insertions.
+pub struct FunctionBatch<'p> {
+    package: &'p mut ir::Package,
+    members: HashMap<String, usize>,
+    max_node_id: usize,
+}
+
+impl<'p> FunctionBatch<'p> {
+    /// Verify the starting package and index the members and allocated IDs.
+    pub fn new(package: &'p mut ir::Package) -> Result<Self, BuilderError> {
+        check_package_name(&package.name)?;
+        verify_package(package)
+            .map_err(|error| BuilderError::InvalidOperation(error.to_string()))?;
+        let mut members = HashMap::new();
+        for (index, member) in package.members.iter().enumerate() {
+            // An input package may use the same name for a function and a
+            // block. Calls resolve to the function, while either occupies the
+            // name for purposes of inserting a new function.
+            match member {
+                ir::PackageMember::Function(f) => {
+                    members.insert(f.name.clone(), index);
+                }
+                ir::PackageMember::Block(b) => {
+                    members.entry(b.name.clone()).or_insert(index);
+                }
+            }
+        }
+        let max_node_id = package_max_emitted_node_id(package);
+        Ok(Self {
+            package,
+            members,
+            max_node_id,
+        })
+    }
+
+    /// Read the verified destination, including functions already appended.
+    pub fn package(&self) -> &ir::Package {
+        self.package
+    }
+
+    /// Append a verified function and return its package member index. A
+    /// failure preserves the package and its insertion state.
+    pub fn append(&mut self, builder: FnBuilder, result: BValue) -> Result<usize, BuilderError> {
+        if self.members.contains_key(&builder.graph.name) {
+            return Err(BuilderError::DuplicateName(builder.graph.name.clone()));
+        }
+        let body = builder.finish_for_package(
+            result,
+            |name| match &self.package.members[*self.members.get(name)?] {
+                ir::PackageMember::Function(f) => Some(f),
+                ir::PackageMember::Block(_) => None,
+            },
+            self.max_node_id,
+        )?;
+        // FnBuilder assigns consecutive local IDs in storage order; rebasing
+        // preserves that order. A verified body always has a return node.
+        self.max_node_id = body
+            .nodes
+            .last()
+            .expect("verified function has a return node")
+            .text_id;
+        let index = self.package.members.len();
+        self.members.insert(body.name.clone(), index);
+        self.package.members.push(ir::PackageMember::Function(body));
+        Ok(index)
     }
 }
 
@@ -1612,6 +1725,36 @@ mod tests {
     }
 
     #[test]
+    fn function_batch_resolves_prior_insertions_and_recovers_after_errors() {
+        let mut leaf = FnBuilder::new("leaf");
+        let value = leaf.param("x", Type::Bits(4)).unwrap();
+        let mut package = leaf.build_package(value, "sample").unwrap();
+        let mut batch = FunctionBatch::new(&mut package).unwrap();
+        let mut caller = FnBuilder::new("caller");
+        let value = caller.param("x", Type::Bits(4)).unwrap();
+        let call = caller
+            .invoke(batch.package().get_fn("leaf").unwrap(), &[value])
+            .unwrap();
+        assert_eq!(batch.append(caller, call).unwrap(), 1);
+
+        let wrong = identity_callee("caller", 8);
+        let mut retry = FnBuilder::new("wrapper");
+        let value = retry.param("x", Type::Bits(8)).unwrap();
+        let call = retry.invoke(&wrong, &[value]).unwrap();
+        assert!(batch.append(retry, call).is_err());
+
+        let mut wrapper = FnBuilder::new("wrapper");
+        let value = wrapper.param("x", Type::Bits(4)).unwrap();
+        let call = wrapper
+            .invoke(batch.package().get_fn("caller").unwrap(), &[value])
+            .unwrap();
+        assert_eq!(batch.append(wrapper, call).unwrap(), 2);
+        assert_eq!(package.get_fn("wrapper").unwrap().get_param(0).text_id, 4);
+        assert_eq!(package.get_top_fn().unwrap().name, "leaf");
+        verify_package(&package).unwrap();
+    }
+
+    #[test]
     fn appending_functions_rebases_ids_and_preserves_top() {
         let mut first = FnBuilder::new("first");
         let x = first.param("x", Type::Bits(4)).unwrap();
@@ -1799,6 +1942,10 @@ mod tests {
     #[test]
     fn invoke_requires_package_context_and_matching_definition() {
         let callee = identity_callee("identity", 8);
+        let signature = InvokeSignature::from_function(&callee).unwrap();
+        let mut malformed = callee.clone();
+        malformed.params.clear();
+        assert!(InvokeSignature::from_function(&malformed).is_err());
         let mut standalone = FnBuilder::new("caller");
         let arg = standalone.param("arg", Type::Bits(8)).unwrap();
         let call = standalone.invoke(&callee, &[arg]).unwrap();
@@ -1812,7 +1959,7 @@ mod tests {
             let before = package.to_string();
             let mut builder = FnBuilder::new("caller");
             let arg = builder.param("arg", Type::Bits(8)).unwrap();
-            let call = builder.invoke(&callee, &[arg]).unwrap();
+            let call = builder.invoke_with_signature(&signature, &[arg]).unwrap();
             assert!(builder.build_into_package(call, &mut package).is_err());
             assert_eq!(package.to_string(), before);
         }

@@ -85,6 +85,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
         pos: 0,
         depth: 0,
         dslx_type_display: false,
+        in_function: false,
     };
     let mut module = DslxOutline::default();
     let mut uses = Vec::new();

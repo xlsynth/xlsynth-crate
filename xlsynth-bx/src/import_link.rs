@@ -18,12 +18,12 @@ pub(crate) fn link_imported_functions(
     destination: &mut Package,
     mut imported: Package,
     roots: &[String],
-    reserved_blocks: &[String],
+    reserved_names: &[String],
 ) -> Result<Vec<usize>, String> {
     if roots.is_empty() {
         return Ok(Vec::new());
     }
-    let symbols = allocate_symbols(destination, &imported, reserved_blocks);
+    let symbols = allocate_symbols(destination, &imported, reserved_names);
     let files = allocate_files(destination, &imported)?;
     let mut node_base = package_max_emitted_node_id(destination);
     // DSLX assigns IDs starting at one. Also allow an explicit zero on a
@@ -108,13 +108,13 @@ struct Symbol {
 fn allocate_symbols(
     destination: &Package,
     imported: &Package,
-    reserved_blocks: &[String],
+    reserved_names: &[String],
 ) -> BTreeMap<String, Symbol> {
     let occupied: BTreeSet<_> = destination
         .members
         .iter()
         .map(|member| member.graph().name.as_str())
-        .chain(reserved_blocks.iter().map(String::as_str))
+        .chain(reserved_names.iter().map(String::as_str))
         .collect();
     let mut used: BTreeSet<String> = occupied.iter().map(|name| (*name).to_owned()).collect();
     used.extend(

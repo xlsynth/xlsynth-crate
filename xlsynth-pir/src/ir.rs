@@ -1091,7 +1091,7 @@ impl Node {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FunctionType {
     pub param_types: Vec<Type>,
     pub return_type: Type,

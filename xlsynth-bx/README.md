@@ -2,10 +2,13 @@
 
 BX describes clocked hardware using blocks, registers, and explicit wiring. Its value language aims to implement a subset of DSLX with the same syntax, type inference, and evaluation rules. For the shared language, see the [DSLX reference manual](https://google.github.io/xls/dslx_reference/).
 
-The Rust frontend parses BX, type-checks it, and adds verified blocks to an XLS IR package. DSLX functions can supply combinational logic through a `use` declaration or a prelinked `extern fn` declaration.
+The Rust frontend parses BX, type-checks it, and adds verified functions and blocks to an XLS IR package. Define a combinational function in the same `.bx` file as its caller, import a DSLX function with `use`, or link an existing IR function with `extern fn`.
 
 ```text
-extern fn math::transform(x: u8) -> u16;
+fn transform(x: u8) -> u16 {
+    let wide = x as u16;
+    wide * wide
+}
 
 struct ResultPorts {
     data: u16,
@@ -16,7 +19,7 @@ pub block transform_pipe(clk, rst, valid_in: bool, x: u8) -> ResultPorts {
     reg data_q: u16;
     reg valid_q: bool = false;
     if valid_in {
-        data_q := math::transform(x);
+        data_q := transform(x);
     }
     valid_q := valid_in;
     ResultPorts { data: data_q, valid: valid_q }
@@ -27,9 +30,27 @@ BX supports concrete bit types, booleans, tuples, named structs, and fixed-size 
 
 The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
+## Defining functions
+
+Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Use concrete types in the signature, including structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
+
+Inside a function, `let` can bind a name or destructure a tuple, as in `let (data, valid) = packet;`. Braced expressions and `if` arms can introduce their own local bindings. The final expression supplies the result. A function that returns `()` may omit the result annotation and end with a semicolon or an empty body.
+
+Give a bound integer literal its intended width before passing it to a function.
+For a parameter of type `u8`, write `let n: u8 = 1; take(n)` or `take(u8:1)`.
+With `let n = 1`, BX infers `u1`. The pinned DSLX typechecker can accept the
+wider call, but its interpreter can retain the narrower value and IR conversion
+can fail on the mismatched signature.
+
+Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
+
+For a register reset value or an `unroll_for!` range bound, use a constant expression that BX can evaluate during checking. For parametric functions, define the function in DSLX and import it with `use`.
+
+BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
+
 ## Compile and link
 
-Use `parse_module` and `check_module` to inspect BX. The checker resolves DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all function calls come from imports.
+Use `parse_module` and `check_module` to inspect BX. The checker resolves DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
 
 ```rust
 use xlsynth_bx::{compile, ResetBehavior};
@@ -177,11 +198,11 @@ An unconditional let initializer or block result can elaborate children in
 its loop body. Pure loops can also appear inside other value expressions.
 `zero!<T>()` supplies an all-zero value of a concrete type and
 `update(array, index, value)` returns an array with one element replaced.
-BX bounds total unrolling work per block, accounting for nested iterations
+BX bounds total unrolling work per function or block, accounting for nested iterations
 and materialized constant aggregates.
 
 The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separately compiled DSLX multiplier, and load enables.
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
 
-To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting and block hierarchies are limited to 64 levels.
+To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting, local function call chains, and block hierarchies are limited to 64 levels.

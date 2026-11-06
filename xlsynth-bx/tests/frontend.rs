@@ -8,6 +8,8 @@ mod directed_expr_eval;
 mod expr_eval;
 #[path = "frontend/imported_structs.rs"]
 mod imported_structs;
+#[path = "frontend/local_functions.rs"]
+mod local_functions;
 #[path = "frontend/unroll_for.rs"]
 mod unroll_for;
 

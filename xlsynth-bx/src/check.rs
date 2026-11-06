@@ -9,19 +9,24 @@ use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type,
+    BinaryOp, Block, Expr, ExternBlock, ExternFn, Function, Module, Param, Stmt, StructDef, Type,
     WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
     CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
-    check_inferred_signed_width, common_type_hint, context_operands, has_common_bit_type,
-    has_concrete_element_type, minimum_type,
+    binding_widths_using, check_argument_widths, check_inferred_signed_width, common_type_hint,
+    context_operands, has_common_bit_type, has_concrete_element_type, minimum_type,
+    projected_type_compatible,
 };
 use crate::parser::explicit_width_hint;
+mod scope;
 mod unroll;
 
-pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
+pub use crate::typed::{
+    CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr,
+    TypedExprKind,
+};
 use crate::typed::{TypedExprKind as K, bits};
 
 impl fmt::Display for Type {
@@ -92,6 +97,7 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
 /// Aggregate constructors share member types with the other operand or branch.
 fn has_aggregate_literal(expr: &Expr) -> bool {
     match expr {
+        Expr::Scope { result, .. } => has_aggregate_literal(result),
         Expr::Array(_) | Expr::Tuple(_) => true,
         Expr::If {
             then_value,
@@ -132,11 +138,51 @@ struct BlockInterface {
     requires_reset: bool,
 }
 
+/// Resolved signature used to check both local and externally linked calls.
+struct FunctionInterface {
+    params: Vec<Param>,
+    result: Type,
+    local: bool,
+}
+
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
-    externs: BTreeMap<&'a str, &'a ExternFn>,
+    positions: BTreeMap<&'a str, usize>,
+    functions: BTreeMap<&'a str, FunctionInterface>,
     blocks: BTreeMap<&'a str, BlockInterface>,
+}
+
+impl Declarations<'_> {
+    /// Qualified imports are visible from their use binding; qualified
+    /// externs are introduced by their full source name.
+    fn visible(&self, name: &str, at: Option<usize>) -> bool {
+        let root = name.split_once("::").map_or(name, |(root, _)| root);
+        let position = self
+            .positions
+            .get(name)
+            .or_else(|| self.positions.get(root));
+        at.zip(position).is_none_or(|(at, &p)| p <= at)
+    }
+
+    fn check_type_visibility(&self, ty: &Type, at: Option<usize>) -> Result<(), String> {
+        if at.is_none() {
+            return Ok(());
+        }
+        let mut pending = vec![ty];
+        while let Some(ty) = pending.pop() {
+            match ty {
+                Type::Named(name) if !self.visible(name, at) => {
+                    return Err(format!("type '{name}' is declared later in the module"));
+                }
+                Type::Tuple(fields) => pending.extend(fields.iter().rev()),
+                Type::Array { element, .. } => pending.push(element),
+                Type::Bool | Type::Bits { .. } | Type::Named(_) => { /* A primitive or visible type. */
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Checked BX and imported DSLX structs, with cached sizes for layout
@@ -288,6 +334,39 @@ struct TypeShape {
 }
 
 impl<'a> Declarations<'a> {
+    /// Resolve and validate each function signature before checking call sites.
+    fn add_function(
+        &mut self,
+        name: &'a str,
+        params: &[Param],
+        result: &Type,
+        local: bool,
+        resolver: &mut ImportResolver,
+        structs: &mut StructTable,
+    ) -> Result<(), String> {
+        let (params, result) = resolve_signature(params, result, [], resolver)?;
+        structs.update_imports(resolver)?;
+        let mut names = BTreeSet::new();
+        for p in &params {
+            declare(&mut names, &p.name)?;
+            structs
+                .validate_type(&p.ty)
+                .map_err(|e| format!("parameter '{}': {e}", p.name))?;
+        }
+        structs
+            .validate_type(&result)
+            .map_err(|e| format!("result: {e}"))?;
+        self.functions.insert(
+            name,
+            FunctionInterface {
+                params,
+                result,
+                local,
+            },
+        );
+        Ok(())
+    }
+
     /// Check the shared physical port ABI before any parent uses this
     /// signature.
     fn add_block(
@@ -443,8 +522,8 @@ enum Visit {
     Complete(usize),
 }
 
-/// Visit named dependencies in source order, rejecting recursive layouts and
-/// hardware.
+/// Visit named dependencies in source order, rejecting cycles and excessive
+/// depth.
 fn dependency_order<'a>(
     kind: &str,
     graph: &[(&'a str, Vec<&'a str>)],
@@ -573,33 +652,69 @@ pub fn check_module_with_options(
         structs.index(index)?;
     }
 
+    let mut declarations = Declarations {
+        positions: module
+            .declaration_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), i))
+            .collect(),
+        ..Declarations::default()
+    };
+    // A programmatically constructed module can still provide function order
+    // through its function list, even without a cross-kind source ordering.
+    if declarations.positions.is_empty() {
+        declarations.positions.extend(
+            module
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.name.as_str(), i)),
+        );
+    }
     let mut externs = Vec::with_capacity(module.externs.len());
     for f in &module.externs {
-        let (params, result) = resolve_signature(&f.params, &f.result, [], &mut resolver)?;
+        declare(&mut names, &f.name)?;
+        declarations
+            .add_function(
+                &f.name,
+                &f.params,
+                &f.result,
+                false,
+                &mut resolver,
+                &mut structs,
+            )
+            .map_err(|e| format!("extern '{}': {e}", f.name))?;
+        let interface = &declarations.functions[f.name.as_str()];
         externs.push(ExternFn {
             name: f.name.clone(),
-            params,
-            result,
+            params: interface.params.clone(),
+            result: interface.result.clone(),
             symbol: f.symbol.clone(),
         });
     }
-    structs.update_imports(&resolver)?;
-    let mut declarations = Declarations {
-        externs: externs.iter().map(|f| (f.name.as_str(), f)).collect(),
-        blocks: BTreeMap::new(),
-    };
-    for f in &externs {
+    for f in &module.functions {
         declare(&mut names, &f.name)?;
-        let mut params = BTreeSet::new();
-        for p in &f.params {
-            declare(&mut params, &p.name)?;
-            structs
-                .validate_type(&p.ty)
-                .map_err(|e| format!("extern '{}', parameter '{}': {e}", f.name, p.name))?;
+        if f.name.contains("::") {
+            return Err(format!(
+                "BX function '{}' must have an unqualified name",
+                f.name
+            ));
         }
-        structs
-            .validate_type(&f.result)
-            .map_err(|e| format!("extern '{}' result: {e}", f.name))?;
+        let at = declarations.positions.get(f.name.as_str()).copied();
+        for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
+            declarations.check_type_visibility(ty, at)?;
+        }
+        declarations
+            .add_function(
+                &f.name,
+                &f.params,
+                &f.result,
+                true,
+                &mut resolver,
+                &mut structs,
+            )
+            .map_err(|e| format!("fn '{}': {e}", f.name))?;
     }
     for b in &module.blocks {
         declare(&mut names, &b.name)?;
@@ -643,13 +758,19 @@ pub fn check_module_with_options(
             result,
         });
     }
+    let functions = check_functions(
+        &module.functions,
+        &declarations,
+        &mut resolver,
+        &mut structs,
+    )?;
     // Static loops can instantiate children. Order the checked blocks using
     // the instances actually elaborated, including children declared later.
     let checked = module
         .blocks
         .iter()
         .map(|block| {
-            BlockChecker::check(&declarations, block, &mut resolver, &mut structs)
+            BodyChecker::check_block(&declarations, block, &mut resolver, &mut structs)
                 .map_err(|e| format!("block '{}': {e}", block.name))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -675,19 +796,68 @@ pub fn check_module_with_options(
     Ok(CheckedModule {
         structs: structs.definitions,
         externs,
+        functions,
         extern_blocks,
         imports: resolver.finish()?,
         blocks,
     })
 }
 
-/// Lexically visible values, static declarations, and the drivers seen in one
-/// block.
-struct BlockChecker<'a, 'm> {
+/// Check local functions in source order and bound the elaborated call depth.
+fn check_functions<'m>(
+    functions: &'m [Function],
+    decls: &Declarations<'m>,
+    resolver: &mut ImportResolver,
+    structs: &mut StructTable,
+) -> Result<Vec<CheckedFunction>, String> {
+    let mut checked = Vec::with_capacity(functions.len());
+    let mut depths = BTreeMap::new();
+    for function in functions {
+        let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+        let body = checker
+            .check_function(function)
+            .map_err(|e| format!("fn '{}': {e}", function.name))?;
+        let mut depth = 1;
+        for callee in checker.local_callees {
+            if callee == function.name {
+                return Err(format!(
+                    "recursive function dependency involving '{callee}'"
+                ));
+            }
+            let prior = depths
+                .get(callee)
+                .ok_or_else(|| format!("function '{callee}' is declared later in the module"))?;
+            depth = depth.max(prior + 1);
+        }
+        if depth > MAX_ELABORATION_DEPTH {
+            return Err(format!(
+                "function dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{}'",
+                function.name
+            ));
+        }
+        depths.insert(function.name.as_str(), depth);
+        checked.push(body);
+    }
+    Ok(checked)
+}
+
+/// Controls which declarations and bindings are available in a BX body.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum BodyKind {
+    Function,
+    Block { has_reset: bool },
+}
+
+/// Lexical values, loop elaboration, and any hardware declared in one body.
+struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
     structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
-    block: &'m Block,
+    kind: BodyKind,
+    /// The enclosing call uses DSLX argument inference for local functions.
+    in_dslx_call_argument: bool,
+    function_position: Option<usize>,
+    local_callees: BTreeSet<&'m str>,
     names: BTreeSet<String>,
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
@@ -704,15 +874,85 @@ struct BlockChecker<'a, 'm> {
     statements: Vec<CheckedStmt>,
     /// Source names bound by currently active loop iterations.
     loop_values: BTreeMap<String, TypedExpr>,
+    /// Function locals resolve to an IR value that stays valid after their
+    /// lexical scope ends, including when another arm binds the same name.
+    function_values: BTreeMap<String, TypedExpr>,
+    next_scope_alias: usize,
     iteration_path: Vec<usize>,
     unroll_work: usize,
     unroll_binding_count: usize,
 }
 
-impl<'a, 'm> BlockChecker<'a, 'm> {
+impl<'a, 'm> BodyChecker<'a, 'm> {
+    /// Start an independent lexical and elaboration scope for a function or
+    /// block.
+    fn new(
+        decls: &'a Declarations<'m>,
+        resolver: &'a mut ImportResolver,
+        structs: &'a mut StructTable,
+        kind: BodyKind,
+    ) -> Self {
+        Self {
+            decls,
+            structs,
+            resolver,
+            kind,
+            in_dslx_call_argument: false,
+            function_position: None,
+            local_callees: BTreeSet::new(),
+            names: BTreeSet::new(),
+            outputs: BTreeSet::new(),
+            reserved_hardware_names: BTreeSet::new(),
+            values: BTreeMap::new(),
+            constants: BTreeMap::new(),
+            constexpr_names: BTreeSet::new(),
+            inferred_bindings: BTreeMap::new(),
+            regs: BTreeMap::new(),
+            writes: BTreeSet::new(),
+            instances: BTreeMap::new(),
+            connections: BTreeSet::new(),
+            statements: Vec::new(),
+            loop_values: BTreeMap::new(),
+            function_values: BTreeMap::new(),
+            next_scope_alias: 0,
+            iteration_path: Vec::new(),
+            unroll_work: 0,
+            unroll_binding_count: 0,
+        }
+    }
+
+    /// Check ordered let bindings and a return expression in a pure scope.
+    fn check_function(&mut self, function: &Function) -> Result<CheckedFunction, String> {
+        self.function_position = self.decls.positions.get(function.name.as_str()).copied();
+        let interface = &self.decls.functions[function.name.as_str()];
+        for p in &interface.params {
+            self.names.insert(p.name.clone());
+            self.values.insert(p.name.clone(), p.ty.clone());
+        }
+        let output = self
+            .scoped_result(&function.body, Some(&interface.result), false)
+            .map_err(|e| format!("result: {e}"))?;
+        let bindings = self
+            .statements
+            .drain(..)
+            .map(|stmt| match stmt {
+                CheckedStmt::Let { name, value } => CheckedBinding { name, value },
+                _ => unreachable!("pure expressions can only elaborate let bindings"),
+            })
+            .collect();
+        Ok(CheckedFunction {
+            name: function.name.clone(),
+            public: function.public,
+            params: interface.params.clone(),
+            result: interface.result.clone(),
+            bindings,
+            output,
+        })
+    }
+
     /// Reserve interface and instance names before checking dataflow
     /// expressions.
-    fn check(
+    fn check_block(
         decls: &'a Declarations<'m>,
         block: &'m Block,
         resolver: &'a mut ImportResolver,
@@ -736,28 +976,16 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
             _ => None,
         }));
-        let mut c = Self {
+        let mut c = Self::new(
             decls,
-            structs,
             resolver,
-            block,
-            names: BTreeSet::new(),
-            outputs,
-            reserved_hardware_names,
-            values: BTreeMap::new(),
-            constants: BTreeMap::new(),
-            constexpr_names: BTreeSet::new(),
-            inferred_bindings: BTreeMap::new(),
-            regs: BTreeMap::new(),
-            writes: BTreeSet::new(),
-            instances: BTreeMap::new(),
-            connections: BTreeSet::new(),
-            statements: Vec::new(),
-            loop_values: BTreeMap::new(),
-            iteration_path: Vec::new(),
-            unroll_work: 0,
-            unroll_binding_count: 0,
-        };
+            structs,
+            BodyKind::Block {
+                has_reset: block.reset.is_some(),
+            },
+        );
+        c.outputs = outputs;
+        c.reserved_hardware_names = reserved_hardware_names;
         c.hardware_name(&block.clock)?;
         if let Some(rst) = &block.reset {
             c.hardware_name(rst)?;
@@ -808,6 +1036,8 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
 
     /// Resolve a type written in a block body and register its concrete fields.
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
+        self.decls
+            .check_type_visibility(source, self.function_position)?;
         let ty = resolve_type(
             source,
             Some(&self.names),
@@ -832,7 +1062,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         target: &str,
         child: &BlockInterface,
     ) -> Result<(), String> {
-        if child.requires_reset && self.block.reset.is_none() {
+        if child.requires_reset && !matches!(self.kind, BodyKind::Block { has_reset: true }) {
             return Err(format!(
                 "instance '{name}' of '{target}' requires a parent reset"
             ));
@@ -926,7 +1156,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
-                            if self.block.reset.is_none() {
+                            if !matches!(self.kind, BodyKind::Block { has_reset: true }) {
                                 return Err(format!(
                                     "initializer on register '{name}' requires a reset"
                                 ));
@@ -992,31 +1222,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     ty,
                     value: initializer,
                 } => {
-                    let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
-                    let value = self
-                        .let_value(name, initializer, ty.as_ref(), !conditional)
-                        .map_err(|e| format!("let '{name}': {e}"))?;
-                    declare(&mut self.names, name)?;
-                    self.values.insert(name.clone(), value.ty.clone());
-                    if value.has_constant_inputs(&self.constexpr_names) {
-                        self.constexpr_names.insert(name.clone());
-                    }
-                    if let Some(v) = value.constant(&self.constants) {
-                        self.constants.insert(name.clone(), v);
-                    }
-                    if ty.is_none()
-                        && let Some(minimum) =
-                            binding_widths(initializer, &value.ty, &self.inferred_bindings)?
-                    {
-                        self.inferred_bindings.insert(name.clone(), minimum);
-                    }
                     if conditional {
                         locals.push(name);
                     }
-                    CheckedStmt::Let {
-                        name: name.clone(),
-                        value,
-                    }
+                    self.check_let(name, ty.as_ref(), initializer, !conditional)?
                 }
                 Stmt::Write { name, value } => {
                     let ty = self
@@ -1059,12 +1268,53 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         Ok(())
     }
 
+    /// Resolve an initializer against the previous scope before installing
+    /// its type, inferred widths, and any compile-time value.
+    fn check_let(
+        &mut self,
+        name: &str,
+        annotation: Option<&Type>,
+        initializer: &Expr,
+        structural: bool,
+    ) -> Result<CheckedStmt, String> {
+        let ty = annotation.map(|t| self.source_type(t)).transpose()?;
+        let value = self
+            .let_value(name, initializer, ty.as_ref(), structural)
+            .map_err(|e| format!("let '{name}': {e}"))?;
+        let constexpr = value.has_constant_inputs(&self.constexpr_names);
+        let constant = value.constant(&self.constants);
+        let widths = if ty.is_none() {
+            binding_widths_using(
+                initializer,
+                &value.ty,
+                WidthLookup::DslxLiterals(Some(&self.inferred_bindings)),
+            )?
+        } else {
+            None
+        };
+        declare(&mut self.names, name)?;
+        self.values.insert(name.to_owned(), value.ty.clone());
+        if constexpr {
+            self.constexpr_names.insert(name.to_owned());
+        }
+        if let Some(v) = constant {
+            self.constants.insert(name.to_owned(), v);
+        }
+        if let Some(widths) = widths {
+            self.inferred_bindings.insert(name.to_owned(), widths);
+        }
+        Ok(CheckedStmt::Let {
+            name: name.to_owned(),
+            value,
+        })
+    }
+
     /// Propagate expected types to literals, aggregate members, and pure call
     /// arguments.
     fn expr(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let value = self.expr_in_group(expr, expected)?;
         if expected.is_none() {
-            check_inferred_signed_width(&[expr], &value.ty)?;
+            check_inferred_signed_width(&[expr], &value.ty, self.dslx_widths())?;
         }
         Ok(value)
     }
@@ -1074,12 +1324,22 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let (ty, kind) = match expr {
+            Expr::Scope { bindings, result } => {
+                return self.value_scope(bindings, result, expected);
+            }
             Expr::UnrollFor(fold) => return self.unroll(fold, expected, false),
-            Expr::Name(name) if name == "_" && !self.iteration_path.is_empty() => {
+            Expr::Name(name)
+                if name == "_"
+                    && (self.kind == BodyKind::Function || !self.iteration_path.is_empty()) =>
+            {
                 return Err("cannot read the wildcard binding '_'".into());
             }
             Expr::Name(name) if self.loop_values.contains_key(name) => {
                 let value = self.loop_values[name].clone();
+                (value.ty, value.kind)
+            }
+            Expr::Name(name) if self.function_values.contains_key(name) => {
+                let value = self.function_values[name].clone();
                 (value.ty, value.kind)
             }
             Expr::Name(name) => {
@@ -1092,10 +1352,29 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             Expr::Bool(value) => (Type::Bool, K::Literal(IrValue::bool(*value))),
             Expr::Zero(ty) => {
                 let ty = self.source_type(ty)?;
-                let layout = crate::layout::Layouts::new(&self.structs.definitions)
-                    .lower(&ty)
-                    .map_err(|e| e.to_string())?;
-                (ty, K::Literal(zero_ir_value_for_type(&layout)))
+                let calls_function = match self.kind {
+                    BodyKind::Function if self.names.contains("zero!") => {
+                        return Err("'zero!' names a local value here".into());
+                    }
+                    BodyKind::Function => {
+                        self.decls.visible("zero!", self.function_position)
+                            && (self.decls.functions.contains_key("zero!")
+                                || self.resolver.lookup("zero!")?.is_some())
+                    }
+                    // BX blocks have historically used the intrinsic even when
+                    // an import has this name. Only a new local definition overrides it.
+                    BodyKind::Block { .. } => {
+                        self.decls.functions.get("zero!").is_some_and(|f| f.local)
+                    }
+                };
+                if calls_function {
+                    self.function_call("zero!", &[])?
+                } else {
+                    let layout = crate::layout::Layouts::new(&self.structs.definitions)
+                        .lower(&ty)
+                        .map_err(|e| e.to_string())?;
+                    (ty, K::Literal(zero_ir_value_for_type(&layout)))
+                }
             }
             Expr::Literal { ty, text } => {
                 let ty = ty
@@ -1364,9 +1643,28 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
             Expr::Binary { op, left, right } => self.binary(*op, left, right, expected)?,
         };
+        let dslx_projection = (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+            && matches!(
+                expr,
+                Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
+            );
+        let dslx_bindings = (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+            .then_some(&self.inferred_bindings);
+        if dslx_projection {
+            // Each nested aggregate infers its fields before a typed sibling
+            // or the enclosing expression supplies a signed result type.
+            check_argument_widths(expr, expected.unwrap_or(&ty), dslx_bindings)?;
+        }
         if let Some(expected) = expected
             && !compatible(&ty, expected)
         {
+            if dslx_projection && projected_type_compatible(expr, &ty, expected, dslx_bindings)? {
+                // Only signedness differs. Preserve the complete IR layout.
+                return Ok(TypedExpr {
+                    ty: expected.clone(),
+                    kind,
+                });
+            }
             // DSLX retains the minimum type of an inferred loop-local value at
             // its binder but can widen references (including projected fields).
             if let Some(locals) = self.loop_widths()
@@ -1407,11 +1705,167 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         Ok(value)
     }
 
+    /// Local function expressions and their arguments can use an unannotated
+    /// binding's literal minimum to find the first concrete operand.
+    fn dslx_widths(&self) -> Option<WidthLookup<'_>> {
+        (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+            .then_some(WidthLookup::DslxLiterals(Some(&self.inferred_bindings)))
+    }
+
+    fn common_widths(&self) -> Option<WidthLookup<'_>> {
+        self.dslx_widths().or_else(|| self.loop_widths())
+    }
+
+    /// Find the stored type and binding behind a reference without evaluating
+    /// its index or copying the aggregate value.
+    fn reference_type<'e>(&'e self, expr: &'e Expr) -> Option<(&'e str, &'e Type)> {
+        match expr {
+            Expr::Name(name) => {
+                let ty = self
+                    .loop_values
+                    .get(name)
+                    .or_else(|| self.function_values.get(name))
+                    .map(|v| &v.ty)
+                    .or_else(|| self.values.get(name))?;
+                Some((name, ty))
+            }
+            Expr::Field { value, name } => {
+                let (binding, Type::Tuple(fields)) = self.reference_type(value)? else {
+                    return None;
+                };
+                Some((binding, fields.get(name.parse::<usize>().ok()?)?))
+            }
+            Expr::Index { value, .. } => {
+                let (binding, Type::Array { element, .. }) = self.reference_type(value)? else {
+                    return None;
+                };
+                Some((binding, element))
+            }
+            _ => None,
+        }
+    }
+
+    /// An inferred aggregate can receive a leaf's type from another operand,
+    /// including when the binding appears inside a tuple or array constructor.
+    fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
+        if self.dslx_widths().is_none() {
+            return false;
+        }
+        match expr {
+            Expr::Tuple(items) | Expr::Array(items) => items
+                .iter()
+                .any(|item| self.contains_inferred_aggregate(item)),
+            _ => self.reference_type(expr).is_some_and(|(name, ty)| {
+                matches!(ty, Type::Array { .. } | Type::Tuple(_))
+                    && self.inferred_bindings.contains_key(name)
+            }),
+        }
+    }
+
+    fn common_hint(&self, items: &[&Expr]) -> Result<CommonTypeHint, String> {
+        if items
+            .iter()
+            .any(|item| self.contains_inferred_aggregate(item))
+        {
+            for (i, item) in items.iter().enumerate() {
+                if !self.contains_inferred_aggregate(item)
+                    && has_concrete_element_type(item, self.common_widths())?
+                {
+                    return Ok(CommonTypeHint::FromExpr(i));
+                }
+            }
+        }
+        common_type_hint(items, self.common_widths())
+    }
+
+    /// Infer corresponding signed leaves across already evaluated aggregate
+    /// references. Different tuple fields may get their concrete signed type
+    /// from different operands. Each operand is subsequently checked against
+    /// the result, including the original literal constraint at each leaf.
+    fn bound_aggregate_hint(&self, items: &[&Expr]) -> Option<Type> {
+        fn merge(ty: &mut Type, other: &Type) -> bool {
+            if let (Some((a, width)), Some((b, other_width))) = (bits(ty), bits(other)) {
+                if width != other_width {
+                    return false;
+                }
+                if b && !a {
+                    *ty = other.clone();
+                }
+                return true;
+            }
+            match (ty, other) {
+                (Type::Tuple(a), Type::Tuple(b)) => {
+                    a.len() == b.len() && a.iter_mut().zip(b).all(|(a, b)| merge(a, b))
+                }
+                (
+                    Type::Array {
+                        element: a,
+                        size: n,
+                    },
+                    Type::Array {
+                        element: b,
+                        size: m,
+                    },
+                ) => n == m && merge(a, b),
+                (a, b) => a == b,
+            }
+        }
+        fn operand(checker: &BodyChecker<'_, '_>, expr: &Expr) -> Option<Type> {
+            match expr {
+                Expr::Tuple(fields) => Some(Type::Tuple(
+                    fields
+                        .iter()
+                        .map(|f| operand(checker, f))
+                        .collect::<Option<_>>()?,
+                )),
+                Expr::Array(items) => {
+                    let (first, rest) = items.split_first()?;
+                    let mut element = operand(checker, first)?;
+                    for item in rest {
+                        if !merge(&mut element, &operand(checker, item)?) {
+                            return None;
+                        }
+                    }
+                    Some(Type::Array {
+                        element: Box::new(element),
+                        size: items.len(),
+                    })
+                }
+                Expr::Literal { ty: Some(ty), .. } => Some(ty.clone()),
+                _ => checker.reference_type(expr).map(|(_, ty)| ty.clone()),
+            }
+        }
+        if !items
+            .iter()
+            .any(|item| self.contains_inferred_aggregate(item))
+        {
+            return None;
+        }
+        let (first, rest) = items.split_first()?;
+        let mut ty = operand(self, first)?;
+        for item in rest {
+            if !merge(&mut ty, &operand(self, item)?) {
+                return None;
+            }
+        }
+        Some(ty)
+    }
+
     /// Check values against a common type, including the corresponding
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        let first_has_type = has_concrete_element_type(items[0], self.loop_widths())?;
+        if items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
+            return self.with_scoped_results(items, Self::unify_values);
+        }
+        if let Some(ty) = self.bound_aggregate_hint(items) {
+            return items
+                .iter()
+                .map(|item| self.expr(item, Some(&ty)))
+                .collect();
+        }
+        let first_has_type = !self.contains_inferred_aggregate(items[0])
+            && has_concrete_element_type(items[0], self.common_widths())?;
         if !first_has_type && items.iter().any(|item| matches!(item, Expr::If { .. })) {
             // Every conditional branch contributes to the same element type.
             let mut branches = Vec::new();
@@ -1511,7 +1965,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         let hint = if first_has_type {
             CommonTypeHint::FromExpr(0)
         } else {
-            common_type_hint(items, self.loop_widths())?
+            self.common_hint(items)?
         };
         match hint {
             CommonTypeHint::Minimum(ty) => items
@@ -1520,6 +1974,9 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 .collect(),
             CommonTypeHint::FromExpr(i) => {
                 let anchor = self.expr(items[i], None)?;
+                if let Some(widths) = self.dslx_widths() {
+                    check_inferred_signed_width(items, &anchor.ty, Some(widths))?;
+                }
                 self.check_siblings(items, i, anchor)
             }
         }
@@ -1554,6 +2011,11 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         items: &[&Expr],
         expected: Option<&Type>,
     ) -> Result<Vec<TypedExpr>, String> {
+        if expected.is_none() && items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
+            return self.with_scoped_results(items, |checker, items| {
+                checker.check_results(items, expected)
+            });
+        }
         if expected.is_none() && items.iter().any(|e| has_aggregate_literal(e)) {
             return self.unify_values(items);
         }
@@ -1574,8 +2036,17 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         if let Some(ty) = expected {
             return Ok((0, self.expr_in_group(first, Some(ty))?));
         }
-        match common_type_hint(items, self.loop_widths())? {
-            CommonTypeHint::FromExpr(i) => Ok((i, self.expr_in_group(items[i], None)?)),
+        if let Some(ty) = self.bound_aggregate_hint(items) {
+            return Ok((0, self.expr_in_group(first, Some(&ty))?));
+        }
+        match self.common_hint(items)? {
+            CommonTypeHint::FromExpr(i) => {
+                let anchor = self.expr_in_group(items[i], None)?;
+                if let Some(widths) = self.dslx_widths() {
+                    check_inferred_signed_width(items, &anchor.ty, Some(widths))?;
+                }
+                Ok((i, anchor))
+            }
             CommonTypeHint::Minimum(ty) => {
                 let i = items.len() - 1;
                 Ok((i, self.expr_in_group(items[i], Some(&ty))?))
@@ -1583,13 +2054,19 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         }
     }
 
-    /// Resolve either a concrete extern declaration or an imported DSLX
-    /// specialization inferred from its actual argument types.
+    /// Resolve a local or extern signature or infer an imported DSLX
+    /// specialization.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
         if self.loop_values.contains_key(name) {
             return Err(format!("'{name}' names a loop-local value"));
         }
-        if let Some((subject, function)) = lookup_use(name, self.resolver, Some(&self.names))? {
+        let visible = self.decls.visible(name, self.function_position);
+        if !visible && name != "update" {
+            return Err(format!("function '{name}' is declared later in the module"));
+        }
+        if visible
+            && let Some((subject, function)) = lookup_use(name, self.resolver, Some(&self.names))?
+        {
             let args = args
                 .iter()
                 .enumerate()
@@ -1604,22 +2081,31 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             self.structs.validate_type(&ty)?;
             return Ok((ty, K::ImportedCall { id, args }));
         }
-        if self.decls.blocks.contains_key(name) {
+        if visible && self.decls.blocks.contains_key(name) {
+            if self.kind == BodyKind::Function {
+                return Err(format!("pure function cannot call block '{name}'"));
+            }
             return Err(format!(
                 "call to block '{name}' must be the entire right-hand side of an unconditional top-level let"
             ));
         }
-        if name == "update" && !self.decls.externs.contains_key(name) {
+        if name == "update" && (!visible || !self.decls.functions.contains_key(name)) {
             if self.names.contains(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
             return self.array_update(args);
         }
-        let f = self
+        let (&callee, f) = self
             .decls
-            .externs
-            .get(name)
-            .ok_or_else(|| format!("unknown extern function '{name}'"))?;
+            .functions
+            .get_key_value(name)
+            .ok_or_else(|| format!("unknown function '{name}'"))?;
+        if self.names.contains(name) && (f.local || self.kind == BodyKind::Function) {
+            return Err(format!("'{name}' names a local value here"));
+        }
+        if f.local && self.kind == BodyKind::Function {
+            self.local_callees.insert(callee);
+        }
         if args.len() != f.params.len() {
             return Err(format!(
                 "'{name}' expects {} arguments, got {}",
@@ -1627,14 +2113,24 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 args.len()
             ));
         }
+        // BX block-to-extern calls use their declared port width as context.
+        // Restore the outer argument's rules after checking a nested call.
+        let dslx_arguments = f.local || self.kind == BodyKind::Function;
+        let outer = std::mem::replace(&mut self.in_dslx_call_argument, dslx_arguments);
         let args = args
             .iter()
             .zip(&f.params)
             .map(|(a, p)| {
-                self.expr(a, Some(&p.ty))
-                    .map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
+                let value = if dslx_arguments {
+                    self.dslx_argument(a, &p.ty)
+                } else {
+                    self.expr(a, Some(&p.ty))
+                };
+                value.map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_, _>>();
+        self.in_dslx_call_argument = outer;
+        let args = args?;
         Ok((
             f.result.clone(),
             K::Call {
@@ -1826,6 +2322,23 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         }
     }
 
+    /// Comparison operands infer their shared type independently of the
+    /// boolean result. Keep any scoped bindings available to that inference.
+    fn comparison_pair(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+    ) -> Result<(TypedExpr, TypedExpr), String> {
+        if self.dslx_widths().is_some() {
+            return self.with_prepared_value(left, |checker, lhs| {
+                checker.with_prepared_value(right, |checker, rhs| checker.pair(lhs, rhs, None))
+            });
+        }
+        let (l, r) = self.pair(left, right, None)?;
+        check_inferred_signed_width(&[left, right], &l.ty, None)?;
+        Ok((l, r))
+    }
+
     /// Use the index context's standard width only when all its operands are
     /// unsized.
     fn unsigned_index(
@@ -1907,8 +2420,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge => {
-                let (l, r) = self.pair(left, right, None)?;
-                check_inferred_signed_width(&[left, right], &l.ty)?;
+                let (l, r) = self.comparison_pair(left, right)?;
                 if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) && bits(&l.ty).is_none() {
                     return Err(format!("comparison '{op}' requires bit operands"));
                 }
@@ -1947,10 +2459,59 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
 #[cfg(test)]
 mod tests {
     use super::{CheckedStmt, MAX_ELABORATION_DEPTH, check_module};
-    use crate::ast::Type;
+    use crate::ast::{BindingPattern, Expr, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn function_unrolls_resolve_calls_without_elaborating_hardware() {
+        let fold = r#"
+fn step(x: u8) -> u8 { x + u8:1 }
+fn fold(x: u8) -> u8 {
+    unroll_for! (_, acc) in u32:0..u32:3 {
+        let next = step(acc);
+        next
+    }(x)
+}
+"#;
+        let checked = check_module(&parse_module(fold).unwrap()).unwrap();
+        assert_eq!(
+            checked
+                .functions()
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            ["step", "fold"],
+        );
+        let recursive = fold.replace("step(acc)", "fold(acc)");
+        assert!(check_module(&parse_module(&recursive).unwrap()).is_err());
+        let empty = recursive.replace("u32:3", "u32:0");
+        check_module(&parse_module(&empty).unwrap()).unwrap();
+
+        let clocked = fold.replace("fn step(x: u8)", "block step(clk, x: u8)");
+        for source in [clocked.replace("u32:3", "u32:0"), clocked] {
+            assert!(check_module(&parse_module(&source).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn function_unroll_charges_lexical_bindings_and_projections() {
+        // The range consumes all but one unit. The let and its selected
+        // tuple field must exhaust the budget during the first iteration.
+        let source = r#"
+fn fold(seed: (u8, u8)) -> (u8, u8) {
+    unroll_for! (_, acc) in u32:0..u32:1048575 {
+        let (x, _) = acc;
+        acc
+    }(seed)
+}"#;
+        let error = check_module(&parse_module(source).unwrap()).unwrap_err();
+        assert!(
+            error.contains("iteration 0") && error.contains("function expansion limit"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn qualified_extern_conflicts_only_with_its_bound_qualifier() {
@@ -1980,6 +2541,75 @@ mod tests {
         );
         module.uses[1].components.clear();
         assert_eq!(check_module(&module).unwrap_err(), "empty DSLX use path");
+    }
+
+    #[test]
+    fn checker_validates_programmatically_constructed_let_patterns() {
+        let mut module =
+            parse_module("fn probe(p: (u8, (u8, u8))) -> u8 { let (_, (.., _)) = p; u8:3 }")
+                .unwrap();
+        check_module(&module).unwrap();
+        for (pattern, error) in [
+            (
+                BindingPattern::Tuple(vec![
+                    BindingPattern::Name("x".into()),
+                    BindingPattern::Tuple(vec![
+                        BindingPattern::Rest,
+                        BindingPattern::Name("x".into()),
+                    ]),
+                ]),
+                "duplicate name 'x' in let pattern",
+            ),
+            (
+                BindingPattern::Tuple(vec![
+                    BindingPattern::Rest,
+                    BindingPattern::Tuple(vec![BindingPattern::Rest, BindingPattern::Rest]),
+                ]),
+                "duplicate rest marker in tuple pattern",
+            ),
+            (BindingPattern::Rest, "rest marker requires a tuple pattern"),
+        ] {
+            let Expr::Scope { bindings, .. } = &mut module.functions[0].body else {
+                panic!("expected the parsed function's let scope");
+            };
+            bindings[0].pattern = pattern;
+            assert_eq!(
+                check_module(&module).unwrap_err(),
+                format!("fn 'probe': result: {error}")
+            );
+        }
+    }
+
+    #[test]
+    fn programmatic_patterns_are_checked_in_empty_and_nonempty_folds() {
+        for count in [0, 2] {
+            let source = format!(
+                r#"fn probe(p: (u8, u8)) -> u8 {{
+                    unroll_for! (_, acc) in u32:0..u32:{count} {{
+                        let (_, _) = p;
+                        acc
+                    }}(u8:0)
+                }}"#
+            );
+            let mut module = parse_module(&source).unwrap();
+            let Expr::UnrollFor(fold) = &mut module.functions[0].body else {
+                panic!("expected the parsed fold");
+            };
+            let Expr::Scope { bindings, .. } = &mut fold.result else {
+                panic!("expected the fold's let scope");
+            };
+            bindings[0].pattern =
+                BindingPattern::Tuple(vec![BindingPattern::Rest, BindingPattern::Rest]);
+            let iteration = if count == 0 {
+                ""
+            } else {
+                "unroll_for! iteration 0: "
+            };
+            assert_eq!(
+                check_module(&module).unwrap_err(),
+                format!("fn 'probe': result: {iteration}duplicate rest marker in tuple pattern")
+            );
+        }
     }
 
     #[test]

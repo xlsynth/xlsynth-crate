@@ -435,9 +435,9 @@ xlsynth-driver gv2block \
 ### `bx2ir`: BX to Block IR
 
 Compiles a `.bx` file to an XLS block IR package on stdout. A BX pipeline
-declares the registers between stages and can call DSLX functions for the
-combinational work. For example, this `mul_inc.bx` captures a product on one
-clock edge and the incremented product on the next.
+declares the registers between stages and can call local BX functions or
+imported DSLX functions for the combinational work. This `mul_inc.bx` captures
+a product on one clock edge and the incremented product on the next.
 
 ```text
 use std;
