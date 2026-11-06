@@ -2826,9 +2826,15 @@ mod tests {
         let path = root
             .path()
             .join(std::ffi::OsStr::from_bytes(b"source-\xff"));
-        std::fs::create_dir(&path)?;
-        std::fs::write(path.join("wire.x"), "pub const TAG = u8:42;")?;
-        let mut data = ImportData::new(Some(&path), &[&path]);
+        let module_dir = match std::fs::create_dir(&path) {
+            Ok(()) => path.as_path(),
+            // Some Unix filesystems require UTF-8 filenames. Still pass the
+            // original path bytes to libxls and import from the valid root.
+            Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => root.path(),
+            Err(e) => return Err(e.into()),
+        };
+        std::fs::write(module_dir.join("wire.x"), "pub const TAG = u8:42;")?;
+        let mut data = ImportData::new(Some(&path), &[root.path(), &path]);
         parse_and_typecheck(
             "import wire; pub fn tag() -> u8 { wire::TAG }",
             "reader.x",

@@ -191,19 +191,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn manifest_can_target_a_non_utf8_unix_filename() -> Result<(), Box<dyn std::error::Error>> {
+    fn manifest_preserves_non_utf8_target_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempdir()?;
         let target = dir
             .path()
             .join(OsString::from_vec(b"source_\xff.x".to_vec()));
-        fs::write(&target, "pub type Width = u8;")?;
         let manifest = dir.path().join("manifest");
         let mut entry = b"com_google_xls/example.x ".to_vec();
         entry.extend(target.as_os_str().as_bytes());
         entry.push(b'\n');
         fs::write(&manifest, entry)?;
         let runfiles = XlsRunfiles::from_locations(Some(manifest), None, None);
-        assert_eq!(runfiles.lookup(Path::new("example.x")), Some(target));
+        assert_eq!(
+            runfiles.resolve(Path::new("com_google_xls/example.x")),
+            Some(target)
+        );
         Ok(())
     }
 
