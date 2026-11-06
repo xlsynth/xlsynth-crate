@@ -315,14 +315,14 @@ impl ImportData {
         let dslx_stdlib_path = dslx_stdlib_path.unwrap_or(&default_dslx_stdlib_path);
 
         let dslx_stdlib_path_c_str =
-            std::ffi::CString::new(dslx_stdlib_path.to_str().unwrap()).unwrap();
+            std::ffi::CString::new(dslx_stdlib_path.as_os_str().as_encoded_bytes()).unwrap();
         let dslx_stdlib_path_c_ptr = dslx_stdlib_path_c_str.as_ptr();
 
         // Note: we make sure we collect up the CString values so their lifetime
         // envelopes the import_data_create call.
         let additional_search_paths_c_strs: Vec<std::ffi::CString> = additional_search_paths
             .iter()
-            .map(|p| std::ffi::CString::new(p.to_str().unwrap()).unwrap())
+            .map(|p| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap())
             .collect::<Vec<_>>();
         let additional_search_paths_c_ptrs: Vec<*const std::os::raw::c_char> =
             additional_search_paths_c_strs
@@ -1269,9 +1269,27 @@ impl StructMember {
     }
 }
 
+/// A DSLX struct declaration, kept alive by its typechecked import graph.
+/// Equality and hashing use the native declaration's identity. Aliases of the
+/// same declaration compare equal, while separate parses of it compare unequal.
+#[derive(Clone)]
 pub struct StructDef {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxStructDef,
+}
+
+impl PartialEq for StructDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for StructDef {}
+
+impl Hash for StructDef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
 }
 
 impl StructDef {
@@ -1280,13 +1298,8 @@ impl StructDef {
     }
 
     /// Returns whether two wrappers point at the same DSLX struct definition.
-    ///
-    /// Use this when a type carries a `StructDef` and the caller needs the
-    /// exact defining declaration, not just another struct with the same name.
-    /// This is an identity check, not a semantic equality comparison between
-    /// independently parsed definitions.
     pub fn is_same_definition(&self, other: &StructDef) -> bool {
-        self.ptr == other.ptr
+        self == other
     }
 
     pub fn get_identifier(&self) -> String {
@@ -2395,6 +2408,17 @@ impl TypeInfo {
         }
     }
 
+    /// Returns the type recorded for this struct declaration in this context.
+    /// For a parametric struct, look up the annotation of the desired
+    /// instantiation when the declaration has no recorded type.
+    pub fn get_type_for_struct_def(&self, struct_def: &StructDef) -> Option<Type> {
+        let ptr = unsafe { sys::xls_dslx_type_info_get_type_struct_def(self.ptr, struct_def.ptr) };
+        (!ptr.is_null()).then(|| Type {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
+
     pub fn get_type_for_enum_def(&self, enum_def: &EnumDef) -> Type {
         Type {
             parent: self.parent.clone(),
@@ -2786,10 +2810,39 @@ pub fn parse_and_typecheck(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+
     use crate::dslx::MatchableModuleMember;
     use crate::ir_value::IrFormatPreference;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_imports_accept_unix_search_path_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"source-\xff"));
+        let module_dir = match std::fs::create_dir(&path) {
+            Ok(()) => path.as_path(),
+            // Some Unix filesystems require UTF-8 filenames. Still pass the
+            // original path bytes to libxls and import from the valid root.
+            Err(e) if e.raw_os_error() == Some(libc::EILSEQ) => root.path(),
+            Err(e) => return Err(e.into()),
+        };
+        std::fs::write(module_dir.join("wire.x"), "pub const TAG = u8:42;")?;
+        let mut data = ImportData::new(Some(&path), &[root.path(), &path]);
+        parse_and_typecheck(
+            "import wire; pub fn tag() -> u8 { wire::TAG }",
+            "reader.x",
+            "reader",
+            &mut data,
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn test_one_enum_def() {
@@ -2876,6 +2929,34 @@ mod tests {
                 .expect("u16 should be bits-like");
             assert_eq!(bits_like, (false, 16));
         }
+    }
+
+    #[test]
+    fn struct_definition_identity_follows_aliases_within_an_import_graph() {
+        let source = "struct Packet { tag: u8 } pub type Header = Packet;";
+        let mut data = ImportData::default();
+        let checked = parse_and_typecheck(source, "packet.x", "packet", &mut data).unwrap();
+        let module = checked.get_module();
+        let definition = module.get_type_definition_as_struct_def(0).unwrap();
+        let info = checked.get_type_info();
+        let ty = info.get_type_for_struct_def(&definition).unwrap();
+        assert!(ty.get_struct_def().unwrap() == definition);
+
+        let alias = module.get_type_definition_as_type_alias(1).unwrap();
+        let aliased_type = info
+            .get_type_for_type_annotation(&alias.get_type_annotation())
+            .unwrap();
+        let mut definitions = HashSet::from([definition.clone()]);
+        assert!(!definitions.insert(aliased_type.get_struct_def().unwrap()));
+
+        let mut other_data = ImportData::default();
+        let other = parse_and_typecheck(source, "packet.x", "packet", &mut other_data).unwrap();
+        let other_definition = other
+            .get_module()
+            .get_type_definition_as_struct_def(0)
+            .unwrap();
+        assert!(info.get_type_for_struct_def(&other_definition).is_none());
+        assert!(definitions.insert(other_definition));
     }
 
     #[test]

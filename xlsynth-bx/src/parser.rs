@@ -2,6 +2,9 @@
 
 //! Parser for BX's structural declarations and DSLX-style value expressions.
 
+pub mod outline;
+pub(crate) mod source_bytes;
+
 use std::collections::BTreeSet;
 
 use crate::ast::{
@@ -119,7 +122,7 @@ pub(crate) fn is_identifier(text: &str) -> bool {
 }
 
 /// Tokenize source without interpreting integer widths or values.
-fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
+fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
     let mut i = 0;
@@ -149,7 +152,10 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
             while i < bytes.len() && dslx_identifier_tail(bytes[i]) {
                 // Keep `a!=b` as inequality, and `a.field!==b` as equality
                 // on the DSLX field named `field!`.
-                if bytes[i..].starts_with(b"!=") && !bytes[i..].starts_with(b"!==") {
+                if dialect == Dialect::Bx
+                    && bytes[i..].starts_with(b"!=")
+                    && !bytes[i..].starts_with(b"!==")
+                {
                     break;
                 }
                 i += 1;
@@ -162,11 +168,27 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
                 .take_while(|c| c.is_digit(radix) || (radix != 10 && *c == '_'))
                 .count();
             i += rest.len() - digits.len() + digit_count;
+        } else if dialect == Dialect::Dslx && b == b'\'' && scan_character(rest).is_none() {
+            // DSLX also uses a standalone apostrophe token.
+            i += 1;
         } else if b == b'\'' {
             let (value, len) = scan_character(rest)
                 .ok_or_else(|| diagnostic(source, start, "invalid byte character literal"))?;
             character = Some(value);
             i += len;
+        } else if dialect == Dialect::Dslx && matches!(b, b'"' | b'`') {
+            // An escaped quote or a delimiter in a string is part of the
+            // literal. Preserve the original spelling for the outline.
+            let mut escaped = false;
+            let end = rest.as_bytes()[1..]
+                .iter()
+                .position(|&c| {
+                    let closes = c == b && !escaped;
+                    escaped = c == b'\\' && !escaped;
+                    closes
+                })
+                .ok_or_else(|| diagnostic(source, start, "unterminated DSLX string"))?;
+            i += end + 2;
         } else if b == b'"' {
             let end = rest[1..]
                 .find(['"', '\n', '\r'])
@@ -175,6 +197,10 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
             if bytes[i] != b'"' {
                 return Err(diagnostic(source, start, "unterminated symbol string"));
             }
+            i += 1;
+        } else if dialect == Dialect::Dslx && (b == b'#' || rest.starts_with(">>")) {
+            // Separate closing angles in nested parametric type arguments.
+            // Expressions in an outline retain their source spelling.
             i += 1;
         } else if rest.starts_with(":=")
             || rest.starts_with("+:")
@@ -200,6 +226,14 @@ fn lex(source: &str) -> Result<Vec<Token<'_>>, String> {
         character: None,
     });
     Ok(tokens)
+}
+
+/// The DSLX outline scanner additionally recognizes attributes, backtick
+/// strings, and standalone apostrophes.
+#[derive(Clone, Copy, PartialEq)]
+enum Dialect {
+    Bx,
+    Dslx,
 }
 
 /// Decode one DSLX byte character and return its value and token length.
@@ -298,7 +332,7 @@ impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
         Ok(Self {
             source,
-            tokens: lex(source)?,
+            tokens: lex(source, Dialect::Bx)?,
             pos: 0,
             depth: 0,
             dslx_type_display,
@@ -388,7 +422,7 @@ impl<'s> Parser<'s> {
             } else if public {
                 return Err(self.error("expected block or struct after pub"));
             } else if self.eat("use") {
-                self.use_tree(&mut Vec::new(), &mut module.uses, &mut use_bindings)?;
+                self.use_tree(&mut module.uses, Some(&mut use_bindings))?;
                 self.expect(";")?;
             } else if self.peek(0) == "import" {
                 return Err(self
@@ -410,44 +444,57 @@ impl<'s> Parser<'s> {
         Ok(module)
     }
 
-    /// Flatten one DSLX use tree, retaining each full path and its leaf
-    /// binding.
+    /// Flatten one DSLX use tree in source order. BX additionally bounds the
+    /// path depth and rejects duplicate leaf bindings in its own namespace.
     fn use_tree(
         &mut self,
-        prefix: &mut Vec<String>,
         paths: &mut Vec<UsePath>,
-        bindings: &mut BTreeSet<String>,
+        mut bx_bindings: Option<&mut BTreeSet<String>>,
     ) -> Result<(), String> {
-        self.nested(|parser| {
-            let offset = parser.tokens[parser.pos].start;
-            let name = parser.take_identifier(is_use_identifier)?;
-            let has_children = parser.eat("::");
-            if !has_children && !bindings.insert(name.clone()) {
+        let mut prefix = Vec::new();
+        let mut groups = Vec::new();
+        loop {
+            if bx_bindings.is_some() && prefix.len() >= MAX_SYNTAX_DEPTH {
+                return Err(
+                    self.error(&format!("syntax nesting exceeds {MAX_SYNTAX_DEPTH} levels"))
+                );
+            }
+            let offset = self.tokens[self.pos].start;
+            let name = self.take_identifier(is_use_identifier)?;
+            let has_children = self.eat("::");
+            if !has_children
+                && let Some(bindings) = &mut bx_bindings
+                && !bindings.insert(name.clone())
+            {
                 return Err(diagnostic(
-                    parser.source,
+                    self.source,
                     offset,
                     &format!("duplicate use binding '{name}'"),
                 ));
             }
             prefix.push(name);
-            if !has_children {
-                paths.push(UsePath {
-                    components: prefix.clone(),
-                });
-            } else if parser.eat("{") {
-                loop {
-                    parser.use_tree(prefix, paths, bindings)?;
-                    if parser.eat("}") {
-                        break;
-                    }
-                    parser.expect(",")?;
+            if has_children {
+                if self.eat("{") {
+                    groups.push(prefix.len());
                 }
-            } else {
-                parser.use_tree(prefix, paths, bindings)?;
+                continue;
             }
-            prefix.pop();
-            Ok(())
-        })
+            paths.push(UsePath {
+                components: prefix.clone(),
+            });
+            loop {
+                let Some(&parent) = groups.last() else {
+                    return Ok(());
+                };
+                if self.eat("}") {
+                    groups.pop();
+                } else {
+                    self.expect(",")?;
+                    prefix.truncate(parent);
+                    break;
+                }
+            }
+        }
     }
 
     /// Parse a local name or a member of an imported DSLX module.

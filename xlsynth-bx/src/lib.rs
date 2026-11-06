@@ -16,6 +16,9 @@ mod typed;
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
 pub use lower::lower_module;
+pub use parser::outline::{
+    DslxOutline, OutlineDecl, OutlineKind, OutlineShape, OutlineType, parse_dslx_outline,
+};
 pub use parser::parse_module;
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 

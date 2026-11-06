@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{error::Error, fs, io, path::Path};
+use std::{collections::BTreeSet, error::Error, fs, io, path::Path};
 
 use tempfile::tempdir;
+use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module_with_options, compile_with_options, empty_package,
@@ -184,6 +185,158 @@ fn an_unused_missing_import_fails_during_checking() -> Result<(), Box<dyn Error>
     let module = parse_module("use test::missing_probe; block b(clk, x: u8) -> u8 { x }")?;
     let error = check_module_with_options(&module, &options).unwrap_err();
     assert!(error.contains("missing_probe"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn imported_proc_spawning_tests_are_checked_and_preserve_function_positions()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let dslx = r#"// Keep blank lines so pretty-printing changes the source locations.
+
+proc P {
+    config() { () }
+    init { () }
+    next(state: ()) { () }
+}
+
+#[test]
+fn spawn_test() { spawn P(); () }
+
+// Deliberately indent the expression independently of the function.
+pub fn tag(x: u8) -> u8 {
+        x + u8:3
+}"#;
+    write_module(root.path(), "wire.x", dslx)?;
+    let options = ImportOptions {
+        dslx_stdlib_path: None,
+        additional_search_paths: vec![root.path()],
+    };
+    let bx = "use wire; block run(clk, x: u8) -> u8 { wire::tag(x) }";
+    let package = compile_with_options(
+        bx,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(run_block(&package, 5)?, IrValue::make_ubits(8, 8)?);
+    let function = package.get_fn("__wire__tag").ok_or("missing wire::tag")?;
+    let add = function.get_node(function.ret_node_ref.ok_or("missing tag result")?);
+    let [pos] = add.pos.as_deref().ok_or("missing tag source location")? else {
+        panic!("expected one source location for the imported addition");
+    };
+    assert_eq!(
+        Path::new(&package.file_table.id_to_path[&pos.fileno]),
+        root.path().join("wire.x")
+    );
+    assert_eq!((pos.lineno, pos.colno), (13, 8));
+
+    let invalid = dslx.replace("spawn P(); ()", "spawn P(); let bad: u8 = u32:1; ()");
+    write_module(root.path(), "wire.x", &invalid)?;
+    let error = check_module_with_options(&parse_module(bx)?, &options).unwrap_err();
+    assert!(error.contains("size mismatch: u32 vs. u8"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn imported_module_errors_report_the_original_path_across_checks() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(root.path(), "wire.x", "pub fn broken() -> u8 { missing }")?;
+    let options = ImportOptions {
+        dslx_stdlib_path: None,
+        additional_search_paths: vec![root.path()],
+    };
+    let bx = parse_module("use wire; block run(clk, x: u8) -> u8 { x }")?;
+    let first = check_module_with_options(&bx, &options).unwrap_err();
+    let second = check_module_with_options(&bx, &options).unwrap_err();
+    assert_eq!(first, second);
+    let location = format!("{}:1:25-1:32", root.path().join("wire.x").display());
+    assert!(first.contains(&location), "{first}");
+    Ok(())
+}
+
+#[test]
+fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let modules = root.path().join("lambda search-path");
+    write_module(
+        &modules,
+        "wire.x",
+        "pub fn adjust(x: u8) -> u8 { x + u8:1 }",
+    )?;
+    // A native lambda symbol includes its filename and both endpoint columns.
+    // Putting the import on this line makes relocation affect both columns.
+    write_module(
+        &modules,
+        "wire_x.x",
+        "import wire; pub fn score(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
+    )?;
+    let bx = "use wire_x; block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
+    let options = ImportOptions {
+        additional_search_paths: vec![&modules],
+        ..Default::default()
+    };
+    let compile = || {
+        compile_with_options(
+            bx,
+            empty_package("design"),
+            ResetBehavior::default(),
+            &options,
+        )
+    };
+    let first = compile()?;
+    assert_eq!(first.to_string(), compile()?.to_string());
+
+    let mut data = ImportData::new(None, &[&modules]);
+    let caller = parse_and_typecheck(
+        "import wire_x; fn main(x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }",
+        "caller.x",
+        "caller",
+        &mut data,
+    )?;
+    let native = Parser::new(&caller.to_ir_text()?).parse_and_verify_package()?;
+    let imported_names = |package: &Package, entry: &str| -> BTreeSet<String> {
+        package
+            .members
+            .iter()
+            .map(|m| &m.graph().name)
+            .filter(|name| name.as_str() != entry)
+            .cloned()
+            .collect()
+    };
+    let expected = imported_names(&native, "__caller__main");
+    assert!(
+        expected
+            .iter()
+            .any(|name| name.starts_with("__wire_x__lambda_capture_struct_at_"))
+    );
+    assert_eq!(imported_names(&first, "run"), expected);
+    Ok(())
+}
+
+#[test]
+fn a_generated_public_fuzz_domain_can_be_passed_directly_between_calls()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "wire.x",
+        r#"#[fuzz_domain("SDomain")]
+pub struct S { x: u8 }
+pub fn make() -> SDomain { SDomain { x: () } }
+pub fn read(_value: SDomain, x: u8) -> u8 { x + u8:5 }"#,
+    )?;
+    let options = ImportOptions {
+        dslx_stdlib_path: None,
+        additional_search_paths: vec![root.path()],
+    };
+    let package = compile_with_options(
+        "use wire; block run(clk, x: u8) -> u8 { wire::read(wire::make(), x) }",
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(run_block(&package, 7)?, IrValue::make_ubits(8, 12)?);
     Ok(())
 }
 
