@@ -1563,7 +1563,7 @@ pub fn lanes(xs: u8[3]) -> u8 {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-#check XlsSource.«sum::Row».value
+#check sum.Row.value
 #guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
 "#
         .into(),
