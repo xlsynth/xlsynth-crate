@@ -34,8 +34,8 @@ pub struct ImportOptions<'a> {
     pub additional_search_paths: Vec<&'a Path>,
 }
 
-/// Parses and checks BX source, then links its blocks into the supplied IR
-/// package.
+/// Parses and checks BX source, then links its functions and blocks into the
+/// supplied IR package.
 pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<Package, String> {
     compile_with_options(source, package, reset, &ImportOptions::default())
 }

@@ -8,7 +8,8 @@
 //! level context (e.g. `invoke`) or richer semantics may return `Ok(None)`
 //! to indicate deduction is not presently implemented.
 
-use crate::ir::{ArrayTypeData, Binop, NaryOp, NodePayload, Type, Unop};
+use crate::ir::{ArrayTypeData, Binop, NaryOp, NodeGraph, NodePayload, Type, Unop};
+use crate::ir_utils::operands;
 use crate::math::ceil_log2;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -121,6 +122,29 @@ where
     deduce_result_type_with_registers(payload, operand_types, resolve_callee_ret_ty, |_| None)
 }
 
+/// Deduce from graph operands, borrowing a sole operand's type so projecting
+/// each field of a wide tuple only copies the selected field.
+pub(crate) fn deduce_graph_result_type(
+    graph: &NodeGraph,
+    payload: &NodePayload,
+    resolve_callee_ret_ty: impl FnMut(&str) -> Option<Type>,
+    resolve_register_ty: impl FnMut(&str) -> Option<Type>,
+) -> Result<Option<Type>, DeduceError> {
+    let refs = operands(payload);
+    let gathered;
+    let types = match refs.as_slice() {
+        [only] => std::slice::from_ref(graph.get_node_ty(*only)),
+        other => {
+            gathered = other
+                .iter()
+                .map(|r| graph.get_node_ty(*r).clone())
+                .collect::<Vec<_>>();
+            &gathered
+        }
+    };
+    deduce_result_type_with_registers(payload, types, resolve_callee_ret_ty, resolve_register_ty)
+}
+
 /// Like `deduce_result_type_with` but also allows resolving register types
 /// by name for `register_read`.
 pub fn deduce_result_type_with_registers<F, R>(
@@ -172,7 +196,7 @@ where
                             tuple_len: members.len(),
                         });
                     }
-                    Ok(Some(*members[*index].clone()))
+                    Ok(Some(members[*index].as_ref().clone()))
                 }
                 _ => Err(DeduceError::ExpectedTuple(tuple_ty.clone())),
             }

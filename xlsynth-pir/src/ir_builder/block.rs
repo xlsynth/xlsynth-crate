@@ -630,7 +630,7 @@ impl Builder<BlockState> {
             return Err(BuilderError::DuplicateName(self.graph.name.clone()));
         }
         verify_package(package).map_err(|error| invalid(error.to_string()))?;
-        self.check_callees(package)?;
+        self.check_callees(|name| package.get_fn(name))?;
         for instance in &self.state.instances {
             let target = &instance.definition.block;
             let actual = match &instance.signature {

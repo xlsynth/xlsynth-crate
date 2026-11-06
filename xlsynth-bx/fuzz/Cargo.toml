@@ -24,6 +24,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_function_calls"
+path = "fuzz_targets/fuzz_bx_dslx_function_calls.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_function_syntax"
+path = "fuzz_targets/fuzz_bx_dslx_function_syntax.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_module_graph"
 path = "fuzz_targets/fuzz_bx_dslx_module_graph.rs"
 test = false

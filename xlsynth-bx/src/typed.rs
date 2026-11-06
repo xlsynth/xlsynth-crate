@@ -16,6 +16,7 @@ use TypedExprKind as K;
 pub struct CheckedModule {
     pub(crate) structs: Vec<StructDef>,
     pub(crate) externs: Vec<ExternFn>,
+    pub(crate) functions: Vec<CheckedFunction>,
     pub(crate) extern_blocks: Vec<ExternBlock>,
     pub(crate) imports: ResolvedImports,
     pub(crate) blocks: Vec<CheckedBlock>,
@@ -27,6 +28,10 @@ impl CheckedModule {
     }
     pub fn externs(&self) -> &[ExternFn] {
         &self.externs
+    }
+    /// Local functions in dependency order, with callees preceding callers.
+    pub fn functions(&self) -> &[CheckedFunction] {
+        &self.functions
     }
     /// Clocked block interfaces that must be supplied by the linked IR package.
     pub fn extern_blocks(&self) -> &[ExternBlock] {
@@ -42,6 +47,24 @@ impl CheckedModule {
     pub fn blocks(&self) -> &[CheckedBlock] {
         &self.blocks
     }
+}
+
+/// A pure function whose bindings and return value have concrete BX types.
+#[derive(Clone, Debug)]
+pub struct CheckedFunction {
+    pub name: String,
+    pub public: bool,
+    pub params: Vec<Param>,
+    pub result: Type,
+    pub bindings: Vec<CheckedBinding>,
+    pub output: TypedExpr,
+}
+
+/// A checked function binding in evaluation order, including unrolled lets.
+#[derive(Clone, Debug)]
+pub struct CheckedBinding {
+    pub name: String,
+    pub value: TypedExpr,
 }
 
 /// Ports, static hardware declarations, and connections of a type-checked
@@ -122,6 +145,12 @@ pub enum TypedExprKind {
         value: Box<TypedExpr>,
         index: usize,
     },
+    /// Project one field of a shared tuple without copying the complete tuple
+    /// type and expression into every projection of a destructuring pattern.
+    BindingTupleIndex {
+        name: String,
+        index: usize,
+    },
     Call {
         name: String,
         args: Vec<TypedExpr>,
@@ -168,7 +197,7 @@ impl TypedExpr {
     /// when its value could be folded by selecting just one branch.
     pub(super) fn has_constant_inputs(&self, names: &BTreeSet<String>) -> bool {
         match &self.kind {
-            K::Name(name) => names.contains(name),
+            K::Name(name) | K::BindingTupleIndex { name, .. } => names.contains(name),
             K::Literal(_) => true,
             K::InstanceOutput { .. } => false,
             K::Tuple(items)
@@ -270,6 +299,7 @@ impl TypedExpr {
                 Some(IrValue::Bits(slice))
             }
             K::TupleIndex { value, index } => value.constant(names)?.get_element(*index).ok(),
+            K::BindingTupleIndex { name, index } => names.get(name)?.get_element(*index).ok(),
             K::Call { .. } | K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
             K::If {
                 condition,

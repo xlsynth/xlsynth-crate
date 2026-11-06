@@ -106,6 +106,43 @@ pub struct ExternFn {
     pub symbol: Option<String>,
 }
 
+/// A local binding in a pure function, evaluated before subsequent bindings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LetBinding {
+    pub pattern: BindingPattern,
+    pub ty: Option<Type>,
+    pub value: Expr,
+}
+
+/// A DSLX let pattern. A rest marker consumes any remaining tuple members.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BindingPattern {
+    Name(String),
+    Tuple(Vec<BindingPattern>),
+    Rest,
+}
+
+impl BindingPattern {
+    /// Visit the visible names introduced by this pattern, in source order.
+    pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) {
+        match self {
+            Self::Name(name) if name != "_" => visit(name),
+            Self::Tuple(fields) => fields.iter().for_each(|f| f.visit_names(visit)),
+            Self::Name(_) | Self::Rest => { /* Wildcards and rest markers bind no value. */ }
+        }
+    }
+}
+
+/// A combinational function defined in this source module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Function {
+    pub name: String,
+    pub public: bool,
+    pub params: Vec<Param>,
+    pub result: Type,
+    pub body: Expr,
+}
+
 /// The BX signature of a clocked block supplied by the linked IR package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternBlock {
@@ -120,6 +157,11 @@ pub struct ExternBlock {
 /// A value computed from this cycle's ports and register contents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
+    /// A lexical value scope, evaluated in source order.
+    Scope {
+        bindings: Vec<LetBinding>,
+        result: Box<Expr>,
+    },
     Name(String),
     Bool(bool),
     Literal {
@@ -263,9 +305,12 @@ impl UsePath {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// Bound names in declaration order, including each leaf of a use tree.
+    pub declaration_order: Vec<String>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
     pub externs: Vec<ExternFn>,
+    pub functions: Vec<Function>,
     pub extern_blocks: Vec<ExternBlock>,
     pub blocks: Vec<Block>,
 }

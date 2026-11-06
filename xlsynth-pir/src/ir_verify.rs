@@ -6,11 +6,11 @@ use std::collections::HashSet;
 use std::fmt;
 
 use crate::ir::{self, Block, Fn, NodeGraph, NodePayload, Package, PackageMember, Type};
-use crate::ir_deduce::{deduce_result_type, deduce_result_type_with};
-use crate::ir_utils::operands;
+use crate::ir_deduce::deduce_graph_result_type;
 
 mod package;
 
+pub(crate) use package::{CalleeLookup, validate_fn_with};
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
 /// Checks the sentinel and canonical parameter nodes without checking the body.
@@ -256,14 +256,9 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
 /// type anticipated by the deduction routine.
 pub fn verify_graph_types_agree_with_deduction(f: &NodeGraph) -> Result<(), String> {
     for (i, node) in f.nodes.iter().enumerate() {
-        // Gather operand types in operand order.
-        let op_refs = operands(&node.payload);
-        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
-        for nr in op_refs.iter() {
-            op_types.push(f.get_node(*nr).ty.clone());
-        }
-        // Ask the deducer what the result type should be for this payload.
-        match deduce_result_type(&node.payload, &op_types).map_err(|e| e.to_string())? {
+        match deduce_graph_result_type(f, &node.payload, |_| None, |_| None)
+            .map_err(|e| e.to_string())?
+        {
             Some(deduced) => {
                 if deduced != node.ty {
                     return Err(format!(
@@ -844,14 +839,9 @@ pub fn verify_graph_types_agree_with_deduction_in_pkg(
     pkg: &Package,
 ) -> Result<(), String> {
     for (i, node) in f.nodes.iter().enumerate() {
-        let op_refs = operands(&node.payload);
-        let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
-        for nr in op_refs.iter() {
-            op_types.push(f.get_node(*nr).ty.clone());
-        }
         let resolver =
             |name: &str| -> Option<Type> { pkg.get_fn(name).map(|callee| callee.ret_ty.clone()) };
-        match deduce_result_type_with(&node.payload, &op_types, resolver)
+        match deduce_graph_result_type(f, &node.payload, resolver, |_| None)
             .map_err(|e| e.to_string())?
         {
             Some(deduced) => {

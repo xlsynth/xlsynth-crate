@@ -56,6 +56,7 @@ struct Generator<'a> {
     variables: Vec<(String, Bits)>,
     inferred_slice_width: Option<usize>,
     nodes_left: usize,
+    domain: EvaluationDomain,
 }
 
 impl Generator<'_> {
@@ -237,6 +238,16 @@ impl Generator<'_> {
                 (index & ((1 << source_width.min(8)) - 1)).to_string()
             }
         };
+        // The pinned bytecode interpreter returns an unsigned zero for a
+        // signed slice whose start is past the end. A later signed operation
+        // can then fail on incompatible runtime values. Keep signed starts
+        // in bounds for bytecode comparisons and retain the unrestricted
+        // generation for the hardware differential target.
+        let start = if self.domain == EvaluationDomain::Bytecode && result.signed {
+            format!("((({start}) as u32) % u32:{source_width})")
+        } else {
+            start
+        };
         let result_type = match self.byte() % 4 {
             0 => result.to_string(),
             1 => format!("xN[{}][{}]", result.signed, result.width),
@@ -259,7 +270,7 @@ impl Generator<'_> {
     /// Compose terms of the requested type. Depth and total nodes bound the
     /// work even for inputs that repeatedly select branching expressions.
     fn with_opcode(&mut self, ty: Bits, depth: u8, opcode: u8) -> String {
-        if depth == 0 || self.nodes_left == 0 || opcode % 16 == 0 {
+        if depth == 0 || self.nodes_left == 0 || opcode.is_multiple_of(16) {
             return self.leaf(ty);
         }
         self.nodes_left -= 1;
@@ -269,7 +280,7 @@ impl Generator<'_> {
             return self.slice(ty, child_depth);
         }
         match opcode % 16 {
-            1 | 2 | 3 => {
+            1..=3 => {
                 const OPS: [&str; 8] = ["+", "-", "*", "/", "%", "&", "|", "^"];
                 let op = OPS[usize::from(self.byte()) % OPS.len()];
                 let operand = self.expr(ty, child_depth);
@@ -354,13 +365,21 @@ impl Generator<'_> {
     }
 }
 
+/// The execution models that the generated expressions must exercise.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EvaluationDomain {
+    Hardware,
+    Bytecode,
+}
+
 /// Decode even an empty byte sequence into a small, type-directed program.
-pub fn generate(data: &[u8]) -> ExpressionSample {
+pub fn generate(data: &[u8], domain: EvaluationDomain) -> ExpressionSample {
     let mut generator = Generator {
         data,
         variables: Vec::new(),
         inferred_slice_width: None,
         nodes_left: 32,
+        domain,
     };
     let root_op = generator.byte();
     let result = Bits::from_byte(generator.byte());

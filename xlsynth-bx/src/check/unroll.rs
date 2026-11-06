@@ -6,25 +6,30 @@ use crate::infer_literal::BindingWidths;
 use xlsynth_pir::IrBits;
 
 /// State hidden by a loop-local name. Restore it when leaving the iteration.
-struct Shadowed {
+pub(super) struct Shadowed {
     name: String,
     value: Option<TypedExpr>,
     widths: Option<BindingWidths>,
     declared: bool,
 }
 
-impl BlockChecker<'_, '_> {
+impl BodyChecker<'_, '_> {
     pub(super) fn loop_widths(&self) -> Option<WidthLookup<'_>> {
         (!self.loop_values.is_empty())
             .then(|| WidthLookup::loop_locals(&self.inferred_bindings, &self.loop_values))
     }
 
-    /// Charge all folds in this block to one budget, including nested ones.
+    /// Charge all folds in this function or block to one budget, including
+    /// nested ones.
     pub(super) fn charge_unroll(&mut self, work: usize) -> Result<(), String> {
         self.unroll_work = self.unroll_work.saturating_add(work);
         if self.unroll_work > MAX_TYPE_SIZE {
+            let kind = match self.kind {
+                BodyKind::Block { .. } => "block",
+                BodyKind::Function => "function",
+            };
             return Err(format!(
-                "unroll_for! exceeds the block expansion limit of {MAX_TYPE_SIZE}"
+                "unroll_for! exceeds the {kind} expansion limit of {MAX_TYPE_SIZE}"
             ));
         }
         Ok(())
@@ -33,6 +38,21 @@ impl BlockChecker<'_, '_> {
     /// Child-producing loops occupy an unconditional binding or block result.
     /// Other expression positions can use the same fold with pure values.
     pub(super) fn scoped_result(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+        structural: bool,
+    ) -> Result<TypedExpr, String> {
+        if self.kind == BodyKind::Function && !matches!(expr, Expr::Scope { .. }) {
+            return self.with_prepared_value(expr, |checker, value| {
+                checker.elaborate_result(value, expected, structural)
+            });
+        }
+        self.elaborate_result(expr, expected, structural)
+    }
+
+    /// Elaborate a result after its contributing lexical scopes are available.
+    pub(super) fn elaborate_result(
         &mut self,
         expr: &Expr,
         expected: Option<&Type>,
@@ -56,6 +76,9 @@ impl BlockChecker<'_, '_> {
         if let Expr::Call { name: target, args } = expr
             && let Some(child) = self.decls.blocks.get(target.as_str())
         {
+            if self.kind == BodyKind::Function {
+                return Err(format!("pure function cannot call block '{target}'"));
+            }
             if !structural {
                 return Err(format!(
                     "call to block '{target}' requires an unconditional top-level let or unrolled let"
@@ -121,7 +144,7 @@ impl BlockChecker<'_, '_> {
 
     /// Install a source binding, preserving shadowed outer values and literal
     /// inference.
-    fn bind_loop_value(
+    pub(super) fn bind_scoped_value(
         &mut self,
         name: &str,
         value: TypedExpr,
@@ -131,9 +154,14 @@ impl BlockChecker<'_, '_> {
         if name == "_" {
             return;
         }
+        let values = if self.iteration_path.is_empty() {
+            &mut self.function_values
+        } else {
+            &mut self.loop_values
+        };
         saved.push(Shadowed {
             name: name.to_owned(),
-            value: self.loop_values.insert(name.to_owned(), value),
+            value: values.insert(name.to_owned(), value),
             widths: self.inferred_bindings.remove(name),
             declared: self.names.insert(name.to_owned()),
         });
@@ -142,12 +170,17 @@ impl BlockChecker<'_, '_> {
         }
     }
 
-    fn leave_iteration(&mut self, saved: Vec<Shadowed>) {
+    pub(super) fn leave_scope(&mut self, saved: Vec<Shadowed>) {
+        let values = if self.iteration_path.is_empty() {
+            &mut self.function_values
+        } else {
+            &mut self.loop_values
+        };
         for old in saved.into_iter().rev() {
             if let Some(value) = old.value {
-                self.loop_values.insert(old.name.clone(), value);
+                values.insert(old.name.clone(), value);
             } else {
-                self.loop_values.remove(&old.name);
+                values.remove(&old.name);
             }
             if let Some(widths) = old.widths {
                 self.inferred_bindings.insert(old.name.clone(), widths);
@@ -232,9 +265,9 @@ impl BlockChecker<'_, '_> {
                 kind: K::Literal(IrValue::Bits(index.clone())),
             };
             let acc_type = carry.ty.clone();
-            let index_widths = inferred_index.then(|| BindingWidths::scalar(lo.ty.clone()));
-            self.bind_loop_value(&fold.index, item, index_widths, &mut saved);
-            self.bind_loop_value(&fold.accumulator, carry, None, &mut saved);
+            let index_widths = inferred_index.then(|| BindingWidths::scalar(signed, width));
+            self.bind_scoped_value(&fold.index, item, index_widths, &mut saved);
+            self.bind_scoped_value(&fold.accumulator, carry, None, &mut saved);
             for stmt in &fold.body {
                 let Stmt::Let {
                     name,
@@ -256,13 +289,13 @@ impl BlockChecker<'_, '_> {
                     None
                 };
                 let value = self.share_loop_value(value);
-                self.bind_loop_value(name, value, widths, &mut saved);
+                self.bind_scoped_value(name, value, widths, &mut saved);
             }
             let value = self
                 .scoped_result(&fold.result, Some(&acc_type), structural)
                 .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
             carry = self.share_loop_value(value);
-            self.leave_iteration(saved);
+            self.leave_scope(saved);
             self.iteration_path.pop();
             index = index.add(&one);
         }
@@ -270,7 +303,7 @@ impl BlockChecker<'_, '_> {
     }
 }
 
-impl BlockChecker<'_, '_> {
+impl BodyChecker<'_, '_> {
     /// DSLX resolves lexical names before unrolling, even when it never
     /// typechecks an iteration. Keep that distinction for an empty range.
     fn check_empty_loop_names(&self, fold: &UnrollFor) -> Result<(), String> {
@@ -306,6 +339,8 @@ impl BlockChecker<'_, '_> {
                 return Err(format!("'{name}' names a local value here"));
             }
             Type::Named(name) => {
+                self.decls
+                    .check_type_visibility(ty, self.function_position)?;
                 if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
                     self.resolver.check_member_name(&module, &member)?;
                 } else {
@@ -329,11 +364,13 @@ impl BlockChecker<'_, '_> {
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
-        if locals.contains(name)
-            || name == "update"
-            || self.decls.externs.contains_key(name)
-            || self.decls.blocks.contains_key(name)
-        {
+        if locals.contains(name) || name == "update" {
+            return Ok(());
+        }
+        if !self.decls.visible(name, self.function_position) {
+            return Err(format!("'{name}' is declared later in the module"));
+        }
+        if self.decls.functions.contains_key(name) || self.decls.blocks.contains_key(name) {
             return Ok(());
         }
         if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
@@ -344,6 +381,20 @@ impl BlockChecker<'_, '_> {
 
     fn check_expr_names(&self, expr: &Expr, locals: &BTreeSet<String>) -> Result<(), String> {
         match expr {
+            Expr::Scope { bindings, result } => {
+                let mut names = locals.clone();
+                for binding in bindings {
+                    self.validate_source_pattern(&binding.pattern)?;
+                    if let Some(ty) = &binding.ty {
+                        self.check_type_names(ty, &names)?;
+                    }
+                    self.check_expr_names(&binding.value, &names)?;
+                    binding.pattern.visit_names(&mut |n| {
+                        names.insert(n.to_owned());
+                    });
+                }
+                self.check_expr_names(result, &names)?;
+            }
             Expr::Name(name) => self.check_value_name(name, locals)?,
             Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to resolve. */ }
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
@@ -351,6 +402,12 @@ impl BlockChecker<'_, '_> {
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
+                    if self.kind == BodyKind::Function
+                        && !locals.contains(name)
+                        && self.decls.blocks.contains_key(name.as_str())
+                    {
+                        return Err(format!("pure function cannot call block '{name}'"));
+                    }
                     self.check_value_name(name, locals)?;
                 }
                 for item in items {

@@ -8,8 +8,8 @@ pub(crate) mod source_bytes;
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Module, Param, Stmt, StructDef, Type, UnaryOp,
-    UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, Function, LetBinding, Module,
+    Param, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -91,6 +91,11 @@ pub(crate) fn is_use_identifier(text: &str) -> bool {
         )
 }
 
+/// DSLX accepts the special name `self` as a name definition or reference.
+fn is_function_identifier(text: &str) -> bool {
+    is_use_identifier(text) || text == "self"
+}
+
 /// A local BX binding may use any identifier word other than reserved syntax.
 pub(crate) fn is_identifier(text: &str) -> bool {
     let keyword = matches!(
@@ -126,6 +131,8 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
     let mut tokens = Vec::new();
     let bytes = source.as_bytes();
     let mut i = 0;
+    let mut brace_depth = 0usize;
+    let mut function_definition = false;
     while i < bytes.len() {
         let start = i;
         let rest = &source[i..];
@@ -139,6 +146,9 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
             continue;
         }
         if let Some(comment) = rest.strip_prefix("/*") {
+            if dialect == Dialect::Bx && function_definition {
+                return Err(diagnostic(source, start, "use a // comment in a function"));
+            }
             let end = comment
                 .find("*/")
                 .ok_or_else(|| diagnostic(source, start, "unterminated block comment"))?;
@@ -153,6 +163,7 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
                 // Keep `a!=b` as inequality, and `a.field!==b` as equality
                 // on the DSLX field named `field!`.
                 if dialect == Dialect::Bx
+                    && !function_definition
                     && bytes[i..].starts_with(b"!=")
                     && !bytes[i..].starts_with(b"!==")
                 {
@@ -215,8 +226,24 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
         } else {
             return Err(diagnostic(source, start, "unexpected character"));
         }
+        let text = &source[start..i];
+        // DSLX consumes a trailing bang in a name even when '=' immediately
+        // follows it. Keep BX's compact inequality spelling in block bodies.
+        match text {
+            "fn" if brace_depth == 0 => {
+                function_definition = tokens.last().is_none_or(|t: &Token| t.text != "extern");
+            }
+            "{" => brace_depth += 1,
+            "}" => {
+                brace_depth = brace_depth.saturating_sub(1);
+                if brace_depth == 0 {
+                    function_definition = false;
+                }
+            }
+            _ => { /* Other tokens do not enter or leave a definition. */ }
+        }
         tokens.push(Token {
-            text: &source[start..i],
+            text,
             start,
             character,
         });
@@ -289,6 +316,8 @@ struct Parser<'s> {
     pos: usize,
     depth: usize,
     dslx_type_display: bool,
+    /// Use DSLX identifier rules throughout a local function definition.
+    in_function: bool,
 }
 
 /// The depth of a parsed type includes both tuple and array constructors.
@@ -337,6 +366,7 @@ impl<'s> Parser<'s> {
             pos: 0,
             depth: 0,
             dslx_type_display,
+            in_function: false,
         })
     }
 
@@ -391,12 +421,16 @@ impl<'s> Parser<'s> {
     }
 
     fn ident(&mut self) -> Result<String, String> {
-        self.take_identifier(is_identifier)
+        if self.in_function {
+            self.take_identifier(is_function_identifier)
+        } else {
+            self.take_identifier(is_identifier)
+        }
     }
 
     fn take_identifier(&mut self, valid: fn(&str) -> bool) -> Result<String, String> {
         let text = self.peek(0);
-        if valid(text) {
+        if valid(text) && (!self.in_function || is_function_identifier(text)) {
             self.pos += 1;
             Ok(text.to_owned())
         } else {
@@ -410,9 +444,18 @@ impl<'s> Parser<'s> {
         while !self.peek(0).is_empty() {
             let public = self.eat("pub");
             if self.eat("block") {
-                module.blocks.push(self.block(public)?);
+                let block = self.block(public)?;
+                module.declaration_order.push(block.name.clone());
+                module.blocks.push(block);
+            } else if self.eat("fn") {
+                self.in_function = true;
+                let function = self.function(public)?;
+                self.in_function = false;
+                module.declaration_order.push(function.name.clone());
+                module.functions.push(function);
             } else if self.eat("struct") {
                 let name = self.ident()?;
+                module.declaration_order.push(name.clone());
                 self.expect("{")?;
                 let fields = self.list("}", Self::param)?;
                 module.structs.push(StructDef {
@@ -421,25 +464,35 @@ impl<'s> Parser<'s> {
                     fields,
                 });
             } else if public {
-                return Err(self.error("expected block or struct after pub"));
+                return Err(self.error("expected block, fn, or struct after pub"));
             } else if self.eat("use") {
+                let start = module.uses.len();
                 self.use_tree(&mut module.uses, Some(&mut use_bindings))?;
+                module.declaration_order.extend(
+                    module.uses[start..]
+                        .iter()
+                        .filter_map(UsePath::binding)
+                        .map(str::to_owned),
+                );
                 self.expect(";")?;
             } else if self.peek(0) == "import" {
                 return Err(self
                     .error("replace `import` with `use` and separate path components with `::`"));
             } else if self.eat("extern") {
                 if self.eat("fn") {
-                    module.externs.push(self.extern_fn()?);
+                    let function = self.extern_fn()?;
+                    module.declaration_order.push(function.name.clone());
+                    module.externs.push(function);
                 } else if self.eat("block") {
                     let signature = self.block_signature()?;
+                    module.declaration_order.push(signature.name.clone());
                     self.expect(";")?;
                     module.extern_blocks.push(signature);
                 } else {
                     return Err(self.error("expected fn or block after extern"));
                 }
             } else {
-                return Err(self.error("expected a block, struct, extern, or use declaration"));
+                return Err(self.error("expected a block, fn, struct, extern, or use declaration"));
             }
         }
         Ok(module)
@@ -527,7 +580,12 @@ impl<'s> Parser<'s> {
     }
 
     fn param(&mut self) -> Result<Param, String> {
-        let name = self.ident()?;
+        let name = if self.in_function {
+            // A self parameter is reserved for DSLX impl and trait methods.
+            self.take_identifier(is_use_identifier)?
+        } else {
+            self.ident()?
+        };
         self.expect(":")?;
         Ok(Param {
             name,
@@ -563,6 +621,100 @@ impl<'s> Parser<'s> {
             result,
             symbol,
         })
+    }
+
+    /// Parse pure local lets and a trailing value. A body ending in a
+    /// semicolon or an empty body returns unit, as in DSLX.
+    fn function(&mut self, public: bool) -> Result<Function, String> {
+        let name = self.ident()?;
+        self.expect("(")?;
+        let params = self.list(")", Self::param)?;
+        let result = if self.eat("->") {
+            self.ty()?
+        } else {
+            Type::Tuple(Vec::new())
+        };
+        self.expect("{")?;
+        let body = self.value_scope()?.value;
+        Ok(Function {
+            name,
+            public,
+            params,
+            result,
+            body,
+        })
+    }
+
+    /// Read a DSLX value block after its opening brace. A trailing semicolon
+    /// discards the preceding expression and supplies unit as the result.
+    fn value_scope(&mut self) -> Result<ParsedExpr, String> {
+        let mut bindings = Vec::new();
+        let mut height = 0;
+        let output = loop {
+            if self.eat("}") {
+                break ParsedExpr::leaf(Expr::Tuple(Vec::new()));
+            }
+            if self.eat("let") {
+                let mut names = BTreeSet::new();
+                let pattern = self.binding_pattern(&mut names)?;
+                let (ty, value) = self.let_initializer()?;
+                height = height.max(value.height);
+                bindings.push(LetBinding {
+                    pattern,
+                    ty,
+                    value: value.value,
+                });
+                self.expect(";")?;
+            } else {
+                let value = self.expr()?;
+                if self.eat("}") {
+                    break value;
+                }
+                self.expect(";")?;
+                height = height.max(value.height);
+                bindings.push(LetBinding {
+                    pattern: BindingPattern::Name("_".into()),
+                    ty: None,
+                    value: value.value,
+                });
+            }
+        };
+        if bindings.is_empty() {
+            return Ok(output);
+        }
+        self.compose(
+            height.max(output.height),
+            Expr::Scope {
+                bindings,
+                result: Box::new(output.value),
+            },
+        )
+    }
+
+    /// Parse nested tuple binders, with at most one rest marker per tuple.
+    fn binding_pattern(&mut self, names: &mut BTreeSet<String>) -> Result<BindingPattern, String> {
+        if self.eat("(") {
+            return self.nested(|parser| {
+                let mut rest = false;
+                let fields = parser.list(")", |p| {
+                    if p.eat("..") {
+                        if rest {
+                            return Err(p.error("duplicate rest marker in tuple pattern"));
+                        }
+                        rest = true;
+                        Ok(BindingPattern::Rest)
+                    } else {
+                        p.binding_pattern(names)
+                    }
+                })?;
+                Ok(BindingPattern::Tuple(fields))
+            });
+        }
+        let name = self.ident()?;
+        if name != "_" && !names.insert(name.clone()) {
+            return Err(self.error(&format!("duplicate name '{name}' in let pattern")));
+        }
+        Ok(BindingPattern::Name(name))
     }
 
     /// Parse the common interface of a defined or external clocked block.
@@ -693,7 +845,7 @@ impl<'s> Parser<'s> {
     fn type_atom(&mut self) -> Result<ParsedType, String> {
         if self.eat("(") {
             return self.nested(|parser| {
-                if parser.dslx_type_display {
+                if parser.dslx_type_display || parser.in_function {
                     let fields = parser.list(")", Self::parsed_ty)?;
                     parser.tuple_type(fields)
                 } else {
@@ -860,13 +1012,7 @@ impl<'s> Parser<'s> {
     /// height for bindings that belong to an enclosing expression.
     fn let_stmt(&mut self) -> Result<(Stmt, usize), String> {
         let name = self.ident()?;
-        let ty = if self.eat(":") {
-            Some(self.ty()?)
-        } else {
-            None
-        };
-        self.expect("=")?;
-        let value = self.expr()?;
+        let (ty, value) = self.let_initializer()?;
         Ok((
             Stmt::Let {
                 name,
@@ -877,24 +1023,64 @@ impl<'s> Parser<'s> {
         ))
     }
 
+    fn let_initializer(&mut self) -> Result<(Option<Type>, ParsedExpr), String> {
+        let ty = if self.eat(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect("=")?;
+        Ok((ty, self.expr()?))
+    }
+
     fn expr(&mut self) -> Result<ParsedExpr, String> {
-        self.expr_at(0, true)
+        self.full_expr(true)
+    }
+
+    /// DSLX ends a full expression at the closing brace of a standalone scope
+    /// or the closing parenthesis of an unroll that begins that expression.
+    fn full_expr(&mut self, allow_struct: bool) -> Result<ParsedExpr, String> {
+        if self.in_function && self.eat("{") {
+            return self.nested(Self::value_scope);
+        }
+        if self.in_function && self.eat("unroll_for!") {
+            return self.nested(Self::unroll_for);
+        }
+        self.expr_at(0, allow_struct)
     }
 
     /// Parse the condition and the opening brace. An unparenthesized name here
     /// refers to the condition signal even when a brace follows it.
     fn condition(&mut self) -> Result<ParsedExpr, String> {
-        let condition = self.expr_at(0, false)?;
+        let condition = self.full_expr(false)?;
         self.expect("{")?;
         Ok(condition)
     }
 
     fn if_expr(&mut self) -> Result<ParsedExpr, String> {
         let condition = self.condition()?;
-        let then_value = self.expr()?;
-        self.expect("}")?;
+        let then_value = self.arm_value()?;
+        if self.in_function && self.peek(0) != "else" {
+            return self.compose(
+                condition.height.max(then_value.height),
+                Expr::If {
+                    condition: Box::new(condition.value),
+                    then_value: Box::new(then_value.value),
+                    else_value: Box::new(Expr::Tuple(Vec::new())),
+                },
+            );
+        }
         self.expect("else")?;
         self.if_tail(condition, then_value)
+    }
+
+    fn arm_value(&mut self) -> Result<ParsedExpr, String> {
+        if self.in_function {
+            return self.value_scope();
+        }
+        let value = self.expr()?;
+        self.expect("}")?;
+        Ok(value)
     }
 
     /// Parse the binders, range, iteration body, and initial accumulator of
@@ -926,20 +1112,25 @@ impl<'s> Parser<'s> {
             None
         };
         self.expect("in")?;
-        let start = self.expr()?;
+        // Range endpoints are operands of '..', even at the start of the
+        // iterable.
+        let start = self.expr_at(0, true)?;
         self.expect("..")?;
         let limit = self.expr_at(0, false)?;
         self.expect("{")?;
         let mut body = Vec::new();
         let mut height = start.height.max(limit.height);
-        while self.eat("let") {
-            let (stmt, initializer_height) = self.let_stmt()?;
-            self.expect(";")?;
-            height = height.max(initializer_height);
-            body.push(stmt);
-        }
-        let result = self.expr()?;
-        self.expect("}")?;
+        let result = if self.in_function {
+            self.value_scope()?
+        } else {
+            while self.eat("let") {
+                let (stmt, initializer_height) = self.let_stmt()?;
+                self.expect(";")?;
+                height = height.max(initializer_height);
+                body.push(stmt);
+            }
+            self.arm_value()?
+        };
         self.expect("(")?;
         let seed = self.expr()?;
         self.expect(")")?;
@@ -967,9 +1158,7 @@ impl<'s> Parser<'s> {
             self.nested(Self::if_expr)?
         } else {
             self.expect("{")?;
-            let value = self.expr()?;
-            self.expect("}")?;
-            value
+            self.arm_value()?
         };
         self.compose(
             condition
@@ -1026,6 +1215,15 @@ impl<'s> Parser<'s> {
         allow_struct: bool,
     ) -> Result<ParsedExpr, String> {
         loop {
+            if self.in_function
+                && left.spelling != ExprSpelling::Parenthesized
+                && matches!(left.value, Expr::If { .. })
+                && matches!(self.peek(0), "." | "[")
+            {
+                return Err(
+                    self.error("parenthesize a conditional before field access or indexing")
+                );
+            }
             if self.eat(".") {
                 let name = if number_token(self.peek(0)) {
                     let offset = self.tokens[self.pos].start;
@@ -1115,6 +1313,9 @@ impl<'s> Parser<'s> {
 
     fn atom(&mut self, allow_struct: bool) -> Result<ParsedExpr, String> {
         let text = self.peek(0);
+        if self.in_function && text == "_" {
+            return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
+        }
         if self.eat("[") {
             let items = self.list("]", Self::expr)?;
             return self.aggregate(items, Expr::Array);
@@ -1365,7 +1566,7 @@ mod tests {
             ("use lib::fn;", "expected identifier"),
             ("use lib::u64;", "expected identifier"),
             ("use std", "expected ';'"),
-            ("pub use std;", "expected block or struct after pub"),
+            ("pub use std;", "expected block, fn, or struct after pub"),
             ("import a.b;", "replace `import` with `use`"),
         ] {
             assert!(

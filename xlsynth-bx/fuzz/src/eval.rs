@@ -25,7 +25,7 @@ pub fn check_sample(sample: &ExpressionSample, input_seed: u64) -> Result<(), St
     };
     let evaluator = ExpressionEvaluator::compile(params, result_type, &body, compile_bundled_dslx)
         .map_err(context)?;
-    for (index, args) in generate_argument_sets_from_seed(&evaluator.bx, input_seed, 4)
+    for (index, args) in generate_argument_sets_from_seed(&evaluator.bx.function, input_seed, 4)
         .iter()
         .enumerate()
     {

@@ -179,7 +179,7 @@ pub fn make() -> Frame {{ zero!<Frame>() }}
             &options,
             compile_bundled_module(&native, &paths),
         )?;
-        for args in generate_argument_sets_from_seed(&evaluator.bx, self.input_seed, 3) {
+        for args in generate_argument_sets_from_seed(&evaluator.bx.function, self.input_seed, 3) {
             evaluator.compare(&args)?;
         }
 

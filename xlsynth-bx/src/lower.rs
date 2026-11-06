@@ -6,28 +6,42 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use xlsynth_pir::ir::{self, NodePayload, Package, PackageMember};
+use xlsynth_pir::ir_builder::{
+    BlockState, Builder, BuilderState, FunctionBatch, InvokeSignature, is_valid_identifier,
+};
 use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{
-    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, RegisterWriteOptions,
+    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, RegisterWriteOptions,
     ResetBehavior,
 };
 
 use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
 use crate::check::{
-    CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind, output_ports,
+    CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
+    output_ports,
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
 
-/// Destination package indices for explicitly declared externs and inferred
-/// imported DSLX specializations.
+/// Destination package indices for named BX functions, externs, and inferred
+/// DSLX specializations.
 struct LinkedFunctions {
-    externs: BTreeMap<String, usize>,
+    named: BTreeMap<String, usize>,
     imported: BTreeMap<usize, usize>,
+    signatures: HashMap<usize, InvokeSignature>,
 }
 
-/// Links every extern and appends verified blocks in child-before-parent order.
+/// Captures the checked signature once per distinct linked function.
+fn invoke_signature(package: &Package, index: usize) -> Result<InvokeSignature, String> {
+    let PackageMember::Function(function) = &package.members[index] else {
+        unreachable!("linked calls refer to function members")
+    };
+    InvokeSignature::from_function(function).map_err(|error| error.to_string())
+}
+
+/// Links external declarations and emits functions and blocks after their
+/// dependencies.
 pub fn lower_module(
     module: &CheckedModule,
     mut package: Package,
@@ -35,12 +49,24 @@ pub fn lower_module(
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
-    let externs = link_externs(module, &package, &mut layouts)?;
+    let named = link_externs(module, &package, &mut layouts)?;
     check_extern_blocks(module, &package, &mut layouts, reset)?;
-    let block_names = module
-        .blocks
-        .iter()
-        .map(|block| block.name.clone())
+    let block_names = module.blocks.iter().map(|block| block.name.as_str());
+    let function_symbols = local_ir_names(
+        module
+            .functions
+            .iter()
+            .map(|function| function.name.as_str()),
+        block_names.clone().chain(
+            package
+                .members
+                .iter()
+                .map(|member| member.graph().name.as_str()),
+        ),
+    );
+    let reserved_names = block_names
+        .map(str::to_owned)
+        .chain(function_symbols.iter().cloned())
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
     for batch in &module.imports.batches {
@@ -48,7 +74,7 @@ pub fn lower_module(
             &mut package,
             batch.package.clone(),
             &batch.roots,
-            &block_names,
+            &reserved_names,
         )?;
         for (&id, index) in batch.call_ids.iter().zip(indices) {
             let call = &module.imports.calls[id];
@@ -65,9 +91,30 @@ pub fn lower_module(
             imported.insert(id, index);
         }
     }
-    let functions = LinkedFunctions { externs, imported };
+    let mut signatures = HashMap::new();
+    for &index in named.values().chain(imported.values()) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = signatures.entry(index) {
+            entry.insert(invoke_signature(&package, index)?);
+        }
+    }
+    let mut functions = LinkedFunctions {
+        named,
+        imported,
+        signatures,
+    };
+    if !module.functions.is_empty() {
+        let mut batch = FunctionBatch::new(&mut package).map_err(|error| error.to_string())?;
+        for (function, symbol) in module.functions.iter().zip(function_symbols) {
+            let index = lower_function(function, &symbol, &mut batch, &functions, &mut layouts)
+                .map_err(|error| format!("fn '{}': {error}", function.name))?;
+            functions
+                .signatures
+                .insert(index, invoke_signature(batch.package(), index)?);
+            functions.named.insert(function.name.clone(), index);
+        }
+    }
     for block in &module.blocks {
-        let builder = LowerBlock::build(
+        let builder = LowerBody::build_block(
             block,
             &package,
             &functions,
@@ -94,6 +141,34 @@ pub fn lower_module(
         }
     }
     Ok(package)
+}
+
+/// Keeps ordinary source identifiers and assigns collision-free IR names to
+/// keywords and DSLX identifiers containing primes or exclamation marks.
+fn local_ir_names<'a>(
+    names: impl Iterator<Item = &'a str> + Clone,
+    existing: impl Iterator<Item = &'a str>,
+) -> Vec<String> {
+    if names.clone().all(is_valid_identifier) {
+        return names.map(str::to_owned).collect();
+    }
+    let mut occupied: BTreeSet<String> = names.clone().chain(existing).map(str::to_owned).collect();
+    names
+        .map(|name| {
+            if is_valid_identifier(name) {
+                return name.to_owned();
+            }
+            let stem = name.replace(['\'', '!'], "_");
+            let mut suffix = 1;
+            loop {
+                let candidate = format!("{stem}__bx_{suffix}");
+                if occupied.insert(candidate.clone()) {
+                    return candidate;
+                }
+                suffix += 1;
+            }
+        })
+        .collect()
 }
 
 /// Matches imported block signatures by timing role and named data ports before
@@ -325,22 +400,56 @@ struct Register {
     reset: Option<BValue>,
 }
 
-/// Block-local values and resources being wired into a checked PIR builder.
-struct LowerBlock<'a, 'defs> {
-    builder: BlockBuilder,
+/// Hardware resources used to wire register and instance inputs in one block.
+#[derive(Default)]
+struct BlockResources {
+    registers: BTreeMap<String, Register>,
+    instances: BTreeMap<String, BInstantiation>,
+}
+
+/// Builds checked value expressions in either a pure function or a clocked
+/// block.
+struct LowerBody<'a, 'defs, S: BuilderState> {
+    builder: Builder<S>,
     package: &'a Package,
     functions: &'a LinkedFunctions,
     layouts: &'a mut Layouts<'defs>,
     values: BTreeMap<String, BValue>,
     tuple_elements: HashMap<BValue, Vec<BValue>>,
-    registers: BTreeMap<String, Register>,
-    instances: BTreeMap<String, BInstantiation>,
 }
 
-impl<'a, 'defs> LowerBlock<'a, 'defs> {
+/// Builds a local function in the destination package's callee and node-ID
+/// context.
+fn lower_function(
+    function: &CheckedFunction,
+    symbol: &str,
+    batch: &mut FunctionBatch,
+    functions: &LinkedFunctions,
+    layouts: &mut Layouts,
+) -> Result<usize, BuilderError> {
+    let mut body = LowerBody::new(FnBuilder::new(symbol), batch.package(), functions, layouts);
+    let param_symbols = local_ir_names(
+        function.params.iter().map(|param| param.name.as_str()),
+        std::iter::empty(),
+    );
+    for (param, param_symbol) in function.params.iter().zip(param_symbols) {
+        let value = body
+            .builder
+            .param(&param_symbol, body.layouts.lower(&param.ty)?)?;
+        body.values.insert(param.name.clone(), value);
+    }
+    for binding in &function.bindings {
+        let value = body.expr(&binding.value)?;
+        body.values.insert(binding.name.clone(), value);
+    }
+    let result = body.expr(&function.output)?;
+    batch.append(body.builder, result)
+}
+
+impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
     /// Allocates the interface and instances before connecting their input
     /// drivers.
-    fn build(
+    fn build_block(
         block: &CheckedBlock,
         package: &'a Package,
         functions: &'a LinkedFunctions,
@@ -348,16 +457,8 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
         structs: &[StructDef],
         reset_behavior: ResetBehavior,
     ) -> Result<BlockBuilder, BuilderError> {
-        let mut state = Self {
-            builder: BlockBuilder::new(&block.name),
-            package,
-            functions,
-            layouts,
-            values: BTreeMap::new(),
-            tuple_elements: HashMap::new(),
-            registers: BTreeMap::new(),
-            instances: BTreeMap::new(),
-        };
+        let mut state = Self::new(BlockBuilder::new(&block.name), package, functions, layouts);
+        let mut resources = BlockResources::default();
         state.builder.clock_port(&block.clock)?;
         let reset = if let Some(name) = &block.reset {
             let physical = state.builder.input_port(name, ir::Type::Bits(1))?;
@@ -384,10 +485,11 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 block: target,
             } = statement
             {
-                state.add_instance(name, target, reset)?;
+                let instance = state.add_instance(name, target, reset)?;
+                resources.instances.insert(name.clone(), instance);
             }
         }
-        state.wire_statements(&block.statements, reset, None)?;
+        state.wire_statements(&block.statements, &mut resources, reset, None)?;
         let ports = output_ports(&block.result, structs).map_err(BuilderError::InvalidOperation)?;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
@@ -413,6 +515,7 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
     fn wire_statements(
         &mut self,
         statements: &[CheckedStmt],
+        resources: &mut BlockResources,
         reset: Option<BValue>,
         guard: Option<BValue>,
     ) -> Result<(), BuilderError> {
@@ -428,7 +531,7 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                             .register(name, self.layouts.lower(ty)?, value.clone())?;
                     let current = self.builder.register_read(handle)?;
                     self.values.insert(name.clone(), current);
-                    self.registers.insert(
+                    resources.registers.insert(
                         name.clone(),
                         Register {
                             handle,
@@ -441,7 +544,7 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                     self.values.insert(name.clone(), value);
                 }
                 CheckedStmt::Write { name, value } => {
-                    let reg = self.registers[name];
+                    let reg = resources.registers[name];
                     let data = self.expr(value)?;
                     self.builder.register_write(
                         reg.handle,
@@ -458,7 +561,7 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                         Some(parent) => self.builder.and(parent, condition)?,
                         None => condition,
                     };
-                    self.wire_statements(body, reset, Some(active))?;
+                    self.wire_statements(body, resources, reset, Some(active))?;
                 }
                 CheckedStmt::Inst { .. } => {
                     // Instance outputs were made available before wiring any
@@ -471,11 +574,57 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 } => {
                     let value = self.expr(value)?;
                     self.builder
-                        .instantiation_input(self.instances[instance], port, value)?;
+                        .instantiation_input(resources.instances[instance], port, value)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Connects the common timing domain and declares all child outputs,
+    /// including unused ports.
+    fn add_instance(
+        &mut self,
+        name: &str,
+        target: &str,
+        parent_reset: Option<BValue>,
+    ) -> Result<BInstantiation, BuilderError> {
+        let child = self.package.get_block(target).ok_or_else(|| {
+            BuilderError::InvalidOperation(format!("unknown child block '{target}'"))
+        })?;
+        let instance = self.builder.instantiate(name, child)?;
+        if let Some(reset) = &child.reset {
+            let signal = parent_reset.ok_or_else(|| {
+                BuilderError::InvalidOperation(format!("child '{name}' requires a reset"))
+            })?;
+            self.builder
+                .instantiation_input(instance, child.port_name(reset.port), signal)?;
+        }
+        for port in child.output_ports() {
+            let port_name = child.port_name(port);
+            let value = self.builder.instantiation_output(instance, port_name)?;
+            // Ordinary BX identifiers cannot contain a dot.
+            self.values.insert(format!("{name}.{port_name}"), value);
+        }
+        Ok(instance)
+    }
+}
+
+impl<'a, 'defs, S: BuilderState> LowerBody<'a, 'defs, S> {
+    fn new(
+        builder: Builder<S>,
+        package: &'a Package,
+        functions: &'a LinkedFunctions,
+        layouts: &'a mut Layouts<'defs>,
+    ) -> Self {
+        Self {
+            builder,
+            package,
+            functions,
+            layouts,
+            values: BTreeMap::new(),
+            tuple_elements: HashMap::new(),
+        }
     }
 
     /// Selects the actual field wire for a locally constructed tuple, even
@@ -515,43 +664,14 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
         }
     }
 
-    /// Connects the common timing domain and declares all child outputs,
-    /// including unused ports.
-    fn add_instance(
-        &mut self,
-        name: &str,
-        target: &str,
-        parent_reset: Option<BValue>,
-    ) -> Result<(), BuilderError> {
-        let child = self.package.get_block(target).ok_or_else(|| {
-            BuilderError::InvalidOperation(format!("unknown child block '{target}'"))
-        })?;
-        let instance = self.builder.instantiate(name, child)?;
-        if let Some(reset) = &child.reset {
-            let signal = parent_reset.ok_or_else(|| {
-                BuilderError::InvalidOperation(format!("child '{name}' requires a reset"))
-            })?;
-            self.builder
-                .instantiation_input(instance, child.port_name(reset.port), signal)?;
-        }
-        for port in child.output_ports() {
-            self.builder
-                .instantiation_output(instance, child.port_name(port))?;
-        }
-        self.instances.insert(name.to_owned(), instance);
-        Ok(())
-    }
-
     /// Invokes a linked function with the lowered BX arguments in source order.
     fn invoke(&mut self, index: usize, args: &[TypedExpr]) -> Result<BValue, BuilderError> {
         let args = args
             .iter()
             .map(|arg| self.expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
-        let PackageMember::Function(function) = &self.package.members[index] else {
-            unreachable!("linked calls refer to function members")
-        };
-        self.builder.invoke(function, &args)
+        self.builder
+            .invoke_with_signature(&self.functions.signatures[&index], &args)
     }
 
     /// Lowers a checked expression at the current instant, without inserting
@@ -606,10 +726,13 @@ impl<'a, 'defs> LowerBlock<'a, 'defs> {
                 let value = self.expr(value)?;
                 self.project(value, *index)
             }
-            TypedExprKind::InstanceOutput { instance, port } => self
-                .builder
-                .instantiation_output(self.instances[instance], port),
-            TypedExprKind::Call { name, args } => self.invoke(self.functions.externs[name], args),
+            TypedExprKind::BindingTupleIndex { name, index } => {
+                self.project(self.values[name], *index)
+            }
+            TypedExprKind::InstanceOutput { instance, port } => {
+                Ok(self.values[&format!("{instance}.{port}")])
+            }
+            TypedExprKind::Call { name, args } => self.invoke(self.functions.named[name], args),
             TypedExprKind::ImportedCall { id, args } => {
                 self.invoke(self.functions.imported[id], args)
             }
