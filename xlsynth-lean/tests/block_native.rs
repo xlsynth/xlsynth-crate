@@ -22,6 +22,56 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        r#"
+pub struct Packet { zebra: u8, apple: u8 }
+pub type Inner = Packet;
+pub type Alias = Inner;
+pub fn id(x: Alias) -> Alias { x }
+"#,
+    )?;
+    let mut bundle = compile_bx(
+        r#"
+use ops;
+struct Envelope { item: ops::Alias }
+block hold(clk, src: Envelope) -> (ops::Alias, u8) {
+    reg stored: ops::Alias;
+    stored := ops::id(src.item);
+    (stored, src.item.zebra)
+}
+"#,
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "PublicInterface.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable XlsSource
+example : «ops::Alias» = «ops::Inner» := rfl
+example : «ops::Inner» = «ops::Packet» := rfl
+example (q : State) (x : Input) : (step q x).stored = x.src.item := rfl
+example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "BX fields, registers and outputs with a linked DSLX alias",
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_imports_keep_source_fields_through_linker_renames() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("picker.x");
