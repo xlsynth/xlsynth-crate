@@ -10,8 +10,8 @@ use xlsynth_pir::ir::{NodePayload, Package};
 use xlsynth_pir::ir_parser;
 
 use crate::ImportOptions;
-use crate::ast::{StructDef, Type, UsePath};
-use crate::check::MAX_TYPE_SIZE;
+use crate::ast::{Block, Stmt, StructDef, Type, UsePath};
+use crate::check::{MAX_TYPE_SIZE, collect_type_names};
 use crate::import_structs::ImportedStructs;
 use crate::parser::{
     MAX_SYNTAX_DEPTH, is_dslx_member_name, is_identifier_word, is_use_identifier, parse_value_type,
@@ -35,6 +35,8 @@ pub struct ImportedCall {
 pub(crate) struct ResolvedImports {
     pub(crate) calls: Vec<ImportedCall>,
     pub(crate) batches: Vec<ImportBatch>,
+    #[cfg(test)]
+    discovery_counts: (usize, usize),
 }
 
 /// Reachable IR functions from one canonical DSLX module. Each root symbol
@@ -189,6 +191,55 @@ impl ImportResolver {
             .map(Type::Named)
     }
 
+    /// Bind register type names that resolve to DSLX imports in this block's
+    /// lexical scope, before other declarations can need their spellings.
+    pub(crate) fn bind_register_types(&mut self, block: &Block) -> Result<(), String> {
+        if self.imports.is_none() {
+            return Ok(());
+        }
+        let mut shadowed: BTreeSet<&str> = std::iter::once(&block.clock)
+            .chain(&block.reset)
+            .chain(block.params.iter().map(|p| &p.name))
+            .chain(block.statements.iter().filter_map(|s| match s {
+                Stmt::Inst { name, .. } => Some(name),
+                _ => None,
+            }))
+            .map(String::as_str)
+            .collect();
+        let mut paths = BTreeSet::new();
+        let mut names = Vec::new();
+        for stmt in &block.statements {
+            let local = match stmt {
+                Stmt::Reg { name, ty, .. } => {
+                    collect_type_names(ty, &mut names)?;
+                    for source in names.drain(..) {
+                        let binding = source.split_once("::").map_or(source, |(head, _)| head);
+                        // The normal checker diagnoses shadowing and malformed
+                        // paths.
+                        if !shadowed.contains(binding)
+                            && let Ok(Some((subject, member))) = self.lookup(source)
+                            && is_dslx_member_name(&member)
+                        {
+                            paths.insert((subject, member));
+                        }
+                    }
+                    name
+                }
+                Stmt::Let { name, .. } => name,
+                // Instances are already in scope and conditional locals do not escape.
+                _ => continue,
+            };
+            if self.bindings.contains_key(local) {
+                shadowed.insert(local.as_str());
+            }
+        }
+        let imports = self.imports.as_mut().expect("declared DSLX import graph");
+        for (subject, member) in paths {
+            self.structs.bind_named(&subject, &member, imports)?;
+        }
+        Ok(())
+    }
+
     /// Struct layouts discovered through named references and inferred call
     /// results.
     pub(crate) fn struct_defs(&self) -> &[StructDef] {
@@ -221,8 +272,15 @@ impl ImportResolver {
         }
         let id = self.calls.len();
         let mut probe_imports = ProbeImports::default();
-        let (params, expr) =
-            probe_call(&mut probe_imports, &self.structs, module, function, &key.2)?;
+        let data = self
+            .imports
+            .as_mut()
+            .expect("a declared subject has an import graph");
+        let (params, expr) = probe_call(&mut probe_imports, module, function, &key.2, |name| {
+            self.structs
+                .parameter_spelling(name, data)
+                .map(str::to_owned)
+        })?;
         let witness = TypeWitness {
             imports: probe_imports.declarations(),
             params,
@@ -236,14 +294,11 @@ fn probe_{id}({}) {{ capture({}) }}
 "#,
             witness.imports, witness.params, witness.expr,
         );
-        let data = self
-            .imports
-            .as_mut()
-            .expect("a declared subject has an import graph");
         let result = check_probe(&source, &format!("0bx_signature_{id}"), data)
             .and_then(|checked| {
                 let capture = ProbeCapture::new(&checked)?;
                 let ty = capture.param_type(0)?;
+                let mut annotation = None;
                 if needs_struct_names(&ty)? {
                     let graph = checked
                         .get_type_info()
@@ -253,15 +308,16 @@ fn probe_{id}({}) {{ capture({}) }}
                         if let Some(callee) = graph.get_callee(&capture.probe, i)
                             && !callee.is_same_definition(&capture.capture)
                         {
-                            self.structs
-                                .observe_module(&callee.get_body().get_owner_module(), &checked);
-                            if let Some(annotation) = callee.get_return_type() {
-                                self.structs.observe_annotation(annotation, 0);
+                            let owner = callee.get_body().get_owner_module();
+                            self.structs.observe_module(&owner, &checked);
+                            if owner.get_name() == module && callee.get_identifier() == function {
+                                annotation = callee.get_return_type();
+                                break;
                             }
                         }
                     }
                 }
-                self.structs.reflect(&ty, data, &witness)
+                self.structs.reflect(&ty, data, &witness, annotation)
             })
             .map_err(|e| format!("{module}::{function}: {e}"))?;
         self.calls.push(ImportedCall {
@@ -301,6 +357,8 @@ fn probe_{id}({}) {{ capture({}) }}
         Ok(ResolvedImports {
             calls: self.calls,
             batches,
+            #[cfg(test)]
+            discovery_counts: self.structs.discovery_counts(),
         })
     }
 }
@@ -363,11 +421,15 @@ impl ProbeImports {
     }
 
     /// Render nominal arguments using aliases valid in the generated module.
-    fn render_type(&mut self, ty: &Type, structs: &ImportedStructs) -> Result<String, String> {
+    fn render_type(
+        &mut self,
+        ty: &Type,
+        public_spelling: &mut impl FnMut(&str) -> Result<String, String>,
+    ) -> Result<String, String> {
         match ty {
             Type::Named(name) => {
-                let (subject, member) = structs
-                    .public_spelling(name)?
+                let path = public_spelling(name)?;
+                let (subject, member) = path
                     .split_once("::")
                     .ok_or_else(|| format!("missing DSLX import for struct '{name}'"))?;
                 Ok(self.qualify(subject, member))
@@ -375,14 +437,15 @@ impl ProbeImports {
             Type::Tuple(items) => {
                 let members = items
                     .iter()
-                    .map(|t| self.render_type(t, structs))
+                    .map(|t| self.render_type(t, public_spelling))
                     .collect::<Result<Vec<_>, _>>()?;
                 let trailing = if members.len() == 1 { "," } else { "" };
                 Ok(format!("({}{trailing})", members.join(", ")))
             }
-            Type::Array { element, size } => {
-                Ok(format!("{}[{size}]", self.render_type(element, structs)?))
-            }
+            Type::Array { element, size } => Ok(format!(
+                "{}[{size}]",
+                self.render_type(element, public_spelling)?
+            )),
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
         }
     }
@@ -391,17 +454,20 @@ impl ProbeImports {
 /// Build parameter declarations and a call expression usable in a DSLX probe.
 fn probe_call(
     imports: &mut ProbeImports,
-    structs: &ImportedStructs,
     subject: &str,
     function: &str,
     args: &[Type],
+    mut public_spelling: impl FnMut(&str) -> Result<String, String>,
 ) -> Result<(String, String), String> {
     let function = imports.qualify(subject, function);
     let mut params = Vec::with_capacity(args.len());
     let mut arguments = Vec::with_capacity(args.len());
     for (i, ty) in args.iter().enumerate() {
         let name = format!("arg_{i}");
-        params.push(format!("{name}: {}", imports.render_type(ty, structs)?));
+        params.push(format!(
+            "{name}: {}",
+            imports.render_type(ty, &mut public_spelling)?
+        ));
         arguments.push(name);
     }
     Ok((
@@ -571,10 +637,10 @@ fn compile_batch(
         let call = &calls[id];
         let (params, expr) = probe_call(
             &mut probe_imports,
-            structs,
             subject,
             &call.function,
             &call.args,
+            |name| structs.public_spelling(name).map(str::to_owned),
         )?;
         probes.push_str(&format!("fn probe_{id}({params}) {{ let _ = {expr}; }}\n"));
     }
@@ -643,6 +709,8 @@ mod tests {
     use std::error::Error;
     use std::fs;
     use tempfile::tempdir;
+    use xlsynth_pir::IrValue;
+    use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 
     #[test]
     fn import_argument_types_use_dslx_widths_and_reject_nested_nominals() {
@@ -778,6 +846,314 @@ mod tests {
                 )
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn nested_struct_calls_reuse_dslx_provenance_in_either_declaration_order()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        for (module, source) in [
+            ("b_function", "pub fn Header() -> u8 { u8:0 }"),
+            ("c_other", "pub struct Header { tag: u8, channel: u8 }"),
+            ("d_constant", "pub const Header = u8:0;"),
+            ("z_protocol", "pub struct Header { tag: u8, channel: u8 }"),
+            (
+                "public_api",
+                "import z_protocol; pub type Payload = z_protocol::Header;",
+            ),
+            (
+                "a_factory",
+                r#"
+import b_function;
+import c_other;
+import d_constant;
+import z_protocol;
+pub struct Envelope { header: z_protocol::Header }
+pub fn make(x: u8) -> Envelope {
+    Envelope { header: z_protocol::Header { tag: x, channel: x + u8:1 } }
+}
+pub fn read(h: z_protocol::Header) -> u8 { h.channel }
+"#,
+            ),
+        ] {
+            fs::write(dir.path().join(format!("{module}.x")), source)?;
+        }
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use public_api; use a_factory; use c_other;")?.uses;
+        let byte = Type::Bits {
+            signed: false,
+            width: 8,
+        };
+        for alias_first in [true, false] {
+            let mut resolver = ImportResolver::new(&uses, &options)?;
+            if alias_first {
+                resolver.resolve_named("public_api", "Payload")?;
+            }
+            let (_, envelope) = resolver.resolve("a_factory", "make", vec![byte.clone()])?;
+            let Type::Named(name) = envelope else {
+                panic!("expected Envelope")
+            };
+            let def = resolver
+                .struct_defs()
+                .iter()
+                .find(|def| def.name == name)
+                .ok_or("missing Envelope")?;
+            let [field] = def.fields.as_slice() else {
+                panic!("expected one Envelope field")
+            };
+            assert_eq!(field.name, "header");
+            let header = field.ty.clone();
+            // In the function-first order this call must have a public spelling
+            // for the projected field before BX has seen the explicit alias.
+            let (_, result) = resolver.resolve("a_factory", "read", vec![header.clone()])?;
+            assert_eq!(result, byte);
+            assert_eq!(header, resolver.resolve_named("public_api", "Payload")?);
+            assert_ne!(header, resolver.resolve_named("c_other", "Header")?);
+            assert_eq!(
+                resolver.structs.discovery_counts(),
+                (0, 0),
+                "alias_first={alias_first}"
+            );
+
+            let imports = resolver.finish()?;
+            let [batch] = imports.batches.as_slice() else {
+                panic!("expected one factory batch")
+            };
+            let make = batch
+                .package
+                .get_fn("__a_factory__make")
+                .ok_or("missing make")?;
+            let read = batch
+                .package
+                .get_fn("__a_factory__read")
+                .ok_or("missing read")?;
+            let made =
+                eval_fn_in_package_value(&batch.package, make, &[IrValue::make_ubits(8, 41)?]);
+            let read = eval_fn_in_package_value(&batch.package, read, &[made.get_element(0)?]);
+            assert_eq!(read, IrValue::make_ubits(8, 42)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn public_alias_resolves_against_the_import_snapshot_after_its_private_struct_is_renamed()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let wire = dir.path().join("wire.x");
+        fs::write(
+            &wire,
+            r#"
+struct Hidden { tag: u8 }
+pub type Item = Hidden;
+pub struct Envelope { item: Hidden }
+pub fn read(value: Hidden) -> u8 { value.tag }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use wire;")?.uses;
+        let mut resolver = ImportResolver::new(&uses, &options)?;
+        // Source discovery now sees Item as a spelling for a different
+        // declaration. The original graph still resolves it to Hidden.
+        fs::write(
+            wire,
+            "struct Renamed { payload: u32 } pub type Item = Renamed;",
+        )?;
+
+        let Type::Named(name) = resolver.resolve_named("wire", "Envelope")? else {
+            panic!("expected Envelope");
+        };
+        let envelope = resolver
+            .struct_defs()
+            .iter()
+            .find(|def| def.name == name)
+            .ok_or("missing Envelope layout")?;
+        let [item] = envelope.fields.as_slice() else {
+            panic!("expected one Envelope field");
+        };
+        resolver.resolve("wire", "read", vec![item.ty.clone()])?;
+        let imports = resolver.finish()?;
+        let [batch] = imports.batches.as_slice() else {
+            panic!("expected one wire batch");
+        };
+        let read = batch.package.get_fn("__wire__read").ok_or("missing read")?;
+        let value = IrValue::parse_typed("(bits[8]:42)")?;
+        assert_eq!(
+            eval_fn_in_package_value(&batch.package, read, &[value]),
+            IrValue::make_ubits(8, 42)?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn projecting_a_private_field_does_not_probe_an_unrelated_function_use()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join("helper.x"), "pub fn read() -> u8 { u8:42 }")?;
+        fs::write(
+            dir.path().join("factory.x"),
+            r#"#![feature(type_inference_v1)]
+#![feature(use_syntax)]
+use helper::read;
+struct Hidden { tag: u8 }
+pub struct Frame { hidden: Hidden }
+pub fn make() -> Frame { zero!<Frame>() }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let bx = crate::parse_module(
+            "use factory; block sample(clk) -> u8 { factory::make().hidden.tag }",
+        )?;
+        let checked = crate::check_module_with_options(&bx, &options)?;
+        assert_eq!(checked.imports.discovery_counts.0, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn use_leaf_keeps_its_alias_when_the_exported_type_changes() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let wire = dir.path().join("wire.x");
+        fs::write(
+            dir.path().join("factory.x"),
+            r#"#![feature(type_inference_v1)]
+#![feature(use_syntax)]
+use wire::Item;
+pub struct Envelope { header: Item }
+pub fn make() -> Envelope { zero!<Envelope>() }
+pub fn read(header: Item) -> u8 { header.channel + u8:42 }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use factory;")?.uses;
+        for replacement in [
+            "pub struct Item { other: u32 }",
+            "pub type Item = u32;",
+            "pub enum Item : u8 { ZERO = 0 }",
+            // The pinned member API cannot enumerate this sum's name. The
+            // generated read parameter must recover it from the checked use.
+            "pub enum Item { None, Some(u8), }",
+        ] {
+            fs::write(
+                &wire,
+                "struct Header { channel: u8 } pub type Item = Header;",
+            )?;
+            let mut resolver = ImportResolver::new(&uses, &options)?;
+            fs::write(&wire, replacement)?;
+
+            resolver.resolve("factory", "make", vec![])?;
+            let [_, envelope] = resolver.struct_defs() else {
+                panic!("expected Header and Envelope layouts");
+            };
+            resolver.resolve("factory", "read", vec![envelope.fields[0].ty.clone()])?;
+            let imports = resolver.finish()?;
+            let package = &imports.batches[0].package;
+            let make = package.get_fn("__factory__make").ok_or("missing make")?;
+            let read = package.get_fn("__factory__read").ok_or("missing read")?;
+            let envelope = eval_fn_in_package_value(package, make, &[]);
+            assert_eq!(
+                eval_fn_in_package_value(package, read, &[envelope.get_element(0)?]),
+                IrValue::make_ubits(8, 42)?,
+                "{replacement}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn register_alias_names_an_opaque_dslx_use_leaf_in_either_order() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("wire.x"),
+            "pub struct Header { channel: u8 } pub type Item = Header;",
+        )?;
+        fs::write(
+            dir.path().join("public_api.x"),
+            "import wire; pub type Payload = wire::Header;",
+        )?;
+        fs::write(
+            dir.path().join("factory.x"),
+            r#"#![feature(type_inference_v1)]
+#![feature(use_syntax)]
+use wire::Item;
+pub struct Envelope { header: Item }
+pub fn make() -> Envelope { zero!<Envelope>() }
+pub fn read(value: Item) -> u8 { value.channel }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let reg = "reg packet: (Payload[1], u8);";
+        let calls = "let frame = factory::make(); let channel = factory::read(frame.header);";
+        for (first, second) in [(reg, calls), (calls, reg)] {
+            let bx = format!(
+                r#"use public_api::Payload;
+use factory;
+block sample(clk) -> u8 {{
+    {first}
+    {second}
+    packet := ([frame.header], channel);
+    packet.1
+}}"#
+            );
+            let checked = crate::check_module_with_options(&crate::parse_module(&bx)?, &options)?;
+            assert_eq!(checked.imports.discovery_counts, (0, 0), "{bx}");
+            assert_eq!(checked.imported_calls().len(), 2);
+        }
+
+        let consumer = format!("block consume(clk) -> u8 {{ {calls} channel }}");
+        let storage = format!("block store(clk) -> u8 {{ {reg} packet := packet; packet.1 }}");
+        for (first, second) in [(&consumer, &storage), (&storage, &consumer)] {
+            let bx = format!("use public_api::Payload; use factory;\n{first}\n{second}");
+            let checked = crate::check_module_with_options(&crate::parse_module(&bx)?, &options)?;
+            assert_eq!(checked.imports.discovery_counts, (0, 0), "{bx}");
+        }
+
+        for statements in [
+            "let public_api = x; reg packet: public_api::Missing;",
+            "reg packet: public_api::Missing; inst public_api: child;",
+        ] {
+            let bx = format!(
+                r#"use public_api;
+block child(clk) -> u8 {{ u8:0 }}
+block sample(clk, x: u8) -> u8 {{ {statements} packet := x; x }}"#
+            );
+            let shadow = crate::parse_module(&bx)?;
+            assert_eq!(
+                crate::check_module_with_options(&shadow, &options).unwrap_err(),
+                "block 'sample': 'public_api' names a local value here"
+            );
+        }
+
+        let invalid = crate::parse_module(
+            r#"use public_api;
+block sample(clk) -> u8 {
+    reg saved: public_api::Payload;
+    missing := saved;
+    reg bad: public_api::Missing;
+    saved := saved;
+    bad := bad;
+    saved.channel
+}"#,
+        )?;
+        assert_eq!(
+            crate::check_module_with_options(&invalid, &options).unwrap_err(),
+            "block 'sample': 'missing' is not a declared register"
+        );
         Ok(())
     }
 

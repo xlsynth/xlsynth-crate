@@ -248,22 +248,25 @@ fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
     }
 }
 
-/// Collect BX dependencies. Imported layouts are registered before local
-/// structs.
-fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
-    let mut pending = vec![ty];
-    while let Some(ty) = pending.pop() {
+/// Collect written nominal type names without recursing through unchecked BX
+/// input.
+pub(crate) fn collect_type_names<'a>(
+    ty: &'a Type,
+    result: &mut Vec<&'a str>,
+) -> Result<(), String> {
+    let mut pending = vec![(ty, MAX_ELABORATION_DEPTH)];
+    while let Some((ty, remaining)) = pending.pop() {
         match ty {
-            Type::Named(name) => {
-                if !name.contains("::") {
-                    result.push(name);
-                }
+            Type::Named(name) => result.push(name),
+            Type::Array { element, .. } => pending.push((element, child_type_budget(remaining)?)),
+            Type::Tuple(fields) => {
+                let budget = child_type_budget(remaining)?;
+                pending.extend(fields.iter().rev().map(|field| (field, budget)));
             }
-            Type::Array { element, .. } => pending.push(element),
-            Type::Tuple(fields) => pending.extend(fields.iter().rev()),
             Type::Bool | Type::Bits { .. } => { /* Primitive types have no dependencies. */ }
         }
     }
+    Ok(())
 }
 
 /// Bound concrete value materialization, including expanded zero-width members.
@@ -535,6 +538,15 @@ pub fn check_module_with_options(
         }
     }
     let mut resolver = ImportResolver::new(&module.uses, options)?;
+    for block in &module.blocks {
+        if resolver.bind_register_types(block).is_err() {
+            // Let normal checking report the first source error. A failed
+            // type probe can invalidate the native graph, so start fresh.
+            drop(resolver);
+            resolver = ImportResolver::new(&module.uses, options)?;
+            break;
+        }
+    }
     let mut structs = StructTable::default();
     for def in &module.structs {
         declare(&mut names, &def.name)?;
@@ -558,8 +570,10 @@ pub fn check_module_with_options(
     for def in &structs.definitions {
         let mut deps = Vec::new();
         for field in &def.fields {
-            type_deps(&field.ty, &mut deps);
+            collect_type_names(&field.ty, &mut deps)?;
         }
+        // Imported layouts are registered before the local structs.
+        deps.retain(|name| !name.contains("::"));
         struct_graph.push((def.name.as_str(), deps));
     }
     let struct_order = dependency_order("struct", &struct_graph)?;

@@ -2,10 +2,11 @@
 
 //! Preserve DSLX nominal type identity when importing structs into BX.
 
+mod annotation;
 mod runfiles;
 
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,11 +17,20 @@ use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::{TypeWitness, check_probe};
 use crate::parser::{is_dslx_member_name, parse_value_type};
 
-/// A DSLX declaration's BX identity and an optional name usable in DSLX probes.
+/// The first public spelling and the layout, if already reflected, of one
+/// declaration in the authoritative DSLX import graph.
+#[derive(Default)]
 struct StructIdentity {
-    declaration: dslx::StructDef,
-    name: String,
     public_path: Option<String>,
+    layout: Option<usize>,
+}
+
+/// Only handles obtained from the authoritative graph can establish identity.
+/// A separately inspected source can supply candidate spellings for that graph.
+#[derive(Clone, Copy, PartialEq)]
+enum ModuleOrigin {
+    Authoritative,
+    Discovery,
 }
 
 /// Structs reflected in one DSLX import graph, with public spellings checked
@@ -29,9 +39,25 @@ pub(crate) struct ImportedStructs {
     subjects: BTreeSet<String>,
     public_types: BTreeMap<String, dslx::Type>,
     rejected_candidates: BTreeSet<String>,
-    aliases: BTreeSet<String>,
+    /// Potential type exports indexed by their member name and, for structs,
+    /// by the underlying declaration's identifier. The authoritative graph
+    /// must confirm visibility and identity.
+    candidates: BTreeMap<String, BTreeSet<String>>,
+    /// A use leaf in the checked graph can still name the original type if
+    /// the declaration behind that spelling changes on disk.
+    checked_use_members: BTreeSet<String>,
+    /// Some native type declarations expose their kind but no member name
+    /// through the pinned module-member API.
+    opaque_type_subjects: BTreeSet<String>,
+    /// Struct aliases and type names selected by checked uses can remain
+    /// addressable even if their underlying declaration changes on disk.
+    discovered_exports: BTreeSet<String>,
+    discovery: Option<ImportData>,
+    #[cfg(test)]
+    candidate_trials: usize,
     observed_modules: BTreeSet<String>,
-    identities: Vec<StructIdentity>,
+    identities: HashMap<dslx::StructDef, StructIdentity>,
+    declarations_by_name: BTreeMap<String, dslx::StructDef>,
     definitions: Vec<StructDef>,
     probe_index: usize,
     stdlib: PathBuf,
@@ -50,9 +76,16 @@ impl ImportedStructs {
             subjects: subjects.clone(),
             public_types: BTreeMap::new(),
             rejected_candidates: BTreeSet::new(),
-            aliases: BTreeSet::new(),
+            candidates: BTreeMap::new(),
+            checked_use_members: BTreeSet::new(),
+            opaque_type_subjects: BTreeSet::new(),
+            discovered_exports: BTreeSet::new(),
+            discovery: None,
+            #[cfg(test)]
+            candidate_trials: 0,
             observed_modules: BTreeSet::new(),
-            identities: Vec::new(),
+            identities: HashMap::new(),
+            declarations_by_name: BTreeMap::new(),
             definitions: Vec::new(),
             probe_index: 0,
             stdlib: stdlib_path.to_owned(),
@@ -69,32 +102,76 @@ impl ImportedStructs {
     /// A generated DSLX parameter must name its type, even when BX first
     /// encountered that type by projecting a private field from a public value.
     pub(crate) fn public_spelling(&self, name: &str) -> Result<&str, String> {
-        let identity = self
-            .identities
-            .iter()
-            .find(|id| id.name == name)
-            .ok_or_else(|| {
-                format!("unsupported nominal type '{name}' in imported function signature")
-            })?;
-        identity.public_path.as_deref().ok_or_else(|| {
+        let declaration = self.declarations_by_name.get(name).ok_or_else(|| {
+            format!("unsupported nominal type '{name}' in imported function signature")
+        })?;
+        self.identities[declaration].public_path.as_deref().ok_or_else(|| {
             format!(
                 "cannot pass DSLX struct '{}' to an imported function without a public type name",
-                identity.declaration.get_identifier()
+                declaration.get_identifier()
             )
         })
     }
 
-    /// Discover transitive subjects and type aliases from the actual callee's
-    /// owning module. A candidate spelling is only used after DSLX resolves it
-    /// to the exact struct declaration.
+    /// When a generated parameter requires a name that the catalogue couldn't
+    /// recover, try the checked use leaves and the original declaration name.
+    pub(crate) fn parameter_spelling(
+        &mut self,
+        name: &str,
+        data: &mut ImportData,
+    ) -> Result<&str, String> {
+        if let Some(declaration) = self.declarations_by_name.get(name)
+            && self.identities[declaration].public_path.is_none()
+        {
+            let declaration = declaration.clone();
+            let identifier = declaration.get_identifier();
+            let candidates = self
+                .checked_use_members
+                .iter()
+                .cloned()
+                .chain(
+                    self.subjects
+                        .iter()
+                        .map(|subject| format!("{subject}::{identifier}"))
+                        .filter(|path| !self.checked_use_members.contains(path)),
+                )
+                .collect();
+            self.match_public_declaration(candidates, &declaration, data)?;
+        }
+        self.public_spelling(name)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn discovery_counts(&self) -> (usize, usize) {
+        (self.candidate_trials, self.inspected_sources.len())
+    }
+
+    /// Record a name and its resolved type together, before walking its fields.
+    /// A later alias can make an existing private layout publicly nameable.
+    fn record_annotation_path(&mut self, ty: &dslx::Type, path: String) {
+        if let Ok(declaration) = ty.get_struct_def() {
+            self.identities
+                .entry(declaration)
+                .or_default()
+                .public_path
+                .get_or_insert_with(|| path.clone());
+            self.public_types.entry(path).or_insert_with(|| ty.clone());
+        }
+    }
+
+    /// Index public structs and aliases once from the actual callee's module
+    /// and its type information, preserving native declaration identity.
     pub(crate) fn observe_module(
         &mut self,
         module: &dslx::Module,
         checked: &dslx::TypecheckedModule,
     ) {
         let subject = module.get_name();
-        if self.observed_modules.insert(subject.clone()) {
-            self.observe_members(&subject, module, checked);
+        if !self.observed_modules.contains(&subject)
+            && let Some(info) = checked.get_type_info_for_module(module)
+        {
+            self.observed_modules.insert(subject.clone());
+            self.observe_members(&subject, module, &info, ModuleOrigin::Authoritative);
         }
     }
 
@@ -102,27 +179,88 @@ impl ImportedStructs {
         &mut self,
         subject: &str,
         module: &dslx::Module,
-        checked: &dslx::TypecheckedModule,
+        info: &dslx::TypeInfo,
+        origin: ModuleOrigin,
     ) {
         self.subjects.insert(subject.to_owned());
-        let context = checked.get_type_info_for_module(module);
         let mut has_uses = false;
         for index in 0..module.get_member_count() {
             let member = module.get_member(index);
+            if origin == ModuleOrigin::Discovery
+                && matches!(
+                    member.kind(),
+                    ModuleMemberKind::SumDef
+                        | ModuleMemberKind::ProcDef
+                        | ModuleMemberKind::ProcAlias
+                )
+            {
+                self.opaque_type_subjects.insert(subject.to_owned());
+                continue;
+            }
             if member.kind() == ModuleMemberKind::Use {
                 has_uses = true;
             } else if let Some(import) = member.to_import() {
                 self.subjects.insert(import.get_subject().join("."));
-            } else if let Some(MatchableModuleMember::TypeAlias(alias)) = member.to_matchable() {
-                let annotation = alias.get_type_annotation();
-                if context
-                    .as_ref()
-                    .and_then(|info| info.get_type_for_type_annotation(&annotation))
-                    .is_some_and(|ty| ty.is_struct())
-                {
-                    self.aliases
-                        .insert(format!("{subject}::{}", alias.get_identifier()));
-                    self.observe_annotation(annotation, 0);
+            } else {
+                let (name, ty, declaration) = match member.to_matchable() {
+                    Some(MatchableModuleMember::StructDef(def)) => {
+                        if origin == ModuleOrigin::Authoritative && def.is_parametric() {
+                            continue;
+                        }
+                        (
+                            def.get_identifier(),
+                            info.get_type_for_struct_def(&def),
+                            def.to_text(),
+                        )
+                    }
+                    Some(MatchableModuleMember::TypeAlias(alias)) => {
+                        let annotation = alias.get_type_annotation();
+                        let ty = info.get_type_for_type_annotation(&annotation);
+                        (alias.get_identifier(), ty, alias.to_text())
+                    }
+                    Some(MatchableModuleMember::EnumDef(def))
+                        if origin == ModuleOrigin::Discovery =>
+                    {
+                        (def.get_identifier(), None, def.to_text())
+                    }
+                    _ => continue,
+                };
+                // The pinned API prints visibility but has no visibility
+                // getter. An attribute precedes the header and
+                // can contain arbitrary text. Verify such names
+                // with the native typechecker on demand.
+                let public = declaration.starts_with("pub ");
+                if !public && !declaration.starts_with("#[") {
+                    continue;
+                }
+                let path = format!("{subject}::{name}");
+                if origin == ModuleOrigin::Discovery {
+                    // The name can still resolve to a struct in the original
+                    // graph even if its on-disk definition is now another type.
+                    self.candidates
+                        .entry(name)
+                        .or_default()
+                        .insert(path.clone());
+                    if self.checked_use_members.contains(&path) {
+                        self.discovered_exports.insert(path.clone());
+                    }
+                }
+                let Some(ty) = ty else { continue };
+                let Ok(def) = ty.get_struct_def() else {
+                    continue;
+                };
+                if origin == ModuleOrigin::Authoritative && public {
+                    self.record_annotation_path(&ty, path);
+                } else {
+                    if origin == ModuleOrigin::Discovery
+                        && member.kind() == ModuleMemberKind::TypeAlias
+                    {
+                        self.discovered_exports.insert(path.clone());
+                    }
+                    self.candidates
+                        .entry(def.get_identifier())
+                        .or_default()
+                        .insert(path);
                 }
             }
         }
@@ -132,7 +270,7 @@ impl ImportedStructs {
                 .lines()
                 .filter_map(|line| line.strip_prefix("use ")?.strip_suffix(';'))
             {
-                self.observe_use_tree(tree);
+                self.observe_use_tree(tree, origin);
             }
         }
     }
@@ -140,7 +278,7 @@ impl ImportedStructs {
     /// libxls prints each checked use tree on one line but does not expose
     /// its leaves. A leaf can select a whole module or a member of its parent.
     /// Keep both spellings as candidates for the original graph to verify.
-    fn observe_use_tree(&mut self, tree: &str) {
+    fn observe_use_tree(&mut self, tree: &str, origin: ModuleOrigin) {
         let mut prefix = Vec::new();
         let mut groups = Vec::new();
         for segment in tree.split_inclusive(['{', '}', ',']) {
@@ -164,7 +302,10 @@ impl ImportedStructs {
                 self.subjects.insert(prefix.join("."));
                 if !parents.is_empty() {
                     let subject = parents.join(".");
-                    self.aliases.insert(format!("{subject}::{member}"));
+                    if origin == ModuleOrigin::Authoritative {
+                        self.checked_use_members
+                            .insert(format!("{subject}::{member}"));
+                    }
                     self.subjects.insert(subject);
                 }
             }
@@ -176,14 +317,14 @@ impl ImportedStructs {
         }
     }
 
-    /// Resolve a source type or constructor spelling, preserving DSLX's own
-    /// visibility and alias resolution.
-    pub(crate) fn resolve_named(
+    /// Bind a type written in BX to its original DSLX declaration without
+    /// discovering or reflecting the layouts of its fields.
+    pub(crate) fn bind_named(
         &mut self,
         subject: &str,
         member: &str,
         data: &mut ImportData,
-    ) -> Result<String, String> {
+    ) -> Result<dslx::Type, String> {
         if !is_dslx_member_name(member) {
             return Err(format!("invalid DSLX struct name '{member}'"));
         }
@@ -192,6 +333,18 @@ impl ImportedStructs {
         if !ty.is_struct() {
             return Err(format!("DSLX type '{name}' is not a struct"));
         }
+        Ok(ty)
+    }
+
+    /// Reflect a named type using the spelling authorized by the DSLX checker.
+    pub(crate) fn resolve_named(
+        &mut self,
+        subject: &str,
+        member: &str,
+        data: &mut ImportData,
+    ) -> Result<String, String> {
+        let ty = self.bind_named(subject, member, data)?;
+        let name = format!("{subject}::{member}");
         let witness = TypeWitness {
             imports: format!("import {subject} as bx_module;\n"),
             params: format!("value: bx_module::{member}"),
@@ -226,7 +379,7 @@ impl ImportedStructs {
             .get_type_info()
             .get_type_for_type_annotation(&function.get_param(0).get_type_annotation())
             .ok_or_else(|| format!("could not resolve DSLX type '{name}'"))?;
-        self.public_types.insert(name.to_owned(), ty.clone());
+        self.record_annotation_path(&ty, name.to_owned());
         Ok(ty)
     }
 
@@ -245,8 +398,14 @@ impl ImportedStructs {
         if self.rejected_candidates.contains(name) {
             return Ok(None);
         }
-        let mut trial = self.new_import_data();
-        if check_probe(&Self::type_probe_source(name), "0bx_type_trial", &mut trial).is_err() {
+        #[cfg(test)]
+        {
+            self.candidate_trials += 1;
+        }
+        if self
+            .check_discovery(&Self::type_probe_source(name), "0bx_type_trial.x")
+            .is_none()
+        {
             self.rejected_candidates.insert(name.to_owned());
             return Ok(None);
         }
@@ -263,6 +422,20 @@ impl ImportedStructs {
         ImportData::new(Some(&self.stdlib), &paths)
     }
 
+    /// Reuse successful discovery work, including already loaded dependencies.
+    /// Drop a failed graph before another probe can enter its inference state.
+    fn check_discovery(&mut self, source: &str, filename: &str) -> Option<dslx::TypecheckedModule> {
+        let mut graph = self
+            .discovery
+            .take()
+            .unwrap_or_else(|| self.new_import_data());
+        let name = format!("0bx_discovery_{}", self.probe_index);
+        self.probe_index += 1;
+        let checked = dslx::parse_and_typecheck(source, filename, &name, &mut graph).ok()?;
+        self.discovery = Some(graph);
+        Some(checked)
+    }
+
     /// Read concrete value types. A tuple's displayed spelling can describe
     /// structural leaves, but only native types can identify struct elements.
     pub(crate) fn reflect(
@@ -270,8 +443,9 @@ impl ImportedStructs {
         ty: &dslx::Type,
         data: &mut ImportData,
         witness: &TypeWitness,
+        annotation: Option<dslx::TypeAnnotation>,
     ) -> Result<Type, String> {
-        self.reflect_at(ty, data, witness, 0)
+        self.reflect_at(ty, data, witness, annotation, 0)
     }
 
     fn reflect_at(
@@ -279,6 +453,7 @@ impl ImportedStructs {
         ty: &dslx::Type,
         data: &mut ImportData,
         witness: &TypeWitness,
+        annotation: Option<dslx::TypeAnnotation>,
         depth: usize,
     ) -> Result<Type, String> {
         if depth > MAX_ELABORATION_DEPTH {
@@ -296,6 +471,10 @@ impl ImportedStructs {
         if let Some((signed, width)) = ty.is_bits_like() {
             return Ok(Type::Bits { signed, width });
         }
+        let annotation = annotation.map(annotation::underlying_annotation);
+        if let Some(written) = &annotation {
+            self.observe_typed_annotation(written, ty);
+        }
         if ty.is_struct() {
             return Ok(Type::Named(
                 self.reflect_struct(ty, None, data, witness, depth)?,
@@ -311,12 +490,17 @@ impl ImportedStructs {
                 "[u32:0]"
             };
             return Ok(Type::Array {
-                element: Box::new(self.reflect_at(
-                    &ty.get_array_element_type(),
-                    data,
-                    &witness.project(index),
-                    depth + 1,
-                )?),
+                element: Box::new(
+                    self.reflect_at(
+                        &ty.get_array_element_type(),
+                        data,
+                        &witness.project(index),
+                        annotation
+                            .and_then(|a| a.to_array_type_annotation())
+                            .map(|a| a.get_element_type()),
+                        depth + 1,
+                    )?,
+                ),
                 size,
             });
         }
@@ -327,11 +511,22 @@ impl ImportedStructs {
                 let probe_index = self.probe_index;
                 self.probe_index += 1;
                 let items = witness.tuple_members(ty, probe_index, data)?;
+                let mut written = annotation
+                    .and_then(|a| a.tuple_members())
+                    .filter(|members| members.len() == items.len())
+                    .unwrap_or_default()
+                    .into_iter();
                 let members = items
                     .iter()
                     .enumerate()
                     .map(|(i, item)| {
-                        self.reflect_at(item, data, &witness.project(&format!(".{i}")), depth + 1)
+                        self.reflect_at(
+                            item,
+                            data,
+                            &witness.project(&format!(".{i}")),
+                            written.next(),
+                            depth + 1,
+                        )
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(Type::Tuple(members))
@@ -357,15 +552,8 @@ impl ImportedStructs {
                 def.get_identifier()
             ));
         }
-        if let Some(identity) = self
-            .identities
-            .iter_mut()
-            .find(|id| id.declaration.is_same_definition(&def))
-        {
-            if identity.public_path.is_none() {
-                identity.public_path = spelling.map(str::to_owned);
-            }
-            return Ok(identity.name.clone());
+        if let Some(index) = self.identities.get(&def).and_then(|id| id.layout) {
+            return Ok(self.definitions[index].name.clone());
         }
         let public_path = match spelling {
             Some(name) => Some(name.to_owned()),
@@ -377,12 +565,13 @@ impl ImportedStructs {
         for index in 0..ty.get_struct_member_count() {
             let member = def.get_member(index);
             let field = member.get_name();
-            self.observe_annotation(member.get_type(), 0);
+            let written = member.get_type();
             let ty = self
                 .reflect_at(
                     &ty.get_struct_member_type(index),
                     data,
                     &witness.project(&format!(".{field}")),
+                    Some(written),
                     depth + 1,
                 )
                 .map_err(|e| format!("DSLX struct field '{display_name}.{field}': {e}"))?;
@@ -391,19 +580,17 @@ impl ImportedStructs {
         // The numeric prefix cannot be written as a BX or DSLX use binding.
         // Assign the ID after visiting the fields so nested declarations are
         // each interned with their own index.
+        let index = self.definitions.len();
         let name = public_path
             .clone()
-            .unwrap_or_else(|| format!("0bx_private_{}::{identifier}", self.identities.len()));
+            .unwrap_or_else(|| format!("0bx_private_{index}::{identifier}"));
         self.definitions.push(StructDef {
             name: name.clone(),
             public: public_path.is_some(),
             fields,
         });
-        self.identities.push(StructIdentity {
-            declaration: def,
-            name: name.clone(),
-            public_path,
-        });
+        self.declarations_by_name.insert(name.clone(), def.clone());
+        self.identities.entry(def).or_default().layout = Some(index);
         Ok(name)
     }
 
@@ -414,31 +601,83 @@ impl ImportedStructs {
         def: &dslx::StructDef,
         data: &mut ImportData,
     ) -> Result<Option<String>, String> {
+        if let Some(path) = self
+            .identities
+            .get(def)
+            .and_then(|id| id.public_path.clone())
+        {
+            return Ok(Some(path));
+        }
         let identifier = def.get_identifier();
         let mut attempted = BTreeSet::new();
         loop {
-            let paths: Vec<_> = self
-                .subjects
-                .iter()
-                .map(|subject| format!("{subject}::{identifier}"))
-                .chain(self.aliases.iter().cloned())
-                .filter(|name| attempted.insert(name.clone()))
-                .collect();
-            for path in paths {
-                if let Some(ty) = self.candidate_type(&path, data)?
-                    && let Ok(candidate) = ty.get_struct_def()
-                    && candidate.is_same_definition(def)
-                {
-                    return Ok(Some(path));
-                }
+            // Prefer the original declaration name across all reachable
+            // modules before trying aliases found in separately read sources.
+            // A newly added alias may be absent from the import snapshot.
+            let paths = self
+                .candidates
+                .get(&identifier)
+                .into_iter()
+                .flatten()
+                .filter(|path| {
+                    path.rsplit_once("::")
+                        .is_some_and(|(_, name)| name == identifier)
+                })
+                .filter(|path| attempted.insert((*path).clone()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Some(path) = self.match_public_declaration(paths, def, data)? {
+                return Ok(Some(path));
             }
             let Some((subject, path)) = self.next_type_only_source() else {
-                return Ok(None);
+                break;
             };
             self.inspected_sources
                 .insert((subject.clone(), path.clone()));
             self.discover_type_only_imports(&subject, &path);
         }
+        // A source with opaque type members may still export the declaration
+        // under its original name. Check that spelling before on-disk aliases.
+        let opaque = self
+            .opaque_type_subjects
+            .iter()
+            .map(|subject| format!("{subject}::{identifier}"))
+            .filter(|path| attempted.insert(path.clone()))
+            .collect();
+        if let Some(path) = self.match_public_declaration(opaque, def, data)? {
+            return Ok(Some(path));
+        }
+        // Prefer type exports named by the checked module, then aliases of a
+        // same-named declaration, then other exports that may have been
+        // retargeted on disk. All must resolve to the original identity.
+        let paths = self
+            .checked_use_members
+            .intersection(&self.discovered_exports)
+            .chain(self.candidates.get(&identifier).into_iter().flatten())
+            .chain(&self.discovered_exports)
+            .filter(|path| attempted.insert((*path).clone()))
+            .cloned()
+            .collect();
+        self.match_public_declaration(paths, def, data)
+    }
+
+    /// Accept a spelling only when it resolves to the requested declaration
+    /// in the graph that checked the BX import.
+    fn match_public_declaration(
+        &mut self,
+        paths: Vec<String>,
+        def: &dslx::StructDef,
+        data: &mut ImportData,
+    ) -> Result<Option<String>, String> {
+        for path in paths {
+            if let Some(ty) = self.candidate_type(&path, data)?
+                && let Ok(candidate) = ty.get_struct_def()
+                && candidate == *def
+            {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// Try reachable subjects under the configured search roots in order.
@@ -452,10 +691,11 @@ impl ImportedStructs {
         for root in roots {
             for subject in self.subjects.difference(&self.observed_modules) {
                 let relative = PathBuf::from(subject.replace('.', "/")).with_extension("x");
-                let tail: PathBuf = relative.components().skip(1).collect();
-                for suffix in
-                    std::iter::once(relative).chain((!tail.as_os_str().is_empty()).then_some(tail))
-                {
+                // libxls appends ".x" even when stripping the depot root
+                // leaves an empty path for a single-component import.
+                let tail = subject.split_once('.').map_or("", |(_, rest)| rest);
+                let stripped = PathBuf::from(format!("{}.x", tail.replace('.', "/")));
+                for suffix in [relative, stripped] {
                     let path = root.unwrap_or_else(|| Path::new("")).join(&suffix);
                     let runfile = std::iter::once_with(|| {
                         if root.is_some() {
@@ -486,36 +726,13 @@ impl ImportedStructs {
         let (Ok(source), Some(filename)) = (fs::read_to_string(path), path.to_str()) else {
             return;
         };
-        let mut discovery = self.new_import_data();
-        if let Ok(checked) = dslx::parse_and_typecheck(&source, filename, subject, &mut discovery) {
-            self.observe_members(subject, &checked.get_module(), &checked);
-        }
-    }
-
-    /// Record qualified names referenced by an actual field or alias, even
-    /// when that module is only imported transitively by DSLX.
-    pub(crate) fn observe_annotation(&mut self, annotation: dslx::TypeAnnotation, depth: usize) {
-        if depth > MAX_ELABORATION_DEPTH {
-            return;
-        }
-        if let Some(reference) = annotation.to_type_ref_type_annotation() {
-            let definition = reference.get_type_ref().get_type_definition();
-            if let Some(colon) = definition.to_colon_ref()
-                && let Some(import) = colon.resolve_import_subject()
-            {
-                let subject = import.get_subject().join(".");
-                self.aliases
-                    .insert(format!("{subject}::{}", colon.get_attr()));
-                self.subjects.insert(subject);
-            } else if let Some(alias) = definition.to_type_alias() {
-                self.observe_annotation(alias.get_type_annotation(), depth + 1);
-            }
-        } else if let Some(array) = annotation.to_array_type_annotation() {
-            self.observe_annotation(array.get_element_type(), depth + 1);
-        } else if let Some(members) = annotation.tuple_members() {
-            for member in members {
-                self.observe_annotation(member, depth + 1);
-            }
+        if let Some(checked) = self.check_discovery(&source, filename) {
+            self.observe_members(
+                subject,
+                &checked.get_module(),
+                &checked.get_type_info(),
+                ModuleOrigin::Discovery,
+            );
         }
     }
 }
@@ -524,6 +741,116 @@ impl ImportedStructs {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn attributed_struct_visibility_comes_from_dslx() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let source = r#"#[sv_type("hidden\npub struct Decoy")]
+struct Hidden { tag: u8 }
+#[sv_type("pkg::visible_t")]
+pub struct Visible { tag: u8 }
+pub struct Frame { hidden: Hidden, visible: Visible }"#;
+        let path = root.path().join("wire.x");
+        fs::write(&path, source)?;
+        let stdlib = xlsynth::default_dslx_stdlib_path();
+        let paths = [root.path()];
+        let mut data = ImportData::new(Some(stdlib), &paths);
+        let checked = dslx::parse_and_typecheck(source, path.to_str().unwrap(), "wire", &mut data)?;
+        let mut registry = ImportedStructs::new(&BTreeSet::from(["wire".into()]), stdlib, &paths);
+        registry.observe_module(&checked.get_module(), &checked);
+        registry.resolve_named("wire", "Frame", &mut data)?;
+        let [hidden, visible, _frame] = registry.definitions() else {
+            panic!("expected two nested structs and their frame")
+        };
+        assert!(registry.public_spelling(&hidden.name).is_err());
+        assert_eq!(registry.public_spelling(&visible.name)?, "wire::Visible");
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_declaration_precedes_aliases_added_on_disk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let noise = root.path().join("a_noise.x");
+        let wire = root.path().join("wire.x");
+        let noise_source = "struct Leaf { x: u8 }";
+        let wire_source = "pub struct Leaf { x: u8 } pub struct Frame { leaf: Leaf }";
+        fs::write(&noise, noise_source)?;
+        fs::write(&wire, wire_source)?;
+        let stdlib = xlsynth::default_dslx_stdlib_path();
+        let paths = [root.path()];
+        let mut data = ImportData::new(Some(stdlib), &paths);
+        check_probe("import a_noise; import wire;", "0bx_snapshot", &mut data)?;
+        fs::write(noise, format!("{noise_source} pub type A = Leaf;"))?;
+        fs::write(wire, format!("{wire_source} pub type A = Leaf;"))?;
+        let subjects = BTreeSet::from(["a_noise".into(), "wire".into()]);
+        let mut registry = ImportedStructs::new(&subjects, stdlib, &paths);
+        registry.resolve_named("wire", "Frame", &mut data)?;
+        let [leaf, _frame] = registry.definitions() else {
+            panic!("expected a nested leaf and its frame")
+        };
+        assert_eq!(registry.public_spelling(&leaf.name)?, "wire::Leaf");
+        assert_eq!(registry.discovery_counts().0, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_snapshot_struct_keeps_its_name_when_the_export_becomes_a_different_type()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        let wire = root.path().join("wire.x");
+        let stdlib = xlsynth::default_dslx_stdlib_path();
+        let paths = [root.path()];
+        for replacement in [
+            "pub enum Leaf : u8 { ZERO = 0 }",
+            "pub type Leaf = u32;",
+            "pub enum Leaf { None, Some(u8), }",
+        ] {
+            fs::write(
+                &wire,
+                "pub struct Leaf { x: u8 } pub struct Frame { leaf: Leaf }",
+            )?;
+            let mut data = ImportData::new(Some(stdlib), &paths);
+            check_probe("import wire;", "0bx_snapshot", &mut data)?;
+            fs::write(&wire, replacement)?;
+
+            let mut registry =
+                ImportedStructs::new(&BTreeSet::from(["wire".into()]), stdlib, &paths);
+            registry.resolve_named("wire", "Frame", &mut data)?;
+            let [leaf, _frame] = registry.definitions() else {
+                panic!("expected the original Leaf and Frame layouts")
+            };
+            let leaf_name = leaf.name.clone();
+            assert_eq!(
+                registry.parameter_spelling(&leaf_name, &mut data)?,
+                "wire::Leaf",
+                "{replacement}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fallback_probes_reuse_already_loaded_dependencies() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempdir()?;
+        let path = root.path().join("wire.x");
+        fs::write(
+            &path,
+            "pub struct First { x: u8 } pub struct Second { x: u8 }",
+        )?;
+        let stdlib = xlsynth::default_dslx_stdlib_path();
+        let paths = [root.path()];
+        let mut data = ImportData::new(Some(stdlib), &paths);
+        let mut registry = ImportedStructs::new(&BTreeSet::from(["wire".into()]), stdlib, &paths);
+        let first = registry.candidate_type("wire::First", &mut data)?.unwrap();
+        // Both graphs loaded wire for the first probe. Starting a fresh
+        // discovery graph for the second would now fail to import it.
+        fs::remove_file(path)?;
+        let second = registry.candidate_type("wire::Second", &mut data)?.unwrap();
+        assert!(first.get_struct_def()? != second.get_struct_def()?);
+        Ok(())
+    }
 
     #[test]
     fn a_later_public_spelling_keeps_a_projected_structs_identity()
@@ -558,6 +885,26 @@ mod tests {
     }
 
     #[test]
+    fn discovery_uses_dslxs_stripped_path_for_a_single_component_import()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::write(
+            root.path().join(".x"),
+            "pub struct Leaf { tag: u8 } pub struct Frame { leaf: Leaf }",
+        )?;
+        let stdlib = xlsynth::default_dslx_stdlib_path();
+        let paths = [root.path()];
+        let mut data = ImportData::new(Some(stdlib), &paths);
+        let mut registry = ImportedStructs::new(&BTreeSet::from(["wire".into()]), stdlib, &paths);
+        registry.resolve_named("wire", "Frame", &mut data)?;
+        let [leaf, _frame] = registry.definitions() else {
+            panic!("expected a nested leaf and its frame")
+        };
+        assert_eq!(registry.public_spelling(&leaf.name)?, "wire::Leaf");
+        Ok(())
+    }
+
+    #[test]
     fn type_only_reexport_keeps_its_nested_structs_defining_module()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempdir()?;
@@ -587,6 +934,8 @@ pub type Header = Outer;"#,
         let mut registry =
             ImportedStructs::new(&BTreeSet::from(["facade".to_string()]), stdlib, &paths);
         registry.resolve_named("facade", "Header", &mut data)?;
+        // Only the catalogued fields::Leaf declaration needs a trial.
+        assert_eq!(registry.discovery_counts().0, 1);
         let [leaf, outer] = registry.definitions() else {
             panic!("expected nested and outer struct declarations")
         };
