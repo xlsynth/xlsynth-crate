@@ -643,39 +643,35 @@ pub fn check_module_with_options(
             result,
         });
     }
-    let mut block_graph = Vec::new();
-    for b in &module.blocks {
-        let deps = b
+    // Static loops can instantiate children. Order the checked blocks using
+    // the instances actually elaborated, including children declared later.
+    let checked = module
+        .blocks
+        .iter()
+        .map(|block| {
+            BlockChecker::check(&declarations, block, &mut resolver, &mut structs)
+                .map_err(|e| format!("block '{}': {e}", block.name))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut graph = Vec::new();
+    for block in &checked {
+        let children = block
             .statements
             .iter()
-            .filter_map(|s| match s {
-                Stmt::Inst { block, .. } => Some(block.as_str()),
-                Stmt::Let {
-                    value: Expr::Call { name, .. },
-                    ..
-                } if declarations.blocks.contains_key(name.as_str()) => Some(name.as_str()),
+            .filter_map(|stmt| match stmt {
+                CheckedStmt::Inst { block, .. } => Some(block.as_str()),
                 _ => None,
             })
             .collect();
-        block_graph.push((b.name.as_str(), deps));
+        graph.push((block.name.as_str(), children));
     }
-    // Imported blocks are leaves here; their bodies belong to the linked
-    // package.
-    block_graph.extend(
-        module
-            .extern_blocks
-            .iter()
-            .map(|b| (b.name.as_str(), Vec::new())),
-    );
-    let mut blocks = Vec::new();
-    for index in dependency_order("block", &block_graph)? {
-        if let Some(block) = module.blocks.get(index) {
-            blocks.push(
-                BlockChecker::check(&declarations, block, &mut resolver, &mut structs)
-                    .map_err(|e| format!("block '{}': {e}", block.name))?,
-            );
-        }
-    }
+    graph.extend(extern_blocks.iter().map(|b| (b.name.as_str(), Vec::new())));
+    let order = dependency_order("block", &graph)?;
+    let mut checked: Vec<_> = checked.into_iter().map(Some).collect();
+    let blocks = order
+        .into_iter()
+        .filter_map(|i| checked.get_mut(i)?.take())
+        .collect();
     Ok(CheckedModule {
         structs: structs.definitions,
         externs,
@@ -796,7 +792,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
         }
         let output = c
-            .expr(&block.output, Some(&interface.result))
+            .scoped_result(&block.output, Some(&interface.result), true)
             .map_err(|e| format!("result: {e}"))?;
         Ok(CheckedBlock {
             name: block.name.clone(),
@@ -997,22 +993,9 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     value: initializer,
                 } => {
                     let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
-                    let value = if let Expr::Call { name: target, args } = initializer
-                        && let Some(child) = self.decls.blocks.get(target.as_str())
-                    {
-                        if conditional {
-                            return Err(format!(
-                                "call to block '{target}' requires an unconditional top-level let"
-                            ));
-                        }
-                        self.block_call(name, target, child, args, ty.as_ref())
-                    } else {
-                        match &ty {
-                            Some(ty) => self.expr(initializer, Some(ty)),
-                            None => self.inferred_expr(initializer),
-                        }
-                    }
-                    .map_err(|e| format!("let '{name}': {e}"))?;
+                    let value = self
+                        .let_value(name, initializer, ty.as_ref(), !conditional)
+                        .map_err(|e| format!("let '{name}': {e}"))?;
                     declare(&mut self.names, name)?;
                     self.values.insert(name.clone(), value.ty.clone());
                     if value.has_constant_inputs(&self.constexpr_names) {
@@ -1091,7 +1074,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let (ty, kind) = match expr {
-            Expr::UnrollFor(fold) => return self.unroll(fold, expected),
+            Expr::UnrollFor(fold) => return self.unroll(fold, expected, false),
             Expr::Name(name) if name == "_" && !self.iteration_path.is_empty() => {
                 return Err("cannot read the wildcard binding '_'".into());
             }

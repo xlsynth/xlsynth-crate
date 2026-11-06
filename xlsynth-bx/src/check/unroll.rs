@@ -30,12 +30,58 @@ impl BlockChecker<'_, '_> {
         Ok(())
     }
 
-    /// Check a loop expression with the type supplied by its binder, if any.
-    fn scoped_result(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
-        match expected {
-            Some(ty) => self.expr(expr, Some(ty)),
-            None => self.inferred_expr(expr),
+    /// Child-producing loops occupy an unconditional binding or block result.
+    /// Other expression positions can use the same fold with pure values.
+    pub(super) fn scoped_result(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+        structural: bool,
+    ) -> Result<TypedExpr, String> {
+        match expr {
+            Expr::UnrollFor(fold) => self.unroll(fold, expected, structural),
+            _ if expected.is_none() => self.inferred_expr(expr),
+            _ => self.expr(expr, expected),
         }
+    }
+
+    /// Check an ordinary binding or elaborate its child instance.
+    pub(super) fn let_value(
+        &mut self,
+        name: &str,
+        expr: &Expr,
+        expected: Option<&Type>,
+        structural: bool,
+    ) -> Result<TypedExpr, String> {
+        if let Expr::Call { name: target, args } = expr
+            && let Some(child) = self.decls.blocks.get(target.as_str())
+        {
+            if !structural {
+                return Err(format!(
+                    "call to block '{target}' requires an unconditional top-level let or unrolled let"
+                ));
+            }
+            if self.loop_values.contains_key(target) {
+                return Err(format!("'{target}' names a loop-local value"));
+            }
+            let binding = if self.iteration_path.is_empty() {
+                name.to_owned()
+            } else {
+                let mut base = name.to_owned();
+                for index in &self.iteration_path {
+                    base.push_str(&format!("_{index}"));
+                }
+                let mut binding = base.clone();
+                let mut suffix = 0;
+                while !self.reserved_hardware_names.insert(binding.clone()) {
+                    suffix += 1;
+                    binding = format!("{base}_{suffix}");
+                }
+                binding
+            };
+            return self.block_call(&binding, target, child, args, expected);
+        }
+        self.scoped_result(expr, expected, structural)
     }
 
     /// Share a loop-local initializer across uses without copying its
@@ -120,6 +166,7 @@ impl BlockChecker<'_, '_> {
         &mut self,
         fold: &UnrollFor,
         expected: Option<&Type>,
+        structural: bool,
     ) -> Result<TypedExpr, String> {
         if fold.index == fold.accumulator && fold.index != "_" {
             return Err(format!("duplicate loop binding '{}'", fold.index));
@@ -165,7 +212,7 @@ impl BlockChecker<'_, '_> {
                     .into(),
             );
         }
-        let seed = self.scoped_result(&fold.seed, acc_hint)?;
+        let seed = self.scoped_result(&fold.seed, acc_hint, false)?;
         if let Some(expected) = expected
             && !compatible(expected, &seed.ty)
         {
@@ -201,7 +248,7 @@ impl BlockChecker<'_, '_> {
                 };
                 let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
                 let value = self
-                    .scoped_result(expr, ty.as_ref())
+                    .let_value(name, expr, ty.as_ref(), structural)
                     .map_err(|e| format!("unroll_for! iteration {ordinal}, let '{name}': {e}"))?;
                 let widths = if ty.is_none() {
                     binding_widths(expr, &value.ty, &self.inferred_bindings)?
@@ -212,7 +259,7 @@ impl BlockChecker<'_, '_> {
                 self.bind_loop_value(name, value, widths, &mut saved);
             }
             let value = self
-                .scoped_result(&fold.result, Some(&acc_type))
+                .scoped_result(&fold.result, Some(&acc_type), structural)
                 .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
             carry = self.share_loop_value(value);
             self.leave_iteration(saved);
