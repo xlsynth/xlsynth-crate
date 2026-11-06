@@ -1939,8 +1939,12 @@ fn bx_import_loop_names_follow_rebased_nodes_and_function_symbols() -> Result<()
     fs::write(
         root.path().join("sum.x"),
         r#"
+struct Row { value: u8 }
 pub fn lanes(xs: u8[3]) -> u8 {
-    for (lane, total) in u32:1..u32:3 { total + xs[lane] }(u8:0)
+    let row = for (lane, carry): (u32, Row) in u32:1..u32:3 {
+        Row { value: carry.value + xs[lane] }
+    }(Row { value: u8:0 });
+    row.value
 }
 "#,
     )?;
@@ -2011,6 +2015,7 @@ pub fn lanes(xs: u8[3]) -> u8 {
         r#"
 import ReadableCorrespondence
 open XlsReadable
+#check XlsSource.«sum::Row».value
 #guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
 "#
         .into(),
