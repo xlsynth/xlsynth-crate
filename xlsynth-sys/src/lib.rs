@@ -1438,6 +1438,11 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
 
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+    pub fn xls_dslx_type_get_struct_parametric_env(
+        ty: *const CDslxType,
+        error_out: *mut *mut std::os::raw::c_char,
+        env_out: *mut *mut CDslxParametricEnv,
+    ) -> bool;
     pub fn xls_dslx_type_struct_get_member_count(ty: *const CDslxType) -> i64;
     pub fn xls_dslx_type_struct_get_member_type(ty: *const CDslxType, index: i64)
     -> *mut CDslxType;
