@@ -88,6 +88,7 @@ pub(super) enum SourceType {
 /// They pair each entry in `outputs` with the IR output port at the same index
 /// when constructing the result or converting it between readable and raw Lean.
 pub(super) struct StatefulInterface {
+    pub(super) bx_module: String,
     /// Physical IR function names mapped to the source signatures available for
     /// readable calls.
     pub(super) helpers: BTreeMap<String, HelperSignature>,
