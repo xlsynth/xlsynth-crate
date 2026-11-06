@@ -27,6 +27,9 @@ use crate::block::BlockContext;
 /// Revalidate the package if you modify it before emission.
 ///
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
+/// Emission rejects a register, data port, or assertion field whose spelling
+/// collides with a Lean-generated declaration (such as `Input.rec`). The error
+/// identifies the structure and field so proofs can rely on source spellings.
 /// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
 /// `reset q x` forces only the reset port and evaluates an ordinary clock; it
@@ -145,13 +148,15 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     for reference in &assertions {
         let node = graph.get_node(*reference);
         if let NodePayload::Assert { label, message, .. } = &node.payload {
+            let field = ir::node_textual_id(graph, *reference);
+            validate_lean_member("Assertions", &field)?;
             writeln!(
                 source,
                 "  -- id={}; label={}; message={}\n  {} : Bool",
                 node.text_id,
                 comment(label),
                 comment(message),
-                identifier(&ir::node_textual_id(graph, *reference))?
+                identifier(&field)?
             )?;
         }
     }
@@ -275,8 +280,27 @@ pub(crate) fn lean_type(ty: &Type) -> Result<String> {
     }
 }
 
-/// Keep the constructor in a separate namespace so every source field keeps its
-/// name.
+/// Lean 4.34.1 generates these declarations in the same namespace as field
+/// projections. Quoting a source name preserves its spelling and the collision.
+pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
+    ensure!(
+        !matches!(
+            field,
+            "rec"
+                | "recOn"
+                | "casesOn"
+                | "noConfusion"
+                | "noConfusionType"
+                | "ctorIdx"
+                | "_sizeOf_1"
+                | "_sizeOf_inst"
+        ),
+        "cannot emit {owner}.{field}: Lean generates a declaration with this name"
+    );
+    Ok(())
+}
+
+/// Keep the constructor in a separate namespace so a field can be named `mk`.
 pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
 }
@@ -288,6 +312,7 @@ fn record_type<'a>(
 ) -> Result<String> {
     let mut source = structure_header(name);
     for (field, ty) in fields {
+        validate_lean_member(name, field)?;
         writeln!(
             source,
             "  {} : {}",
