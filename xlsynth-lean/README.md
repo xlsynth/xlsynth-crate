@@ -119,6 +119,12 @@ several outputs become a Lean product in port order. The register and port
 types come from checked declarations, and every equation comes from the linked
 block. Internal bindings can be renamed without changing these public fields.
 
+For a BX `use` of a DSLX function, readable emission takes parameter names
+and types from the same checked DSLX compilation that supplied the function's
+IR, including concrete parametric calls. The BX linker records the final
+symbol of each imported function so a collision in the destination package
+does not change which declaration supplies its Lean interface.
+
 `LeanBlockBundle::files` contains these five files in dependency order:
 
 1. `Generated.lean` - the exact raw emission of the lowered block.

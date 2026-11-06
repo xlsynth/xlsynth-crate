@@ -18,6 +18,7 @@ pub struct CompiledBx {
     pub(super) checked: CheckedModule,
     pub(super) package: ir::Package,
     dslx: Option<super::helper_types::DslxLink>,
+    imports: Vec<super::helper_types::DslxLink>,
 }
 
 /// Check BX source with its import paths and lower it into the supplied
@@ -29,14 +30,20 @@ pub fn compile_bx(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    let module = xlsynth_bx::parse_module(source).map_err(anyhow::Error::msg)?;
-    let checked =
-        xlsynth_bx::check_module_with_options(&module, options).map_err(anyhow::Error::msg)?;
-    let package = xlsynth_bx::lower_module(&checked, package, reset).map_err(anyhow::Error::msg)?;
+    let xlsynth_bx::CompiledModule {
+        checked,
+        package,
+        imports,
+    } = xlsynth_bx::compile_with_source(source, package, reset, options)
+        .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
         checked,
         package,
         dslx: None,
+        imports: imports
+            .into_iter()
+            .map(super::helper_types::DslxLink::from_import)
+            .collect(),
     })
 }
 
@@ -68,8 +75,16 @@ impl CompiledBx {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
         let (mut declarations, mut interface) = self.readable_interface(&block)?;
-        if let Some(link) = &self.dslx {
+        for link in self.dslx.iter().chain(&self.imports) {
             link.add_signatures(&block, &mut declarations, &mut interface)?;
+        }
+        // Two specializations (or two linked copies of the same definition)
+        // share a DSLX name but need separate Lean definitions.
+        let mut names = std::collections::BTreeSet::new();
+        for (symbol, signature) in &mut interface.helpers {
+            if !names.insert(signature.name.clone()) {
+                signature.name = format!("{}@{symbol}", signature.name);
+            }
         }
         readable::emit(&block, &declarations, &interface)
     }

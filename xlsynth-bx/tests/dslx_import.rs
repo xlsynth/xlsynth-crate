@@ -30,6 +30,44 @@ fn run_block(package: &Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
 }
 
 #[test]
+fn imported_declarations_bind_to_their_linked_specializations() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "ops.x",
+        "pub fn id<N: u32>(operand: uN[N]) -> uN[N] { operand }",
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let compiled = xlsynth_bx::compile_with_source(
+        "use ops; block widths(clk, a: u8, b: u4) -> (u8, u4) { (ops::id(a), ops::id(b)) }",
+        empty_package("top"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    let [batch] = &*compiled.imports else {
+        panic!("expected one DSLX compilation")
+    };
+    assert_eq!(batch.symbols.len(), 2);
+    let widths: std::collections::BTreeSet<_> = batch
+        .symbols
+        .values()
+        .map(|symbol| {
+            let function = compiled.package.get_fn(symbol).unwrap();
+            assert_eq!(function.get_param(0).param_name(), "operand");
+            let xlsynth_pir::ir::Type::Bits(width) = function.ret_ty else {
+                panic!("expected bits")
+            };
+            width
+        })
+        .collect();
+    assert_eq!(widths, [4, 8].into());
+    Ok(())
+}
+
+#[test]
 fn ordered_roots_select_the_body_and_qualified_and_direct_calls_share_one_specialization()
 -> Result<(), Box<dyn Error>> {
     let first = tempdir()?;

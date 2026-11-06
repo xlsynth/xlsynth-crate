@@ -277,7 +277,10 @@ fn probe_{id}({}) {{ capture({}) }}
     /// Compile each imported module's requested specializations together.
     /// Separate packages keep DSLX names such as `a.b` and `a_b` distinct
     /// until BX links their generated IR symbols into the destination.
-    pub(crate) fn finish(mut self) -> Result<ResolvedImports, String> {
+    pub(crate) fn finish(
+        mut self,
+        mut on_import: impl FnMut(TypecheckedModule),
+    ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(data) = self.imports.as_mut() {
             let mut groups = BTreeMap::<&str, Vec<usize>>::new();
@@ -285,7 +288,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 groups.entry(&call.module).or_default().push(id);
             }
             for (index, (subject, ids)) in groups.into_iter().enumerate() {
-                let batch = compile_batch(
+                let (batch, checked) = compile_batch(
                     subject,
                     index,
                     &self.calls,
@@ -296,6 +299,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 )
                 .map_err(|e| format!("compiling DSLX import '{subject}': {e}"))?;
                 batches.push(batch);
+                on_import(checked);
             }
         }
         Ok(ResolvedImports {
@@ -564,7 +568,7 @@ fn compile_batch(
     imports: &mut ImportData,
     stdlib_path: &Path,
     structs: &ImportedStructs,
-) -> Result<ImportBatch, String> {
+) -> Result<(ImportBatch, TypecheckedModule), String> {
     let mut probe_imports = ProbeImports::default();
     let mut probes = String::new();
     for &id in &call_ids {
@@ -630,11 +634,14 @@ fn compile_batch(
         roots.push(symbol.clone());
     }
     crate::import_link::retain_reachable_functions(&mut package, &roots)?;
-    Ok(ImportBatch {
-        package,
-        roots,
-        call_ids,
-    })
+    Ok((
+        ImportBatch {
+            package,
+            roots,
+            call_ids,
+        },
+        checked,
+    ))
 }
 
 #[cfg(test)]

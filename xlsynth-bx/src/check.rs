@@ -517,6 +517,14 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
+    check_with_imports(module, options, |_| {})
+}
+
+pub(crate) fn check_with_imports(
+    module: &Module,
+    options: &ImportOptions<'_>,
+    on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
+) -> Result<CheckedModule, String> {
     let mut names = BTreeSet::new();
     for path in &module.uses {
         let name = path.binding().ok_or("empty DSLX use path")?;
@@ -675,7 +683,7 @@ pub fn check_module_with_options(
         structs: structs.definitions,
         externs,
         extern_blocks,
-        imports: resolver.finish()?,
+        imports: resolver.finish(on_import)?,
         blocks,
     })
 }
