@@ -661,9 +661,8 @@ impl Catalogue<'_> {
         }
         Ok(())
     }
-    /// A concrete DSLX type alone does not retain a struct's parametric
-    /// arguments. Read the declared type of an operand at the actual caller;
-    /// a shared body can use it only when every call supplies the same type.
+    /// Read each loop operand's declared type at the caller. A shared loop
+    /// body can use a source type only when every call supplies the same type.
     fn declared_loop_operands<'a>(
         &self,
         block: &BlockContext<'a>,
