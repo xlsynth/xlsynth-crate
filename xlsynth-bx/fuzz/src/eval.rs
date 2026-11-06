@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[path = "../../tests/support/expr_eval.rs"]
-mod expr_eval;
+pub(crate) mod expr_eval;
 
 use crate::generator::ExpressionSample;
 use expr_eval::{ExpressionEvaluator, compile_bundled_dslx, dslx_source};

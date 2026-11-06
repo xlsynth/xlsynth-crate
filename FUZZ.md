@@ -106,6 +106,19 @@ DSLX_STDLIB_PATH=/path/to/xls/xls/dslx/stdlib \
 cargo test -p xlsynth-bx --test frontend packed_slice
 ```
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
+
+Generates small DSLX module graphs with two distinct, same-shaped structs,
+public aliases, private declarations, enum values, and field dimensions computed
+in another module. The target compares the Rust outline and the checked BX
+layout with native DSLX metadata, including a field passed directly from a
+function result to a concrete or generic consumer. It also evaluates projected
+fields through both frontends. Passing an alias, passing the other module's
+struct, and naming a private declaration test type acceptance independently of
+value equality.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_graph --sanitizer none`.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset

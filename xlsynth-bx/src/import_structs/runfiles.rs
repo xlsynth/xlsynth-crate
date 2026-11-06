@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
 const XLS_REPOSITORY: &str = "com_google_xls";
 
@@ -63,26 +65,20 @@ impl XlsRunfiles {
             repository: XLS_REPOSITORY.into(),
         };
         if let Some(bytes) = manifest.and_then(|path| fs::read(path).ok()) {
-            // DSLX requires UTF-8 import paths. Unrelated runfile entries can
-            // still contain arbitrary OS path bytes.
+            // Logical XLS keys are UTF-8, but their physical targets can
+            // contain arbitrary OS filename bytes.
             for line in bytes
-                .split(|&byte| byte == b'\n')
+                .split(|&b| b == b'\n')
                 .take_while(|line| !line.is_empty())
-                .filter_map(|line| std::str::from_utf8(line).ok())
             {
-                let line = line.strip_suffix('\r').unwrap_or(line);
-                let entry = if let Some(escaped) = line.strip_prefix(' ') {
-                    escaped
-                        .split_once(' ')
-                        .map(|(key, value)| (unescape(key), unescape(value)))
-                } else {
-                    line.split_once(' ')
-                        .map(|(key, value)| (key.into(), value.into()))
-                };
-                if let Some((key, value)) = entry {
-                    result
-                        .manifest
-                        .insert(PathBuf::from(key), PathBuf::from(value));
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                let escaped = line.starts_with(b" ");
+                let entry = line.strip_prefix(b" ").unwrap_or(line);
+                if let Some(split) = entry.iter().position(|&b| b == b' ')
+                    && let Some(key) = manifest_path(&entry[..split], escaped)
+                    && let Some(value) = manifest_path(&entry[split + 1..], escaped)
+                {
+                    result.manifest.insert(key, value);
                 }
             }
         }
@@ -138,6 +134,18 @@ impl XlsRunfiles {
         };
         path.is_file().then_some(path)
     }
+
+    /// A private module prefix must be absent from the tree and all manifest
+    /// entries below that prefix.
+    pub(super) fn contains_prefix(&self, prefix: &str) -> bool {
+        let key = Path::new(&self.repository).join(prefix);
+        self.resolve(&key).is_some_and(|p| p.exists())
+            || self
+                .manifest
+                .range(key.clone()..)
+                .next()
+                .is_some_and(|(candidate, _)| candidate.starts_with(&key))
+    }
 }
 
 fn append(path: &Path, suffix: &str) -> PathBuf {
@@ -146,33 +154,58 @@ fn append(path: &Path, suffix: &str) -> PathBuf {
     value.into()
 }
 
-/// Decode Bazel's space, newline and backslash escapes in a manifest record.
-fn unescape(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('s') => result.push(' '),
-                Some('n') => result.push('\n'),
-                Some('b') => result.push('\\'),
-                Some(other) => {
-                    result.push('\\');
-                    result.push(other);
-                }
-                None => result.push('\\'),
+/// Decode Bazel's space, newline and backslash escapes without imposing a
+/// text encoding on a Unix filename.
+fn manifest_path(text: &[u8], escaped: bool) -> Option<PathBuf> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut input = text.iter().copied();
+    while let Some(b) = input.next() {
+        if escaped && b == b'\\' {
+            match input.next() {
+                Some(b's') => bytes.push(b' '),
+                Some(b'n') => bytes.push(b'\n'),
+                Some(b'b') => bytes.push(b'\\'),
+                Some(other) => bytes.extend([b'\\', other]),
+                None => bytes.push(b'\\'),
             }
         } else {
-            result.push(c);
+            bytes.push(b);
         }
     }
-    result
+    #[cfg(unix)]
+    {
+        Some(OsString::from_vec(bytes).into())
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(bytes).ok().map(PathBuf::from)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_can_target_a_non_utf8_unix_filename() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let target = dir
+            .path()
+            .join(OsString::from_vec(b"source_\xff.x".to_vec()));
+        fs::write(&target, "pub type Width = u8;")?;
+        let manifest = dir.path().join("manifest");
+        let mut entry = b"com_google_xls/example.x ".to_vec();
+        entry.extend(target.as_os_str().as_bytes());
+        entry.push(b'\n');
+        fs::write(&manifest, entry)?;
+        let runfiles = XlsRunfiles::from_locations(Some(manifest), None, None);
+        assert_eq!(runfiles.lookup(Path::new("example.x")), Some(target));
+        Ok(())
+    }
 
     #[test]
     fn discovers_the_runfiles_tree_beside_the_executable() -> std::io::Result<()> {

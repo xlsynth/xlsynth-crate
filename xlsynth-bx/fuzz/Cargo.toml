@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+tempfile = "3.20"
 xlsynth = { path = "../../xlsynth", version = "0.80.0" }
 xlsynth-bx = { path = "..", version = "0.80.0" }
 xlsynth-pir = { path = "../../xlsynth-pir", version = "0.80.0" }
@@ -19,5 +20,11 @@ members = ["."]
 [[bin]]
 name = "fuzz_bx_dslx_expr_eval_equiv"
 path = "fuzz_targets/fuzz_bx_dslx_expr_eval_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_module_graph"
+path = "fuzz_targets/fuzz_bx_dslx_module_graph.rs"
 test = false
 doc = false

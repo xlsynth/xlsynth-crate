@@ -315,14 +315,14 @@ impl ImportData {
         let dslx_stdlib_path = dslx_stdlib_path.unwrap_or(&default_dslx_stdlib_path);
 
         let dslx_stdlib_path_c_str =
-            std::ffi::CString::new(dslx_stdlib_path.to_str().unwrap()).unwrap();
+            std::ffi::CString::new(dslx_stdlib_path.as_os_str().as_encoded_bytes()).unwrap();
         let dslx_stdlib_path_c_ptr = dslx_stdlib_path_c_str.as_ptr();
 
         // Note: we make sure we collect up the CString values so their lifetime
         // envelopes the import_data_create call.
         let additional_search_paths_c_strs: Vec<std::ffi::CString> = additional_search_paths
             .iter()
-            .map(|p| std::ffi::CString::new(p.to_str().unwrap()).unwrap())
+            .map(|p| std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap())
             .collect::<Vec<_>>();
         let additional_search_paths_c_ptrs: Vec<*const std::os::raw::c_char> =
             additional_search_paths_c_strs
@@ -2811,11 +2811,32 @@ pub fn parse_and_typecheck(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
 
     use crate::dslx::MatchableModuleMember;
     use crate::ir_value::IrFormatPreference;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn native_imports_accept_unix_search_path_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let path = root
+            .path()
+            .join(std::ffi::OsStr::from_bytes(b"source-\xff"));
+        std::fs::create_dir(&path)?;
+        std::fs::write(path.join("wire.x"), "pub const TAG = u8:42;")?;
+        let mut data = ImportData::new(Some(&path), &[&path]);
+        parse_and_typecheck(
+            "import wire; pub fn tag() -> u8 { wire::TAG }",
+            "reader.x",
+            "reader",
+            &mut data,
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn test_one_enum_def() {
