@@ -14,9 +14,9 @@ use crate::ast::{
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
-    ArrayElementHint, ContextOperands, InferredBindings, OperandHint, WidthLookup,
-    array_element_hint, binding_widths, check_inferred_signed_width, context_operands,
-    has_common_bit_type, has_concrete_element_type, minimum_type, operand_hint,
+    CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
+    check_inferred_signed_width, common_type_hint, context_operands, has_common_bit_type,
+    has_concrete_element_type, minimum_type,
 };
 use crate::parser::explicit_width_hint;
 mod unroll;
@@ -1336,7 +1336,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 else_value,
             } => {
                 let cond = self.expr(condition, Some(&Type::Bool))?;
-                let (t, f) = self.pair(then_value, else_value, expected)?;
+                let [t, f] = self
+                    .check_results(&[then_value, else_value], expected)?
+                    .try_into()
+                    .expect("two checked branches");
                 (
                     t.ty.clone(),
                     K::If {
@@ -1506,28 +1509,76 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 .collect());
         }
         let hint = if first_has_type {
-            ArrayElementHint::FromElement(0)
+            CommonTypeHint::FromExpr(0)
         } else {
-            array_element_hint(items, self.loop_widths())?
+            common_type_hint(items, self.loop_widths())?
         };
         match hint {
-            ArrayElementHint::Minimum(ty) => items
+            CommonTypeHint::Minimum(ty) => items
                 .iter()
                 .map(|item| self.expr(item, Some(&ty)))
                 .collect(),
-            ArrayElementHint::FromElement(i) => {
-                let element = self.expr(items[i], None)?;
-                let ty = &element.ty;
-                let mut values = Vec::with_capacity(items.len());
-                for item in &items[..i] {
-                    values.push(self.expr(item, Some(ty))?);
-                }
-                let ty = element.ty.clone();
-                values.push(element);
-                for item in &items[i + 1..] {
-                    values.push(self.expr(item, Some(&ty))?);
-                }
-                Ok(values)
+            CommonTypeHint::FromExpr(i) => {
+                let anchor = self.expr(items[i], None)?;
+                self.check_siblings(items, i, anchor)
+            }
+        }
+    }
+
+    /// Check the other expressions against the anchor, returning each checked
+    /// value in source order without evaluating the anchor a second time.
+    fn check_siblings(
+        &mut self,
+        items: &[&Expr],
+        index: usize,
+        anchor: TypedExpr,
+    ) -> Result<Vec<TypedExpr>, String> {
+        let ty = anchor.ty.clone();
+        let mut values = Vec::with_capacity(items.len());
+        for item in &items[..index] {
+            values.push(self.expr_in_group(item, Some(&ty))?);
+        }
+        values.push(anchor);
+        for item in &items[index + 1..] {
+            values.push(self.expr_in_group(item, Some(&ty))?);
+        }
+        Ok(values)
+    }
+
+    /// Check the alternatives of a value-producing expression as one result
+    /// group. Aggregate literals can obtain their member types from later arms.
+    /// The enclosing expression must include all arms when checking the
+    /// inferred width of a prefix of signed and unsigned literals.
+    fn check_results(
+        &mut self,
+        items: &[&Expr],
+        expected: Option<&Type>,
+    ) -> Result<Vec<TypedExpr>, String> {
+        if expected.is_none() && items.iter().any(|e| has_aggregate_literal(e)) {
+            return self.unify_values(items);
+        }
+        let (index, anchor) = self.result_anchor(items, expected)?;
+        self.check_siblings(items, index, anchor)
+    }
+
+    /// Start at the first result with a concrete type, or check the final
+    /// result against the group's minimum if all results are implicit.
+    fn result_anchor(
+        &mut self,
+        items: &[&Expr],
+        expected: Option<&Type>,
+    ) -> Result<(usize, TypedExpr), String> {
+        let first = items
+            .first()
+            .ok_or("expected at least one result expression")?;
+        if let Some(ty) = expected {
+            return Ok((0, self.expr_in_group(first, Some(ty))?));
+        }
+        match common_type_hint(items, self.loop_widths())? {
+            CommonTypeHint::FromExpr(i) => Ok((i, self.expr_in_group(items[i], None)?)),
+            CommonTypeHint::Minimum(ty) => {
+                let i = items.len() - 1;
+                Ok((i, self.expr_in_group(items[i], Some(&ty))?))
             }
         }
     }
@@ -1765,16 +1816,14 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 .expect("one typed expression per operand");
             return Ok((left, right));
         }
-        if expected.is_none()
-            && let OperandHint::FromRight(common) = operand_hint(left, right, self.loop_widths())?
-        {
-            let r = self.expr_in_group(right, common.as_ref())?;
-            let l = self.expr_in_group(left, Some(&r.ty))?;
-            return Ok((l, r));
+        let (index, anchor) = self.result_anchor(&[left, right], expected)?;
+        if index == 0 {
+            let r = self.expr_in_group(right, Some(&anchor.ty))?;
+            Ok((anchor, r))
+        } else {
+            let l = self.expr_in_group(left, Some(&anchor.ty))?;
+            Ok((l, anchor))
         }
-        let l = self.expr_in_group(left, expected)?;
-        let r = self.expr_in_group(right, Some(&l.ty))?;
-        Ok((l, r))
     }
 
     /// Use the index context's standard width only when all its operands are

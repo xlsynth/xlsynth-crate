@@ -426,6 +426,21 @@ fn signed_operand_unifies_prior_literal_widths_in_source_order() {
 }
 
 #[test]
+fn conditional_checks_signed_literal_width_across_both_results() {
+    assert_expr_matches_dslx(
+        "flag: bool",
+        "s8",
+        "let y = if flag { -1 } else { 0xff + 0xff + s8:0 }; y",
+        [(true, 255), (false, 254)].map(|(flag, value)| {
+            (
+                vec![IrValue::bool(flag)],
+                IrValue::make_ubits(8, value).unwrap(),
+            )
+        }),
+    );
+}
+
+#[test]
 fn packed_slices_extract_lsb_first_and_zero_fill_past_the_end() {
     let body = r#"
     let word = words[1];
