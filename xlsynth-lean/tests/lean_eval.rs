@@ -29,9 +29,13 @@ fn evaluator() -> &'static LeanEvaluator {
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn block_trace_observes_old_state_and_carries_simultaneous_writes() {
-    let package = Parser::new(include_str!("fixtures/block_step.ir"))
-        .parse_and_validate_package()
-        .unwrap();
+    // Exercise positional trace construction with a generated-name collision
+    // and nonalphabetical declaration order in both input and state records.
+    let ir = include_str!("fixtures/block_step.ir")
+        .replace("rst", "recOn")
+        .replace("reg a(", "reg noConfusion(")
+        .replace("register=a", "register=noConfusion");
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
     let block = package.get_top_block().unwrap();
     let word = |n| IrValue::make_ubits(2, n).unwrap();
     let bit = |n| IrValue::make_ubits(1, n).unwrap();

@@ -39,9 +39,8 @@ pub struct LeanBlockBundle {
 /// Revalidate the package if you modify it before emission.
 ///
 /// `State`, `Input`, and `Output` fields keep source names and exact widths.
-/// Emission rejects a register, data port, or assertion field whose spelling
-/// collides with a Lean-generated declaration (such as `Input.rec`). The error
-/// identifies the structure and field so proofs can rely on source spellings.
+/// When a field shares a name with a Lean-generated declaration (such as
+/// `Input.rec`), the record exposes that field through a named accessor.
 /// An XLS tuple `[a, b]` is represented by `(a, (b, ()))`; element `j` uses
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
 /// `reset q x` forces only the reset port and evaluates an ordinary clock; it
@@ -186,33 +185,29 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
             .output_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
-    let assertion_fields: Vec<_> = assertions
-        .iter()
-        .map(|reference| ir::node_textual_id(graph, *reference))
-        .collect();
-    source.push_str(&checked_structure_header(
-        "Assertions",
-        assertion_fields.iter().map(String::as_str),
-    )?);
-    let mut fields = RecordFields::default();
+    let mut fields = Vec::new();
+    let mut comments = Vec::new();
     for reference in &assertions {
         let node = graph.get_node(*reference);
         if let NodePayload::Assert { label, message, .. } = &node.payload {
-            writeln!(
-                source,
-                "  -- id={}; label={}; message={}",
+            comments.push(format!(
+                "id={}; label={}; message={}",
                 node.text_id,
                 comment(label),
                 comment(message)
-            )?;
-            fields.write(
-                &mut source,
-                &identifier(&ir::node_textual_id(graph, *reference))?,
-                "_root_.Bool",
-            )?;
+            ));
+            fields.push((
+                identifier(&ir::node_textual_id(graph, *reference))?,
+                "_root_.Bool".to_owned(),
+            ));
         }
     }
-    source.push_str("  deriving Repr\n\n");
+    source.push_str(&record_declaration(
+        "Assertions",
+        &fields,
+        "Repr",
+        &comments,
+    )?);
     source.push_str(&structure_header("Evaluation"));
     source.push_str(
         "  next : State\n\
@@ -281,9 +276,9 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     writeln!(
         source,
         "  {{ next := {},\n    output := {},\n    assertions := {} }}\n",
-        record_value(&next_fields),
-        record_value(&output_fields),
-        record_value(&assertion_fields)
+        source_record_value(&next_fields),
+        source_record_value(&output_fields),
+        source_record_value(&assertion_fields)
     )?;
     source.push_str(
         "def step (q : State) (x : Input) : State := (eval q x).next\n\n\
@@ -309,7 +304,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         writeln!(
             source,
             "  eval q {{ x with {} := BitVec.ofNat 1 {} }}",
-            identifier(graph.port_name(reset.port))?,
+            storage_field(&identifier(graph.port_name(reset.port))?),
             u8::from(!reset.active_low)
         )?;
     } else {
@@ -402,19 +397,23 @@ fn physical_type(ty: &Type, prefix: &str) -> Result<String> {
 
 /// Lean generates these declarations for every structure and inductive type.
 /// Quoting a source name preserves its spelling but does not prevent a clash.
+pub(super) fn generated_member(field: &str) -> bool {
+    matches!(
+        field,
+        "rec"
+            | "recOn"
+            | "casesOn"
+            | "noConfusion"
+            | "noConfusionType"
+            | "ctorIdx"
+            | "_sizeOf_1"
+            | "_sizeOf_inst"
+    )
+}
+
 pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
     ensure!(
-        !matches!(
-            field,
-            "rec"
-                | "recOn"
-                | "casesOn"
-                | "noConfusion"
-                | "noConfusionType"
-                | "ctorIdx"
-                | "_sizeOf_1"
-                | "_sizeOf_inst"
-        ),
+        !generated_member(field),
         "cannot emit {owner}.{field}: Lean generates a declaration with this name"
     );
     Ok(())
@@ -426,14 +425,80 @@ pub(super) fn structure_header(name: &str) -> String {
     format!("structure {name} where\n  Constructors.mk ::\n")
 }
 
-pub(super) fn checked_structure_header<'a>(
+/// Emit source fields under their public names. Lean puts its own eliminators
+/// next to the real structure, so only records with a competing field need a
+/// separate underlying type. Quoted names containing ':' cannot occur in BX
+/// or DSLX source.
+pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
+    // Source modules may declare their own type named Repr.
+    record_declaration(name, fields, "_root_.Repr", &[])
+}
+
+fn record_declaration(
     name: &str,
-    fields: impl Iterator<Item = &'a str>,
+    fields: &[(String, String)],
+    derived_repr: &str,
+    comments: &[String],
 ) -> Result<String> {
-    for field in fields {
-        validate_lean_member(name, field)?;
+    let exceptional = has_generated_field(fields);
+    let backing = if exceptional {
+        format!("«xls:implementation».{name}")
+    } else {
+        name.to_owned()
+    };
+    let mut out = structure_header(&backing);
+    let mut scope = RecordFields::default();
+    for (index, (field, ty)) in fields.iter().enumerate() {
+        if let Some(comment) = comments.get(index) {
+            writeln!(out, "  -- {comment}")?;
+        }
+        scope.write(&mut out, &storage_field(field), ty)?;
     }
-    Ok(structure_header(name))
+    writeln!(out, "  deriving {derived_repr}\n")?;
+    if exceptional {
+        writeln!(out, "abbrev {name} := {backing}\n")?;
+        for (field, _) in fields {
+            writeln!(
+                out,
+                "@[simp] abbrev {name}.{field} (p : {name}) := {backing}.{} p",
+                storage_field(field)
+            )?;
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+pub(super) fn storage_field(field: &str) -> String {
+    let spelling = field.trim_matches(['«', '»']);
+    if generated_member(spelling) {
+        format!("«field:{spelling}»")
+    } else {
+        field.to_owned()
+    }
+}
+
+fn has_generated_field(fields: &[(String, String)]) -> bool {
+    fields
+        .iter()
+        .any(|(field, _)| generated_member(field.trim_matches(['«', '»'])))
+}
+
+/// Brace literals require actual structure fields. Construct a record with
+/// public field accessors positionally, in the declaration's field order.
+pub(crate) fn source_record_value(fields: &[(String, String)]) -> String {
+    if has_generated_field(fields) {
+        format!(
+            "⟨{}⟩",
+            fields
+                .iter()
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        record_value(fields)
+    }
 }
 
 /// Track the field scope of one Lean structure declaration.
@@ -467,18 +532,15 @@ fn record_type<'a>(
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
-    let fields: Vec<_> = fields.collect();
-    let mut source = checked_structure_header(name, fields.iter().map(|(field, _)| *field))?;
-    let mut scope = RecordFields::default();
-    for (field, ty) in fields {
-        scope.write(
-            &mut source,
-            &identifier(field).with_context(|| format!("{name} field {field}"))?,
-            &physical_field_type(ty).with_context(|| format!("{name} field {field}"))?,
-        )?;
-    }
-    source.push_str("  deriving Repr\n\n");
-    Ok(source)
+    let fields = fields
+        .map(|(field, ty)| {
+            Ok((
+                identifier(field).with_context(|| format!("{name} field {field}"))?,
+                physical_field_type(ty).with_context(|| format!("{name} field {field}"))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    record_declaration(name, &fields, "Repr", &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.
@@ -738,7 +800,7 @@ pub(crate) fn node_expression(
             // Bind the operand before the fold so its names stay in caller
             // scope.
             Ok(format!(
-                "(let mask := {}; (List.range {input_width}).foldl (fun acc i => if mask.getLsbD i then BitVec.or acc (BitVec.ofNat {width} i) else acc) (BitVec.ofNat {width} 0))",
+                "(let mask := {}; (_root_.List.range {input_width}).foldl (fun acc i => if mask.getLsbD i then BitVec.or acc (BitVec.ofNat {width} i) else acc) (BitVec.ofNat {width} 0))",
                 operand(*arg)?
             ))
         }

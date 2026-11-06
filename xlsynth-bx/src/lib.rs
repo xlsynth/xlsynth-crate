@@ -19,7 +19,7 @@ pub use lower::lower_module;
 pub use parser::parse_module;
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, rc::Rc};
 use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
@@ -69,12 +69,22 @@ pub struct LinkedImport {
     pub symbols: BTreeMap<String, String>,
 }
 
+/// A written DSLX struct reference resolved by the same import graph as BX.
+pub struct LinkedStruct {
+    pub module: dslx::TypecheckedModule,
+    pub annotation: dslx::TypeAnnotation,
+}
+
 /// The checked source and its linked hardware, with the import graphs that
 /// produced its callable IR functions.
 pub struct CompiledModule {
+    /// Written annotations retain transparent aliases erased by BX checking.
+    pub source: ast::Module,
     pub checked: CheckedModule,
     pub package: Package,
     pub imports: Vec<LinkedImport>,
+    /// Indexed by the spelling used in BX, including unqualified use bindings.
+    pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
 }
 
 /// Compile BX while retaining the source graph for each linked DSLX import.
@@ -85,7 +95,14 @@ pub fn compile_with_source(
     options: &ImportOptions<'_>,
 ) -> Result<CompiledModule, String> {
     let mut modules = Vec::new();
-    let checked = check::check_with_imports(&parse_module(source)?, options, |m| modules.push(m))?;
+    let mut imported_structs = BTreeMap::new();
+    let source = parse_module(source)?;
+    let checked = check::check_with_imports(
+        &source,
+        options,
+        |m| modules.push(m),
+        |s| imported_structs = s.into_sources(),
+    )?;
     let mut modules = modules.into_iter();
     let mut imports = Vec::new();
     let package = lower::lower_with_imports(&checked, package, reset, |linked| {
@@ -97,8 +114,10 @@ pub fn compile_with_source(
         imports.push(LinkedImport { module, symbols });
     })?;
     Ok(CompiledModule {
+        source,
         checked,
         package,
         imports,
+        imported_structs,
     })
 }

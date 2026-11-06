@@ -177,7 +177,12 @@ impl ImportResolver {
     }
 
     /// Resolve a source-level type reference using the declared import graph.
-    pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
+    pub(crate) fn resolve_named(
+        &mut self,
+        written: &str,
+        subject: &str,
+        member: &str,
+    ) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
             return Err(format!(
                 "invalid imported type reference '{subject}::{member}'"
@@ -185,7 +190,7 @@ impl ImportResolver {
         }
         let imports = self.imports.as_mut().expect("declared DSLX import graph");
         self.structs
-            .resolve_named(subject, member, imports)
+            .resolve_written(written, subject, member, imports)
             .map(Type::Named)
     }
 
@@ -280,6 +285,7 @@ fn probe_{id}({}) {{ capture({}) }}
     pub(crate) fn finish(
         mut self,
         mut on_import: impl FnMut(TypecheckedModule),
+        on_structs: impl FnOnce(ImportedStructs),
     ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(data) = self.imports.as_mut() {
@@ -302,6 +308,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 on_import(checked);
             }
         }
+        on_structs(self.structs);
         Ok(ResolvedImports {
             calls: self.calls,
             batches,

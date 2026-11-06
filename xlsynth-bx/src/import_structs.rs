@@ -8,6 +8,7 @@ use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember, ModuleMemberKind};
 
@@ -27,7 +28,8 @@ struct StructIdentity {
 /// by that graph's typechecker. Definitions are appended in dependency order.
 pub(crate) struct ImportedStructs {
     subjects: BTreeSet<String>,
-    public_types: BTreeMap<String, dslx::Type>,
+    public_types: BTreeMap<String, (dslx::Type, Rc<crate::LinkedStruct>)>,
+    written_types: BTreeMap<String, Rc<crate::LinkedStruct>>,
     rejected_candidates: BTreeSet<String>,
     aliases: BTreeSet<String>,
     observed_modules: BTreeSet<String>,
@@ -49,6 +51,7 @@ impl ImportedStructs {
         Self {
             subjects: subjects.clone(),
             public_types: BTreeMap::new(),
+            written_types: BTreeMap::new(),
             rejected_candidates: BTreeSet::new(),
             aliases: BTreeSet::new(),
             observed_modules: BTreeSet::new(),
@@ -64,6 +67,10 @@ impl ImportedStructs {
 
     pub(crate) fn definitions(&self) -> &[StructDef] {
         &self.definitions
+    }
+
+    pub(crate) fn into_sources(self) -> BTreeMap<String, Rc<crate::LinkedStruct>> {
+        self.written_types
     }
 
     /// A generated DSLX parameter must name its type, even when BX first
@@ -176,9 +183,25 @@ impl ImportedStructs {
         }
     }
 
+    /// Keep the actual alias at this BX use independently of the interned
+    /// struct identity that BX needs for type equality.
+    pub(crate) fn resolve_written(
+        &mut self,
+        written: &str,
+        subject: &str,
+        member: &str,
+        data: &mut ImportData,
+    ) -> Result<String, String> {
+        let identity = self.resolve_named(subject, member, data)?;
+        self.written_types
+            .entry(written.to_owned())
+            .or_insert_with(|| Rc::clone(&self.public_types[&format!("{subject}::{member}")].1));
+        Ok(identity)
+    }
+
     /// Resolve a source type or constructor spelling, preserving DSLX's own
     /// visibility and alias resolution.
-    pub(crate) fn resolve_named(
+    fn resolve_named(
         &mut self,
         subject: &str,
         member: &str,
@@ -207,7 +230,7 @@ impl ImportedStructs {
 
     /// Read the type and nominal identity of a public name in the shared graph.
     fn public_type(&mut self, name: &str, data: &mut ImportData) -> Result<dslx::Type, String> {
-        if let Some(ty) = self.public_types.get(name) {
+        if let Some((ty, _)) = self.public_types.get(name) {
             return Ok(ty.clone());
         }
         let probe_name = format!("0bx_struct_{}", self.probe_index);
@@ -222,11 +245,21 @@ impl ImportedStructs {
         }) else {
             return Err("missing DSLX type probe".into());
         };
-        let ty = checked
-            .get_type_info()
-            .get_type_for_type_annotation(&function.get_param(0).get_type_annotation())
+        let annotation = function.get_param(0).get_type_annotation();
+        let type_info = checked.get_type_info();
+        let ty = type_info
+            .get_type_for_type_annotation(&annotation)
             .ok_or_else(|| format!("could not resolve DSLX type '{name}'"))?;
-        self.public_types.insert(name.to_owned(), ty.clone());
+        self.public_types.insert(
+            name.to_owned(),
+            (
+                ty.clone(),
+                Rc::new(crate::LinkedStruct {
+                    module: checked,
+                    annotation,
+                }),
+            ),
+        );
         Ok(ty)
     }
 
@@ -239,7 +272,7 @@ impl ImportedStructs {
         name: &str,
         data: &mut ImportData,
     ) -> Result<Option<dslx::Type>, String> {
-        if let Some(ty) = self.public_types.get(name) {
+        if let Some((ty, _)) = self.public_types.get(name) {
             return Ok(Some(ty.clone()));
         }
         if self.rejected_candidates.contains(name) {

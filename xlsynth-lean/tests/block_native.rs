@@ -10,6 +10,7 @@ use xlsynth_pir::ir_parser::Parser;
 
 fn bx_bundle(source: &str) -> LeanBlockBundle {
     compile_bx(
+        "design",
         source,
         xlsynth_bx::empty_package("example"),
         Default::default(),
@@ -18,6 +19,75 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
     .unwrap()
     .emit_readable(None)
     .unwrap()
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        "pub struct Packet { data: u8 } pub type Message = Packet; pub type Data = Packet;
+         pub struct Other { data: u8 }",
+    )?;
+    // The checked BX type is identical for direct, message and data. Their
+    // Lean annotations must still reflect the type named at each source site.
+    for params in [
+        "direct: ops::Packet, message: Message, data: ops::Data",
+        "data: ops::Data, message: Message, direct: ops::Packet",
+    ] {
+        let source = format!(
+            "use ops; use ops::Message;
+            block inspect(clk, {params}, other: ops::Other) -> (u8, u8, u8, u8) {{
+                (direct.data, message.data, data.data, other.data)
+            }}"
+        );
+        let mut bundle = compile_bx(
+            "design",
+            &source,
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)?;
+        let generated = &bundle
+            .files
+            .iter()
+            .find(|(p, _)| p == "ReadableGenerated.lean")
+            .unwrap()
+            .1;
+        for (field, ty) in [
+            ("direct", "Packet"),
+            ("message", "Message"),
+            ("data", "Data"),
+            ("other", "Other"),
+        ] {
+            assert!(
+                generated.contains(&format!("«{field}» : «ops».«{ty}»")),
+                "{generated}"
+            );
+        }
+        bundle.files.push((
+            "AliasPorts.lean".into(),
+            r#"import ReadableCorrespondence
+open XlsReadable
+example : ops.Data = ops.Packet := rfl
+example : ops.Message = ops.Packet := rfl
+#check_failure fun (x : Input) => (show ops.Other from x.direct)
+example (q : State) (x : Input) :
+  observe q x = (x.direct.data, x.message.data, x.data.data, x.other.data) := rfl
+"#
+            .into(),
+        ));
+        check_bundle(
+            bundle,
+            "BX ports retaining direct and aliased DSLX type names",
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -34,6 +104,7 @@ pub fn id(x: Alias) -> Alias { x }
 "#,
     )?;
     let mut bundle = compile_bx(
+        "design",
         r#"
 use ops;
 struct Envelope { item: ops::Alias }
@@ -51,13 +122,15 @@ block hold(clk, src: Envelope) -> (ops::Alias, u8) {
         },
     )?
     .emit_readable(None)?;
+    let types = &bundle.files[1].1;
+    assert!(types.contains("«item» : «ops».«Alias»"), "{types}");
     bundle.files.push((
         "PublicInterface.lean".into(),
         r#"
 import ReadableCorrespondence
-open XlsReadable XlsSource
-example : «ops::Alias» = «ops::Inner» := rfl
-example : «ops::Inner» = «ops::Packet» := rfl
+open XlsReadable
+example : ops.Alias = ops.Inner := rfl
+example : ops.Inner = ops.Packet := rfl
 example (q : State) (x : Input) : (step q x).stored = x.src.item := rfl
 example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := rfl
 "#
@@ -67,6 +140,98 @@ example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := 
         bundle,
         "BX fields, registers and outputs with a linked DSLX alias",
     );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_and_imported_dslx_fields_keep_their_source_names() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("field0.x"),
+        r#"
+pub struct Packet { recOn: u8, valid: bool }
+pub fn read(p: Packet) -> u8 { p.recOn }
+"#,
+    )?;
+    let compiled = compile_bx(
+        "design",
+        r#"
+use field0;
+struct Outputs { seen: bool }
+struct Report { result: Outputs, packet: field0::Packet }
+struct Packet { Outputs: u8, design: u8, result: Outputs }
+struct Result { recOn: u8, other_seen: bool, report_seen: bool }
+block monitor(clk, p: field0::Packet, other: Packet, report: Report) -> Result {
+    Result { recOn: field0::read(p), other_seen: other.result.seen, report_seen: report.result.seen }
+}
+"#,
+        xlsynth_bx::empty_package("linked_ir"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    let mut bundle = compiled.emit_readable(None)?;
+    let types = &bundle.files[1].1;
+    assert!(types.contains("«result» : «Outputs»"), "{types}");
+    bundle.files.push((
+        "SourceFields.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+def packet : field0.Packet := ⟨41, true⟩
+#guard packet.recOn == 41 && packet.valid
+example (p : field0.Packet) : (match p with | ⟨n, _⟩ => n) = p.recOn := by cases p; rfl
+example (q : State) (x : Input) :
+    observe q x = (x.p.recOn, x.other.result.seen, x.report.result.seen) := rfl
+example (q : XlsBlock.State) (x : XlsBlock.Input) :
+    (XlsBlock.observe q x).recOn = x.p.1 := rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "BX and imported DSLX field names");
+    Ok(())
+}
+
+// bus.bx and bus.x both own a Packet with the same physical layout.
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_and_dslx_packets_with_the_same_module_name_remain_distinct() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("bus.x"),
+        "pub struct Packet { data: u8 } pub type Message = Packet;",
+    )?;
+    let compiled = compile_bx(
+        "bus",
+        r#"
+use bus;
+struct Packet { value: u8 }
+block copy(clk, a: Packet, b: bus::Message) -> (u8, u8) { (a.value, b.data) }
+"#,
+        xlsynth_bx::empty_package("linked_ir"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    let mut bundle = compiled.emit_readable(None)?;
+    bundle.files.push((
+        "SameName.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+example (x : Input) : «bx:bus».Packet := x.a
+example (x : Input) : bus.Message := x.b
+example : bus.Message = bus.Packet := rfl
+#check_failure fun (x : Input) => (show bus.Packet from x.a)
+example (q : State) (x : Input) : observe q x = (x.a.value, x.b.data) := rfl
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "equal BX and DSLX module and type names");
     Ok(())
 }
 
@@ -100,6 +265,7 @@ fn __picker__first(other: bits[8] id=3) -> bits[8] { ret c: bits[8] = not(other,
     )
     .parse_and_validate_package()?;
     let compiled = compile_bx(
+        "design",
         r#"
 use picker;
 block probe(clk, packet: picker::Packet, flag: bool) -> (u8, bool) {
@@ -159,6 +325,7 @@ fn bx_field_order_across_linked_dslx() {
     .ir;
     let package = Parser::new(&ir).parse_and_validate_package().unwrap();
     let compiled = compile_bx(
+        "field_order",
         include_str!("fixtures/bx_field_order/field_order.bx"),
         package,
         Default::default(),
@@ -282,7 +449,7 @@ fn bx_fields_keep_lean_names() {
     let mut bundle = bx_bundle(
         r#"
 struct Word { mk: u8 }
-struct Packet { XlsSource: u8, _root_: u8, word: Word }
+struct Packet { design: u8, _root_: u8, word: Word }
 block machine(clk, rst, BitVec: u8, packet: Packet) -> (u8, Packet) {
     reg mk: Packet;
     mk := packet;
@@ -295,7 +462,7 @@ block machine(clk, rst, BitVec: u8, packet: Packet) -> (u8, Packet) {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-#check XlsSource.Word.Constructors.mk
+#check design.Word.Constructors.mk
 example (q : State) (x : Input) : (observe q x).2.word.mk = q.mk.word.mk := by rfl
 example (q : State) (x : Input) : (step q x).mk.«_root_» = x.packet.«_root_» := by rfl
 "#
@@ -349,11 +516,16 @@ block pipeline(clk, rst, left: u8, right: u8) -> u8 {
     count
 }
 "#;
-    let mut bundle =
-        xlsynth_lean::block::compile_bx(bx, package, Default::default(), &Default::default())
-            .unwrap()
-            .emit_readable(None)
-            .unwrap();
+    let mut bundle = xlsynth_lean::block::compile_bx(
+        "design",
+        bx,
+        package,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
     let model = &bundle
         .files
         .iter()
@@ -383,8 +555,14 @@ private def initial : State := { count := 7 }
 fn checked_helper_bundle(bx: &str, source: &str, paths: &[&Path]) -> Result<LeanBlockBundle> {
     let mut imports = xlsynth::dslx::ImportData::new(None, paths);
     let module = xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)?;
-    xlsynth_lean::block::compile_bx_with_dslx(bx, module, Default::default(), &Default::default())?
-        .emit_readable(None)
+    xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
+        bx,
+        module,
+        Default::default(),
+        &Default::default(),
+    )?
+    .emit_readable(None)
 }
 
 #[test]
@@ -399,6 +577,7 @@ fn linked_field_order_uses_the_checked_helper() {
     )
     .unwrap();
     let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
         include_str!("fixtures/bx_field_order/field_order.bx"),
         module,
         Default::default(),
@@ -723,9 +902,9 @@ block select_values(clk, rst, small: u5, large: u6, fallback: u5) -> u6 {
         r#"import ReadableCorrespondence
 open XlsReadable
 private def stimulus : Input := {rst := false, small := 3, large := 37, fallback := 17}
-private def small : XlsSource.«packets::Packet<5>» := {value := stimulus.small, enabled := false}
-private def large : XlsSource.«packets::Packet<6>» := {value := stimulus.large, enabled := true}
-private def fallback : XlsSource.«packets::Fallback<5>» := {value := 17, enabled := true}
+private def small : packets.«Packet<5>» := {value := stimulus.small, enabled := false}
+private def large : packets.«Packet<6>» := {value := stimulus.large, enabled := true}
+private def fallback : packets.«Fallback<5>» := {value := 17, enabled := true}
 #guard (Helpers.«packets::choose<5>» (packet := small) (fallback := 17)).value == 17
 #check_failure Helpers.«packets::choose<5>» (packet := fallback) (fallback := 17)
 #guard (Helpers.«packets::choose<6>» (packet := large) (fallback := 41)).value == 37
@@ -764,7 +943,7 @@ block distinguish(clk, rst, one: u8, two: u8) -> u8 {
         "Check.lean".into(),
         r#"import ReadableCorrespondence
 open XlsReadable
-variable (one : XlsSource.«machine::Tagged<1>») (two : XlsSource.«machine::Tagged<2>»)
+variable (one : machine.«Tagged<1>») (two : machine.«Tagged<2>»)
 example : Helpers.«machine::take_two» two = two.value := rfl
 #check_failure Helpers.«machine::take_two» one
 "#
@@ -796,9 +975,9 @@ block pass(clk, x: u6) -> u6 { machine::advance(x) }
         r#"import ReadableGenerated
 open XlsReadable
 variable (x : BitVec 6)
-example : XlsSource.«machine::Packet<3,6,7>» := Helpers.«machine::pack» x
+example : machine.«Packet<3,6,7>» := Helpers.«machine::pack» x
 example : Helpers.«machine::unpack» (Helpers.«machine::relay» (Helpers.«machine::pack» x)) = x := rfl
-example (p : XlsSource.«machine::Packet<3,6,8>») : Helpers.«machine::other» p = p.data := rfl
+example (p : machine.«Packet<3,6,8>») : Helpers.«machine::other» p = p.data := rfl
 #check_failure Helpers.«machine::other» (Helpers.«machine::pack» x)
 "#
         .into(),
@@ -979,12 +1158,12 @@ private def clock (index : BitVec 64) :=
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn encode_changed_bits_matches_xls_for_multihot_masks() {
-    let source = "fn encode_mask(acc: u8) -> u3 { encode(acc) }
+    let source = "fn encode_mask(List: u8) -> u3 { encode(List) }
     fn machine(mask: u8, current_previous: u8) -> (u3, u8) {
         (encode_mask(mask ^ current_previous), mask)
     }";
     let bx = r#"
-extern fn machine::encode_mask(acc: u8) -> u3;
+extern fn machine::encode_mask(List: u8) -> u3;
 block changed(clk, rst, mask: u8) -> u3 {
     reg previous: u8 = 0;
     previous := mask;
@@ -993,6 +1172,13 @@ block changed(clk, rst, mask: u8) -> u3 {
 "#;
     let (mut bundle, machine) =
         compile_lean_and_xls_machine(bx, source).expect("changed-bit mask fixture (machine.x)");
+    assert!(
+        bundle.files[2]
+            .1
+            .contains("def Helpers.«machine::encode_mask» («List»"),
+        "{}",
+        bundle.files[2].1
+    );
     let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
     let previous = 0b0000_0100;
     // No change, clear bit 2, set bit 4, then flip both bits relative to
@@ -1072,6 +1258,7 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {
     let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
+        "design",
         include_str!("fixtures/bx_loop_bindings/counter.bx"),
         checked_nonzero_range(),
         Default::default(),

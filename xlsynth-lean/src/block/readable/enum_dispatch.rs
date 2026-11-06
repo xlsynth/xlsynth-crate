@@ -81,10 +81,10 @@ impl Presentation<'_> {
         let mut out = String::new();
         for (id, dispatch) in self.enum_dispatches()? {
             let name = self.enum_dispatch_name(id);
-            let ty = identifier(dispatch.name)?;
+            let ty = nominal_reference(&self.bx_namespace, dispatch.name, None, &|_| false)?;
             writeln!(
                 out,
-                "def EnumDispatch.{name} {{α : Type}} (s : XlsSource.{ty}) ({} : α) : α :=\n  match s with",
+                "def EnumDispatch.{name} {{α : Type}} (s : {ty}) ({} : α) : α :=\n  match s with",
                 dispatch.arguments()
             )?;
             for (member, encoding) in self.enum_cases(dispatch.name)? {
@@ -103,13 +103,14 @@ impl Presentation<'_> {
     pub(super) fn enum_dispatch_laws(&self, out: &mut String) -> Result<Vec<String>> {
         let mut rules = Vec::new();
         for (id, dispatch) in self.enum_dispatches()? {
-            let ty = identifier(dispatch.name)?;
+            let ty = nominal_reference(&self.bx_namespace, dispatch.name, None, &|_| false)?;
+            let codec = identifier(dispatch.name)?;
             let args = dispatch.arguments();
             let name = self.enum_dispatch_name(id);
             let rule = format!("{name}_priority");
             writeln!(
                 out,
-                "private theorem {rule} {{α : Type}} (s : XlsSource.{ty}) ({args} : α) :\n    EnumDispatch.{name} s {args} =\n      (let bits := XlsCodec.{ty}.encode s\n       {}) := by\n  cases s <;> rfl\n",
+                "private theorem {rule} {{α : Type}} (s : {ty}) ({args} : α) :\n    EnumDispatch.{name} s {args} =\n      (let bits := XlsCodec.{codec}.encode s\n       {}) := by\n  cases s <;> rfl\n",
                 dispatch.physical_selection()
             )?;
             rules.push(rule);

@@ -71,20 +71,7 @@ impl DslxLink {
         if reachable.is_empty() {
             return Ok(());
         }
-        let module = self.module.get_module();
-        let root = ModuleContext {
-            qualifier: module.get_name(),
-            module,
-            type_info: self.module.get_type_info(),
-        };
-        let mut catalogue = Catalogue {
-            context: root.clone(),
-            reachable,
-            declarations: Vec::new(),
-            helpers: BTreeMap::new(),
-            unsupported: BTreeMap::new(),
-            entry: root,
-        };
+        let mut catalogue = Catalogue::new(&self.module, reachable);
         catalogue.collect_helpers()?;
         catalogue.helpers = catalogue
             .helpers
@@ -263,6 +250,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         },
     ];
     let mut interface = StatefulInterface {
+        bx_module: "machine".into(),
         inputs: Default::default(),
         outputs: Default::default(),
         registers: Default::default(),
@@ -311,7 +299,35 @@ impl ModuleContext {
     }
 }
 
-impl Catalogue<'_> {
+/// Collect an interface annotation before transparent aliases are erased.
+pub(super) fn imported_struct(
+    source: &xlsynth_bx::LinkedStruct,
+    declarations: &mut Vec<TypeDecl>,
+) -> Result<SourceType> {
+    let mut catalogue = Catalogue::new(&source.module, BTreeSet::new());
+    catalogue.declarations = std::mem::take(declarations);
+    let ty = catalogue.annotation_type(&source.annotation)?;
+    *declarations = catalogue.declarations;
+    Ok(ty)
+}
+
+impl<'a> Catalogue<'a> {
+    fn new(module: &dslx::TypecheckedModule, reachable: BTreeSet<&'a str>) -> Self {
+        let root = ModuleContext {
+            module: module.get_module(),
+            qualifier: module.get_module().get_name(),
+            type_info: module.get_type_info(),
+        };
+        Self {
+            context: root.clone(),
+            reachable,
+            declarations: Vec::new(),
+            helpers: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
+            entry: root,
+        }
+    }
+
     fn qualified_name(&self, local: &str) -> String {
         format!("{}::{local}", self.context.qualifier)
     }
