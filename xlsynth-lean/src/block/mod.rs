@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generate Lean models from verified XLS block IR.
-//!
-//! [`emit`] preserves physical values and clock-step behavior.
-//! Emission returns text; it does not invoke Lean or check the generated
-//! proofs.
+//! Emit Lean from XLS block IR or a checked BX block with a named interface.
 
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
+mod bx;
 mod raw;
-pub use raw::emit;
+mod readable;
+mod source_types;
+pub use bx::{CompiledBx, compile_bx};
+
+pub use raw::{LeanBlockBundle, emit};
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {

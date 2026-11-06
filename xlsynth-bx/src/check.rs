@@ -65,7 +65,7 @@ fn unknown_declaration(kind: &str, name: &str) -> String {
 }
 
 /// Choose the physical output ports from the source result's outermost type.
-pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<Param>, String> {
+pub fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<Param>, String> {
     match result {
         Type::Named(name) => structs
             .iter()
