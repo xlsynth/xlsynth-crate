@@ -931,6 +931,37 @@ private def clock (a b : BitVec 5) :=
     check_bundle(bundle, "unsigned fixed-width arithmetic");
 }
 
+fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bx_loop_bindings");
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[&root]);
+    xlsynth::dslx::parse_and_typecheck(
+        include_str!("fixtures/bx_loop_bindings/machine.x"),
+        "machine.x",
+        "machine",
+        &mut imports,
+    )
+    .unwrap()
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn nonzero_range_without_loop_records() {
+    let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
+        include_str!("fixtures/bx_loop_bindings/counter.bx"),
+        checked_nonzero_range(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        include_str!("fixtures/bx_loop_bindings/CheckLoop.lean").into(),
+    ));
+    check_bundle(bundle, "nonzero range without loop records");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")

@@ -16,6 +16,7 @@
 use std::{collections::BTreeSet, fmt::Write};
 
 mod enum_dispatch;
+mod loop_correspondence;
 
 use anyhow::{Context, Result, bail, ensure};
 use xlsynth_pir::{
@@ -167,6 +168,18 @@ impl<'a> Presentation<'a> {
         let order = ir_utils::get_topological_nodes(&graph.nodes);
         for reference in &order {
             match &graph.get_node(*reference).payload {
+                NodePayload::CountedFor {
+                    init,
+                    body,
+                    invariant_args,
+                    ..
+                } if let Some(signature) = interface.helpers.get(body) => {
+                    result.node_types[reference.index] = Some(signature.result.clone());
+                    result.annotate(*init, &signature.params[1].1)?;
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        result.annotate(*arg, ty)?;
+                    }
+                }
                 NodePayload::Invoke { to_apply, operands } => {
                     if let Some(signature) = interface.helpers.get(to_apply) {
                         result.node_types[reference.index] = Some(signature.result.clone());
@@ -508,7 +521,18 @@ impl<'a> Presentation<'a> {
         to: Option<&SourceType>,
         value: &str,
     ) -> Result<String> {
-        if from == to {
+        // A Lean abbreviation and its target already have the same type,
+        // including underneath Vector and Prod. Keep nominal types distinct.
+        let same_type = match (from, to) {
+            (Some(from), Some(to)) => {
+                from == to
+                    || resolve_aliases(from, self.declarations)?
+                        == resolve_aliases(to, self.declarations)?
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if same_type {
             Ok(value.into())
         } else {
             self.convert(to, &self.convert(from, value, true)?, false)
@@ -811,6 +835,28 @@ impl<'a> Presentation<'a> {
         let operand = |r| self.typed_operand(r, target, depth);
         let boolean = |r| self.typed_operand(r, Some(&SourceType::Bool), depth);
         match &node.payload {
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } if let Some(signature) = self.interface.helpers.get(body) => {
+                let mut step = format!(
+                    "_root_.XlsReadable.Helpers.{}",
+                    identifier(&signature.name)?
+                );
+                if !invariant_args.is_empty() {
+                    step.push_str(" · ·");
+                    for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
+                        write!(step, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
+                    }
+                }
+                let init = self.typed_operand(*init, Some(&signature.result), depth)?;
+                let call =
+                    format!("(_root_.XlsBlock.countedFor {trip_count} {stride} ({step}) ({init}))");
+                self.coerce(Some(&signature.result), target, &call)
+            }
             NodePayload::Invoke { to_apply, operands }
                 if self.interface.helpers.contains_key(to_apply) =>
             {
@@ -1406,6 +1452,35 @@ end XlsReadable
         }
     }
 
+    fn proof_graphs(&self) -> impl Iterator<Item = &ir::NodeGraph> {
+        std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
+    }
+
+    /// Distribute only codecs and projections. Arbitrary functions could move
+    /// nested conditionals or array reads through each other.
+    fn projection_functions(&self) -> Result<BTreeSet<String>> {
+        let mut functions = BTreeSet::from([
+            "XlsCodec.encodeBool".to_owned(),
+            "XlsCodec.decodeBool".to_owned(),
+        ]);
+        for declaration in self.declarations {
+            let name = identifier(declaration.name())?;
+            functions.extend(declaration_functions(declaration, &name)?);
+        }
+        for graph in self.proof_graphs() {
+            for node in &graph.nodes {
+                if let NodePayload::TupleIndex { tuple, index } = &node.payload {
+                    functions.insert(format!(
+                        "(fun (value : {}) => {})",
+                        lean_type(&graph.get_node(*tuple).ty)?,
+                        tuple_element("value", *index)
+                    ));
+                }
+            }
+        }
+        Ok(functions)
+    }
+
     /// Emit proofs relating readable and raw evaluation for arbitrary physical
     /// state.
     ///
@@ -1413,6 +1488,21 @@ end XlsReadable
     /// encoders unfold afterward. Successful text generation is not Lean proof
     /// checking and does not establish correspondence to XLS execution.
     fn correspondence(&self) -> Result<String> {
+        if self
+            .block
+            .helpers
+            .iter()
+            .map(|f| &f.graph)
+            .chain([self.graph])
+            .any(|graph| {
+                graph.nodes.iter().any(|node| {
+                    matches!(&node.payload,
+                NodePayload::CountedFor { body, .. } if self.interface.helpers.contains_key(body))
+                })
+            })
+        {
+            return self.loop_correspondence();
+        }
         let mut out = String::from("import ReadableRepresentation\n\nnamespace XlsReadable\n\n");
         out.push_str(BOOL_CORRESPONDENCE);
         let mut dispatch_rules = self.enum_dispatch_laws(&mut out)?;
@@ -1496,64 +1586,22 @@ end XlsReadable
             })
             .collect::<Result<Vec<_>>>()?;
         writeln!(out, "  rcases x with ⟨{}⟩", inputs.join(", "))?;
-        let (structural_rules, indexed_rules) = {
-            // Distribute only codecs and projections; arbitrary functions could
-            // move nested conditionals or array reads through each other.
-            let mut functions = BTreeSet::from([
-                "XlsCodec.encodeBool".to_owned(),
-                "XlsCodec.decodeBool".to_owned(),
-            ]);
-            let mut has_array_index = false;
-            for declaration in self.declarations {
-                let name = identifier(declaration.name())?;
-                functions.insert(format!("XlsCodec.{name}.encode"));
-                functions.insert(format!("XlsCodec.{name}.decode"));
-                if let TypeDecl::Struct { fields, .. } = declaration {
-                    for field in fields {
-                        functions.insert(format!("XlsSource.{name}.{}", identifier(&field.name)?));
-                    }
-                }
-            }
-            for graph in
-                std::iter::once(self.graph).chain(self.block.helpers.iter().map(|f| &f.graph))
-            {
-                for node in &graph.nodes {
-                    has_array_index |= matches!(node.payload, NodePayload::ArrayIndex { .. });
-                    if let NodePayload::TupleIndex { tuple, index } = &node.payload {
-                        functions.insert(format!(
-                            "(fun (value : {}) => {})",
-                            lean_type(&graph.get_node(*tuple).ty)?,
-                            tuple_element("value", *index)
-                        ));
-                    }
-                }
-            }
-            let indexed_rules = has_array_index.then(|| {
-                functions
-                    .iter()
-                    .map(|f| format!("← vector_getD_back_map {f}"))
-                    .collect::<Vec<_>>()
-                    .join(",\n       ")
-            });
+        let functions = self.projection_functions()?;
+        let indexed = self
+            .proof_graphs()
+            .any(has_array_index)
+            .then(|| indexed_projection_simp(&functions));
+        let structural_rules = {
             let mut rules = functions
                 .into_iter()
                 .map(|f| format!("apply_ite {f}"))
                 .collect::<Vec<_>>();
-            rules.extend([
-                "prod_fst_ite".into(),
-                "prod_snd_ite".into(),
-                "vector_map_ite".into(),
-                "vector_getD_back_map".into(),
-                "Vector.map_setIfInBounds".into(),
-                "Vector.map_map".into(),
-                "Function.comp_def".into(),
-                "Vector.map_id'".into(),
-            ]);
+            rules.extend(PROJECTION_ITE_RULES.map(str::to_owned));
+            rules.extend(VECTOR_MAP_RULES.map(str::to_owned));
             for declaration in self.declarations.iter().rev() {
                 let name = identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
-                rules.push(format!("XlsCodec.{name}.encode_decode"));
-                rules.push(format!("XlsCodec.{name}.decode_encode"));
+                rules.extend(codec_round_trip_rules(&name));
                 if let TypeDecl::Struct { name, .. } = declaration {
                     rules.push(identifier(&format!("encode_{name}_mk"))?);
                     // A BX record and a DSLX parameter may share only their
@@ -1562,9 +1610,8 @@ end XlsReadable
                     rules.push(format!("XlsCodec.{}.decode", identifier(name)?));
                 }
             }
-            rules.push("XlsCodec.decode_encodeBool".into());
-            rules.push("XlsCodec.encode_decodeBool".into());
-            (rules.join(",\n       "), indexed_rules)
+            rules.extend(BOOL_ROUND_TRIP_RULES.map(str::to_owned));
+            rules.join(",\n       ")
         };
         let mut helper_rules = String::new();
         for function in &self.block.helpers {
@@ -1593,35 +1640,33 @@ end XlsReadable
       [XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
-        let enum_encoders = self
+        let final_encoders = self
             .declarations
             .iter()
             .filter_map(|declaration| match declaration {
-                TypeDecl::Enum { name, .. } => {
+                TypeDecl::Enum { name, .. } | TypeDecl::Alias { name, .. } => {
                     Some(identifier(name).map(|name| format!("XlsCodec.{name}.encode")))
                 }
                 _ => None,
             })
             .collect::<Result<Vec<_>>>()?;
-        if !enum_encoders.is_empty() {
+        if !final_encoders.is_empty() {
             writeln!(
                 out,
-                "  all_goals\n    -- Reduce enum encodings after the structural rewrites.\n    dsimp (config := {{ instances := true }}) only [{}]",
-                enum_encoders.join(", ")
+                "  all_goals\n    -- Reduce aliases and enum constructors after codec round trips cancel.\n    dsimp (config := {{ instances := true, failIfUnchanged := false }}) only [{}]",
+                final_encoders.join(", ")
             )?;
         }
         // A source tuple is encoded one field at a time, while the raw
         // register update selects the entire physical tuple at once.
         out.push_str("  all_goals try simp only [ite_prod_mk, ite_self]\n");
-        if let Some(rules) = indexed_rules {
+        if let Some(tactic) = indexed {
             writeln!(
                 out,
                 r#"  all_goals first
     | rfl
     | -- Compare indexed fields by mapping the projection over each vector.
-      simp only [{rules},
-       vector_map_ite, Vector.map_map, Function.comp_def,
-       Vector.map_mk, List.map_toArray, List.map_cons, List.map_nil] <;> rfl
+      {tactic}
 "#
             )?;
         } else {
@@ -1631,6 +1676,60 @@ end XlsReadable
         out.push_str("\nend XlsReadable\n");
         Ok(out)
     }
+}
+
+fn has_array_index(graph: &ir::NodeGraph) -> bool {
+    graph
+        .nodes
+        .iter()
+        .any(|node| matches!(node.payload, NodePayload::ArrayIndex { .. }))
+}
+
+fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
+    let rules = functions
+        .iter()
+        .map(|f| format!("← vector_getD_back_map {f}"))
+        .collect::<Vec<_>>()
+        .join(",\n       ");
+    format!(
+        "simp only [{rules},\n       vector_map_ite, Vector.map_map, Function.comp_def,\n       Vector.map_mk, List.map_toArray, List.map_cons, List.map_nil] <;> rfl"
+    )
+}
+
+// Both correspondence strategies use these laws, but apply them in different
+// orders.
+const BOOL_ENCODE_ITE: &str = "apply_ite XlsCodec.encodeBool";
+const BOOL_ROUND_TRIP_RULES: [&str; 2] =
+    ["XlsCodec.decode_encodeBool", "XlsCodec.encode_decodeBool"];
+const PROJECTION_ITE_RULES: [&str; 3] = ["prod_fst_ite", "prod_snd_ite", "vector_map_ite"];
+const VECTOR_MAP_RULES: [&str; 5] = [
+    "vector_getD_back_map",
+    "Vector.map_setIfInBounds",
+    "Vector.map_map",
+    "Function.comp_def",
+    "Vector.map_id'",
+];
+
+fn codec_round_trip_rules(name: &str) -> [String; 2] {
+    [
+        format!("XlsCodec.{name}.encode_decode"),
+        format!("XlsCodec.{name}.decode_encode"),
+    ]
+}
+
+/// Codecs and field projections used to distribute conditionals and vector
+/// reads.
+fn declaration_functions(declaration: &TypeDecl, name: &str) -> Result<Vec<String>> {
+    let mut functions = vec![
+        format!("XlsCodec.{name}.encode"),
+        format!("XlsCodec.{name}.decode"),
+    ];
+    if let TypeDecl::Struct { fields, .. } = declaration {
+        for field in fields {
+            functions.push(format!("XlsSource.{name}.{}", identifier(&field.name)?));
+        }
+    }
+    Ok(functions)
 }
 
 /// Lean products have no trailing Unit. Only an explicit singleton DSLX
