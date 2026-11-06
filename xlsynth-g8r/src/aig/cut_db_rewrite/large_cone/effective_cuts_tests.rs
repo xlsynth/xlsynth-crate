@@ -36,14 +36,11 @@ fn ranked_and_unranked_cuts_carry_their_truth_and_enclosed_count() {
         );
         assert_eq!(selected.len(), expected);
         for input in selected {
-            let measured = input
-                .measured
-                .expect("selected cuts must carry their measurements");
             assert_eq!(
-                measured.removable,
+                input.mffc.len(),
                 collect_mffc_nodes_under_cut(&state, root.node, &input.leaves).len()
             );
-            let cone = measured.cone;
+            let cone = input.cone;
             for row in 0..1 << input.leaves.len() {
                 assert_eq!(
                     cone.table.get_bit(row),

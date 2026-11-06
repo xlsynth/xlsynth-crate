@@ -17,8 +17,9 @@ use rustc_hash::FxHashMap;
 use std::cmp::Ordering;
 
 use super::{
-    AigNode, AigOperand, AigRef, ConeTruth, DynamicStructuralHash, FactorInput, FactorInputs,
-    GateFn, LARGE_CONE_MAX_LEAVES, MeasuredCut, collect_mffc_nodes_under_cut, positive_operand,
+    AigNode, AigOperand, AigRef, ConeTruth, CutForFactoring, CutMffc, CutsForFactoring,
+    DynamicStructuralHash, GateFn, LARGE_CONE_MAX_LEAVES, collect_mffc_nodes_under_cut,
+    positive_operand,
 };
 use smallvec::{SmallVec, smallvec};
 
@@ -207,7 +208,7 @@ impl EffectiveCuts {
         root: AigRef,
         state: &DynamicStructuralHash,
         depths: &[usize],
-    ) -> FactorInputs {
+    ) -> CutsForFactoring {
         self.fill(state.gate_fn(), root, depths);
         if depths[root.id] < cut_truth::MIN_SPAN {
             self.select_from_retained::<false>(root, state, depths[root.id])
@@ -221,7 +222,7 @@ impl EffectiveCuts {
         root: AigRef,
         state: &DynamicStructuralHash,
         root_depth: usize,
-    ) -> FactorInputs {
+    ) -> CutsForFactoring {
         let eligible = self.by_node[&root]
             .iter()
             .filter(|cut| cut.priority.tree_ands > 1 && cut.leaves.len() >= 2);
@@ -241,7 +242,7 @@ impl EffectiveCuts {
                 };
             (leaves, cone)
         });
-        let mut chosen: FactorInputs = if cut_leaves.clone().count() > MAX_FACTORED {
+        let mut chosen: CutsForFactoring = if cut_leaves.clone().count() > MAX_FACTORED {
             let boundaries: SmallVec<[&[AigRef]; 16]> = cut_leaves.collect();
             let counts = self.mffc.counts(state, root, &boundaries);
             let mut scored: Vec<_> = evaluated
@@ -252,21 +253,20 @@ impl EffectiveCuts {
             scored
                 .into_iter()
                 .take(MAX_FACTORED)
-                .map(|cut| FactorInput {
+                .map(|cut| CutForFactoring {
                     leaves: cut.leaves,
-                    measured: Some(MeasuredCut {
-                        cone: cut.cone,
-                        removable: cut.removable,
-                    }),
+                    cone: cut.cone,
+                    mffc: CutMffc::Count(cut.removable),
                 })
                 .collect()
         } else {
             evaluated
                 .map(|(leaves, cone)| {
                     let removable = collect_mffc_nodes_under_cut(state, root, &leaves).len();
-                    FactorInput {
+                    CutForFactoring {
                         leaves,
-                        measured: Some(MeasuredCut { cone, removable }),
+                        cone,
+                        mffc: CutMffc::Count(removable),
                     }
                 })
                 .collect()

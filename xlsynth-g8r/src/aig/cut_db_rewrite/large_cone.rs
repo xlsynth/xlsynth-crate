@@ -1528,18 +1528,30 @@ struct ConeTruth {
     enclosed: usize,
 }
 
-/// Effective-cut measurements stay with their ordered boundary until factoring.
-struct MeasuredCut {
-    cone: ConeTruth,
-    removable: usize,
-}
-
-struct FactorInput {
+/// A selected cut and its measurements on the current graph. The order of the
+/// leaves fixes the variables of the truth table. Top-down selection records
+/// the removable ANDs. Bottom-up selection only needs their count.
+struct CutForFactoring {
     leaves: Vec<AigOperand>,
-    measured: Option<MeasuredCut>,
+    cone: ConeTruth,
+    mffc: CutMffc,
 }
 
-type FactorInputs = smallvec::SmallVec<[FactorInput; effective_cuts::MAX_FACTORED]>;
+type CutsForFactoring = smallvec::SmallVec<[CutForFactoring; effective_cuts::MAX_FACTORED]>;
+
+/// Select and measure the top-down search's single reconvergent cut, if any.
+fn select_top_down_cut(
+    root: AigRef,
+    state: &DynamicStructuralHash,
+    depths: &[usize],
+    evaluator: &mut CutEvaluator,
+) -> Option<CutForFactoring> {
+    let g = state.gate_fn();
+    let leaves = find_reconvergent_cone(g, root, depths, state.use_counts())?;
+    let cone = evaluator.collapse(g, root, &leaves);
+    let mffc = CutMffc::Members(collect_mffc_nodes_under_cut(state, root, &leaves));
+    Some(CutForFactoring { leaves, cone, mffc })
+}
 
 /// Constructs large-cone candidate replacements for `root`.
 ///
@@ -1555,37 +1567,26 @@ pub(super) fn construct_large_cone_candidate_replacements_for_root(
     stats: &mut LargeConeCandidateStats,
     memo: &mut SopMemo,
 ) -> ConstructedLargeConeCandidates {
-    let g = state.gate_fn();
-    let inputs: FactorInputs = match effective {
+    let cuts: CutsForFactoring = match effective {
         Some(cuts) => cuts.select(root, state, depths),
-        None => find_reconvergent_cone(g, root, depths, state.use_counts())
+        None => select_top_down_cut(root, state, depths, top_down_evaluator)
             .into_iter()
-            .map(|leaves| FactorInput {
-                leaves,
-                measured: None,
-            })
             .collect(),
     };
     let mut cands = Vec::new();
     let mut candidates_considered = 0;
-    if inputs.is_empty() {
+    if cuts.is_empty() {
         stats.rejected_no_cone += 1;
     }
-    for FactorInput {
+    for CutForFactoring {
         leaves: leaf_ops,
-        measured,
-    } in inputs
+        cone,
+        mffc,
+    } in cuts
     {
         stats.cones_built += 1;
         stats.cone_leaves_sum += leaf_ops.len();
         stats.cone_leaves_max = stats.cone_leaves_max.max(leaf_ops.len());
-        let (cone, mffc) = match measured {
-            Some(cut) => (cut.cone, CutMffc::Count(cut.removable)),
-            None => (
-                top_down_evaluator.collapse(g, root, &leaf_ops),
-                CutMffc::Members(collect_mffc_nodes_under_cut(state, root, &leaf_ops)),
-            ),
-        };
         stats.record_enclosed(cone.enclosed);
         let removable = mffc.len();
         if removable == 0 {
