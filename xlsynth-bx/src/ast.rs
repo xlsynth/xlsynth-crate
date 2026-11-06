@@ -126,6 +126,8 @@ pub enum Expr {
         ty: Option<Type>,
         text: String,
     },
+    /// An all-zero value of the specified type, including aggregate types.
+    Zero(Type),
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
     Struct {
@@ -170,6 +172,21 @@ pub enum Expr {
         then_value: Box<Expr>,
         else_value: Box<Expr>,
     },
+    UnrollFor(Box<UnrollFor>),
+}
+
+/// A fold over a compile-time half-open range. Each iteration's local lets
+/// and result expression can use the index and accumulator bindings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnrollFor {
+    pub index: String,
+    pub accumulator: String,
+    pub annotation: Option<(Type, Type)>,
+    pub start: Expr,
+    pub limit: Expr,
+    pub body: Vec<Stmt>,
+    pub result: Expr,
+    pub seed: Expr,
 }
 
 /// The result type in `value[start+:type]`, before resolving its constant

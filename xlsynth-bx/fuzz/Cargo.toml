@@ -28,3 +28,9 @@ name = "fuzz_bx_dslx_module_graph"
 path = "fuzz_targets/fuzz_bx_dslx_module_graph.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_unroll_types"
+path = "fuzz_targets/fuzz_bx_dslx_unroll_types.rs"
+test = false
+doc = false

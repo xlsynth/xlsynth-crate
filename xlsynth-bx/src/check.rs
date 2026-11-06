@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use xlsynth_pir::IrValue;
-use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
+use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
 use crate::ImportOptions;
 use crate::ast::{
@@ -14,11 +14,13 @@ use crate::ast::{
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
-    ArrayElementHint, ContextOperands, InferredBindings, OperandHint, array_element_hint,
-    binding_widths, check_inferred_signed_width, context_operands, has_common_bit_type,
-    has_concrete_element_type, minimum_type, operand_hint,
+    ArrayElementHint, ContextOperands, InferredBindings, OperandHint, WidthLookup,
+    array_element_hint, binding_widths, check_inferred_signed_width, context_operands,
+    has_common_bit_type, has_concrete_element_type, minimum_type, operand_hint,
 };
 use crate::parser::explicit_width_hint;
+mod unroll;
+
 pub use crate::typed::{CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind};
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -171,6 +173,9 @@ fn resolve_type(
 ) -> Result<Type, String> {
     match ty {
         Type::Named(name) => {
+            if scope.is_some_and(|scope| scope.contains(name)) {
+                return Err(format!("'{name}' names a local value here"));
+            }
             if let Some((subject, member)) = lookup_use(name, resolver, scope)? {
                 resolver.resolve_named(&subject, &member)
             } else if let Some((qualifier, _)) = name.split_once("::") {
@@ -701,6 +706,11 @@ struct BlockChecker<'a, 'm> {
     instances: BTreeMap<String, &'a BlockInterface>,
     connections: BTreeSet<(String, String)>,
     statements: Vec<CheckedStmt>,
+    /// Source names bound by currently active loop iterations.
+    loop_values: BTreeMap<String, TypedExpr>,
+    iteration_path: Vec<usize>,
+    unroll_work: usize,
+    unroll_binding_count: usize,
 }
 
 impl<'a, 'm> BlockChecker<'a, 'm> {
@@ -747,6 +757,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             instances: BTreeMap::new(),
             connections: BTreeSet::new(),
             statements: Vec::new(),
+            loop_values: BTreeMap::new(),
+            iteration_path: Vec::new(),
+            unroll_work: 0,
+            unroll_binding_count: 0,
         };
         c.hardware_name(&block.clock)?;
         if let Some(rst) = &block.reset {
@@ -1077,6 +1091,14 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
         let (ty, kind) = match expr {
+            Expr::UnrollFor(fold) => return self.unroll(fold, expected),
+            Expr::Name(name) if name == "_" && !self.iteration_path.is_empty() => {
+                return Err("cannot read the wildcard binding '_'".into());
+            }
+            Expr::Name(name) if self.loop_values.contains_key(name) => {
+                let value = self.loop_values[name].clone();
+                (value.ty, value.kind)
+            }
             Expr::Name(name) => {
                 let ty = self
                     .values
@@ -1085,6 +1107,13 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                 (ty.clone(), K::Name(name.clone()))
             }
             Expr::Bool(value) => (Type::Bool, K::Literal(IrValue::bool(*value))),
+            Expr::Zero(ty) => {
+                let ty = self.source_type(ty)?;
+                let layout = crate::layout::Layouts::new(&self.structs.definitions)
+                    .lower(&ty)
+                    .map_err(|e| e.to_string())?;
+                (ty, K::Literal(zero_ir_value_for_type(&layout)))
+            }
             Expr::Literal { ty, text } => {
                 let ty = ty
                     .as_ref()
@@ -1182,6 +1211,16 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
                     return Err("cannot index an empty array".into());
                 }
                 let index = self.unsigned_index(index, Some(32))?;
+                if index.has_constant_inputs(&self.constexpr_names)
+                    && let Some(value) = index.constant(&self.constants)
+                    && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+                        .is_none_or(|i| i >= *size)
+                {
+                    return Err(format!(
+                        "constant index {value} out of bounds for {}",
+                        array.ty
+                    ));
+                }
                 (
                     element.as_ref().clone(),
                     K::Index {
@@ -1249,6 +1288,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             }
             Expr::Field { value, name } => {
                 if let Expr::Name(instance) = value.as_ref()
+                    && !self.loop_values.contains_key(instance)
                     && let Some(child) = self.instances.get(instance)
                 {
                     let p = child
@@ -1341,19 +1381,51 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         if let Some(expected) = expected
             && !compatible(&ty, expected)
         {
+            // DSLX retains the minimum type of an inferred loop-local value at
+            // its binder but can widen references (including projected fields).
+            if let Some(locals) = self.loop_widths()
+                && locals.is_inferred_reference(expr)?
+                && let (Some((signed, width)), Some((target_signed, target_width))) =
+                    (bits(&ty), bits(expected))
+                && (!signed || target_signed)
+                && target_width >= width + usize::from(!signed && target_signed)
+            {
+                return Ok(TypedExpr {
+                    ty: expected.clone(),
+                    kind: K::Cast {
+                        value: Box::new(TypedExpr { ty, kind }),
+                    },
+                });
+            }
             return Err(format!("expected {expected}, got {ty}"));
         }
         if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
             self.structs.validate_type(&ty)?;
         }
-        Ok(TypedExpr { ty, kind })
+        let value = TypedExpr { ty, kind };
+        if !self.iteration_path.is_empty()
+            && matches!(
+                value.kind,
+                K::ArrayUpdate { .. } | K::Array(_) | K::Tuple(_) | K::Literal(_)
+            )
+            && value.has_constant_inputs(&self.constexpr_names)
+        {
+            // Rebuilding a constant array each iteration can take quadratic
+            // work. Charge its size in machine words when elaborating the fold.
+            let size = self
+                .structs
+                .type_shape(&value.ty, MAX_ELABORATION_DEPTH)?
+                .size;
+            self.charge_unroll(size.div_ceil(64))?;
+        }
+        Ok(value)
     }
 
     /// Check values against a common type, including the corresponding
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        let first_has_type = has_concrete_element_type(items[0])?;
+        let first_has_type = has_concrete_element_type(items[0], self.loop_widths())?;
         if !first_has_type && items.iter().any(|item| matches!(item, Expr::If { .. })) {
             // Every conditional branch contributes to the same element type.
             let mut branches = Vec::new();
@@ -1453,7 +1525,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
         let hint = if first_has_type {
             ArrayElementHint::FromElement(0)
         } else {
-            array_element_hint(items)?
+            array_element_hint(items, self.loop_widths())?
         };
         match hint {
             ArrayElementHint::Minimum(ty) => items
@@ -1480,6 +1552,9 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     /// Resolve either a concrete extern declaration or an imported DSLX
     /// specialization inferred from its actual argument types.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+        if self.loop_values.contains_key(name) {
+            return Err(format!("'{name}' names a loop-local value"));
+        }
         if let Some((subject, function)) = lookup_use(name, self.resolver, Some(&self.names))? {
             let args = args
                 .iter()
@@ -1499,6 +1574,12 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             return Err(format!(
                 "call to block '{name}' must be the entire right-hand side of an unconditional top-level let"
             ));
+        }
+        if name == "update" && !self.decls.externs.contains_key(name) {
+            if self.names.contains(name) {
+                return Err(format!("'{name}' names a local value here"));
+            }
+            return self.array_update(args);
         }
         let f = self
             .decls
@@ -1525,6 +1606,47 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             K::Call {
                 name: name.to_owned(),
                 args,
+            },
+        ))
+    }
+
+    /// Check DSLX's single-index array update with independently inferred
+    /// arguments.
+    fn array_update(&mut self, args: &[Expr]) -> Result<(Type, K), String> {
+        let [array, index, replacement] = args else {
+            return Err(format!("'update' expects 3 arguments, got {}", args.len()));
+        };
+        let array = self.expr(array, None)?;
+        let Type::Array { element, .. } = &array.ty else {
+            return Err(format!("'update' requires an array, got {}", array.ty));
+        };
+        // DSLX infers the index and replacement type parameters separately.
+        // An inline unsized scalar cannot supply either type parameter.
+        for (arg, role) in [(index, "index"), (replacement, "replacement")] {
+            if minimum_type(arg)?.is_some() {
+                return Err(format!("cannot infer the type of 'update' {role}"));
+            }
+        }
+        let index = self.expr(index, None)?;
+        if !bits(&index.ty).is_some_and(|(signed, _)| !signed) {
+            return Err(format!(
+                "'update' requires an unsigned index, got {}",
+                index.ty
+            ));
+        }
+        let replacement = self.expr(replacement, None)?;
+        if !compatible(element, &replacement.ty) {
+            return Err(format!(
+                "'update' replacement expects {element}, got {}",
+                replacement.ty
+            ));
+        }
+        Ok((
+            array.ty.clone(),
+            K::ArrayUpdate {
+                array: Box::new(array),
+                index: Box::new(index),
+                replacement: Box::new(replacement),
             },
         ))
     }
@@ -1661,7 +1783,7 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
             return Ok((left, right));
         }
         if expected.is_none()
-            && let OperandHint::FromRight(common) = operand_hint(left, right)?
+            && let OperandHint::FromRight(common) = operand_hint(left, right, self.loop_widths())?
         {
             let r = self.expr_in_group(right, common.as_ref())?;
             let l = self.expr_in_group(left, Some(&r.ty))?;
@@ -1697,9 +1819,10 @@ impl<'a, 'm> BlockChecker<'a, 'm> {
     }
 
     /// Check the independently typed shift distance against the left operand.
-    fn shift_distance(&mut self, right: &Expr, width: usize) -> Result<TypedExpr, String> {
-        let right = self.unsigned_index(right, None)?;
-        if let K::Literal(value) = &right.kind
+    fn shift_distance(&mut self, expr: &Expr, width: usize) -> Result<TypedExpr, String> {
+        let right = self.unsigned_index(expr, None)?;
+        if matches!(expr, Expr::Literal { .. } | Expr::Bool(_))
+            && let K::Literal(value) = &right.kind
             && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .is_none_or(|shift| shift > width)
         {
@@ -2087,11 +2210,11 @@ block same(clk, a: (s8, u8[3]), b: (s8, u8[3])) -> bool { a == b }
     }
 
     #[test]
-    fn constant_index_clamps_and_zero_width_cast_extends_with_zero() {
+    fn constant_array_index_and_zero_width_cast_in_register_reset() {
         let source = r#"
 block constants(clk, rst) -> (s8, u8) {
     let samples = [s8:0xff, s8:0b1000_0000];
-    reg q: (s8, u8) = (samples[uN[100]:0xffffffffffffffffffff], sN[0]:0 as u8);
+    reg q: (s8, u8) = (samples[uN[100]:1], sN[0]:0 as u8);
     q := q;
     q
 }"#;
@@ -2103,7 +2226,13 @@ block constants(clk, rst) -> (s8, u8) {
             *reset,
             Some(IrValue::parse_typed("(bits[8]:-128, bits[8]:0)").unwrap())
         );
-        for expression in ["s8:128", "s8:-129", "u8:-1", "s8:1[u1:0]"] {
+        for expression in [
+            "s8:128",
+            "s8:-129",
+            "u8:-1",
+            "s8:1[u1:0]",
+            "[s8:1,s8:2][uN[100]:0xffffffffffffffffffff]",
+        ] {
             let source = format!("block invalid(clk) -> s8 {{ {expression} }}");
             assert!(
                 check_module(&parse_module(&source).unwrap()).is_err(),

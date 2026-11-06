@@ -16,6 +16,9 @@ pub struct DslxOutline {
     /// Full paths of the leaves selected by DSLX use trees.
     pub uses: Vec<Vec<String>>,
     pub declarations: BTreeMap<String, OutlineDecl>,
+    /// Public functions and constants, including functions with no return
+    /// annotation.
+    pub public_values: BTreeSet<String>,
     /// Explicit function return annotations in their declaration scope.
     pub functions: BTreeMap<String, OutlineType>,
 }
@@ -157,6 +160,9 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
                     }
                     "enum" => parser.outline_enum(&bindings)?,
                     "fn" => {
+                        if public {
+                            module.public_values.insert(name.clone());
+                        }
                         parser.outline_group("(")?;
                         if parser.eat("->") {
                             module
@@ -182,7 +188,15 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
                 );
             }
             "impl" | "trait" => parser.skip_outline_item(true)?,
-            "const" | "const_assert!" => parser.skip_outline_item(false)?,
+            "const" => {
+                parser.pos += 1;
+                let name = parser.outline_identifier()?;
+                if public {
+                    module.public_values.insert(name);
+                }
+                parser.skip_outline_item(false)?;
+            }
+            "const_assert!" => parser.skip_outline_item(false)?,
             _ => return Err(parser.error("expected a DSLX module declaration")),
         }
     }

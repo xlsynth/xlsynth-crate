@@ -109,6 +109,11 @@ pub enum TypedExprKind {
         value: Box<TypedExpr>,
         index: Box<TypedExpr>,
     },
+    ArrayUpdate {
+        array: Box<TypedExpr>,
+        index: Box<TypedExpr>,
+        replacement: Box<TypedExpr>,
+    },
     WidthSlice {
         value: Box<TypedExpr>,
         start: Box<TypedExpr>,
@@ -195,6 +200,15 @@ impl TypedExpr {
                     && then_value.has_constant_inputs(names)
                     && else_value.has_constant_inputs(names)
             }
+            K::ArrayUpdate {
+                array,
+                index,
+                replacement,
+            } => {
+                array.has_constant_inputs(names)
+                    && index.has_constant_inputs(names)
+                    && replacement.has_constant_inputs(names)
+            }
         }
     }
 
@@ -221,6 +235,25 @@ impl TypedExpr {
                 let last = array.get_element_count().ok()?.checked_sub(1)?;
                 let i = ir_bits_to_usize(index.constant(names)?.as_bits().ok()?).unwrap_or(last);
                 array.get_element(i.min(last)).ok()
+            }
+            K::ArrayUpdate {
+                array,
+                index,
+                replacement,
+            } => {
+                let IrValue::Array(array) = array.constant(names)? else {
+                    return None;
+                };
+                // DSLX constexpr evaluation requires an in-bounds update.
+                // Runtime IR handles an out-of-bounds index as a no-op.
+                let i = ir_bits_to_usize_in_range(
+                    index.constant(names)?.as_bits().ok()?,
+                    array.elements().len(),
+                )?;
+                let replacement = replacement.constant(names)?;
+                let mut elements = array.elements().to_vec();
+                elements[i] = replacement;
+                IrValue::make_array_typed(array.element_type().clone(), &elements).ok()
             }
             K::WidthSlice { value, start } => {
                 let value = value.constant(names)?;

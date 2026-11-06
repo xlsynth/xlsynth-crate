@@ -158,6 +158,17 @@ impl ImportResolver {
         }
     }
 
+    /// Check visibility without typechecking an invocation in an empty fold.
+    pub(crate) fn check_member_name(&self, subject: &str, member: &str) -> Result<(), String> {
+        if self.structs.has_public_member(subject, member) {
+            Ok(())
+        } else {
+            Err(format!(
+                "unknown or private DSLX member '{subject}::{member}'"
+            ))
+        }
+    }
+
     /// Resolve a source-level type reference using the declared import graph.
     pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
