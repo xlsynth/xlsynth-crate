@@ -29,6 +29,14 @@ pub struct OutlineDecl {
     pub kind: OutlineKind,
 }
 
+impl OutlineDecl {
+    /// DSLX can declare `self`, but a qualified reference requires an
+    /// identifier.
+    pub(crate) fn has_public_spelling(&self, name: &str) -> bool {
+        self.public && is_use_identifier(name)
+    }
+}
+
 /// Type declarations and ordered members as written, before typechecking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutlineKind {

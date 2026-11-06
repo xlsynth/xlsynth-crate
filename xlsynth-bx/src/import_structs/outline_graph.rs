@@ -352,7 +352,7 @@ impl OutlineGraph {
                     ..
                 }) = &decl.kind
                 {
-                    if decl.public && !decl.parametric {
+                    if decl.has_public_spelling(name) && !decl.parametric {
                         self.unresolved_aliases.insert(id.clone());
                     }
                     links.insert(id, self.reference(subject, path));
@@ -376,7 +376,9 @@ impl OutlineGraph {
             }
         }
         for (id, target) in &self.targets {
-            if !self.modules[&id.subject].outline.declarations[&id.name].public {
+            if !self.modules[&id.subject].outline.declarations[&id.name]
+                .has_public_spelling(&id.name)
+            {
                 continue;
             }
             let path = format!("{}::{}", id.subject, id.name);
@@ -394,7 +396,7 @@ impl OutlineGraph {
         self.targets.iter().filter(|(id, target)| {
             let decl = &self.modules[&id.subject].outline.declarations[&id.name];
             let original = &self.modules[&target.subject].outline.declarations[&target.name];
-            decl.public
+            decl.has_public_spelling(&id.name)
                 && !decl.parametric
                 && !original.parametric
                 && matches!(
@@ -416,7 +418,12 @@ impl OutlineGraph {
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {
         let module = self.modules.get(subject)?;
-        if !module.outline.declarations.get(name)?.public {
+        if !module
+            .outline
+            .declarations
+            .get(name)?
+            .has_public_spelling(name)
+        {
             return None;
         }
         let id = DeclId {

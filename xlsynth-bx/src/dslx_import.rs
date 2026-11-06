@@ -825,6 +825,40 @@ pub fn read(h: z_protocol::Header) -> u8 { h.channel }
     }
 
     #[test]
+    fn unrelated_struct_imports_work_with_a_public_declaration_named_self()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join("other.x"), "pub struct self { v: u8 }")?;
+        fs::write(
+            dir.path().join("wire.x"),
+            r#"import other;
+struct Hidden { v: u8 }
+pub type self = Hidden;
+pub type value_t = Hidden;
+pub fn make(x: u8) -> Hidden { Hidden { v: x } }
+pub fn read(value: Hidden) -> u8 { value.v }
+"#,
+        )?;
+        let paths = [dir.path()];
+        let mut native = ImportData::new(None, &paths);
+        dslx::parse_and_typecheck(
+            "import wire; fn probe(x: u8) -> u8 { let v: wire::value_t = wire::make(x); wire::read(v) }",
+            "probe.x",
+            "probe",
+            &mut native,
+        )?;
+        let block = crate::parse_module(
+            "use wire; block b(clk, x: u8) -> u8 { let v: wire::value_t = wire::make(x); wire::read(v) }",
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: paths.to_vec(),
+            ..Default::default()
+        };
+        crate::check_module_with_options(&block, &options)?;
+        Ok(())
+    }
+
+    #[test]
     fn public_alias_resolves_against_the_import_snapshot_after_its_private_struct_is_renamed()
     -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
