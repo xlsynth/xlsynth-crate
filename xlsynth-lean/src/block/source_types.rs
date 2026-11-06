@@ -74,6 +74,12 @@ pub(super) enum SourceType {
     Alias { name: String },
 }
 
+/// Carries the checked BX port and register types into the readable Lean model.
+///
+/// Interface validation matches BX declarations to IR names and physical types.
+/// The readable evaluator and its codecs look up inputs and registers by name.
+/// They pair each entry in `outputs` with the IR output port at the same index
+/// when constructing the result or converting it between readable and raw Lean.
 pub(super) struct StatefulInterface {
     pub(super) inputs: BTreeMap<String, SourceType>,
     pub(super) registers: BTreeMap<String, SourceType>,
