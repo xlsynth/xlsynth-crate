@@ -647,6 +647,42 @@ example : Helpers.«machine::take_two» two = two.value := rfl
     check_bundle(bundle, "equal-layout struct instances");
 }
 
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn compose_helpers_across_dependent_struct_defaults() {
+    let source = r#"
+struct Packet<N: u32, M: u32 = {N * u32:2}, K: u32 = {M + u32:1}> { data: bits[M] }
+fn pack(x: u6) -> Packet<3> { Packet<3> { data: x } }
+fn relay(p: Packet<3, 6>) -> Packet<3, 6> { p }
+fn unpack(p: Packet<3, 6, 7>) -> u6 { p.data }
+fn other(p: Packet<3, 6, 8>) -> u6 { p.data }
+fn advance(x: u6) -> u6 {
+    unpack(relay(pack(x))) + other(Packet<3, 6, 8> { data: x })
+}
+"#;
+    let bx = r#"
+extern fn machine::advance(x: u6) -> u6;
+block pass(clk, x: u6) -> u6 { machine::advance(x) }
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    bundle.files.push((
+        "Compose.lean".into(),
+        r#"import ReadableGenerated
+open XlsReadable
+variable (x : BitVec 6)
+example : XlsSource.«machine::Packet<3,6,7>» := Helpers.«machine::pack» x
+example : Helpers.«machine::unpack» (Helpers.«machine::relay» (Helpers.«machine::pack» x)) = x := rfl
+example (p : XlsSource.«machine::Packet<3,6,8>») : Helpers.«machine::other» p = p.data := rfl
+#check_failure Helpers.«machine::other» (Helpers.«machine::pack» x)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "omitted, partial and fully explicit struct bindings",
+    );
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, fixture: &str) {
     let lean = std::env::var_os("XLSYNTH_LEAN")

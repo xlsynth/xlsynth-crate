@@ -2731,6 +2731,20 @@ impl Type {
         })
     }
 
+    /// Returns the evaluated value bindings of a concrete parametric struct,
+    /// including defaults and bindings that do not occur in its fields.
+    pub fn get_struct_parametric_env(&self) -> Result<ParametricEnv, XlsynthError> {
+        let mut error = std::ptr::null_mut();
+        let mut env = std::ptr::null_mut();
+        unsafe {
+            if sys::xls_dslx_type_get_struct_parametric_env(self.ptr, &mut error, &mut env) {
+                Ok(ParametricEnv { ptr: env })
+            } else {
+                Err(XlsynthError(c_str_to_rust(error)))
+            }
+        }
+    }
+
     pub fn get_struct_member_count(&self) -> usize {
         assert!(self.is_struct());
         let count = unsafe { sys::xls_dslx_type_struct_get_member_count(self.ptr) };

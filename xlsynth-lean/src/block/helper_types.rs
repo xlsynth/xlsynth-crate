@@ -119,18 +119,6 @@ struct ModuleContext {
     qualifier: String,
 }
 
-impl ModuleContext {
-    fn evaluated_argument(&self, expr: &dslx::Expr) -> Option<String> {
-        self.type_info
-            .get_const_expr(expr)
-            .ok()?
-            .convert_to_ir()
-            .ok()?
-            .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::UnsignedDecimal)
-            .ok()
-    }
-}
-
 impl Catalogue<'_> {
     fn qualified_name(&self, local: &str) -> String {
         format!("{}::{local}", self.context.qualifier)
@@ -207,16 +195,6 @@ impl Catalogue<'_> {
             .then(|| ty.get_struct_def())
             .transpose()?
             .filter(|definition| definition.is_parametric());
-        // The use site owns the written arguments, even for a qualified type.
-        let arguments = record.as_ref().and_then(|_| {
-            let reference = reference.as_ref()?;
-            (0..reference.get_parametric_count())
-                .map(|i| {
-                    self.context
-                        .evaluated_argument(&reference.get_parametric_expr(i)?)
-                })
-                .collect::<Option<Vec<_>>>()
-        });
         if let Some(external) = definition
             .as_ref()
             .and_then(dslx::TypeDefinition::to_colon_ref)
@@ -248,7 +226,7 @@ impl Catalogue<'_> {
                 r.get_identifier() == local
                     && r.get_owner_module().get_name() == self.context.qualifier
             }) {
-                self.concrete_record(&record, ty, arguments.as_deref())
+                self.concrete_record(&record, ty)
             } else {
                 self.nominal_reference(&local)
             };
@@ -285,7 +263,7 @@ impl Catalogue<'_> {
             Ok(SourceType::Tuple { members })
         } else if ty.is_enum() || ty.is_struct() {
             if let Some(record) = record {
-                self.concrete_record(&record, ty, arguments.as_deref())
+                self.concrete_record(&record, ty)
             } else if ty.is_struct() {
                 self.nominal_reference(&ty.get_struct_def()?.get_identifier())
             } else {
@@ -316,28 +294,29 @@ impl Catalogue<'_> {
 
     /// A specialization reuses the declared field names with their checked
     /// concrete types. Two uses can spell the same specialization differently.
-    fn concrete_record(
-        &mut self,
-        record: &dslx::StructDef,
-        ty: &dslx::Type,
-        arguments: Option<&[String]>,
-    ) -> Result<SourceType> {
+    fn concrete_record(&mut self, record: &dslx::StructDef, ty: &dslx::Type) -> Result<SourceType> {
         let base = self.qualified_name(&record.get_identifier());
         // A binding can distinguish two DSLX types without changing any field.
-        let written = arguments
-            .with_context(|| format!("missing evaluated parametric arguments for {base}"))?;
-        let defaults = (written.len()..record.get_parametric_binding_count())
-            .map(|i| record.get_parametric_binding(i).get_expr())
-            .collect::<Option<Vec<_>>>()
-            .with_context(|| format!("missing required parametric argument for {base}"))?;
-        // The written prefix determines trailing defaults. Include a default
-        // in the name only when DSLX evaluated it in the declaring context.
-        let mut arguments = written.to_vec();
-        arguments.extend(
-            defaults
-                .iter()
-                .map_while(|expr| self.context.evaluated_argument(expr)),
-        );
+        let bindings: BTreeMap<_, _> = ty
+            .get_struct_parametric_env()
+            .with_context(|| format!("getting checked parametric bindings for {base}"))?
+            .bindings()
+            .into_iter()
+            .collect();
+        let arguments = record
+            .parametric_bindings()
+            .iter()
+            .map(|binding| {
+                let id = binding.get_identifier();
+                let value = bindings
+                    .get(&id)
+                    .with_context(|| format!("missing checked binding {id} for {base}"))?;
+                value
+                    .convert_to_ir()?
+                    .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::UnsignedDecimal)
+                    .with_context(|| format!("rendering checked binding {id} for {base}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let name = format!("{base}<{}>", arguments.join(","));
         if self.declarations.iter().any(|decl| decl.name() == name) {
             return Ok(SourceType::Struct { name });
