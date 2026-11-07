@@ -86,6 +86,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
         depth: 0,
         dslx_type_display: false,
         in_function: false,
+        in_counted_for: false,
         block_type_params: BTreeSet::new(),
     };
     let mut module = DslxOutline::default();

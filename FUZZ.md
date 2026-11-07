@@ -201,6 +201,12 @@ types.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_unroll_types --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_counted_for.rs
+
+Compares counted `for` expressions in BX blocks and local functions with pinned DSLX. Generated loops vary half-open and inclusive ranges, runtime arrays, tuple binders, accumulator types, captures, nesting, and invalid annotations or iterables. Named and scoped literal arrays exercise how an element annotation determines the signedness of implicit bit patterns. Accepted programs run on the same concrete inputs through BX Block IR and DSLX constant calls. The target also compares native DSLX IR when the range base fits its converter. It detects acceptance differences, incorrect base offsets or carry ordering, and lost captured values.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_counted_for --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod counted_for;
 mod eval;
 mod function_calls;
 mod function_oracle;
@@ -9,6 +10,7 @@ mod module_graph;
 mod scalar_match;
 mod unroll_types;
 
+pub use counted_for::check_counted_for;
 pub use function_calls::check_function_calls;
 pub use function_syntax::check_function_syntax;
 pub use module_graph::check_module_graph;

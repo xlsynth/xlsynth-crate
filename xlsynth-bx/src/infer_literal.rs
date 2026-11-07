@@ -25,12 +25,12 @@ struct Minimum {
     /// retains the width at which it was evaluated.
     has_inline_literal: bool,
     /// An unannotated fold with an unsized seed needs a concrete use site.
-    needs_concrete_type: bool,
+    needs_accumulator_type: Option<&'static str>,
 }
 
 /// A path in an aggregate type. All array elements share the same type.
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-enum Member {
+pub(crate) enum Member {
     TupleField(usize),
     ArrayElement,
 }
@@ -54,6 +54,21 @@ impl BindingWidths {
         fields
     }
 
+    /// Remove the shared array-element prefix when binding an iteration value.
+    pub(crate) fn array_element(self) -> Option<Self> {
+        let widths = self
+            .0
+            .into_iter()
+            .filter_map(|(path, ty)| {
+                let (Member::ArrayElement, rest) = path.split_first()? else {
+                    return None;
+                };
+                Some((rest.to_vec(), ty))
+            })
+            .collect::<BTreeMap<_, _>>();
+        (!widths.is_empty()).then_some(Self(widths))
+    }
+
     /// The inferred scalar type of a range element before use-site constraints.
     pub(crate) fn scalar(signed: bool, width: usize) -> Self {
         let minimum = Minimum {
@@ -62,7 +77,7 @@ impl BindingWidths {
             has_prefix: false,
             origin: None,
             has_inline_literal: false,
-            needs_concrete_type: false,
+            needs_accumulator_type: None,
         };
         Self(BTreeMap::from([(Vec::new(), minimum)]))
     }
@@ -135,10 +150,10 @@ impl<'a> WidthLookup<'a> {
 
 impl Minimum {
     fn inferred_type(self) -> Result<Type, String> {
-        if self.needs_concrete_type {
-            return Err(
-                "unroll_for! with an implicit seed needs a concrete accumulator type".into(),
-            );
+        if let Some(fold) = self.needs_accumulator_type {
+            return Err(format!(
+                "{fold} with an implicit seed needs a concrete accumulator type"
+            ));
         }
         Ok(self.into_type())
     }
@@ -168,7 +183,7 @@ impl Minimum {
             has_prefix: radix != 10,
             origin: None,
             has_inline_literal: true,
-            needs_concrete_type: false,
+            needs_accumulator_type: None,
         })
     }
 
@@ -193,7 +208,7 @@ impl Minimum {
             has_prefix: false,
             origin: None,
             has_inline_literal: self.has_inline_literal || other.has_inline_literal,
-            needs_concrete_type: self.needs_concrete_type || other.needs_concrete_type,
+            needs_accumulator_type: self.needs_accumulator_type.or(other.needs_accumulator_type),
         }
     }
 }
@@ -233,6 +248,29 @@ enum CallWidth<'a> {
     },
 }
 
+/// An implicit scalar seed contributes literal constraints to its enclosing
+/// expression, but cannot by itself establish the accumulator's type.
+fn collect_fold_seed(
+    seed: &Expr,
+    fold_name: &'static str,
+    minimum: &mut Option<Minimum>,
+    calls: CallWidth<'_>,
+) -> Result<bool, String> {
+    let mut seed_minimum = None;
+    if !collect_minimum_with_calls(seed, None, &mut seed_minimum, calls)? {
+        return Ok(false);
+    }
+    let Some(mut seed) = seed_minimum else {
+        return Ok(matches!(calls, CallWidth::Deferred { .. }));
+    };
+    seed.needs_accumulator_type = Some(fold_name);
+    *minimum = Some(match minimum.take() {
+        Some(prior) => prior.merge(seed),
+        None => seed,
+    });
+    Ok(true)
+}
+
 fn collect_minimum_with_calls(
     expr: &Expr,
     bindings: Option<WidthLookup<'_>>,
@@ -251,15 +289,10 @@ fn collect_minimum_with_calls(
             };
         }
         Expr::UnrollFor(fold) if fold.annotation.is_none() => {
-            let mut seed = None;
-            if !collect_minimum_with_calls(&fold.seed, None, &mut seed, calls)? {
-                return Ok(false);
-            }
-            let Some(mut seed) = seed else {
-                return Ok(matches!(calls, CallWidth::Deferred { .. }));
-            };
-            seed.needs_concrete_type = true;
-            seed
+            return collect_fold_seed(&fold.seed, "unroll_for!", minimum, calls);
+        }
+        Expr::For(fold) if fold.annotation.is_none() => {
+            return collect_fold_seed(&fold.seed, "for", minimum, calls);
         }
         Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
             if matches!(bindings, Some(WidthLookup::DslxLiterals(_))) =>
@@ -372,7 +405,7 @@ fn collect_projected_with_calls(
                 has_prefix: bound.has_prefix && dslx,
                 origin: if dslx { bound.origin.clone() } else { None },
                 has_inline_literal: false,
-                needs_concrete_type: false,
+                needs_accumulator_type: None,
             };
             *minimum = Some(match minimum.take() {
                 Some(previous) => previous.merge(next),
@@ -404,6 +437,9 @@ fn collect_projected_with_calls(
                 }
             }
             Ok(!items.is_empty())
+        }
+        (Expr::For(fold), Some(_)) if fold.annotation.is_none() => {
+            collect_projected_with_calls(&fold.seed, path, bindings, minimum, calls)
         }
         (
             Expr::If {
@@ -814,6 +850,7 @@ pub(crate) fn has_concrete_element_type(
     locals: Option<WidthLookup<'_>>,
 ) -> Result<bool, String> {
     match expr {
+        Expr::For(fold) if fold.annotation.is_none() => has_concrete_element_type(&fold.seed, None),
         Expr::If {
             then_value,
             else_value,

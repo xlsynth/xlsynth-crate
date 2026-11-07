@@ -16,11 +16,12 @@ use crate::ast::{
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
     CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
-    binding_widths_using, check_argument_widths, check_match_operand_width, check_result_width,
-    common_type_hint, context_operands, has_common_bit_type, has_concrete_element_type,
-    minimum_type, projected_type_compatible,
+    check_argument_widths, check_match_operand_width, check_result_width, common_type_hint,
+    context_operands, has_common_bit_type, has_concrete_element_type, minimum_type,
+    projected_type_compatible,
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
+mod counted_for;
 mod generic_blocks;
 mod generic_inputs;
 mod match_patterns;
@@ -29,9 +30,10 @@ mod unroll;
 
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern,
-    TypedExpr, TypedExprKind, TypedMatchArm,
+    TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMatchArm,
 };
-use crate::typed::{TypedExprKind as K, bits};
+use crate::typed::{ConstantBinding, ConstantFailure, TypedExprKind as K, bits};
+use counted_for::CarryContext;
 use generic_blocks::Bindings;
 
 impl fmt::Display for Type {
@@ -102,6 +104,7 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
 /// Aggregate constructors share member types with the other operand or branch.
 fn has_aggregate_literal(expr: &Expr) -> bool {
     match expr {
+        Expr::For(fold) if fold.annotation.is_none() => has_aggregate_literal(&fold.seed),
         Expr::Scope { result, .. } => has_aggregate_literal(result),
         Expr::Array(_) | Expr::Tuple(_) => true,
         Expr::If {
@@ -215,6 +218,30 @@ struct BlockSpecialization<'m> {
     path: Vec<&'m str>,
 }
 
+/// Required dimensions and reset constants retain their own counted-loop
+/// evaluation allowance when speculative propagation exhausts its allowance.
+struct ConstantBudgets {
+    speculative: usize,
+    required: usize,
+}
+
+impl Default for ConstantBudgets {
+    fn default() -> Self {
+        Self {
+            speculative: MAX_TYPE_SIZE,
+            required: MAX_TYPE_SIZE,
+        }
+    }
+}
+
+/// Lexical constants and their checked definitions share the active body's
+/// budgets. Statements precede every initializer that can depend on them.
+struct ConstantContext<'a> {
+    names: &'a mut BTreeMap<String, ConstantBinding>,
+    statements: &'a [CheckedStmt],
+    budgets: &'a mut ConstantBudgets,
+}
+
 /// Interns specialized block interfaces as calls are checked. Checking queued
 /// bodies iteratively also discovers calls inside those bodies.
 struct BlockSpecializations<'m> {
@@ -223,6 +250,7 @@ struct BlockSpecializations<'m> {
     reserved: BTreeSet<String>,
     next_id: usize,
     unroll_work: usize,
+    constant_budgets: ConstantBudgets,
 }
 
 impl<'m> BlockSpecializations<'m> {
@@ -233,6 +261,7 @@ impl<'m> BlockSpecializations<'m> {
             reserved,
             next_id: 0,
             unroll_work: 0,
+            constant_budgets: ConstantBudgets::default(),
         }
     }
 
@@ -1179,7 +1208,7 @@ struct BodyChecker<'a, 'm> {
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
-    constants: BTreeMap<String, IrValue>,
+    constants: BTreeMap<String, ConstantBinding>,
     /// Bindings whose entire initializer depends only on compile-time inputs.
     constexpr_names: BTreeSet<String>,
     /// Minimum widths of unannotated bindings and their aggregate members.
@@ -1195,12 +1224,94 @@ struct BodyChecker<'a, 'm> {
     /// lexical scope ends, including when another arm binds the same name.
     function_values: BTreeMap<String, TypedExpr>,
     next_scope_alias: usize,
+    /// Iterables checked before a scoped seed is prepared for result inference.
+    prepared_counted_iterables: BTreeMap<String, counted_for::Iteration>,
+    /// Counted bodies bind runtime loop values even outside a structural
+    /// unroll.
+    in_counted_body: bool,
+    next_counted_loop: usize,
     iteration_path: Vec<usize>,
     unroll_work: usize,
+    constant_budgets: ConstantBudgets,
     unroll_binding_count: usize,
 }
 
 impl<'a, 'm> BodyChecker<'a, 'm> {
+    /// Generated bodies charge their common registry. Ordinary source bodies
+    /// own independent budgets just as they do for structural unrolling.
+    fn constant_context(&mut self) -> ConstantContext<'_> {
+        let budgets = match (&mut self.specializations, self.specialization) {
+            (Some(registry), Some(_)) => &mut registry.constant_budgets,
+            _ => &mut self.constant_budgets,
+        };
+        ConstantContext {
+            names: &mut self.constants,
+            statements: &self.statements,
+            budgets,
+        }
+    }
+
+    /// Record a constant if speculative loop folding has work remaining.
+    fn fold_constant(&mut self, value: &TypedExpr) -> Option<ConstantBinding> {
+        let ctx = self.constant_context();
+        match value.constant(ctx.names, &mut ctx.budgets.speculative, false) {
+            Ok(value) => value.map(ConstantBinding::Known),
+            Err(_) => Some(ConstantBinding::Deferred(ctx.statements.len())),
+        }
+    }
+
+    /// Replay only required earlier lets, using an explicit stack so long
+    /// chains cannot overflow the checker. Cache each result in its binding.
+    fn checked_constant(&mut self, value: &TypedExpr) -> Result<Option<IrValue>, String> {
+        let ctx = self.constant_context();
+        let mut pending: Vec<usize> = Vec::new();
+        let mut replaying = false;
+        loop {
+            let definition = pending.last().copied();
+            let (expr, name) = if let Some(index) = definition {
+                let CheckedStmt::Let { name, value } = &ctx.statements[index] else {
+                    unreachable!("deferred constant refers to a checked let")
+                };
+                if !matches!(ctx.names.get(name), Some(ConstantBinding::Deferred(i)) if *i == index)
+                {
+                    pending.pop();
+                    continue;
+                }
+                (value, Some(name))
+            } else {
+                (value, None)
+            };
+            match expr.constant(ctx.names, &mut ctx.budgets.required, replaying) {
+                Ok(result) => {
+                    let Some(name) = name else { return Ok(result) };
+                    if let Some(result) = result {
+                        ctx.names
+                            .insert(name.clone(), ConstantBinding::Known(result));
+                    } else {
+                        ctx.names.remove(name);
+                    }
+                    pending.pop();
+                }
+                Err(ConstantFailure::Deferred(index)) => {
+                    replaying = true;
+                    let mut earlier = BTreeSet::from([index]);
+                    expr.deferred_inputs(ctx.names, &mut earlier);
+                    debug_assert!(
+                        earlier
+                            .last()
+                            .is_some_and(|i| *i < definition.unwrap_or(ctx.statements.len()))
+                    );
+                    pending.extend(earlier.into_iter().rev());
+                }
+                Err(ConstantFailure::WorkLimit) => {
+                    return Err(format!(
+                        "counted for constant evaluation exceeds the work limit of {MAX_TYPE_SIZE}"
+                    ));
+                }
+            }
+        }
+    }
+
     /// Start an independent lexical and elaboration scope for a function or
     /// block.
     fn new(
@@ -1234,8 +1345,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             loop_values: BTreeMap::new(),
             function_values: BTreeMap::new(),
             next_scope_alias: 0,
+            prepared_counted_iterables: BTreeMap::new(),
+            in_counted_body: false,
+            next_counted_loop: 0,
             iteration_path: Vec::new(),
             unroll_work: 0,
+            constant_budgets: ConstantBudgets::default(),
             unroll_binding_count: 0,
         }
     }
@@ -1518,7 +1633,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             let value = self
                                 .expr(expr, Some(&ty))
                                 .map_err(|e| format!("reset of register '{name}': {e}"))?;
-                            Some(value.constant(&self.constants).ok_or_else(|| {
+                            Some(self.checked_constant(&value)?.ok_or_else(|| {
                                 format!(
                                     "reset of register '{name}' must be a compile-time constant"
                                 )
@@ -1632,20 +1747,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         structural: bool,
     ) -> Result<CheckedStmt, String> {
         let ty = annotation.map(|t| self.source_type(t)).transpose()?;
-        let value = self
-            .let_value(name, initializer, ty.as_ref(), structural)
+        // Preparing a lexical scope exposes its trailing expression, which
+        // still occupies a pure value position inside the original scope.
+        let structural = structural && !matches!(initializer, Expr::Scope { .. });
+        let scope::BindingInitializer { value, widths } = self
+            .binding_initializer(initializer, ty.as_ref(), |checker, expr| {
+                checker.let_value(name, expr, ty.as_ref(), structural)
+            })
             .map_err(|e| format!("let '{name}': {e}"))?;
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
-        let constant = value.constant(&self.constants);
-        let widths = if ty.is_none() {
-            binding_widths_using(
-                initializer,
-                &value.ty,
-                WidthLookup::DslxLiterals(Some(&self.inferred_bindings)),
-            )?
-        } else {
-            None
-        };
+        let constant = self.fold_constant(&value);
         declare(&mut self.names, name)?;
         self.values.insert(name.to_owned(), value.ty.clone());
         if constexpr {
@@ -1699,6 +1810,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 return self.value_scope(bindings, result, expected);
             }
             Expr::UnrollFor(fold) => return self.unroll(fold, expected, false),
+            Expr::For(fold) => {
+                return self.with_dslx_value_context(|checker| {
+                    checker.counted_for(fold, CarryContext::Expected(expected))
+                });
+            }
             Expr::Name(name) => self.named_value(name),
             Expr::Bool(value) => Ok((Type::Bool, K::Literal(IrValue::bool(*value)))),
             Expr::Zero(ty) => self.zero_value(ty),
@@ -1735,7 +1851,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Look up a lexical value before consulting the block interface.
     fn named_value(&self, name: &str) -> Result<(Type, K), String> {
-        if name == "_" && (self.kind == BodyKind::Function || !self.iteration_path.is_empty()) {
+        if name == "_" && (self.kind == BodyKind::Function || self.in_loop_scope()) {
             return Err("cannot read the wildcard binding '_'".into());
         }
         if let Some(value) = self
@@ -1906,7 +2022,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let index = self.unsigned_index(index, Some(32))?;
         if index.has_constant_inputs(&self.constexpr_names)
-            && let Some(value) = index.constant(&self.constants)
+            && let Some(value) = self.checked_constant(&index)?
             && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .is_none_or(|i| i >= *size)
         {
@@ -1995,6 +2111,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok(
             if let Expr::Name(instance) = value
                 && !self.loop_values.contains_key(instance)
+                && !self.function_values.contains_key(instance)
                 && let Some(child) = self.instances.get(instance)
             {
                 let p = child
@@ -2325,6 +2442,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        if items.iter().any(|e| matches!(e, Expr::For(fold) if fold.annotation.is_none() && has_aggregate_literal(&fold.seed))) {
+            return self.with_dslx_value_context(|checker| checker.unify_loop_seeds(items));
+        }
         if self.dslx_widths().is_none()
             && items.iter().any(|item| matches!(item, Expr::Match { .. }))
         {
@@ -2471,6 +2591,38 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
+    /// An aggregate carry may obtain different field types from different
+    /// siblings. Unify its seed once and use the resulting value for the loop.
+    fn unify_loop_seeds(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        let folds: Vec<_> = items
+            .iter()
+            .map(|item| match item {
+                Expr::For(fold)
+                    if fold.annotation.is_none() && has_aggregate_literal(&fold.seed) =>
+                {
+                    Some(fold)
+                }
+                _ => None,
+            })
+            .collect();
+        let seeds: Vec<_> = items
+            .iter()
+            .zip(&folds)
+            .map(|(item, fold)| fold.map_or(*item, |f| &f.seed))
+            .collect();
+        let values = self.unify_values(&seeds)?;
+        folds
+            .into_iter()
+            .zip(values)
+            .map(|(fold, value)| match fold {
+                Some(f) => self.with_dslx_value_context(|checker| {
+                    checker.counted_for(f, CarryContext::Prepared(value))
+                }),
+                None => Ok(value),
+            })
+            .collect()
+    }
+
     /// Check the other expressions against the anchor, returning each checked
     /// value in source order without evaluating the anchor a second time.
     fn check_siblings(
@@ -2596,6 +2748,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
         if self.loop_values.contains_key(name) {
             return Err(format!("'{name}' names a loop-local value"));
+        }
+        if self.function_values.contains_key(name) {
+            return Err(format!("'{name}' names a local value here"));
         }
         let visible = self.decls.visible(name, self.function_position);
         if !visible && name != "update" {
@@ -2724,9 +2879,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         match expr {
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
-                let subject = selector
-                    .subject
-                    .constant(&checker.constants)
+                let subject = checker
+                    .checked_constant(&selector.subject)?
                     .ok_or("slice type dimension must be a compile-time constant")?;
                 let value = subject.as_bits().map_err(|e| e.to_string())?;
                 let signed = bits(&selector.subject.ty).expect("checked scalar match").0;
@@ -2752,8 +2906,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 // The chosen branch's physical width is preserved when it
                 // becomes an operand of further constexpr arithmetic.
                 let condition = self.expr(condition, Some(&Type::Bool))?;
-                let select_then = condition
-                    .constant(&self.constants)
+                let select_then = self
+                    .checked_constant(&condition)?
                     .ok_or("slice type dimension must be a compile-time constant")?
                     .to_bool()
                     .map_err(|e| e.to_string())?;
@@ -2830,8 +2984,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if !dimension.has_constant_inputs(&self.constexpr_names) {
             return Err("slice type dimension must be a compile-time constant".into());
         }
-        let value = dimension
-            .constant(&self.constants)
+        let value = self
+            .checked_constant(&dimension)?
             .ok_or("slice type dimension must be a compile-time constant")?;
         ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
             .ok_or("slice type dimension does not fit usize".into())

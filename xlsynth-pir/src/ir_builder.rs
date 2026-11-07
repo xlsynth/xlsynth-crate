@@ -1113,6 +1113,19 @@ impl<'p> FunctionBatch<'p> {
         self.package
     }
 
+    /// Append a block that uses the batch's functions, preserving the name
+    /// and ID indices for further generated functions and blocks.
+    pub fn append_block(&mut self, builder: BlockBuilder) -> Result<(), BuilderError> {
+        let block = builder.build_in_package(self.package)?;
+        for node in &block.nodes {
+            self.max_node_id = self.max_node_id.max(node.text_id);
+        }
+        self.members
+            .insert(block.name.clone(), self.package.members.len());
+        self.package.members.push(ir::PackageMember::Block(block));
+        Ok(())
+    }
+
     /// Append a verified function and return its package member index. A
     /// failure preserves the package and its insertion state.
     pub fn append(&mut self, builder: FnBuilder, result: BValue) -> Result<usize, BuilderError> {

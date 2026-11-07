@@ -2,6 +2,8 @@
 
 #[path = "frontend/array_update.rs"]
 mod array_update;
+#[path = "frontend/counted_for.rs"]
+mod counted_for;
 #[path = "support/directed_expr_eval.rs"]
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]

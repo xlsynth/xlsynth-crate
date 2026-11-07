@@ -2,7 +2,7 @@
 
 use super::unroll::Shadowed;
 use super::{BodyChecker, CheckedStmt, K, Type, TypedExpr};
-use crate::ast::{BinaryOp, BindingPattern, Expr, LetBinding, Stmt, WidthSliceType};
+use crate::ast::{BinaryOp, BindingPattern, Expr, ForIterable, LetBinding, Stmt, WidthSliceType};
 use crate::infer_literal::{BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,9 +10,9 @@ use xlsynth_pir::IrValue;
 
 /// An elaborated let initializer and the unsized literals retained at its
 /// leaves.
-struct BindingInitializer {
-    value: TypedExpr,
-    widths: Option<BindingWidths>,
+pub(super) struct BindingInitializer {
+    pub value: TypedExpr,
+    pub widths: Option<BindingWidths>,
 }
 
 impl BodyChecker<'_, '_> {
@@ -76,7 +76,10 @@ impl BodyChecker<'_, '_> {
                 .as_ref()
                 .map(|t| self.source_type(t))
                 .transpose()?;
-            let init = self.binding_initializer(&binding.value, annotation.as_ref())?;
+            let init =
+                self.binding_initializer(&binding.value, annotation.as_ref(), |checker, expr| {
+                    checker.elaborate_result(expr, annotation.as_ref(), false)
+                })?;
             self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)
         });
         if let Err(error) = result {
@@ -88,13 +91,14 @@ impl BodyChecker<'_, '_> {
 
     /// Capture inferred widths while the bindings that produced the result
     /// are still in scope, including when the initializer is itself a block.
-    fn binding_initializer(
+    pub(super) fn binding_initializer(
         &mut self,
         expr: &Expr,
         annotation: Option<&Type>,
+        check_value: impl FnOnce(&mut Self, &Expr) -> Result<TypedExpr, String>,
     ) -> Result<BindingInitializer, String> {
         self.with_prepared_value(expr, |checker, expr| {
-            let value = checker.elaborate_result(expr, annotation, false)?;
+            let value = check_value(checker, expr)?;
             let widths = if annotation.is_none() {
                 binding_widths_using(
                     expr,
@@ -165,6 +169,7 @@ impl BodyChecker<'_, '_> {
             self.loop_values.remove(&name);
             self.names.remove(&name);
             self.inferred_bindings.remove(&name);
+            self.prepared_counted_iterables.remove(&name);
         }
         self.next_scope_alias = first_alias;
         result
@@ -174,15 +179,52 @@ impl BodyChecker<'_, '_> {
     /// its trailing expression. Other edges (such as an index or a nested
     /// call's arguments) have independent contexts and are checked normally.
     pub(super) fn prepare_value<'e>(&mut self, expr: &'e Expr) -> Result<Cow<'e, Expr>, String> {
+        self.prepare_scopes(expr, &mut |_| Ok(()))
+    }
+
+    /// Check pending loop iterables before entering the first scope that can
+    /// supply their seed's type. Scope-free seeds keep the borrowed AST.
+    fn prepare_scopes<'e>(
+        &mut self,
+        expr: &'e Expr,
+        before_scope: &mut dyn FnMut(&mut Self) -> Result<(), String>,
+    ) -> Result<Cow<'e, Expr>, String> {
         let mut prepared = Cow::Borrowed(expr);
         match expr {
+            Expr::For(fold) if fold.annotation.is_none() => {
+                let mut iteration = None;
+                let seed = self.with_dslx_value_context(|checker| {
+                    checker.prepare_scopes(&fold.seed, &mut |checker| {
+                        if iteration.is_none() {
+                            before_scope(checker)?;
+                            checker.validate_counted_binders(fold)?;
+                            iteration = Some(checker.counted_iteration(&fold.iterable, None)?);
+                        }
+                        Ok(())
+                    })
+                })?;
+                if let Some(iteration) = iteration {
+                    // The enclosing inference scope owns both the checked
+                    // iterable and the lexical aliases in the seed.
+                    let alias = format!("$scope_{}", self.next_scope_alias);
+                    self.next_scope_alias += 1;
+                    self.prepared_counted_iterables
+                        .insert(alias.clone(), iteration);
+                    let Expr::For(fold) = prepared.to_mut() else {
+                        unreachable!()
+                    };
+                    fold.iterable = ForIterable::Array(Expr::Name(alias));
+                    fold.seed = seed.into_owned();
+                }
+            }
             Expr::Scope { .. } => {
+                before_scope(self)?;
                 let mut result = self
                     .capture_scoped_results(&[expr])?
                     .pop()
                     .expect("one scope")
                     .into_owned();
-                if let Cow::Owned(nested) = self.prepare_value(&result)? {
+                if let Cow::Owned(nested) = self.prepare_scopes(&result, before_scope)? {
                     result = nested;
                 }
                 prepared = Cow::Owned(result);
@@ -190,11 +232,12 @@ impl BodyChecker<'_, '_> {
             Expr::Match { .. } if self.dslx_widths().is_none() => {
                 // The lexical initializers in a match arm use DSLX inference
                 // even if its enclosing block argument uses BX inference.
-                return self.with_dslx_value_context(|checker| checker.prepare_value(expr));
+                return self
+                    .with_dslx_value_context(|checker| checker.prepare_scopes(expr, before_scope));
             }
             Expr::Match { arms, .. } => {
                 for (index, arm) in arms.iter().enumerate() {
-                    if let Cow::Owned(value) = self.prepare_value(&arm.value)? {
+                    if let Cow::Owned(value) = self.prepare_scopes(&arm.value, before_scope)? {
                         let Expr::Match { arms, .. } = prepared.to_mut() else {
                             unreachable!()
                         };
@@ -204,7 +247,7 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Tuple(items) | Expr::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
-                    if let Cow::Owned(item) = self.prepare_value(item)? {
+                    if let Cow::Owned(item) = self.prepare_scopes(item, before_scope)? {
                         let (Expr::Tuple(items) | Expr::Array(items)) = prepared.to_mut() else {
                             unreachable!()
                         };
@@ -213,7 +256,7 @@ impl BodyChecker<'_, '_> {
                 }
             }
             Expr::Field { value, .. } | Expr::Index { value, .. } | Expr::Unary { value, .. } => {
-                if let Cow::Owned(value) = self.prepare_value(value)? {
+                if let Cow::Owned(value) = self.prepare_scopes(value, before_scope)? {
                     let (Expr::Field { value: subject, .. }
                     | Expr::Index { value: subject, .. }
                     | Expr::Unary { value: subject, .. }) = prepared.to_mut()
@@ -226,9 +269,9 @@ impl BodyChecker<'_, '_> {
             Expr::Binary { op, left, right }
                 if has_common_bit_type(*op) || matches!(op, BinaryOp::Shl | BinaryOp::Shr) =>
             {
-                let lhs = self.prepare_value(left)?;
+                let lhs = self.prepare_scopes(left, before_scope)?;
                 let rhs = if has_common_bit_type(*op) {
-                    self.prepare_value(right)?
+                    self.prepare_scopes(right, before_scope)?
                 } else {
                     Cow::Borrowed(right.as_ref())
                 };
@@ -245,8 +288,8 @@ impl BodyChecker<'_, '_> {
                 then_value,
                 else_value,
             } => {
-                let lhs = self.prepare_value(then_value)?;
-                let rhs = self.prepare_value(else_value)?;
+                let lhs = self.prepare_scopes(then_value, before_scope)?;
+                let rhs = self.prepare_scopes(else_value, before_scope)?;
                 if matches!(lhs, Cow::Owned(_)) || matches!(rhs, Cow::Owned(_)) {
                     prepared = Cow::Owned(Expr::If {
                         condition: condition.clone(),
@@ -279,10 +322,10 @@ impl BodyChecker<'_, '_> {
                     }
                     let alias = format!("$scope_{}", self.next_scope_alias);
                     self.next_scope_alias += 1;
-                    let values = if self.iteration_path.is_empty() {
-                        &mut self.function_values
-                    } else {
+                    let values = if self.in_loop_scope() {
                         &mut self.loop_values
+                    } else {
+                        &mut self.function_values
                     };
                     values.insert(alias.clone(), values[name].clone());
                     self.names.insert(alias.clone());
@@ -307,11 +350,18 @@ impl BodyChecker<'_, '_> {
             return value;
         }
         let name = format!("$let_{}", self.statements.len());
-        if value.has_constant_inputs(&self.constexpr_names) {
+        let constexpr = value.has_constant_inputs(&self.constexpr_names);
+        // Guarded statements move into their own body, so a later scoped
+        // binding can reuse the same temporary name in the enclosing block.
+        if constexpr {
             self.constexpr_names.insert(name.clone());
+        } else {
+            self.constexpr_names.remove(&name);
         }
-        if let Some(constant) = value.constant(&self.constants) {
+        if let Some(constant) = self.fold_constant(&value) {
             self.constants.insert(name.clone(), constant);
+        } else {
+            self.constants.remove(&name);
         }
         let ty = value.ty.clone();
         self.statements.push(CheckedStmt::Let {
@@ -325,7 +375,7 @@ impl BodyChecker<'_, '_> {
     }
 
     /// Project the members selected by a tuple pattern from its initializer.
-    fn bind_pattern(
+    pub(super) fn bind_pattern(
         &mut self,
         pattern: &BindingPattern,
         value: TypedExpr,
@@ -544,6 +594,26 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 }
             }
             capture_names(&mut fold.result, aliases);
+            aliases.extend(hidden);
+        }
+        Expr::For(fold) => {
+            if let Some((element, carry)) = &mut fold.annotation {
+                rename_type(element, aliases);
+                rename_type(carry, aliases);
+            }
+            match &mut fold.iterable {
+                ForIterable::Range { start, limit, .. } => {
+                    capture_names(start, aliases);
+                    capture_names(limit, aliases);
+                }
+                ForIterable::Array(expr) => capture_names(expr, aliases),
+            }
+            capture_names(&mut fold.seed, aliases);
+            let mut hidden = Vec::new();
+            for pattern in [&fold.element, &fold.accumulator] {
+                pattern.visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
+            }
+            capture_names(&mut fold.body, aliases);
             aliases.extend(hidden);
         }
     }

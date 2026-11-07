@@ -8,9 +8,9 @@ pub(crate) mod source_bytes;
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, Function, LetBinding, MatchArm,
-    MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath,
-    WidthSliceType,
+    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function,
+    LetBinding, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, UnrollFor,
+    UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -322,6 +322,9 @@ struct Parser<'s> {
     dslx_type_display: bool,
     /// Use DSLX identifier rules throughout a local function definition.
     in_function: bool,
+    /// Counted-loop operands and bodies permit lexical value scopes while
+    /// keeping BX identifiers, including an instance's `out` port.
+    in_counted_for: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
 }
@@ -344,6 +347,16 @@ struct ParsedExpr {
     value: Expr,
     height: usize,
     spelling: ExprSpelling,
+}
+
+/// An iterable being parsed, retaining expression heights through parentheses.
+enum ParsedIterable {
+    Array(ParsedExpr),
+    Range {
+        start: ParsedExpr,
+        limit: ParsedExpr,
+        inclusive: bool,
+    },
 }
 
 /// Source distinctions needed for DSLX postfix and comparison precedence.
@@ -382,6 +395,7 @@ impl<'s> Parser<'s> {
             depth: 0,
             dslx_type_display,
             in_function: false,
+            in_counted_for: false,
             block_type_params: BTreeSet::new(),
         })
     }
@@ -729,7 +743,7 @@ impl<'s> Parser<'s> {
         }
         let name = self.ident()?;
         if name != "_" && !names.insert(name.clone()) {
-            return Err(self.error(&format!("duplicate name '{name}' in let pattern")));
+            return Err(self.error(&format!("duplicate name '{name}' in binding pattern")));
         }
         Ok(BindingPattern::Name(name))
     }
@@ -1083,13 +1097,17 @@ impl<'s> Parser<'s> {
     }
 
     /// DSLX ends a full expression at the closing brace of a standalone scope
-    /// or the closing parenthesis of an unroll that begins that expression.
+    /// or the closing parenthesis of a fold that begins that expression.
     fn full_expr(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
-        if self.in_function && self.eat("{") {
+        if self.in_value_body() && self.eat("{") {
             return self.nested(Self::value_scope);
         }
-        if self.in_function && self.eat("unroll_for!") {
+        if self.in_value_body() && self.eat("unroll_for!") {
             return self.nested(Self::unroll_for);
+        }
+        if self.in_value_body() && self.starts_counted_for() {
+            self.pos += 1;
+            return self.nested(Self::counted_for);
         }
         self.expr_at(0, braces)
     }
@@ -1105,7 +1123,7 @@ impl<'s> Parser<'s> {
     fn if_expr(&mut self) -> Result<ParsedExpr, String> {
         let condition = self.condition()?;
         let then_value = self.arm_value()?;
-        if self.in_function && self.peek(0) != "else" {
+        if self.in_value_body() && self.peek(0) != "else" {
             return self.compose(
                 condition.height.max(then_value.height),
                 Expr::If {
@@ -1120,7 +1138,7 @@ impl<'s> Parser<'s> {
     }
 
     fn arm_value(&mut self) -> Result<ParsedExpr, String> {
-        if self.in_function {
+        if self.in_value_body() {
             return self.value_scope();
         }
         let value = self.expr()?;
@@ -1303,6 +1321,142 @@ impl<'s> Parser<'s> {
         false
     }
 
+    /// Both loop spellings allow an optional element and accumulator type pair.
+    fn loop_annotation(&mut self) -> Result<Option<(Type, Type)>, String> {
+        if !self.eat(":") {
+            return Ok(None);
+        }
+        self.expect("(")?;
+        let element = self.ty()?;
+        self.expect(",")?;
+        let accumulator = self.ty()?;
+        self.eat(",");
+        self.expect(")")?;
+        Ok(Some((element, accumulator)))
+    }
+
+    /// Parse a pure counted fold in either a block or a local function.
+    fn counted_for(&mut self) -> Result<ParsedExpr, String> {
+        let outer = std::mem::replace(&mut self.in_counted_for, true);
+        let result = self.counted_for_contents();
+        self.in_counted_for = outer;
+        result
+    }
+
+    fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
+        self.expect("(")?;
+        let mut names = BTreeSet::new();
+        let element = self.binding_pattern(&mut names)?;
+        self.expect(",")?;
+        let accumulator = self.binding_pattern(&mut names)?;
+        self.eat(",");
+        self.expect(")")?;
+        let annotation = self.loop_annotation()?;
+        self.expect("in")?;
+        let (iterable, height) = match self.for_iterable(Braces::Body)? {
+            ParsedIterable::Array(value) => (ForIterable::Array(value.value), value.height),
+            ParsedIterable::Range {
+                start,
+                limit,
+                inclusive,
+            } => (
+                ForIterable::Range {
+                    start: start.value,
+                    limit: limit.value,
+                    inclusive,
+                },
+                start.height.max(limit.height),
+            ),
+        };
+        self.expect("{")?;
+        let body = self.value_scope()?;
+        self.expect("(")?;
+        let seed = self.expr()?;
+        self.expect(")")?;
+        self.compose(
+            height.max(body.height).max(seed.height),
+            Expr::For(Box::new(ForLoop {
+                element,
+                accumulator,
+                annotation,
+                iterable,
+                body: body.value,
+                seed: seed.value,
+            })),
+        )
+    }
+
+    fn in_value_body(&self) -> bool {
+        self.in_function || self.in_counted_for
+    }
+
+    /// Parse the range operator below all binary operators. Parentheses can
+    /// enclose an entire range, one endpoint, or an array-producing expression.
+    fn for_iterable(&mut self, braces: Braces) -> Result<ParsedIterable, String> {
+        let start = if self.eat("(") {
+            let grouped = self.nested(|p| {
+                p.parenthesized(
+                    |p| p.for_iterable(Braces::Struct),
+                    |p, fields| {
+                        let items = fields
+                            .into_iter()
+                            .map(|field| match field {
+                                ParsedIterable::Array(expr) => Ok(expr),
+                                ParsedIterable::Range { .. } => {
+                                    Err(p.error("expected a tuple member expression"))
+                                }
+                            })
+                            .collect::<Result<_, _>>()?;
+                        p.aggregate(items, Expr::Tuple).map(ParsedIterable::Array)
+                    },
+                )
+            })?;
+            let ParsedIterable::Array(mut value) = grouped else {
+                return Ok(grouped);
+            };
+            value.spelling = ExprSpelling::Parenthesized;
+            self.expr_tail(value, 0, braces)?
+        } else {
+            self.full_expr(braces)?
+        };
+        if !matches!(self.peek(0), ".." | "..=") {
+            return Ok(ParsedIterable::Array(start));
+        }
+        let inclusive = self.peek(0) == "..=";
+        self.pos += 1;
+        let limit = self.expr_at(0, braces)?;
+        Ok(ParsedIterable::Range {
+            start,
+            limit,
+            inclusive,
+        })
+    }
+
+    /// In blocks, `for` is also a legal legacy name. A parenthesized binder
+    /// followed by `in` or a type annotation identifies the counted loop.
+    fn starts_counted_for(&self) -> bool {
+        if self.peek(0) != "for" || self.peek(1) != "(" {
+            return false;
+        }
+        if self.in_function {
+            return true;
+        }
+        let mut depth = 1usize;
+        for (i, token) in self.tokens[self.pos + 2..].iter().enumerate() {
+            match token.text {
+                "(" => depth += 1,
+                ")" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.peek(i + 3), "in" | ":");
+                    }
+                }
+                _ => { /* Only parentheses affect the binder's closing position. */ }
+            }
+        }
+        false
+    }
+
     /// Parse the binders, range, iteration body, and initial accumulator of
     /// a DSLX-style unrolled fold.
     fn unroll_for(&mut self) -> Result<ParsedExpr, String> {
@@ -1320,17 +1474,7 @@ impl<'s> Parser<'s> {
         }
         self.eat(",");
         self.expect(")")?;
-        let annotation = if self.eat(":") {
-            self.expect("(")?;
-            let index_ty = self.ty()?;
-            self.expect(",")?;
-            let accumulator_ty = self.ty()?;
-            self.eat(",");
-            self.expect(")")?;
-            Some((index_ty, accumulator_ty))
-        } else {
-            None
-        };
+        let annotation = self.loop_annotation()?;
         self.expect("in")?;
         // Range endpoints are operands of '..', even at the start of the
         // iterable.
@@ -1340,7 +1484,7 @@ impl<'s> Parser<'s> {
         self.expect("{")?;
         let mut body = Vec::new();
         let mut height = start.height.max(limit.height);
-        let result = if self.in_function {
+        let result = if self.in_value_body() {
             self.value_scope()?
         } else {
             while self.eat("let") {
@@ -1556,6 +1700,10 @@ impl<'s> Parser<'s> {
         }
         if self.eat("unroll_for!") {
             return self.unroll_for();
+        }
+        if self.starts_counted_for() {
+            self.pos += 1;
+            return self.counted_for();
         }
         if text == "zero!" && self.peek(1) == "<" {
             self.pos += 2;
@@ -2273,6 +2421,100 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
         assert!(
             matches!(&values[..], [Expr::Index { value, .. }] if matches!(value.as_ref(), Expr::Index { .. }))
         );
+    }
+
+    #[test]
+    fn counted_loops_parse_array_values_and_nested_tuple_binders() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn fold(xs: (u8, u16, u8)[2]) -> (u8, u8) {
+    for ((x, .., y), (a, b)): ((u8, u16, u8), (u8, u8)) in ((), xs).1 {
+        let next = (a + x, b + y);
+        next
+    }((u8:0, u8:0))
+}
+block wrapper(clk, xs: u8[2]) -> u8 {
+    for (i, acc) in xs { let step = { let j = i; j }; acc + step }(u8:0)
+}
+"#,
+        )?;
+        let Expr::For(fold) = &module.functions[0].body else {
+            panic!("expected a counted loop")
+        };
+        assert_eq!(
+            fold.element,
+            BindingPattern::Tuple(vec![
+                BindingPattern::Name("x".into()),
+                BindingPattern::Rest,
+                BindingPattern::Name("y".into())
+            ])
+        );
+        assert!(matches!(&fold.accumulator, BindingPattern::Tuple(fields) if fields.len() == 2));
+        assert!(
+            matches!(&fold.annotation, Some((Type::Tuple(items), Type::Tuple(carry))) if items.len() == 3 && carry.len() == 2)
+        );
+        assert!(
+            matches!(&fold.iterable, ForIterable::Array(Expr::Field { name, .. }) if name == "1")
+        );
+        assert!(matches!(fold.body, Expr::Scope { .. }));
+        let Expr::For(fold) = &module.blocks[0].output else {
+            panic!("expected a counted loop")
+        };
+        assert!(matches!(&fold.iterable, ForIterable::Array(Expr::Name(name)) if name == "xs"));
+        assert!(matches!(fold.body, Expr::Scope { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn counted_ranges_preserve_endpoints_and_inclusivity_through_parentheses() -> Result<(), String>
+    {
+        for (range, inclusive) in [
+            ("u8:1..u8:3", false),
+            ("(u8:1)..=(u8:3)", true),
+            ("((u8:1..u8:3))", false),
+            ("((u8:1)..=u8:3)", true),
+        ] {
+            let module = parse_module(&format!(
+                "fn f() -> () {{ for (_, ()) in {range} {{ }}(()) }}"
+            ))?;
+            let Expr::For(fold) = &module.functions[0].body else {
+                panic!("expected a counted loop")
+            };
+            assert!(matches!(&fold.iterable, ForIterable::Range {
+                start: Expr::Literal { text: start, .. },
+                limit: Expr::Literal { text: end, .. }, inclusive: flag
+            } if start == "1" && end == "3" && *flag == inclusive));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn counted_loop_binders_and_precedence_follow_dslx_functions() {
+        for expr in [
+            "for pair in xs { pair.0 }(u8:0)",
+            "for (i, ..) in xs { i }(u8:0)",
+            "for ((i, _), i) in xs { i }(u8:0)",
+            "for (i, acc) in xs { acc }",
+            "for (i, acc) in xs { acc := i; acc }(u8:0)",
+            "for (i, acc) in xs { acc }(u8:0) + u8:1",
+        ] {
+            assert!(
+                parse_module(&format!("fn f(xs:u8[2]) -> u8 {{ {expr} }}")).is_err(),
+                "{expr}"
+            );
+        }
+        for expr in [
+            "(for (i, acc) in xs { acc }(u8:0)) + u8:1",
+            "u8:1 + for (i, acc) in xs { acc }(u8:0)",
+        ] {
+            assert!(
+                parse_module(&format!("fn f(xs:u8[2]) -> u8 {{ {expr} }}")).is_ok(),
+                "{expr}"
+            );
+        }
+        // Existing BX block names and calls spelled 'for' remain unambiguous.
+        assert!(parse_module("block b(clk, for:u8) -> u8 { for }").is_ok());
+        assert!(parse_module("block b(clk, x:u8) -> u8 { let y = for(x); y }").is_ok());
     }
 
     #[test]
