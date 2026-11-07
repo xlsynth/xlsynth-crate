@@ -207,6 +207,12 @@ Compares counted `for` expressions in BX blocks and local functions with pinned 
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_counted_for --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_map_lambda.rs
+
+Compares capture-free anonymous `map` lambdas in BX blocks and local functions with pinned DSLX typechecking, concrete calls, and compiled IR. It varies signedness, widths, runtime arrays, inferred literal arrays and ranges, tuple elements, nested maps, module helper calls, scalar or aggregate results, and invalid lambda annotations. It detects incorrect parameter or result types, element ordering, and name resolution. For wider parameter annotations on literal inputs or wider declared arrays returned by unannotated constant callbacks, BX rejection is compared with the actual element width produced by DSLX. Inferred tuple and array literals are compared through concrete execution because the pinned DSLX converter emits unparsable helper names for those results. For enclosing-value captures it checks that DSLX accepts the source and BX rejects it.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_map_lambda --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

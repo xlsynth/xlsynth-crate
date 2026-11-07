@@ -125,13 +125,20 @@ pub enum BindingPattern {
 }
 
 impl BindingPattern {
-    /// Visit the visible names introduced by this pattern, in source order.
-    pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) {
+    /// Visit the names introduced in source order and return the number of
+    /// pattern nodes traversed, including wildcards and rest markers.
+    pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) -> usize {
+        let mut nodes = 1;
         match self {
             Self::Name(name) if name != "_" => visit(name),
-            Self::Tuple(fields) => fields.iter().for_each(|f| f.visit_names(visit)),
+            Self::Tuple(fields) => {
+                for field in fields {
+                    nodes += field.visit_names(visit);
+                }
+            }
             Self::Name(_) | Self::Rest => { /* Wildcards and rest markers bind no value. */ }
         }
+        nodes
     }
 }
 
@@ -243,6 +250,7 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    Map(Box<MapExpr>),
     Unary {
         op: UnaryOp,
         value: Box<Expr>,
@@ -269,6 +277,20 @@ pub enum Expr {
     For(Box<ForLoop>),
 }
 
+/// An array mapped by an inline unary lambda. The checker verifies that the
+/// body is closed over its parameter and visible module declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MapExpr {
+    /// The callee name, retained so lexical scope preparation preserves
+    /// shadowing.
+    pub target: String,
+    pub iterable: ForIterable,
+    pub parameter: String,
+    pub parameter_type: Option<Type>,
+    pub result_type: Option<Type>,
+    pub body: Expr,
+}
+
 /// A counted fold, with an iteration element and a loop-carried accumulator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForLoop {
@@ -280,7 +302,8 @@ pub struct ForLoop {
     pub seed: Expr,
 }
 
-/// A counted loop visits a statically bounded integer range or an array value.
+/// A counted loop or map visits a statically bounded integer range or an array
+/// value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForIterable {
     Range {

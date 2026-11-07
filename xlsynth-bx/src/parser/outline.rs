@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Dialect, MAX_SYNTAX_DEPTH, Parser, fixed_width, is_dslx_member_name, is_use_identifier, lex,
+    Dialect, MAX_SYNTAX_DEPTH, Parser, ValueContext, fixed_width, is_dslx_member_name,
+    is_use_identifier, lex,
 };
 
 /// Names, types, and import bindings written in one DSLX source module.
@@ -81,12 +82,12 @@ pub enum OutlineShape {
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
     let mut parser = Parser {
         source,
-        tokens: lex(source, Dialect::Dslx)?,
+        tokens: lex(source, Dialect::Dslx, None)?,
         pos: 0,
         depth: 0,
         dslx_type_display: false,
-        in_function: false,
-        in_counted_for: false,
+        value_context: ValueContext::Block,
+        in_value_expression: false,
         block_type_params: BTreeSet::new(),
     };
     let mut module = DslxOutline::default();

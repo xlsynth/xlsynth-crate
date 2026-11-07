@@ -12,6 +12,8 @@ mod expr_eval;
 mod imported_structs;
 #[path = "frontend/local_functions.rs"]
 mod local_functions;
+#[path = "frontend/map_lambda.rs"]
+mod map_lambda;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
 #[path = "frontend/unroll_for.rs"]

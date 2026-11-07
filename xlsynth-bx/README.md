@@ -70,6 +70,31 @@ For a register reset value or a loop range bound, use a constant expression that
 
 BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
 
+### Map expressions
+
+Use `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The input supplies the parameter type, and the lambda's result supplies the output element type. The output has the same length as the input.
+
+```text
+block widen(clk, words: u8[4]) -> u16[4] {
+    map(words, |word| {
+        let wide = word as u16;
+        wide + u16:1
+    })
+}
+```
+
+The lambda can use its parameter, its own local bindings, and visible pure helpers. Reading a value from an enclosing scope is a capture and produces an error, even for a constant local binding. A nested `map` may use its enclosing lambda's parameter as the array to transform. Its callback gets a fresh parameter of its own.
+
+Write `|x: u8| -> u16 { ... }` to give explicit types. Give input literals their intended width before mapping. For example, `[1, 3]` supplies two-bit elements, so `map([1, 3], |x| x + 1)` yields `[2, 0]`. For eight-bit arithmetic, write `map([u8:1, u8:3], |x| x + 1)`. A result annotation is useful for a body that returns an unsized literal, as in `|_| -> u16 { 0 }`. A constant integer range is also a valid input, for example `map(u8:0..=u8:3, |x| x * x)`.
+
+BX emits an XLS IR `map` with a unary body function. If structural unrolling or generic block specialization creates multiple copies of the callback, those copies count toward the elaboration work limit. To emit SystemVerilog from a block that uses `map`, inline the map first.
+
+```shell
+xlsynth-driver bx2ir widen.bx > widen.ir
+opt_main --passes=map_inlining widen.ir > widen.inlined.ir
+xlsynth-driver block2sv widen.inlined.ir > widen.sv
+```
+
 ### Counted for expressions
 
 Use a DSLX-style `for` in a function or block to fold an array or a constant integer range into a value. The expression after the body supplies the initial accumulator. Each iteration binds the next element and the previous accumulator, then returns the next accumulator.

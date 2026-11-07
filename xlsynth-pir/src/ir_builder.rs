@@ -435,6 +435,35 @@ impl<S: sealed::State> Builder<S> {
         Ok(value)
     }
 
+    /// Apply a unary function independently to every array element.
+    pub fn map(&mut self, array: BValue, body: &ir::Fn) -> Result<BValue, BuilderError> {
+        self.check_callee(body)?;
+        let array = self.node(array)?;
+        let Type::Array(input) = self.graph.get_node_ty(array) else {
+            return Err(BuilderError::InvalidOperation(
+                "map requires an array".into(),
+            ));
+        };
+        if body.params.len() != 1 || &body.get_param(0).ty != input.element_type.as_ref() {
+            return Err(BuilderError::InvalidOperation(format!(
+                "map body '{}' requires one parameter of type {}",
+                body.name, input.element_type
+            )));
+        }
+        let result = Type::new_array(body.ret_ty.clone(), input.element_count);
+        let value = self.add_node(
+            NodePayload::Map {
+                array,
+                to_apply: body.name.clone(),
+            },
+            Some(result),
+        )?;
+        self.callees
+            .entry(body.name.clone())
+            .or_insert_with(|| body.get_type());
+        Ok(value)
+    }
+
     /// Adds a counted loop whose body is `(index, carry, invariants...) ->
     /// carry`.
     ///
@@ -963,7 +992,7 @@ impl Builder<FunctionState> {
     /// Consumes and verifies a standalone function with no package
     /// dependencies.
     ///
-    /// Functions containing `invoke` or `counted_for` require
+    /// Functions containing `invoke`, `map`, or `counted_for` require
     /// `build_in_package` or `build_into_package`, even if the call's
     /// result is unused.
     pub fn build(self, return_value: BValue) -> Result<ir::Fn, BuilderError> {
@@ -2002,6 +2031,35 @@ mod tests {
         let step = builder.param("step", Type::Bits(8)).unwrap();
         let result = builder.add(carry, step).unwrap();
         builder.build(result).unwrap()
+    }
+
+    #[test]
+    fn map_checks_element_type_and_preserves_array_length() {
+        let mut body = FnBuilder::new("pair");
+        let element = body.param("element", Type::Bits(8)).unwrap();
+        let pair = body.tuple(&[element, element]).unwrap();
+        let body = body.build(pair).unwrap();
+        for len in [0, 2] {
+            let mut builder = FnBuilder::new("caller");
+            let scalar = builder.literal(bits(8, 3)).unwrap();
+            let array = builder.array(Type::Bits(8), &vec![scalar; len]).unwrap();
+            assert!(builder.map(scalar, &body).is_err());
+            assert!(builder.map(array, &identity_callee("narrow", 4)).is_err());
+            assert!(builder.map(array, &loop_body(4)).is_err());
+            assert_eq!(builder.last_value(), Some(array));
+            let result = builder.map(array, &body).unwrap();
+            let mut package = package_for(body.clone());
+            builder.build_into_package(result, &mut package).unwrap();
+            let caller = package.get_fn("caller").unwrap();
+            assert_eq!(caller.ret_ty, Type::new_array(body.ret_ty.clone(), len));
+            match eval_fn_in_package(&package, caller, &[]) {
+                FnEvalResult::Success(result) => assert_eq!(
+                    result.value.as_elements().unwrap(),
+                    vec![IrValue::make_tuple(&[bits(8, 3), bits(8, 3)]); len],
+                ),
+                FnEvalResult::Failure(result) => panic!("unexpected failure: {result:?}"),
+            }
+        }
     }
 
     #[test]
