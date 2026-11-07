@@ -350,6 +350,29 @@ impl ImportResolver {
         result
     }
 
+    pub(crate) fn capture_written_types(&mut self, capture: bool) {
+        self.structs.written_types = capture.then(Default::default);
+    }
+
+    pub(crate) fn take_written_types(&mut self) -> crate::import_structs::WrittenTypes {
+        self.structs.written_types.take().unwrap_or_default()
+    }
+
+    pub(crate) fn record_written_type(
+        &mut self,
+        written: &Type,
+        subject: &str,
+        member: &str,
+        resolved: &Type,
+    ) -> Result<(), String> {
+        if self.structs.written_types.is_none() || !matches!(resolved, Type::Named(_)) {
+            return Ok(());
+        }
+        self.with_imports(|structs, data| {
+            structs.record_written_type(written, subject, member, data)
+        })
+    }
+
     /// Resolve a source-level type reference using the declared import graph.
     pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
