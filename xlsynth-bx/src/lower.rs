@@ -64,8 +64,9 @@ pub fn lower_module(
                 .map(|member| member.graph().name.as_str()),
         ),
     );
+    let block_symbols = BlockSymbols::new(module, &package, &function_symbols);
     let reserved_names = block_names
-        .map(str::to_owned)
+        .map(|name| block_symbols.get(name).to_owned())
         .chain(function_symbols.iter().cloned())
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
@@ -116,6 +117,7 @@ pub fn lower_module(
     for block in &module.blocks {
         let builder = LowerBody::build_block(
             block,
+            &block_symbols,
             &package,
             &functions,
             &mut layouts,
@@ -127,12 +129,16 @@ pub fn lower_module(
             .build_into_package(&mut package)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
     }
-    if !module.blocks.is_empty() {
+    let mut concrete = module
+        .blocks
+        .iter()
+        .filter(|block| !module.specialized_blocks.contains(&block.name));
+    if let Some(first) = concrete.next() {
         package.top = None;
-        let mut public = module.blocks.iter().filter(|block| block.public);
-        let top = if module.blocks.len() == 1 {
-            module.blocks.first()
+        let top = if concrete.clone().next().is_none() {
+            Some(first)
         } else {
+            let mut public = std::iter::once(first).chain(concrete).filter(|b| b.public);
             let first = public.next();
             first.filter(|_| public.next().is_none())
         };
@@ -141,6 +147,56 @@ pub fn lower_module(
         }
     }
     Ok(package)
+}
+
+/// IR symbols for generated block definitions whose preferred name is already
+/// occupied in the linked package. Parent instances use the same mapping.
+#[derive(Default)]
+struct BlockSymbols {
+    renamed: BTreeMap<String, String>,
+}
+
+impl BlockSymbols {
+    fn new(module: &CheckedModule, package: &Package, function_symbols: &[String]) -> Self {
+        if module.specialized_blocks.is_empty() {
+            return Self::default();
+        }
+        let linked: BTreeSet<_> = package
+            .members
+            .iter()
+            .map(|member| member.graph().name.as_str())
+            .collect();
+        let mut occupied = linked
+            .iter()
+            .copied()
+            .chain(module.blocks.iter().map(|block| block.name.as_str()))
+            .chain(function_symbols.iter().map(String::as_str))
+            .map(str::to_owned)
+            .collect();
+        let renamed = module
+            .specialized_blocks
+            .iter()
+            .filter(|name| linked.contains(name.as_str()))
+            .map(|name| (name.clone(), fresh_ir_name(name, &mut occupied)))
+            .collect();
+        Self { renamed }
+    }
+
+    fn get<'a>(&'a self, name: &'a str) -> &'a str {
+        self.renamed.get(name).map_or(name, String::as_str)
+    }
+}
+
+/// Reserve a numbered suffix for a generated package symbol.
+fn fresh_ir_name(stem: &str, occupied: &mut BTreeSet<String>) -> String {
+    let mut suffix = 1;
+    loop {
+        let candidate = format!("{stem}__bx_{suffix}");
+        if occupied.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 /// Keeps ordinary source identifiers and assigns collision-free IR names to
@@ -159,14 +215,7 @@ fn local_ir_names<'a>(
                 return name.to_owned();
             }
             let stem = name.replace(['\'', '!'], "_");
-            let mut suffix = 1;
-            loop {
-                let candidate = format!("{stem}__bx_{suffix}");
-                if occupied.insert(candidate.clone()) {
-                    return candidate;
-                }
-                suffix += 1;
-            }
+            fresh_ir_name(&stem, &mut occupied)
         })
         .collect()
 }
@@ -451,13 +500,19 @@ impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
     /// drivers.
     fn build_block(
         block: &CheckedBlock,
+        symbols: &BlockSymbols,
         package: &'a Package,
         functions: &'a LinkedFunctions,
         layouts: &'a mut Layouts<'defs>,
         structs: &[StructDef],
         reset_behavior: ResetBehavior,
     ) -> Result<BlockBuilder, BuilderError> {
-        let mut state = Self::new(BlockBuilder::new(&block.name), package, functions, layouts);
+        let mut state = Self::new(
+            BlockBuilder::new(symbols.get(&block.name)),
+            package,
+            functions,
+            layouts,
+        );
         let mut resources = BlockResources::default();
         state.builder.clock_port(&block.clock)?;
         let reset = if let Some(name) = &block.reset {
@@ -485,7 +540,7 @@ impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
                 block: target,
             } = statement
             {
-                let instance = state.add_instance(name, target, reset)?;
+                let instance = state.add_instance(name, symbols.get(target), reset)?;
                 resources.instances.insert(name.clone(), instance);
             }
         }

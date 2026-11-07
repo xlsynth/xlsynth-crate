@@ -20,6 +20,8 @@ pub struct CheckedModule {
     pub(crate) extern_blocks: Vec<ExternBlock>,
     pub(crate) imports: ResolvedImports,
     pub(crate) blocks: Vec<CheckedBlock>,
+    /// Generated block definitions referenced by inferred call sites.
+    pub(crate) specialized_blocks: BTreeSet<String>,
 }
 
 impl CheckedModule {

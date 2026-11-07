@@ -166,7 +166,7 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 - The first port is `clk`, followed by optional `rst` and typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields as output ports in declaration order, so those field names must be valid XLS IR port names. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
 - A `reg` name in an expression reads its current value. Each register has exactly one `:=` update site. A surrounding `if` supplies the load enable. An ordinary value expression such as `q := if en { x } else { q };` supplies a mux on the data input. All registers update together at the active edge.
 - A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
-- A module with one block selects it as top. With multiple blocks, a single `pub block` selects the top. For other configurations, select the desired block on the returned package.
+- A module with one concrete block declaration selects it as top. With multiple concrete declarations, a single concrete `pub block` selects the top. For other configurations, select the desired block on the returned package.
 
 ### Calling a block
 
@@ -186,6 +186,33 @@ block pair(clk, rst, x: u8, y: u8) -> (LaneOut, LaneOut) {
 Use the same call syntax for a BX block defined anywhere in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
+
+### Generic blocks
+
+Declare a type parameter after the block name and use it for ports, registers, and local type annotations. At each call, BX infers the type parameter from the data arguments.
+
+```text
+block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
+    reg valid_q: bool = false;
+    reg data_q: T;
+    valid_q := valid_in;
+    if valid_in { data_q := data_in; }
+    (valid_q, data_q)
+}
+
+struct Packet { tag: u8, words: u32[2] }
+
+block packet_stage(clk, rst, valid: bool, packet: Packet) -> (bool, Packet) {
+    let stage = pipe_reg(valid, packet);
+    stage
+}
+```
+
+Here the type of `packet` gives `T = Packet`. The valid register clears on reset. The data register loads when `valid` is asserted and holds its last payload through bubbles. Calling `pipe_reg` with a `u32` payload creates a second block definition. Calls with the same payload type reuse one definition, and each call creates an instance with its own registers.
+
+Use `<T, U>` to declare multiple type parameters. You can also spell a type parameter `<T: type>`. Each parameter must appear in a data input and can occur within a tuple or fixed-size array, as in `pair: (T, U[2])`. Repeated occurrences must agree on the concrete type, including signedness and struct identity. `bool` and `u1` are equivalent.
+
+Use a call binding to supply the arguments for inference. When a payload literal is the only source for its type, give it a width, as in `let stage = pipe_reg(valid, u32:0);`. A concrete wrapper such as `packet_stage` supplies a top for compilation. BX validates each generic signature at declaration time, then checks the body at the concrete types of each instantiated specialization.
 
 ### Replicating child blocks
 
@@ -227,4 +254,4 @@ The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separa
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
 
-To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting, local function call chains, and block hierarchies are limited to 64 levels.
+To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting, local function call chains, and block hierarchies are limited to 64 levels. A module can elaborate up to 4,096 distinct generic block specializations. Their bodies share the module’s generic unroll budget of 1,048,576 work units. Multiple instances of the same specialization count once.

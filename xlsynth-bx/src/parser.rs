@@ -322,6 +322,8 @@ struct Parser<'s> {
     dslx_type_display: bool,
     /// Use DSLX identifier rules throughout a local function definition.
     in_function: bool,
+    /// Type parameters that can annotate integer literals in this block.
+    block_type_params: BTreeSet<&'s str>,
 }
 
 /// The depth of a parsed type includes both tuple and array constructors.
@@ -380,6 +382,7 @@ impl<'s> Parser<'s> {
             depth: 0,
             dslx_type_display,
             in_function: false,
+            block_type_params: BTreeSet::new(),
         })
     }
 
@@ -497,7 +500,8 @@ impl<'s> Parser<'s> {
                     module.declaration_order.push(function.name.clone());
                     module.externs.push(function);
                 } else if self.eat("block") {
-                    let signature = self.block_signature()?;
+                    let name = self.ident()?;
+                    let signature = self.block_signature(name)?;
                     module.declaration_order.push(signature.name.clone());
                     self.expect(";")?;
                     module.extern_blocks.push(signature);
@@ -730,9 +734,8 @@ impl<'s> Parser<'s> {
         Ok(BindingPattern::Name(name))
     }
 
-    /// Parse the common interface of a defined or external clocked block.
-    fn block_signature(&mut self) -> Result<ExternBlock, String> {
-        let name = self.ident()?;
+    /// Parse the common port list and result of a defined or external block.
+    fn block_signature(&mut self, name: String) -> Result<ExternBlock, String> {
         self.expect("(")?;
         self.expect("clk")?;
         let clock = "clk".to_owned();
@@ -764,16 +767,45 @@ impl<'s> Parser<'s> {
         })
     }
 
+    /// Read the optional type parameters of a block definition.
+    fn block_type_params(&mut self) -> Result<Vec<String>, String> {
+        if !self.eat("<") {
+            return Ok(Vec::new());
+        }
+        if self.peek(0) == ">" {
+            return Err(self.error("expected a block type parameter"));
+        }
+        self.list(">", |p| {
+            let token = p.tokens[p.pos];
+            let name = p.ident()?;
+            if !p.block_type_params.insert(token.text) {
+                return Err(diagnostic(
+                    p.source,
+                    token.start,
+                    &format!("duplicate block type parameter '{name}'"),
+                ));
+            }
+            if p.eat(":") {
+                p.expect("type")?;
+            }
+            Ok(name)
+        })
+    }
+
     fn block(&mut self, public: bool) -> Result<Block, String> {
-        let signature = self.block_signature()?;
+        let name = self.ident()?;
+        let type_params = self.block_type_params()?;
+        let signature = self.block_signature(name)?;
         self.expect("{")?;
         let body = self.body()?;
+        self.block_type_params.clear();
         let output = body
             .output
             .ok_or_else(|| self.error("block requires an output expression"))?;
         Ok(Block {
             name: signature.name,
             public,
+            type_params,
             clock: signature.clock,
             reset: signature.reset,
             params: signature.params,
@@ -1183,7 +1215,9 @@ impl<'s> Parser<'s> {
         }
         let literal = if self.starts_bit_literal()? {
             let ty = self.ty()?;
-            if !matches!(ty, Type::Bool | Type::Bits { .. }) {
+            if !matches!(ty, Type::Bool | Type::Bits { .. })
+                && !matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
+            {
                 return Err(self.error("match patterns require a scalar literal type"));
             }
             self.expect(":")?;
@@ -1211,6 +1245,15 @@ impl<'s> Parser<'s> {
                 }
                 let field =
                     is_function_identifier(first) || !self.in_function && is_identifier(first);
+                if next == ":" && self.block_type_params.contains(first) {
+                    // Both a field initializer and an annotated integer pattern
+                    // can start with `T:0`. Only the latter continues to an arm
+                    // arrow before a comma or brace.
+                    return self.tokens[self.pos + 3..]
+                        .iter()
+                        .find(|t| matches!(t.text, "=>" | "," | "{" | "}"))
+                        .is_none_or(|t| t.text != "=>");
+                }
                 field && matches!(next, ":" | "," | "}")
             }
         }
@@ -1576,7 +1619,10 @@ impl<'s> Parser<'s> {
     /// when a formerly accepted shorthand is followed by a colon.
     fn starts_bit_literal(&self) -> Result<bool, String> {
         let name = self.peek(0);
-        if matches!(name, "bits" | "uN" | "sN" | "xN" | "bool") || fixed_width(name).is_some() {
+        if matches!(name, "bits" | "uN" | "sN" | "xN" | "bool")
+            || fixed_width(name).is_some()
+            || (self.peek(1) == ":" && self.block_type_params.contains(name))
+        {
             return Ok(true);
         }
         if self.peek(1) == ":"
@@ -1607,21 +1653,27 @@ impl<'s> Parser<'s> {
     /// type.
     fn literal(&mut self, ty: Option<Type>) -> Result<ParsedExpr, String> {
         let annotated = ty.is_some();
-        let (ty, text) = if let Some(byte) = self.tokens[self.pos].character {
-            let ty = ty.unwrap_or(Type::Bits {
-                signed: false,
-                width: 8,
+        let spelling = self.peek(0);
+        let (ty, text) = if self.tokens[self.pos].character.is_some()
+            || matches!(spelling, "true" | "false")
+        {
+            let ty = ty.unwrap_or(if self.tokens[self.pos].character.is_some() {
+                Type::Bits {
+                    signed: false,
+                    width: 8,
+                }
+            } else {
+                Type::Bool
             });
-            if !matches!(ty, Type::Bits { width: 8.., .. }) {
-                return Err(self.error("a character literal requires at least eight bits"));
-            }
-            (Some(ty), format!("0x{byte:02x}"))
-        } else if matches!(self.peek(0), "true" | "false") {
-            if !matches!(ty, Some(Type::Bool | Type::Bits { width: 1.., .. })) {
-                return Err(self.error("a boolean literal requires at least one bit"));
-            }
-            let bit = if self.peek(0) == "true" { "0b1" } else { "0b0" };
-            (ty, bit.to_owned())
+            let text = if matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
+            {
+                // Preserve the intrinsic width requirement until the call binds
+                // this type.
+                spelling.to_owned()
+            } else {
+                character_or_bool_digits(spelling, &ty).map_err(|e| self.error(e))?
+            };
+            (Some(ty), text)
         } else {
             let text = normalized_integer(self.peek(0))
                 .ok_or_else(|| self.error("expected an integer literal"))?;
@@ -1634,6 +1686,24 @@ impl<'s> Parser<'s> {
         }
         Ok(expr)
     }
+}
+
+/// Check the intrinsic width of a character or boolean token, then spell its
+/// value as a bit pattern so signed annotations retain the same bits.
+pub(crate) fn character_or_bool_digits(text: &str, ty: &Type) -> Result<String, &'static str> {
+    if matches!(text, "true" | "false") {
+        if !matches!(ty, Type::Bool | Type::Bits { width: 1.., .. }) {
+            return Err("a boolean literal requires at least one bit");
+        }
+        return Ok(if text == "true" { "0b1" } else { "0b0" }.to_owned());
+    }
+    if !matches!(ty, Type::Bits { width: 8.., .. }) {
+        return Err("a character literal requires at least eight bits");
+    }
+    let (byte, _) = scan_character(text)
+        .filter(|(_, len)| *len == text.len())
+        .ok_or("invalid byte character literal")?;
+    Ok(format!("0x{byte:02x}"))
 }
 
 impl Body {
@@ -1980,6 +2050,97 @@ block i(clk, x: u8) -> u8 { inst(x) }
             matches!(&block.statements[..], [Stmt::Reg { reset: Some(_), .. }, Stmt::If { body, .. }] if matches!(&body[..], [Stmt::Write { name, .. }] if name == "sum"))
         );
         assert!(matches!(&block.output, Expr::If { .. }));
+    }
+
+    #[test]
+    fn block_type_parameters_are_retained_in_ports_and_body_annotations() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            pub block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
+                reg data: T = zero!<T>();
+                let next: T = data_in;
+                data := next;
+                (valid_in, data)
+            }
+            block pair<R: type, L>(clk, input: (L, R[2])[3]) -> (L, R[2])[3] { input }
+            block plain(clk) -> () { () }
+            "#,
+        )?;
+        let pipe = &module.blocks[0];
+        let t = Type::Named("T".into());
+        assert_eq!(pipe.type_params, ["T"]);
+        assert_eq!(pipe.params[1].ty, t);
+        assert_eq!(pipe.result, Type::Tuple(vec![Type::Bool, t.clone()]));
+        assert!(matches!(
+            &pipe.statements[..],
+            [Stmt::Reg { ty, reset: Some(Expr::Zero(zero_ty)), .. }, Stmt::Let { ty: Some(let_ty), .. }, Stmt::Write { .. }]
+                if ty == &t && zero_ty == &t && let_ty == &t
+        ));
+        let pair = &module.blocks[1];
+        assert_eq!(pair.type_params, ["R", "L"]);
+        assert_eq!(
+            pair.params[0].ty,
+            Type::Array {
+                element: Box::new(Type::Tuple(vec![
+                    Type::Named("L".into()),
+                    Type::Array {
+                        element: Box::new(Type::Named("R".into())),
+                        size: 2
+                    },
+                ])),
+                size: 3,
+            }
+        );
+        assert_eq!(pair.result, pair.params[0].ty);
+        assert!(module.blocks[2].type_params.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn block_type_parameter_lists_require_distinct_type_binders() {
+        for (params, error) in [
+            ("<>", "expected a block type parameter"),
+            ("<T, T: type>", "duplicate block type parameter 'T'"),
+            ("<N: u32>", "expected 'type'"),
+            ("<T = u32>", "expected ','"),
+            ("<T,,U>", "expected identifier"),
+            ("<bool>", "expected identifier"),
+            ("<T U>", "expected ','"),
+        ] {
+            let source = format!("block b{params}(clk) -> bool {{ false }}");
+            assert!(
+                parse_module(&source).unwrap_err().contains(error),
+                "{source}"
+            );
+        }
+        assert!(parse_module("extern block b<T>(clk, x: T) -> T;").is_err());
+    }
+
+    #[test]
+    fn integer_literal_annotations_use_the_enclosing_block_type_parameters() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            struct Header { T: u8 }
+            block is_zero<T>(clk, x: T) -> bool {
+                let n = T:0;
+                let y = match Header { T: 0 }.T { 0 => true, _ => false };
+                match x { T:0 => y, _ => false }
+            }
+            "#,
+        )?;
+        let block = &module.blocks[0];
+        let zero = Expr::Literal {
+            ty: Some(Type::Named("T".into())),
+            text: "0".into(),
+        };
+        assert!(matches!(&block.statements[0], Stmt::Let { value, .. } if value == &zero));
+        let Expr::Match { arms, .. } = &block.output else {
+            panic!("expected match");
+        };
+        assert_eq!(arms[0].patterns, [MatchPattern::Literal(zero)]);
+        let subsequent = "block b<T>(clk, x: T) -> T { T:0 } block plain(clk) -> u8 { T:0 }";
+        assert!(parse_module(subsequent).is_err());
+        Ok(())
     }
 
     #[test]

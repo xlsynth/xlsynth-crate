@@ -71,7 +71,9 @@ impl BinaryOp {
     }
 }
 
-/// Concrete value types shared by block ports, registers, and function calls.
+/// Value types shared by block ports, registers, and function calls.
+/// A named type can refer to a declaration or an enclosing block type
+/// parameter.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Type {
     Bits { signed: bool, width: usize },
@@ -163,6 +165,17 @@ impl MatchPattern {
         .into_iter()
         .flatten()
     }
+
+    /// Visit the same expressions when capturing their type annotations.
+    pub(crate) fn literals_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
+        match self {
+            Self::Wildcard => [None, None],
+            Self::Literal(value) => [Some(value), None],
+            Self::Range { start, end, .. } => [Some(start), Some(end)],
+        }
+        .into_iter()
+        .flatten()
+    }
 }
 
 /// A combinational function defined in this source module.
@@ -198,6 +211,8 @@ pub enum Expr {
     Bool(bool),
     Literal {
         ty: Option<Type>,
+        /// Numeric text, or the character or boolean spelling when a generic
+        /// annotation defers checking that literal's required width.
         text: String,
     },
     /// An all-zero value of the specified type, including aggregate types.
@@ -316,6 +331,8 @@ pub enum Stmt {
 pub struct Block {
     pub name: String,
     pub public: bool,
+    /// Type parameter names in declaration order.
+    pub type_params: Vec<String>,
     pub clock: String,
     pub reset: Option<String>,
     pub params: Vec<Param>,
