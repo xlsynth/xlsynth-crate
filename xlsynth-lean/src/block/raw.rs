@@ -430,14 +430,6 @@ pub(super) fn generated_member(field: &str) -> bool {
     )
 }
 
-pub(super) fn validate_lean_member(owner: &str, field: &str) -> Result<()> {
-    ensure!(
-        !generated_member(field),
-        "cannot emit {owner}.{field}: Lean generates a declaration with this name"
-    );
-    Ok(())
-}
-
 /// Keep the constructor in a separate namespace so every source field keeps its
 /// name.
 pub(super) fn structure_header(name: &str) -> String {
