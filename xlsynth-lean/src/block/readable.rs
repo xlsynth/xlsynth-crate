@@ -1289,12 +1289,12 @@ end XlsReadable
        encodeOutput, encodeAssertions]
   all_goals
     -- Distribute encoders before exposing constructors and cancelling roundtrips.
-    simp (config := {{ instances := true }}) only
+    simp (config := {{ instances := true, failIfUnchanged := false }}) only
       [{structural_rules}]
   all_goals
     -- Keep raw one-bit operations and selectors in the readable Boolean form.
     simp (config := {{ instances := true }}) only
-      [XlsCodec.raw_select, raw_flag, raw_not, raw_and, raw_or, decode_ofBool,
+      [XlsCodec.raw_select, raw_flag, raw_flag_zero, raw_not, raw_and, raw_or, decode_ofBool,
        {structural_rules}]"#
         )?;
         let enum_encoders = self
@@ -1431,6 +1431,10 @@ private theorem raw_or (a b : BitVec 1) :
 private theorem raw_flag (b : BitVec 1) :
     (b == BitVec.ofNat 1 1) = XlsCodec.decodeBool b := by
   rfl
+
+private theorem raw_flag_zero (b : BitVec 1) :
+    (b == BitVec.ofNat 1 0) = !XlsCodec.decodeBool b := by
+  rcases XlsCodec.one_bit_cases b with rfl | rfl <;> rfl
 
 private theorem decode_ofBool (b : Bool) :
     XlsCodec.decodeBool (BitVec.ofBool b) = b := by
