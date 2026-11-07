@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Minimized normalization predicate with a 23-bit selected shift window.
+package replay_input
+
+top fn main(leaf_2: bits[8] id=67, leaf_6: bits[23] id=68, leaf_8: bits[24] id=69) -> bits[1] {
+  literal.70: bits[8] = literal(value=129, id=70)
+  add.71: bits[8] = add(leaf_2, literal.70, id=71)
+  bit_slice.72: bits[5] = bit_slice(add.71, start=0, width=5, id=72)
+  neg.73: bits[5] = neg(bit_slice.72, id=73)
+  literal.74: bits[8] = literal(value=0, id=74)
+  bit_slice.75: bits[3] = bit_slice(add.71, start=0, width=3, id=75)
+  shrl.76: bits[24] = shrl(leaf_8, neg.73, id=76)
+  sgt.77: bits[1] = sgt(add.71, literal.74, id=77)
+  shll.78: bits[23] = shll(leaf_6, bit_slice.75, id=78)
+  bit_slice.79: bits[23] = bit_slice(shrl.76, start=0, width=23, id=79)
+  priority_sel.80: bits[23] = priority_sel(sgt.77, cases=[shll.78], default=bit_slice.79, id=80)
+  literal.81: bits[23] = literal(value=0, id=81)
+  ret ne.82: bits[1] = ne(priority_sel.80, literal.81, id=82)
+}
