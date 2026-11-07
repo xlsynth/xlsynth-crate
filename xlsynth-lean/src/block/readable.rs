@@ -15,10 +15,12 @@
 
 use std::{borrow::Cow, collections::BTreeSet, fmt::Write};
 
+mod callable_names;
 mod enum_dispatch;
 mod loop_correspondence;
 mod source_names;
 
+use callable_names::CallableNames;
 use source_names::{
     declaring_name, module_identifier, nominal_reference, source_type_in, write_struct,
 };
@@ -32,9 +34,7 @@ use xlsynth_pir::{
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type},
-    source_types::{
-        HelperSignature, SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape,
-    },
+    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use crate::local_expr::{LeanOperand, LocalRenderer};
 
@@ -48,22 +48,6 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
     })
 }
 
-/// Use the same absolute name in definitions, calls and proofs. Compiler
-/// functions such as lowered loop bodies have no DSLX declaration to name.
-fn helper_path(signature: &HelperSignature, symbol: &str) -> Result<String> {
-    match &signature.source_name {
-        Some((module, local)) => Ok(format!(
-            "_root_.{}.{}",
-            module_identifier(module)?,
-            source_names::declaration_identifier(module, local, "function")?
-        )),
-        None => Ok(format!(
-            "_root_.XlsReadable.Helpers.{}",
-            lean::helper_identifier(symbol)?
-        )),
-    }
-}
-
 /// Source type annotations and collision-free names for one verified block.
 ///
 /// All vectors use the checked graph's node or register order. Annotation
@@ -74,7 +58,8 @@ struct Presentation<'a> {
     helper_index: Option<usize>,
     block: &'a BlockContext<'a>,
     declarations: &'a [TypeDecl],
-    bx_namespace: String,
+    bx_namespace: &'a str,
+    callables: &'a CallableNames<'a>,
     interface: &'a StatefulInterface,
     node_types: Vec<Option<SourceType>>,
     /// A shared graph node is traversed once for each distinct nominal context.
@@ -106,7 +91,21 @@ pub(super) fn emit(
 ) -> Result<LeanBlockBundle> {
     source_names::check_type_namespaces(declarations, interface)?;
     let raw = lean::emit_with_context(block, "XlsBlock")?;
-    let presentation = Presentation::new(block, declarations, interface, None)?;
+    let bx_module = &interface.bx_module;
+    let bx_namespace = if bx_module.contains(':') {
+        format!("file:{bx_module}")
+    } else {
+        bx_module.clone()
+    };
+    let callables = CallableNames::new(block, declarations, interface, &bx_namespace)?;
+    let presentation = Presentation::new(
+        block,
+        declarations,
+        interface,
+        &bx_namespace,
+        &callables,
+        None,
+    )?;
     Ok(LeanBlockBundle {
         files: vec![
             ("Generated.lean".into(), raw),
@@ -125,6 +124,17 @@ pub(super) fn emit(
 }
 
 impl<'a> Presentation<'a> {
+    fn helper_model(&self, index: usize, function: &'a ir::Fn) -> Result<Self> {
+        Self::new(
+            self.block,
+            self.declarations,
+            self.interface,
+            self.bx_namespace,
+            self.callables,
+            Some((index, function)),
+        )
+    }
+
     /// Allocate noncapturing names and infer types from checked register
     /// bindings.
     ///
@@ -134,6 +144,8 @@ impl<'a> Presentation<'a> {
         block: &'a BlockContext<'a>,
         declarations: &'a [TypeDecl],
         interface: &'a StatefulInterface,
+        bx_namespace: &'a str,
+        callables: &'a CallableNames<'a>,
         helper: Option<(usize, &'a ir::Fn)>,
     ) -> Result<Self> {
         let (helper_index, helper) = helper.unzip();
@@ -203,18 +215,13 @@ impl<'a> Presentation<'a> {
             .iter()
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?;
-        let bx_module = &interface.bx_module;
-        let bx_namespace = if bx_module.contains(':') {
-            format!("file:{bx_module}")
-        } else {
-            bx_module.clone()
-        };
         let mut result = Self {
             graph,
             helper_index,
             block,
             declarations,
             bx_namespace,
+            callables,
             interface,
             node_types: graph
                 .nodes
@@ -509,7 +516,7 @@ impl<'a> Presentation<'a> {
     /// These annotations occur in a generated namespace, sometimes after an
     /// evaluator local has bound a name that also names a source module.
     fn source_type(&self, ty: &SourceType) -> Result<String> {
-        source_type_in(&self.bx_namespace, ty, None, &|n| {
+        source_type_in(self.bx_namespace, ty, None, &|n| {
             self.local_names.contains(n)
         })
     }
@@ -681,7 +688,7 @@ impl<'a> Presentation<'a> {
         // Source members and generated codecs have disjoint namespaces. A
         // source field named `encode` must remain an ordinary record field.
         for declaration in self.declarations {
-            let (module, local) = declaring_name(&self.bx_namespace, declaration.name());
+            let (module, local) = declaring_name(self.bx_namespace, declaration.name());
             let namespace = module_identifier(module)?;
             let name = source_names::declaration_identifier(module, local, "type")?;
             writeln!(out, "namespace {namespace}\n")?;
@@ -693,7 +700,7 @@ impl<'a> Presentation<'a> {
                 TypeDecl::Struct { fields, .. } => {
                     let backing = write_struct(
                         &mut out,
-                        &self.bx_namespace,
+                        self.bx_namespace,
                         module,
                         local,
                         fields,
@@ -706,7 +713,7 @@ impl<'a> Presentation<'a> {
                         out,
                         "abbrev {name} := {}\n",
                         source_type_in(
-                            &self.bx_namespace,
+                            self.bx_namespace,
                             target,
                             Some((module, self.declarations)),
                             &|_| false
@@ -732,7 +739,7 @@ impl<'a> Presentation<'a> {
             let nominal = self.named_type(declaration.name())?;
             // Codec namespaces and their arguments have their own scope,
             // independent of the readable evaluator's locals.
-            let source_type = source_type_in(&self.bx_namespace, &nominal, None, &|_| true)?;
+            let source_type = source_type_in(self.bx_namespace, &nominal, None, &|_| true)?;
             let physical = source_shape(&nominal, self.declarations)?;
             writeln!(out, "namespace {name}\n")?;
             match declaration {
@@ -955,7 +962,7 @@ impl<'a> Presentation<'a> {
                 body,
                 invariant_args,
             } if let Some(signature) = self.interface.helpers.get(body) => {
-                let mut step = helper_path(signature, body)?;
+                let mut step = self.callables.helpers[body.as_str()].clone();
                 if !invariant_args.is_empty() {
                     step.push_str(" · ·");
                     for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
@@ -971,7 +978,7 @@ impl<'a> Presentation<'a> {
                 if self.interface.helpers.contains_key(to_apply) =>
             {
                 let signature = &self.interface.helpers[to_apply];
-                let mut call = helper_path(signature, to_apply)?;
+                let mut call = self.callables.helpers[to_apply.as_str()].clone();
                 for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                     write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
                 }
@@ -1185,14 +1192,22 @@ impl<'a> Presentation<'a> {
         );
         for (index, function) in block.helpers.iter().enumerate() {
             if let Some(signature) = self.interface.helpers.get(&function.name) {
-                let model = Self::new(
-                    block,
-                    self.declarations,
-                    self.interface,
-                    Some((index, function)),
-                )?;
+                let model = self.helper_model(index, function)?;
                 out.push_str(&model.enum_dispatch_definitions()?);
-                write!(out, "def {}", helper_path(signature, &function.name)?)?;
+                let path = &self.callables.helpers[function.name.as_str()];
+                // Lean accepts _root_ inside a reference and a top-level
+                // declaration name, but not inside a rooted declaration
+                // command.
+                let top_level = path.contains(".«_root_».");
+                if top_level {
+                    write!(
+                        out,
+                        "end XlsReadable\n\nopen XlsReadable in\ndef {}",
+                        path.trim_start_matches("_root_.")
+                    )?;
+                } else {
+                    write!(out, "def {path}")?;
+                }
                 for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                     write!(
                         out,
@@ -1227,13 +1242,16 @@ impl<'a> Presentation<'a> {
                         0
                     )?
                 )?;
+                if top_level {
+                    out.push_str("namespace XlsReadable\n\n");
+                }
             }
         }
         let mut fields = Vec::new();
         let mut preceding = BTreeSet::new();
         for (field, register) in self.register_fields.iter().zip(&block.graph.registers) {
             let ty = if let Some(ty) = self.register_type(&register.name)? {
-                source_type_in(&self.bx_namespace, &ty, None, &|name| {
+                source_type_in(self.bx_namespace, &ty, None, &|name| {
                     preceding.contains(name)
                 })?
             } else {
@@ -1248,7 +1266,7 @@ impl<'a> Presentation<'a> {
         preceding.clear();
         for port in block.graph.input_ports() {
             let name = block.graph.port_name(port);
-            let ty = source_type_in(&self.bx_namespace, &interface.inputs[name], None, &|n| {
+            let ty = source_type_in(self.bx_namespace, &interface.inputs[name], None, &|n| {
                 preceding.contains(n)
             })?;
             fields.push((identifier(name)?, ty));
@@ -1380,10 +1398,10 @@ def eval (q : State) (x : Input) : Evaluation :=
         out.push_str("\nend XlsReadable\n");
         writeln!(
             out,
-            "\nabbrev {}.{} := _root_.XlsReadable.eval",
-            module_identifier(&self.bx_namespace)?,
-            source_names::declaration_identifier(&self.bx_namespace, &block.graph.name, "block")?
+            "\nabbrev {} := _root_.XlsReadable.eval",
+            self.callables.block.trim_start_matches("_root_.")
         )?;
+        out.push_str(&self.callables.aliases);
         Ok(out)
     }
 
@@ -1577,7 +1595,7 @@ end XlsReadable
         for declaration in self.declarations {
             let name = type_identifier(declaration.name())?;
             functions.extend(declaration_functions(
-                &self.bx_namespace,
+                self.bx_namespace,
                 declaration,
                 &name,
             )?);
@@ -1623,12 +1641,7 @@ end XlsReadable
         let mut dispatch_rules = self.enum_dispatch_laws(&mut out)?;
         for (index, function) in self.block.helpers.iter().enumerate() {
             if self.interface.helpers.contains_key(&function.name) {
-                let model = Self::new(
-                    self.block,
-                    self.declarations,
-                    self.interface,
-                    Some((index, function)),
-                )?;
+                let model = self.helper_model(index, function)?;
                 dispatch_rules.extend(model.enum_dispatch_laws(&mut out)?);
             }
         }
@@ -1642,7 +1655,7 @@ end XlsReadable
                     .map(|(index, field)| {
                         Ok(format!(
                             "(field{index} : {})",
-                            source_type_in(&self.bx_namespace, &field.source_type, None, &|_| {
+                            source_type_in(self.bx_namespace, &field.source_type, None, &|_| {
                                 true
                             })?
                         ))
@@ -1730,11 +1743,11 @@ end XlsReadable
         };
         let mut helper_rules = String::new();
         for function in &self.block.helpers {
-            if let Some(signature) = self.interface.helpers.get(&function.name) {
+            if let Some(readable) = self.callables.helpers.get(function.name.as_str()) {
                 write!(
                     helper_rules,
                     ", {}, {}",
-                    helper_path(signature, &function.name)?,
+                    readable,
                     lean::helper_path("XlsBlock", &function.name)?
                 )?;
             }

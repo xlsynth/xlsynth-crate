@@ -415,6 +415,123 @@ fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Res
 }
 
 #[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn callable_children_keep_their_source_names() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let pkg = dir.path().join("pkg");
+    fs::create_dir_all(pkg.join("a"))?;
+    fs::write(
+        pkg.join("a.x"),
+        "
+        pub fn f(x: u8) -> u8 { x + u8:1 }
+        pub fn arr(x: u8) -> u8[1] { [x] }
+        pub fn plain(x: u8) -> u8 { x }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/f.x"),
+        "
+        import pkg.a as parent;
+        pub fn eq_1(x: u8) -> u8 { parent::f(x) + u8:2 }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/arr.x"),
+        "
+        import pkg.a as parent;
+        pub fn _proof_1(x: u8) -> u8[1] { parent::arr(x) }
+    ",
+    )?;
+    fs::write(
+        pkg.join("a/plain.x"),
+        "
+        import pkg.a as parent;
+        pub fn hcongr_one(x: u8) -> u8 { parent::plain(x) }
+        pub fn eq_def(x: u8) -> u8 { x }
+    ",
+    )?;
+    // The selected block is emitted after this child. Its abbreviation
+    // reserves equation names just as a helper definition does.
+    fs::write(
+        pkg.join("a/controller.x"),
+        "pub fn eq_unfold(x: u8) -> u8 { x }",
+    )?;
+    fs::write(pkg.join("_root_.x"), "pub fn id(x: u8) -> u8 { x }")?;
+    let mut bundle = compile_bx(
+        "pkg.a",
+        "
+        use pkg::a::f::eq_1; use pkg::a::arr::_proof_1;
+        use pkg::a::plain::hcongr_one; use pkg::a::controller::eq_unfold;
+        use pkg::_root_::id;
+        block controller(clk, x: u8) -> (u8, u8[1], u8, u8) {
+            (eq_1(id(x)), _proof_1(x), hcongr_one(x), eq_unfold(x))
+        }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "SourceCallables.lean".into(),
+        r#"import ReadableCorrespondence
+example (x : BitVec 8) : XLS.pkg.a.f x = x + 1 := by simp [XLS.pkg.a.f]
+example : _root_.XLS.pkg.a.f.eq_1 7 = 10 := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.arr x = #v[x] := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.arr._proof_1 x = #v[x] := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.a.plain x = x := rfl
+#check _root_.XLS.pkg.a.plain.eq_1
+#check_failure XLS.pkg.a.«xls:implementation».plain
+example (x : BitVec 8) : _root_.XLS.pkg.a.plain.hcongr_one x = x := rfl
+example (x : BitVec 8) : _root_.XLS.pkg.«_root_».id x = x := rfl
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    XLS.pkg.a.controller q x = XlsReadable.eval q x := rfl
+example : _root_.XLS.pkg.a.controller.eq_unfold 7 = 7 := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "source declarations under functions and the selected block",
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn selected_block_can_use_a_helpers_congruence_theorem_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("a.x"), "pub fn f(x: u8) -> u8 { x + u8:1 }")?;
+    let mut bundle = compile_bx(
+        "a.f",
+        "use a; block hcongr_1(clk, x: u8) -> u8 { a::f(x) }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "BlockChild.lean".into(),
+        r#"import ReadableCorrespondence
+example : XLS.a.f 7 = 8 := rfl
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    (_root_.XLS.a.f.hcongr_1 q x).output = XLS.a.f x.x := rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "selected block named after a generated congruence theorem",
+    );
+    Ok(())
+}
+
+#[test]
 fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
