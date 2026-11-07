@@ -2001,7 +2001,7 @@ pub fn lanes(xs: u8[3]) -> u8 {
         .unwrap()
         .1;
     let (_, body) = model
-        .split_once(&format!("def Helpers.«{linked}»"))
+        .split_once(&format!("def _root_.XlsReadable.Helpers.«{linked}»"))
         .unwrap();
     let body = body.split("\n\n").next().unwrap();
     assert!(
@@ -2015,7 +2015,7 @@ pub fn lanes(xs: u8[3]) -> u8 {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-#check sum.Row.value
+#check XLS.sum.Row.value
 #guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
 "#
         .into(),
@@ -2069,7 +2069,7 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
     // The helper still computes the same result if the wrong local is named
     // bank.
     let (_, body) = model
-        .split_once("def Helpers.«____machine__fold_counted_for_0_body»")
+        .split_once("def _root_.XlsReadable.Helpers.«____machine__fold_counted_for_0_body»")
         .unwrap();
     let body = body.split("\n\n").next().unwrap();
     let offset = body
@@ -2094,12 +2094,12 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
     assert!(body.contains(".«valid»"));
     let checks = r#"import ReadableCorrespondence
 open XlsReadable
-private def pool : packets.«Pool<5>» := { status := (3, 4), slots := #v[
+private def pool : XLS.packets.«Pool<5>» := { status := (3, 4), slots := #v[
   {write := {valid := true, data := 11}},
   {write := {valid := false, data := 19}},
   {write := {valid := true, data := 23}}] }
 #guard Helpers.«____machine__fold_counted_for_0_body»
-  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := packets.Mode.Run) == 30
+  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := XLS.packets.Mode.Run) == 30
 "#;
     bundle
         .files
@@ -2152,7 +2152,7 @@ block sum(clk, first: u8, other: u8) -> u8 {
         "Captures.lean".into(),
         r#"import ReadableCorrespondence
 open XlsReadable
-variable (first : machine.«Tagged<1>») (other : machine.«Tagged<2>»)
+variable (first : XLS.machine.«Tagged<1>») (other : XLS.machine.«Tagged<2>»)
 #check Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := first) (other := other)
 #check_failure Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := other) (other := first)
 "#
