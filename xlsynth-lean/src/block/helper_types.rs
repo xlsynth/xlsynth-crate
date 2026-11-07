@@ -23,7 +23,7 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// BX adds its blocks and imports to the supplied package without renaming
 /// these functions.
 pub(super) struct DslxLink {
-    module: dslx::TypecheckedModule,
+    pub(super) module: dslx::TypecheckedModule,
     symbols: BTreeMap<String, String>,
 }
 
@@ -60,6 +60,7 @@ impl DslxLink {
         block: &BlockContext<'_>,
         declarations: &mut Vec<TypeDecl>,
         interface: &mut StatefulInterface,
+        mut observe_owner: impl FnMut(&str) -> Result<()>,
     ) -> Result<()> {
         let linked: BTreeSet<_> = block.helpers.iter().map(|f| f.name.as_str()).collect();
         let reachable = self
@@ -71,21 +72,24 @@ impl DslxLink {
         if reachable.is_empty() {
             return Ok(());
         }
-        let module = self.module.get_module();
-        let root = ModuleContext {
-            qualifier: module.get_name(),
-            module,
-            type_info: self.module.get_type_info(),
-        };
-        let mut catalogue = Catalogue {
-            context: root.clone(),
-            reachable,
-            declarations: Vec::new(),
-            helpers: BTreeMap::new(),
-            unsupported: BTreeMap::new(),
-            entry: root,
-        };
+        let mut catalogue = Catalogue::new(&self.module, reachable);
         catalogue.collect_helpers()?;
+        // These are the checked declarations behind reachable references,
+        // including references brought into scope by DSLX use trees.
+        for owner in catalogue
+            .declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::").map(|(owner, _)| owner))
+            .chain(
+                catalogue
+                    .helpers
+                    .values()
+                    .filter_map(|sig| sig.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+            )
+        {
+            observe_owner(owner)?;
+        }
         catalogue.helpers = catalogue
             .helpers
             .into_iter()
@@ -263,6 +267,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         },
     ];
     let mut interface = StatefulInterface {
+        bx_module: "machine".into(),
         inputs: Default::default(),
         outputs: Default::default(),
         registers: Default::default(),
@@ -311,7 +316,35 @@ impl ModuleContext {
     }
 }
 
-impl Catalogue<'_> {
+/// Collect an interface annotation before transparent aliases are erased.
+pub(super) fn imported_struct(
+    source: &xlsynth_bx::LinkedStruct,
+    declarations: &mut Vec<TypeDecl>,
+) -> Result<SourceType> {
+    let mut catalogue = Catalogue::new(&source.module, BTreeSet::new());
+    catalogue.declarations = std::mem::take(declarations);
+    let ty = catalogue.annotation_type(&source.annotation)?;
+    *declarations = catalogue.declarations;
+    Ok(ty)
+}
+
+impl<'a> Catalogue<'a> {
+    fn new(module: &dslx::TypecheckedModule, reachable: BTreeSet<&'a str>) -> Self {
+        let root = ModuleContext {
+            module: module.get_module(),
+            qualifier: module.get_module().get_name(),
+            type_info: module.get_type_info(),
+        };
+        Self {
+            context: root.clone(),
+            reachable,
+            declarations: Vec::new(),
+            helpers: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
+            entry: root,
+        }
+    }
+
     fn qualified_name(&self, local: &str) -> String {
         format!("{}::{local}", self.context.qualifier)
     }
@@ -911,7 +944,7 @@ impl Catalogue<'_> {
                 self.helpers.insert(
                     function.name.clone(),
                     HelperSignature {
-                        name: function.name.clone(),
+                        source_name: None,
                         result: params[1].1.clone(),
                         params,
                     },
@@ -972,7 +1005,7 @@ impl Catalogue<'_> {
             },
         };
         Ok(HelperSignature {
-            name: self.qualified_name(name),
+            source_name: Some((self.context.qualifier.clone(), name.to_owned())),
             params,
             result,
         })

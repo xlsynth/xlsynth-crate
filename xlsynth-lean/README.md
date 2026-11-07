@@ -107,7 +107,7 @@ pub block counter(clk, rst, take: bool) -> u8 {
 ```rust
 use xlsynth_lean::block::compile_bx;
 
-let compiled = compile_bx(&source, xlsynth_bx::empty_package("counter"),
+let compiled = compile_bx("counter", &source, xlsynth_bx::empty_package("counter"),
                           Default::default(), &Default::default())?;
 let bundle = compiled.emit_readable(None)?;
 ```
@@ -118,6 +118,30 @@ ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
 types come from checked declarations, and every equation comes from the linked
 block. Internal bindings can be renamed without changing these public fields.
+
+Public source declarations live under `XLS.<full logical module>`. For
+example, importing `left.bus` and `right.bus` gives the proof author distinct
+types `XLS.left.bus.Packet` and `XLS.right.bus.Packet`. Readable DSLX functions
+use the same rule, including concrete specializations such as
+`XLS.left.bus.«choose<5>»`. Compiler-generated loop bodies live under
+`XlsReadable.Helpers`.
+
+Supply the BX module name as the first argument to `compile_bx`. For block
+`controller` in `common.bx`, `XLS.common.controller q x` evaluates the block
+on state `q` and input `x` and returns the complete `XlsReadable.Evaluation`.
+A DSLX module `common.x` can contribute other declarations under the same
+namespace, such as `XLS.common.inc`. Readable emission reports an error if the
+two modules claim the same declaration. Multiple imports of one DSLX module
+within the BX import graph can share its declarations. If a separately
+supplied checked DSLX module and the BX imports both include the same DSLX
+module, call the separately supplied function via a BX
+`extern`, or omit the separate DSLX input and use the BX import.
+
+A DSLX or BX field such as `recOn` retains its proof-facing spelling, so
+`p.recOn` reads the
+source field. For a struct with such a collision, use positional construction
+and pattern matching, for example `(⟨41, true⟩ : XLS.bus.Packet)` for two fields
+declared in that order.
 
 For a BX `use` of a DSLX function, readable emission takes parameter names
 and types from the same checked DSLX compilation that supplied the function's

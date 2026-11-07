@@ -172,7 +172,7 @@ fn resolve_type(
     match ty {
         Type::Named(name) => {
             if let Some((subject, member)) = lookup_use(name, resolver, scope)? {
-                resolver.resolve_named(&subject, &member)
+                resolver.resolve_named(name, &subject, &member)
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
             } else {
@@ -517,13 +517,14 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    check_with_imports(module, options, |_| {})
+    check_with_imports(module, options, |_| {}, |_, _| {})
 }
 
 pub(crate) fn check_with_imports(
     module: &Module,
     options: &ImportOptions<'_>,
     on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
+    on_sources: impl FnOnce(crate::import_structs::ImportedStructs, BTreeSet<String>),
 ) -> Result<CheckedModule, String> {
     let mut names = BTreeSet::new();
     for path in &module.uses {
@@ -683,7 +684,7 @@ pub(crate) fn check_with_imports(
         structs: structs.definitions,
         externs,
         extern_blocks,
-        imports: resolver.finish(on_import)?,
+        imports: resolver.finish(on_import, on_sources)?,
         blocks,
     })
 }

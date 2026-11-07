@@ -60,51 +60,41 @@ fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertion
     pretty_assertions::assert_eq!(source, golden);
 }
 
-// Each field becomes a projection in the Lean structure's namespace.
-// Report the owning field when Lean would generate the same declaration.
+// All four physical records can have fields whose names Lean also generates.
 #[test]
-fn raw_emission_rejects_field_names_used_by_lean() {
-    let check = |ir: String, owner: &str, field: &str| {
-        let package = package(&ir);
-        let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
-        assert_eq!(
-            error.root_cause().to_string(),
-            format!("cannot emit {owner}.{field}: Lean generates a declaration with this name")
-        );
-    };
-    for field in [
-        "rec",
-        "recOn",
-        "casesOn",
-        "noConfusion",
-        "noConfusionType",
-        "ctorIdx",
-        "_sizeOf_1",
-        "_sizeOf_inst",
-    ] {
-        let ir = format!(
-            "package ports\n\ntop block ports({field}: bits[1], out: bits[1]) {{
-  {field}: bits[1] = input_port(name={field}, id=1)
-  out: () = output_port({field}, name=out, id=2)
-}}"
-        );
-        check(ir, "Input", field);
-    }
-    check(
-        BLOCK
-            .replace("reg b(", "reg rec(")
-            .replace("register=b", "register=rec"),
-        "State",
-        "rec",
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn raw_projections_keep_lean_generated_member_names() {
+    let package = package(
+        r#"package ports
+top block ports(clk: clock, recOn: bits[1], casesOn: bits[1], rec: bits[1]) {
+  #![reset(port="recOn", asynchronous=false, active_low=false)]
+  reg noConfusion(bits[1], reset_value=1)
+  reg b(bits[1])
+  recOn: bits[1] = input_port(name=recOn, id=1)
+  casesOn: bits[1] = input_port(name=casesOn, id=2)
+  current: bits[1] = register_read(register=noConfusion, id=3)
+  old_b: bits[1] = register_read(register=b, id=9)
+  tok: token = literal(value=token, id=4)
+  ctorIdx: token = assert(tok, casesOn, message="enabled", label="enabled", id=5)
+  set_current: () = register_write(casesOn, register=noConfusion, reset=recOn, id=6)
+  save_old: () = register_write(current, register=b, id=7)
+  rec: () = output_port(current, name=rec, id=8)
+}"#,
     );
-    check(
-        BLOCK
-            .replace("out:", "rec:")
-            .replace("name=out", "name=rec"),
-        "Output",
-        "rec",
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    source.push_str(
+        r#"
+open XlsBlock
+example (rst en : BitVec 1) :
+    let x : Input := ⟨rst, en⟩
+    (x.recOn, x.casesOn) = (rst, en) := rfl
+example (q : State) (x : Input) : (observe q x).rec = q.noConfusion := rfl
+example (q : State) (x : Input) : (step q x).b = q.noConfusion := rfl
+example (q : State) (x : Input) : (eval q x).assertions.ctorIdx = (x.casesOn == 1) := rfl
+example (q : State) (x : Input) : (reset q x).next.noConfusion = 1 := rfl
+"#,
     );
-    check(BLOCK.replace("checked:", "rec:"), "Assertions", "rec");
+    check_lean(&source);
 }
 
 // A port named mk must remain distinct from the constructor and from ports
@@ -137,6 +127,10 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
 #check Evaluation.Constructors.mk
 "#,
     );
+    check_lean(&source);
+}
+
+fn check_lean(source: &str) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("Ports.lean");
     std::fs::write(&path, source).unwrap();

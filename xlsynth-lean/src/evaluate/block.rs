@@ -7,7 +7,7 @@ use xlsynth_ir_value::{IrFormatPreference, IrValue};
 use xlsynth_pir::ir::{Block, Package, Type};
 
 use super::{LeanEvaluator, run_lean_process};
-use crate::block::{emit, identifier, record_value};
+use crate::block::{emit, identifier, source_record_value};
 
 /// The outputs observed before the clock edge and register values after it.
 #[derive(Debug, PartialEq, Eq)]
@@ -152,5 +152,5 @@ fn input_record(fields: &[(String, usize)], values: &[IrValue]) -> Result<String
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(record_value(&literals))
+    Ok(source_record_value(&literals))
 }

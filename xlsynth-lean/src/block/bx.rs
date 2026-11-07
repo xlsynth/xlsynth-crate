@@ -2,20 +2,29 @@
 
 //! Keep BX declarations paired with the package produced by lowering them.
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 use xlsynth_bx::{
-    CheckedModule, ImportOptions, ResetBehavior,
-    ast::Type,
-    check::{CheckedStmt, output_ports},
+    ImportOptions, LinkedStruct, ResetBehavior,
+    ast::{Module, Stmt, Type},
+    check::output_ports,
 };
 use xlsynth_pir::ir;
 
-use super::source_types::{SourceType, StatefulInterface, StructField, TypeDecl, source_shape};
+use super::source_types::{
+    SourceType, StatefulInterface, StructField, TypeDecl, resolve_aliases, source_shape,
+};
 use super::{BlockContext, LeanBlockBundle, readable, select_block};
 
 /// A checked BX module and its linked block IR, from the same compilation.
 pub struct CompiledBx {
-    pub(super) checked: CheckedModule,
+    module_name: String,
+    imported_modules: BTreeSet<String>,
+    imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
+    source: Module,
     pub(super) package: ir::Package,
     dslx: Option<super::helper_types::DslxLink>,
     imports: Vec<super::helper_types::DslxLink>,
@@ -25,19 +34,26 @@ pub struct CompiledBx {
 /// package. The package may already contain functions or blocks used by BX
 /// externs.
 pub fn compile_bx(
+    module_name: &str,
     source: &str,
     package: ir::Package,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
     let xlsynth_bx::CompiledModule {
-        checked,
+        source,
         package,
         imports,
+        imported_structs,
+        imported_modules,
+        ..
     } = xlsynth_bx::compile_with_source(source, package, reset, options)
         .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
-        checked,
+        module_name: module_name.to_owned(),
+        imported_modules,
+        imported_structs,
+        source,
         package,
         dslx: None,
         imports: imports
@@ -50,13 +66,14 @@ pub fn compile_bx(
 /// Link the IR produced from this checked DSLX module and retain its source
 /// types for calls from the BX block.
 pub fn compile_bx_with_dslx(
+    module_name: &str,
     source: &str,
     module: xlsynth::dslx::TypecheckedModule,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
     let (package, link) = super::helper_types::DslxLink::compile(module)?;
-    let compiled = compile_bx(source, package, reset, options)?;
+    let compiled = compile_bx(module_name, source, package, reset, options)?;
     Ok(CompiledBx {
         dslx: Some(link),
         ..compiled
@@ -75,15 +92,74 @@ impl CompiledBx {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
         let (mut declarations, mut interface) = self.readable_interface(&block)?;
-        for link in self.dslx.iter().chain(&self.imports) {
-            link.add_signatures(&block, &mut declarations, &mut interface)?;
+        let independent = |owner: &str| {
+            anyhow::anyhow!(
+                "DSLX module '{owner}' was checked independently by the supplied DSLX module and BX imports; use one source for '{owner}' (remove the redundant BX use and call the supplied helper via extern, or omit the separate DSLX input)"
+            )
+        };
+        let mut external = BTreeSet::new();
+        if let Some(link) = &self.dslx {
+            let mut bx_imports = self.imported_modules.clone();
+            bx_imports.extend(declarations.iter().filter_map(|decl| {
+                decl.name()
+                    .split_once("::")
+                    .map(|(owner, _)| owner.to_owned())
+            }));
+            link.module.collect_import_subjects(&mut external);
+            external.insert(link.module.get_module().get_name());
+            if let Some(owner) = bx_imports.intersection(&external).next() {
+                return Err(independent(owner));
+            }
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if bx_imports.contains(owner) {
+                    return Err(independent(owner));
+                }
+                external.insert(owner.to_owned());
+                Ok(())
+            })?;
         }
-        // Two specializations (or two linked copies of the same definition)
-        // share a DSLX name but need separate Lean definitions.
+        for link in &self.imports {
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if external.contains(owner) {
+                    return Err(independent(owner));
+                }
+                Ok(())
+            })?;
+        }
+        // BX structs have unqualified source keys. DSLX declarations keep the
+        // owning module in theirs. Diagnose overlaps before rendering either.
+        let bx_names: BTreeSet<_> = declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter(|name| !name.contains("::"))
+            .chain(std::iter::once(graph.name.as_str()))
+            .collect();
+        for (owner, local) in declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::"))
+            .chain(
+                interface
+                    .helpers
+                    .values()
+                    .filter_map(|helper| helper.source_name.as_ref())
+                    .map(|(owner, local)| (owner.as_str(), local.as_str())),
+            )
+        {
+            ensure!(
+                self.module_name != owner || !bx_names.contains(local),
+                "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
+            );
+        }
+        // Two linked copies can share a checked declaration and specialization.
+        // Give it one public definition, keeping any other physical copy
+        // callable.
         let mut names = std::collections::BTreeSet::new();
-        for (symbol, signature) in &mut interface.helpers {
-            if !names.insert(signature.name.clone()) {
-                signature.name = format!("{}@{symbol}", signature.name);
+        for signature in interface.helpers.values_mut() {
+            if let Some(name) = &signature.source_name
+                && !names.insert(name.clone())
+            {
+                signature.source_name = None;
             }
         }
         readable::emit(&block, &declarations, &interface)
@@ -95,8 +171,8 @@ impl CompiledBx {
     ) -> Result<(Vec<TypeDecl>, StatefulInterface)> {
         let graph = block.graph;
         let source = self
-            .checked
-            .blocks()
+            .source
+            .blocks
             .iter()
             .find(|b| b.name == graph.name)
             .with_context(|| format!("block {} has no checked BX declaration", graph.name))?;
@@ -112,9 +188,10 @@ impl CompiledBx {
         );
 
         let mut declarations = Vec::new();
-        let mut check = |kind: &str,
-                         expected: Vec<(&str, &Type)>,
-                         physical: Vec<(&str, &ir::Type)>|
+        let check = |kind: &str,
+                     expected: Vec<(String, SourceType)>,
+                     physical: Vec<(&str, &ir::Type)>,
+                     declarations: &[TypeDecl]|
          -> Result<Vec<(String, SourceType)>> {
             ensure!(
                 expected.len() == physical.len(),
@@ -126,17 +203,21 @@ impl CompiledBx {
                 .zip(physical)
                 .map(|((name, ty), (actual, shape))| {
                     ensure!(name == actual, "expected BX {kind} {name}, found {actual}");
-                    let ty = bx_type(ty, &self.checked, &mut declarations)
-                        .with_context(|| format!("BX {kind} {name}"))?;
                     ensure!(
-                        &source_shape(&ty, &declarations)? == shape,
+                        &source_shape(&ty, declarations)? == shape,
                         "BX {kind} {name} has type {ty:?} but block has {shape}"
                     );
-                    Ok((name.to_owned(), ty))
+                    Ok((name, ty))
                 })
                 .collect()
         };
         let ports = |port| (graph.port_name(port), graph.port_type(port));
+        let read_type = |kind: &str, (name, ty): (&str, &Type), decls: &mut Vec<TypeDecl>| {
+            Ok((
+                name.to_owned(),
+                bx_type(ty, self, decls).with_context(|| format!("BX {kind} {name}"))?,
+            ))
+        };
         let inputs = check(
             "input",
             source
@@ -144,8 +225,10 @@ impl CompiledBx {
                 .iter()
                 .map(|n| (n.as_str(), &Type::Bool))
                 .chain(source.params.iter().map(|p| (p.name.as_str(), &p.ty)))
-                .collect(),
+                .map(|p| read_type("input", p, &mut declarations))
+                .collect::<Result<_>>()?,
             graph.input_ports().map(ports).collect(),
+            &declarations,
         )?
         .into_iter()
         .collect();
@@ -155,24 +238,50 @@ impl CompiledBx {
                 .statements
                 .iter()
                 .filter_map(|s| match s {
-                    CheckedStmt::Reg { name, ty, .. } => Some((name.as_str(), ty)),
+                    Stmt::Reg { name, ty, .. } => Some((name.as_str(), ty)),
                     _ => None,
                 })
-                .collect(),
+                .map(|p| read_type("register", p, &mut declarations))
+                .collect::<Result<_>>()?,
             graph
                 .registers
                 .iter()
                 .map(|r| (r.name.as_str(), &r.ty))
                 .collect(),
+            &declarations,
         )?
         .into_iter()
         .collect();
-        let outputs =
-            output_ports(&source.result, self.checked.structs()).map_err(anyhow::Error::msg)?;
+        let outputs = if let Type::Named(key) = &source.result
+            && let Some(import) = self.imported_structs.get(key)
+        {
+            let ty = super::helper_types::imported_struct(import, &mut declarations)?;
+            let SourceType::Struct { name } = resolve_aliases(&ty, &declarations)? else {
+                bail!("expected imported BX result struct {key}");
+            };
+            let fields = declarations
+                .iter()
+                .find_map(|d| match d {
+                    TypeDecl::Struct { name: n, fields } if *n == name => Some(fields),
+                    _ => None,
+                })
+                .with_context(|| format!("missing imported BX result struct {name}"))?;
+            fields
+                .iter()
+                .map(|f| (f.name.clone(), f.source_type.clone()))
+                .collect()
+        } else {
+            output_ports(&source.result, &self.source.structs)
+                .map_err(anyhow::Error::msg)?
+                .iter()
+                .map(|p| read_type("output", (&p.name, &p.ty), &mut declarations))
+                .collect::<Result<_>>()?
+        };
         let outputs = check(
             "output",
-            outputs.iter().map(|p| (p.name.as_str(), &p.ty)).collect(),
+            outputs,
             graph.output_ports().map(ports).collect(),
+            &declarations,
         )?
         .into_iter()
         .map(|(_, ty)| ty)
@@ -180,6 +289,7 @@ impl CompiledBx {
         Ok((
             declarations,
             StatefulInterface {
+                bx_module: self.module_name.clone(),
                 inputs,
                 registers,
                 outputs,
@@ -191,11 +301,7 @@ impl CompiledBx {
 
 /// Collect only interface-reachable types. Lean requires a nested struct to
 /// precede its user even when the BX declarations appear in the reverse order.
-fn bx_type(
-    ty: &Type,
-    module: &CheckedModule,
-    declarations: &mut Vec<TypeDecl>,
-) -> Result<SourceType> {
+fn bx_type(ty: &Type, module: &CompiledBx, declarations: &mut Vec<TypeDecl>) -> Result<SourceType> {
     Ok(match ty {
         Type::Bool
         | Type::Bits {
@@ -219,30 +325,34 @@ fn bx_type(
             element: Box::new(bx_type(element, module, declarations)?),
             size: *size,
         },
-        Type::Named(name) => {
-            if !declarations.iter().any(|d| d.name() == name) {
+        Type::Named(key) => {
+            if let Some(import) = module.imported_structs.get(key) {
+                return super::helper_types::imported_struct(import, declarations);
+            }
+            if !declarations.iter().any(|d| d.name() == key) {
                 let def = module
-                    .structs()
+                    .source
+                    .structs
                     .iter()
-                    .find(|s| s.name == *name)
-                    .ok_or_else(|| anyhow!("unknown checked BX struct {name}"))?;
+                    .find(|s| s.name == *key)
+                    .with_context(|| format!("unknown BX struct {key}"))?;
                 let fields = def
                     .fields
                     .iter()
-                    .map(|f| {
+                    .map(|field| {
                         Ok(StructField {
-                            name: f.name.clone(),
-                            source_type: bx_type(&f.ty, module, declarations)
-                                .with_context(|| format!("field {name}.{}", f.name))?,
+                            name: field.name.clone(),
+                            source_type: bx_type(&field.ty, module, declarations)
+                                .with_context(|| format!("field {key}.{}", field.name))?,
                         })
                     })
                     .collect::<Result<_>>()?;
                 declarations.push(TypeDecl::Struct {
-                    name: name.clone(),
+                    name: key.clone(),
                     fields,
                 });
             }
-            SourceType::Struct { name: name.clone() }
+            SourceType::Struct { name: key.clone() }
         }
     })
 }
@@ -254,6 +364,7 @@ mod tests {
     #[test]
     fn equal_width_output_reordering_is_rejected() {
         let mut compiled = compile_bx(
+            "example",
             "struct Ports { zebra: u8, apple: u8 } block pair(clk, x: u8) -> Ports { Ports { apple: u8:42, zebra: x } }",
             xlsynth_bx::empty_package("example"),
             Default::default(),

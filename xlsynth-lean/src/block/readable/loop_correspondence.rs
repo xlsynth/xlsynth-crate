@@ -54,7 +54,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
                 continue;
             };
             let raw = lean::helper_path(&function.name)?;
-            let readable = format!("Helpers.{}", identifier(&sig.name)?);
+            let readable = helper_path(sig, &function.name)?;
             let mut binders = Vec::new();
             let mut params = Vec::new();
             let mut decoded = Vec::new();
@@ -167,7 +167,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             let codec = format!("XlsCodec.{name}");
             rules.extend(codec_round_trip_rules(&name));
             rules.extend(
-                declaration_functions(decl, &name)?
+                declaration_functions(&self.bx_namespace, decl, &name)?
                     .into_iter()
                     .map(|f| format!("apply_ite {f}")),
             );

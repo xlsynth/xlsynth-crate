@@ -56,6 +56,7 @@ enum UseBinding {
 pub(crate) struct ImportResolver {
     bindings: BTreeMap<String, UseBinding>,
     subjects: BTreeSet<String>,
+    imported_modules: BTreeSet<String>,
     stdlib_path: PathBuf,
     imports: Option<ImportData>,
     structs: ImportedStructs,
@@ -85,6 +86,7 @@ impl ImportResolver {
         }
         let mut bindings = BTreeMap::new();
         let mut subjects = BTreeSet::new();
+        let mut imported_modules = BTreeSet::new();
         let mut imports = None;
         for (index, declaration) in declarations.iter().enumerate() {
             let Some((leaf, parents)) = declaration.components.split_last() else {
@@ -131,21 +133,31 @@ impl ImportResolver {
                 // Native use resolution still prefers an existing full module,
                 // so a malformed module cannot fall through to a parent's
                 // member.
+                // A DSLX module cannot mix use and import syntax. Check the
+                // member here, then inspect its owner's import graph below.
+                check_probe(
+                    &format!("#![feature(use_syntax)]\nuse {use_path};"),
+                    &format!("0bx_member_{index}"),
+                    data,
+                )
+                .map_err(|e| format!("checking use '{use_path}': {e}"))?;
                 let parent = parents.join(".");
                 subjects.insert(parent.clone());
                 (
-                    format!("#![feature(use_syntax)]\nuse {use_path};"),
+                    format!("import {parent} as bx_module;"),
                     UseBinding::MemberOf(parent),
                 )
             };
             check_probe(&source, &probe_name, data)
-                .map_err(|e| format!("checking use '{use_path}': {e}"))?;
+                .map_err(|e| format!("checking use '{use_path}': {e}"))?
+                .collect_import_subjects(&mut imported_modules);
             bindings.insert(leaf.clone(), binding);
         }
         Ok(Self {
             bindings,
             structs: ImportedStructs::new(&subjects, stdlib_path, &options.additional_search_paths),
             subjects,
+            imported_modules,
             stdlib_path: stdlib_path.to_owned(),
             imports,
             ids: HashMap::new(),
@@ -177,7 +189,12 @@ impl ImportResolver {
     }
 
     /// Resolve a source-level type reference using the declared import graph.
-    pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
+    pub(crate) fn resolve_named(
+        &mut self,
+        written: &str,
+        subject: &str,
+        member: &str,
+    ) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
             return Err(format!(
                 "invalid imported type reference '{subject}::{member}'"
@@ -185,7 +202,7 @@ impl ImportResolver {
         }
         let imports = self.imports.as_mut().expect("declared DSLX import graph");
         self.structs
-            .resolve_named(subject, member, imports)
+            .resolve_written(written, subject, member, imports)
             .map(Type::Named)
     }
 
@@ -280,6 +297,7 @@ fn probe_{id}({}) {{ capture({}) }}
     pub(crate) fn finish(
         mut self,
         mut on_import: impl FnMut(TypecheckedModule),
+        on_sources: impl FnOnce(ImportedStructs, BTreeSet<String>),
     ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(data) = self.imports.as_mut() {
@@ -302,6 +320,7 @@ fn probe_{id}({}) {{ capture({}) }}
                 on_import(checked);
             }
         }
+        on_sources(self.structs, self.imported_modules);
         Ok(ResolvedImports {
             calls: self.calls,
             batches,
