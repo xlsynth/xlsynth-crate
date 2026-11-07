@@ -93,7 +93,9 @@ pub(super) struct StatefulInterface {
 
 /// Source name and declared parameter and return types of a linked IR function.
 pub(super) struct HelperSignature {
-    pub(super) name: String,
+    /// Declaring module and local name (including specialization arguments).
+    /// Compiler-generated bodies have only their physical IR symbol.
+    pub(super) source_name: Option<(String, String)>,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }

@@ -54,7 +54,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
                 continue;
             };
             let raw = lean::helper_path("XlsBlock", &function.name)?;
-            let readable = format!("Helpers.{}", identifier(&sig.name)?);
+            let readable = helper_path(sig, &function.name)?;
             let mut binders = Vec::new();
             let mut params = Vec::new();
             let mut decoded = Vec::new();

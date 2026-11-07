@@ -252,8 +252,8 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             .collect();
         let expected = if named {
             [
-                "let «slot» : «machine».«Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
-                "let «slot_write» : «machine».«Write» := («slot»).«write»",
+                "let «slot» : XLS.«machine».«Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
+                "let «slot_write» : XLS.«machine».«Write» := («slot»).«write»",
                 "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).«data»",
             ]
         } else {

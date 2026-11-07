@@ -67,22 +67,21 @@ end XLS
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<()> {
-    for module in ["Circuit", "Nat"] {
+    for module in ["Circuit", "Nat", "hw.Nat"] {
         let mut bundle = compile_bx(
             module,
-            "struct succ { value: u8 } block demo(clk, p: succ) -> u8 { p.value }",
+            "struct succ { value: u8 } block demo(clk, XLS: u8, p: succ) -> u8 { p.value + XLS }",
             xlsynth_bx::empty_package("example"),
             Default::default(),
             &Default::default(),
         )?
         .emit_readable(None)?;
-        if module == "Circuit" {
-            bundle.files.push((
-                "SourceName.lean".into(),
-                "import ReadableGenerated\nexample (x : XlsReadable.Input) : Circuit.succ := x.p\n"
-                    .into(),
-            ));
-        }
+        bundle.files.push((
+            "SourceName.lean".into(),
+            format!(
+                "import ReadableGenerated\nexample (x : XlsReadable.Input) : XLS.{module}.succ := x.p\nexample : _root_.Nat.succ 0 = 1 := rfl\n"
+            ),
+        ));
         check_bundle(bundle, module);
     }
     Ok(())
@@ -92,8 +91,9 @@ fn bx_module_and_struct_names_can_coincide_with_a_lean_declaration() -> Result<(
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<()> {
     let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("left"))?;
     fs::write(
-        dir.path().join("ops.x"),
+        dir.path().join("left/ops.x"),
         "pub struct Packet { data: u8 } pub type Message = Packet; pub type Data = Packet;
          pub struct Other { data: u8 }",
     )?;
@@ -104,7 +104,7 @@ fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<(
         "data: ops::Data, message: Message, direct: ops::Packet",
     ] {
         let source = format!(
-            "use ops; use ops::Message;
+            "use left::ops; use left::ops::Message;
             block inspect(clk, {params}, other: ops::Other) -> (u8, u8, u8, u8) {{
                 (direct.data, message.data, data.data, other.data)
             }}"
@@ -133,7 +133,7 @@ fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<(
             ("other", "Other"),
         ] {
             assert!(
-                generated.contains(&format!("«{field}» : «ops».«{ty}»")),
+                generated.contains(&format!("«{field}» : XLS.«left».«ops».«{ty}»")),
                 "{generated}"
             );
         }
@@ -141,9 +141,9 @@ fn bx_preserves_each_imported_struct_spelling_in_either_port_order() -> Result<(
             "AliasPorts.lean".into(),
             r#"import ReadableCorrespondence
 open XlsReadable
-example : ops.Data = ops.Packet := rfl
-example : ops.Message = ops.Packet := rfl
-#check_failure fun (x : Input) => (show ops.Other from x.direct)
+example : XLS.left.ops.Data = XLS.left.ops.Packet := rfl
+example : XLS.left.ops.Message = XLS.left.ops.Packet := rfl
+#check_failure fun (x : Input) => (show XLS.left.ops.Other from x.direct)
 example (q : State) (x : Input) :
   observe q x = (x.direct.data, x.message.data, x.data.data, x.other.data) := rfl
 "#
@@ -241,14 +241,14 @@ block hold(clk, src: Envelope) -> (ops::Alias, u8) {
     )?
     .emit_readable(None)?;
     let types = &bundle.files[1].1;
-    assert!(types.contains("«item» : «ops».«Alias»"), "{types}");
+    assert!(types.contains("«item» : XLS.«ops».«Alias»"), "{types}");
     bundle.files.push((
         "PublicInterface.lean".into(),
         r#"
 import ReadableCorrespondence
 open XlsReadable
-example : ops.Alias = ops.Inner := rfl
-example : ops.Inner = ops.Packet := rfl
+example : XLS.ops.Alias = XLS.ops.Inner := rfl
+example : XLS.ops.Inner = XLS.ops.Packet := rfl
 example (q : State) (x : Input) : (step q x).stored = x.src.item := rfl
 example (q : State) (x : Input) : observe q x = (q.stored, x.src.item.zebra) := rfl
 "#
@@ -299,9 +299,9 @@ block monitor(clk, p: field0::Packet, other: Packet, report: Report) -> Result {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-def packet : field0.Packet := ⟨41, true⟩
+def packet : XLS.field0.Packet := ⟨41, true⟩
 #guard packet.recOn == 41 && packet.valid
-example (p : field0.Packet) : (match p with | ⟨n, _⟩ => n) = p.recOn := by cases p; rfl
+example (p : XLS.field0.Packet) : (match p with | ⟨n, _⟩ => n) = p.recOn := by cases p; rfl
 example (q : State) (x : Input) :
     observe q x = (x.p.recOn, x.other.result.seen, x.report.result.seen) := rfl
 example (q : XlsBlock.State) (x : XlsBlock.Input) :
@@ -313,43 +313,242 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
     Ok(())
 }
 
-// bus.bx and bus.x both own a Packet with the same physical layout.
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
-fn bx_and_dslx_packets_with_the_same_module_name_remain_distinct() -> Result<()> {
+fn selected_bx_block_and_dslx_function_share_a_module() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
-        dir.path().join("bus.x"),
-        "pub struct Packet { data: u8 } pub type Message = Packet;",
+        dir.path().join("common.x"),
+        "pub fn inc(x: u8) -> u8 { x + u8:1 }",
     )?;
-    let compiled = compile_bx(
-        "bus",
-        r#"
-use bus;
-struct Packet { value: u8 }
-block copy(clk, a: Packet, b: bus::Message) -> (u8, u8) { (a.value, b.data) }
-"#,
-        xlsynth_bx::empty_package("linked_ir"),
+    let mut bundle = compile_bx(
+        "common",
+        "use common; block controller(clk, x: u8) -> u8 { common::inc(x) }",
+        xlsynth_bx::empty_package("pkg"),
         Default::default(),
         &xlsynth_bx::ImportOptions {
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         },
-    )?;
-    let mut bundle = compiled.emit_readable(None)?;
+    )?
+    .emit_readable(None)?;
     bundle.files.push((
-        "SameName.lean".into(),
+        "PublicBlock.lean".into(),
         r#"import ReadableCorrespondence
-open XlsReadable
-example (x : Input) : «bx:bus».Packet := x.a
-example (x : Input) : bus.Message := x.b
-example : bus.Message = bus.Packet := rfl
-#check_failure fun (x : Input) => (show bus.Packet from x.a)
-example (q : State) (x : Input) : observe q x = (x.a.value, x.b.data) := rfl
+example (q : XlsReadable.State) (x : XlsReadable.Input) :
+    XLS.common.controller q x = XlsReadable.eval q x := rfl
+#guard XLS.common.inc 41 == 42
 "#
         .into(),
     ));
-    check_bundle(bundle, "equal BX and DSLX module and type names");
+    check_bundle(bundle, "public BX and DSLX declarations");
+    Ok(())
+}
+
+#[test]
+fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("bus.x"),
+        "pub struct Packet { data: u8 } pub type Message = Packet;",
+    )?;
+    let emit = |source| {
+        compile_bx(
+            "bus",
+            source,
+            xlsynth_bx::empty_package("linked_ir"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)
+    };
+    emit(
+        "use bus; struct Local { x: u8 }
+          block copy(clk, a: Local, b: bus::Packet) -> (u8, u8) { (a.x, b.data) }",
+    )?;
+    emit(
+        "use bus::Message; struct Packet { x: u8 }
+          block copy(clk, p: Packet) -> u8 { p.x }",
+    )?;
+    let collision = emit(
+        "use bus; struct Packet { value: u8 }
+          block copy(clk, a: Packet, b: bus::Message) -> (u8, u8) { (a.value, b.data) }",
+    );
+    assert_eq!(
+        collision.err().unwrap().to_string(),
+        "duplicate source declaration 'bus::Packet' in BX 'bus.bx' and DSLX 'bus.x'; rename one declaration"
+    );
+    Ok(())
+}
+
+#[test]
+fn module_owner_cannot_supply_declarations_under_a_source_type() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("design"))?;
+    fs::write(
+        dir.path().join("design/Packet.x"),
+        "pub fn get() -> u8 { u8:7 }",
+    )?;
+    fs::write(dir.path().join("design.x"), "pub struct Packet { get: u8 }")?;
+    fs::write(
+        dir.path().join("ops.x"),
+        "import design.Packet as packet; pub fn call() -> u8 { packet::get() }",
+    )?;
+    let emit = |owner, source| {
+        compile_bx(
+            owner,
+            source,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![dir.path()],
+                ..Default::default()
+            },
+        )?
+        .emit_readable(None)
+    };
+    // Only emitted declarations claim a public namespace.
+    emit(
+        "design",
+        "use ops; struct Packet { get: u8 }
+         block demo(clk, p: Packet) -> u8 { p.get }",
+    )?;
+    for (owner, source) in [
+        (
+            "design",
+            "use ops; struct Packet { get: u8 }
+         block demo(clk, p: Packet) -> u8 { p.get + ops::call() }",
+        ),
+        (
+            "design.Packet",
+            "use design; block get(clk, p: design::Packet) -> u8 { p.get }",
+        ),
+    ] {
+        let err = emit(owner, source).err().unwrap().to_string();
+        assert_eq!(
+            err,
+            "source module 'design.Packet' would emit declarations under the Lean namespace of source type 'design::Packet' (XLS.design.Packet); rename the type or module"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn module_owner_is_shared_by_transitive_imports() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("bus.x"), "pub fn get() -> u8 { u8:3 }")?;
+    for name in ["left", "right"] {
+        fs::write(
+            dir.path().join(format!("{name}.x")),
+            "import bus; pub fn get() -> u8 { bus::get() }",
+        )?;
+    }
+    let bx = "use left; use right; block both(clk) -> u8 { left::get() + right::get() }";
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    for module in ["design", "bus"] {
+        let compiled = compile_bx(
+            module,
+            bx,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &options,
+        )?;
+        compiled.emit_readable(None)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn module_owner_cannot_come_from_independent_dslx_inputs() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("common.x"), "pub fn get() -> u8 { u8:3 }")?;
+    fs::write(
+        dir.path().join("wrapper.x"),
+        "import common; pub fn get() -> u8 { common::get() }",
+    )?;
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    for (name, source, import) in [
+        ("common", "pub fn unrelated() -> u8 { u8:1 }", "use common;"),
+        (
+            "external",
+            "import common; pub fn unrelated() -> u8 { u8:1 }",
+            "use wrapper::get;",
+        ),
+    ] {
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[dir.path()]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(source, &format!("{name}.x"), name, &mut imports)?;
+        let compiled = xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
+            &format!("{import} block demo(clk, x: u8) -> u8 {{ x }}"),
+            module,
+            Default::default(),
+            &options,
+        )?;
+        let err = compiled.emit_readable(None).err().unwrap().to_string();
+        assert!(
+            err.contains("DSLX module 'common' was checked independently"),
+            "{err}"
+        );
+        assert!(err.contains("remove the redundant BX use"), "{err}");
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn module_owner_uses_the_full_dotted_subject() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    for package in ["left", "right"] {
+        let root = dir.path().join(package);
+        fs::create_dir(&root)?;
+        fs::write(
+            root.join("myarbiter.x"),
+            format!(
+                "pub fn compute() -> u8 {{ u8:7 }} pub fn {package}_value() -> u8 {{ compute() }}"
+            ),
+        )?;
+    }
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let emit = |name, uses: &str| -> Result<_> {
+        let source = format!("{uses} block demo(clk, x: u8) -> u8 {{ x }}");
+        compile_bx(
+            name,
+            &source,
+            xlsynth_bx::empty_package("pkg"),
+            Default::default(),
+            &options,
+        )?
+        .emit_readable(None)
+    };
+    let repeated = "use left::myarbiter; use left::myarbiter::left_value;";
+    emit("design", repeated)?;
+    emit("myarbiter", repeated)?;
+    let source = "use right::myarbiter::right_value; use left::myarbiter::left_value;
+                  block demo(clk) -> u8 { right_value() + left_value() }";
+    let mut bundle = compile_bx(
+        "myarbiter",
+        source,
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &options,
+    )?
+    .emit_readable(None)?;
+    bundle.files.push(("DottedOwners.lean".into(),
+        "import ReadableGenerated\n#check XLS.left.myarbiter.compute\n#check XLS.right.myarbiter.compute\n".into()));
+    check_bundle(bundle, "separate dotted DSLX owners with the same basename");
     Ok(())
 }
 
@@ -412,7 +611,7 @@ block probe(clk, packet: picker::Packet, flag: bool) -> (u8, bool) {
         ("id<1>", "argument"),
     ] {
         assert!(
-            executable.contains(&format!("def Helpers.«picker::{name}» («{parameter}»")),
+            executable.contains(&format!("def _root_.XLS.«picker».«{name}» («{parameter}»")),
             "{executable}"
         );
     }
@@ -613,7 +812,7 @@ fn bx_fields_keep_lean_names() {
         r#"
 struct Word { mk: u8 }
 struct Packet { design: u8, _root_: u8, word: Word }
-block machine(clk, BitVec: u8, packet: Packet) -> (u8, Packet) {
+block instReprPacket(clk, BitVec: u8, packet: Packet) -> (u8, Packet) {
     reg mk: Packet;
     mk := packet;
     (BitVec, mk)
@@ -625,7 +824,9 @@ block machine(clk, BitVec: u8, packet: Packet) -> (u8, Packet) {
         r#"
 import ReadableCorrespondence
 open XlsReadable
-#check design.Word.Constructors.mk
+#check XLS.design.Word.Constructors.mk
+#synth Repr XLS.design.Packet
+example : XLS.design.instReprPacket = eval := rfl
 example (q : State) (x : Input) : (observe q x).2.word.mk = q.mk.word.mk := by rfl
 example (q : State) (x : Input) : (step q x).mk.«_root_» = x.packet.«_root_» := by rfl
 "#
@@ -811,8 +1012,8 @@ block pipeline(clk, packet: Packet) -> u8 {
         .iter()
         .find(|(name, _)| name == "ReadableGenerated.lean")
         .unwrap();
-    for helper in ["left_side::advance", "machine::advance"] {
-        assert!(model.contains(&format!("_root_.XlsReadable.Helpers.«{helper}»")));
+    for owner in ["left_side", "machine"] {
+        assert!(model.contains(&format!("_root_.XLS.«{owner}».«advance»")));
     }
     bundle.files.push((
         "CheckCalls.lean".into(),
@@ -821,7 +1022,7 @@ import ReadableCorrespondence
 open XlsReadable
 private def stimulus : Input := { rst := false, packet := { left := 13, right := 5 } }
 private def initial : State := { count := 7 }
-#guard (Helpers.«left_side::advance» (command := { base := 13, delta := 5 })).base == 18
+#guard (XLS.left_side.advance (command := { base := 13, delta := 5 })).base == 18
 #guard observe initial stimulus == 7
 #guard (step initial stimulus).count == 25
 "#
@@ -1108,15 +1309,15 @@ block select_values(clk, small: u5, large: u6, fallback: u5) -> u6 {
         r#"import ReadableCorrespondence
 open XlsReadable
 private def stimulus : Input := {rst := false, small := 3, large := 37, fallback := 17}
-private def small : packets.«Packet<5>» := {value := stimulus.small, enabled := false}
-private def large : packets.«Packet<6>» := {value := stimulus.large, enabled := true}
-private def fallback : packets.«Fallback<5>» := {value := 17, enabled := true}
-#guard (Helpers.«packets::choose<5>» (packet := small) (fallback := 17)).value == 17
-#check_failure Helpers.«packets::choose<5>» (packet := fallback) (fallback := 17)
-#guard (Helpers.«packets::choose<6>» (packet := large) (fallback := 41)).value == 37
-#guard (Helpers.«packets::bias<1>» (x := 0), Helpers.«packets::bias<2>» (x := 0)) == (1, 2)
-#guard Helpers.«packets::passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
-#guard (Helpers.«packets::passthrough<Packet>» (x := { current := 7 })).current == 7
+private def small : XLS.packets.«Packet<5>» := {value := stimulus.small, enabled := false}
+private def large : XLS.packets.«Packet<6>» := {value := stimulus.large, enabled := true}
+private def fallback : XLS.packets.«Fallback<5>» := {value := 17, enabled := true}
+#guard (XLS.packets.«choose<5>» (packet := small) (fallback := 17)).value == 17
+#check_failure XLS.packets.«choose<5>» (packet := fallback) (fallback := 17)
+#guard (XLS.packets.«choose<6>» (packet := large) (fallback := 41)).value == 37
+#guard (XLS.packets.«bias<1>» (x := 0), XLS.packets.«bias<2>» (x := 0)) == (1, 2)
+#guard XLS.packets.«passthrough<(u8,bool)>» (x := (13, true)) == ((13 : BitVec 8), true)
+#guard (XLS.packets.«passthrough<Packet>» (x := { current := 7 })).current == 7
 #guard (step { last := 7 } stimulus).last == 57
 "#
         .into(),
@@ -1149,9 +1350,9 @@ block distinguish(clk, one: u8, two: u8) -> u8 {
         "Check.lean".into(),
         r#"import ReadableCorrespondence
 open XlsReadable
-variable (one : machine.«Tagged<1>») (two : machine.«Tagged<2>»)
-example : Helpers.«machine::take_two» two = two.value := rfl
-#check_failure Helpers.«machine::take_two» one
+variable (one : XLS.machine.«Tagged<1>») (two : XLS.machine.«Tagged<2>»)
+example : XLS.machine.take_two two = two.value := rfl
+#check_failure XLS.machine.take_two one
 "#
         .into(),
     ));
@@ -1181,10 +1382,10 @@ block pass(clk, x: u6) -> u6 { machine::advance(x) }
         r#"import ReadableGenerated
 open XlsReadable
 variable (x : BitVec 6)
-example : machine.«Packet<3,6,7>» := Helpers.«machine::pack» x
-example : Helpers.«machine::unpack» (Helpers.«machine::relay» (Helpers.«machine::pack» x)) = x := rfl
-example (p : machine.«Packet<3,6,8>») : Helpers.«machine::other» p = p.data := rfl
-#check_failure Helpers.«machine::other» (Helpers.«machine::pack» x)
+example : XLS.machine.«Packet<3,6,7>» := XLS.machine.pack x
+example : XLS.machine.unpack (XLS.machine.relay (XLS.machine.pack x)) = x := rfl
+example (p : XLS.machine.«Packet<3,6,8>») : XLS.machine.other p = p.data := rfl
+#check_failure XLS.machine.other (XLS.machine.pack x)
 "#
         .into(),
     ));
@@ -1394,7 +1595,7 @@ block changed(clk, mask: u8) -> u3 {
     assert!(
         bundle.files[2]
             .1
-            .contains("def Helpers.«machine::encode_mask» («List»"),
+            .contains("def _root_.XLS.«machine».«encode_mask» («List»"),
         "{}",
         bundle.files[2].1
     );

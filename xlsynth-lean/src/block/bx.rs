@@ -3,7 +3,10 @@
 //! Keep BX declarations paired with the package produced by lowering them.
 
 use anyhow::{Context, Result, bail, ensure};
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 use xlsynth_bx::{
     CheckedModule, ImportOptions, LinkedStruct, ResetBehavior,
     ast::{Module, Param, Stmt, Type},
@@ -20,6 +23,7 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 pub struct CompiledBx {
     checked: CheckedModule,
     module_name: String,
+    imported_modules: BTreeSet<String>,
     imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
     source: Module,
     pub(super) package: ir::Package,
@@ -43,12 +47,14 @@ pub fn compile_bx(
         package,
         imports,
         imported_structs,
+        imported_modules,
         ..
     } = xlsynth_bx::compile_with_source(source, package, reset, options)
         .map_err(anyhow::Error::msg)?;
     Ok(CompiledBx {
         checked,
         module_name: module_name.to_owned(),
+        imported_modules,
         imported_structs,
         source,
         package,
@@ -116,15 +122,74 @@ impl CompiledBx {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
         let (mut declarations, mut interface) = self.readable_interface(&block)?;
-        for link in self.dslx.iter().chain(&self.imports) {
-            link.add_signatures(&block, &mut declarations, &mut interface)?;
+        let independent = |owner: &str| {
+            anyhow::anyhow!(
+                "DSLX module '{owner}' was checked independently by the supplied DSLX module and BX imports; use one source for '{owner}' (remove the redundant BX use and call the supplied helper via extern, or omit the separate DSLX input)"
+            )
+        };
+        let mut external = BTreeSet::new();
+        if let Some(link) = &self.dslx {
+            let mut bx_imports = self.imported_modules.clone();
+            bx_imports.extend(declarations.iter().filter_map(|decl| {
+                decl.name()
+                    .split_once("::")
+                    .map(|(owner, _)| owner.to_owned())
+            }));
+            link.module.collect_import_subjects(&mut external);
+            external.insert(link.module.get_module().get_name());
+            if let Some(owner) = bx_imports.intersection(&external).next() {
+                return Err(independent(owner));
+            }
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if bx_imports.contains(owner) {
+                    return Err(independent(owner));
+                }
+                external.insert(owner.to_owned());
+                Ok(())
+            })?;
         }
-        // Two specializations (or two linked copies of the same definition)
-        // share a DSLX name but need separate Lean definitions.
+        for link in &self.imports {
+            link.add_signatures(&block, &mut declarations, &mut interface, |owner| {
+                if external.contains(owner) {
+                    return Err(independent(owner));
+                }
+                Ok(())
+            })?;
+        }
+        // BX structs have unqualified source keys. DSLX declarations keep the
+        // owning module in theirs. Diagnose overlaps before rendering either.
+        let bx_names: BTreeSet<_> = declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter(|name| !name.contains("::"))
+            .chain(std::iter::once(graph.name.as_str()))
+            .collect();
+        for (owner, local) in declarations
+            .iter()
+            .map(TypeDecl::name)
+            .filter_map(|name| name.split_once("::"))
+            .chain(
+                interface
+                    .helpers
+                    .values()
+                    .filter_map(|helper| helper.source_name.as_ref())
+                    .map(|(owner, local)| (owner.as_str(), local.as_str())),
+            )
+        {
+            ensure!(
+                self.module_name != owner || !bx_names.contains(local),
+                "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
+            );
+        }
+        // Two linked copies can share a checked declaration and specialization.
+        // Give it one public definition, keeping any other physical copy
+        // callable.
         let mut names = std::collections::BTreeSet::new();
-        for (symbol, signature) in &mut interface.helpers {
-            if !names.insert(signature.name.clone()) {
-                signature.name = format!("{}@{symbol}", signature.name);
+        for signature in interface.helpers.values_mut() {
+            if let Some(name) = &signature.source_name
+                && !names.insert(name.clone())
+            {
+                signature.source_name = None;
             }
         }
         readable::emit(&block, &declarations, &interface)
