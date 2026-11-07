@@ -64,10 +64,10 @@ pub fn check_contract(
     converter: &Path,
     stdlib: &Path,
 ) -> Result<EquivResult, CheckFailure> {
-    check_semantic_contract(case, converter, stdlib, None)
+    check_semantic_contract(case, converter, stdlib, &[])
 }
 
-/// Checks the observation associated with an audit-v1 case.
+/// Checks the observation associated with a focused audit case.
 pub fn check_audit(
     case: AuditCase,
     converter: &Path,
@@ -75,9 +75,24 @@ pub fn check_audit(
 ) -> Result<EquivResult, CheckFailure> {
     match case {
         AuditCase::Semantic(case) => check_contract(case, converter, stdlib),
-        AuditCase::Traces { case, expected } => {
-            check_semantic_contract(case, converter, stdlib, Some(expected))
-        }
+        AuditCase::Traces { case, expected } => check_semantic_contract(
+            case,
+            converter,
+            stdlib,
+            &[(true, TraceExpectation::Count(expected))],
+        ),
+        AuditCase::TraceMessages {
+            case,
+            expected: [when_false, when_true],
+        } => check_semantic_contract(
+            case,
+            converter,
+            stdlib,
+            &[
+                (false, TraceExpectation::Message(&when_false)),
+                (true, TraceExpectation::Message(&when_true)),
+            ],
+        ),
         AuditCase::ConstexprFailure { modules } => {
             let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
             let output = run_converter(&modules, converter, stdlib, directory.path(), None, true)?;
@@ -103,13 +118,19 @@ pub fn check_audit(
     }
 }
 
-/// Proves the public interface and, for event contracts, observes the CLI's IR
-/// at a fixed input.
+/// The observable traces expected from a single execution of the converted top.
+#[derive(Debug)]
+enum TraceExpectation<'a> {
+    Count(usize),
+    Message(&'a str),
+}
+
+/// Proves the public interface and checks event observations on the CLI's IR.
 fn check_semantic_contract(
     case: ContractCase,
     converter: &Path,
     stdlib: &Path,
-    expected_traces: Option<usize>,
+    expected_traces: &[(bool, TraceExpectation)],
 ) -> Result<EquivResult, CheckFailure> {
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let prepared = convert_modules(
@@ -129,18 +150,27 @@ fn check_semantic_contract(
     let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same);
     let feedback = native_feedback(&prepared, stdlib, directory.path(), None);
     let outcome = verdict?;
-    if let Some(expected) = expected_traces {
+    if !expected_traces.is_empty() {
         let top = package
             .get_function(&prepared.converted_top)
             .map_err(|e| e.to_string())?;
         let jit = xlsynth::IrFunctionJit::new(&top).map_err(|e| e.to_string())?;
-        let input = xlsynth::XlsIrValue::make_ubits(1, 1).map_err(|e| e.to_string())?;
-        let events = jit.run(&[input]).map_err(|e| e.to_string())?;
-        if events.trace_messages.len() != expected || !events.assert_messages.is_empty() {
-            return Err(CheckFailure::Disproved(format!(
-                "At x=true DSLX bytecode expects {expected} traces and no assertions; CLI IR produced traces {:?} and assertions {:?}\n{prepared:#?}",
-                events.trace_messages, events.assert_messages
-            )));
+        for (x, expected) in expected_traces {
+            let events = jit
+                .run(&[xlsynth::XlsIrValue::bool(*x)])
+                .map_err(|e| e.to_string())?;
+            let matches = match expected {
+                TraceExpectation::Count(n) => events.trace_messages.len() == *n,
+                TraceExpectation::Message(text) => matches!(
+                    events.trace_messages.as_slice(), [trace] if trace.message == *text
+                ),
+            };
+            if !matches || !events.assert_messages.is_empty() {
+                return Err(CheckFailure::Disproved(format!(
+                    "At x={x} expected {expected:?} and no assertions. CLI IR produced traces {:?} and assertions {:?}\n{prepared:#?}",
+                    events.trace_messages, events.assert_messages
+                )));
+            }
         }
     }
     if let (EquivResult::Proved, Some(limit)) = (&outcome, case.max_and_nodes) {

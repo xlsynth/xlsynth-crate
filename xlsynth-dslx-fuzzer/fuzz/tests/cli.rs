@@ -116,6 +116,47 @@ fn failing_constexpr_requires_a_semantic_rejection() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn correct_trace_counts_do_not_mask_wrong_text_on_either_input()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let converter = dir.path().join("converter");
+    // The generated s2 inputs are -1 and 1, rendered as 3 and 1 with {:u}.
+    for (when_false, when_true, correct) in [(3, 1, true), (0, 1, false), (3, 0, false)] {
+        std::fs::write(
+            &converter,
+            format!(
+                r#"#!/bin/sh
+cat <<'IR'
+package sample
+top fn __sample__main(x: bits[1] id=1) -> bits[1] {{
+  token0: token = after_all(id=2)
+  enabled: bits[1] = literal(value=1, id=3)
+  low: bits[2] = literal(value={when_false}, id=4)
+  high: bits[2] = literal(value={when_true}, id=5)
+  n: bits[2] = sel(x, cases=[low, high], id=6)
+  event: token = trace(token0, enabled, format="VALUE {{:u}}", data_operands=[n], id=7)
+  ret x: bits[1] = param(name=x, id=1)
+}}
+IR
+"#
+            ),
+        )?;
+        std::fs::set_permissions(&converter, std::fs::Permissions::from_mode(0o755))?;
+        let case = audit_contracts::generate_v2(&[5, 2])?;
+        let result = check_audit(case, &converter, xlsynth::default_dslx_stdlib_path());
+        if correct {
+            assert!(matches!(result, Ok(EquivResult::Proved)), "{result:?}");
+        } else {
+            assert!(
+                matches!(result, Err(CheckFailure::Disproved(_))),
+                "{result:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn secondary_dso_failure_preserves_cli_signature_finding() -> Result<(), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;

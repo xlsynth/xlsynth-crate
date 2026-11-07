@@ -4,6 +4,7 @@
 
 pub mod aggregate_flow;
 pub mod aggregate_match;
+mod aggregate_method_contracts;
 pub mod array_fragment;
 pub mod ast;
 pub mod audit_contracts;
@@ -17,6 +18,8 @@ pub mod imported_const;
 pub mod imported_struct;
 pub mod map_fragment;
 pub mod mission_expr;
+mod nominal_contracts;
+mod observable_value_contracts;
 mod observer_contracts;
 pub mod range_match;
 mod scope_contracts;

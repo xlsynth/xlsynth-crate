@@ -201,7 +201,7 @@ mod tests {
         let (case, count) = match generate(bytes)? {
             AuditCase::Semantic(case) => (case, None),
             AuditCase::Traces { case, expected } => (case, Some(expected)),
-            AuditCase::ConstexprFailure { .. } => return Err("unexpected acceptance case".into()),
+            _ => return Err("unexpected observer case".into()),
         };
         assert_eq!(count, traces);
         let reference = IrPackage::parse_ir(&case.expected_ir, None)?;
