@@ -221,7 +221,7 @@ fn read_input_samples(matches: &ArgMatches, gate_fn: &GateFn) -> Result<Vec<IrVa
 
 fn write_toggle_activity_json(
     path: &str,
-    activity: &count_toggles::ToggleActivityStats,
+    activity: &count_toggles::ToggleActivityWithMffcStats,
 ) -> Result<(), String> {
     let file = std::fs::File::create(path)
         .map_err(|e| format!("failed to create --toggle-output-json {}: {}", path, e))?;
@@ -283,7 +283,7 @@ pub fn handle_aig_eval(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     }
 
     if let Some(toggle_output_json) = matches.get_one::<String>("toggle_output_json") {
-        let activity = count_toggles::count_toggle_activity(&gate_fn, &batch_inputs);
+        let activity = count_toggles::count_toggle_activity_with_mffc(&gate_fn, &batch_inputs);
         write_toggle_activity_json(toggle_output_json, &activity).unwrap_or_else(|e| {
             eprintln!("aig-eval error: {e}");
             std::process::exit(1);
