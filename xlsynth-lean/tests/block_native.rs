@@ -98,6 +98,50 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_counter_reset_polarities() {
+    let source = r#"
+block counter(clk, rst) -> u8 {
+    reg count: u8 = 3;
+    count := count + u8:1;
+    count
+}
+"#;
+    for active_low in [true, false] {
+        let reset = xlsynth_bx::ResetBehavior {
+            asynchronous: false,
+            active_low,
+        };
+        let mut bundle = compile_bx(
+            source,
+            xlsynth_bx::empty_package("example"),
+            reset,
+            &Default::default(),
+        )
+        .unwrap()
+        .emit_readable(None)
+        .unwrap();
+        let asserted = !active_low;
+        let released = active_low;
+        let client = format!(
+            r#"
+import ReadableCorrespondence
+open XlsReadable
+#guard (step {{count := 7}} {{rst := {asserted}}}).count == 3
+#guard (step {{count := 7}} {{rst := {released}}}).count == 8
+#guard observe {{count := 7}} {{rst := {asserted}}} == 7
+#guard observe {{count := 7}} {{rst := {released}}} == 7
+"#
+        );
+        bundle.files.push(("PublicInterface.lean".into(), client));
+        check_bundle(
+            bundle,
+            &format!("counter with reset active_low={active_low}"),
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_positional_outputs_and_simultaneous_registers() {
     let source = r#"
 struct InputPacket { sample: (bool, u8) }
