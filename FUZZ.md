@@ -195,6 +195,9 @@ properties alongside passing controls. It runs the standalone converter and
 parses its output with the C++ IR parser. Bitwuzla compares the return value
 and assertion failure condition against independently constructed IR. A nested
 guard case also checks the AND-node count after the semantic proof succeeds.
+The `audit-v2` correctness grammar exercises cross-module type specialization,
+derived bit packing, mapped instance methods, assertion labels, and signed
+trace text. Its trace oracle checks the messages produced by the CLI's IR.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

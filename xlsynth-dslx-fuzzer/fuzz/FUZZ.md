@@ -46,9 +46,30 @@ The grammar also embeds the existing focused families. Keep its corpus in a
 separate directory and set the same variable when replaying a retained input.
 Leaving it unset selects the original eight-family encoding.
 
+Set `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v2` to fuzz correctness across these
+additional DSLX constructions:
+
+- Independently declared types in two imported modules. The grammar varies
+  type names, field layouts, and call order. Standard-library enumeration
+  uses default DSLX. The shared projection and method-dispatch cases enable
+  `#![feature(generics)]` in the module that defines the generic helper.
+- Derived `ToBits` on nested aggregate fields, and instance methods supplied
+  to `map` in different expression positions. The expected IR packs the
+  source values or computes the mapped result independently.
+- Ordinary and formatted assertion labels, and signed trace operands with
+  default or explicit decimal formatting. The trace oracle compares the JIT
+  messages with independently formatted expected text as well as proving the
+  returned value.
+
+Keep an audit-v2 corpus separate and select the same grammar for replay.
+Prefix an audit-v1 input with one zero byte to reuse its program and semantic
+checks in audit-v2. The v2 grammar checks correctness without a graph-size
+limit.
+
 The target proves values and assertion conditions against independent IR and
-compares the exact top signature. Trace cases additionally run the standalone
-CLI's emitted IR through the JIT at Boolean input true and count events.
+compares the exact top signature. Trace-count cases run the standalone CLI's
+emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
+cases compare the exact message at both Boolean inputs.
 The effectful struct-base and array-size families use DSLX bytecode's observed
 evaluation behavior as the reference. A discrepancy in those families
 identifies a difference between execution paths. For failing module

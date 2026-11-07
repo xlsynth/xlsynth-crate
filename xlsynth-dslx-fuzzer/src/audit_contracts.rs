@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Version-one converter audit grammar, with distinct semantic, event and
-//! compile-time acceptance oracles.
+//! Versioned converter audit grammars with semantic, event and compile-time
+//! acceptance oracles.
 
 use crate::converter_contracts::{self, ContractCase};
-use crate::{SourceModule, builtin_contracts, observer_contracts, scope_contracts};
+use crate::{
+    SourceModule, aggregate_method_contracts, builtin_contracts, nominal_contracts,
+    observable_value_contracts, observer_contracts, scope_contracts,
+};
 
 /// The observable property of a generated program under the standalone
 /// converter.
@@ -16,6 +19,11 @@ pub enum AuditCase {
         case: ContractCase,
         expected: usize,
     },
+    /// Exactly one trace message for each Boolean input, in false, true order.
+    TraceMessages {
+        case: ContractCase,
+        expected: [String; 2],
+    },
     /// A failing assertion in a module constant must prevent conversion.
     ConstexprFailure {
         modules: Vec<SourceModule>,
@@ -26,7 +34,9 @@ impl AuditCase {
     /// Stable identifier used to retain replay bytes per property.
     pub fn family(&self) -> &'static str {
         match self {
-            Self::Semantic(case) | Self::Traces { case, .. } => case.family,
+            Self::Semantic(case) | Self::Traces { case, .. } | Self::TraceMessages { case, .. } => {
+                case.family
+            }
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
         }
     }
@@ -42,6 +52,27 @@ pub fn generate(data: &[u8]) -> Result<AuditCase, String> {
         2 => observer_contracts::generate(options),
         3 => Ok(constexpr_block(options)),
         _ => converter_contracts::generate(options).map(AuditCase::Semantic),
+    }
+}
+
+/// Decodes audit-v2 correctness cases. A leading zero embeds an audit-v1
+/// sample and checks its semantics without imposing a graph-size limit.
+pub fn generate_v2(data: &[u8]) -> Result<AuditCase, String> {
+    let (&family, options) = data.split_first().unwrap_or((&0, &[]));
+    match family % 7 {
+        0 => {
+            let mut case = generate(options)?;
+            if let AuditCase::Semantic(contract) = &mut case {
+                contract.max_and_nodes = None;
+            }
+            Ok(case)
+        }
+        1 => nominal_contracts::enumerate(options).map(AuditCase::Semantic),
+        2 => nominal_contracts::projection(options).map(AuditCase::Semantic),
+        3 => aggregate_method_contracts::derive_to_bits(options).map(AuditCase::Semantic),
+        4 => aggregate_method_contracts::method_map(options).map(AuditCase::Semantic),
+        5 => observable_value_contracts::trace_message(options),
+        _ => observable_value_contracts::assertion_label(options),
     }
 }
 
@@ -87,5 +118,25 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
                 text: source,
             }],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AuditCase, generate, generate_v2};
+
+    #[test]
+    fn embedded_guard_keeps_its_program_and_only_checks_correctness() -> Result<(), String> {
+        let AuditCase::Semantic(old) = generate(&[4, 5, 1])? else {
+            return Err("expected a semantic guard contract".into());
+        };
+        let AuditCase::Semantic(new) = generate_v2(&[0, 4, 5, 1])? else {
+            return Err("expected an embedded semantic guard contract".into());
+        };
+        assert_eq!(old.modules, new.modules);
+        assert_eq!(old.expected_ir, new.expected_ir);
+        assert!(old.max_and_nodes.is_some());
+        assert_eq!(new.max_and_nodes, None);
+        Ok(())
     }
 }
