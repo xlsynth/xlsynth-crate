@@ -10,7 +10,7 @@ use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, Expr, ExternBlock, ExternFn, Function, MatchArm, Module, Param, Stmt,
-    StructDef, Type, WidthSliceType,
+    StructDef, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -1394,331 +1394,407 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// type. The enclosing group checks its complete prefix of unsized
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
+        // Keep the recursive dispatch frame small for expressions at the depth
+        // limit.
         let (ty, kind) = match expr {
             Expr::Scope { bindings, result } => {
                 return self.value_scope(bindings, result, expected);
             }
             Expr::UnrollFor(fold) => return self.unroll(fold, expected, false),
-            Expr::Name(name)
-                if name == "_"
-                    && (self.kind == BodyKind::Function || !self.iteration_path.is_empty()) =>
-            {
-                return Err("cannot read the wildcard binding '_'".into());
-            }
-            Expr::Name(name) if self.loop_values.contains_key(name) => {
-                let value = self.loop_values[name].clone();
-                (value.ty, value.kind)
-            }
-            Expr::Name(name) if self.function_values.contains_key(name) => {
-                let value = self.function_values[name].clone();
-                (value.ty, value.kind)
-            }
-            Expr::Name(name) => {
-                let ty = self
-                    .values
-                    .get(name)
-                    .ok_or_else(|| format!("unknown value '{name}'"))?;
-                (ty.clone(), K::Name(name.clone()))
-            }
-            Expr::Bool(value) => (Type::Bool, K::Literal(IrValue::bool(*value))),
-            Expr::Zero(ty) => {
-                let ty = self.source_type(ty)?;
-                if self.zero_calls_function()? {
-                    self.function_call("zero!", &[])?
-                } else {
-                    let layout = crate::layout::Layouts::new(&self.structs.definitions)
-                        .lower(&ty)
-                        .map_err(|e| e.to_string())?;
-                    (ty, K::Literal(zero_ir_value_for_type(&layout)))
-                }
-            }
-            Expr::Literal { ty, text } => {
-                // An explicitly typed DSLX negative literal negates a
-                // width-checked magnitude. For example, s3:-5 represents 3.
-                let magnitude = if ty.is_some() && self.dslx_widths().is_some() {
-                    text.strip_prefix('-')
-                } else {
-                    None
-                };
-                let ty = ty
-                    .as_ref()
-                    .or(expected)
-                    .ok_or_else(|| format!("literal '{text}' requires a concrete bit type"))?;
-                let (signed, width) =
-                    bits(ty).ok_or_else(|| format!("integer literal cannot have type {ty}"))?;
-                self.structs.validate_type(ty)?;
-                if !signed && text.starts_with('-') {
-                    return Err(format!("negative literal '{text}' has unsigned type {ty}"));
-                }
-                let digits = magnitude.unwrap_or(text);
-                let value = IrValue::parse_typed(&format!("bits[{width}]:{digits}"))
-                    .map_err(|e| format!("invalid literal '{ty}:{text}': {e}"))?;
-                let value = if magnitude.is_some() {
-                    IrValue::Bits(value.to_bits().map_err(|e| e.to_string())?.negate())
-                } else {
-                    value
-                };
-                // Like DSLX, hexadecimal and binary literals can spell a signed
-                // bit pattern directly, e.g. s8:0xff represents -1.
-                if signed
-                    && !text.starts_with('-')
-                    && !text.starts_with("0x")
-                    && !text.starts_with("0b")
-                    && value.as_bits().map_err(|e| e.to_string())?.is_negative()
-                {
-                    return Err(format!("literal '{text}' does not fit in {ty}"));
-                }
-                (ty.clone(), K::Literal(value))
-            }
-            Expr::Tuple(items) => {
-                let hints = match expected {
-                    Some(Type::Tuple(ts)) if ts.len() == items.len() => Some(ts),
-                    _ => None,
-                };
-                let values = items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, value)| match hints {
-                        Some(types) => self.expr(value, Some(&types[i])),
-                        None => self.inferred_expr(value),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                (
-                    Type::Tuple(values.iter().map(|v| v.ty.clone()).collect()),
-                    K::Tuple(values),
-                )
-            }
-            Expr::Array(items) => {
-                let hint = match expected {
-                    Some(Type::Array { element, size }) => {
-                        if *size != items.len() {
-                            return Err(format!(
-                                "expected array length {size}, got {}",
-                                items.len()
-                            ));
-                        }
-                        Some(element.as_ref())
-                    }
-                    Some(other) => return Err(format!("expected {other}, got an array")),
-                    None => None,
-                };
-                if !items.is_empty() {
-                    let values = match hint {
-                        Some(element) => items
-                            .iter()
-                            .map(|item| self.expr(item, Some(element)))
-                            .collect::<Result<Vec<_>, _>>()?,
-                        None => self.unify_values(&items.iter().collect::<Vec<_>>())?,
-                    };
-                    (
-                        Type::Array {
-                            element: Box::new(values[0].ty.clone()),
-                            size: items.len(),
-                        },
-                        K::Array(values),
-                    )
-                } else {
-                    let element = hint
-                        .ok_or_else(|| "empty array literal requires an array type".to_owned())?;
-                    let mut layouts = crate::layout::Layouts::new(&self.structs.definitions);
-                    let element_ir = layouts.lower(element).map_err(|e| e.to_string())?;
-                    let empty =
-                        IrValue::make_array_typed(element_ir, &[]).map_err(|e| e.to_string())?;
-                    (
-                        Type::Array {
-                            element: Box::new(element.clone()),
-                            size: 0,
-                        },
-                        K::Literal(empty),
-                    )
-                }
-            }
-            Expr::Index { value, index } => {
-                let array = self.expr(value, None)?;
-                let Type::Array { element, size } = &array.ty else {
-                    return Err(format!("indexing requires an array, got {}", array.ty));
-                };
-                if *size == 0 {
-                    return Err("cannot index an empty array".into());
-                }
-                let index = self.unsigned_index(index, Some(32))?;
-                if index.has_constant_inputs(&self.constexpr_names)
-                    && let Some(value) = index.constant(&self.constants)
-                    && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
-                        .is_none_or(|i| i >= *size)
-                {
-                    return Err(format!(
-                        "constant index {value} out of bounds for {}",
-                        array.ty
-                    ));
-                }
-                (
-                    element.as_ref().clone(),
-                    K::Index {
-                        value: Box::new(array),
-                        index: Box::new(index),
-                    },
-                )
-            }
+            Expr::Name(name) => self.named_value(name),
+            Expr::Bool(value) => Ok((Type::Bool, K::Literal(IrValue::bool(*value)))),
+            Expr::Zero(ty) => self.zero_value(ty),
+            Expr::Literal { ty, text } => self.bit_literal(ty.as_ref(), text, expected),
+            Expr::Tuple(items) => self.tuple_literal(items, expected),
+            Expr::Array(items) => self.array_literal(items, expected),
+            Expr::Index { value, index } => self.array_index(value, index),
             Expr::WidthSlice {
                 value,
                 start,
                 width,
-            } => {
-                let value = self.inferred_expr(value)?;
-                let Some((false, source_width)) = bits(&value.ty) else {
-                    return Err(format!(
-                        "width slice requires an unsigned bit value, got {}",
-                        value.ty
-                    ));
-                };
-                let ty = self.slice_result_type(width)?;
-                let Some((_, result_width)) = bits(&ty) else {
-                    return Err(format!("width slice requires a bit result type, got {ty}"));
-                };
-                if result_width > source_width {
-                    return Err(format!(
-                        "slice width {result_width} exceeds input width {source_width}"
-                    ));
-                }
-                let start = self.unsigned_index(start, Some(source_width))?;
-                (
-                    ty,
-                    K::WidthSlice {
-                        value: Box::new(value),
-                        start: Box::new(start),
-                    },
-                )
-            }
-            Expr::Struct { name, fields } => {
-                let ty = self.source_type(&Type::Named(name.clone()))?;
-                let Type::Named(canonical) = &ty else {
-                    return Err(format!("'{name}' is not a struct"));
-                };
-                let members = self.structs.definition(canonical)?.fields.clone();
-                let mut supplied = BTreeMap::new();
-                for (field, value) in fields {
-                    if supplied.insert(field.as_str(), value).is_some() {
-                        return Err(format!("duplicate field '{name}.{field}'"));
-                    }
-                }
-                let mut values = Vec::new();
-                for p in &members {
-                    let v = supplied
-                        .remove(p.name.as_str())
-                        .ok_or_else(|| format!("missing field '{name}.{}'", p.name))?;
-                    values.push(
-                        self.expr(v, Some(&p.ty))
-                            .map_err(|e| format!("field '{name}.{}': {e}", p.name))?,
-                    );
-                }
-                if let Some(field) = supplied.keys().next() {
-                    return Err(format!("unknown field '{name}.{field}'"));
-                }
-                (ty, K::Tuple(values))
-            }
-            Expr::Field { value, name } => {
-                if let Expr::Name(instance) = value.as_ref()
-                    && !self.loop_values.contains_key(instance)
-                    && let Some(child) = self.instances.get(instance)
-                {
-                    let p = child
-                        .outputs
-                        .iter()
-                        .find(|p| p.name == *name)
-                        .ok_or_else(|| format!("'{instance}.{name}' is not an output"))?;
-                    (
-                        p.ty.clone(),
-                        K::InstanceOutput {
-                            instance: instance.clone(),
-                            port: name.clone(),
-                        },
-                    )
-                } else {
-                    let v = self.expr(value, None)?;
-                    let (index, ty) = match &v.ty {
-                        Type::Tuple(items) => {
-                            let index: usize = name
-                                .parse()
-                                .map_err(|_| format!("invalid tuple field '{name}'"))?;
-                            (
-                                index,
-                                items
-                                    .get(index)
-                                    .ok_or_else(|| format!("tuple field {index} out of bounds"))?
-                                    .clone(),
-                            )
-                        }
-                        Type::Named(s) => {
-                            let fields = &self.structs.definition(s)?.fields;
-                            let (i, p) = fields
-                                .iter()
-                                .enumerate()
-                                .find(|(_, p)| p.name == *name)
-                                .ok_or_else(|| format!("unknown field '{s}.{name}'"))?;
-                            (i, p.ty.clone())
-                        }
-                        other => return Err(format!("cannot project field '{name}' from {other}")),
-                    };
-                    (
-                        ty,
-                        K::TupleIndex {
-                            value: Box::new(v),
-                            index,
-                        },
-                    )
-                }
-            }
-            Expr::Call { name, args } => self.function_call(name, args)?,
+            } => self.width_slice(value, start, width),
+            Expr::Struct { name, fields } => self.struct_literal(name, fields),
+            Expr::Field { value, name } => self.project_field(value, name),
+            Expr::Call { name, args } => self.function_call(name, args),
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
                 let results: Vec<_> = arms.iter().map(|arm| &arm.value).collect();
                 let values = checker.check_results(&results, expected)?;
                 let value = selector.with_values(&mut values.into_iter());
                 Ok((value.ty, value.kind))
-            })?,
-            Expr::Cast { value, ty } => {
-                self.structs.validate_type(ty)?;
-                let v = self.inferred_expr(value)?;
-                if bits(&v.ty).is_none() || bits(ty).is_none() {
-                    return Err(format!("cast from {} to {ty} requires bit types", v.ty));
-                }
-                (ty.clone(), K::Cast { value: Box::new(v) })
-            }
+            }),
+            Expr::Cast { value, ty } => self.bit_cast(value, ty),
             Expr::If {
                 condition,
                 then_value,
                 else_value,
-            } => {
-                let cond = self.expr(condition, Some(&Type::Bool))?;
-                let [t, f] = self
-                    .check_results(&[then_value, else_value], expected)?
-                    .try_into()
-                    .expect("two checked branches");
-                (
-                    t.ty.clone(),
-                    K::If {
-                        condition: Box::new(cond),
-                        then_value: Box::new(t),
-                        else_value: Box::new(f),
-                    },
-                )
-            }
-            Expr::Unary { op, value } => {
-                let v = self.expr_in_group(value, expected)?;
-                if bits(&v.ty).is_none() {
-                    return Err(format!("invalid unary '{op}' for {}", v.ty));
-                }
-                (
-                    v.ty.clone(),
-                    K::Unary {
-                        op: *op,
-                        value: Box::new(v),
-                    },
-                )
-            }
-            Expr::Binary { op, left, right } => self.binary(*op, left, right, expected)?,
+            } => self.conditional(condition, then_value, else_value, expected),
+            Expr::Unary { op, value } => self.unary(*op, value, expected),
+            Expr::Binary { op, left, right } => self.binary(*op, left, right, expected),
+        }?;
+        self.finish_expr(expr, expected, ty, kind)
+    }
+
+    /// Look up a lexical value before consulting the block interface.
+    fn named_value(&self, name: &str) -> Result<(Type, K), String> {
+        if name == "_" && (self.kind == BodyKind::Function || !self.iteration_path.is_empty()) {
+            return Err("cannot read the wildcard binding '_'".into());
+        }
+        if let Some(value) = self
+            .loop_values
+            .get(name)
+            .or_else(|| self.function_values.get(name))
+        {
+            return Ok((value.ty.clone(), value.kind.clone()));
+        }
+        let ty = self
+            .values
+            .get(name)
+            .ok_or_else(|| format!("unknown value '{name}'"))?;
+        Ok((ty.clone(), K::Name(name.to_owned())))
+    }
+
+    /// Resolve zero! to its local function or construct the intrinsic zero
+    /// value.
+    fn zero_value(&mut self, ty: &Type) -> Result<(Type, K), String> {
+        let ty = self.source_type(ty)?;
+        if self.zero_calls_function()? {
+            self.function_call("zero!", &[])
+        } else {
+            let layout = crate::layout::Layouts::new(&self.structs.definitions)
+                .lower(&ty)
+                .map_err(|e| e.to_string())?;
+            Ok((ty, K::Literal(zero_ir_value_for_type(&layout))))
+        }
+    }
+
+    /// Check a bit literal at its annotated or inferred width.
+    fn bit_literal(
+        &mut self,
+        annotation: Option<&Type>,
+        text: &str,
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
+        // An explicitly typed DSLX negative literal negates a
+        // width-checked magnitude. For example, s3:-5 represents 3.
+        let magnitude = if annotation.is_some() && self.dslx_widths().is_some() {
+            text.strip_prefix('-')
+        } else {
+            None
         };
+        let ty = annotation
+            .or(expected)
+            .ok_or_else(|| format!("literal '{text}' requires a concrete bit type"))?;
+        let (signed, width) =
+            bits(ty).ok_or_else(|| format!("integer literal cannot have type {ty}"))?;
+        self.structs.validate_type(ty)?;
+        if !signed && text.starts_with('-') {
+            return Err(format!("negative literal '{text}' has unsigned type {ty}"));
+        }
+        let digits = magnitude.unwrap_or(text);
+        let value = IrValue::parse_typed(&format!("bits[{width}]:{digits}"))
+            .map_err(|e| format!("invalid literal '{ty}:{text}': {e}"))?;
+        let value = if magnitude.is_some() {
+            IrValue::Bits(value.to_bits().map_err(|e| e.to_string())?.negate())
+        } else {
+            value
+        };
+        // Like DSLX, hexadecimal and binary literals can spell a signed
+        // bit pattern directly, e.g. s8:0xff represents -1.
+        if signed
+            && !text.starts_with('-')
+            && !text.starts_with("0x")
+            && !text.starts_with("0b")
+            && value.as_bits().map_err(|e| e.to_string())?.is_negative()
+        {
+            return Err(format!("literal '{text}' does not fit in {ty}"));
+        }
+        Ok((ty.clone(), K::Literal(value)))
+    }
+
+    /// Check tuple fields against their respective contextual types.
+    fn tuple_literal(
+        &mut self,
+        items: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
+        let hints = match expected {
+            Some(Type::Tuple(ts)) if ts.len() == items.len() => Some(ts),
+            _ => None,
+        };
+        let values = items
+            .iter()
+            .enumerate()
+            .map(|(i, value)| match hints {
+                Some(types) => self.expr(value, Some(&types[i])),
+                None => self.inferred_expr(value),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            Type::Tuple(values.iter().map(|v| v.ty.clone()).collect()),
+            K::Tuple(values),
+        ))
+    }
+
+    /// Infer a common element type and preserve the type of an empty array.
+    fn array_literal(
+        &mut self,
+        items: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
+        let hint = match expected {
+            Some(Type::Array { element, size }) => {
+                if *size != items.len() {
+                    return Err(format!("expected array length {size}, got {}", items.len()));
+                }
+                Some(element.as_ref())
+            }
+            Some(other) => return Err(format!("expected {other}, got an array")),
+            None => None,
+        };
+        Ok(if !items.is_empty() {
+            let values = match hint {
+                Some(element) => items
+                    .iter()
+                    .map(|item| self.expr(item, Some(element)))
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => self.unify_values(&items.iter().collect::<Vec<_>>())?,
+            };
+            (
+                Type::Array {
+                    element: Box::new(values[0].ty.clone()),
+                    size: items.len(),
+                },
+                K::Array(values),
+            )
+        } else {
+            let element =
+                hint.ok_or_else(|| "empty array literal requires an array type".to_owned())?;
+            let mut layouts = crate::layout::Layouts::new(&self.structs.definitions);
+            let element_ir = layouts.lower(element).map_err(|e| e.to_string())?;
+            let empty = IrValue::make_array_typed(element_ir, &[]).map_err(|e| e.to_string())?;
+            (
+                Type::Array {
+                    element: Box::new(element.clone()),
+                    size: 0,
+                },
+                K::Literal(empty),
+            )
+        })
+    }
+
+    /// Check the index against the array type and any compile-time bounds.
+    fn array_index(&mut self, value: &Expr, index: &Expr) -> Result<(Type, K), String> {
+        let array = self.expr(value, None)?;
+        let Type::Array { element, size } = &array.ty else {
+            return Err(format!("indexing requires an array, got {}", array.ty));
+        };
+        if *size == 0 {
+            return Err("cannot index an empty array".into());
+        }
+        let index = self.unsigned_index(index, Some(32))?;
+        if index.has_constant_inputs(&self.constexpr_names)
+            && let Some(value) = index.constant(&self.constants)
+            && ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+                .is_none_or(|i| i >= *size)
+        {
+            return Err(format!(
+                "constant index {value} out of bounds for {}",
+                array.ty
+            ));
+        }
+        Ok((
+            element.as_ref().clone(),
+            K::Index {
+                value: Box::new(array),
+                index: Box::new(index),
+            },
+        ))
+    }
+
+    /// Check the bit slice and resolve its signedness and width.
+    fn width_slice(
+        &mut self,
+        value: &Expr,
+        start: &Expr,
+        width: &WidthSliceType,
+    ) -> Result<(Type, K), String> {
+        let value = self.inferred_expr(value)?;
+        let Some((false, source_width)) = bits(&value.ty) else {
+            return Err(format!(
+                "width slice requires an unsigned bit value, got {}",
+                value.ty
+            ));
+        };
+        let ty = self.slice_result_type(width)?;
+        let Some((_, result_width)) = bits(&ty) else {
+            return Err(format!("width slice requires a bit result type, got {ty}"));
+        };
+        if result_width > source_width {
+            return Err(format!(
+                "slice width {result_width} exceeds input width {source_width}"
+            ));
+        }
+        let start = self.unsigned_index(start, Some(source_width))?;
+        Ok((
+            ty,
+            K::WidthSlice {
+                value: Box::new(value),
+                start: Box::new(start),
+            },
+        ))
+    }
+
+    /// Resolve the struct and check its fields in declaration order.
+    fn struct_literal(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+    ) -> Result<(Type, K), String> {
+        let ty = self.source_type(&Type::Named(name.to_owned()))?;
+        let Type::Named(canonical) = &ty else {
+            return Err(format!("'{name}' is not a struct"));
+        };
+        let members = self.structs.definition(canonical)?.fields.clone();
+        let mut supplied = BTreeMap::new();
+        for (field, value) in fields {
+            if supplied.insert(field.as_str(), value).is_some() {
+                return Err(format!("duplicate field '{name}.{field}'"));
+            }
+        }
+        let mut values = Vec::new();
+        for p in &members {
+            let v = supplied
+                .remove(p.name.as_str())
+                .ok_or_else(|| format!("missing field '{name}.{}'", p.name))?;
+            values.push(
+                self.expr(v, Some(&p.ty))
+                    .map_err(|e| format!("field '{name}.{}': {e}", p.name))?,
+            );
+        }
+        if let Some(field) = supplied.keys().next() {
+            return Err(format!("unknown field '{name}.{field}'"));
+        }
+        Ok((ty, K::Tuple(values)))
+    }
+
+    /// Resolve an instance output, tuple element, or named struct field.
+    fn project_field(&mut self, value: &Expr, name: &str) -> Result<(Type, K), String> {
+        Ok(
+            if let Expr::Name(instance) = value
+                && !self.loop_values.contains_key(instance)
+                && let Some(child) = self.instances.get(instance)
+            {
+                let p = child
+                    .outputs
+                    .iter()
+                    .find(|p| p.name == name)
+                    .ok_or_else(|| format!("'{instance}.{name}' is not an output"))?;
+                (
+                    p.ty.clone(),
+                    K::InstanceOutput {
+                        instance: instance.clone(),
+                        port: name.to_owned(),
+                    },
+                )
+            } else {
+                let v = self.expr(value, None)?;
+                let (index, ty) = match &v.ty {
+                    Type::Tuple(items) => {
+                        let index: usize = name
+                            .parse()
+                            .map_err(|_| format!("invalid tuple field '{name}'"))?;
+                        (
+                            index,
+                            items
+                                .get(index)
+                                .ok_or_else(|| format!("tuple field {index} out of bounds"))?
+                                .clone(),
+                        )
+                    }
+                    Type::Named(s) => {
+                        let fields = &self.structs.definition(s)?.fields;
+                        let (i, p) = fields
+                            .iter()
+                            .enumerate()
+                            .find(|(_, p)| p.name == name)
+                            .ok_or_else(|| format!("unknown field '{s}.{name}'"))?;
+                        (i, p.ty.clone())
+                    }
+                    other => return Err(format!("cannot project field '{name}' from {other}")),
+                };
+                (
+                    ty,
+                    K::TupleIndex {
+                        value: Box::new(v),
+                        index,
+                    },
+                )
+            },
+        )
+    }
+
+    /// Check a cast between two bit types.
+    fn bit_cast(&mut self, value: &Expr, ty: &Type) -> Result<(Type, K), String> {
+        self.structs.validate_type(ty)?;
+        let v = self.inferred_expr(value)?;
+        if bits(&v.ty).is_none() || bits(ty).is_none() {
+            return Err(format!("cast from {} to {ty} requires bit types", v.ty));
+        }
+        Ok((ty.clone(), K::Cast { value: Box::new(v) }))
+    }
+
+    /// Check a boolean condition and infer its branch results together.
+    fn conditional(
+        &mut self,
+        condition: &Expr,
+        then_value: &Expr,
+        else_value: &Expr,
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
+        let cond = self.expr(condition, Some(&Type::Bool))?;
+        let [t, f] = self
+            .check_results(&[then_value, else_value], expected)?
+            .try_into()
+            .expect("two checked branches");
+        Ok((
+            t.ty.clone(),
+            K::If {
+                condition: Box::new(cond),
+                then_value: Box::new(t),
+                else_value: Box::new(f),
+            },
+        ))
+    }
+
+    /// Check a unary bit operation in its operand context.
+    fn unary(
+        &mut self,
+        op: UnaryOp,
+        value: &Expr,
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), String> {
+        let v = self.expr_in_group(value, expected)?;
+        if bits(&v.ty).is_none() {
+            return Err(format!("invalid unary '{op}' for {}", v.ty));
+        }
+        Ok((
+            v.ty.clone(),
+            K::Unary {
+                op,
+                value: Box::new(v),
+            },
+        ))
+    }
+
+    /// Check the result against its context after recursive operands return.
+    fn finish_expr(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+        ty: Type,
+        kind: K,
+    ) -> Result<TypedExpr, String> {
         let dslx_projection = (self.kind == BodyKind::Function || self.dslx_value_context)
             && matches!(
                 expr,
