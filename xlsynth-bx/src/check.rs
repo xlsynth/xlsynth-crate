@@ -13,7 +13,7 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, LetBinding, MatchArm,
-    MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, WidthSliceType,
+    MatchPattern, Module, OutputCycles, Param, Stmt, StructDef, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -1619,6 +1619,258 @@ pub(crate) fn check_sources(
     Ok(checked)
 }
 
+/// A known cycle or a value available at every cycle.
+#[derive(Clone, Copy)]
+enum Cycle {
+    At(u64),
+    Independent,
+}
+
+/// The expression that supplies a name and the cycles added by its driver.
+struct TimingDriver<'a> {
+    value: &'a TypedExpr,
+    cycle_offset: u64,
+}
+
+/// Follow let bindings back to their source expression and count the hops.
+fn follow_timing_lets<'a>(
+    mut expr: &'a TypedExpr,
+    drivers: &BTreeMap<&str, TimingDriver<'a>>,
+) -> (&'a TypedExpr, usize) {
+    let mut hops = 0;
+    // Each let leads backward at the same cycle.
+    while let K::Name(name) = &expr.kind
+        && let Some(driver) = drivers.get(name.as_str())
+        && driver.cycle_offset == 0
+    {
+        expr = driver.value;
+        hops += 1;
+    }
+    (expr, hops)
+}
+
+/// Entry point for timing validation of an annotated block.
+fn check_output_cycles(
+    block: &CheckedBlock,
+    ports: &[Param],
+    port_names: &BTreeSet<String>,
+) -> Result<(), String> {
+    let Some(expected) = &block.output_cycles else {
+        return Ok(());
+    };
+    let mut cycles: BTreeMap<&str, Cycle> = block
+        .params
+        .iter()
+        .map(|param| {
+            let cycle = block.input_cycles.get(&param.name).copied().unwrap_or(0);
+            (param.name.as_str(), Cycle::At(cycle))
+        })
+        .collect();
+    let mut drivers = BTreeMap::new();
+    for stmt in &block.statements {
+        let (name, value, cycle_offset) = match stmt {
+            CheckedStmt::Let { name, value } => (name, value, 0),
+            CheckedStmt::Write { name, value } => (name, value, 1),
+            // Timing inference currently follows unconditional value drivers.
+            _ => continue,
+        };
+        drivers.insert(
+            name.as_str(),
+            TimingDriver {
+                value,
+                cycle_offset,
+            },
+        );
+    }
+
+    if let OutputCycles::ByPort(expected) = expected {
+        for port in expected.keys() {
+            if !port_names.contains(port) {
+                return Err(format!("unknown output port '{port}' in cycle annotation"));
+            }
+        }
+        for port in port_names {
+            if !expected.contains_key(port) {
+                return Err(format!("missing cycle annotation for output port '{port}'"));
+            }
+        }
+    }
+
+    let has_field_ports = matches!(&block.result, Type::Named(_) | Type::Tuple(_));
+    let (output, hops) = if has_field_ports {
+        follow_timing_lets(&block.output, &drivers)
+    } else {
+        (&block.output, 0)
+    };
+    let fields = match (&output.kind, expected) {
+        // `-> Ports @1 { Ports { saved: q, live: q } }` gives one
+        // expression per port, as does a tuple literal.
+        (K::Tuple(fields), _) => Some(fields.as_slice()),
+        (_, OutputCycles::Uniform(cycle)) => {
+            // `-> Ports @1 { p }` checks `p` as a whole when `p` is an input.
+            let actual = infer_expr_cycle(
+                &block.output,
+                &mut cycles,
+                &drivers,
+                &mut BTreeSet::new(),
+                0,
+            )?;
+            return check_inferred_cycle(actual, *cycle);
+        }
+        // `-> u8 @(out: 0) { x }` checks `x` as the single port. An array
+        // result also drives a single port.
+        (_, OutputCycles::ByPort(_)) if !has_field_ports => {
+            Some(std::slice::from_ref(&block.output))
+        }
+        (_, OutputCycles::ByPort(_)) => {
+            // `-> Ports @(saved: 2, live: 1) { p }` projects a field per port.
+            None
+        }
+    };
+    // Tuple members follow port declaration order.
+    for (index, port) in ports.iter().enumerate() {
+        let cycle = match expected {
+            OutputCycles::Uniform(cycle) => *cycle,
+            OutputCycles::ByPort(port_cycles) => port_cycles[&port.name],
+        };
+        let mut visiting = BTreeSet::new();
+        let inferred = match fields {
+            Some(fields) => {
+                infer_expr_cycle(&fields[index], &mut cycles, &drivers, &mut visiting, 0)
+            }
+            None => infer_field_cycle(output, index, &mut cycles, &drivers, &mut visiting, hops),
+        };
+        inferred
+            .and_then(|actual| check_inferred_cycle(actual, cycle))
+            .map_err(|e| format!("output '{}': {e}", port.name))?;
+    }
+    Ok(())
+}
+
+/// Compare the inferred output cycle with its declaration.
+fn check_inferred_cycle(actual: Option<Cycle>, expected: u64) -> Result<(), String> {
+    let actual = actual.ok_or("cannot infer output cycle for this expression")?;
+    if let Cycle::At(actual) = actual
+        && actual != expected
+    {
+        return Err(format!("expected cycle {expected}, got cycle {actual}"));
+    }
+    Ok(())
+}
+
+/// Infer a cycle by following expression operands and value drivers.
+fn infer_expr_cycle<'a>(
+    expr: &'a TypedExpr,
+    cycles: &mut BTreeMap<&'a str, Cycle>,
+    drivers: &BTreeMap<&str, TimingDriver<'a>>,
+    visiting: &mut BTreeSet<&'a str>,
+    depth: usize,
+) -> Result<Option<Cycle>, String> {
+    if depth > MAX_ELABORATION_DEPTH {
+        return Err(format!(
+            "timing dependency depth exceeds {MAX_ELABORATION_DEPTH}"
+        ));
+    }
+    let name = match &expr.kind {
+        K::Name(name) => name.as_str(),
+        K::Literal(_) => return Ok(Some(Cycle::Independent)),
+        K::Unary { value, .. } | K::Cast { value } => {
+            return infer_expr_cycle(value, cycles, drivers, visiting, depth + 1);
+        }
+        K::TupleIndex { value, index } => {
+            return infer_field_cycle(value, *index, cycles, drivers, visiting, depth + 1);
+        }
+        K::Binary { op, left, right } => {
+            let left = infer_expr_cycle(left, cycles, drivers, visiting, depth + 1)?;
+            let right = infer_expr_cycle(right, cycles, drivers, visiting, depth + 1)?;
+            let (Some(left), Some(right)) = (left, right) else {
+                return Ok(None);
+            };
+            let cycle = match (left, right) {
+                (Cycle::Independent, cycle) | (cycle, Cycle::Independent) => cycle,
+                (Cycle::At(left), Cycle::At(right)) if left == right => Cycle::At(left),
+                (Cycle::At(left), Cycle::At(right)) => {
+                    return Err(format!(
+                        "operator '{op}' combines cycle {left} with cycle {right}"
+                    ));
+                }
+            };
+            return Ok(Some(cycle));
+        }
+        _ => return Ok(None),
+    };
+    if let Some(&cycle) = cycles.get(name) {
+        return Ok(Some(cycle));
+    }
+    let Some(driver) = drivers.get(name) else {
+        return Ok(None);
+    };
+    if visiting.contains(name) {
+        return Err(format!("timing feedback through '{name}' is unsupported"));
+    }
+    visiting.insert(name);
+    let inferred = infer_expr_cycle(driver.value, cycles, drivers, visiting, depth + 1);
+    visiting.remove(name);
+
+    let Some(cycle) = apply_cycle_offset(inferred?, driver.cycle_offset, name)? else {
+        return Ok(None);
+    };
+    cycles.insert(name, cycle);
+    Ok(Some(cycle))
+}
+
+/// Infer the cycle of one field of an aggregate value.
+fn infer_field_cycle<'a>(
+    value: &'a TypedExpr,
+    index: usize,
+    cycles: &mut BTreeMap<&'a str, Cycle>,
+    drivers: &BTreeMap<&str, TimingDriver<'a>>,
+    visiting: &mut BTreeSet<&'a str>,
+    depth: usize,
+) -> Result<Option<Cycle>, String> {
+    let (aggregate, hops) = follow_timing_lets(value, drivers);
+    if let K::Tuple(fields) = &aggregate.kind {
+        return infer_expr_cycle(&fields[index], cycles, drivers, visiting, depth + hops + 1);
+    }
+    // A name with a driver after following lets is a register.
+    if let K::Name(name) = &aggregate.kind
+        && let Some(driver) = drivers.get(name.as_str())
+        && let K::Tuple(fields) = &driver.value.kind
+    {
+        let name = name.as_str();
+        if !visiting.insert(name) {
+            return Err(format!("timing feedback through '{name}' is unsupported"));
+        }
+        let inferred =
+            infer_expr_cycle(&fields[index], cycles, drivers, visiting, depth + hops + 2);
+        visiting.remove(name);
+        return apply_cycle_offset(inferred?, driver.cycle_offset, name);
+    }
+    // A whole-value cycle, such as on `p: Ports @1`, applies to every field.
+    infer_expr_cycle(value, cycles, drivers, visiting, depth)
+}
+
+/// Apply the cycles added by a driver to its inferred input cycle.
+fn apply_cycle_offset(
+    inferred: Option<Cycle>,
+    cycle_offset: u64,
+    name: &str,
+) -> Result<Option<Cycle>, String> {
+    Ok(match inferred {
+        Some(Cycle::At(cycle)) => {
+            let cycle = cycle
+                .checked_add(cycle_offset)
+                .ok_or_else(|| format!("cycle offset overflow at '{name}'"))?;
+            Some(Cycle::At(cycle))
+        }
+        Some(Cycle::Independent) if cycle_offset == 0 => Some(Cycle::Independent),
+        // A register may have a different value before the first capture.
+        // TODO: 2026-11-06 Decide whether `@N` covers the first post-reset
+        // sample or assumes the pipeline has warmed up.
+        Some(Cycle::Independent) | None => None,
+    })
+}
+
 /// Controls which declarations and bindings are available in a BX body.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BodyKind {
@@ -2122,10 +2374,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             clock: block.clock.clone(),
             reset: block.reset.clone(),
             params: interface.params.clone(),
+            input_cycles: block.input_cycles.clone(),
             result: interface.result.clone(),
+            output_cycles: block.output_cycles.clone(),
             statements: c.statements,
             output,
         };
+        check_output_cycles(&block, &interface.outputs, &c.outputs)?;
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -4316,6 +4571,268 @@ fn fold(seed: (u8, u8)) -> (u8, u8) {
         assert!(
             error.contains("iteration 0") && error.contains("function expansion limit"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn declared_output_cycle_must_match_the_inferred_cycle() {
+        let check_delay = |cycle| {
+            let source = format!("block b(clk, x: u8) -> u8 @{cycle} {{ reg q: u8; q := x; q }}");
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_delay(1).unwrap();
+        assert_eq!(
+            check_delay(0).unwrap_err(),
+            "block 'b': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn uniform_output_cycle_applies_to_each_field() {
+        let check_tap = |live| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block tap(clk, x: u8) -> Ports @1 {{
+    reg q: u8;
+    q := x;
+    Ports {{ saved: q, live: {live} }}
+}}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_tap("q").unwrap();
+        assert_eq!(
+            check_tap("x").unwrap_err(),
+            "block 'tap': output 'live': expected cycle 1, got cycle 0"
+        );
+    }
+
+    #[test]
+    fn uniform_output_cycle_can_check_an_aggregate_input_as_a_whole() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block pass(clk, p: Ports @1) -> Ports @1 { p }
+"#;
+        check_module(&parse_module(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn field_projection_inherits_the_aggregate_cycle() {
+        let check_pick = |cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block pick(clk, p: Ports @1) -> u8 @{cycle} {{ p.saved }}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_pick(1).unwrap();
+        assert_eq!(
+            check_pick(0).unwrap_err(),
+            "block 'pick': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn field_projection_follows_the_selected_initializer() {
+        let check_pick = |field, cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block pick(clk, x: u8) -> u8 @{cycle} {{
+    reg q: u8;
+    q := x;
+    let fields = Ports {{ saved: q, live: x }};
+    let p = fields;
+    p.{field}
+}}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_pick("saved", 1).unwrap();
+        check_pick("live", 0).unwrap();
+        assert_eq!(
+            check_pick("live", 1).unwrap_err(),
+            "block 'pick': expected cycle 1, got cycle 0"
+        );
+    }
+
+    #[test]
+    fn field_projection_adds_the_register_cycle() {
+        let check_pick = |saved| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
+    reg q: u8;
+    reg p: Ports;
+    q := x;
+    p := Ports {{ saved: {saved}, live: x }};
+    Ports {{ saved: p.saved, live: p.live }}
+}}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_pick("q").unwrap();
+        assert_eq!(
+            check_pick("p.saved").unwrap_err(),
+            "block 'pick': output 'saved': timing feedback through 'p' is unsupported"
+        );
+    }
+
+    #[test]
+    fn declared_output_cycles_match_fields_by_port_name() {
+        let check_tap = |saved_cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block tap(clk, x: u8) -> Ports @(live: 0, saved: {saved_cycle}) {{
+    reg q: u8;
+    q := x;
+    Ports {{ live: x, saved: q }}
+}}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_tap(1).unwrap();
+        assert_eq!(
+            check_tap(0).unwrap_err(),
+            "block 'tap': output 'saved': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn per_port_timing_follows_aggregate_let_bindings() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block tap(clk, x: u8) -> Ports @(saved: 1, live: 0) {
+    reg q: u8;
+    q := x;
+    let ports = Ports { saved: q, live: x };
+    let result = ports;
+    result
+}
+"#;
+        check_module(&parse_module(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn per_port_timing_projects_a_returned_register() {
+        let check_tap = |saved_cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block tap(clk, x: u8) -> Ports @(live: 1, saved: {saved_cycle}) {{
+    reg q: u8;
+    reg p: Ports;
+    q := x;
+    p := Ports {{ saved: q, live: x }};
+    p
+}}
+"#
+            );
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_tap(2).unwrap();
+        assert_eq!(
+            check_tap(1).unwrap_err(),
+            "block 'tap': output 'saved': expected cycle 1, got cycle 2"
+        );
+    }
+
+    #[test]
+    fn output_cycle_annotations_reject_unknown_ports() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block tap(clk, x: u8) -> Ports @(svaed: 1) {
+    Ports { saved: x, live: x }
+}
+"#;
+        let module = parse_module(source).unwrap();
+        assert_eq!(
+            check_module(&module).unwrap_err(),
+            "block 'tap': unknown output port 'svaed' in cycle annotation"
+        );
+    }
+
+    #[test]
+    fn output_cycle_annotations_require_every_port() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block tap(clk, x: u8) -> Ports @(saved: 1) {
+    Ports { saved: x, live: x }
+}
+"#;
+        let module = parse_module(source).unwrap();
+        assert_eq!(
+            check_module(&module).unwrap_err(),
+            "block 'tap': missing cycle annotation for output port 'live'"
+        );
+    }
+
+    #[test]
+    fn declared_input_cycles_seed_timing_inference() {
+        let source = r#"
+block b(clk, x: u8, y: u8 @1) -> u8 @1 {
+    reg q: u8;
+    q := x;
+    q + y
+}
+"#;
+        check_module(&parse_module(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn let_binding_inherits_the_cycle_of_its_initializer() {
+        let source = "block b(clk, x: u8) -> u8 @1 { reg q: u8; let saved = q; q := x; saved }";
+        check_module(&parse_module(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn binary_operands_must_agree_on_cycle() {
+        let check_sum = |sum| {
+            let source = format!("block b(clk, x: u8) -> u8 @1 {{ reg q: u8; q := x; {sum} }}");
+            check_module(&parse_module(&source).unwrap())
+        };
+        check_sum("q + q").unwrap();
+        check_sum("q + u8:1").unwrap();
+        check_sum("u8:1 + q").unwrap();
+        assert_eq!(
+            check_sum("q + x").unwrap_err(),
+            "block 'b': operator '+' combines cycle 1 with cycle 0"
+        );
+    }
+
+    #[test]
+    fn unary_and_cast_expressions_inherit_the_operand_cycle() {
+        let source = "block b(clk, x: u8) -> u16 @1 { reg q: u8; q := x; (!q) as u16 }";
+        check_module(&parse_module(source).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn annotated_blocks_require_an_inferred_output_cycle() {
+        let plain = parse_module("block b(clk, x: u8[2]) -> u8 { x[u1:0] }").unwrap();
+        check_module(&plain).unwrap();
+        let timed = parse_module("block b(clk, x: u8[2]) -> u8 @0 { x[u1:0] }").unwrap();
+        assert_eq!(
+            check_module(&timed).unwrap_err(),
+            "block 'b': cannot infer output cycle for this expression"
+        );
+    }
+
+    #[test]
+    fn output_cycle_inference_rejects_register_feedback() {
+        let source = "block b(clk) -> u8 @1 { reg q: u8; q := q; q }";
+        let module = parse_module(source).unwrap();
+        assert_eq!(
+            check_module(&module).unwrap_err(),
+            "block 'b': timing feedback through 'q' is unsupported"
         );
     }
 

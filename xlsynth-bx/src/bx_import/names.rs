@@ -498,7 +498,9 @@ impl<'a> Scope<'a> {
             clock: def.clock.clone(),
             reset: def.reset.clone(),
             params,
+            input_cycles: def.input_cycles.clone(),
             result,
+            output_cycles: def.output_cycles.clone(),
             statements,
             output: self.expr(&def.output)?,
         })
