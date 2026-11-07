@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::ast::{ForIterable, UnrollFor};
+use crate::ast::{BindingPattern, ForIterable, MapExpr, UnrollFor};
 use crate::infer_literal::BindingWidths;
+use std::borrow::Cow;
+use std::cell::Cell;
 use xlsynth_pir::IrBits;
 
 /// Static bounds for a fold. Keep the index in its source bit width and
@@ -23,9 +25,15 @@ pub(super) struct Shadowed {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Structural iterations and generic specializations elaborate separate
+    /// copies of their bodies.
+    pub(super) fn replaying_body(&self) -> bool {
+        !self.iteration_path.is_empty() || self.specialization.is_some()
+    }
+
     /// Both elaborated iterations and counted bodies have lexical loop values.
     pub(super) fn in_loop_scope(&self) -> bool {
-        self.in_counted_body || !self.iteration_path.is_empty()
+        self.in_counted_body || self.iteration_path.len() > self.map_outer_iterations.unwrap_or(0)
     }
 
     pub(super) fn loop_widths(&self) -> Option<WidthLookup<'_>> {
@@ -33,20 +41,24 @@ impl BodyChecker<'_, '_> {
             .then(|| WidthLookup::loop_locals(&self.inferred_bindings, &self.loop_values))
     }
 
-    /// Charge nested folds to their source body. Generated bodies share a
-    /// module budget so specialization cannot multiply a large fold's cost.
-    pub(super) fn charge_unroll(&mut self, work: usize) -> Result<(), String> {
-        let (total, kind) = match (&mut self.specializations, self.specialization, self.kind) {
+    /// Charge expanded folds and range operands to their source body.
+    /// Specializations of a generic block share the module's expansion budget.
+    pub(super) fn charge_expansion(&mut self, expression: &str, work: usize) -> Result<(), String> {
+        let (total, kind) = match (
+            &mut self.specializations,
+            self.specialization,
+            self.source_kind,
+        ) {
             (Some(registry), Some(_), _) => {
-                (&mut registry.unroll_work, "generic block specialization")
+                (&mut registry.expansion_work, "generic block specialization")
             }
-            (_, _, BodyKind::Block { .. }) => (&mut self.unroll_work, "block"),
-            (_, _, BodyKind::Function) => (&mut self.unroll_work, "function"),
+            (_, _, BodyKind::Block { .. }) => (&mut self.expansion_work, "block"),
+            (_, _, BodyKind::Function) => (&mut self.expansion_work, "function"),
         };
         *total = total.saturating_add(work);
         if *total > MAX_TYPE_SIZE {
             return Err(format!(
-                "unroll_for! exceeds the {kind} expansion limit of {MAX_TYPE_SIZE}"
+                "{expression} exceeds the {kind} expansion limit of {MAX_TYPE_SIZE}"
             ));
         }
         Ok(())
@@ -282,7 +294,8 @@ impl BodyChecker<'_, '_> {
         let mut index = range.first;
         // Charge nested loops to the same block. A small inner range repeated
         // many times consumes the same budget as a single large range.
-        self.charge_unroll(
+        self.charge_expansion(
+            "unroll_for!",
             count.saturating_mul(fold.body.len().saturating_add(width.div_ceil(64).max(1))),
         )?;
         if acc_hint.is_none() && minimum_type(&fold.seed)?.is_some() {
@@ -348,23 +361,176 @@ impl BodyChecker<'_, '_> {
     }
 }
 
+/// Value names visible inside one expression. A lambda introduces a new
+/// scope and retains its enclosing names only to diagnose attempted captures.
+struct LexicalScope<'a> {
+    values: Cow<'a, BTreeSet<String>>,
+    /// An ordinary nested scope sees the bindings in its parent. A lambda
+    /// starts a fresh chain and checks its enclosing scope only for captures.
+    parent: Option<&'a LexicalScope<'a>>,
+    enclosing: Option<&'a LexicalScope<'a>>,
+    alias_names: &'a [Option<String>],
+    /// Shared across nested scopes in this one lexical walk, including
+    /// zero-trip bodies that will never produce a typed expression.
+    visited: &'a Cell<usize>,
+}
+
+impl<'a> LexicalScope<'a> {
+    fn root(
+        values: &'a BTreeSet<String>,
+        alias_names: &'a [Option<String>],
+        visited: &'a Cell<usize>,
+    ) -> Self {
+        Self {
+            values: Cow::Borrowed(values),
+            parent: None,
+            enclosing: None,
+            alias_names,
+            visited,
+        }
+    }
+
+    fn nested(&self) -> LexicalScope<'_> {
+        LexicalScope {
+            values: Cow::Owned(BTreeSet::new()),
+            parent: Some(self),
+            enclosing: self.enclosing,
+            alias_names: self.alias_names,
+            visited: self.visited,
+        }
+    }
+
+    fn bind_pattern(&mut self, pattern: &BindingPattern) {
+        let nodes = pattern.visit_names(&mut |name| {
+            self.values.to_mut().insert(name.to_owned());
+        });
+        self.visited.set(self.visited.get().saturating_add(nodes));
+    }
+
+    /// Look up a binding without crossing a lambda boundary or copying the
+    /// bindings accumulated before a sibling scope.
+    fn contains(&self, name: &str) -> bool {
+        let mut scope = Some(self);
+        while let Some(current) = scope {
+            if current.values.contains(name) {
+                return true;
+            }
+            scope = current.parent;
+        }
+        false
+    }
+
+    fn reject_capture(&self, name: &str) -> Result<(), String> {
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if self.contains(head) {
+            return Ok(());
+        }
+        let mut enclosing = self.enclosing;
+        while let Some(scope) = enclosing {
+            if scope.contains(head) {
+                let source = head
+                    .strip_prefix("$scope_")
+                    .and_then(|index| index.parse::<usize>().ok())
+                    .and_then(|index| self.alias_names.get(index))
+                    .and_then(Option::as_deref)
+                    .unwrap_or(head);
+                return Err(format!(
+                    "map lambda cannot capture enclosing value '{source}'"
+                ));
+            }
+            enclosing = scope.enclosing;
+        }
+        Ok(())
+    }
+}
+
 impl BodyChecker<'_, '_> {
+    /// A lambda argument is available only on the built-in map.
+    fn check_map_target(&self, map: &MapExpr, locals: &LexicalScope<'_>) -> Result<(), String> {
+        locals.reject_capture(&map.target)?;
+        if locals.contains(&map.target) {
+            return Err("'map' names a local value here".into());
+        }
+        let module_binding = self.decls.visible("map", self.function_position)
+            && (self.decls.functions.contains_key("map")
+                || self.decls.is_block("map")
+                || self.structs.indices.contains_key("map")
+                || self.resolver.lookup("map")?.is_some());
+        if map.target != "map"
+            || module_binding
+            || self
+                .specialization
+                .is_some_and(|spec| spec.bindings.declares("map"))
+        {
+            return Err("an inline lambda argument requires the built-in map".into());
+        }
+        Ok(())
+    }
+
+    fn check_map_body_names(
+        &self,
+        map: &MapExpr,
+        enclosing: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        if let Some(ty) = &map.parameter_type {
+            self.check_type_names(ty, enclosing)?;
+        }
+        let body_scope = LexicalScope {
+            values: Cow::Owned(BTreeSet::from([map.parameter.clone()])),
+            parent: None,
+            enclosing: Some(enclosing),
+            alias_names: enclosing.alias_names,
+            visited: enclosing.visited,
+        };
+        if let Some(ty) = &map.result_type {
+            self.check_type_names(ty, &body_scope)?;
+        }
+        self.check_expr_names(&map.body, &body_scope)
+    }
+
+    /// Validate the entire lambda subtree, including untaken branches and
+    /// zero-trip structural loops, before any constants can be substituted.
+    pub(super) fn check_map_names(&mut self, map: &MapExpr) -> Result<(), String> {
+        let visited = Cell::new(0);
+        let enclosing = LexicalScope::root(&self.names, &self.scope_alias_names, &visited);
+        self.check_map_target(map, &enclosing)?;
+        if self.map_outer_iterations.is_none() {
+            self.check_map_body_names(map, &enclosing)?;
+            if self.replaying_body() {
+                self.charge_expansion("map lambda", visited.get())?;
+            }
+        }
+        Ok(())
+    }
+
     /// DSLX resolves lexical names before unrolling, even when it never
     /// typechecks an iteration. Keep that distinction for an empty range.
-    fn check_empty_loop_names(&self, fold: &UnrollFor) -> Result<(), String> {
-        let mut locals = self.names.clone();
-        self.check_body_names(fold, &mut locals)
+    fn check_empty_loop_names(&mut self, fold: &UnrollFor) -> Result<(), String> {
+        if self.map_outer_iterations.is_some() {
+            // The enclosing callback already resolved names in this subtree.
+            return Ok(());
+        }
+        let visited = Cell::new(0);
+        let locals = LexicalScope::root(&self.names, &self.scope_alias_names, &visited);
+        self.check_body_names(fold, &mut locals.nested())?;
+        if self.replaying_body() {
+            self.charge_expansion("unroll_for!", visited.get())?;
+        }
+        Ok(())
     }
 
     fn check_body_names(
         &self,
         fold: &UnrollFor,
-        locals: &mut BTreeSet<String>,
+        locals: &mut LexicalScope<'_>,
     ) -> Result<(), String> {
         if fold.index == fold.accumulator && fold.index != "_" {
             return Err(format!("duplicate loop binding '{}'", fold.index));
         }
-        locals.extend([fold.index.clone(), fold.accumulator.clone()]);
+        locals
+            .values
+            .to_mut()
+            .extend([fold.index.clone(), fold.accumulator.clone()]);
         for stmt in &fold.body {
             let Stmt::Let { name, value, ty } = stmt else {
                 return Err("unroll_for! bodies permit only let bindings before the result".into());
@@ -373,17 +539,19 @@ impl BodyChecker<'_, '_> {
                 self.check_type_names(ty, locals)?;
             }
             self.check_expr_names(value, locals)?;
-            locals.insert(name.clone());
+            locals.values.to_mut().insert(name.clone());
         }
         self.check_expr_names(&fold.result, locals)
     }
 
-    fn check_type_names(&self, ty: &Type, locals: &BTreeSet<String>) -> Result<(), String> {
+    fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
+        locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
             Type::Named(name) if locals.contains(name) => {
                 return Err(format!("'{name}' names a local value here"));
             }
             Type::Named(name) => {
+                locals.reject_capture(name)?;
                 if self
                     .specialization
                     .is_some_and(|spec| spec.bindings.declares(name))
@@ -392,7 +560,9 @@ impl BodyChecker<'_, '_> {
                 }
                 self.decls
                     .check_type_visibility(ty, self.function_position)?;
-                if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
+                if let Some((module, member)) =
+                    lookup_use(name, self.resolver, |binding| locals.contains(binding))?
+                {
                     self.resolver.check_member_name(&module, &member)?;
                 } else {
                     self.structs.definition(name)?;
@@ -411,7 +581,8 @@ impl BodyChecker<'_, '_> {
 
     /// An unused call still needs a visible callee, but DSLX checks its kind
     /// and arity only when it elaborates an iteration.
-    fn check_value_name(&self, name: &str, locals: &BTreeSet<String>) -> Result<(), String> {
+    fn check_value_name(&self, name: &str, locals: &LexicalScope<'_>) -> Result<(), String> {
+        locals.reject_capture(name)?;
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
@@ -424,36 +595,40 @@ impl BodyChecker<'_, '_> {
         if self.decls.functions.contains_key(name) || self.decls.is_block(name) {
             return Ok(());
         }
-        if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
+        if let Some((module, member)) =
+            lookup_use(name, self.resolver, |binding| locals.contains(binding))?
+        {
             return self.resolver.check_member_name(&module, &member);
         }
         Err(format!("unknown value '{name}'"))
     }
 
-    fn check_expr_names(&self, expr: &Expr, locals: &BTreeSet<String>) -> Result<(), String> {
+    fn check_expr_names(&self, expr: &Expr, locals: &LexicalScope<'_>) -> Result<(), String> {
+        locals.visited.set(locals.visited.get().saturating_add(1));
         match expr {
             Expr::Scope { bindings, result } => {
-                let mut names = locals.clone();
+                let mut names = locals.nested();
                 for binding in bindings {
                     self.validate_source_pattern(&binding.pattern)?;
                     if let Some(ty) = &binding.ty {
                         self.check_type_names(ty, &names)?;
                     }
                     self.check_expr_names(&binding.value, &names)?;
-                    binding.pattern.visit_names(&mut |n| {
-                        names.insert(n.to_owned());
-                    });
+                    names.bind_pattern(&binding.pattern);
                 }
                 self.check_expr_names(result, &names)?;
             }
             Expr::Name(name) => self.check_value_name(name, locals)?,
             Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to resolve. */ }
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
+                if matches!(expr, Expr::Zero(_)) {
+                    locals.reject_capture("zero!")?;
+                }
                 self.check_type_names(ty, locals)?
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
-                    if self.kind == BodyKind::Function
+                    if (self.kind == BodyKind::Function || locals.enclosing.is_some())
                         && !locals.contains(name)
                         && self.decls.is_block(name)
                     {
@@ -515,6 +690,9 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(operand, locals)?;
                 }
                 for arm in arms {
+                    locals
+                        .visited
+                        .set(locals.visited.get().saturating_add(arm.patterns.len()));
                     self.check_expr_names(&arm.value, locals)?;
                 }
             }
@@ -526,7 +704,18 @@ impl BodyChecker<'_, '_> {
                     self.check_type_names(index, locals)?;
                     self.check_type_names(acc, locals)?;
                 }
-                self.check_body_names(fold, &mut locals.clone())?;
+                self.check_body_names(fold, &mut locals.nested())?;
+            }
+            Expr::Map(map) => {
+                self.check_map_target(map, locals)?;
+                match &map.iterable {
+                    ForIterable::Range { start, limit, .. } => {
+                        self.check_expr_names(start, locals)?;
+                        self.check_expr_names(limit, locals)?;
+                    }
+                    ForIterable::Array(array) => self.check_expr_names(array, locals)?,
+                }
+                self.check_map_body_names(map, locals)?;
             }
             Expr::For(fold) => {
                 match &fold.iterable {
@@ -541,12 +730,10 @@ impl BodyChecker<'_, '_> {
                     self.check_type_names(carry, locals)?;
                 }
                 self.check_expr_names(&fold.seed, locals)?;
-                let mut names = locals.clone();
+                let mut names = locals.nested();
                 self.validate_counted_binders(fold)?;
                 for pattern in [&fold.element, &fold.accumulator] {
-                    pattern.visit_names(&mut |name| {
-                        names.insert(name.to_owned());
-                    });
+                    names.bind_pattern(pattern);
                 }
                 self.check_expr_names(&fold.body, &names)?;
             }

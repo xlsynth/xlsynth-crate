@@ -270,18 +270,22 @@ impl BodyChecker<'_, '_> {
         })();
         self.leave_scope(saved);
         self.in_counted_body = outer_counted_body;
-        let bindings = self
-            .statements
+        let bindings = self.take_pure_bindings(start);
+        Ok((bindings, output?))
+    }
+
+    /// Move the lets belonging to one generated function out of the caller.
+    pub(super) fn take_pure_bindings(&mut self, start: usize) -> Vec<CheckedBinding> {
+        self.statements
             .drain(start..)
             .map(|stmt| {
                 let CheckedStmt::Let { name, value } = stmt else {
-                    unreachable!("pure for bodies only emit lexical let bindings")
+                    unreachable!("pure bodies only emit lexical let bindings")
                 };
                 self.constants.remove(&name);
                 self.constexpr_names.remove(&name);
                 CheckedBinding { name, value }
             })
-            .collect();
-        Ok((bindings, output?))
+            .collect()
     }
 }

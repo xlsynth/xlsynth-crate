@@ -194,10 +194,20 @@ pub struct TypedFor {
     uses_element: bool,
 }
 
+/// A capture-free array transformation and its statically checked lambda.
+#[derive(Clone, Debug)]
+pub struct TypedMap {
+    pub array: TypedExpr,
+    pub element: Param,
+    pub bindings: Vec<CheckedBinding>,
+    pub output: TypedExpr,
+}
+
 /// Resolved operations, including field projections in declaration order.
 #[derive(Clone, Debug)]
 pub enum TypedExprKind {
     For(Box<TypedFor>),
+    Map(Box<TypedMap>),
     Name(String),
     Literal(IrValue),
     Tuple(Vec<TypedExpr>),
@@ -348,7 +358,8 @@ impl ConstantScope<'_> {
     }
 }
 
-/// One constant evaluation charges counted-loop work to its caller's budget.
+/// One constant evaluation charges loop and map iterations to its caller's
+/// budget.
 struct CountedWork<'a> {
     remaining: &'a mut usize,
     inside_loop: bool,
@@ -458,63 +469,103 @@ impl TypedFor {
                 locals.insert(self.element.name.as_str(), element);
             }
             locals.insert(self.accumulator.name.as_str(), carry);
-            carry = self.constant_iteration(names, &mut locals, &definitions, remaining)?;
+            carry = constant_iteration(
+                &self.bindings,
+                &self.output,
+                names,
+                &mut locals,
+                &definitions,
+                remaining,
+            )?;
         }
         Some(carry)
     }
+}
 
-    /// Evaluate only the lets that the iteration result reads. The explicit
-    /// stack preserves lexical order even for long chains of local aliases.
-    fn constant_iteration<'a>(
-        &'a self,
-        parent: &ConstantScope<'_>,
-        locals: &mut BTreeMap<&'a str, IrValue>,
-        definitions: &BTreeMap<&str, usize>,
-        work: &mut CountedWork<'_>,
-    ) -> Option<IrValue> {
-        let depth = parent.depth() + 1;
-        let mut pending: Vec<usize> = Vec::new();
-        loop {
-            let index = pending.last().copied().unwrap_or(self.bindings.len());
-            let expr = match self.bindings.get(index) {
-                Some(binding) if locals.contains_key(binding.name.as_str()) => {
-                    pending.pop();
-                    continue;
-                }
-                Some(binding) => &binding.value,
-                None => &self.output,
-            };
-            let scope = ConstantScope::Iteration {
-                parent,
-                locals,
-                definitions,
-                before: index,
-                depth,
-            };
-            if let Some(value) = expr.constant_with_budget(&scope, work) {
-                let Some(index) = pending.pop() else {
-                    return Some(value);
-                };
-                locals.insert(self.bindings[index].name.as_str(), value);
-            } else if let Some((owner, missing)) = work.missing_local
-                && owner == depth
-            {
-                work.missing_local = None;
-                let mut required = BTreeSet::from([missing]);
-                expr.all_inputs(false, &mut |name| {
-                    if let Some(&i) = definitions.get(name)
-                        && i < index
-                        && !locals.contains_key(name)
-                    {
-                        required.insert(i);
-                    }
-                    true
-                });
-                work.charge(required.len())?;
-                pending.extend(required.into_iter().rev());
-            } else {
-                return None;
+impl TypedMap {
+    /// Apply the closed body to each element, sharing the evaluator's work
+    /// limit with any nested maps or counted loops.
+    fn constant(&self, names: &ConstantScope<'_>, work: &mut CountedWork<'_>) -> Option<IrValue> {
+        let array = self.array.constant_with_budget(names, work)?;
+        let elements = array.as_elements().ok()?;
+        work.charge(elements.len())?;
+        work.charge(self.bindings.len())?;
+        let definitions = self
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(index, b)| (b.name.as_str(), index))
+            .collect();
+        let mut locals = BTreeMap::new();
+        let mut values = Vec::with_capacity(elements.len());
+        for element in elements {
+            locals.clear();
+            locals.insert(self.element.name.as_str(), element.clone());
+            values.push(constant_iteration(
+                &self.bindings,
+                &self.output,
+                names,
+                &mut locals,
+                &definitions,
+                work,
+            )?);
+        }
+        IrValue::make_array(&values).ok()
+    }
+}
+
+/// Evaluate only the lets that the iteration result reads. The explicit
+/// stack preserves lexical order even for long chains of local aliases.
+fn constant_iteration<'a>(
+    bindings: &'a [CheckedBinding],
+    output: &TypedExpr,
+    parent: &ConstantScope<'_>,
+    locals: &mut BTreeMap<&'a str, IrValue>,
+    definitions: &BTreeMap<&str, usize>,
+    work: &mut CountedWork<'_>,
+) -> Option<IrValue> {
+    let depth = parent.depth() + 1;
+    let mut pending: Vec<usize> = Vec::new();
+    loop {
+        let index = pending.last().copied().unwrap_or(bindings.len());
+        let expr = match bindings.get(index) {
+            Some(binding) if locals.contains_key(binding.name.as_str()) => {
+                pending.pop();
+                continue;
             }
+            Some(binding) => &binding.value,
+            None => output,
+        };
+        let scope = ConstantScope::Iteration {
+            parent,
+            locals,
+            definitions,
+            before: index,
+            depth,
+        };
+        if let Some(value) = expr.constant_with_budget(&scope, work) {
+            let Some(index) = pending.pop() else {
+                return Some(value);
+            };
+            locals.insert(bindings[index].name.as_str(), value);
+        } else if let Some((owner, missing)) = work.missing_local
+            && owner == depth
+        {
+            work.missing_local = None;
+            let mut required = BTreeSet::from([missing]);
+            expr.all_inputs(false, &mut |name| {
+                if let Some(&i) = definitions.get(name)
+                    && i < index
+                    && !locals.contains_key(name)
+                {
+                    required.insert(i);
+                }
+                true
+            });
+            work.charge(required.len())?;
+            pending.extend(required.into_iter().rev());
+        } else {
+            return None;
         }
     }
 }
@@ -522,7 +573,7 @@ impl TypedFor {
 /// Storage and arithmetic work of a concrete value produced inside a loop.
 /// Charge array elements through their cached type, including nominal
 /// payloads whose lowered representation is a tuple.
-fn constant_work(value: &IrValue) -> usize {
+pub(crate) fn constant_work(value: &IrValue) -> usize {
     fn layout(ty: &IrType) -> usize {
         match ty {
             IrType::Token => 1,
@@ -580,7 +631,7 @@ fn constant_match_arm<'a>(
 
 impl TypedExpr {
     /// Visit the value dependencies of an expression, with lexical binders
-    /// removed from nested loop bodies.
+    /// removed from nested loop and map bodies.
     fn all_inputs(&self, branches: bool, accept: &mut dyn FnMut(&str) -> bool) -> bool {
         match &self.kind {
             K::Name(name) | K::BindingTupleIndex { name, .. } => accept(name),
@@ -589,6 +640,7 @@ impl TypedExpr {
             K::For(fold) if !branches && fold.trip_count == 0 => {
                 fold.seed.all_inputs(branches, accept)
             }
+            K::Map(map) => map.array.all_inputs(branches, accept),
             K::Call { .. } | K::ImportedCall { .. } if !branches => true,
             K::For(fold) => {
                 fold.seed.all_inputs(branches, accept)
@@ -697,6 +749,12 @@ impl TypedExpr {
         remaining: &mut CountedWork<'_>,
     ) -> Option<IrValue> {
         let value = match &self.kind {
+            K::Map(map) => {
+                let outer = std::mem::replace(&mut remaining.inside_loop, true);
+                let value = map.constant(names, remaining);
+                remaining.inside_loop = outer;
+                value
+            }
             K::For(fold) => {
                 let outer = std::mem::replace(&mut remaining.inside_loop, true);
                 let value = fold.constant(names, remaining);
@@ -947,6 +1005,39 @@ block folded(clk) -> u16 {{
     }
 
     #[test]
+    fn nested_maps_replay_local_arrays_within_one_constant_work_budget() -> Result<(), String> {
+        let source = r#"
+block folded(clk, rows: u8[2][2]) -> u8[2][2] {
+    map(rows, |row| {
+        let cells = row;
+        map(cells, |cell| {
+            let plus = cell + u8:1;
+            plus
+        })
+    })
+}
+"#;
+        let module = check_module(&parse_module(source)?)?;
+        let output = &module.blocks()[0].output;
+        let input = IrValue::parse_typed("[[bits[8]:0, bits[8]:1], [bits[8]:255, bits[8]:2]]")
+            .map_err(|e| e.to_string())?;
+        let expected = IrValue::parse_typed("[[bits[8]:1, bits[8]:2], [bits[8]:0, bits[8]:3]]")
+            .map_err(|e| e.to_string())?;
+        let names = BTreeMap::from([("rows".to_string(), ConstantBinding::Known(input))]);
+        let mut ample = 1024;
+        assert_eq!(
+            output.constant(&names, &mut ample, false),
+            Ok(Some(expected))
+        );
+        let mut limited = 26;
+        assert_eq!(
+            output.constant(&names, &mut limited, false),
+            Err(ConstantFailure::WorkLimit)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn structural_iterations_and_specializations_share_speculative_work() -> Result<(), String> {
         let body = r#"
             let sum = unroll_for! (_, a) in u8:0..u8:TRIPS {
@@ -1055,10 +1146,7 @@ block stage(clk, rst, x: u32) -> u32 {
         )));
         for (live, expected) in [
             ("runtime", "must be a compile-time constant"),
-            (
-                "costly",
-                "counted for constant evaluation exceeds the work limit",
-            ),
+            ("costly", "constant evaluation exceeds the work limit"),
         ] {
             let source = source
                 .replace("if true", "if false")
@@ -1082,7 +1170,7 @@ block wrapper(clk, rst) -> u8 {
 "#;
         let error = check_module(&parse_module(source)?).unwrap_err();
         assert!(
-            error.contains("counted for constant evaluation exceeds the work limit"),
+            error.contains("constant evaluation exceeds the work limit"),
             "{error}"
         );
         Ok(())

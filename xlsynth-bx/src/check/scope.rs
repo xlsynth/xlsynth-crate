@@ -66,7 +66,7 @@ impl BodyChecker<'_, '_> {
     /// Enter each binding only after its initializer has been checked.
     fn enter_scope(&mut self, bindings: &[LetBinding]) -> Result<Vec<Shadowed>, String> {
         if !self.iteration_path.is_empty() {
-            self.charge_unroll(bindings.len())?;
+            self.charge_expansion("unroll_for!", bindings.len())?;
         }
         let mut saved = Vec::new();
         let result = bindings.iter().try_for_each(|binding| {
@@ -161,9 +161,9 @@ impl BodyChecker<'_, '_> {
         &mut self,
         check: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        let first_alias = self.next_scope_alias;
+        let first_alias = self.scope_alias_names.len();
         let result = check(self);
-        for i in first_alias..self.next_scope_alias {
+        for i in first_alias..self.scope_alias_names.len() {
             let name = format!("$scope_{i}");
             self.function_values.remove(&name);
             self.loop_values.remove(&name);
@@ -171,7 +171,7 @@ impl BodyChecker<'_, '_> {
             self.inferred_bindings.remove(&name);
             self.prepared_counted_iterables.remove(&name);
         }
-        self.next_scope_alias = first_alias;
+        self.scope_alias_names.truncate(first_alias);
         result
     }
 
@@ -206,8 +206,8 @@ impl BodyChecker<'_, '_> {
                 if let Some(iteration) = iteration {
                     // The enclosing inference scope owns both the checked
                     // iterable and the lexical aliases in the seed.
-                    let alias = format!("$scope_{}", self.next_scope_alias);
-                    self.next_scope_alias += 1;
+                    let alias = format!("$scope_{}", self.scope_alias_names.len());
+                    self.scope_alias_names.push(None);
                     self.prepared_counted_iterables
                         .insert(alias.clone(), iteration);
                     let Expr::For(fold) = prepared.to_mut() else {
@@ -320,8 +320,8 @@ impl BodyChecker<'_, '_> {
                     if aliases.contains_key(name) {
                         return;
                     }
-                    let alias = format!("$scope_{}", self.next_scope_alias);
-                    self.next_scope_alias += 1;
+                    let alias = format!("$scope_{}", self.scope_alias_names.len());
+                    self.scope_alias_names.push(Some(name.to_owned()));
                     let values = if self.in_loop_scope() {
                         &mut self.loop_values
                     } else {
@@ -403,7 +403,7 @@ impl BodyChecker<'_, '_> {
                 if !self.iteration_path.is_empty() {
                     // Selecting just one field can still scan the tuple or
                     // a long wildcard pattern. Charge once for the traversal.
-                    self.charge_unroll(count.max(patterns.len()))?;
+                    self.charge_expansion("unroll_for!", count.max(patterns.len()))?;
                 }
                 let rest = patterns
                     .iter()
@@ -614,6 +614,25 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 pattern.visit_names(&mut |name| hidden.extend(aliases.remove_entry(name)));
             }
             capture_names(&mut fold.body, aliases);
+            aliases.extend(hidden);
+        }
+        Expr::Map(map) => {
+            rename(&mut map.target, aliases);
+            match &mut map.iterable {
+                ForIterable::Range { start, limit, .. } => {
+                    capture_names(start, aliases);
+                    capture_names(limit, aliases);
+                }
+                ForIterable::Array(array) => capture_names(array, aliases),
+            }
+            if let Some(ty) = &mut map.parameter_type {
+                rename_type(ty, aliases);
+            }
+            let hidden = aliases.remove_entry(&map.parameter);
+            if let Some(ty) = &mut map.result_type {
+                rename_type(ty, aliases);
+            }
+            capture_names(&mut map.body, aliases);
             aliases.extend(hidden);
         }
     }

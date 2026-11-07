@@ -23,7 +23,7 @@ use crate::check::{
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
-use crate::typed::{TypedFor, TypedIterable};
+use crate::typed::{CheckedBinding, TypedFor, TypedIterable, TypedMap};
 
 /// Destination package indices for named BX functions, externs, and inferred
 /// DSLX specializations.
@@ -114,7 +114,7 @@ pub fn lower_module(
     let mut destination = Destination {
         batch: FunctionBatch::new(&mut package).map_err(|error| error.to_string())?,
         occupied,
-        next_loop: 0,
+        next_body: 0,
     };
     for (function, symbol) in module.functions.iter().zip(function_symbols) {
         let index = lower_function(
@@ -474,19 +474,20 @@ struct BlockResources {
 }
 
 /// The destination package and symbols reserved for user definitions and
-/// generated counted-loop bodies.
+/// generated loop and map bodies.
 struct Destination<'p> {
     batch: FunctionBatch<'p>,
     occupied: BTreeSet<String>,
-    next_loop: usize,
+    next_body: usize,
 }
 
 impl Destination<'_> {
-    /// Assign loop bodies collision-free names in source traversal order.
-    fn loop_symbol(&mut self) -> String {
+    /// Assign generated functions collision-free names in source traversal
+    /// order.
+    fn body_symbol(&mut self, kind: &str) -> String {
         loop {
-            let name = format!("__bx_for_{}", self.next_loop);
-            self.next_loop += 1;
+            let name = format!("__bx_{kind}_{}", self.next_body);
+            self.next_body += 1;
             if self.occupied.insert(name.clone()) {
                 return name;
             }
@@ -525,11 +526,7 @@ fn lower_function(
             .param(&param_symbol, body.layouts.lower(&param.ty)?)?;
         body.values.insert(param.name.clone(), value);
     }
-    for binding in &function.bindings {
-        let value = body.expr(&binding.value)?;
-        body.values.insert(binding.name.clone(), value);
-    }
-    let result = body.expr(&function.output)?;
+    let result = body.bound_expr(&function.bindings, &function.output)?;
     body.destination.batch.append(body.builder, result)
 }
 
@@ -846,6 +843,42 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             .invoke_with_signature(&self.functions.signatures[&index], &args)
     }
 
+    /// Lower a result after evaluating its checked lexical bindings in order.
+    fn bound_expr(
+        &mut self,
+        bindings: &[CheckedBinding],
+        output: &TypedExpr,
+    ) -> Result<BValue, BuilderError> {
+        for binding in bindings {
+            let value = self.expr(&binding.value)?;
+            self.values.insert(binding.name.clone(), value);
+        }
+        self.expr(output)
+    }
+
+    /// Build a unary function for the closed lambda and map it over the input.
+    fn map(&mut self, map: &TypedMap) -> Result<BValue, BuilderError> {
+        let array = self.expr(&map.array)?;
+        let symbol = self.destination.body_symbol("map");
+        let mut body = LowerBody::new(
+            FnBuilder::new(&symbol),
+            self.destination,
+            self.functions,
+            self.layouts,
+        );
+        let element = body
+            .builder
+            .param("element", body.layouts.lower(&map.element.ty)?)?;
+        body.values.insert(map.element.name.clone(), element);
+        let result = body.bound_expr(&map.bindings, &map.output)?;
+        let index = body.destination.batch.append(body.builder, result)?;
+        let PackageMember::Function(function) = &self.destination.batch.package().members[index]
+        else {
+            unreachable!("appended map body is a function");
+        };
+        self.builder.map(array, function)
+    }
+
     /// Build one pure iteration function. Captures become invariant
     /// arguments; the array or range element is derived from the ordinal.
     fn counted_for(&mut self, fold: &TypedFor) -> Result<BValue, BuilderError> {
@@ -854,7 +887,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             return Ok(carry);
         }
         let mut invariants = Vec::new();
-        let symbol = self.destination.loop_symbol();
+        let symbol = self.destination.body_symbol("for");
         let mut builder = FnBuilder::new(&symbol);
         let index_width = match &fold.iterable {
             TypedIterable::Range { start } => start.get_bit_count().max(1),
@@ -898,11 +931,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 .array_index(array.expect("array invariant"), index)?,
         };
         body.values.insert(fold.element.name.clone(), element);
-        for binding in &fold.bindings {
-            let value = body.expr(&binding.value)?;
-            body.values.insert(binding.name.clone(), value);
-        }
-        let result = body.expr(&fold.output)?;
+        let result = body.bound_expr(&fold.bindings, &fold.output)?;
         let index = body.destination.batch.append(body.builder, result)?;
         let PackageMember::Function(function) = &self.destination.batch.package().members[index]
         else {
@@ -919,6 +948,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             TypedExprKind::Name(name) => Ok(self.values[name]),
             TypedExprKind::Literal(value) => self.builder.literal(value.clone()),
             TypedExprKind::For(fold) => self.counted_for(fold),
+            TypedExprKind::Map(map) => self.map(map),
             TypedExprKind::Array(items) => {
                 let Type::Array { element, .. } = &expr.ty else {
                     return Err(BuilderError::InvalidOperation(

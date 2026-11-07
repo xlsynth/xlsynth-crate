@@ -24,13 +24,14 @@ use crate::parser::{character_or_bool_digits, explicit_width_hint};
 mod counted_for;
 mod generic_blocks;
 mod generic_inputs;
+mod map;
 mod match_patterns;
 mod scope;
 mod unroll;
 
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern,
-    TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMatchArm,
+    TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap, TypedMatchArm,
 };
 use crate::typed::{ConstantBinding, ConstantFailure, TypedExprKind as K, bits};
 use counted_for::CarryContext;
@@ -249,7 +250,7 @@ struct BlockSpecializations<'m> {
     pending: VecDeque<Rc<BlockSpecialization<'m>>>,
     reserved: BTreeSet<String>,
     next_id: usize,
-    unroll_work: usize,
+    expansion_work: usize,
     constant_budgets: ConstantBudgets,
 }
 
@@ -260,7 +261,7 @@ impl<'m> BlockSpecializations<'m> {
             pending: VecDeque::new(),
             reserved,
             next_id: 0,
-            unroll_work: 0,
+            expansion_work: 0,
             constant_budgets: ConstantBudgets::default(),
         }
     }
@@ -402,11 +403,11 @@ struct StructTable {
 fn lookup_use(
     name: &str,
     resolver: &ImportResolver,
-    scope: Option<&BTreeSet<String>>,
+    is_local: impl FnOnce(&str) -> bool,
 ) -> Result<Option<(String, String)>, String> {
     let member = resolver.lookup(name)?;
     let binding = name.split_once("::").map_or(name, |(head, _)| head);
-    if member.is_some() && scope.is_some_and(|scope| scope.contains(binding)) {
+    if member.is_some() && is_local(binding) {
         return Err(format!("'{binding}' names a local value here"));
     }
     Ok(member)
@@ -433,7 +434,9 @@ fn resolve_type(
                 // During template declaration the name is still symbolic.
                 return Ok(bindings.get(name).unwrap_or(ty).clone());
             }
-            if let Some((subject, member)) = lookup_use(name, resolver, scope)? {
+            if let Some((subject, member)) = lookup_use(name, resolver, |binding| {
+                scope.is_some_and(|names| names.contains(binding))
+            })? {
                 resolver.resolve_named(&subject, &member)
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
@@ -556,6 +559,9 @@ pub(crate) const MAX_ELABORATION_DEPTH: usize = 64;
 struct TypeShape {
     size: usize,
     depth: usize,
+    /// Nodes in the lowered IR type. Arrays store their element type once,
+    /// and nominal structs expand to tuples.
+    ir_nodes: usize,
 }
 
 impl<'a> Declarations<'a> {
@@ -739,7 +745,11 @@ impl StructTable {
 }
 
 impl TypeShape {
-    const LEAF: Self = Self { size: 1, depth: 0 };
+    const LEAF: Self = Self {
+        size: 1,
+        depth: 0,
+        ir_nodes: 1,
+    };
 
     /// Compute the expanded layout without allocating its substituted type.
     /// Named leaves supply a previously checked struct or type argument shape.
@@ -752,7 +762,7 @@ impl TypeShape {
             Type::Bool => Self::LEAF,
             Type::Bits { width, .. } => TypeShape {
                 size: (*width).max(1),
-                depth: 0,
+                ..Self::LEAF
             },
             Type::Tuple(items) => Self::aggregate(items, remaining, named_shape)?,
             Type::Array { element, size } => {
@@ -760,6 +770,7 @@ impl TypeShape {
                 TypeShape {
                     size: child.size.saturating_mul((*size).max(1)).saturating_add(1),
                     depth: child.depth + 1,
+                    ir_nodes: child.ir_nodes.saturating_add(1),
                 }
             }
             Type::Named(name) => named_shape(name)?,
@@ -783,10 +794,14 @@ impl TypeShape {
         named_shape: &impl Fn(&str) -> Result<Self, String>,
     ) -> Result<TypeShape, String> {
         let child_budget = child_type_budget(remaining)?;
-        let mut shape = TypeShape { size: 1, depth: 1 };
+        let mut shape = TypeShape {
+            depth: 1,
+            ..Self::LEAF
+        };
         for field in fields {
             let child = Self::for_type(field, child_budget, named_shape)?;
             shape.size = shape.size.saturating_add(child.size);
+            shape.ir_nodes = shape.ir_nodes.saturating_add(child.ir_nodes);
             shape.depth = shape.depth.max(child.depth + 1);
             if shape.size > MAX_TYPE_SIZE {
                 return Err(format!(
@@ -1198,6 +1213,9 @@ struct BodyChecker<'a, 'm> {
     structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
     kind: BodyKind,
+    /// The source body owns the expansion budget even while checking a lambda
+    /// with function-local rules.
+    source_kind: BodyKind,
     specializations: Option<&'a mut BlockSpecializations<'m>>,
     specialization: Option<&'a BlockSpecialization<'m>>,
     /// Use DSLX literal inference inside a local call argument or scalar match.
@@ -1223,15 +1241,20 @@ struct BodyChecker<'a, 'm> {
     /// Function locals resolve to an IR value that stays valid after their
     /// lexical scope ends, including when another arm binds the same name.
     function_values: BTreeMap<String, TypedExpr>,
-    next_scope_alias: usize,
+    /// Source spelling behind each live `$scope_N` alias. Prepared loop
+    /// iterables have no binding name.
+    scope_alias_names: Vec<Option<String>>,
     /// Iterables checked before a scoped seed is prepared for result inference.
     prepared_counted_iterables: BTreeMap<String, counted_for::Iteration>,
     /// Counted bodies bind runtime loop values even outside a structural
     /// unroll.
     in_counted_body: bool,
+    /// Structural iterations enclosing the current closed lambda. They still
+    /// consume expansion work, but do not supply loop-local type inference.
+    map_outer_iterations: Option<usize>,
     next_counted_loop: usize,
     iteration_path: Vec<usize>,
-    unroll_work: usize,
+    expansion_work: usize,
     constant_budgets: ConstantBudgets,
     unroll_binding_count: usize,
 }
@@ -1305,7 +1328,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 Err(ConstantFailure::WorkLimit) => {
                     return Err(format!(
-                        "counted for constant evaluation exceeds the work limit of {MAX_TYPE_SIZE}"
+                        "constant evaluation exceeds the work limit of {MAX_TYPE_SIZE}"
                     ));
                 }
             }
@@ -1325,6 +1348,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             structs,
             resolver,
             kind,
+            source_kind: kind,
             specializations: None,
             specialization: None,
             dslx_value_context: false,
@@ -1344,12 +1368,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             statements: Vec::new(),
             loop_values: BTreeMap::new(),
             function_values: BTreeMap::new(),
-            next_scope_alias: 0,
+            scope_alias_names: Vec::new(),
             prepared_counted_iterables: BTreeMap::new(),
             in_counted_body: false,
+            map_outer_iterations: None,
             next_counted_loop: 0,
             iteration_path: Vec::new(),
-            unroll_work: 0,
+            expansion_work: 0,
             constant_budgets: ConstantBudgets::default(),
             unroll_binding_count: 0,
         }
@@ -1815,6 +1840,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     checker.counted_for(fold, CarryContext::Expected(expected))
                 });
             }
+            Expr::Map(map) => self.with_dslx_value_context(|checker| checker.map_lambda(map)),
             Expr::Name(name) => self.named_value(name),
             Expr::Bool(value) => Ok((Type::Bool, K::Literal(IrValue::bool(*value)))),
             Expr::Zero(ty) => self.zero_value(ty),
@@ -2224,6 +2250,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ty: Type,
         kind: K,
     ) -> Result<TypedExpr, String> {
+        if self.map_outer_iterations.is_some() && self.replaying_body() {
+            // Every generated callback stores the IR types of its intermediate
+            // results. A literal additionally materializes its entire value.
+            let nodes = self
+                .structs
+                .type_shape(&ty, MAX_ELABORATION_DEPTH)?
+                .ir_nodes;
+            let literal_work = match &kind {
+                K::Literal(value) => crate::typed::constant_work(value),
+                _ => 0,
+            };
+            self.charge_expansion("map lambda", nodes.saturating_add(literal_work))?;
+        }
         let dslx_projection = (self.kind == BodyKind::Function || self.dslx_value_context)
             && matches!(
                 expr,
@@ -2281,7 +2320,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .structs
                 .type_shape(&value.ty, MAX_ELABORATION_DEPTH)?
                 .size;
-            self.charge_unroll(size.div_ceil(64))?;
+            self.charge_expansion("unroll_for!", size.div_ceil(64))?;
         }
         Ok(value)
     }
@@ -2757,7 +2796,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err(format!("function '{name}' is declared later in the module"));
         }
         if visible
-            && let Some((subject, function)) = lookup_use(name, self.resolver, Some(&self.names))?
+            && let Some((subject, function)) =
+                lookup_use(name, self.resolver, |binding| self.names.contains(binding))?
         {
             let args = args
                 .iter()

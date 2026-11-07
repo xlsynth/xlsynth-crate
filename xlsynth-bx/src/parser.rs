@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 
 use crate::ast::{
     BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function,
-    LetBinding, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, UnrollFor,
-    UsePath, WidthSliceType,
+    LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp,
+    UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -127,16 +127,23 @@ pub(crate) fn is_identifier(text: &str) -> bool {
         && fixed_width(text).is_none()
 }
 
-/// Tokenize source without interpreting integer widths or values.
-fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
+/// Tokenize a module, or a callback span using the lexical rules of a local
+/// function. Offsets always refer to the full source for diagnostics.
+fn lex(
+    source: &str,
+    dialect: Dialect,
+    function_body: Option<std::ops::Range<usize>>,
+) -> Result<Vec<Token<'_>>, String> {
     let mut tokens = Vec::new();
-    let bytes = source.as_bytes();
-    let mut i = 0;
+    let callback = function_body.is_some();
+    let span = function_body.unwrap_or(0..source.len());
+    let bytes = &source.as_bytes()[..span.end];
+    let mut i = span.start;
     let mut brace_depth = 0usize;
     let mut function_definition = false;
     while i < bytes.len() {
         let start = i;
-        let rest = &source[i..];
+        let rest = &source[i..span.end];
         let b = bytes[i];
         if b.is_ascii_whitespace() {
             i += 1;
@@ -147,7 +154,7 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
             continue;
         }
         if let Some(comment) = rest.strip_prefix("/*") {
-            if dialect == Dialect::Bx && function_definition {
+            if dialect == Dialect::Bx && (function_definition || callback) {
                 return Err(diagnostic(source, start, "use a // comment in a function"));
             }
             let end = comment
@@ -165,6 +172,7 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
                 // on the DSLX field named `field!`.
                 if dialect == Dialect::Bx
                     && !function_definition
+                    && !callback
                     && bytes[i..].starts_with(b"!=")
                     && !bytes[i..].starts_with(b"!==")
                 {
@@ -254,7 +262,7 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
     }
     tokens.push(Token {
         text: "",
-        start: source.len(),
+        start: span.end,
         character: None,
     });
     Ok(tokens)
@@ -320,13 +328,21 @@ struct Parser<'s> {
     pos: usize,
     depth: usize,
     dslx_type_display: bool,
-    /// Use DSLX identifier rules throughout a local function definition.
-    in_function: bool,
-    /// Counted-loop operands and bodies permit lexical value scopes while
-    /// keeping BX identifiers, including an instance's `out` port.
-    in_counted_for: bool,
+    value_context: ValueContext,
+    /// Pure operands such as counted-loop iterables and map inputs permit
+    /// lexical value scopes while keeping the enclosing identifier dialect.
+    in_value_expression: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
+}
+
+/// Lambdas use DSLX function grammar. Inside a BX block they can also name
+/// the block's instance output ports, including in capture diagnostics.
+#[derive(Clone, Copy, PartialEq)]
+enum ValueContext {
+    Block,
+    Function,
+    BlockLambda,
 }
 
 /// The depth of a parsed type includes both tuple and array constructors.
@@ -357,6 +373,26 @@ enum ParsedIterable {
         limit: ParsedExpr,
         inclusive: bool,
     },
+}
+
+impl ParsedIterable {
+    fn into_ast(self) -> (ForIterable, usize) {
+        match self {
+            Self::Array(value) => (ForIterable::Array(value.value), value.height),
+            Self::Range {
+                start,
+                limit,
+                inclusive,
+            } => (
+                ForIterable::Range {
+                    start: start.value,
+                    limit: limit.value,
+                    inclusive,
+                },
+                start.height.max(limit.height),
+            ),
+        }
+    }
 }
 
 /// Source distinctions needed for DSLX postfix and comparison precedence.
@@ -390,12 +426,12 @@ impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
         Ok(Self {
             source,
-            tokens: lex(source, Dialect::Bx)?,
+            tokens: lex(source, Dialect::Bx, None)?,
             pos: 0,
             depth: 0,
             dslx_type_display,
-            in_function: false,
-            in_counted_for: false,
+            value_context: ValueContext::Block,
+            in_value_expression: false,
             block_type_params: BTreeSet::new(),
         })
     }
@@ -450,8 +486,12 @@ impl<'s> Parser<'s> {
         }
     }
 
+    fn dslx_value_grammar(&self) -> bool {
+        self.value_context != ValueContext::Block
+    }
+
     fn ident(&mut self) -> Result<String, String> {
-        if self.in_function {
+        if self.dslx_value_grammar() {
             self.take_identifier(is_function_identifier)
         } else {
             self.take_identifier(is_identifier)
@@ -460,7 +500,7 @@ impl<'s> Parser<'s> {
 
     fn take_identifier(&mut self, valid: fn(&str) -> bool) -> Result<String, String> {
         let text = self.peek(0);
-        if valid(text) && (!self.in_function || is_function_identifier(text)) {
+        if valid(text) && (!self.dslx_value_grammar() || is_function_identifier(text)) {
             self.pos += 1;
             Ok(text.to_owned())
         } else {
@@ -478,9 +518,9 @@ impl<'s> Parser<'s> {
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
             } else if self.eat("fn") {
-                self.in_function = true;
+                self.value_context = ValueContext::Function;
                 let function = self.function(public)?;
-                self.in_function = false;
+                self.value_context = ValueContext::Block;
                 module.declaration_order.push(function.name.clone());
                 module.functions.push(function);
             } else if self.eat("struct") {
@@ -611,7 +651,7 @@ impl<'s> Parser<'s> {
     }
 
     fn param(&mut self) -> Result<Param, String> {
-        let name = if self.in_function {
+        let name = if self.dslx_value_grammar() {
             // A self parameter is reserved for DSLX impl and trait methods.
             self.take_identifier(is_use_identifier)?
         } else {
@@ -904,7 +944,7 @@ impl<'s> Parser<'s> {
     fn type_atom(&mut self) -> Result<ParsedType, String> {
         if self.eat("(") {
             return self.nested(|parser| {
-                if parser.dslx_type_display || parser.in_function {
+                if parser.dslx_type_display || parser.dslx_value_grammar() {
                     let fields = parser.list(")", Self::parsed_ty)?;
                     parser.tuple_type(fields)
                 } else {
@@ -1261,8 +1301,8 @@ impl<'s> Parser<'s> {
                     return matches!(next, "." | "[" | "as" | "{")
                         || BinaryOp::from_spelling(next).is_some();
                 }
-                let field =
-                    is_function_identifier(first) || !self.in_function && is_identifier(first);
+                let field = is_function_identifier(first)
+                    || !self.dslx_value_grammar() && is_identifier(first);
                 if next == ":" && self.block_type_params.contains(first) {
                     // Both a field initializer and an annotated integer pattern
                     // can start with `T:0`. Only the latter continues to an arm
@@ -1337,10 +1377,7 @@ impl<'s> Parser<'s> {
 
     /// Parse a pure counted fold in either a block or a local function.
     fn counted_for(&mut self) -> Result<ParsedExpr, String> {
-        let outer = std::mem::replace(&mut self.in_counted_for, true);
-        let result = self.counted_for_contents();
-        self.in_counted_for = outer;
-        result
+        self.with_value_grammar(Self::counted_for_contents)
     }
 
     fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
@@ -1353,21 +1390,7 @@ impl<'s> Parser<'s> {
         self.expect(")")?;
         let annotation = self.loop_annotation()?;
         self.expect("in")?;
-        let (iterable, height) = match self.for_iterable(Braces::Body)? {
-            ParsedIterable::Array(value) => (ForIterable::Array(value.value), value.height),
-            ParsedIterable::Range {
-                start,
-                limit,
-                inclusive,
-            } => (
-                ForIterable::Range {
-                    start: start.value,
-                    limit: limit.value,
-                    inclusive,
-                },
-                start.height.max(limit.height),
-            ),
-        };
+        let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
         self.expect("{")?;
         let body = self.value_scope()?;
         self.expect("(")?;
@@ -1387,7 +1410,18 @@ impl<'s> Parser<'s> {
     }
 
     fn in_value_body(&self) -> bool {
-        self.in_function || self.in_counted_for
+        self.dslx_value_grammar() || self.in_value_expression
+    }
+
+    /// Enable value blocks with pure lets without hiding BX port names.
+    fn with_value_grammar<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let outer = std::mem::replace(&mut self.in_value_expression, true);
+        let result = parse(self);
+        self.in_value_expression = outer;
+        result
     }
 
     /// Parse the range operator below all binary operators. Parentheses can
@@ -1438,7 +1472,7 @@ impl<'s> Parser<'s> {
         if self.peek(0) != "for" || self.peek(1) != "(" {
             return false;
         }
-        if self.in_function {
+        if self.dslx_value_grammar() {
             return true;
         }
         let mut depth = 1usize;
@@ -1579,7 +1613,7 @@ impl<'s> Parser<'s> {
         braces: Braces,
     ) -> Result<ParsedExpr, String> {
         loop {
-            if self.in_function
+            if self.dslx_value_grammar()
                 && left.spelling != ExprSpelling::Parenthesized
                 && matches!(left.value, Expr::If { .. })
                 && matches!(self.peek(0), "." | "[")
@@ -1595,6 +1629,8 @@ impl<'s> Parser<'s> {
                         diagnostic(self.source, offset, "tuple index must fit in u32")
                     })?;
                     index.to_string()
+                } else if self.value_context == ValueContext::BlockLambda && self.eat("out") {
+                    "out".to_owned()
                 } else {
                     self.take_identifier(is_dslx_member_name)?
                 };
@@ -1677,7 +1713,7 @@ impl<'s> Parser<'s> {
 
     fn atom(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
         let text = self.peek(0);
-        if self.in_function && text == "_" {
+        if self.dslx_value_grammar() && text == "_" {
             return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
         }
         if self.eat("[") {
@@ -1694,7 +1730,7 @@ impl<'s> Parser<'s> {
         if self.eat("if") {
             return self.if_expr();
         }
-        if text == "match" && (self.in_function || self.block_match_ahead()) {
+        if text == "match" && (self.dslx_value_grammar() || self.block_match_ahead()) {
             self.pos += 1;
             return self.match_expr();
         }
@@ -1737,6 +1773,9 @@ impl<'s> Parser<'s> {
         }
         let name = self.name_or_qualified_member()?;
         if self.eat("(") {
+            if name == "map" && self.has_lambda_argument() {
+                return self.map_call();
+            }
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
         }
@@ -1761,6 +1800,130 @@ impl<'s> Parser<'s> {
             );
         }
         Ok(ParsedExpr::leaf(Expr::Name(name)))
+    }
+
+    /// An inline lambda is available only as the second argument of `map`.
+    /// Calls with ordinary arguments retain their usual name resolution.
+    fn map_call(&mut self) -> Result<ParsedExpr, String> {
+        let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
+        self.expect(",")?;
+        let mapped = if self.value_context == ValueContext::Block {
+            self.block_map_lambda(iterable)?
+        } else {
+            self.map_lambda(iterable)?
+        };
+        self.eat(",");
+        self.expect(")")?;
+        Ok(mapped)
+    }
+
+    /// The module lexer used BX rules here. Re-lex the callback once using
+    /// function rules, including any nested map lambdas, then resume the BX
+    /// token stream at the call's closing parenthesis or trailing comma.
+    fn block_map_lambda(&mut self, iterable: ParsedIterable) -> Result<ParsedExpr, String> {
+        let mut depth = 0usize;
+        let end = self.tokens[self.pos..]
+            .iter()
+            .position(|token| match token.text {
+                "(" => {
+                    depth += 1;
+                    false
+                }
+                ")" if depth > 0 => {
+                    depth -= 1;
+                    false
+                }
+                ")" | "" => true,
+                _ => false,
+            })
+            .expect("the token stream ends with EOF")
+            + self.pos;
+        let callback_end = if self.tokens[end - 1].text == "," {
+            end - 1
+        } else {
+            end
+        };
+        let start = self.tokens[self.pos - 1].start + 1; // Immediately after the comma.
+        let span = start..self.tokens[callback_end].start;
+        let tokens = lex(self.source, Dialect::Bx, Some(span))?;
+        let outer_tokens = std::mem::replace(&mut self.tokens, tokens);
+        self.pos = 0;
+        self.value_context = ValueContext::BlockLambda;
+        let mapped = self.map_lambda(iterable).and_then(|value| {
+            if self.peek(0).is_empty() {
+                Ok(value)
+            } else {
+                Err(self.error("expected end of map lambda"))
+            }
+        });
+        self.value_context = ValueContext::Block;
+        self.tokens = outer_tokens;
+        self.pos = callback_end;
+        mapped
+    }
+
+    /// Find the separator after the array without interpreting commas in
+    /// nested calls, aggregate literals, or lexical blocks.
+    fn has_lambda_argument(&self) -> bool {
+        let mut tokens = self.tokens[self.pos..].iter();
+        let mut depth = 0;
+        while let Some(token) = tokens.next() {
+            match token.text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" if depth == 0 => return false,
+                ")" | "]" | "}" => depth -= 1,
+                "," if depth == 0 => {
+                    return tokens
+                        .find(|t| t.text != "(")
+                        .is_some_and(|t| matches!(t.text, "|" | "||"));
+                }
+                _ => { /* Other tokens leave the argument nesting unchanged. */ }
+            }
+        }
+        false
+    }
+
+    /// Parse a unary map lambda in DSLX's pure expression grammar. An
+    /// explicit return annotation requires a braced body.
+    fn map_lambda(&mut self, iterable: ParsedIterable) -> Result<ParsedExpr, String> {
+        if self.eat("(") {
+            let mapped = self.nested(|parser| parser.map_lambda(iterable))?;
+            self.expect(")")?;
+            return Ok(mapped);
+        }
+        self.expect("|")?;
+        let parameter = self.take_identifier(is_use_identifier)?;
+        let parameter_type = if self.eat(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.eat(",");
+        self.expect("|")?;
+        let result_type = if self.eat("->") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        let body = if self.eat("{") {
+            self.value_scope()?
+        } else if result_type.is_some() {
+            return Err(self.error("lambda with an explicit result type requires a braced body"));
+        } else {
+            self.expr()?
+        };
+        let (iterable, height) = iterable.into_ast();
+        self.compose(
+            height.max(body.height),
+            Expr::Map(Box::new(MapExpr {
+                target: "map".into(),
+                iterable,
+                parameter,
+                parameter_type,
+                result_type,
+                body: body.value,
+            })),
+        )
     }
 
     /// Recognize a bit literal's annotation and suggest the DSLX spelling
@@ -2421,6 +2584,121 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
         assert!(
             matches!(&values[..], [Expr::Index { value, .. }] if matches!(value.as_ref(), Expr::Index { .. }))
         );
+    }
+
+    #[test]
+    fn map_lambdas_parse_scopes_annotations_and_ranges() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+block wrapper(clk, xs: (u8, u8)[2]) -> u8[2] {
+    map({ let ys = xs; ys }, ((|p: (u8, u8),| -> u8 {
+        let (a, b) = p;
+        a | b
+    })),)
+}
+fn visit() -> u8[3] {
+    map(((u8:1..=u8:3)), |_| u8:4)
+}
+"#,
+        )?;
+        let Expr::Map(mapped) = &module.blocks[0].output else {
+            panic!("expected an inline map")
+        };
+        assert!(matches!(
+            mapped.iterable,
+            ForIterable::Array(Expr::Scope { .. })
+        ));
+        assert_eq!(mapped.parameter, "p");
+        assert!(matches!(&mapped.parameter_type, Some(Type::Tuple(items)) if items.len() == 2));
+        assert_eq!(
+            mapped.result_type,
+            Some(Type::Bits {
+                signed: false,
+                width: 8
+            })
+        );
+        assert!(matches!(mapped.body, Expr::Scope { .. }));
+        let Expr::Map(mapped) = &module.functions[0].body else {
+            panic!("expected a map over a range")
+        };
+        assert!(matches!(
+            mapped.iterable,
+            ForIterable::Range {
+                inclusive: true,
+                ..
+            }
+        ));
+        assert_eq!(mapped.parameter, "_");
+        assert_eq!(mapped.parameter_type, None);
+        assert_eq!(mapped.result_type, None);
+        assert!(matches!(mapped.body, Expr::Literal { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn block_map_callbacks_use_function_tokens_only_inside_the_callback() -> Result<(), String> {
+        parse_module(
+            r#"
+block b(clk, xs: u8[2], x: u8) -> u8[2] {
+    let mapped = map(if x!=u8:0 { /* BX */ xs } else { xs }, ((|x| {
+        let a!=x;
+        map([a!], |y| { let b!=y; b! })[u32:0]
+    })),);
+    if x!=u8:0 { /* BX */ mapped } else { xs }
+}
+"#,
+        )?;
+        assert!(
+            parse_module("block b(clk, xs:u8[2]) -> bool[2] { map(xs, |x| x!=u8:0) }").is_err()
+        );
+        let commented = "block b(clk, xs:u8[2]) -> u8[2] {\n    map(xs, |x| {\n        /* comment */ x\n    })\n}";
+        assert_eq!(
+            parse_module(commented).unwrap_err(),
+            "3:9: use a // comment in a function"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_calls_named_map_and_bitwise_or_remain_unambiguous() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn map(x: u8, y: u8) -> u8 { x + y }
+block wrapper(clk, x: u8, y: u8) -> u8 { map(x, (x | y)) }
+"#,
+        )?;
+        let Expr::Call { name, args } = &module.blocks[0].output else {
+            panic!("expected an ordinary call")
+        };
+        assert_eq!(name, "map");
+        assert!(matches!(&args[..], [Expr::Name(_), Expr::Binary { .. }]));
+        Ok(())
+    }
+
+    #[test]
+    fn map_lambda_grammar_rejects_invalid_binders_and_hardware_statements() {
+        for value in [
+            "map(xs, || u8:0)",
+            "map(xs, |a, b| a)",
+            "map(xs, |(a, b)| a)",
+            "map(xs, |self| self)",
+            "map(xs, |out| out)",
+            "map(xs, |_| _)",
+            "map(xs, |x| -> u8 x)",
+            "map(xs, |x| { reg state: u8; x })",
+            "map(xs, |x| { inst child: Child; x })",
+            "map(xs, |x| { state := x; x })",
+            "map(xs, |x| x, xs)",
+            "other(xs, |x| x)",
+            "lib::map(xs, |x| x)",
+            "|x| x",
+        ] {
+            assert!(
+                parse_module(&format!("block b(clk, xs: u8[2]) -> u8[2] {{ {value} }}")).is_err(),
+                "{value}"
+            );
+        }
+        assert!(parse_module("fn f(xs: u8[2]) -> u8[2] { map(xs, |c| c.out) }").is_err());
     }
 
     #[test]
