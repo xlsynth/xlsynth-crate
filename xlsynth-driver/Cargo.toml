@@ -57,6 +57,7 @@ pretty_assertions = "1.4.1"
 
 [features]
 default = []
+dslx-loop-bindings = ["xlsynth-lean/dslx-loop-bindings"]
 iverilog-tests = []
 unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
 has-boolector = ["xlsynth-prover/has-boolector", "xlsynth-autocov/has-boolector"]

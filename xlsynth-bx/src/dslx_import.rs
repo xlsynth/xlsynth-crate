@@ -296,7 +296,7 @@ fn probe_{id}({}) {{ capture({}) }}
     /// until BX links their generated IR symbols into the destination.
     pub(crate) fn finish(
         mut self,
-        mut on_import: impl FnMut(TypecheckedModule),
+        mut convert: impl FnMut(TypecheckedModule) -> Result<String, String>,
         on_sources: impl FnOnce(ImportedStructs, BTreeSet<String>),
     ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
@@ -306,18 +306,17 @@ fn probe_{id}({}) {{ capture({}) }}
                 groups.entry(&call.module).or_default().push(id);
             }
             for (index, (subject, ids)) in groups.into_iter().enumerate() {
-                let (batch, checked) = compile_batch(
-                    subject,
+                let batch = compile_batch(
                     index,
                     &self.calls,
                     ids,
                     data,
                     &self.stdlib_path,
                     &self.structs,
+                    &mut convert,
                 )
                 .map_err(|e| format!("compiling DSLX import '{subject}': {e}"))?;
                 batches.push(batch);
-                on_import(checked);
             }
         }
         on_sources(self.structs, self.imported_modules);
@@ -580,14 +579,14 @@ impl ProbeCapture {
 
 /// Recover each specialization's exact IR symbol from its generated probe.
 fn compile_batch(
-    subject: &str,
     index: usize,
     calls: &[ImportedCall],
     call_ids: Vec<usize>,
     imports: &mut ImportData,
     stdlib_path: &Path,
     structs: &ImportedStructs,
-) -> Result<(ImportBatch, TypecheckedModule), String> {
+    convert: &mut impl FnMut(TypecheckedModule) -> Result<String, String>,
+) -> Result<ImportBatch, String> {
     let mut probe_imports = ProbeImports::default();
     let mut probes = String::new();
     for &id in &call_ids {
@@ -595,7 +594,7 @@ fn compile_batch(
         let (params, expr) = probe_call(
             &mut probe_imports,
             structs,
-            subject,
+            &call.module,
             &call.function,
             &call.args,
         )?;
@@ -604,7 +603,7 @@ fn compile_batch(
     let source = probe_imports.declarations() + &probes;
     let module = format!("0bx_batch_{index}");
     let checked = check_probe(&source, &module, imports)?;
-    let mut ir = checked.to_ir_text().map_err(|e| e.to_string())?;
+    let mut ir = convert(checked)?;
     // libxls accepts a numeric initial in a synthetic DSLX module name.
     // Give just the enclosing PIR package a legal initial; the generated
     // function symbols retain their collision-free prefix.
@@ -634,33 +633,33 @@ fn compile_batch(
         let call = &calls[id];
         let name = xlsynth::mangle_dslx_name(&module, &format!("probe_{id}"))
             .map_err(|e| e.to_string())?;
-        let probe = functions
-            .get(name.as_str())
-            .ok_or_else(|| format!("missing compiled probe for {subject}::{}", call.function))?;
+        let probe = functions.get(name.as_str()).ok_or_else(|| {
+            format!(
+                "missing compiled probe for {}::{}",
+                call.module, call.function
+            )
+        })?;
         let mut invokes = probe.nodes.iter().filter_map(|n| match &n.payload {
             NodePayload::Invoke { to_apply, .. } => Some(to_apply),
             _ => None,
         });
         let symbol = invokes
             .next()
-            .ok_or_else(|| format!("missing invoke for {subject}::{}", call.function))?;
+            .ok_or_else(|| format!("missing invoke for {}::{}", call.module, call.function))?;
         if invokes.next().is_some() {
             return Err(format!(
-                "ambiguous compiled probe for {subject}::{}",
-                call.function
+                "ambiguous compiled probe for {}::{}",
+                call.module, call.function
             ));
         }
         roots.push(symbol.clone());
     }
     crate::import_link::retain_reachable_functions(&mut package, &roots)?;
-    Ok((
-        ImportBatch {
-            package,
-            roots,
-            call_ids,
-        },
-        checked,
-    ))
+    Ok(ImportBatch {
+        package,
+        roots,
+        call_ids,
+    })
 }
 
 #[cfg(test)]

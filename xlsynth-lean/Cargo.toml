@@ -11,6 +11,9 @@ documentation = "https://docs.rs/xlsynth-lean"
 [lints]
 workspace = true
 
+[features]
+dslx-loop-bindings = ["xlsynth/dslx-loop-bindings", "xlsynth-bx/dslx-loop-bindings"]
+
 [dependencies]
 anyhow = "1"
 xlsynth = { path = "../xlsynth", version = "0.80.0" }

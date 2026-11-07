@@ -98,6 +98,8 @@ pub(super) struct HelperSignature {
     pub(super) source_name: Option<(String, String)>,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
+    /// Checked bindings in the original function, keyed by its IR node ID.
+    pub(super) node_bindings: BTreeMap<usize, (String, SourceType)>,
 }
 
 /// Resolve a name within the collected leaf declarations, rejecting unknowns.
