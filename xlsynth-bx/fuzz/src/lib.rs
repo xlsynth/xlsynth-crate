@@ -6,11 +6,13 @@ mod function_oracle;
 mod function_syntax;
 mod generator;
 mod module_graph;
+mod scalar_match;
 mod unroll_types;
 
 pub use function_calls::check_function_calls;
 pub use function_syntax::check_function_syntax;
 pub use module_graph::check_module_graph;
+pub use scalar_match::check_scalar_match;
 pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible

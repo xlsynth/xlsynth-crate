@@ -9,23 +9,24 @@ use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Function, Module, Param, Stmt, StructDef, Type,
-    WidthSliceType,
+    BinaryOp, Block, Expr, ExternBlock, ExternFn, Function, MatchArm, Module, Param, Stmt,
+    StructDef, Type, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
     CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
-    binding_widths_using, check_argument_widths, check_inferred_signed_width, common_type_hint,
-    context_operands, has_common_bit_type, has_concrete_element_type, minimum_type,
-    projected_type_compatible,
+    binding_widths_using, check_argument_widths, check_match_operand_width, check_result_width,
+    common_type_hint, context_operands, has_common_bit_type, has_concrete_element_type,
+    minimum_type, projected_type_compatible,
 };
 use crate::parser::explicit_width_hint;
+mod match_patterns;
 mod scope;
 mod unroll;
 
 pub use crate::typed::{
-    CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr,
-    TypedExprKind,
+    CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern,
+    TypedExpr, TypedExprKind, TypedMatchArm,
 };
 use crate::typed::{TypedExprKind as K, bits};
 
@@ -104,8 +105,63 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
             else_value,
             ..
         } => has_aggregate_literal(then_value) || has_aggregate_literal(else_value),
+        Expr::Match { arms, .. } => arms.iter().any(|arm| has_aggregate_literal(&arm.value)),
         _ => false,
     }
+}
+
+/// A match subject and its patterns, checked independently of the result
+/// group. Each pattern group consumes exactly one checked arm value.
+struct MatchSelector {
+    subject: TypedExpr,
+    patterns: Vec<Vec<ScalarPattern>>,
+}
+
+impl MatchSelector {
+    fn with_values(self, values: &mut impl Iterator<Item = TypedExpr>) -> TypedExpr {
+        let arms: Vec<_> = self
+            .patterns
+            .into_iter()
+            .map(|patterns| TypedMatchArm {
+                patterns,
+                value: values.next().expect("one checked result per match arm"),
+            })
+            .collect();
+        TypedExpr {
+            ty: arms[0].value.ty.clone(),
+            kind: K::Match {
+                subject: Box::new(self.subject),
+                arms,
+            },
+        }
+    }
+}
+
+/// Retains each selector while nested branch results are inferred together.
+enum BranchSelector {
+    Value,
+    If(TypedExpr),
+    Match(MatchSelector),
+}
+
+/// Collect the subject and literal constraints in source order. AST callers
+/// can construct patterns directly, including inside an empty unrolled loop.
+fn match_operands<'e>(subject: &'e Expr, arms: &'e [MatchArm]) -> Result<Vec<&'e Expr>, String> {
+    if arms.is_empty() || arms.iter().any(|arm| arm.patterns.is_empty()) {
+        return Err("match requires at least one arm and a pattern for each arm".into());
+    }
+    let mut operands = vec![subject];
+    for literal in arms
+        .iter()
+        .flat_map(|arm| &arm.patterns)
+        .flat_map(|pattern| pattern.literals())
+    {
+        if !matches!(literal, Expr::Bool(_) | Expr::Literal { .. }) {
+            return Err("scalar match patterns require literal values".into());
+        }
+        operands.push(literal);
+    }
+    Ok(operands)
 }
 
 /// DSLX's bool and u1 are the same unsigned bit type, including in tuples.
@@ -854,8 +910,8 @@ struct BodyChecker<'a, 'm> {
     structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
     kind: BodyKind,
-    /// The enclosing call uses DSLX argument inference for local functions.
-    in_dslx_call_argument: bool,
+    /// Use DSLX literal inference inside a local call argument or scalar match.
+    dslx_value_context: bool,
     function_position: Option<usize>,
     local_callees: BTreeSet<&'m str>,
     names: BTreeSet<String>,
@@ -897,7 +953,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             structs,
             resolver,
             kind,
-            in_dslx_call_argument: false,
+            dslx_value_context: false,
             function_position: None,
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
@@ -1312,10 +1368,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Propagate expected types to literals, aggregate members, and pure call
     /// arguments.
     fn expr(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
-        let value = self.expr_in_group(expr, expected)?;
-        if expected.is_none() {
-            check_inferred_signed_width(&[expr], &value.ty, self.dslx_widths())?;
+        if expected.is_some() {
+            return self.expr_in_group(expr, expected);
         }
+        if crate::infer_literal::has_scalar_match_result(expr) {
+            // Check the inferred group while arm-local aliases still retain
+            // their literal widths, including in block initializers.
+            return self.with_dslx_value_context(|checker| {
+                checker.with_prepared_value(expr, Self::inferred_group_result)
+            });
+        }
+        self.inferred_group_result(expr)
+    }
+
+    /// Validate a self-determined result after elaborating its concrete type.
+    fn inferred_group_result(&mut self, expr: &Expr) -> Result<TypedExpr, String> {
+        let value = self.expr_in_group(expr, None)?;
+        check_result_width(&[expr], &value.ty, self.dslx_widths(), &|| {
+            self.zero_calls_function()
+        })?;
         Ok(value)
     }
 
@@ -1352,21 +1423,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Bool(value) => (Type::Bool, K::Literal(IrValue::bool(*value))),
             Expr::Zero(ty) => {
                 let ty = self.source_type(ty)?;
-                let calls_function = match self.kind {
-                    BodyKind::Function if self.names.contains("zero!") => {
-                        return Err("'zero!' names a local value here".into());
-                    }
-                    BodyKind::Function => {
-                        self.decls.visible("zero!", self.function_position)
-                            && (self.decls.functions.contains_key("zero!")
-                                || self.resolver.lookup("zero!")?.is_some())
-                    }
-                    // Only a local function can override zero! in a BX block.
-                    BodyKind::Block { .. } => {
-                        self.decls.functions.get("zero!").is_some_and(|f| f.local)
-                    }
-                };
-                if calls_function {
+                if self.zero_calls_function()? {
                     self.function_call("zero!", &[])?
                 } else {
                     let layout = crate::layout::Layouts::new(&self.structs.definitions)
@@ -1376,6 +1433,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
             Expr::Literal { ty, text } => {
+                // An explicitly typed DSLX negative literal negates a
+                // width-checked magnitude. For example, s3:-5 represents 3.
+                let magnitude = if ty.is_some() && self.dslx_widths().is_some() {
+                    text.strip_prefix('-')
+                } else {
+                    None
+                };
                 let ty = ty
                     .as_ref()
                     .or(expected)
@@ -1386,8 +1450,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 if !signed && text.starts_with('-') {
                     return Err(format!("negative literal '{text}' has unsigned type {ty}"));
                 }
-                let value = IrValue::parse_typed(&format!("bits[{width}]:{text}"))
+                let digits = magnitude.unwrap_or(text);
+                let value = IrValue::parse_typed(&format!("bits[{width}]:{digits}"))
                     .map_err(|e| format!("invalid literal '{ty}:{text}': {e}"))?;
+                let value = if magnitude.is_some() {
+                    IrValue::Bits(value.to_bits().map_err(|e| e.to_string())?.negate())
+                } else {
+                    value
+                };
                 // Like DSLX, hexadecimal and binary literals can spell a signed
                 // bit pattern directly, e.g. s8:0xff represents -1.
                 if signed
@@ -1600,6 +1670,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
             Expr::Call { name, args } => self.function_call(name, args)?,
+            Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
+                let selector = checker.match_selector(subject, arms)?;
+                let results: Vec<_> = arms.iter().map(|arm| &arm.value).collect();
+                let values = checker.check_results(&results, expected)?;
+                let value = selector.with_values(&mut values.into_iter());
+                Ok((value.ty, value.kind))
+            })?,
             Expr::Cast { value, ty } => {
                 self.structs.validate_type(ty)?;
                 let v = self.inferred_expr(value)?;
@@ -1642,17 +1719,17 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             Expr::Binary { op, left, right } => self.binary(*op, left, right, expected)?,
         };
-        let dslx_projection = (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+        let dslx_projection = (self.kind == BodyKind::Function || self.dslx_value_context)
             && matches!(
                 expr,
                 Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
             );
-        let dslx_bindings = (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+        let dslx_bindings = (self.kind == BodyKind::Function || self.dslx_value_context)
             .then_some(&self.inferred_bindings);
         if dslx_projection {
             // Each nested aggregate infers its fields before a typed sibling
             // or the enclosing expression supplies a signed result type.
-            check_argument_widths(expr, expected.unwrap_or(&ty), dslx_bindings)?;
+            check_argument_widths(expr, expected.unwrap_or(&ty), dslx_bindings, None)?;
         }
         if let Some(expected) = expected
             && !compatible(&ty, expected)
@@ -1707,7 +1784,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Local function expressions and their arguments can use an unannotated
     /// binding's literal minimum to find the first concrete operand.
     fn dslx_widths(&self) -> Option<WidthLookup<'_>> {
-        (self.kind == BodyKind::Function || self.in_dslx_call_argument)
+        (self.kind == BodyKind::Function || self.dslx_value_context)
             .then_some(WidthLookup::DslxLiterals(Some(&self.inferred_bindings)))
     }
 
@@ -1854,6 +1931,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        if self.dslx_widths().is_none()
+            && items.iter().any(|item| matches!(item, Expr::Match { .. }))
+        {
+            return self.with_dslx_value_context(|checker| checker.unify_values(items));
+        }
         if items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
             return self.with_scoped_results(items, Self::unify_values);
         }
@@ -1865,32 +1947,44 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let first_has_type = !self.contains_inferred_aggregate(items[0])
             && has_concrete_element_type(items[0], self.common_widths())?;
-        if !first_has_type && items.iter().any(|item| matches!(item, Expr::If { .. })) {
+        if !first_has_type
+            && items
+                .iter()
+                .any(|item| matches!(item, Expr::If { .. } | Expr::Match { .. }))
+        {
             // Every conditional branch contributes to the same element type.
             let mut branches = Vec::new();
             let mut conditions = Vec::new();
             for item in items {
-                if let Expr::If {
-                    condition,
-                    then_value,
-                    else_value,
-                } = item
-                {
-                    conditions.push(Some(self.expr(condition, Some(&Type::Bool))?));
-                    branches.extend([then_value.as_ref(), else_value.as_ref()]);
-                } else {
-                    conditions.push(None);
-                    branches.push(*item);
+                match item {
+                    Expr::If {
+                        condition,
+                        then_value,
+                        else_value,
+                    } => {
+                        conditions
+                            .push(BranchSelector::If(self.expr(condition, Some(&Type::Bool))?));
+                        branches.extend([then_value.as_ref(), else_value.as_ref()]);
+                    }
+                    Expr::Match { subject, arms } => {
+                        conditions.push(BranchSelector::Match(self.match_selector(subject, arms)?));
+                        branches.extend(arms.iter().map(|arm| &arm.value));
+                    }
+                    _ => {
+                        conditions.push(BranchSelector::Value);
+                        branches.push(*item);
+                    }
                 }
             }
             let mut branches = self.unify_values(&branches)?.into_iter();
             return Ok(conditions
                 .into_iter()
-                .map(|condition| {
-                    let value = branches.next().expect("one value per item");
-                    match condition {
-                        None => value,
-                        Some(condition) => TypedExpr {
+                .map(|condition| match condition {
+                    BranchSelector::Value => branches.next().expect("one value per item"),
+                    BranchSelector::Match(selector) => selector.with_values(&mut branches),
+                    BranchSelector::If(condition) => {
+                        let value = branches.next().expect("then branch");
+                        TypedExpr {
                             ty: value.ty.clone(),
                             kind: K::If {
                                 condition: Box::new(condition),
@@ -1899,7 +1993,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                                     branches.next().expect("two branches per conditional"),
                                 ),
                             },
-                        },
+                        }
                     }
                 })
                 .collect());
@@ -1974,7 +2068,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             CommonTypeHint::FromExpr(i) => {
                 let anchor = self.expr(items[i], None)?;
                 if let Some(widths) = self.dslx_widths() {
-                    check_inferred_signed_width(items, &anchor.ty, Some(widths))?;
+                    check_result_width(items, &anchor.ty, Some(widths), &|| {
+                        self.zero_calls_function()
+                    })?;
                 }
                 self.check_siblings(items, i, anchor)
             }
@@ -1999,6 +2095,52 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             values.push(self.expr_in_group(item, Some(&ty))?);
         }
         Ok(values)
+    }
+
+    /// Use DSLX inference for new value expressions in either kind of body.
+    fn with_dslx_value_context<T>(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let outer = std::mem::replace(&mut self.dslx_value_context, true);
+        let result = check(self);
+        self.dslx_value_context = outer;
+        result
+    }
+
+    /// Resolve the spelling shared by the zero intrinsic and a function.
+    fn zero_calls_function(&self) -> Result<bool, String> {
+        match self.kind {
+            BodyKind::Function if self.names.contains("zero!") => {
+                Err("'zero!' names a local value here".into())
+            }
+            BodyKind::Function => Ok(self.decls.visible("zero!", self.function_position)
+                && (self.decls.functions.contains_key("zero!")
+                    || self.resolver.lookup("zero!")?.is_some())),
+            // Only a local function can override zero! in a BX block.
+            BodyKind::Block { .. } => {
+                Ok(self.decls.functions.get("zero!").is_some_and(|f| f.local))
+            }
+        }
+    }
+
+    /// The subject and literal patterns share one type. An explicitly typed
+    /// endpoint can supply the width for an otherwise untyped subject.
+    fn match_selector(
+        &mut self,
+        subject: &Expr,
+        arms: &[MatchArm],
+    ) -> Result<MatchSelector, String> {
+        self.with_prepared_value(subject, |checker, subject| {
+            let operands = match_operands(subject, arms)?;
+            let mut values = checker.check_results(&operands, None)?.into_iter();
+            let subject = values.next().expect("subject is the first operand");
+            check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
+                checker.zero_calls_function()
+            })?;
+            let patterns = match_patterns::check_patterns(&subject.ty, arms, values)?;
+            Ok(MatchSelector { subject, patterns })
+        })
     }
 
     /// Check the alternatives of a value-producing expression as one result
@@ -2042,7 +2184,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             CommonTypeHint::FromExpr(i) => {
                 let anchor = self.expr_in_group(items[i], None)?;
                 if let Some(widths) = self.dslx_widths() {
-                    check_inferred_signed_width(items, &anchor.ty, Some(widths))?;
+                    check_result_width(items, &anchor.ty, Some(widths), &|| {
+                        self.zero_calls_function()
+                    })?;
                 }
                 Ok((i, anchor))
             }
@@ -2115,7 +2259,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         // BX block-to-extern calls use their declared port width as context.
         // Restore the outer argument's rules after checking a nested call.
         let dslx_arguments = f.local || self.kind == BodyKind::Function;
-        let outer = std::mem::replace(&mut self.in_dslx_call_argument, dslx_arguments);
+        let outer = std::mem::replace(&mut self.dslx_value_context, dslx_arguments);
         let args = args
             .iter()
             .zip(&f.params)
@@ -2128,7 +2272,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 value.map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
             })
             .collect::<Result<_, _>>();
-        self.in_dslx_call_argument = outer;
+        self.dslx_value_context = outer;
         let args = args?;
         Ok((
             f.result.clone(),
@@ -2184,6 +2328,28 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// evaluation.
     fn dimension_expr(&mut self, expr: &Expr, context_width: usize) -> Result<TypedExpr, String> {
         match expr {
+            Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
+                let selector = checker.match_selector(subject, arms)?;
+                let subject = selector
+                    .subject
+                    .constant(&checker.constants)
+                    .ok_or("slice type dimension must be a compile-time constant")?;
+                let value = subject.as_bits().map_err(|e| e.to_string())?;
+                let signed = bits(&selector.subject.ty).expect("checked scalar match").0;
+                let selected = selector
+                    .patterns
+                    .iter()
+                    .position(|patterns| patterns.iter().any(|p| p.matches(value, signed)))
+                    .expect("exhaustive match");
+                let values = arms
+                    .iter()
+                    .map(|arm| checker.dimension_expr(&arm.value, context_width))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ty = values[selected].ty.clone();
+                let mut value = selector.with_values(&mut values.into_iter());
+                value.ty = ty;
+                Ok(value)
+            }),
             Expr::If {
                 condition,
                 then_value,
@@ -2334,7 +2500,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             });
         }
         let (l, r) = self.pair(left, right, None)?;
-        check_inferred_signed_width(&[left, right], &l.ty, None)?;
+        check_result_width(&[left, right], &l.ty, None, &|| self.zero_calls_function())?;
         Ok((l, r))
     }
 

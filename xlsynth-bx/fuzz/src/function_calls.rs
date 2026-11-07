@@ -50,11 +50,12 @@ pub fn route({params}) -> {result} {{
             params: sample.params,
             result: sample.result_type,
             body: call,
-            valid: mode % 8 < 5,
+            valid: Some(mode % 8 < 5),
             dslx_ir: true,
             dynamic_index: None,
         },
         crate::input_seed(data),
         DslxExecution::ConcreteConstants,
+        Vec::new(),
     )
 }

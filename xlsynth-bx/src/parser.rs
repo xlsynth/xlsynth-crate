@@ -8,8 +8,9 @@ pub(crate) mod source_bytes;
 use std::collections::BTreeSet;
 
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, Function, LetBinding, Module,
-    Param, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, Function, LetBinding, MatchArm,
+    MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath,
+    WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -213,10 +214,13 @@ fn lex(source: &str, dialect: Dialect) -> Result<Vec<Token<'_>>, String> {
             // Separate closing angles in nested parametric type arguments.
             // Expressions in an outline retain their source spelling.
             i += 1;
+        } else if dialect == Dialect::Bx && rest.starts_with("..=") {
+            i += 3;
         } else if rest.starts_with(":=")
             || rest.starts_with("+:")
             || rest.starts_with("::")
             || rest.starts_with("->")
+            || rest.starts_with("=>")
             || (dialect == Dialect::Bx && rest.starts_with(".."))
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
         {
@@ -346,6 +350,15 @@ enum ExprSpelling {
     Ordinary,
     Parenthesized,
     AnnotatedLiteral,
+}
+
+/// Distinguishes a struct constructor from a brace terminating the subject
+/// of a conditional, range, or match.
+#[derive(Clone, Copy, PartialEq)]
+enum Braces {
+    Struct,
+    Body,
+    MatchArms,
 }
 
 impl ParsedExpr {
@@ -977,7 +990,7 @@ impl<'s> Parser<'s> {
                         self.error("value-producing if requires an expression in each arm")
                     })?;
                     let expr = self.if_tail(condition, then_value)?;
-                    let output = self.expr_tail(expr, 0, true)?;
+                    let output = self.expr_tail(expr, 0, Braces::Struct)?;
                     self.expect("}")?;
                     return Ok(Body {
                         statements,
@@ -1034,25 +1047,25 @@ impl<'s> Parser<'s> {
     }
 
     fn expr(&mut self) -> Result<ParsedExpr, String> {
-        self.full_expr(true)
+        self.full_expr(Braces::Struct)
     }
 
     /// DSLX ends a full expression at the closing brace of a standalone scope
     /// or the closing parenthesis of an unroll that begins that expression.
-    fn full_expr(&mut self, allow_struct: bool) -> Result<ParsedExpr, String> {
+    fn full_expr(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
         if self.in_function && self.eat("{") {
             return self.nested(Self::value_scope);
         }
         if self.in_function && self.eat("unroll_for!") {
             return self.nested(Self::unroll_for);
         }
-        self.expr_at(0, allow_struct)
+        self.expr_at(0, braces)
     }
 
     /// Parse the condition and the opening brace. An unparenthesized name here
     /// refers to the condition signal even when a brace follows it.
     fn condition(&mut self) -> Result<ParsedExpr, String> {
-        let condition = self.full_expr(false)?;
+        let condition = self.full_expr(Braces::Body)?;
         self.expect("{")?;
         Ok(condition)
     }
@@ -1081,6 +1094,170 @@ impl<'s> Parser<'s> {
         let value = self.expr()?;
         self.expect("}")?;
         Ok(value)
+    }
+
+    /// Braced match subjects and arm results introduce a pure value scope
+    /// in both functions and blocks.
+    fn match_value(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
+        if self.eat("{") {
+            self.nested(Self::value_scope)
+        } else {
+            self.full_expr(braces)
+        }
+    }
+
+    /// Retain arms in source order without constructing a nested condition
+    /// tree. The result height depends on the deepest arm, not their count.
+    fn match_expr(&mut self) -> Result<ParsedExpr, String> {
+        let subject = self.match_value(Braces::MatchArms)?;
+        self.expect("{")?;
+        let mut height = subject.height;
+        let mut range_spellings = BTreeSet::new();
+        let arms = self.list("}", |parser| {
+            let mut patterns = vec![parser.match_pattern(&mut range_spellings)?];
+            while parser.eat("|") {
+                patterns.push(parser.match_pattern(&mut range_spellings)?);
+            }
+            parser.expect("=>")?;
+            let value = parser.match_value(Braces::Struct)?;
+            height = height.max(value.height);
+            Ok(MatchArm {
+                patterns,
+                value: value.value,
+            })
+        })?;
+        self.compose(
+            height,
+            Expr::Match {
+                subject: Box::new(subject.value),
+                arms,
+            },
+        )
+    }
+
+    fn match_pattern(
+        &mut self,
+        range_spellings: &mut BTreeSet<String>,
+    ) -> Result<MatchPattern, String> {
+        if self.eat("_") {
+            return Ok(MatchPattern::Wildcard);
+        }
+        let first = self.pos;
+        let start = self.pattern_literal()?;
+        let separator = self.pos;
+        let inclusive = self.eat("..=");
+        if inclusive || self.eat("..") {
+            let end = self.pattern_literal()?;
+            // An empty interval contributes no coverage, but DSLX still
+            // rejects repeated source patterns, including in one alternative.
+            let spelling = format!(
+                "{}{}{}",
+                literal_pattern_spelling(&self.tokens[first..separator]),
+                self.tokens[separator].text,
+                literal_pattern_spelling(&self.tokens[separator + 1..self.pos]),
+            );
+            if !range_spellings.insert(spelling) {
+                return Err(diagnostic(
+                    self.source,
+                    self.tokens[first].start,
+                    "duplicate range pattern",
+                ));
+            }
+            Ok(MatchPattern::Range {
+                start,
+                end,
+                inclusive,
+            })
+        } else {
+            Ok(MatchPattern::Literal(start))
+        }
+    }
+
+    /// DSLX range endpoints use the same number grammar as literal patterns.
+    fn pattern_literal(&mut self) -> Result<Expr, String> {
+        if self.eat("true") {
+            return Ok(Expr::Bool(true));
+        }
+        if self.eat("false") {
+            return Ok(Expr::Bool(false));
+        }
+        let literal = if self.starts_bit_literal()? {
+            let ty = self.ty()?;
+            if !matches!(ty, Type::Bool | Type::Bits { .. }) {
+                return Err(self.error("match patterns require a scalar literal type"));
+            }
+            self.expect(":")?;
+            self.annotated_literal(ty)?
+        } else if number_token(self.peek(0)) || self.tokens[self.pos].character.is_some() {
+            self.literal(None)?
+        } else {
+            return Err(self.error("expected a scalar match pattern (literal, range, or _)"));
+        };
+        Ok(literal.value)
+    }
+
+    /// In a match subject, a named field starts a struct constructor while a
+    /// scalar literal or wildcard starts the pattern list.
+    fn struct_braces(&self, braces: Braces) -> bool {
+        match braces {
+            Braces::Struct => true,
+            Braces::Body => false,
+            Braces::MatchArms => {
+                let first = self.peek(1);
+                let next = self.peek(2);
+                if first == "}" {
+                    return matches!(next, "." | "[" | "as" | "{")
+                        || BinaryOp::from_spelling(next).is_some();
+                }
+                let field =
+                    is_function_identifier(first) || !self.in_function && is_identifier(first);
+                field && matches!(next, ":" | "," | "}")
+            }
+        }
+    }
+
+    /// BX block names predate the match keyword. An arrow in the following
+    /// braces distinguishes `match (x) { ... }` from a call named `match`,
+    /// and `match - x { ... }` from a subtraction in an existing guard.
+    fn block_match_ahead(&self) -> bool {
+        let next = self.peek(1);
+        if !matches!(next, "(" | "[" | "{" | "-") {
+            return next != "as"
+                && (is_dslx_member_name(next)
+                    || number_token(next)
+                    || self.tokens[self.pos + 1].character.is_some()
+                    || next == "!");
+        }
+        let mut depth = 0usize;
+        let mut brace_offset = None;
+        for (offset, token) in self.tokens[self.pos + 1..].iter().enumerate() {
+            match token.text {
+                "(" | "[" | "{" => {
+                    if depth == 0 {
+                        brace_offset = (token.text == "{").then_some(offset);
+                    }
+                    depth += 1;
+                }
+                "=>" if depth == 1 && brace_offset.is_some_and(|start| start > 0) => return true,
+                "," | ";" | "=>" if depth == 0 => return false,
+                ")" | "]" | "}" => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    if depth == 0 && brace_offset.is_some() {
+                        let after = self.peek(offset + 2);
+                        if !matches!(after, "{" | "." | "[" | "as")
+                            && BinaryOp::from_spelling(after).is_none()
+                        {
+                            return false;
+                        }
+                    }
+                }
+                _ => { /* Other tokens can occur inside the subject or arm. */ }
+            }
+        }
+        false
     }
 
     /// Parse the binders, range, iteration body, and initial accumulator of
@@ -1114,9 +1291,9 @@ impl<'s> Parser<'s> {
         self.expect("in")?;
         // Range endpoints are operands of '..', even at the start of the
         // iterable.
-        let start = self.expr_at(0, true)?;
+        let start = self.expr_at(0, Braces::Struct)?;
         self.expect("..")?;
-        let limit = self.expr_at(0, false)?;
+        let limit = self.expr_at(0, Braces::Body)?;
         self.expect("{")?;
         let mut body = Vec::new();
         let mut height = start.height.max(limit.height);
@@ -1201,10 +1378,10 @@ impl<'s> Parser<'s> {
     }
 
     /// Parse operators according to DSLX precedence, highest for field access.
-    fn expr_at(&mut self, min: u8, allow_struct: bool) -> Result<ParsedExpr, String> {
+    fn expr_at(&mut self, min: u8, braces: Braces) -> Result<ParsedExpr, String> {
         self.nested(|parser| {
-            let left = parser.atom(allow_struct)?;
-            parser.expr_tail(left, min, allow_struct)
+            let left = parser.atom(braces)?;
+            parser.expr_tail(left, min, braces)
         })
     }
 
@@ -1212,7 +1389,7 @@ impl<'s> Parser<'s> {
         &mut self,
         mut left: ParsedExpr,
         min: u8,
-        allow_struct: bool,
+        braces: Braces,
     ) -> Result<ParsedExpr, String> {
         loop {
             if self.in_function
@@ -1265,7 +1442,7 @@ impl<'s> Parser<'s> {
                     return Err(self.error("comparison operators cannot be chained"));
                 }
                 self.pos += 1;
-                let right = self.expr_at(op.precedence() + 1, allow_struct)?;
+                let right = self.expr_at(op.precedence() + 1, braces)?;
                 left = self.compose(
                     left.height.max(right.height),
                     Expr::Binary {
@@ -1311,7 +1488,7 @@ impl<'s> Parser<'s> {
         self.compose(height, expr)
     }
 
-    fn atom(&mut self, allow_struct: bool) -> Result<ParsedExpr, String> {
+    fn atom(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
         let text = self.peek(0);
         if self.in_function && text == "_" {
             return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
@@ -1330,6 +1507,10 @@ impl<'s> Parser<'s> {
         if self.eat("if") {
             return self.if_expr();
         }
+        if text == "match" && (self.in_function || self.block_match_ahead()) {
+            self.pos += 1;
+            return self.match_expr();
+        }
         if self.eat("unroll_for!") {
             return self.unroll_for();
         }
@@ -1346,7 +1527,7 @@ impl<'s> Parser<'s> {
         }
         if let Some(op) = UnaryOp::from_spelling(text) {
             self.pos += 1;
-            let value = self.expr_at(11, allow_struct)?;
+            let value = self.expr_at(11, braces)?;
             return self.compose(
                 value.height,
                 Expr::Unary {
@@ -1368,7 +1549,8 @@ impl<'s> Parser<'s> {
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
         }
-        if allow_struct && self.eat("{") {
+        if self.peek(0) == "{" && self.struct_braces(braces) {
+            self.pos += 1;
             let mut height = 0;
             let fields = self.list("}", |parser| {
                 let field = parser.take_identifier(is_dslx_member_name)?;
@@ -1464,6 +1646,32 @@ impl Body {
     }
 }
 
+/// DSLX retains the outer type spelling, the numeric radix and separators,
+/// and whether the literal was parenthesized. Character escapes denote the
+/// same literal as the corresponding byte.
+fn literal_pattern_spelling(tokens: &[Token]) -> String {
+    let mut result = String::new();
+    if let Some(colon) = tokens.iter().position(|t| t.text == ":") {
+        for token in &tokens[..=colon] {
+            result.push_str(token.text);
+        }
+    }
+    let value = tokens
+        .iter()
+        .rfind(|t| t.text != ")")
+        .expect("parsed literal");
+    if let Some(byte) = value.character {
+        result.push_str(&format!("'{byte}'"));
+    } else {
+        result.push_str(value.text);
+    }
+    if tokens.iter().any(|t| t.text == "(") {
+        format!("({result})")
+    } else {
+        result
+    }
+}
+
 /// DSLX decimal digits have no leading zero unless the entire spelling is `0`.
 fn is_canonical_decimal(text: &str) -> bool {
     !text.is_empty()
@@ -1524,6 +1732,122 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_match_preserves_patterns_arm_order_and_postfix_syntax() {
+        let src = r#"
+fn f(x: s8) -> s8 {
+    match x {
+        -2..s8:0 | s8:1 => (s8:3,),
+        0x04..=s8:6 => { let v = x; (v,) },
+        _ => (x,),
+    }.0
+}
+block b(clk, x: s8) -> s8 { match (x) { _ => { let y = x; y } } }
+"#;
+        let module = parse_module(src).unwrap();
+        let Expr::Field { value, name } = &module.functions[0].body else {
+            panic!("expected projection after match");
+        };
+        assert_eq!(name, "0");
+        let Expr::Match { subject, arms } = value.as_ref() else {
+            panic!("expected match expression");
+        };
+        assert_eq!(subject.as_ref(), &Expr::Name("x".into()));
+        assert!(matches!(
+            &arms[0].patterns[..],
+            [
+                MatchPattern::Range {
+                    inclusive: false,
+                    ..
+                },
+                MatchPattern::Literal(_)
+            ]
+        ));
+        assert!(matches!(
+            &arms[1].patterns[..],
+            [MatchPattern::Range {
+                inclusive: true,
+                ..
+            }]
+        ));
+        assert_eq!(arms[2].patterns, [MatchPattern::Wildcard]);
+        assert!(matches!(arms[1].value, Expr::Scope { .. }));
+        assert!(matches!(module.blocks[0].output, Expr::Match { .. }));
+    }
+
+    #[test]
+    fn match_is_contextual_in_existing_bx_block_expressions() {
+        let src = r#"
+extern fn match(x: u8) -> u8;
+block existing(clk, match: u8) -> u8 {
+    let n = match(match);
+    let m = match as u8;
+    if match == n { n } else { m }
+}
+struct Data { match: u8 }
+block dispatch(clk, match: u8) -> u8 {
+    match Data { match: match }.match {
+        0 => match match { 1 => u8:1, _ => u8:2 },
+        _ => match (match + u8:1) { _ => match },
+    }
+}
+"#;
+        let module = parse_module(src).unwrap();
+        let Stmt::Let { value, .. } = &module.blocks[0].statements[0] else {
+            panic!("expected binding");
+        };
+        assert!(
+            matches!(value, Expr::Call { name, args } if name == "match" && args == &[Expr::Name("match".into())])
+        );
+        let Expr::Match { subject, arms } = &module.blocks[1].output else {
+            panic!("expected scalar match");
+        };
+        assert!(
+            matches!(subject.as_ref(), Expr::Field { value, .. } if matches!(value.as_ref(), Expr::Struct { .. }))
+        );
+        assert!(
+            matches!(&arms[0].value, Expr::Match { subject, .. } if subject.as_ref() == &Expr::Name("match".into()))
+        );
+        assert!(matches!(arms[1].value, Expr::Match { .. }));
+    }
+
+    #[test]
+    fn match_patterns_require_scalar_literals_and_punctuated_arms() {
+        for arms in [
+            "0 => x 1 => x",
+            "0 -> x",
+            "0 = > x",
+            "_ | => x",
+            "0 .. = 1 => x",
+            "0 .. x => x",
+            "- 1 => x",
+            "(0,) => x",
+            "[0] => x",
+            "name => x",
+            "u8[1]:0 => x",
+        ] {
+            let src = format!("fn f(x:u8) -> u8 {{ match x {{ {arms} }} }}");
+            assert!(parse_module(&src).is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn repeated_range_spelling_is_checked_before_literal_normalization() {
+        for (left, right, duplicate) in [
+            ("u8:3", "uN[8]:3", false),
+            ("0b1_1", "0b11", false),
+            ("u8:(3)", "u8:3", false),
+            ("u8:(3)", "u8:((3))", true),
+            ("u8:u4:3", "u8:3", true),
+            ("'A'", "'\\x41'", true),
+        ] {
+            let src = format!(
+                "fn f(x:u8) -> u8 {{ match x {{ {left}..{left} => x, {right}..{right} => x, _ => x }} }}"
+            );
+            assert_eq!(parse_module(&src).is_err(), duplicate, "{src}");
+        }
+    }
 
     #[test]
     fn use_trees_bind_each_leaf_and_preserve_its_full_path() {

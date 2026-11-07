@@ -126,7 +126,12 @@ impl BodyChecker<'_, '_> {
     /// value and width available through both inference and elaboration.
     pub(super) fn dslx_argument(&mut self, expr: &Expr, ty: &Type) -> Result<TypedExpr, String> {
         self.with_prepared_value(expr, |checker, arg| {
-            super::check_argument_widths(arg, ty, Some(&checker.inferred_bindings))?;
+            super::check_argument_widths(
+                arg,
+                ty,
+                Some(&checker.inferred_bindings),
+                Some(&|| checker.zero_calls_function()),
+            )?;
             checker.expr(arg, Some(ty))
         })
     }
@@ -173,6 +178,16 @@ impl BodyChecker<'_, '_> {
                     result = nested;
                 }
                 prepared = Cow::Owned(result);
+            }
+            Expr::Match { arms, .. } => {
+                for (index, arm) in arms.iter().enumerate() {
+                    if let Cow::Owned(value) = self.prepare_value(&arm.value)? {
+                        let Expr::Match { arms, .. } = prepared.to_mut() else {
+                            unreachable!()
+                        };
+                        arms[index].value = value;
+                    }
+                }
             }
             Expr::Tuple(items) | Expr::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
@@ -458,6 +473,13 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                     capture_names(signed, aliases);
                     capture_names(bit_count, aliases);
                 }
+            }
+        }
+        Expr::Match { subject, arms } => {
+            capture_names(subject, aliases);
+            for arm in arms {
+                // Scalar patterns contain only literals, ranges and wildcards.
+                capture_names(&mut arm.value, aliases);
             }
         }
         Expr::If {

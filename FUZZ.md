@@ -123,8 +123,11 @@ The pinned DSLX API exposes the latter through constexpr metadata. The harness
 binds each invocation to a module constant with the exact concrete arguments.
 Invalid calls exercise missing, extra, and incompatible arguments. Signed slice
 starts stay within the source word for bytecode comparison. In the pinned DSLX
-interpreter, an out-of-range signed slice produces unsigned zero, which can
-cause a subsequent signed arithmetic operation to fail. The expression hardware
+bytecode interpreter, an out-of-range signed slice produces unsigned zero.
+For example, `x[i+:s8] + s8:1` with `x = u8:0` and `i = u8:8` fails with
+`ubits vs. sbits`, while the hardware IR evaluates to 1.
+See the [pinned DSLX interpreter implementation](https://github.com/xlsynth/xlsynth/blob/e50f6ad07a1433af08d0f38b7eca686f631e9413/xls/dslx/bytecode/bytecode_interpreter.cc#L1761-L1792).
+The expression hardware
 target continues to generate unrestricted slice starts.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_calls --sanitizer none`.
@@ -163,6 +166,29 @@ checkout. From `xlsynth-bx`, run:
 
 ```shell
 XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_function_syntax --sanitizer none
+```
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_scalar_match.rs
+
+Compares scalar `match` in BX blocks and local functions against pinned DSLX
+source checking, native bytecode execution and hardware IR. The generator
+varies signedness and widths up to 129 bits, literals, alternatives, wildcards,
+and exclusive and inclusive ranges. It generates exhaustive partitions,
+coverage gaps, partial overlaps, freely combined patterns and malformed
+arms. Match subjects include names, function calls and unsized literals, so
+both the subject and the patterns can supply the first concrete bit width.
+Signed patterns also vary the spelling of negative literals whose magnitude
+uses the full width. Result arms mix unsized literals with explicit signed
+values and local calls, both directly and inside aggregate results.
+For runtime subjects, the target exercises every pattern endpoint and its
+immediate neighbors alongside random inputs. Distinct arm results expose priority inversions,
+and an array read confined to the zero arm exposes eager evaluation of
+unselected arms in bytecode.
+
+From `xlsynth-bx`, run:
+
+```shell
+XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_scalar_match --sanitizer none
 ```
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs

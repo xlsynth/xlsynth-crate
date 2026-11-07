@@ -220,15 +220,43 @@ fn collect_minimum(
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
 ) -> Result<bool, String> {
+    collect_minimum_with_calls(expr, bindings, minimum, CallWidth::Concrete)
+}
+
+/// Match subjects unify their literal constraints with patterns before an
+/// invocation on a common-type edge supplies its concrete result width.
+#[derive(Clone, Copy)]
+enum CallWidth<'a> {
+    Concrete,
+    Deferred {
+        zero_is_call: &'a dyn Fn() -> Result<bool, String>,
+    },
+}
+
+fn collect_minimum_with_calls(
+    expr: &Expr,
+    bindings: Option<WidthLookup<'_>>,
+    minimum: &mut Option<Minimum>,
+    calls: CallWidth<'_>,
+) -> Result<bool, String> {
     let next = match expr {
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
+        Expr::Call { .. } if matches!(calls, CallWidth::Deferred { .. }) => return Ok(true),
+        Expr::Zero(_) => {
+            // An intrinsic has an explicit result type; a local zero! function
+            // has the same delayed result constraint as any other invocation.
+            return match calls {
+                CallWidth::Concrete => Ok(false),
+                CallWidth::Deferred { zero_is_call } => zero_is_call(),
+            };
+        }
         Expr::UnrollFor(fold) if fold.annotation.is_none() => {
             let mut seed = None;
-            if !collect_minimum(&fold.seed, None, &mut seed)? {
+            if !collect_minimum_with_calls(&fold.seed, None, &mut seed, calls)? {
                 return Ok(false);
             }
             let Some(mut seed) = seed else {
-                return Ok(false);
+                return Ok(matches!(calls, CallWidth::Deferred { .. }));
             };
             seed.needs_concrete_type = true;
             seed
@@ -256,10 +284,11 @@ fn collect_minimum(
         }
         // Bindings inside the scope may shadow any outer width annotations.
         Expr::Scope { result, .. } => {
-            return collect_minimum(
+            return collect_minimum_with_calls(
                 result,
                 bindings.and_then(WidthLookup::without_names),
                 minimum,
+                calls,
             );
         }
         Expr::Unary { value, .. }
@@ -267,18 +296,26 @@ fn collect_minimum(
             op: BinaryOp::Shl | BinaryOp::Shr,
             left: value,
             ..
-        } => return collect_minimum(value, bindings, minimum),
+        } => return collect_minimum_with_calls(value, bindings, minimum, calls),
         Expr::Binary { op, left, right } if has_common_bit_type(*op) => {
-            return Ok(collect_minimum(left, bindings, minimum)?
-                && collect_minimum(right, bindings, minimum)?);
+            return Ok(collect_minimum_with_calls(left, bindings, minimum, calls)?
+                && collect_minimum_with_calls(right, bindings, minimum, calls)?);
         }
         Expr::If {
             then_value: left,
             else_value: right,
             ..
         } => {
-            return Ok(collect_minimum(left, bindings, minimum)?
-                && collect_minimum(right, bindings, minimum)?);
+            return Ok(collect_minimum_with_calls(left, bindings, minimum, calls)?
+                && collect_minimum_with_calls(right, bindings, minimum, calls)?);
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                if !collect_minimum_with_calls(&arm.value, bindings, minimum, calls)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(!arms.is_empty());
         }
         _ => return Ok(false),
     };
@@ -307,6 +344,18 @@ fn collect_projected(
     path: &[Member],
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
+) -> Result<bool, String> {
+    collect_projected_with_calls(expr, path, bindings, minimum, CallWidth::Concrete)
+}
+
+/// Collect a member's literal constraints before any deferred invocation
+/// results are applied. A projection reads an independently inferred aggregate.
+fn collect_projected_with_calls(
+    expr: &Expr,
+    path: &[Member],
+    bindings: Option<WidthLookup<'_>>,
+    minimum: &mut Option<Minimum>,
+    calls: CallWidth<'_>,
 ) -> Result<bool, String> {
     match (expr, path.split_first()) {
         (Expr::Name(name), _) => {
@@ -345,12 +394,12 @@ fn collect_projected(
             collect_projected(value, &source_path, bindings, minimum)
         }
         (Expr::Tuple(fields), Some((Member::TupleField(i), rest))) => match fields.get(*i) {
-            Some(field) => collect_projected(field, rest, bindings, minimum),
+            Some(field) => collect_projected_with_calls(field, rest, bindings, minimum, calls),
             None => Ok(false),
         },
         (Expr::Array(items), Some((Member::ArrayElement, rest))) => {
             for item in items {
-                if !collect_projected(item, rest, bindings, minimum)? {
+                if !collect_projected_with_calls(item, rest, bindings, minimum, calls)? {
                     return Ok(false);
                 }
             }
@@ -363,15 +412,26 @@ fn collect_projected(
                 ..
             },
             Some(_),
-        ) => Ok(collect_projected(then_value, path, bindings, minimum)?
-            && collect_projected(else_value, path, bindings, minimum)?),
-        (Expr::Scope { result, .. }, _) => collect_projected(
+        ) => Ok(
+            collect_projected_with_calls(then_value, path, bindings, minimum, calls)?
+                && collect_projected_with_calls(else_value, path, bindings, minimum, calls)?,
+        ),
+        (Expr::Match { arms, .. }, Some(_)) => {
+            for arm in arms {
+                if !collect_projected_with_calls(&arm.value, path, bindings, minimum, calls)? {
+                    return Ok(false);
+                }
+            }
+            Ok(!arms.is_empty())
+        }
+        (Expr::Scope { result, .. }, _) => collect_projected_with_calls(
             result,
             path,
             bindings.and_then(WidthLookup::without_names),
             minimum,
+            calls,
         ),
-        (_, None) => collect_minimum(expr, bindings, minimum),
+        (_, None) => collect_minimum_with_calls(expr, bindings, minimum, calls),
         _ => Ok(false),
     }
 }
@@ -471,6 +531,63 @@ pub(crate) fn context_operands(
     Ok(ContextOperands::Explicit)
 }
 
+/// Is the selected result type constrained by a match? Selectors, projections
+/// and call arguments have their own groups and are checked independently.
+fn has_match_result(expr: &Expr, path: &[Member]) -> bool {
+    match (expr, path.split_first()) {
+        (Expr::Match { .. }, _) => true,
+        (
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            },
+            _,
+        ) => has_match_result(then_value, path) || has_match_result(else_value, path),
+        (Expr::Scope { result, .. }, _) => has_match_result(result, path),
+        (Expr::Tuple(fields), Some((Member::TupleField(i), rest))) => fields
+            .get(*i)
+            .is_some_and(|field| has_match_result(field, rest)),
+        (Expr::Array(items), Some((Member::ArrayElement, rest))) => {
+            items.iter().any(|item| has_match_result(item, rest))
+        }
+        (
+            Expr::Unary { value, .. }
+            | Expr::Binary {
+                op: BinaryOp::Shl | BinaryOp::Shr,
+                left: value,
+                ..
+            },
+            None,
+        ) => has_match_result(value, path),
+        (Expr::Binary { op, left, right }, None) if has_common_bit_type(*op) => {
+            has_match_result(left, path) || has_match_result(right, path)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a match contributes to this expression's scalar type group.
+pub(crate) fn has_scalar_match_result(expr: &Expr) -> bool {
+    has_match_result(expr, &[])
+}
+
+/// When a match supplies an inferred result, invocations on the group's
+/// common-type edges acquire their types after its unsized literals unify.
+pub(crate) fn check_result_width(
+    exprs: &[&Expr],
+    ty: &Type,
+    bindings: Option<WidthLookup>,
+    zero_is_call: &dyn Fn() -> Result<bool, String>,
+) -> Result<(), String> {
+    if bits(ty).is_some_and(|(signed, _)| signed) && exprs.iter().any(|e| has_match_result(e, &[]))
+    {
+        check_match_operand_width(exprs, ty, bindings, zero_is_call)
+    } else {
+        check_inferred_signed_width(exprs, ty, bindings)
+    }
+}
+
 /// Check the accumulated literal minimum against the first concrete signed
 /// operand. Once two unsized literals have unified, their minimum loses the
 /// radix prefix that lets an individual hex or binary literal spell a sign bit.
@@ -479,12 +596,33 @@ pub(crate) fn check_inferred_signed_width(
     ty: &Type,
     bindings: Option<WidthLookup>,
 ) -> Result<(), String> {
+    check_signed_operand_prefix(exprs, ty, bindings, CallWidth::Concrete)
+}
+
+/// A direct `s8` argument anchors patterns immediately. With an `s8`
+/// invocation as subject, `0 | 0xff` first merges two unsized minima,
+/// losing the hexadecimal affordance and requiring nine signed bits.
+pub(crate) fn check_match_operand_width(
+    operands: &[&Expr],
+    ty: &Type,
+    bindings: Option<WidthLookup>,
+    zero_is_call: &dyn Fn() -> Result<bool, String>,
+) -> Result<(), String> {
+    check_signed_operand_prefix(operands, ty, bindings, CallWidth::Deferred { zero_is_call })
+}
+
+fn check_signed_operand_prefix(
+    exprs: &[&Expr],
+    ty: &Type,
+    bindings: Option<WidthLookup>,
+    calls: CallWidth<'_>,
+) -> Result<(), String> {
     let Some((true, width)) = bits(ty) else {
         return Ok(());
     };
     let mut minimum = None;
     for expr in exprs {
-        if !collect_minimum(expr, bindings, &mut minimum)? {
+        if !collect_minimum_with_calls(expr, bindings, &mut minimum, calls)? {
             break;
         }
     }
@@ -509,10 +647,11 @@ pub(crate) fn check_argument_widths(
     expr: &Expr,
     ty: &Type,
     bindings: Option<&InferredBindings>,
+    zero_is_call: Option<&dyn Fn() -> Result<bool, String>>,
 ) -> Result<(), String> {
     visit_bit_members(ty, &mut Vec::new(), &mut |path, ty| {
         if let Some((true, width)) = bits(ty) {
-            check_projected_argument(expr, path, ty, width, bindings)?;
+            check_projected_argument(expr, path, ty, width, bindings, zero_is_call)?;
         }
         Ok(())
     })
@@ -526,31 +665,32 @@ fn check_projected_argument(
     ty: &Type,
     width: usize,
     bindings: Option<&InferredBindings>,
+    zero_is_call: Option<&dyn Fn() -> Result<bool, String>>,
 ) -> Result<(), String> {
     match (expr, path.split_first()) {
         (Expr::Scope { result, .. }, _) => {
-            return check_projected_argument(result, path, ty, width, None);
+            return check_projected_argument(result, path, ty, width, None, zero_is_call);
         }
         (Expr::Field { value, name }, _) => {
             if let Ok(i) = name.parse() {
                 let mut source_path = vec![Member::TupleField(i)];
                 source_path.extend_from_slice(path);
-                return check_projected_argument(value, &source_path, ty, width, bindings);
+                return check_projected_argument(value, &source_path, ty, width, bindings, None);
             }
         }
         (Expr::Index { value, .. }, _) => {
             let mut source_path = vec![Member::ArrayElement];
             source_path.extend_from_slice(path);
-            return check_projected_argument(value, &source_path, ty, width, bindings);
+            return check_projected_argument(value, &source_path, ty, width, bindings, None);
         }
         (Expr::Tuple(items), Some((Member::TupleField(i), rest))) => {
             if let Some(item) = items.get(*i) {
-                return check_projected_argument(item, rest, ty, width, bindings);
+                return check_projected_argument(item, rest, ty, width, bindings, zero_is_call);
             }
         }
         (Expr::Array(items), Some((Member::ArrayElement, rest))) if !rest.is_empty() => {
             for item in items {
-                check_projected_argument(item, rest, ty, width, bindings)?;
+                check_projected_argument(item, rest, ty, width, bindings, zero_is_call)?;
             }
         }
         (
@@ -561,17 +701,27 @@ fn check_projected_argument(
             },
             Some(_),
         ) => {
-            check_projected_argument(then_value, path, ty, width, bindings)?;
-            check_projected_argument(else_value, path, ty, width, bindings)?;
+            check_projected_argument(then_value, path, ty, width, bindings, zero_is_call)?;
+            check_projected_argument(else_value, path, ty, width, bindings, zero_is_call)?;
+        }
+        (Expr::Match { arms, .. }, Some(_)) => {
+            for arm in arms {
+                check_projected_argument(&arm.value, path, ty, width, bindings, zero_is_call)?;
+            }
         }
         _ => { /* Scalar operands contribute to the common minimum below. */ }
     }
     let mut minimum = None;
-    collect_projected(
+    let calls = match zero_is_call {
+        Some(zero_is_call) if has_match_result(expr, path) => CallWidth::Deferred { zero_is_call },
+        _ => CallWidth::Concrete,
+    };
+    collect_projected_with_calls(
         expr,
         path,
         Some(WidthLookup::DslxLiterals(bindings)),
         &mut minimum,
+        calls,
     )?;
     check_signed_minimum(minimum, ty, width)
 }
@@ -670,6 +820,14 @@ pub(crate) fn has_concrete_element_type(
             ..
         } => Ok(has_concrete_element_type(then_value, locals)?
             || has_concrete_element_type(else_value, locals)?),
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                if has_concrete_element_type(&arm.value, locals)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
         Expr::Tuple(fields) => {
             for field in fields {
                 if !has_concrete_element_type(field, locals)? {

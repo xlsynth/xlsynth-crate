@@ -42,6 +42,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_scalar_match"
+path = "fuzz_targets/fuzz_bx_dslx_scalar_match.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_unroll_types"
 path = "fuzz_targets/fuzz_bx_dslx_unroll_types.rs"
 test = false

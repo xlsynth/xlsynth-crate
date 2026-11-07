@@ -12,14 +12,14 @@ use xlsynth_pir::ir_builder::{
 use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{
-    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, RegisterWriteOptions,
-    ResetBehavior,
+    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, IrValue,
+    RegisterWriteOptions, ResetBehavior,
 };
 
 use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
 use crate::check::{
-    CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
-    output_ports,
+    CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern, TypedExpr,
+    TypedExprKind, TypedMatchArm, output_ports,
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
@@ -637,31 +637,105 @@ impl<'a, 'defs, S: BuilderState> LowerBody<'a, 'defs, S> {
         }
     }
 
-    /// Selects tuple fields independently to preserve each port's combinational
-    /// dependencies.
+    /// Selects the first asserted case, with case zero in the low bit.
+    /// Select tuple fields independently to preserve each port's dependencies.
     fn select_value(
         &mut self,
-        condition: BValue,
-        yes: BValue,
-        no: BValue,
+        selector: BValue,
+        cases: &[BValue],
+        default: BValue,
     ) -> Result<BValue, BuilderError> {
-        if yes == no {
-            return Ok(yes);
+        if cases.iter().all(|case| *case == default) {
+            return Ok(default);
         }
-        if let ir::Type::Tuple(fields) = self.builder.get_type(yes)? {
+        if let ir::Type::Tuple(fields) = self.builder.get_type(default)? {
             let count = fields.len();
             let mut elements = Vec::with_capacity(count);
             for index in 0..count {
-                let yes = self.project(yes, index)?;
-                let no = self.project(no, index)?;
-                elements.push(self.select_value(condition, yes, no)?);
+                let fields = cases
+                    .iter()
+                    .map(|&case| self.project(case, index))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let field_default = self.project(default, index)?;
+                elements.push(self.select_value(selector, &fields, field_default)?);
             }
             let tuple = self.builder.tuple(&elements)?;
             self.tuple_elements.insert(tuple, elements);
             Ok(tuple)
+        } else if let [yes] = cases {
+            self.builder.select(selector, &[default, *yes], None)
         } else {
-            self.builder.select(condition, &[no, yes], None)
+            self.builder.priority_select(selector, cases, default)
         }
+    }
+
+    /// Build each predicate from the same subject wire. The checker marks
+    /// the arm that completes coverage as the unconditional default.
+    fn lower_match(
+        &mut self,
+        subject: &TypedExpr,
+        arms: &[TypedMatchArm],
+    ) -> Result<BValue, BuilderError> {
+        let signed = matches!(subject.ty, Type::Bits { signed: true, .. });
+        let subject = self.expr(subject)?;
+        let mut predicates = Vec::new();
+        let mut cases = Vec::new();
+        for arm in arms {
+            if arm.patterns.is_empty() {
+                // Every source alternative in this arm was an empty range.
+                continue;
+            }
+            if matches!(arm.patterns.as_slice(), [ScalarPattern::Wildcard]) {
+                let default = self.expr(&arm.value)?;
+                if predicates.is_empty() {
+                    return Ok(default);
+                }
+                predicates.reverse();
+                let selector = if let [predicate] = predicates.as_slice() {
+                    *predicate
+                } else {
+                    self.builder.concat(&predicates)?
+                };
+                return self.select_value(selector, &cases, default);
+            }
+            let mut alternatives = Vec::with_capacity(arm.patterns.len());
+            for pattern in &arm.patterns {
+                alternatives.push(match pattern {
+                    ScalarPattern::Literal(bits) => {
+                        let literal = self.builder.literal(IrValue::Bits(bits.clone()))?;
+                        self.builder.eq(subject, literal)?
+                    }
+                    ScalarPattern::Range {
+                        start,
+                        end,
+                        inclusive,
+                    } => {
+                        let start = self.builder.literal(IrValue::Bits(start.clone()))?;
+                        let end = self.builder.literal(IrValue::Bits(end.clone()))?;
+                        let ge = self.binary(BinaryOp::Ge, signed, subject, start)?;
+                        let op = if *inclusive {
+                            BinaryOp::Le
+                        } else {
+                            BinaryOp::Lt
+                        };
+                        let upper = self.binary(op, signed, subject, end)?;
+                        self.builder.and(ge, upper)?
+                    }
+                    ScalarPattern::Wildcard => unreachable!("exhaustive arm is normalized"),
+                });
+            }
+            let predicate = if let [only] = alternatives.as_slice() {
+                *only
+            } else {
+                let bits = self.builder.concat(&alternatives)?;
+                self.builder.or_reduce(bits)?
+            };
+            predicates.push(predicate);
+            cases.push(self.expr(&arm.value)?);
+        }
+        Err(BuilderError::InvalidOperation(
+            "match has no exhaustive arm".into(),
+        ))
     }
 
     /// Invokes a linked function with the lowered BX arguments in source order.
@@ -779,8 +853,9 @@ impl<'a, 'defs, S: BuilderState> LowerBody<'a, 'defs, S> {
                 let condition = self.expr(condition)?;
                 let yes = self.expr(then_value)?;
                 let no = self.expr(else_value)?;
-                self.select_value(condition, yes, no)
+                self.select_value(condition, &[yes], no)
             }
+            TypedExprKind::Match { subject, arms } => self.lower_match(subject, arms),
         }
     }
 

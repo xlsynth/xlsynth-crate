@@ -133,6 +133,38 @@ impl BindingPattern {
     }
 }
 
+/// Alternatives in one match arm share a result expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchArm {
+    pub patterns: Vec<MatchPattern>,
+    pub value: Expr,
+}
+
+/// A wildcard, scalar literal, or range between two scalar literals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MatchPattern {
+    Wildcard,
+    Literal(Expr),
+    Range {
+        start: Expr,
+        end: Expr,
+        inclusive: bool,
+    },
+}
+
+impl MatchPattern {
+    /// Visit literal expressions in the order they occur in the pattern.
+    pub(crate) fn literals(&self) -> impl Iterator<Item = &Expr> {
+        match self {
+            Self::Wildcard => [None, None],
+            Self::Literal(value) => [Some(value), None],
+            Self::Range { start, end, .. } => [Some(start), Some(end)],
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+
 /// A combinational function defined in this source module.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
@@ -213,6 +245,10 @@ pub enum Expr {
         condition: Box<Expr>,
         then_value: Box<Expr>,
         else_value: Box<Expr>,
+    },
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
     },
     UnrollFor(Box<UnrollFor>),
 }
