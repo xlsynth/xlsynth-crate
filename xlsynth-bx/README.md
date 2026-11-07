@@ -66,9 +66,29 @@ can fail on the mismatched signature.
 
 Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
 
-For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. For parametric functions, define the function in DSLX and import it with `use`.
+For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. For functions with type or integer parametrics, define the function in DSLX and import it with `use`.
 
 BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
+
+### Compile-time function parameters
+
+Declare callable parameters between angle brackets in the order callers will supply them. Give each callback its argument and result types. As with a local function declaration, omitting the result annotation means `()`. Inside the function body, use the parameter as the callee of a direct call.
+
+```text
+fn fold4<F: fn(u16, u16) -> u16>(xs: u16[4], seed: u16) -> u16 {
+    for (x, acc) in xs { F(acc, x) }(seed)
+}
+
+fn add16(a: u16, b: u16) -> u16 { a + b }
+
+block sum(clk, xs: u16[4]) -> u16 {
+    fold4<add16>(xs, u16:0)
+}
+```
+
+Each callable argument must directly name a visible non-parametric BX function or a public, pure DSLX function from a `use` declaration. For example, `use arithmetic;` lets a caller write `fold4<arithmetic::add16>(xs, seed)`. BX uses the declared callback argument types to resolve an imported DSLX specialization and checks its result type. The import and the callback name are resolved at the call site. Names written directly in the template body follow its declaration scope.
+
+BX checks the body against its declared signatures, then generates one function per distinct ordered set of callback identities. Only data arguments appear in the generated function's IR signature. Callable parameters cannot be assigned to a `let`, returned, or forwarded to another template. Inline lambdas remain available in `map` expressions. This function-parametric syntax is a BX extension.
 
 ### Map expressions
 

@@ -18,6 +18,9 @@ pub struct CheckedModule {
     pub(crate) structs: Vec<StructDef>,
     pub(crate) externs: Vec<ExternFn>,
     pub(crate) functions: Vec<CheckedFunction>,
+    /// Generated function definitions that can be renamed when linked into
+    /// an existing package.
+    pub(crate) specialized_functions: BTreeSet<String>,
     pub(crate) extern_blocks: Vec<ExternBlock>,
     pub(crate) imports: ResolvedImports,
     pub(crate) blocks: Vec<CheckedBlock>,

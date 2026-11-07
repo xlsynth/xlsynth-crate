@@ -8,6 +8,8 @@ mod counted_for;
 mod directed_expr_eval;
 #[path = "support/expr_eval.rs"]
 mod expr_eval;
+#[path = "frontend/function_parametrics.rs"]
+mod function_parametrics;
 #[path = "frontend/imported_structs.rs"]
 mod imported_structs;
 #[path = "frontend/local_functions.rs"]

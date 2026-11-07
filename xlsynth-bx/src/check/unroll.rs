@@ -28,7 +28,9 @@ impl BodyChecker<'_, '_> {
     /// Structural iterations and generic specializations elaborate separate
     /// copies of their bodies.
     pub(super) fn replaying_body(&self) -> bool {
-        !self.iteration_path.is_empty() || self.specialization.is_some()
+        !self.iteration_path.is_empty()
+            || self.specialization.is_some()
+            || self.function_spec.is_some()
     }
 
     /// Both elaborated iterations and counted bodies have lexical loop values.
@@ -47,13 +49,18 @@ impl BodyChecker<'_, '_> {
         let (total, kind) = match (
             &mut self.specializations,
             self.specialization,
+            &mut self.function_registry,
+            self.function_spec,
             self.source_kind,
         ) {
-            (Some(registry), Some(_), _) => {
+            (Some(registry), Some(_), _, _, _) => {
                 (&mut registry.expansion_work, "generic block specialization")
             }
-            (_, _, BodyKind::Block { .. }) => (&mut self.expansion_work, "block"),
-            (_, _, BodyKind::Function) => (&mut self.expansion_work, "function"),
+            (_, _, Some(registry), Some(_), _) => {
+                (&mut registry.expansion_work, "function specialization")
+            }
+            (_, _, _, _, BodyKind::Block { .. }) => (&mut self.expansion_work, "block"),
+            (_, _, _, _, BodyKind::Function) => (&mut self.expansion_work, "function"),
         };
         *total = total.saturating_add(work);
         if *total > MAX_TYPE_SIZE {
@@ -104,6 +111,7 @@ impl BodyChecker<'_, '_> {
     ) -> Result<TypedExpr, String> {
         if let Expr::Call { name: target, args } = expr
             && self.decls.is_block(target)
+            && self.callback_index(target).is_none()
         {
             if self.kind == BodyKind::Function {
                 return Err(format!("pure function cannot call block '{target}'"));
@@ -407,6 +415,13 @@ impl<'a> LexicalScope<'a> {
         self.visited.set(self.visited.get().saturating_add(nodes));
     }
 
+    /// An unrolled binding or lambda parameter can discard its value with `_`.
+    fn bind_pattern_name(&mut self, name: &str) {
+        if name != "_" {
+            self.values.to_mut().insert(name.to_owned());
+        }
+    }
+
     /// Look up a binding without crossing a lambda boundary or copying the
     /// bindings accumulated before a sibling scope.
     fn contains(&self, name: &str) -> bool {
@@ -428,12 +443,7 @@ impl<'a> LexicalScope<'a> {
         let mut enclosing = self.enclosing;
         while let Some(scope) = enclosing {
             if scope.contains(head) {
-                let source = head
-                    .strip_prefix("$scope_")
-                    .and_then(|index| index.parse::<usize>().ok())
-                    .and_then(|index| self.alias_names.get(index))
-                    .and_then(Option::as_deref)
-                    .unwrap_or(head);
+                let source = super::scope::source_binding_name(head, self.alias_names);
                 return Err(format!(
                     "map lambda cannot capture enclosing value '{source}'"
                 ));
@@ -457,6 +467,7 @@ impl BodyChecker<'_, '_> {
                 || self.structs.indices.contains_key("map")
                 || self.resolver.lookup("map")?.is_some());
         if map.target != "map"
+            || self.callback_index("map").is_some()
             || module_binding
             || self
                 .specialization
@@ -475,13 +486,14 @@ impl BodyChecker<'_, '_> {
         if let Some(ty) = &map.parameter_type {
             self.check_type_names(ty, enclosing)?;
         }
-        let body_scope = LexicalScope {
-            values: Cow::Owned(BTreeSet::from([map.parameter.clone()])),
+        let mut body_scope = LexicalScope {
+            values: Cow::Owned(BTreeSet::new()),
             parent: None,
             enclosing: Some(enclosing),
             alias_names: enclosing.alias_names,
             visited: enclosing.visited,
         };
+        body_scope.bind_pattern_name(&map.parameter);
         if let Some(ty) = &map.result_type {
             self.check_type_names(ty, &body_scope)?;
         }
@@ -527,10 +539,8 @@ impl BodyChecker<'_, '_> {
         if fold.index == fold.accumulator && fold.index != "_" {
             return Err(format!("duplicate loop binding '{}'", fold.index));
         }
-        locals
-            .values
-            .to_mut()
-            .extend([fold.index.clone(), fold.accumulator.clone()]);
+        locals.bind_pattern_name(&fold.index);
+        locals.bind_pattern_name(&fold.accumulator);
         for stmt in &fold.body {
             let Stmt::Let { name, value, ty } = stmt else {
                 return Err("unroll_for! bodies permit only let bindings before the result".into());
@@ -539,7 +549,7 @@ impl BodyChecker<'_, '_> {
                 self.check_type_names(ty, locals)?;
             }
             self.check_expr_names(value, locals)?;
-            locals.values.to_mut().insert(name.clone());
+            locals.bind_pattern_name(name);
         }
         self.check_expr_names(&fold.result, locals)
     }
@@ -552,6 +562,14 @@ impl BodyChecker<'_, '_> {
             }
             Type::Named(name) => {
                 locals.reject_capture(name)?;
+                let head = name
+                    .split_once("::")
+                    .map_or(name.as_str(), |(head, _)| head);
+                if self.callback_index(head).is_some() {
+                    return Err(format!(
+                        "callable parameter '{head}' may only be used as a callee"
+                    ));
+                }
                 if self
                     .specialization
                     .is_some_and(|spec| spec.bindings.declares(name))
@@ -586,7 +604,16 @@ impl BodyChecker<'_, '_> {
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
-        if locals.contains(name) || name == "update" {
+        if locals.contains(name) {
+            return Ok(());
+        }
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if self.callback_index(head).is_some() {
+            return Err(format!(
+                "callable parameter '{head}' may only be used as a callee"
+            ));
+        }
+        if name == "update" {
             return Ok(());
         }
         if !self.decls.visible(name, self.function_position) {
@@ -623,21 +650,46 @@ impl BodyChecker<'_, '_> {
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
                 if matches!(expr, Expr::Zero(_)) {
                     locals.reject_capture("zero!")?;
+                    if !locals.contains("zero!") && self.callback_index("zero!").is_some() {
+                        return Err("callable parameter 'zero!' requires a direct call".into());
+                    }
                 }
                 self.check_type_names(ty, locals)?
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
+                    locals.reject_capture(name)?;
                     if (self.kind == BodyKind::Function || locals.enclosing.is_some())
                         && !locals.contains(name)
+                        && self.callback_index(name).is_none()
                         && self.decls.is_block(name)
                     {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
-                    self.check_value_name(name, locals)?;
+                    if self.callback_index(name).is_none() || locals.contains(name) {
+                        self.check_value_name(name, locals)?;
+                    }
                 }
                 for item in items {
                     self.check_expr_names(item, locals)?;
+                }
+            }
+            Expr::ParametricCall {
+                name,
+                callbacks,
+                args,
+            } => {
+                locals
+                    .visited
+                    .set(locals.visited.get().saturating_add(callbacks.len()));
+                locals.reject_capture(name)?;
+                self.callable_template(name, locals.contains(name), callbacks.len())?;
+                for callback in callbacks {
+                    locals.reject_capture(callback)?;
+                    self.callback_source(callback, |head| locals.contains(head))?;
+                }
+                for arg in args {
+                    self.check_expr_names(arg, locals)?;
                 }
             }
             Expr::Struct { name, fields } => {

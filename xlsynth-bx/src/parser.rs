@@ -5,12 +5,12 @@
 pub mod outline;
 pub(crate) mod source_bytes;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function,
-    LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp,
-    UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, CallbackParam, Expr, ExternBlock, ExternFn, ForIterable,
+    ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef,
+    Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -334,6 +334,12 @@ struct Parser<'s> {
     in_value_expression: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
+    /// Local callback-template declarations disambiguate angle brackets from
+    /// comparisons in a comma-separated expression list. Blocks can invoke
+    /// functions declared later in the source.
+    callback_templates: BTreeMap<&'s str, usize>,
+    /// Entries hidden by currently active data or callable bindings.
+    hidden_templates: Vec<(&'s str, usize)>,
 }
 
 /// Lambdas use DSLX function grammar. Inside a BX block they can also name
@@ -424,15 +430,23 @@ impl ParsedExpr {
 
 impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
+        let tokens = lex(source, Dialect::Bx, None)?;
+        let callback_templates = tokens
+            .windows(3)
+            .filter(|ts| ts[0].text == "fn" && ts[2].text == "<")
+            .map(|ts| (ts[1].text, ts[1].start))
+            .collect();
         Ok(Self {
             source,
-            tokens: lex(source, Dialect::Bx, None)?,
+            tokens,
             pos: 0,
             depth: 0,
             dslx_type_display,
             value_context: ValueContext::Block,
             in_value_expression: false,
             block_type_params: BTreeSet::new(),
+            callback_templates,
+            hidden_templates: Vec::new(),
         })
     }
 
@@ -490,6 +504,32 @@ impl<'s> Parser<'s> {
         self.value_context != ValueContext::Block
     }
 
+    /// Restore only the template names shadowed in this lexical scope.
+    fn with_name_scope<T>(
+        &mut self,
+        parse: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let first = self.hidden_templates.len();
+        let result = parse(self);
+        self.callback_templates
+            .extend(self.hidden_templates.drain(first..));
+        result
+    }
+
+    fn hide_template(&mut self, name: &str) {
+        if let Some(entry) = self.callback_templates.remove_entry(name) {
+            self.hidden_templates.push(entry);
+        }
+    }
+
+    /// A wildcard in a loop or lambda discards its value without binding a
+    /// name.
+    fn hide_pattern_name(&mut self, name: &str) {
+        if name != "_" {
+            self.hide_template(name);
+        }
+    }
+
     fn ident(&mut self) -> Result<String, String> {
         if self.dslx_value_grammar() {
             self.take_identifier(is_function_identifier)
@@ -514,12 +554,12 @@ impl<'s> Parser<'s> {
         while !self.peek(0).is_empty() {
             let public = self.eat("pub");
             if self.eat("block") {
-                let block = self.block(public)?;
+                let block = self.with_name_scope(|p| p.block(public))?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
             } else if self.eat("fn") {
                 self.value_context = ValueContext::Function;
-                let function = self.function(public)?;
+                let function = self.with_name_scope(|p| p.function(public))?;
                 self.value_context = ValueContext::Block;
                 module.declaration_order.push(function.name.clone());
                 module.functions.push(function);
@@ -698,6 +738,14 @@ impl<'s> Parser<'s> {
     /// semicolon or an empty body returns unit, as in DSLX.
     fn function(&mut self, public: bool) -> Result<Function, String> {
         let name = self.ident()?;
+        let callback_params = if self.eat("<") {
+            if self.peek(0) == ">" {
+                return Err(self.error("expected a function parameter"));
+            }
+            self.list(">", Self::callback_param)?
+        } else {
+            Vec::new()
+        };
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
         let result = if self.eat("->") {
@@ -706,19 +754,50 @@ impl<'s> Parser<'s> {
             Type::Tuple(Vec::new())
         };
         self.expect("{")?;
+        for formal in &callback_params {
+            self.hide_template(&formal.name);
+        }
+        for param in &params {
+            self.hide_template(&param.name);
+        }
         let body = self.value_scope()?.value;
         Ok(Function {
             name,
             public,
+            callback_params,
             params,
             result,
             body,
         })
     }
 
+    /// Parse a named callable's concrete signature in a function's
+    /// compile-time parameter list.
+    fn callback_param(&mut self) -> Result<CallbackParam, String> {
+        let name = self.take_identifier(is_use_identifier)?;
+        self.expect(":")?;
+        self.expect("fn")?;
+        self.expect("(")?;
+        let params = self.list(")", Self::ty)?;
+        let result = if self.eat("->") {
+            self.ty()?
+        } else {
+            Type::Tuple(Vec::new())
+        };
+        Ok(CallbackParam {
+            name,
+            params,
+            result,
+        })
+    }
+
     /// Read a DSLX value block after its opening brace. A trailing semicolon
     /// discards the preceding expression and supplies unit as the result.
     fn value_scope(&mut self) -> Result<ParsedExpr, String> {
+        self.with_name_scope(Self::value_scope_contents)
+    }
+
+    fn value_scope_contents(&mut self) -> Result<ParsedExpr, String> {
         let mut bindings = Vec::new();
         let mut height = 0;
         let output = loop {
@@ -729,6 +808,9 @@ impl<'s> Parser<'s> {
                 let mut names = BTreeSet::new();
                 let pattern = self.binding_pattern(&mut names)?;
                 let (ty, value) = self.let_initializer()?;
+                for name in names {
+                    self.hide_template(&name);
+                }
                 height = height.max(value.height);
                 bindings.push(LetBinding {
                     pattern,
@@ -851,6 +933,16 @@ impl<'s> Parser<'s> {
         let type_params = self.block_type_params()?;
         let signature = self.block_signature(name)?;
         self.expect("{")?;
+        for name in &type_params {
+            self.hide_template(name);
+        }
+        self.hide_template(&signature.clock);
+        if let Some(reset) = &signature.reset {
+            self.hide_template(reset);
+        }
+        for port in &signature.params {
+            self.hide_template(&port.name);
+        }
         let body = self.body()?;
         self.block_type_params.clear();
         let output = body
@@ -1024,6 +1116,10 @@ impl<'s> Parser<'s> {
 
     /// Read declarations and updates followed by an optional trailing value.
     fn body(&mut self) -> Result<Body, String> {
+        self.with_name_scope(Self::block_body_contents)
+    }
+
+    fn block_body_contents(&mut self) -> Result<Body, String> {
         let mut statements = Vec::new();
         while !self.eat("}") {
             // A DSLX use leaf can be named reg or inst. A following name
@@ -1036,17 +1132,19 @@ impl<'s> Parser<'s> {
                 } else {
                     None
                 };
+                self.hide_template(&param.name);
                 statements.push(Stmt::Reg {
                     name: param.name,
                     ty: param.ty,
                     reset,
                 });
             } else if self.eat("let") {
-                statements.push(self.let_stmt()?.0);
+                statements.push(self.let_stmt(Self::hide_template)?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
                 self.pos += 1;
                 let name = self.ident()?;
                 self.expect(":")?;
+                self.hide_template(&name);
                 statements.push(Stmt::Inst {
                     name,
                     block: self.ident()?,
@@ -1109,9 +1207,10 @@ impl<'s> Parser<'s> {
 
     /// Parse a simple let after its keyword, retaining the initializer's
     /// height for bindings that belong to an enclosing expression.
-    fn let_stmt(&mut self) -> Result<(Stmt, usize), String> {
+    fn let_stmt(&mut self, hide_binding: fn(&mut Self, &str)) -> Result<(Stmt, usize), String> {
         let name = self.ident()?;
         let (ty, value) = self.let_initializer()?;
+        hide_binding(self, &name);
         Ok((
             Stmt::Let {
                 name,
@@ -1331,7 +1430,7 @@ impl<'s> Parser<'s> {
         }
         let mut depth = 0usize;
         let mut brace_offset = None;
-        for (offset, token) in self.tokens[self.pos + 1..].iter().enumerate() {
+        for (offset, token) in self.expression_lookahead(self.pos + 1) {
             match token.text {
                 "(" | "[" | "{" => {
                     if depth == 0 {
@@ -1392,7 +1491,12 @@ impl<'s> Parser<'s> {
         self.expect("in")?;
         let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
         self.expect("{")?;
-        let body = self.value_scope()?;
+        let body = self.with_name_scope(|p| {
+            for name in names {
+                p.hide_template(&name);
+            }
+            p.value_scope()
+        })?;
         self.expect("(")?;
         let seed = self.expr()?;
         self.expect(")")?;
@@ -1518,17 +1622,20 @@ impl<'s> Parser<'s> {
         self.expect("{")?;
         let mut body = Vec::new();
         let mut height = start.height.max(limit.height);
-        let result = if self.in_value_body() {
-            self.value_scope()?
-        } else {
-            while self.eat("let") {
-                let (stmt, initializer_height) = self.let_stmt()?;
-                self.expect(";")?;
+        let result = self.with_name_scope(|p| {
+            p.hide_pattern_name(&index);
+            p.hide_pattern_name(&accumulator);
+            if p.in_value_body() {
+                return p.value_scope();
+            }
+            while p.eat("let") {
+                let (stmt, initializer_height) = p.let_stmt(Self::hide_pattern_name)?;
+                p.expect(";")?;
                 height = height.max(initializer_height);
                 body.push(stmt);
             }
-            self.arm_value()?
-        };
+            p.arm_value()
+        })?;
         self.expect("(")?;
         let seed = self.expr()?;
         self.expect(")")?;
@@ -1741,7 +1848,7 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return self.counted_for();
         }
-        if text == "zero!" && self.peek(1) == "<" {
+        if text == "zero!" && self.peek(1) == "<" && !self.visible_callback_template(text) {
             self.pos += 2;
             let ty = self.ty()?;
             self.expect(">")?;
@@ -1772,6 +1879,20 @@ impl<'s> Parser<'s> {
             return self.literal(None);
         }
         let name = self.name_or_qualified_member()?;
+        if self.callback_arguments_end(self.pos).is_some() {
+            self.expect("<")?;
+            if self.peek(0) == ">" {
+                return Err(self.error("expected a named function argument"));
+            }
+            let callbacks = self.list(">", Self::name_or_qualified_member)?;
+            self.expect("(")?;
+            let args = self.list(")", Self::expr)?;
+            return self.aggregate(args, |args| Expr::ParametricCall {
+                name,
+                callbacks,
+                args,
+            });
+        }
         if self.eat("(") {
             if name == "map" && self.has_lambda_argument() {
                 return self.map_call();
@@ -1800,6 +1921,50 @@ impl<'s> Parser<'s> {
             );
         }
         Ok(ParsedExpr::leaf(Expr::Name(name)))
+    }
+
+    /// A less-than begins callback arguments only when a list of names and
+    /// path separators ends in `>(`. The ordinary list parser checks each
+    /// name, comma, and qualifier once this call spelling is recognized.
+    fn callback_arguments_end(&self, angle: usize) -> Option<usize> {
+        if self.tokens[angle].text != "<" || angle == 0 {
+            return None;
+        }
+        // In `pair(x < y, z > (w))` the comma separates two comparisons.
+        // Only a declared template can consume it as a callback separator.
+        let name = self.tokens[angle - 1].text;
+        let allow_comma = self.callback_templates.contains_key(name)
+            && (angle < 2 || self.tokens[angle - 2].text != "::");
+        let names = self.tokens[angle + 1..]
+            .iter()
+            .take_while(|token| {
+                is_dslx_member_name(token.text)
+                    || token.text == "::"
+                    || (allow_comma && token.text == ",")
+            })
+            .count();
+        let end = angle + names + 1;
+        (self.tokens[end].text == ">" && self.tokens[end + 1].text == "(").then_some(end)
+    }
+
+    /// Skip callback argument lists while looking for expression delimiters.
+    /// Offsets still refer to the enclosing token stream.
+    fn expression_lookahead(&self, start: usize) -> impl Iterator<Item = (usize, &Token<'s>)> {
+        let mut index = start;
+        std::iter::from_fn(move || {
+            let token = self.tokens.get(index)?;
+            let offset = index - start;
+            index = self.callback_arguments_end(index).unwrap_or(index) + 1;
+            Some((offset, token))
+        })
+    }
+
+    /// A user template can shadow the `zero!<T>()` intrinsic. A local
+    /// function sees only earlier declarations, while a block sees the module.
+    fn visible_callback_template(&self, name: &str) -> bool {
+        self.callback_templates.get(name).is_some_and(|start| {
+            self.value_context != ValueContext::Function || *start <= self.tokens[self.pos].start
+        })
     }
 
     /// An inline lambda is available only as the second argument of `map`.
@@ -1865,7 +2030,7 @@ impl<'s> Parser<'s> {
     /// Find the separator after the array without interpreting commas in
     /// nested calls, aggregate literals, or lexical blocks.
     fn has_lambda_argument(&self) -> bool {
-        let mut tokens = self.tokens[self.pos..].iter();
+        let mut tokens = self.expression_lookahead(self.pos).map(|(_, token)| token);
         let mut depth = 0;
         while let Some(token) = tokens.next() {
             match token.text {
@@ -1905,13 +2070,16 @@ impl<'s> Parser<'s> {
         } else {
             None
         };
-        let body = if self.eat("{") {
-            self.value_scope()?
-        } else if result_type.is_some() {
-            return Err(self.error("lambda with an explicit result type requires a braced body"));
-        } else {
-            self.expr()?
-        };
+        let body = self.with_name_scope(|p| {
+            p.hide_pattern_name(&parameter);
+            if p.eat("{") {
+                p.value_scope()
+            } else if result_type.is_some() {
+                Err(p.error("lambda with an explicit result type requires a braced body"))
+            } else {
+                p.expr()
+            }
+        })?;
         let (iterable, height) = iterable.into_ast();
         self.compose(
             height.max(body.height),
@@ -2113,6 +2281,179 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_signatures_and_named_actuals_are_separate_from_data_arguments() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+block top(clk, x: u8[2]) -> u8 {
+    transform<ops::step, ready, sink,>(x)[u32:0]
+}
+fn transform<F: fn(u8[2], (bool, u8)) -> u8[2], G: fn() -> bool, H: fn(u8),>(x: u8[2]) -> u8[2] {
+    F(x, (G(), u8:1))
+}
+"#,
+        )?;
+        let formals = &module.functions[0].callback_params;
+        assert_eq!(formals.len(), 3);
+        assert_eq!(formals[0].name, "F");
+        let byte = Type::Bits {
+            signed: false,
+            width: 8,
+        };
+        let array = Type::Array {
+            element: Box::new(byte.clone()),
+            size: 2,
+        };
+        assert_eq!(
+            formals[0].params,
+            [array.clone(), Type::Tuple(vec![Type::Bool, byte])]
+        );
+        assert_eq!(formals[0].result, array);
+        assert_eq!(formals[1].name, "G");
+        assert!(formals[1].params.is_empty());
+        assert_eq!(formals[1].result, Type::Bool);
+        assert_eq!(formals[2].result, Type::Tuple(Vec::new()));
+        let Expr::Index { value, .. } = &module.blocks[0].output else {
+            panic!("expected an index into the specialized result");
+        };
+        let Expr::ParametricCall {
+            name,
+            callbacks,
+            args,
+        } = value.as_ref()
+        else {
+            panic!("expected a callback-parametric call");
+        };
+        assert_eq!(name, "transform");
+        assert_eq!(callbacks, &["ops::step", "ready", "sink"]);
+        assert_eq!(args, &[Expr::Name("x".into())]);
+        assert!(
+            matches!(&module.functions[0].body, Expr::Call { name, args } if name == "F" && args.len() == 2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_arguments_preserve_comparisons_and_visible_zero_intrinsics() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn before() -> u8 { zero!<u8>() }
+fn zero!<F: fn() -> u8>() -> u8 { F() }
+fn get() -> u8 { u8:7 }
+fn after() -> u8 { zero!<get>() }
+fn cmp(x:u8, y:u8, z:u8, w:u8) -> (bool, bool) { (x < y, z > (w)) }
+fn cmp_call(x:u8) -> bool { x < zero!<get>() }
+"#,
+        )?;
+        assert!(matches!(&module.functions[0].body, Expr::Zero(_)));
+        assert!(
+            matches!(&module.functions[3].body, Expr::ParametricCall { name, callbacks, args } if name == "zero!" && callbacks == &["get"] && args.is_empty())
+        );
+        let Expr::Tuple(comparisons) = &module.functions[4].body else {
+            panic!("expected a pair of comparisons");
+        };
+        assert!(matches!(
+            &comparisons[..],
+            [
+                Expr::Binary {
+                    op: BinaryOp::Lt,
+                    ..
+                },
+                Expr::Binary {
+                    op: BinaryOp::Gt,
+                    ..
+                }
+            ]
+        ));
+        assert!(
+            matches!(&module.functions[5].body, Expr::Binary { op: BinaryOp::Lt, right, .. } if matches!(right.as_ref(), Expr::ParametricCall { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_separators_respect_lexical_shadowing_and_enclosing_expressions()
+    -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn compose<F:fn(u8)->u8, G:fn(u8)->u8>(x:u8)->u8 { F(G(x)) }
+fn pair(compose:u8, x:u8, y:u8, z:u8)->(bool, bool) { (compose < x, y > (z)) }
+fn id(x:u8)->u8 { x }
+fn shadow(x:u8, y:u8, z:u8)->u8 {
+    let (_, _) = { let compose = x; (compose < x, y > (z)) };
+    compose<id,id>(x)
+}
+fn compose_arrays<F:fn(u8[2])->u8[2], G:fn(u8[2])->u8[2]>(xs:u8[2])->u8[2] { F(G(xs)) }
+fn array_id(xs:u8[2])->u8[2] { xs }
+block wrapped(clk, xs:u8[2])->u8[2] {
+    let words = map(compose_arrays<array_id,array_id>(xs), |v| v);
+    match (u8:0) + compose<id,id>(xs[u32:0]) { u8:0 => words, _ => xs }
+}
+"#,
+        )?;
+        let Expr::Tuple(pair) = &module.functions[1].body else {
+            panic!("expected tuple with two comparisons");
+        };
+        assert!(matches!(
+            &pair[..],
+            [
+                Expr::Binary {
+                    op: BinaryOp::Lt,
+                    ..
+                },
+                Expr::Binary {
+                    op: BinaryOp::Gt,
+                    ..
+                }
+            ]
+        ));
+        let Expr::Scope { bindings, result } = &module.functions[3].body else {
+            panic!("expected nested binding");
+        };
+        assert!(
+            matches!(&bindings[0].value, Expr::Scope { result, .. } if matches!(result.as_ref(), Expr::Tuple(pair) if pair.len() == 2))
+        );
+        assert!(
+            matches!(result.as_ref(), Expr::ParametricCall { callbacks, .. } if callbacks == &["id", "id"])
+        );
+        assert!(
+            matches!(&module.blocks[0].statements[0], Stmt::Let { value: Expr::Map(map), .. } if matches!(&map.iterable, ForIterable::Array(Expr::ParametricCall { .. })))
+        );
+        assert!(matches!(&module.blocks[0].output, Expr::Match { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn callback_parametrics_require_function_signatures_and_named_actuals() {
+        for declaration in [
+            "fn f<>(x:u8)->u8 {x}",
+            "fn f<F: u8>(x:u8)->u8 {x}",
+            "fn f<F: fn(x:u8) -> u8>(x:u8)->u8 {x}",
+            "fn f<F: fn(u8)->fn(u8)->u8>(x:u8)->u8 {x}",
+            "fn f(self: fn(u8)->u8)->u8 {u8:0}",
+            "block f<F: fn(u8)->u8>(clk,x:u8)->u8 {x}",
+        ] {
+            assert!(parse_module(declaration).is_err(), "{declaration}");
+        }
+        for call in [
+            "f<>(x)",
+            "f<|v| v>(x)",
+            "f<(helper)>(x)",
+            "f<helper(x)>(x)",
+            "f<if x { a } else { b }>(x)",
+            "f<u8>(x)",
+            "f<a::b::c>(x)",
+            "f<,helper>(x)",
+            "f<helper,,>(x)",
+        ] {
+            let source = format!(
+                "fn f<F: fn(u8)->u8>(x:u8)->u8 {{F(x)}} block top(clk,x:u8)->u8 {{ {call} }}"
+            );
+            assert!(parse_module(&source).is_err(), "{call}");
+        }
+    }
 
     #[test]
     fn scalar_match_preserves_patterns_arm_order_and_postfix_syntax() {

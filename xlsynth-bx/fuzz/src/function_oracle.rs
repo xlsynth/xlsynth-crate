@@ -5,10 +5,14 @@
 
 use crate::eval::expr_eval::{BlockEvaluator, bx_source, compile_bundled_module, dslx_source};
 use std::fmt::Write;
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 use xlsynth_bx::ast::Type;
-use xlsynth_bx::{check_module, parse_module};
+use xlsynth_bx::{ImportOptions, check_module_with_options, parse_module};
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
 use xlsynth_pir::libxls_bridge::value_to_libxls;
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
@@ -142,14 +146,35 @@ pub(crate) fn compare_program(
         program.functions,
         bx_source(&program.params, &program.result, &program.body)
     );
+    compare_bx_program(&bx, program, seed, execution, additional_inputs, &[])
+}
+
+/// Compare an explicit BX program with independently constructed concrete
+/// DSLX functions when the BX source uses a language extension.
+pub(crate) fn compare_bx_program(
+    bx: &str,
+    program: FunctionProgram,
+    seed: u64,
+    execution: DslxExecution,
+    additional_inputs: Vec<Vec<IrValue>>,
+    search_paths: &[&Path],
+) -> Result<(), String> {
     let reference = format!(
         "{}\n{}",
         program.functions,
         dslx_source(&program.params, &program.result, &program.body)
     );
-    let bx_check = parse_module(&bx).and_then(|m| check_module(&m));
-    let dslx_check =
-        dslx::parse_and_typecheck(&reference, "oracle.x", "oracle", &mut ImportData::default());
+    let options = ImportOptions {
+        additional_search_paths: search_paths.to_vec(),
+        ..ImportOptions::default()
+    };
+    let bx_check = parse_module(bx).and_then(|m| check_module_with_options(&m, &options));
+    let dslx_check = dslx::parse_and_typecheck(
+        &reference,
+        "oracle.x",
+        "oracle",
+        &mut ImportData::new(None, search_paths),
+    );
     let checked = match (bx_check, dslx_check) {
         (Ok(bx), Ok(_)) if program.valid != Some(false) => bx,
         // Rejection by both frontends is a successful comparison unless the
@@ -157,17 +182,17 @@ pub(crate) fn compare_program(
         (Err(_), Err(_)) if program.valid != Some(true) => return Ok(()),
         (bx_result, native_result) => {
             return Err(format!(
-                "expected source acceptance {:?}: BX {:?}, DSLX {:?}\n{bx}",
+                "expected source acceptance {:?}: BX {:?}, DSLX {:?}\nBX:\n{bx}\nDSLX:\n{reference}",
                 program.valid,
                 bx_result.err(),
                 native_result.err()
             ));
         }
     };
-    let evaluator = BlockEvaluator::lower(&checked, &bx)?;
+    let evaluator = BlockEvaluator::lower(&checked, bx)?;
     let native_ir = if program.dslx_ir {
         Some(
-            compile_bundled_module(&reference, &[])
+            compile_bundled_module(&reference, search_paths)
                 .map_err(|e| format!("DSLX IR lowering failed: {e}\n{reference}"))?,
         )
     } else {
@@ -207,22 +232,32 @@ pub(crate) fn compare_program(
         });
     }
     let outcome = match execution {
-        DslxExecution::ConcreteConstants => compare_concrete_constants(reference, &calls),
+        DslxExecution::ConcreteConstants => {
+            compare_concrete_constants(reference, &calls, search_paths)
+        }
         DslxExecution::BytecodeTests => {
-            run_bytecode_tests(reference, &calls, &checked.blocks()[0].result)
+            run_bytecode_tests(reference, &calls, &checked.blocks()[0].result, search_paths)
         }
     };
     outcome.map_err(|error| format!("{error}\nseed {seed:#x}\n{bx}"))
 }
 
 /// Execute in-process calls independently of the DSLX-to-IR converter.
-fn compare_concrete_constants(mut source: String, calls: &[ConcreteCall]) -> Result<(), String> {
+fn compare_concrete_constants(
+    mut source: String,
+    calls: &[ConcreteCall],
+    search_paths: &[&Path],
+) -> Result<(), String> {
     for (i, call) in calls.iter().enumerate() {
         writeln!(source, "\nconst RESULT_{i} = {};", call.expression).unwrap();
     }
-    let native =
-        dslx::parse_and_typecheck(&source, "oracle.x", "oracle", &mut ImportData::default())
-            .map_err(|e| format!("DSLX concrete calls failed: {e}\n{source}"))?;
+    let native = dslx::parse_and_typecheck(
+        &source,
+        "oracle.x",
+        "oracle",
+        &mut ImportData::new(None, search_paths),
+    )
+    .map_err(|e| format!("DSLX concrete calls failed: {e}\n{source}"))?;
     let module = native.get_module();
     let info = native.get_type_info();
     let first = module.get_member_count() - calls.len();
@@ -252,6 +287,7 @@ fn run_bytecode_tests(
     mut source: String,
     calls: &[ConcreteCall],
     result: &Type,
+    search_paths: &[&Path],
 ) -> Result<(), String> {
     source.push_str("\n#[test]\nfn compare_values() {\n");
     for call in calls.iter().filter(|c| c.out_of_bounds.is_none()) {
@@ -279,7 +315,13 @@ fn run_bytecode_tests(
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = dir.path().join("oracle.x");
     fs::write(&path, &source).map_err(|e| e.to_string())?;
-    let output = Command::new(&binary)
+    let mut command = Command::new(&binary);
+    if !search_paths.is_empty() {
+        command
+            .arg("--dslx_path")
+            .arg(env::join_paths(search_paths).map_err(|e| e.to_string())?);
+    }
+    let output = command
         .args([
             "--evaluator=dslx-interpreter",
             "--compare=none",

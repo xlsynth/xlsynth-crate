@@ -213,6 +213,12 @@ Compares capture-free anonymous `map` lambdas in BX blocks and local functions w
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_map_lambda --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_parametrics.rs
+
+Compares BX functions specialized on named callbacks with independently generated DSLX programs that call the corresponding helpers directly. Generated calls vary aggregate and scalar signatures, signedness, bit widths, callback identity and order, counted folds, and public DSLX imports with inferred parametrics. The target compares acceptance and evaluates accepted programs on the same inputs through BX block IR, native DSLX IR, and concrete DSLX calls. It detects incorrect signature checks, incorrect specialization reuse, and misresolved callback targets.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parametrics --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

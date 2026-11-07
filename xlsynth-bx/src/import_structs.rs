@@ -221,6 +221,10 @@ impl ImportedStructs {
         self.graph.has_public_member(subject, member)
     }
 
+    pub(crate) fn has_public_function(&self, subject: &str, member: &str) -> bool {
+        self.graph.has_public_function(subject, member)
+    }
+
     #[cfg(test)]
     pub(crate) fn type_witnesses(&self) -> usize {
         self.type_witnesses

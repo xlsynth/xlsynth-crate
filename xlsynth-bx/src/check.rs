@@ -10,8 +10,8 @@ use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExternBlock, ExternFn, Function, MatchArm, Module, Param, Stmt,
-    StructDef, Type, UnaryOp, WidthSliceType,
+    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, MatchArm, Module, Param,
+    Stmt, StructDef, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -21,7 +21,9 @@ use crate::infer_literal::{
     projected_type_compatible,
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
+mod callables;
 mod counted_for;
+mod function_specializations;
 mod generic_blocks;
 mod generic_inputs;
 mod map;
@@ -35,6 +37,7 @@ pub use crate::typed::{
 };
 use crate::typed::{ConstantBinding, ConstantFailure, TypedExprKind as K, bits};
 use counted_for::CarryContext;
+use function_specializations::{CallbackTarget, FunctionSpecialization, FunctionSpecializations};
 use generic_blocks::Bindings;
 
 impl fmt::Display for Type {
@@ -342,7 +345,28 @@ impl<'m> BlockSpecializations<'m> {
 struct FunctionInterface {
     params: Vec<Param>,
     result: Type,
+    callback_params: Vec<CallbackFormal>,
+    /// Lookup in the body's lexical scope while preserving declaration order
+    /// in the specialization key.
+    callback_indices: BTreeMap<String, usize>,
     local: bool,
+}
+
+/// A resolved callback signature and the cost of validating a new actual
+/// against it. The declaration order determines the cache's formal index.
+struct CallbackFormal {
+    signature: CallbackParam,
+    binding_work: usize,
+}
+
+/// Nodes visited when comparing or cloning a checked BX callback type.
+/// A nominal reference is a single name and an array carries one element type.
+fn callback_type_nodes(ty: &Type) -> usize {
+    match ty {
+        Type::Tuple(fields) => 1 + fields.iter().map(callback_type_nodes).sum::<usize>(),
+        Type::Array { element, .. } => 1 + callback_type_nodes(element),
+        Type::Named(_) | Type::Bool | Type::Bits { .. } => 1,
+    }
 }
 
 /// Source declaration indices for lookup during checking.
@@ -350,6 +374,7 @@ struct FunctionInterface {
 struct Declarations<'a> {
     positions: BTreeMap<&'a str, usize>,
     functions: BTreeMap<&'a str, FunctionInterface>,
+    function_templates: BTreeMap<&'a str, &'a Function>,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
 }
@@ -417,14 +442,14 @@ fn lookup_use(
 /// we go. Bound the walk before cloning any recursive types from AST callers.
 fn resolve_type(
     ty: &Type,
-    scope: Option<&BTreeSet<String>>,
+    is_local: &dyn Fn(&str) -> bool,
     bindings: Option<&Bindings>,
     resolver: &mut ImportResolver,
     remaining: usize,
 ) -> Result<Type, String> {
     match ty {
         Type::Named(name) => {
-            if scope.is_some_and(|scope| scope.contains(name)) {
+            if is_local(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
             if let Some(bindings) = bindings
@@ -434,9 +459,7 @@ fn resolve_type(
                 // During template declaration the name is still symbolic.
                 return Ok(bindings.get(name).unwrap_or(ty).clone());
             }
-            if let Some((subject, member)) = lookup_use(name, resolver, |binding| {
-                scope.is_some_and(|names| names.contains(binding))
-            })? {
+            if let Some((subject, member)) = lookup_use(name, resolver, is_local)? {
                 resolver.resolve_named(&subject, &member)
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
@@ -447,7 +470,7 @@ fn resolve_type(
         Type::Array { element, size } => Ok(Type::Array {
             element: Box::new(resolve_type(
                 element,
-                scope,
+                is_local,
                 bindings,
                 resolver,
                 child_type_budget(remaining)?,
@@ -458,7 +481,7 @@ fn resolve_type(
             let child_budget = child_type_budget(remaining)?;
             items
                 .iter()
-                .map(|item| resolve_type(item, scope, bindings, resolver, child_budget))
+                .map(|item| resolve_type(item, is_local, bindings, resolver, child_budget))
                 .collect::<Result<_, _>>()
                 .map(Type::Tuple)
         }
@@ -473,7 +496,7 @@ fn resolve_fields(params: &[Param], resolver: &mut ImportResolver) -> Result<Vec
         .map(|p| {
             Ok(Param {
                 name: p.name.clone(),
-                ty: resolve_type(&p.ty, None, None, resolver, MAX_ELABORATION_DEPTH)?,
+                ty: resolve_type(&p.ty, &|_| false, None, resolver, MAX_ELABORATION_DEPTH)?,
             })
         })
         .collect()
@@ -496,7 +519,7 @@ fn resolve_signature<'a>(
             name: p.name.clone(),
             ty: resolve_type(
                 &p.ty,
-                Some(&scope),
+                &|name| scope.contains(name),
                 bindings,
                 resolver,
                 MAX_ELABORATION_DEPTH,
@@ -505,7 +528,7 @@ fn resolve_signature<'a>(
     }
     let result = resolve_type(
         result,
-        Some(&scope),
+        &|name| scope.contains(name),
         bindings,
         resolver,
         MAX_ELABORATION_DEPTH,
@@ -571,13 +594,58 @@ impl<'a> Declarations<'a> {
         name: &'a str,
         params: &[Param],
         result: &Type,
-        local: bool,
+        local: Option<&'a Function>,
         resolver: &mut ImportResolver,
         structs: &mut StructTable,
     ) -> Result<(), String> {
-        let (params, result) = resolve_signature(params, result, [], None, resolver)?;
-        structs.update_imports(resolver)?;
         let mut names = BTreeSet::new();
+        let mut callback_params = Vec::new();
+        if let Some(function) = local {
+            let at = self.positions.get(name).copied();
+            for callback in &function.callback_params {
+                declare(&mut names, &callback.name)?;
+                let mut resolve = |ty: &Type| {
+                    self.check_type_visibility(ty, at)?;
+                    resolve_type(
+                        ty,
+                        &|name| names.contains(name),
+                        None,
+                        resolver,
+                        MAX_ELABORATION_DEPTH,
+                    )
+                };
+                callback_params.push(CallbackParam {
+                    name: callback.name.clone(),
+                    params: callback
+                        .params
+                        .iter()
+                        .map(&mut resolve)
+                        .collect::<Result<_, _>>()?,
+                    result: resolve(&callback.result)?,
+                });
+            }
+            if !callback_params.is_empty() {
+                self.function_templates.insert(name, function);
+            }
+        }
+        let (params, result) = resolve_signature(params, result, &names, None, resolver)?;
+        structs.update_imports(resolver)?;
+        let callback_params = callback_params
+            .into_iter()
+            .map(|signature| {
+                let mut binding_work = 0usize;
+                for ty in signature.params.iter().chain([&signature.result]) {
+                    structs
+                        .validate_type(ty)
+                        .map_err(|e| format!("callback '{}': {e}", signature.name))?;
+                    binding_work = binding_work.saturating_add(callback_type_nodes(ty));
+                }
+                Ok(CallbackFormal {
+                    signature,
+                    binding_work,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         for p in &params {
             declare(&mut names, &p.name)?;
             structs
@@ -592,7 +660,13 @@ impl<'a> Declarations<'a> {
             FunctionInterface {
                 params,
                 result,
-                local,
+                callback_indices: callback_params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, callback)| (callback.signature.name.clone(), i))
+                    .collect(),
+                callback_params,
+                local: local.is_some(),
             },
         );
         Ok(())
@@ -985,7 +1059,7 @@ pub fn check_module_with_options(
                 &f.name,
                 &f.params,
                 &f.result,
-                false,
+                None,
                 &mut resolver,
                 &mut structs,
             )
@@ -1015,7 +1089,7 @@ pub fn check_module_with_options(
                 &f.name,
                 &f.params,
                 &f.result,
-                true,
+                Some(f),
                 &mut resolver,
                 &mut structs,
             )
@@ -1095,7 +1169,8 @@ pub fn check_module_with_options(
             result,
         });
     }
-    let functions = check_functions(
+    let mut function_registry = FunctionSpecializations::new(names.clone());
+    let function_bodies = function_registry.check_sources(
         &module.functions,
         &declarations,
         &mut resolver,
@@ -1114,6 +1189,7 @@ pub fn check_module_with_options(
                 &mut structs,
                 &mut specializations,
                 None,
+                &mut function_registry,
             )
             .map_err(|e| format!("block '{}': {e}", block.name))?,
         );
@@ -1127,11 +1203,14 @@ pub fn check_module_with_options(
             &mut structs,
             &mut specializations,
             Some(&spec),
+            &mut function_registry,
         )
         .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
         specialized_blocks.insert(spec.name.clone());
         checked.push(block);
     }
+    let functions =
+        function_registry.finish(function_bodies, &declarations, &mut resolver, &mut structs)?;
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -1155,49 +1234,12 @@ pub fn check_module_with_options(
         structs: structs.definitions,
         externs,
         functions,
+        specialized_functions: function_registry.generated_names(),
         extern_blocks,
         imports: resolver.finish()?,
         blocks,
         specialized_blocks,
     })
-}
-
-/// Check local functions in source order and bound the elaborated call depth.
-fn check_functions<'m>(
-    functions: &'m [Function],
-    decls: &Declarations<'m>,
-    resolver: &mut ImportResolver,
-    structs: &mut StructTable,
-) -> Result<Vec<CheckedFunction>, String> {
-    let mut checked = Vec::with_capacity(functions.len());
-    let mut depths = BTreeMap::new();
-    for function in functions {
-        let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
-        let body = checker
-            .check_function(function)
-            .map_err(|e| format!("fn '{}': {e}", function.name))?;
-        let mut depth = 1;
-        for callee in checker.local_callees {
-            if callee == function.name {
-                return Err(format!(
-                    "recursive function dependency involving '{callee}'"
-                ));
-            }
-            let prior = depths
-                .get(callee)
-                .ok_or_else(|| format!("function '{callee}' is declared later in the module"))?;
-            depth = depth.max(prior + 1);
-        }
-        if depth > MAX_ELABORATION_DEPTH {
-            return Err(format!(
-                "function dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{}'",
-                function.name
-            ));
-        }
-        depths.insert(function.name.as_str(), depth);
-        checked.push(body);
-    }
-    Ok(checked)
 }
 
 /// Controls which declarations and bindings are available in a BX body.
@@ -1218,10 +1260,14 @@ struct BodyChecker<'a, 'm> {
     source_kind: BodyKind,
     specializations: Option<&'a mut BlockSpecializations<'m>>,
     specialization: Option<&'a BlockSpecialization<'m>>,
+    function_registry: Option<&'a mut FunctionSpecializations<'m>>,
+    function_spec: Option<&'a FunctionSpecialization<'m>>,
+    /// The enclosing template's signature for abstract or concrete checking.
+    source_template: Option<&'a FunctionInterface>,
     /// Use DSLX literal inference inside a local call argument or scalar match.
     dslx_value_context: bool,
     function_position: Option<usize>,
-    local_callees: BTreeSet<&'m str>,
+    local_callees: BTreeSet<String>,
     names: BTreeSet<String>,
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
@@ -1263,8 +1309,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Generated bodies charge their common registry. Ordinary source bodies
     /// own independent budgets just as they do for structural unrolling.
     fn constant_context(&mut self) -> ConstantContext<'_> {
-        let budgets = match (&mut self.specializations, self.specialization) {
-            (Some(registry), Some(_)) => &mut registry.constant_budgets,
+        let budgets = match (
+            &mut self.function_registry,
+            self.function_spec,
+            &mut self.specializations,
+            self.specialization,
+        ) {
+            (Some(registry), Some(_), _, _) => &mut registry.constant_budgets,
+            (_, _, Some(registry), Some(_)) => &mut registry.constant_budgets,
             _ => &mut self.constant_budgets,
         };
         ConstantContext {
@@ -1276,8 +1328,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Record a constant if speculative loop folding has work remaining.
     fn fold_constant(&mut self, value: &TypedExpr) -> Option<ConstantBinding> {
+        let replaying = self.function_spec.is_some();
         let ctx = self.constant_context();
-        match value.constant(ctx.names, &mut ctx.budgets.speculative, false) {
+        match value.constant(ctx.names, &mut ctx.budgets.speculative, replaying) {
             Ok(value) => value.map(ConstantBinding::Known),
             Err(_) => Some(ConstantBinding::Deferred(ctx.statements.len())),
         }
@@ -1286,9 +1339,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Replay only required earlier lets, using an explicit stack so long
     /// chains cannot overflow the checker. Cache each result in its binding.
     fn checked_constant(&mut self, value: &TypedExpr) -> Result<Option<IrValue>, String> {
+        let mut replaying = self.function_spec.is_some();
         let ctx = self.constant_context();
         let mut pending: Vec<usize> = Vec::new();
-        let mut replaying = false;
         loop {
             let definition = pending.last().copied();
             let (expr, name) = if let Some(index) = definition {
@@ -1351,6 +1404,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             source_kind: kind,
             specializations: None,
             specialization: None,
+            function_registry: None,
+            function_spec: None,
+            source_template: None,
             dslx_value_context: false,
             function_position: None,
             local_callees: BTreeSet::new(),
@@ -1384,6 +1440,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn check_function(&mut self, function: &Function) -> Result<CheckedFunction, String> {
         self.function_position = self.decls.positions.get(function.name.as_str()).copied();
         let interface = &self.decls.functions[function.name.as_str()];
+        self.source_template = (!interface.callback_params.is_empty()).then_some(interface);
+        if self.function_spec.is_some() {
+            for ty in interface
+                .params
+                .iter()
+                .map(|p| &p.ty)
+                .chain([&interface.result])
+            {
+                let nodes = self.structs.type_shape(ty, MAX_ELABORATION_DEPTH)?.ir_nodes;
+                self.charge_expansion("function signature", nodes)?;
+            }
+        }
         for p in &interface.params {
             self.names.insert(p.name.clone());
             self.values.insert(p.name.clone(), p.ty.clone());
@@ -1400,8 +1468,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             })
             .collect();
         Ok(CheckedFunction {
-            name: function.name.clone(),
-            public: function.public,
+            name: self
+                .function_spec
+                .map_or(&function.name, |s| &s.name)
+                .clone(),
+            public: self.function_spec.is_none() && function.public,
             params: interface.params.clone(),
             result: interface.result.clone(),
             bindings,
@@ -1418,6 +1489,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         structs: &'a mut StructTable,
         specializations: &'a mut BlockSpecializations<'m>,
         specialization: Option<&'a BlockSpecialization<'m>>,
+        function_registry: &'a mut FunctionSpecializations<'m>,
     ) -> Result<CheckedBlock, String> {
         let interface = match specialization {
             Some(spec) => &spec.interface,
@@ -1451,6 +1523,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         c.outputs = outputs;
         c.specializations = Some(specializations);
         c.specialization = specialization;
+        c.function_registry = Some(function_registry);
         c.reserved_hardware_names = reserved_hardware_names;
         c.hardware_name(&block.clock)?;
         if let Some(rst) = &block.reset {
@@ -1514,7 +1587,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let ty = resolve_type(
             source,
-            Some(&self.names),
+            &|name| {
+                self.names.contains(name)
+                    || self
+                        .source_template
+                        .is_some_and(|template| template.callback_indices.contains_key(name))
+            },
             self.specialization.map(|s| &s.bindings),
             self.resolver,
             MAX_ELABORATION_DEPTH,
@@ -1856,6 +1934,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Struct { name, fields } => self.struct_literal(name, fields),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
+            Expr::ParametricCall {
+                name,
+                callbacks,
+                args,
+            } => self.parametric_call(name, callbacks, args),
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
                 let results: Vec<_> = arms.iter().map(|arm| &arm.value).collect();
@@ -1887,10 +1970,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             return Ok((value.ty.clone(), value.kind.clone()));
         }
-        let ty = self
-            .values
-            .get(name)
-            .ok_or_else(|| format!("unknown value '{name}'"))?;
+        let ty = self.values.get(name).ok_or_else(|| {
+            if self.callback_index(name).is_some() {
+                format!("callable parameter '{name}' may only be used as a callee")
+            } else {
+                format!("unknown value '{name}'")
+            }
+        })?;
         Ok((ty.clone(), K::Name(name.to_owned())))
     }
 
@@ -2250,9 +2336,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ty: Type,
         kind: K,
     ) -> Result<TypedExpr, String> {
-        if self.map_outer_iterations.is_some() && self.replaying_body() {
-            // Every generated callback stores the IR types of its intermediate
-            // results. A literal additionally materializes its entire value.
+        if (self.source_template.is_some() || self.map_outer_iterations.is_some())
+            && self.replaying_body()
+        {
+            // Each generated body stores its intermediate IR types. A
+            // literal additionally materializes its entire value.
             let nodes = self
                 .structs
                 .type_shape(&ty, MAX_ELABORATION_DEPTH)?
@@ -2261,7 +2349,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 K::Literal(value) => crate::typed::constant_work(value),
                 _ => 0,
             };
-            self.charge_expansion("map lambda", nodes.saturating_add(literal_work))?;
+            let body = if self.map_outer_iterations.is_some() {
+                "map lambda"
+            } else {
+                "function body"
+            };
+            self.charge_expansion(body, nodes.saturating_add(literal_work))?;
         }
         let dslx_projection = (self.kind == BodyKind::Function || self.dslx_value_context)
             && matches!(
@@ -2699,6 +2792,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             BodyKind::Function if self.names.contains("zero!") => {
                 Err("'zero!' names a local value here".into())
             }
+            BodyKind::Function if self.callback_index("zero!").is_some() => {
+                Err("callable parameter 'zero!' requires a direct call".into())
+            }
             BodyKind::Function => Ok(self.decls.visible("zero!", self.function_position)
                 && (self.decls.functions.contains_key("zero!")
                     || self.resolver.lookup("zero!")?.is_some())),
@@ -2791,6 +2887,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.function_values.contains_key(name) {
             return Err(format!("'{name}' names a local value here"));
         }
+        if let Some(index) = self.callback_index(name) {
+            return self.call_formal(index, args);
+        }
+        if let Some((head, _)) = name.split_once("::")
+            && self.callback_index(head).is_some()
+        {
+            return Err(format!(
+                "callable parameter '{head}' may only be used as a callee"
+            ));
+        }
         let visible = self.decls.visible(name, self.function_position);
         if !visible && name != "update" {
             return Err(format!("function '{name}' is declared later in the module"));
@@ -2835,34 +2941,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.names.contains(name) && (f.local || self.kind == BodyKind::Function) {
             return Err(format!("'{name}' names a local value here"));
         }
-        if f.local && self.kind == BodyKind::Function {
-            self.local_callees.insert(callee);
-        }
-        if args.len() != f.params.len() {
+        if !f.callback_params.is_empty() {
             return Err(format!(
-                "'{name}' expects {} arguments, got {}",
-                f.params.len(),
-                args.len()
+                "'{name}' requires {} callable arguments",
+                f.callback_params.len()
             ));
+        }
+        if f.local && self.kind == BodyKind::Function {
+            self.local_callees.insert(callee.to_owned());
         }
         // BX block-to-extern calls use their declared port width as context.
         // Restore the outer argument's rules after checking a nested call.
         let dslx_arguments = f.local || self.kind == BodyKind::Function;
-        let outer = std::mem::replace(&mut self.dslx_value_context, dslx_arguments);
-        let args = args
-            .iter()
-            .zip(&f.params)
-            .map(|(a, p)| {
-                let value = if dslx_arguments {
-                    self.dslx_argument(a, &p.ty)
-                } else {
-                    self.expr(a, Some(&p.ty))
-                };
-                value.map_err(|e| format!("argument '{}', call to '{name}': {e}", p.name))
-            })
-            .collect::<Result<_, _>>();
-        self.dslx_value_context = outer;
-        let args = args?;
+        let args = self.call_arguments(
+            name,
+            args,
+            f.params.iter().map(|p| (Some(p.name.as_str()), &p.ty)),
+            dslx_arguments,
+        )?;
         Ok((
             f.result.clone(),
             K::Call {

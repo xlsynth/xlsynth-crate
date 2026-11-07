@@ -190,9 +190,19 @@ impl MatchPattern {
 pub struct Function {
     pub name: String,
     pub public: bool,
+    /// Named, compile-time function parameters in declaration order.
+    pub callback_params: Vec<CallbackParam>,
     pub params: Vec<Param>,
     pub result: Type,
     pub body: Expr,
+}
+
+/// A callable that a function template binds to one named pure function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallbackParam {
+    pub name: String,
+    pub params: Vec<Type>,
+    pub result: Type,
 }
 
 /// The BX signature of a clocked block supplied by the linked IR package.
@@ -248,6 +258,12 @@ pub enum Expr {
         /// A function name (including qualified imported or extern functions),
         /// or a block name when the call initializes a let binding.
         name: String,
+        args: Vec<Expr>,
+    },
+    /// A BX function specialized with named local or imported functions.
+    ParametricCall {
+        name: String,
+        callbacks: Vec<String>,
         args: Vec<Expr>,
     },
     Map(Box<MapExpr>),

@@ -64,6 +64,7 @@ pub fn lower_module(
                 .iter()
                 .map(|member| member.graph().name.as_str()),
         ),
+        &module.specialized_functions,
     );
     let block_symbols = BlockSymbols::new(module, &package, &function_symbols);
     let reserved_names = block_names
@@ -216,19 +217,28 @@ fn fresh_ir_name(stem: &str, occupied: &mut BTreeSet<String>) -> String {
     }
 }
 
-/// Keeps ordinary source identifiers and assigns collision-free IR names to
-/// keywords and DSLX identifiers containing primes or exclamation marks.
+/// Keep ordinary source identifiers and allocate collision-free IR names for
+/// invalid identifiers or generated functions shadowed in the linked package.
 fn local_ir_names<'a>(
     names: impl Iterator<Item = &'a str> + Clone,
-    existing: impl Iterator<Item = &'a str>,
+    existing: impl Iterator<Item = &'a str> + Clone,
+    generated: &BTreeSet<String>,
 ) -> Vec<String> {
-    if names.clone().all(is_valid_identifier) {
+    let conflicts: BTreeSet<_> = if generated.is_empty() {
+        BTreeSet::new()
+    } else {
+        existing
+            .clone()
+            .filter(|&name| generated.contains(name))
+            .collect()
+    };
+    if conflicts.is_empty() && names.clone().all(is_valid_identifier) {
         return names.map(str::to_owned).collect();
     }
     let mut occupied: BTreeSet<String> = names.clone().chain(existing).map(str::to_owned).collect();
     names
         .map(|name| {
-            if is_valid_identifier(name) {
+            if is_valid_identifier(name) && !conflicts.contains(name) {
                 return name.to_owned();
             }
             let stem = name.replace(['\'', '!'], "_");
@@ -519,6 +529,7 @@ fn lower_function(
     let param_symbols = local_ir_names(
         function.params.iter().map(|param| param.name.as_str()),
         std::iter::empty(),
+        &BTreeSet::new(),
     );
     for (param, param_symbol) in function.params.iter().zip(param_symbols) {
         let value = body

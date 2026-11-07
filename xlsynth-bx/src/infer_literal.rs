@@ -279,7 +279,11 @@ fn collect_minimum_with_calls(
 ) -> Result<bool, String> {
     let next = match expr {
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
-        Expr::Call { .. } if matches!(calls, CallWidth::Deferred { .. }) => return Ok(true),
+        Expr::Call { .. } | Expr::ParametricCall { .. }
+            if matches!(calls, CallWidth::Deferred { .. }) =>
+        {
+            return Ok(true);
+        }
         Expr::Zero(_) => {
             // An intrinsic has an explicit result type; a local zero! function
             // has the same delayed result constraint as any other invocation.
