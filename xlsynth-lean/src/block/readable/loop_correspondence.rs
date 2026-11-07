@@ -154,7 +154,8 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
     /// Keep the shared codec rule lists in one place in the Lean module.
     fn proof_tactics(&self, out: &mut String) -> Result<()> {
         let mut rules = vec![
-            "XlsCodec.raw_select, raw_not, raw_and, raw_or, raw_flag, decode_ofBool".into(),
+            "XlsCodec.raw_select, raw_not, raw_and, raw_or, raw_flag, raw_flag_zero, decode_ofBool"
+                .into(),
             BOOL_ROUND_TRIP_RULES.join(", "),
             VECTOR_MAP_RULES.join(", "),
             BOOL_ENCODE_ITE.into(),

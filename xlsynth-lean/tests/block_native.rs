@@ -502,15 +502,17 @@ fn compile_lean_and_xls_machine(
     bx: &str,
     source: &str,
 ) -> Result<(LeanBlockBundle, xlsynth::IrFunction)> {
-    let path = Path::new("machine.x");
     let bundle = checked_helper_bundle(bx, source, &[]).context("compile BX and emit Lean")?;
-    let package = xlsynth::convert_dslx_to_ir(source, path, &Default::default())
+    Ok((bundle, xls_machine(source)?))
+}
+
+fn xls_machine(source: &str) -> Result<xlsynth::IrFunction> {
+    let package = xlsynth::convert_dslx_to_ir(source, Path::new("machine.x"), &Default::default())
         .context("convert DSLX to XLS IR")?;
-    let machine = package
+    package
         .ir
         .get_function("__machine__machine")
-        .context("look up __machine__machine in XLS IR")?;
-    Ok((bundle, machine))
+        .context("look up __machine__machine in XLS IR")
 }
 
 #[test]
@@ -529,30 +531,66 @@ fn machine(mask: u8, offset: u8, current_count: u8) -> (u8, u8) {
     let bx = r#"
 extern fn machine::fold(seed: u8, mask: u8, offset: u8) -> u8;
 block counter(clk, mask: u8, offset: u8) -> u8 {
-    reg count: u8 = 0;
+    reg count: u8 = 3;
     count := machine::fold(count, mask, offset);
     count
 }
 "#;
-    let (mut bundle, machine) =
-        compile_lean_and_xls_machine(bx, source).expect("counted loop fixture (machine.x)");
-    let mut checks = String::from("import ReadableCorrespondence\nopen XlsReadable\n");
-    for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
-        let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
-        let expected = machine
-            .interpret(&args)
-            .unwrap()
-            .get_element(1)
-            .unwrap()
-            .to_u64()
-            .unwrap();
-        writeln!(checks, "#guard (step {{ count := {seed} }} {{ rst := false, mask := {mask}, offset := {offset} }}).count == {expected}").unwrap();
+    let machine = xls_machine(source).unwrap();
+    for active_low in [false, true] {
+        let reset = xlsynth_bx::ResetBehavior {
+            active_low,
+            ..Default::default()
+        };
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let module =
+            xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports)
+                .unwrap();
+        let mut bundle =
+            xlsynth_lean::block::compile_bx_with_dslx(bx, module, reset, &Default::default())
+                .unwrap()
+                .emit_readable(None)
+                .unwrap();
+        let mut checks = String::from(
+            r#"import ReadableCorrespondence
+open XlsReadable
+private def readableClock (seed mask offset : BitVec 8) (rst : Bool) :=
+  let e := eval { count := seed } { rst, mask, offset }
+  (e.output, e.next.count)
+private def rawClock (seed mask offset : BitVec 8) (rst : BitVec 1) :=
+  let e := XlsBlock.eval { count := seed } { rst, mask, offset }
+  (e.output.out, e.next.count)
+"#,
+        );
+        for (seed, mask, offset) in [(1, 3, 2), (255, 1, 0), (128, 255, 5)] {
+            let args = [mask, offset, seed].map(|n| xlsynth::XlsIrValue::make_ubits(8, n).unwrap());
+            let folded = machine
+                .interpret(&args)
+                .unwrap()
+                .get_element(1)
+                .unwrap()
+                .to_u64()
+                .unwrap();
+            for (rst, next) in [(!active_low, 3), (active_low, folded)] {
+                writeln!(
+                    checks,
+                    "#guard readableClock {seed} {mask} {offset} {rst} == ({seed}, {next})"
+                )
+                .unwrap();
+                writeln!(
+                    checks,
+                    "#guard rawClock {seed} {mask} {offset} {} == ({seed}, {next})",
+                    u8::from(rst)
+                )
+                .unwrap();
+            }
+        }
+        bundle.files.push(("CheckLoop.lean".into(), checks));
+        check_bundle(
+            bundle,
+            &format!("counted loop with active_low={active_low}"),
+        );
     }
-    bundle.files.push(("CheckLoop.lean".into(), checks));
-    check_bundle(
-        bundle,
-        "counted loop over a register and two captured inputs",
-    );
 }
 
 #[test]
