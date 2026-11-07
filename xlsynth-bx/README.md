@@ -66,9 +66,39 @@ can fail on the mismatched signature.
 
 Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
 
-For a register reset value or an `unroll_for!` range bound, use a constant expression that BX can evaluate during checking. For parametric functions, define the function in DSLX and import it with `use`.
+For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. For parametric functions, define the function in DSLX and import it with `use`.
 
 BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
+
+### Counted for expressions
+
+Use a DSLX-style `for` in a function or block to fold an array or a constant integer range into a value. The expression after the body supplies the initial accumulator. Each iteration binds the next element and the previous accumulator, then returns the next accumulator.
+
+```text
+fn sum_words(words: u16[4], bias: u32) -> u32 {
+    for (word, sum): (u16, u32) in words {
+        sum + (word as u32)
+    }(bias)
+}
+
+block checksum(clk, words: u16[4], bias: u32) -> u32 {
+    sum_words(words, bias)
+}
+```
+
+The binder annotation is optional when the iterable and accumulator types can be inferred. Tuple patterns can destructure either binder. Array values can come from input ports, function calls, or other expressions. Integer ranges support both an exclusive limit (`lo..hi`) and an inclusive limit (`lo..=hi`). An empty loop returns the seed and its body still has to typecheck.
+
+BX preserves the width of a let-bound value used as an iterable or seed. For a `u16` fold, write `let xs: u16[2] = [0, 1];` and `let seed: u16 = 0;` if those values are bound before the loop. An inline seed such as `}(0)` can take its width from the accumulator annotation. When checking range bounds and reset values, BX can evaluate constant counted loops within its compile-time work limit.
+
+If only the body supplies the signed type of an aggregate member, give the seed or the accumulator that type explicitly. For example, with `x: s8`, write `let q = for (_, c) in u8:0..u8:1 { [x] }([s8:-1]);`. An accumulator annotation of `(u8, s8[1])` also gives the inline seed `[0xff]` the intended signed element type.
+
+BX lowers a nonempty loop to an XLS IR `counted_for` with a body function and invariant arguments for captured values. To emit SystemVerilog with `block2sv`, run the XLS loop-unrolling pass first. Use `unroll_for!` for structural replication of child blocks.
+
+```shell
+xlsynth-driver bx2ir checksum.bx > checksum.ir
+opt_main --passes=loop_unroll checksum.ir > checksum.unrolled.ir
+xlsynth-driver block2sv checksum.unrolled.ir > checksum.sv
+```
 
 ## Compile and link
 

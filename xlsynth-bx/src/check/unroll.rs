@@ -1,9 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::ast::UnrollFor;
+use crate::ast::{ForIterable, UnrollFor};
 use crate::infer_literal::BindingWidths;
 use xlsynth_pir::IrBits;
+
+/// Static bounds for a fold. Keep the index in its source bit width and
+/// convert only the distance between endpoints to a host iteration count.
+pub(super) struct StaticRange {
+    pub ty: Type,
+    pub first: IrBits,
+    pub count: usize,
+    pub widths: Option<BindingWidths>,
+}
 
 /// State hidden by a loop-local name. Restore it when leaving the iteration.
 pub(super) struct Shadowed {
@@ -14,6 +23,11 @@ pub(super) struct Shadowed {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Both elaborated iterations and counted bodies have lexical loop values.
+    pub(super) fn in_loop_scope(&self) -> bool {
+        self.in_counted_body || !self.iteration_path.is_empty()
+    }
+
     pub(super) fn loop_widths(&self) -> Option<WidthLookup<'_>> {
         (!self.loop_values.is_empty())
             .then(|| WidthLookup::loop_locals(&self.inferred_bindings, &self.loop_values))
@@ -119,8 +133,8 @@ impl BodyChecker<'_, '_> {
         }
         let ty = value.ty.clone();
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
-        let constant = value.constant(&self.constants);
-        if constexpr && let Some(v) = constant {
+        let constant = self.fold_constant(&value);
+        if constexpr && let Some(super::ConstantBinding::Known(v)) = constant {
             return TypedExpr {
                 ty,
                 kind: K::Literal(v),
@@ -157,10 +171,10 @@ impl BodyChecker<'_, '_> {
         if name == "_" {
             return;
         }
-        let values = if self.iteration_path.is_empty() {
-            &mut self.function_values
-        } else {
+        let values = if self.in_loop_scope() {
             &mut self.loop_values
+        } else {
+            &mut self.function_values
         };
         saved.push(Shadowed {
             name: name.to_owned(),
@@ -174,10 +188,10 @@ impl BodyChecker<'_, '_> {
     }
 
     pub(super) fn leave_scope(&mut self, saved: Vec<Shadowed>) {
-        let values = if self.iteration_path.is_empty() {
-            &mut self.function_values
-        } else {
+        let values = if self.in_loop_scope() {
             &mut self.loop_values
+        } else {
+            &mut self.function_values
         };
         for old in saved.into_iter().rev() {
             if let Some(value) = old.value {
@@ -194,6 +208,53 @@ impl BodyChecker<'_, '_> {
                 self.names.remove(&old.name);
             }
         }
+    }
+
+    /// Resolve compatible bound types and count their distance without
+    /// narrowing the source values, including ranges crossing signed zero.
+    pub(super) fn static_range(
+        &mut self,
+        start: &Expr,
+        limit: &Expr,
+        hint: Option<&Type>,
+        inclusive: bool,
+        keyword: &str,
+    ) -> Result<StaticRange, String> {
+        let (lo, hi) = self.pair(start, limit, hint)?;
+        let (signed, width) =
+            bits(&lo.ty).ok_or_else(|| format!("{keyword} range requires integer bounds"))?;
+        let inferred = hint.is_none()
+            && binding_widths(start, &lo.ty, &self.inferred_bindings)?.is_some()
+            && binding_widths(limit, &hi.ty, &self.inferred_bindings)?.is_some();
+        let mut constant = |bound: &TypedExpr| {
+            if bound.has_constant_inputs(&self.constexpr_names)
+                && let Some(value) = self.checked_constant(bound)?
+                && let Ok(bits) = value.to_bits()
+            {
+                return Ok(bits);
+            }
+            Err(format!(
+                "{keyword} range bounds must be compile-time constants"
+            ))
+        };
+        let first = constant(&lo)?;
+        let last = constant(&hi)?;
+        if if signed {
+            last.slt(&first)
+        } else {
+            last.ult(&first)
+        } {
+            return Err(format!("{keyword} range limit precedes its start"));
+        }
+        let count = ir_bits_to_usize(&last.sub(&first))
+            .and_then(|n| n.checked_add(usize::from(inclusive)))
+            .ok_or_else(|| format!("{keyword} range too large"))?;
+        Ok(StaticRange {
+            ty: lo.ty,
+            first,
+            count,
+            widths: inferred.then(|| BindingWidths::scalar(signed, width)),
+        })
     }
 
     /// Fold a constant half-open range in source order. Bounds may be wider
@@ -214,29 +275,11 @@ impl BodyChecker<'_, '_> {
             .transpose()?;
         let index_hint = annotation.as_ref().map(|(i, _)| i);
         let acc_hint = annotation.as_ref().map(|(_, a)| a).or(expected);
-        let (lo, hi) = self.pair(&fold.start, &fold.limit, index_hint)?;
-        let (signed, width) = bits(&lo.ty).ok_or("unroll_for! range requires integer bounds")?;
-        let inferred_index = index_hint.is_none()
-            && binding_widths(&fold.start, &lo.ty, &self.inferred_bindings)?.is_some()
-            && binding_widths(&fold.limit, &hi.ty, &self.inferred_bindings)?.is_some();
-        let bound = |v: &TypedExpr| {
-            if !v.has_constant_inputs(&self.constexpr_names) {
-                return Err("unroll_for! range bounds must be compile-time constants");
-            }
-            v.constant(&self.constants)
-                .and_then(|v| v.to_bits().ok())
-                .ok_or("unroll_for! range bounds must be compile-time constants")
-        };
-        let mut index = bound(&lo)?;
-        let limit = bound(&hi)?;
-        if if signed {
-            limit.slt(&index)
-        } else {
-            limit.ult(&index)
-        } {
-            return Err("unroll_for! range limit precedes its start".into());
-        }
-        let count = ir_bits_to_usize(&limit.sub(&index)).ok_or("unroll_for! range too large")?;
+        let range =
+            self.static_range(&fold.start, &fold.limit, index_hint, false, "unroll_for!")?;
+        let count = range.count;
+        let width = range.first.get_bit_count();
+        let mut index = range.first;
         // Charge nested loops to the same block. A small inner range repeated
         // many times consumes the same budget as a single large range.
         self.charge_unroll(
@@ -264,12 +307,11 @@ impl BodyChecker<'_, '_> {
             self.iteration_path.push(ordinal);
             let mut saved = Vec::new();
             let item = TypedExpr {
-                ty: lo.ty.clone(),
+                ty: range.ty.clone(),
                 kind: K::Literal(IrValue::Bits(index.clone())),
             };
             let acc_type = carry.ty.clone();
-            let index_widths = inferred_index.then(|| BindingWidths::scalar(signed, width));
-            self.bind_scoped_value(&fold.index, item, index_widths, &mut saved);
+            self.bind_scoped_value(&fold.index, item, range.widths.clone(), &mut saved);
             self.bind_scoped_value(&fold.accumulator, carry, None, &mut saved);
             for stmt in &fold.body {
                 let Stmt::Let {
@@ -485,6 +527,28 @@ impl BodyChecker<'_, '_> {
                     self.check_type_names(acc, locals)?;
                 }
                 self.check_body_names(fold, &mut locals.clone())?;
+            }
+            Expr::For(fold) => {
+                match &fold.iterable {
+                    ForIterable::Range { start, limit, .. } => {
+                        self.check_expr_names(start, locals)?;
+                        self.check_expr_names(limit, locals)?;
+                    }
+                    ForIterable::Array(expr) => self.check_expr_names(expr, locals)?,
+                }
+                if let Some((element, carry)) = &fold.annotation {
+                    self.check_type_names(element, locals)?;
+                    self.check_type_names(carry, locals)?;
+                }
+                self.check_expr_names(&fold.seed, locals)?;
+                let mut names = locals.clone();
+                self.validate_counted_binders(fold)?;
+                for pattern in [&fold.element, &fold.accumulator] {
+                    pattern.visit_names(&mut |name| {
+                        names.insert(name.to_owned());
+                    });
+                }
+                self.check_expr_names(&fold.body, &names)?;
             }
         }
         Ok(())

@@ -23,6 +23,7 @@ use crate::check::{
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
+use crate::typed::{TypedFor, TypedIterable};
 
 /// Destination package indices for named BX functions, externs, and inferred
 /// DSLX specializations.
@@ -103,30 +104,46 @@ pub fn lower_module(
         imported,
         signatures,
     };
-    if !module.functions.is_empty() {
-        let mut batch = FunctionBatch::new(&mut package).map_err(|error| error.to_string())?;
-        for (function, symbol) in module.functions.iter().zip(function_symbols) {
-            let index = lower_function(function, &symbol, &mut batch, &functions, &mut layouts)
-                .map_err(|error| format!("fn '{}': {error}", function.name))?;
-            functions
-                .signatures
-                .insert(index, invoke_signature(batch.package(), index)?);
-            functions.named.insert(function.name.clone(), index);
-        }
+    if module.functions.is_empty() && module.blocks.is_empty() {
+        return Ok(package);
+    }
+    let occupied = reserved_names
+        .into_iter()
+        .chain(package.members.iter().map(|m| m.graph().name.clone()))
+        .collect();
+    let mut destination = Destination {
+        batch: FunctionBatch::new(&mut package).map_err(|error| error.to_string())?,
+        occupied,
+        next_loop: 0,
+    };
+    for (function, symbol) in module.functions.iter().zip(function_symbols) {
+        let index = lower_function(
+            function,
+            &symbol,
+            &mut destination,
+            &functions,
+            &mut layouts,
+        )
+        .map_err(|error| format!("fn '{}': {error}", function.name))?;
+        functions
+            .signatures
+            .insert(index, invoke_signature(destination.batch.package(), index)?);
+        functions.named.insert(function.name.clone(), index);
     }
     for block in &module.blocks {
         let builder = LowerBody::build_block(
             block,
             &block_symbols,
-            &package,
+            &mut destination,
             &functions,
             &mut layouts,
             &module.structs,
             reset,
         )
         .map_err(|error| format!("block '{}': {error}", block.name))?;
-        builder
-            .build_into_package(&mut package)
+        destination
+            .batch
+            .append_block(builder)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
     }
     let mut concrete = module
@@ -456,11 +473,32 @@ struct BlockResources {
     instances: BTreeMap<String, BInstantiation>,
 }
 
+/// The destination package and symbols reserved for user definitions and
+/// generated counted-loop bodies.
+struct Destination<'p> {
+    batch: FunctionBatch<'p>,
+    occupied: BTreeSet<String>,
+    next_loop: usize,
+}
+
+impl Destination<'_> {
+    /// Assign loop bodies collision-free names in source traversal order.
+    fn loop_symbol(&mut self) -> String {
+        loop {
+            let name = format!("__bx_for_{}", self.next_loop);
+            self.next_loop += 1;
+            if self.occupied.insert(name.clone()) {
+                return name;
+            }
+        }
+    }
+}
+
 /// Builds checked value expressions in either a pure function or a clocked
 /// block.
-struct LowerBody<'a, 'defs, S: BuilderState> {
+struct LowerBody<'a, 'defs, 'p, S: BuilderState> {
     builder: Builder<S>,
-    package: &'a Package,
+    destination: &'a mut Destination<'p>,
     functions: &'a LinkedFunctions,
     layouts: &'a mut Layouts<'defs>,
     values: BTreeMap<String, BValue>,
@@ -472,11 +510,11 @@ struct LowerBody<'a, 'defs, S: BuilderState> {
 fn lower_function(
     function: &CheckedFunction,
     symbol: &str,
-    batch: &mut FunctionBatch,
+    destination: &mut Destination,
     functions: &LinkedFunctions,
     layouts: &mut Layouts,
 ) -> Result<usize, BuilderError> {
-    let mut body = LowerBody::new(FnBuilder::new(symbol), batch.package(), functions, layouts);
+    let mut body = LowerBody::new(FnBuilder::new(symbol), destination, functions, layouts);
     let param_symbols = local_ir_names(
         function.params.iter().map(|param| param.name.as_str()),
         std::iter::empty(),
@@ -492,16 +530,16 @@ fn lower_function(
         body.values.insert(binding.name.clone(), value);
     }
     let result = body.expr(&function.output)?;
-    batch.append(body.builder, result)
+    body.destination.batch.append(body.builder, result)
 }
 
-impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
+impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
     /// Allocates the interface and instances before connecting their input
     /// drivers.
     fn build_block(
         block: &CheckedBlock,
         symbols: &BlockSymbols,
-        package: &'a Package,
+        destination: &'a mut Destination<'p>,
         functions: &'a LinkedFunctions,
         layouts: &'a mut Layouts<'defs>,
         structs: &[StructDef],
@@ -509,7 +547,7 @@ impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
     ) -> Result<BlockBuilder, BuilderError> {
         let mut state = Self::new(
             BlockBuilder::new(symbols.get(&block.name)),
-            package,
+            destination,
             functions,
             layouts,
         );
@@ -644,9 +682,14 @@ impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
         target: &str,
         parent_reset: Option<BValue>,
     ) -> Result<BInstantiation, BuilderError> {
-        let child = self.package.get_block(target).ok_or_else(|| {
-            BuilderError::InvalidOperation(format!("unknown child block '{target}'"))
-        })?;
+        let child = self
+            .destination
+            .batch
+            .package()
+            .get_block(target)
+            .ok_or_else(|| {
+                BuilderError::InvalidOperation(format!("unknown child block '{target}'"))
+            })?;
         let instance = self.builder.instantiate(name, child)?;
         if let Some(reset) = &child.reset {
             let signal = parent_reset.ok_or_else(|| {
@@ -665,16 +708,16 @@ impl<'a, 'defs> LowerBody<'a, 'defs, BlockState> {
     }
 }
 
-impl<'a, 'defs, S: BuilderState> LowerBody<'a, 'defs, S> {
+impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     fn new(
         builder: Builder<S>,
-        package: &'a Package,
+        destination: &'a mut Destination<'p>,
         functions: &'a LinkedFunctions,
         layouts: &'a mut Layouts<'defs>,
     ) -> Self {
         Self {
             builder,
-            package,
+            destination,
             functions,
             layouts,
             values: BTreeMap::new(),
@@ -803,12 +846,79 @@ impl<'a, 'defs, S: BuilderState> LowerBody<'a, 'defs, S> {
             .invoke_with_signature(&self.functions.signatures[&index], &args)
     }
 
+    /// Build one pure iteration function. Captures become invariant
+    /// arguments; the array or range element is derived from the ordinal.
+    fn counted_for(&mut self, fold: &TypedFor) -> Result<BValue, BuilderError> {
+        let carry = self.expr(&fold.seed)?;
+        if fold.trip_count == 0 {
+            return Ok(carry);
+        }
+        let mut invariants = Vec::new();
+        let symbol = self.destination.loop_symbol();
+        let mut builder = FnBuilder::new(&symbol);
+        let index_width = match &fold.iterable {
+            TypedIterable::Range { start } => start.get_bit_count().max(1),
+            TypedIterable::Array(_) => {
+                (usize::BITS - (fold.trip_count - 1).leading_zeros()).max(1) as usize
+            }
+        };
+        let index = builder.param("index", ir::Type::Bits(index_width))?;
+        let accumulator = builder.param("carry", self.builder.get_type(carry)?.clone())?;
+        let array = match &fold.iterable {
+            TypedIterable::Array(array) => {
+                let wire = self.expr(array)?;
+                invariants.push(wire);
+                Some(builder.param("iterable", self.builder.get_type(wire)?.clone())?)
+            }
+            TypedIterable::Range { .. } => None,
+        };
+        let mut body = LowerBody::new(builder, self.destination, self.functions, self.layouts);
+        body.values
+            .insert(fold.accumulator.name.clone(), accumulator);
+        for (ordinal, name) in fold.captures.iter().enumerate() {
+            let wire = self.values[name];
+            invariants.push(wire);
+            let param = body.builder.param(
+                &format!("capture_{ordinal}"),
+                self.builder.get_type(wire)?.clone(),
+            )?;
+            body.values.insert(name.clone(), param);
+        }
+        let element = match &fold.iterable {
+            TypedIterable::Range { start } if start.get_bit_count() == 0 => {
+                body.builder.literal(IrValue::Bits(start.clone()))?
+            }
+            TypedIterable::Range { start } if start.is_zero() => index,
+            TypedIterable::Range { start } => {
+                let start = body.builder.literal(IrValue::Bits(start.clone()))?;
+                body.builder.add(start, index)?
+            }
+            TypedIterable::Array(_) => body
+                .builder
+                .array_index(array.expect("array invariant"), index)?,
+        };
+        body.values.insert(fold.element.name.clone(), element);
+        for binding in &fold.bindings {
+            let value = body.expr(&binding.value)?;
+            body.values.insert(binding.name.clone(), value);
+        }
+        let result = body.expr(&fold.output)?;
+        let index = body.destination.batch.append(body.builder, result)?;
+        let PackageMember::Function(function) = &self.destination.batch.package().members[index]
+        else {
+            unreachable!("appended loop body is a function");
+        };
+        self.builder
+            .counted_for(carry, fold.trip_count, 1, function, &invariants)
+    }
+
     /// Lowers a checked expression at the current instant, without inserting
     /// registers.
     fn expr(&mut self, expr: &TypedExpr) -> Result<BValue, BuilderError> {
         match &expr.kind {
             TypedExprKind::Name(name) => Ok(self.values[name]),
             TypedExprKind::Literal(value) => self.builder.literal(value.clone()),
+            TypedExprKind::For(fold) => self.counted_for(fold),
             TypedExprKind::Array(items) => {
                 let Type::Array { element, .. } = &expr.ty else {
                     return Err(BuilderError::InvalidOperation(

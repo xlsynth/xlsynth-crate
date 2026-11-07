@@ -266,6 +266,29 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     UnrollFor(Box<UnrollFor>),
+    For(Box<ForLoop>),
+}
+
+/// A counted fold, with an iteration element and a loop-carried accumulator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForLoop {
+    pub element: BindingPattern,
+    pub accumulator: BindingPattern,
+    pub annotation: Option<(Type, Type)>,
+    pub iterable: ForIterable,
+    pub body: Expr,
+    pub seed: Expr,
+}
+
+/// A counted loop visits a statically bounded integer range or an array value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForIterable {
+    Range {
+        start: Expr,
+        limit: Expr,
+        inclusive: bool,
+    },
+    Array(Expr),
 }
 
 /// A fold over a compile-time half-open range. Each iteration's local lets

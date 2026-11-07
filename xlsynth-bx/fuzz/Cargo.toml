@@ -52,3 +52,9 @@ name = "fuzz_bx_dslx_unroll_types"
 path = "fuzz_targets/fuzz_bx_dslx_unroll_types.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_counted_for"
+path = "fuzz_targets/fuzz_bx_dslx_counted_for.rs"
+test = false
+doc = false
