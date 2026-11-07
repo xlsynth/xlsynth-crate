@@ -50,6 +50,8 @@ struct AggregateProjection {
     suffix: String,
 }
 
+pub(crate) type WrittenTypes = BTreeMap<String, Rc<crate::LinkedStruct>>;
+
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
@@ -70,6 +72,7 @@ pub(crate) struct ImportedStructs {
     /// The canonical BX type, including declaration identities, selects the
     /// spelling.
     aggregate_candidates: HashMap<String, Vec<DeclId>>,
+    pub(crate) written_types: Option<WrittenTypes>,
     named_layouts: BTreeMap<String, usize>,
     parametric_instances: BTreeMap<usize, ImportedStructInstance>,
     /// Reflected layouts that contain a concrete parametric struct, including
@@ -138,6 +141,7 @@ impl ImportedStructs {
             bindings: HashMap::new(),
             declarations: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
+            written_types: None,
             reflected_aliases: BTreeMap::new(),
             aggregate_spellings: HashMap::new(),
             value_spellings: HashMap::new(),
@@ -541,6 +545,41 @@ impl ImportedStructs {
         Err(format!(
             "unsupported nominal type '{name}' in imported function signature"
         ))
+    }
+
+    /// Capture the written annotation before BX erases transparent aliases.
+    /// The witness shares the same frozen files and native import context.
+    pub(crate) fn record_written_type(
+        &mut self,
+        written: &Type,
+        subject: &str,
+        member: &str,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        let key = written.to_string();
+        if self
+            .written_types
+            .as_ref()
+            .is_some_and(|types| types.contains_key(&key))
+        {
+            return Ok(());
+        }
+        let spelling = match written {
+            Type::Applied { args, .. } => instance_spelling(member, args),
+            _ => member.to_owned(),
+        };
+        let source = format!(
+            "import {subject} as bx_module;\nfn inspect(value: bx_module::{spelling}) {{}}"
+        );
+        let name = format!("0bx_written_{}", self.probe_index);
+        self.probe_index += 1;
+        let module = self.check_probe(&source, &name, data)?;
+        let annotation = probe_function(&module)?.get_param(0).get_type_annotation();
+        self.written_types
+            .as_mut()
+            .expect("capture enabled")
+            .insert(key, Rc::new(crate::LinkedStruct { module, annotation }));
+        Ok(())
     }
 
     pub(crate) fn resolve_exported_type(

@@ -25,6 +25,43 @@ fn bx_bundle(source: &str) -> LeanBlockBundle {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_packet_keeps_private_field_type() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        r#"
+struct Internal { value: u8 }
+pub struct Packet { inner: Internal }
+pub fn pick(x: Packet) -> u8 { x.inner.value }
+"#,
+    )?;
+    let mut bundle = compile_bx(
+        "use ops; block demo(clk, p: ops::Packet) -> u8 { ops::pick(p) }",
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "PrivateField.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable XlsSource
+example (p : «ops::Packet») : «ops::Internal» := p.inner
+example (p : «ops::Packet») : Helpers.«ops::pick» p = p.inner.value := rfl
+#guard observe {} {p := {inner := {value := 37}}} == 37
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "public BX port with a private DSLX field type");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(

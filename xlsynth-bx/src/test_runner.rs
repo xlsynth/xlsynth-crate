@@ -424,7 +424,7 @@ fn compile_tests(
     };
     let (root, imports) = bx_import::read_for_tests(source, options).map_err(at_file)?;
     let mut checked =
-        check::check_sources_with_tests(&root, imports, options, Some(&mut suite), |_| {})
+        check::check_sources_with_tests(&root, imports, options, Some(&mut suite), |_| {}, None)
             .map_err(bx_import::diagnostic)
             .map_err(at_file)?;
     for block in &mut checked.blocks {
