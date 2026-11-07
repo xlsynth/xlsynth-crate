@@ -238,8 +238,8 @@ impl Generator<'_> {
                 (index & ((1 << source_width.min(8)) - 1)).to_string()
             }
         };
-        // The pinned bytecode interpreter returns an unsigned zero for a
-        // signed slice whose start is past the end. A later signed operation
+        // XLS v0.61.0's DSLX bytecode interpreter returns unsigned zero for
+        // an out-of-bounds signed width slice. A later signed operation
         // can then fail on incompatible runtime values. Keep signed starts
         // in bounds for bytecode comparisons and retain the unrestricted
         // generation for the hardware differential target.

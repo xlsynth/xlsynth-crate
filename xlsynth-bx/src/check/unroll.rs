@@ -459,6 +459,14 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(then_value, locals)?;
                 self.check_expr_names(else_value, locals)?;
             }
+            Expr::Match { subject, arms } => {
+                for operand in super::match_operands(subject, arms)? {
+                    self.check_expr_names(operand, locals)?;
+                }
+                for arm in arms {
+                    self.check_expr_names(&arm.value, locals)?;
+                }
+            }
             Expr::UnrollFor(fold) => {
                 self.check_expr_names(&fold.start, locals)?;
                 self.check_expr_names(&fold.limit, locals)?;

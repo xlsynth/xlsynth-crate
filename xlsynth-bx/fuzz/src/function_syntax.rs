@@ -351,11 +351,12 @@ pub fn check_function_syntax(data: &[u8]) -> Result<(), String> {
             params,
             result: caller_result,
             body: block_body.unwrap_or_else(|| format!("route({caller_args})")),
-            valid,
+            valid: Some(valid),
             dslx_ir,
             dynamic_index,
         },
         crate::input_seed(data),
         DslxExecution::BytecodeTests,
+        Vec::new(),
     )
 }

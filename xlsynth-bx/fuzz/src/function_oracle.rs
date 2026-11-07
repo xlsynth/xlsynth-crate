@@ -20,7 +20,9 @@ pub(crate) struct FunctionProgram {
     pub params: String,
     pub result: String,
     pub body: String,
-    pub valid: bool,
+    /// Known acceptance for a generated family, or use native DSLX to decide
+    /// for freely combined patterns.
+    pub valid: Option<bool>,
     /// The pinned converter emits unparsable IR names for DSLX functions with
     /// punctuation. Such programs still exercise both source frontends and
     /// compare the lowered BX result to actual DSLX execution.
@@ -133,6 +135,7 @@ pub(crate) fn compare_program(
     program: FunctionProgram,
     seed: u64,
     execution: DslxExecution,
+    additional_inputs: Vec<Vec<IrValue>>,
 ) -> Result<(), String> {
     let bx = format!(
         "{}\n{}",
@@ -148,13 +151,13 @@ pub(crate) fn compare_program(
     let dslx_check =
         dslx::parse_and_typecheck(&reference, "oracle.x", "oracle", &mut ImportData::default());
     let checked = match (bx_check, dslx_check) {
-        (Ok(bx), Ok(_)) if program.valid => bx,
-        // An intentionally invalid call or binding must fail source checking
-        // on both sides. IR conversion errors never count as source rejection.
-        (Err(_), Err(_)) if !program.valid => return Ok(()),
+        (Ok(bx), Ok(_)) if program.valid != Some(false) => bx,
+        // Rejection by both frontends is a successful comparison unless the
+        // generator guarantees acceptance. IR failures are checked separately.
+        (Err(_), Err(_)) if program.valid != Some(true) => return Ok(()),
         (bx_result, native_result) => {
             return Err(format!(
-                "expected source acceptance {}: BX {:?}, DSLX {:?}\n{bx}",
+                "expected source acceptance {:?}: BX {:?}, DSLX {:?}\n{bx}",
                 program.valid,
                 bx_result.err(),
                 native_result.err()
@@ -171,7 +174,14 @@ pub(crate) fn compare_program(
         None
     };
     let mut calls = Vec::new();
-    for args in generate_argument_sets_from_seed(&evaluator.function, seed, 4) {
+    for args in additional_inputs
+        .into_iter()
+        .chain(generate_argument_sets_from_seed(
+            &evaluator.function,
+            seed,
+            4,
+        ))
+    {
         let hardware = match &native_ir {
             Some(ir) => evaluator.compare_ir(ir, &args),
             None => evaluator.evaluate(&args),

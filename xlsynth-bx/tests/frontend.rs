@@ -10,6 +10,8 @@ mod expr_eval;
 mod imported_structs;
 #[path = "frontend/local_functions.rs"]
 mod local_functions;
+#[path = "frontend/scalar_match.rs"]
+mod scalar_match;
 #[path = "frontend/unroll_for.rs"]
 mod unroll_for;
 
@@ -123,6 +125,7 @@ pub block parent(clk, delta: u8) -> u8 {
     lane.x := lane.saved + delta;
     lane.live
 }
+
 block mixed(clk, x: u8) -> Ports {
     reg q: u8;
     q := x;
@@ -130,6 +133,32 @@ block mixed(clk, x: u8) -> Ports {
     bundle
 }"#;
     compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let cycle = source.replace("lane.saved + delta", "lane.live + delta");
+    assert!(compile(&cycle, empty_package("design"), ResetBehavior::default()).is_err());
+}
+
+#[test]
+fn match_tracks_feedthrough_per_reachable_result_field() {
+    let source = r#"
+struct Ports { saved: u8, live: u8 }
+pub block parent(clk, delta: u8) -> u8 {
+    inst lane: mixed;
+    lane.x := lane.saved + delta;
+    lane.live
+}
+block mixed(clk, x: u8) -> Ports {
+    reg q: u8;
+    q := x;
+    match x as u2 {
+        2..1 => Ports { saved: x, live: q },
+        0 => Ports { saved: q, live: x },
+        1..=2 => Ports { saved: q, live: !x },
+        3 => Ports { saved: q, live: x + u8:1 },
+        _ => Ports { saved: x, live: x },
+    }
+}"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
     let cycle = source.replace("lane.saved + delta", "lane.live + delta");
     assert!(compile(&cycle, empty_package("design"), ResetBehavior::default()).is_err());
 }

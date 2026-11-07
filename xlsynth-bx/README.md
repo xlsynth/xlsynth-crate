@@ -30,6 +30,28 @@ BX supports concrete bit types, booleans, tuples, named structs, and fixed-size 
 
 The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
+### Scalar match expressions
+
+Use `match` on a boolean or a signed or unsigned bit value in a function or
+block. The first matching arm supplies the result. All arms share a result
+type, which can also be an array, tuple, or struct.
+
+```text
+fn classify(op: u4) -> (u8, bool) {
+    match op {
+        0 | 2 => (u8:1, true),
+        2..=5 => (u8:2, true),
+        _ => (u8:0, false),
+    }
+}
+```
+
+Here `op == 2` selects the first arm. Use `a..b` to exclude the upper endpoint
+and `a..=b` to include it. Patterns use literal values or endpoints, `|`
+alternatives, and `_` for any remaining value. The arms must cover the whole
+subject type. For example, `true` and `false` cover a boolean without a
+wildcard.
+
 ## Defining functions
 
 Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Use concrete types in the signature, including structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.

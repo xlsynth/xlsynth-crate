@@ -121,6 +121,53 @@ pub struct TypedExpr {
     pub kind: TypedExprKind,
 }
 
+/// A checked pattern whose bit values have the subject's width. Range
+/// comparisons use the subject's signedness.
+#[derive(Clone, Debug)]
+pub enum ScalarPattern {
+    Wildcard,
+    Literal(IrBits),
+    Range {
+        start: IrBits,
+        end: IrBits,
+        inclusive: bool,
+    },
+}
+
+impl ScalarPattern {
+    pub(super) fn matches(&self, value: &IrBits, signed: bool) -> bool {
+        match self {
+            Self::Wildcard => true,
+            Self::Literal(literal) => value == literal,
+            Self::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let at_or_above = if signed {
+                    value.sge(start)
+                } else {
+                    value.uge(start)
+                };
+                let below = if signed {
+                    value.slt(end)
+                } else {
+                    value.ult(end)
+                };
+                at_or_above && (below || *inclusive && value == end)
+            }
+        }
+    }
+}
+
+/// Alternatives sharing one checked result in a source-ordered scalar match.
+#[derive(Clone, Debug)]
+pub struct TypedMatchArm {
+    /// An empty list means every source alternative was an empty range.
+    pub patterns: Vec<ScalarPattern>,
+    pub value: TypedExpr,
+}
+
 /// Resolved operations, including field projections in declaration order.
 #[derive(Clone, Debug)]
 pub enum TypedExprKind {
@@ -177,6 +224,10 @@ pub enum TypedExprKind {
         condition: Box<TypedExpr>,
         then_value: Box<TypedExpr>,
         else_value: Box<TypedExpr>,
+    },
+    Match {
+        subject: Box<TypedExpr>,
+        arms: Vec<TypedMatchArm>,
     },
     InstanceOutput {
         instance: String,
@@ -237,6 +288,10 @@ impl TypedExpr {
                 array.has_constant_inputs(names)
                     && index.has_constant_inputs(names)
                     && replacement.has_constant_inputs(names)
+            }
+            K::Match { subject, arms } => {
+                subject.has_constant_inputs(names)
+                    && arms.iter().all(|arm| arm.value.has_constant_inputs(names))
             }
         }
     }
@@ -301,6 +356,15 @@ impl TypedExpr {
             K::TupleIndex { value, index } => value.constant(names)?.get_element(*index).ok(),
             K::BindingTupleIndex { name, index } => names.get(name)?.get_element(*index).ok(),
             K::Call { .. } | K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
+            K::Match { subject, arms } => {
+                let value = subject.constant(names)?;
+                let bits_value = value.as_bits().ok()?;
+                let signed = bits(&subject.ty)?.0;
+                arms.iter()
+                    .find(|arm| arm.patterns.iter().any(|p| p.matches(bits_value, signed)))?
+                    .value
+                    .constant(names)
+            }
             K::If {
                 condition,
                 then_value,
