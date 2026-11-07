@@ -232,6 +232,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         }
     }
     source.push_str(&record_declaration(
+        "XlsBlock",
         "Assertions",
         &fields,
         Some("Repr"),
@@ -347,12 +348,22 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
 pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
     Ok(format!(
         "_root_.{namespace}.Helpers.{}",
-        identifier(physical)?
+        helper_identifier(physical)?
     ))
 }
 
+pub(super) fn helper_identifier(physical: &str) -> Result<String> {
+    // Lean reserves this declaration name. A space cannot occur in a quoted
+    // IR identifier accepted by identifier(), so the replacement is unique.
+    if physical == "_root_" {
+        Ok("«xls helper _root_»".into())
+    } else {
+        identifier(physical)
+    }
+}
+
 fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Result<()> {
-    write!(source, "def Helpers.{}", identifier(&function.name)?)?;
+    write!(source, "def Helpers.{}", helper_identifier(&function.name)?)?;
     for param in &function.params {
         write!(
             source,
@@ -436,7 +447,7 @@ pub(super) fn structure_header(name: &str) -> String {
 /// or DSLX source.
 pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
     // Source modules may declare their own type named Repr.
-    record_declaration(name, fields, Some("_root_.Repr"), &[])
+    record_declaration("XlsReadable", name, fields, Some("_root_.Repr"), &[])
 }
 
 pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> String {
@@ -448,6 +459,7 @@ pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> St
 }
 
 pub(super) fn record_declaration(
+    namespace: &str,
     name: &str,
     fields: &[(String, String)],
     derived_repr: Option<&str>,
@@ -469,9 +481,15 @@ pub(super) fn record_declaration(
     if backing != name {
         writeln!(out, "abbrev {name} := {backing}\n")?;
         for (field, _) in fields {
+            ensure!(
+                field != "«_root_»",
+                "cannot emit {namespace}.{name} field '_root_': Lean reserves this name for declarations, and this record needs a separate field accessor"
+            );
+            // This declaration opens the record namespace. An earlier reader
+            // named like the record can shadow the type in later signatures.
             writeln!(
                 out,
-                "@[simp] abbrev {name}.{field} (p : {name}) := {backing}.{} p",
+                "@[simp] abbrev {name}.{field} (p : _root_.{namespace}.{name}) := {backing}.{} p",
                 storage_field(field)
             )?;
         }
@@ -551,7 +569,7 @@ fn record_type<'a>(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    record_declaration(name, &fields, Some("Repr"), &[])
+    record_declaration("XlsBlock", name, &fields, Some("Repr"), &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.

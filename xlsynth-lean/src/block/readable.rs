@@ -55,11 +55,11 @@ fn helper_path(signature: &HelperSignature, symbol: &str) -> Result<String> {
         Some((module, local)) => Ok(format!(
             "_root_.{}.{}",
             module_identifier(module)?,
-            identifier(local)?
+            source_names::declaration_identifier(module, local, "function")?
         )),
         None => Ok(format!(
             "_root_.XlsReadable.Helpers.{}",
-            identifier(symbol)?
+            lean::helper_identifier(symbol)?
         )),
     }
 }
@@ -632,7 +632,7 @@ impl<'a> Presentation<'a> {
         for declaration in self.declarations {
             let (module, local) = declaring_name(&self.bx_namespace, declaration.name());
             let namespace = module_identifier(module)?;
-            let name = identifier(local)?;
+            let name = source_names::declaration_identifier(module, local, "type")?;
             writeln!(out, "namespace {namespace}\n")?;
             let derived = match declaration {
                 TypeDecl::Enum { name: original, .. } => {
@@ -1343,7 +1343,7 @@ def eval (q : State) (x : Input) : Evaluation :=
             out,
             "\nabbrev {}.{} := _root_.XlsReadable.eval",
             module_identifier(&self.bx_namespace)?,
-            identifier(&block.graph.name)?
+            source_names::declaration_identifier(&self.bx_namespace, &block.graph.name, "block")?
         )?;
         Ok(out)
     }

@@ -215,17 +215,21 @@ open XlsBlock
 fn raw_projections_keep_lean_generated_member_names() {
     let package = Parser::new(
         r#"package ports
-top block ports(clk: clock, recOn: bits[1], casesOn: bits[1], rec: bits[1]) {
+fn _root_(x: bits[1] id=10) -> bits[1] {
+  ret inverted: bits[1] = not(x, id=11)
+}
+top block ports(clk: clock, Input: bits[1], recOn: bits[1], rec: bits[1]) {
   #![reset(port="recOn", asynchronous=false, active_low=false)]
   reg noConfusion(bits[1], reset_value=1)
   reg b(bits[1])
+  Input: bits[1] = input_port(name=Input, id=2)
   recOn: bits[1] = input_port(name=recOn, id=1)
-  casesOn: bits[1] = input_port(name=casesOn, id=2)
+  en: bits[1] = invoke(Input, to_apply=_root_, id=12)
   current: bits[1] = register_read(register=noConfusion, id=3)
   old_b: bits[1] = register_read(register=b, id=9)
   tok: token = literal(value=token, id=4)
-  ctorIdx: token = assert(tok, casesOn, message="enabled", label="enabled", id=5)
-  set_current: () = register_write(casesOn, register=noConfusion, reset=recOn, id=6)
+  ctorIdx: token = assert(tok, en, message="enabled", label="enabled", id=5)
+  set_current: () = register_write(en, register=noConfusion, reset=recOn, id=6)
   save_old: () = register_write(current, register=b, id=7)
   rec: () = output_port(current, name=rec, id=8)
 }"#,
@@ -237,11 +241,11 @@ top block ports(clk: clock, recOn: bits[1], casesOn: bits[1], rec: bits[1]) {
         r#"
 open XlsBlock
 example (rst en : BitVec 1) :
-    let x : Input := ⟨rst, en⟩
-    (x.recOn, x.casesOn) = (rst, en) := rfl
+    let x : Input := ⟨en, rst⟩
+    (x.recOn, x.Input) = (rst, en) := rfl
 example (q : State) (x : Input) : (observe q x).rec = q.noConfusion := rfl
 example (q : State) (x : Input) : (step q x).b = q.noConfusion := rfl
-example (q : State) (x : Input) : (eval q x).assertions.ctorIdx = (x.casesOn == 1) := rfl
+example (q : State) (x : Input) : (eval q x).assertions.ctorIdx = (BitVec.not x.Input == 1) := rfl
 example (q : State) (x : Input) : (reset q x).next.noConfusion = 1 := rfl
 "#,
     );
