@@ -20,6 +20,8 @@ pub struct DslxOutline {
     /// Public functions and constants, including functions with no return
     /// annotation.
     pub public_values: BTreeSet<String>,
+    /// Directly declared public functions, including implicit unit results.
+    pub public_functions: BTreeSet<String>,
     /// Explicit function return annotations in their declaration scope.
     pub functions: BTreeMap<String, OutlineType>,
 }
@@ -89,6 +91,8 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
         value_context: ValueContext::Block,
         in_value_expression: false,
         block_type_params: BTreeSet::new(),
+        callback_templates: Default::default(),
+        hidden_templates: Vec::new(),
     };
     let mut module = DslxOutline::default();
     let mut uses = Vec::new();
@@ -166,6 +170,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
                     "fn" => {
                         if public {
                             module.public_values.insert(name.clone());
+                            module.public_functions.insert(name.clone());
                         }
                         parser.outline_group("(")?;
                         if parser.eat("->") {

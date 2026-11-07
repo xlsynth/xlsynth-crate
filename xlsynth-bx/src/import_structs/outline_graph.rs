@@ -323,6 +323,12 @@ impl OutlineGraph {
         })
     }
 
+    pub(super) fn has_public_function(&self, subject: &str, name: &str) -> bool {
+        self.modules
+            .get(subject)
+            .is_some_and(|module| module.outline.public_functions.contains(name))
+    }
+
     /// Resolve a type name in the module that wrote it. Native typechecking
     /// enforces access rules at each source reference (including v1 use
     /// syntax).

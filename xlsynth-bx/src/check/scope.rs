@@ -459,6 +459,16 @@ impl BodyChecker<'_, '_> {
     }
 }
 
+/// Recover the user's binding name when scope preparation has replaced a
+/// free reference with its temporary alias.
+pub(super) fn source_binding_name<'s>(name: &'s str, aliases: &'s [Option<String>]) -> &'s str {
+    name.strip_prefix("$scope_")
+        .and_then(|index| index.parse::<usize>().ok())
+        .and_then(|index| aliases.get(index))
+        .and_then(Option::as_deref)
+        .unwrap_or(name)
+}
+
 /// Substitute stable aliases for free references to the enclosing scope.
 /// Binders introduced by a nested value scope or fold hide outer aliases.
 fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
@@ -506,6 +516,19 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::Call { name, args } => {
             rename(name, aliases);
+            for arg in args {
+                capture_names(arg, aliases);
+            }
+        }
+        Expr::ParametricCall {
+            name,
+            callbacks,
+            args,
+        } => {
+            rename(name, aliases);
+            for callback in callbacks {
+                rename(callback, aliases);
+            }
             for arg in args {
                 capture_names(arg, aliases);
             }

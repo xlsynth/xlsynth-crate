@@ -4,6 +4,7 @@ mod counted_for;
 mod eval;
 mod function_calls;
 mod function_oracle;
+mod function_parametrics;
 mod function_syntax;
 mod generator;
 mod map_lambda;
@@ -13,6 +14,7 @@ mod unroll_types;
 
 pub use counted_for::check_counted_for;
 pub use function_calls::check_function_calls;
+pub use function_parametrics::check_function_parametrics;
 pub use function_syntax::check_function_syntax;
 pub use map_lambda::check_map_lambda;
 pub use module_graph::check_module_graph;
