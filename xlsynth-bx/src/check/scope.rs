@@ -69,7 +69,7 @@ impl BodyChecker<'_, '_> {
             self.charge_unroll(bindings.len())?;
         }
         let mut saved = Vec::new();
-        for binding in bindings {
+        let result = bindings.iter().try_for_each(|binding| {
             self.validate_source_pattern(&binding.pattern)?;
             let annotation = binding
                 .ty
@@ -77,7 +77,11 @@ impl BodyChecker<'_, '_> {
                 .map(|t| self.source_type(t))
                 .transpose()?;
             let init = self.binding_initializer(&binding.value, annotation.as_ref())?;
-            self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)?;
+            self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)
+        });
+        if let Err(error) = result {
+            self.leave_scope(saved);
+            return Err(error);
         }
         Ok(saved)
     }
@@ -112,13 +116,11 @@ impl BodyChecker<'_, '_> {
         items: &[&Expr],
         check: impl FnOnce(&mut Self, &[&Expr]) -> Result<T, String>,
     ) -> Result<T, String> {
-        let first_alias = self.next_scope_alias;
-        let checked = self.capture_scoped_results(items).and_then(|prepared| {
+        self.with_scope_aliases(|checker| {
+            let prepared = checker.capture_scoped_results(items)?;
             let expressions = prepared.iter().map(|e| e.as_ref()).collect::<Vec<_>>();
-            check(self, &expressions)
-        });
-        self.release_scope_aliases(first_alias);
-        checked
+            check(checker, &expressions)
+        })
     }
 
     /// Resolve lexical scopes on the argument's common-type edges before
@@ -143,15 +145,20 @@ impl BodyChecker<'_, '_> {
         expr: &Expr,
         check: impl FnOnce(&mut Self, &Expr) -> Result<T, String>,
     ) -> Result<T, String> {
-        let first_alias = self.next_scope_alias;
-        let result = self
-            .prepare_value(expr)
-            .and_then(|value| check(self, &value));
-        self.release_scope_aliases(first_alias);
-        result
+        self.with_scope_aliases(|checker| {
+            let value = checker.prepare_value(expr)?;
+            check(checker, &value)
+        })
     }
 
-    fn release_scope_aliases(&mut self, first_alias: usize) {
+    /// Keep all aliases made during a group of checks alive through its final
+    /// elaboration, then release them on success or failure.
+    pub(super) fn with_scope_aliases<T>(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let first_alias = self.next_scope_alias;
+        let result = check(self);
         for i in first_alias..self.next_scope_alias {
             let name = format!("$scope_{i}");
             self.function_values.remove(&name);
@@ -160,12 +167,13 @@ impl BodyChecker<'_, '_> {
             self.inferred_bindings.remove(&name);
         }
         self.next_scope_alias = first_alias;
+        result
     }
 
     /// Replace each scope contributing to a value's inferred type with
     /// its trailing expression. Other edges (such as an index or a nested
     /// call's arguments) have independent contexts and are checked normally.
-    fn prepare_value<'e>(&mut self, expr: &'e Expr) -> Result<Cow<'e, Expr>, String> {
+    pub(super) fn prepare_value<'e>(&mut self, expr: &'e Expr) -> Result<Cow<'e, Expr>, String> {
         let mut prepared = Cow::Borrowed(expr);
         match expr {
             Expr::Scope { .. } => {
@@ -178,6 +186,11 @@ impl BodyChecker<'_, '_> {
                     result = nested;
                 }
                 prepared = Cow::Owned(result);
+            }
+            Expr::Match { .. } if self.dslx_widths().is_none() => {
+                // The lexical initializers in a match arm use DSLX inference
+                // even if its enclosing block argument uses BX inference.
+                return self.with_dslx_value_context(|checker| checker.prepare_value(expr));
             }
             Expr::Match { arms, .. } => {
                 for (index, arm) in arms.iter().enumerate() {
@@ -478,7 +491,9 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         Expr::Match { subject, arms } => {
             capture_names(subject, aliases);
             for arm in arms {
-                // Scalar patterns contain only literals, ranges and wildcards.
+                for literal in arm.patterns.iter_mut().flat_map(|p| p.literals_mut()) {
+                    capture_names(literal, aliases);
+                }
                 capture_names(&mut arm.value, aliases);
             }
         }

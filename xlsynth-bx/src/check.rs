@@ -2,8 +2,9 @@
 
 //! BX name resolution, value type checking, and structural driver checks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
+use std::rc::Rc;
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
@@ -19,7 +20,9 @@ use crate::infer_literal::{
     common_type_hint, context_operands, has_common_bit_type, has_concrete_element_type,
     minimum_type, projected_type_compatible,
 };
-use crate::parser::explicit_width_hint;
+use crate::parser::{character_or_bool_digits, explicit_width_hint};
+mod generic_blocks;
+mod generic_inputs;
 mod match_patterns;
 mod scope;
 mod unroll;
@@ -29,6 +32,7 @@ pub use crate::typed::{
     TypedExpr, TypedExprKind, TypedMatchArm,
 };
 use crate::typed::{TypedExprKind as K, bits};
+use generic_blocks::Bindings;
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -194,6 +198,116 @@ struct BlockInterface {
     requires_reset: bool,
 }
 
+/// A source block with symbolic data ports and a result in its declaration
+/// scope.
+struct BlockTemplate<'m> {
+    block: &'m Block,
+    params: Vec<Param>,
+    result: Type,
+}
+
+/// The concrete interface shared by instances with identical type bindings.
+struct BlockSpecialization<'m> {
+    block: &'m Block,
+    name: String,
+    interface: BlockInterface,
+    bindings: Bindings,
+    path: Vec<&'m str>,
+}
+
+/// Interns specialized block interfaces as calls are checked. Checking queued
+/// bodies iteratively also discovers calls inside those bodies.
+struct BlockSpecializations<'m> {
+    cache: HashMap<(&'m str, Vec<Type>), Rc<BlockSpecialization<'m>>>,
+    pending: VecDeque<Rc<BlockSpecialization<'m>>>,
+    reserved: BTreeSet<String>,
+    next_id: usize,
+    unroll_work: usize,
+}
+
+impl<'m> BlockSpecializations<'m> {
+    fn new(reserved: BTreeSet<String>) -> Self {
+        Self {
+            cache: HashMap::new(),
+            pending: VecDeque::new(),
+            reserved,
+            next_id: 0,
+            unroll_work: 0,
+        }
+    }
+
+    /// Assign one name and interface per binding tuple. Recursive calls can
+    /// otherwise request a different (and growing) payload type at each step.
+    fn intern(
+        &mut self,
+        template: &BlockTemplate<'m>,
+        bindings: Bindings,
+        path: &[&'m str],
+        structs: &StructTable,
+    ) -> Result<Rc<BlockSpecialization<'m>>, String> {
+        let block = template.block;
+        let name = block.name.as_str();
+        if path.contains(&name) {
+            return Err(format!("recursive block dependency involving '{name}'"));
+        }
+        if path.len() >= MAX_ELABORATION_DEPTH {
+            return Err(format!(
+                "block dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{name}'"
+            ));
+        }
+        let key = (name, bindings.arguments(&block.type_params)?);
+        if let Some(prior) = self.cache.get(&key) {
+            return Ok(Rc::clone(prior));
+        }
+        // An acyclic template graph can still request exponentially many
+        // distinct specializations. Repeated instances of one type share this
+        // budget entry.
+        const MAX_SPECIALIZATIONS: usize = 4096;
+        if self.cache.len() >= MAX_SPECIALIZATIONS {
+            return Err(format!(
+                "generic block specialization limit of {MAX_SPECIALIZATIONS} exceeded"
+            ));
+        }
+        let params = template
+            .params
+            .iter()
+            .map(|p| {
+                Ok(Param {
+                    name: p.name.clone(),
+                    ty: bindings.concrete_type(&p.ty)?,
+                })
+            })
+            .collect::<Result<_, String>>()?;
+        let result = bindings.concrete_type(&template.result)?;
+        let interface = BlockInterface::new(
+            &block.clock,
+            block.reset.as_deref(),
+            params,
+            result,
+            structs,
+        )?;
+        let symbol = loop {
+            let candidate = format!("{name}__{}", self.next_id);
+            self.next_id += 1;
+            if self.reserved.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        let mut path = path.to_vec();
+        path.push(name);
+        let spec = Rc::new(BlockSpecialization {
+            block,
+            name: symbol,
+            interface,
+            bindings,
+            path,
+        });
+        self.cache.insert(key, Rc::clone(&spec));
+        self.pending.push_back(Rc::clone(&spec));
+        Ok(spec)
+    }
+}
+
 /// Resolved signature used to check both local and externally linked calls.
 struct FunctionInterface {
     params: Vec<Param>,
@@ -207,9 +321,13 @@ struct Declarations<'a> {
     positions: BTreeMap<&'a str, usize>,
     functions: BTreeMap<&'a str, FunctionInterface>,
     blocks: BTreeMap<&'a str, BlockInterface>,
+    templates: BTreeMap<&'a str, BlockTemplate<'a>>,
 }
 
 impl Declarations<'_> {
+    fn is_block(&self, name: &str) -> bool {
+        self.blocks.contains_key(name) || self.templates.contains_key(name)
+    }
     /// Qualified imports are visible from their use binding; qualified
     /// externs are introduced by their full source name.
     fn visible(&self, name: &str, at: Option<usize>) -> bool {
@@ -270,6 +388,7 @@ fn lookup_use(
 fn resolve_type(
     ty: &Type,
     scope: Option<&BTreeSet<String>>,
+    bindings: Option<&Bindings>,
     resolver: &mut ImportResolver,
     remaining: usize,
 ) -> Result<Type, String> {
@@ -277,6 +396,13 @@ fn resolve_type(
         Type::Named(name) => {
             if scope.is_some_and(|scope| scope.contains(name)) {
                 return Err(format!("'{name}' names a local value here"));
+            }
+            if let Some(bindings) = bindings
+                && bindings.declares(name)
+            {
+                // An actual type is already resolved in the caller's scope.
+                // During template declaration the name is still symbolic.
+                return Ok(bindings.get(name).unwrap_or(ty).clone());
             }
             if let Some((subject, member)) = lookup_use(name, resolver, scope)? {
                 resolver.resolve_named(&subject, &member)
@@ -290,6 +416,7 @@ fn resolve_type(
             element: Box::new(resolve_type(
                 element,
                 scope,
+                bindings,
                 resolver,
                 child_type_budget(remaining)?,
             )?),
@@ -299,7 +426,7 @@ fn resolve_type(
             let child_budget = child_type_budget(remaining)?;
             items
                 .iter()
-                .map(|item| resolve_type(item, scope, resolver, child_budget))
+                .map(|item| resolve_type(item, scope, bindings, resolver, child_budget))
                 .collect::<Result<_, _>>()
                 .map(Type::Tuple)
         }
@@ -314,7 +441,7 @@ fn resolve_fields(params: &[Param], resolver: &mut ImportResolver) -> Result<Vec
         .map(|p| {
             Ok(Param {
                 name: p.name.clone(),
-                ty: resolve_type(&p.ty, None, resolver, MAX_ELABORATION_DEPTH)?,
+                ty: resolve_type(&p.ty, None, None, resolver, MAX_ELABORATION_DEPTH)?,
             })
         })
         .collect()
@@ -326,6 +453,7 @@ fn resolve_signature<'a>(
     params: &[Param],
     result: &Type,
     timing_ports: impl IntoIterator<Item = &'a String>,
+    bindings: Option<&Bindings>,
     resolver: &mut ImportResolver,
 ) -> Result<(Vec<Param>, Type), String> {
     let mut scope: BTreeSet<_> = timing_ports.into_iter().cloned().collect();
@@ -334,10 +462,22 @@ fn resolve_signature<'a>(
         scope.insert(p.name.clone());
         resolved.push(Param {
             name: p.name.clone(),
-            ty: resolve_type(&p.ty, Some(&scope), resolver, MAX_ELABORATION_DEPTH)?,
+            ty: resolve_type(
+                &p.ty,
+                Some(&scope),
+                bindings,
+                resolver,
+                MAX_ELABORATION_DEPTH,
+            )?,
         });
     }
-    let result = resolve_type(result, Some(&scope), resolver, MAX_ELABORATION_DEPTH)?;
+    let result = resolve_type(
+        result,
+        Some(&scope),
+        bindings,
+        resolver,
+        MAX_ELABORATION_DEPTH,
+    )?;
     Ok((resolved, result))
 }
 
@@ -400,7 +540,7 @@ impl<'a> Declarations<'a> {
         resolver: &mut ImportResolver,
         structs: &mut StructTable,
     ) -> Result<(), String> {
-        let (params, result) = resolve_signature(params, result, [], resolver)?;
+        let (params, result) = resolve_signature(params, result, [], None, resolver)?;
         structs.update_imports(resolver)?;
         let mut names = BTreeSet::new();
         for p in &params {
@@ -434,21 +574,58 @@ impl<'a> Declarations<'a> {
         result: Type,
         structs: &StructTable,
     ) -> Result<(), String> {
+        let interface = BlockInterface::new(clock, reset, params, result, structs)?;
+        self.blocks.insert(name, interface);
+        Ok(())
+    }
+}
+
+impl BlockInterface {
+    /// Validate the concrete physical port ABI for a block definition.
+    fn new(
+        clock: &str,
+        reset: Option<&str>,
+        params: Vec<Param>,
+        result: Type,
+        structs: &StructTable,
+    ) -> Result<Self, String> {
+        let outputs = Self::check_ports(clock, reset, &params, &result, structs, None)?;
+        Ok(Self {
+            params,
+            result,
+            outputs,
+            requires_reset: reset.is_some(),
+        })
+    }
+
+    /// Check physical port names and layout bounds. A bare type parameter can
+    /// introduce struct fields or tuple outputs once its binding is known.
+    fn check_ports(
+        clock: &str,
+        reset: Option<&str>,
+        params: &[Param],
+        result: &Type,
+        structs: &StructTable,
+        parameters: Option<&Bindings>,
+    ) -> Result<Vec<Param>, String> {
         let mut ports = BTreeSet::new();
         declare(&mut ports, clock)?;
         if let Some(reset) = reset {
             declare(&mut ports, reset)?;
         }
-        for p in &params {
+        for p in params {
             declare(&mut ports, &p.name)?;
             structs
-                .validate_type(&p.ty)
+                .formal_shape(&p.ty, MAX_ELABORATION_DEPTH, parameters)
                 .map_err(|e| format!("input '{}': {e}", p.name))?;
         }
         structs
-            .validate_type(&result)
+            .formal_shape(result, MAX_ELABORATION_DEPTH, parameters)
             .map_err(|e| format!("result: {e}"))?;
-        let outputs = output_ports(&result, &structs.definitions)?;
+        if matches!(result, Type::Named(name) if parameters.is_some_and(|p| p.declares(name))) {
+            return Ok(Vec::new());
+        }
+        let outputs = output_ports(result, &structs.definitions)?;
         for output in &outputs {
             if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
                 return Err(format!(
@@ -458,16 +635,7 @@ impl<'a> Declarations<'a> {
             }
             declare(&mut ports, &output.name)?;
         }
-        self.blocks.insert(
-            name,
-            BlockInterface {
-                params,
-                result,
-                outputs,
-                requires_reset: reset.is_some(),
-            },
-        );
-        Ok(())
+        Ok(outputs)
     }
 }
 
@@ -476,9 +644,12 @@ impl StructTable {
     /// selection.
     fn index(&mut self, index: usize) -> Result<(), String> {
         let def = &self.definitions[index];
-        let shape = self
-            .aggregate_shape(def.fields.iter().map(|p| &p.ty), MAX_ELABORATION_DEPTH)
-            .map_err(|e| format!("struct '{}': {e}", def.name))?;
+        let shape = TypeShape::aggregate(
+            def.fields.iter().map(|p| &p.ty),
+            MAX_ELABORATION_DEPTH,
+            &|name| self.named_shape(name),
+        )
+        .map_err(|e| format!("struct '{}': {e}", def.name))?;
         self.indices.insert(def.name.clone(), (index, shape));
         Ok(())
     }
@@ -510,25 +681,59 @@ impl StructTable {
     /// Bound the concrete layout, including the full depth of memoized named
     /// types.
     fn type_shape(&self, ty: &Type, remaining: usize) -> Result<TypeShape, String> {
+        self.formal_shape(ty, remaining, None)
+    }
+
+    fn named_shape(&self, name: &str) -> Result<TypeShape, String> {
+        self.indices
+            .get(name)
+            .map(|(_, shape)| *shape)
+            .ok_or_else(|| unknown_declaration("struct", name))
+    }
+
+    /// An unbound type occupies at least one unit. This lower bound lets
+    /// declarations check fixed dimensions and nominal names before any call.
+    fn formal_shape(
+        &self,
+        ty: &Type,
+        remaining: usize,
+        parameters: Option<&Bindings>,
+    ) -> Result<TypeShape, String> {
+        TypeShape::for_type(ty, remaining, &|name| {
+            if parameters.is_some_and(|p| p.declares(name)) {
+                Ok(TypeShape::LEAF)
+            } else {
+                self.named_shape(name)
+            }
+        })
+    }
+}
+
+impl TypeShape {
+    const LEAF: Self = Self { size: 1, depth: 0 };
+
+    /// Compute the expanded layout without allocating its substituted type.
+    /// Named leaves supply a previously checked struct or type argument shape.
+    fn for_type(
+        ty: &Type,
+        remaining: usize,
+        named_shape: &impl Fn(&str) -> Result<Self, String>,
+    ) -> Result<Self, String> {
         let shape = match ty {
-            Type::Bool => TypeShape { size: 1, depth: 0 },
+            Type::Bool => Self::LEAF,
             Type::Bits { width, .. } => TypeShape {
                 size: (*width).max(1),
                 depth: 0,
             },
-            Type::Tuple(items) => self.aggregate_shape(items, remaining)?,
+            Type::Tuple(items) => Self::aggregate(items, remaining, named_shape)?,
             Type::Array { element, size } => {
-                let child = self.type_shape(element, child_type_budget(remaining)?)?;
+                let child = Self::for_type(element, child_type_budget(remaining)?, named_shape)?;
                 TypeShape {
                     size: child.size.saturating_mul((*size).max(1)).saturating_add(1),
                     depth: child.depth + 1,
                 }
             }
-            Type::Named(name) => self
-                .indices
-                .get(name.as_str())
-                .map(|(_, shape)| *shape)
-                .ok_or_else(|| unknown_declaration("struct", name))?,
+            Type::Named(name) => named_shape(name)?,
         };
         if shape.depth > remaining {
             return Err(format!(
@@ -543,15 +748,15 @@ impl StructTable {
         Ok(shape)
     }
 
-    fn aggregate_shape<'t>(
-        &self,
+    fn aggregate<'t>(
         fields: impl IntoIterator<Item = &'t Type>,
         remaining: usize,
+        named_shape: &impl Fn(&str) -> Result<Self, String>,
     ) -> Result<TypeShape, String> {
         let child_budget = child_type_budget(remaining)?;
         let mut shape = TypeShape { size: 1, depth: 1 };
         for field in fields {
-            let child = self.type_shape(field, child_budget)?;
+            let child = Self::for_type(field, child_budget, named_shape)?;
             shape.size = shape.size.saturating_add(child.size);
             shape.depth = shape.depth.max(child.depth + 1);
             if shape.size > MAX_TYPE_SIZE {
@@ -775,9 +980,41 @@ pub fn check_module_with_options(
     for b in &module.blocks {
         declare(&mut names, &b.name)?;
         let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
-        let (params, result) =
-            resolve_signature(&b.params, &b.result, timing_ports, &mut resolver)?;
+        let symbolic = if b.type_params.is_empty() {
+            None
+        } else {
+            generic_blocks::validate_declaration(b)
+                .map_err(|e| format!("block '{}': {e}", b.name))?;
+            Some(Bindings::new(&b.type_params))
+        };
+        let (params, result) = resolve_signature(
+            &b.params,
+            &b.result,
+            timing_ports,
+            symbolic.as_ref(),
+            &mut resolver,
+        )?;
         structs.update_imports(&resolver)?;
+        if let Some(bindings) = &symbolic {
+            BlockInterface::check_ports(
+                &b.clock,
+                b.reset.as_deref(),
+                &params,
+                &result,
+                &structs,
+                Some(bindings),
+            )
+            .map_err(|e| format!("block '{}': {e}", b.name))?;
+            declarations.templates.insert(
+                &b.name,
+                BlockTemplate {
+                    block: b,
+                    params,
+                    result,
+                },
+            );
+            continue;
+        }
         declarations
             .add_block(
                 &b.name,
@@ -794,7 +1031,7 @@ pub fn check_module_with_options(
         declare(&mut names, &b.name)?;
         let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
         let (params, result) =
-            resolve_signature(&b.params, &b.result, timing_ports, &mut resolver)?;
+            resolve_signature(&b.params, &b.result, timing_ports, None, &mut resolver)?;
         structs.update_imports(&resolver)?;
         declarations
             .add_block(
@@ -822,14 +1059,35 @@ pub fn check_module_with_options(
     )?;
     // Static loops can instantiate children. Order the checked blocks using
     // the instances actually elaborated, including children declared later.
-    let checked = module
-        .blocks
-        .iter()
-        .map(|block| {
-            BodyChecker::check_block(&declarations, block, &mut resolver, &mut structs)
-                .map_err(|e| format!("block '{}': {e}", block.name))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut specializations = BlockSpecializations::new(names);
+    let mut checked = Vec::new();
+    for block in module.blocks.iter().filter(|b| b.type_params.is_empty()) {
+        checked.push(
+            BodyChecker::check_block(
+                &declarations,
+                block,
+                &mut resolver,
+                &mut structs,
+                &mut specializations,
+                None,
+            )
+            .map_err(|e| format!("block '{}': {e}", block.name))?,
+        );
+    }
+    let mut specialized_blocks = BTreeSet::new();
+    while let Some(spec) = specializations.pending.pop_front() {
+        let block = BodyChecker::check_block(
+            &declarations,
+            spec.block,
+            &mut resolver,
+            &mut structs,
+            &mut specializations,
+            Some(&spec),
+        )
+        .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
+        specialized_blocks.insert(spec.name.clone());
+        checked.push(block);
+    }
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -856,6 +1114,7 @@ pub fn check_module_with_options(
         extern_blocks,
         imports: resolver.finish()?,
         blocks,
+        specialized_blocks,
     })
 }
 
@@ -910,6 +1169,8 @@ struct BodyChecker<'a, 'm> {
     structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
     kind: BodyKind,
+    specializations: Option<&'a mut BlockSpecializations<'m>>,
+    specialization: Option<&'a BlockSpecialization<'m>>,
     /// Use DSLX literal inference inside a local call argument or scalar match.
     dslx_value_context: bool,
     function_position: Option<usize>,
@@ -953,6 +1214,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             structs,
             resolver,
             kind,
+            specializations: None,
+            specialization: None,
             dslx_value_context: false,
             function_position: None,
             local_callees: BTreeSet::new(),
@@ -1013,8 +1276,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         block: &'m Block,
         resolver: &'a mut ImportResolver,
         structs: &'a mut StructTable,
+        specializations: &'a mut BlockSpecializations<'m>,
+        specialization: Option<&'a BlockSpecialization<'m>>,
     ) -> Result<CheckedBlock, String> {
-        let interface = &decls.blocks[block.name.as_str()];
+        let interface = match specialization {
+            Some(spec) => &spec.interface,
+            None => &decls.blocks[block.name.as_str()],
+        };
         let outputs = interface
             .outputs
             .iter()
@@ -1041,6 +1309,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
         );
         c.outputs = outputs;
+        c.specializations = Some(specializations);
+        c.specialization = specialization;
         c.reserved_hardware_names = reserved_hardware_names;
         c.hardware_name(&block.clock)?;
         if let Some(rst) = &block.reset {
@@ -1054,6 +1324,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         for stmt in &block.statements {
             if let Stmt::Inst { name, block: child } = stmt {
                 c.hardware_name(name)?;
+                if decls.templates.contains_key(child.as_str()) {
+                    return Err(format!(
+                        "generic block '{child}' needs data arguments to infer its type parameters; use 'let {name} = {child}(...)'"
+                    ));
+                }
                 let child_block = decls
                     .blocks
                     .get(child.as_str())
@@ -1079,8 +1354,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .scoped_result(&block.output, Some(&interface.result), true)
             .map_err(|e| format!("result: {e}"))?;
         Ok(CheckedBlock {
-            name: block.name.clone(),
-            public: block.public,
+            name: specialization.map_or(&block.name, |s| &s.name).clone(),
+            public: specialization.is_none() && block.public,
             clock: block.clock.clone(),
             reset: block.reset.clone(),
             params: interface.params.clone(),
@@ -1094,9 +1369,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
         self.decls
             .check_type_visibility(source, self.function_position)?;
+        if let Some(spec) = self.specialization {
+            spec.bindings.validate_substitution(source)?;
+        }
         let ty = resolve_type(
             source,
             Some(&self.names),
+            self.specialization.map(|s| &s.bindings),
             self.resolver,
             MAX_ELABORATION_DEPTH,
         )?;
@@ -1147,10 +1426,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         binding: &str,
         target: &str,
-        child: &BlockInterface,
         args: &[Expr],
         expected: Option<&Type>,
     ) -> Result<TypedExpr, String> {
+        let mut prepared = None;
+        let spec;
+        let (symbol, child) = if let Some(template) = self.decls.templates.get(target) {
+            let (bindings, values) =
+                self.generic_inputs(target, &template.params, args, &template.block.type_params)?;
+            let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
+            spec = self
+                .specializations
+                .as_mut()
+                .expect("block elaboration")
+                .intern(template, bindings, path, self.structs)
+                .map_err(|e| format!("call to block '{target}': {e}"))?;
+            prepared = Some(values.into_iter());
+            (spec.name.as_str(), &spec.interface)
+        } else {
+            (target, &self.decls.blocks[target])
+        };
         self.check_child_reset(binding, target, child)?;
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
@@ -1167,12 +1462,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let instance = self.call_instance_name(binding);
         self.statements.push(CheckedStmt::Inst {
             name: instance.clone(),
-            block: target.to_owned(),
+            block: symbol.to_owned(),
         });
         for (arg, param) in args.iter().zip(&child.params) {
-            let value = self
-                .expr(arg, Some(&param.ty))
-                .map_err(|e| format!("input '{}', call to block '{target}': {e}", param.name))?;
+            let value = match &mut prepared {
+                Some(values) => values.next().expect("one checked value per generic input"),
+                None => self.expr(arg, Some(&param.ty)).map_err(|e| {
+                    format!("input '{}', call to block '{target}': {e}", param.name)
+                })?,
+            };
             self.statements.push(CheckedStmt::Connect {
                 instance: instance.clone(),
                 port: param.name.clone(),
@@ -1475,6 +1773,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         text: &str,
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
+        let resolved;
+        let annotation = if let Some(ty @ Type::Named(_)) = annotation {
+            resolved = self.source_type(ty)?;
+            Some(&resolved)
+        } else {
+            annotation
+        };
+        let ty = annotation
+            .or(expected)
+            .ok_or_else(|| format!("literal '{text}' requires a concrete bit type"))?;
+        let normalized;
+        let text = if text.starts_with('\'') || matches!(text, "true" | "false") {
+            normalized = character_or_bool_digits(text, ty)?;
+            normalized.as_str()
+        } else {
+            text
+        };
         // An explicitly typed DSLX negative literal negates a
         // width-checked magnitude. For example, s3:-5 represents 3.
         let magnitude = if annotation.is_some() && self.dslx_widths().is_some() {
@@ -1482,9 +1797,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             None
         };
-        let ty = annotation
-            .or(expected)
-            .ok_or_else(|| format!("literal '{text}' requires a concrete bit type"))?;
         let (signed, width) =
             bits(ty).ok_or_else(|| format!("integer literal cannot have type {ty}"))?;
         self.structs.validate_type(ty)?;
@@ -1736,12 +2048,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Check a cast between two bit types.
     fn bit_cast(&mut self, value: &Expr, ty: &Type) -> Result<(Type, K), String> {
-        self.structs.validate_type(ty)?;
+        let ty = self.source_type(ty)?;
         let v = self.inferred_expr(value)?;
-        if bits(&v.ty).is_none() || bits(ty).is_none() {
+        if bits(&v.ty).is_none() || bits(&ty).is_none() {
             return Err(format!("cast from {} to {ty} requires bit types", v.ty));
         }
-        Ok((ty.clone(), K::Cast { value: Box::new(v) }))
+        Ok((ty, K::Cast { value: Box::new(v) }))
     }
 
     /// Check a boolean condition and infer its branch results together.
@@ -1983,7 +2295,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         size: items.len(),
                     })
                 }
-                Expr::Literal { ty: Some(ty), .. } => Some(ty.clone()),
+                Expr::Literal { ty: Some(ty), .. } => {
+                    let ty = match (ty, checker.specialization) {
+                        (Type::Named(name), Some(spec)) => spec.bindings.get(name)?,
+                        _ => ty,
+                    };
+                    bits(ty).map(|_| ty.clone())
+                }
                 _ => checker.reference_type(expr).map(|(_, ty)| ty.clone()),
             }
         }
@@ -2300,7 +2618,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.structs.validate_type(&ty)?;
             return Ok((ty, K::ImportedCall { id, args }));
         }
-        if visible && self.decls.blocks.contains_key(name) {
+        if visible && self.decls.is_block(name) {
             if self.kind == BodyKind::Function {
                 return Err(format!("pure function cannot call block '{name}'"));
             }

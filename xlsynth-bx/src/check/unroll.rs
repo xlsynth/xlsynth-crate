@@ -19,15 +19,18 @@ impl BodyChecker<'_, '_> {
             .then(|| WidthLookup::loop_locals(&self.inferred_bindings, &self.loop_values))
     }
 
-    /// Charge all folds in this function or block to one budget, including
-    /// nested ones.
+    /// Charge nested folds to their source body. Generated bodies share a
+    /// module budget so specialization cannot multiply a large fold's cost.
     pub(super) fn charge_unroll(&mut self, work: usize) -> Result<(), String> {
-        self.unroll_work = self.unroll_work.saturating_add(work);
-        if self.unroll_work > MAX_TYPE_SIZE {
-            let kind = match self.kind {
-                BodyKind::Block { .. } => "block",
-                BodyKind::Function => "function",
-            };
+        let (total, kind) = match (&mut self.specializations, self.specialization, self.kind) {
+            (Some(registry), Some(_), _) => {
+                (&mut registry.unroll_work, "generic block specialization")
+            }
+            (_, _, BodyKind::Block { .. }) => (&mut self.unroll_work, "block"),
+            (_, _, BodyKind::Function) => (&mut self.unroll_work, "function"),
+        };
+        *total = total.saturating_add(work);
+        if *total > MAX_TYPE_SIZE {
             return Err(format!(
                 "unroll_for! exceeds the {kind} expansion limit of {MAX_TYPE_SIZE}"
             ));
@@ -74,7 +77,7 @@ impl BodyChecker<'_, '_> {
         structural: bool,
     ) -> Result<TypedExpr, String> {
         if let Expr::Call { name: target, args } = expr
-            && let Some(child) = self.decls.blocks.get(target.as_str())
+            && self.decls.is_block(target)
         {
             if self.kind == BodyKind::Function {
                 return Err(format!("pure function cannot call block '{target}'"));
@@ -102,7 +105,7 @@ impl BodyChecker<'_, '_> {
                 }
                 binding
             };
-            return self.block_call(&binding, target, child, args, expected);
+            return self.block_call(&binding, target, args, expected);
         }
         self.scoped_result(expr, expected, structural)
     }
@@ -339,6 +342,12 @@ impl BodyChecker<'_, '_> {
                 return Err(format!("'{name}' names a local value here"));
             }
             Type::Named(name) => {
+                if self
+                    .specialization
+                    .is_some_and(|spec| spec.bindings.declares(name))
+                {
+                    return Ok(());
+                }
                 self.decls
                     .check_type_visibility(ty, self.function_position)?;
                 if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
@@ -370,7 +379,7 @@ impl BodyChecker<'_, '_> {
         if !self.decls.visible(name, self.function_position) {
             return Err(format!("'{name}' is declared later in the module"));
         }
-        if self.decls.functions.contains_key(name) || self.decls.blocks.contains_key(name) {
+        if self.decls.functions.contains_key(name) || self.decls.is_block(name) {
             return Ok(());
         }
         if let Some((module, member)) = lookup_use(name, self.resolver, Some(locals))? {
@@ -404,7 +413,7 @@ impl BodyChecker<'_, '_> {
                 if let Expr::Call { name, .. } = expr {
                     if self.kind == BodyKind::Function
                         && !locals.contains(name)
-                        && self.decls.blocks.contains_key(name.as_str())
+                        && self.decls.is_block(name)
                     {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
