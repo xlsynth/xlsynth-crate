@@ -417,11 +417,11 @@ fn bound_payload_keeps_its_nominal_type_in_the_callees_scope() -> Result<(), Box
         "pub struct Header { value: u8 }",
     )?;
     std::fs::write(
-        dir.path().join("packet.x"),
+        dir.path().join("payload_types.x"),
         "import fabric.wire; pub type Packet = wire::Header;",
     )?;
     let source = r#"
-use packet::Packet;
+use payload_types::Packet;
 struct Local { value: s8 }
 block held<T>(clk, rst, data: T) -> T {
     let Local = true;
