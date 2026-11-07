@@ -102,7 +102,9 @@ pub(super) struct StatefulInterface {
 /// Parameters keep their DSLX names and declaration order. Each parameter is
 /// paired by position with its linked IR node, whose physical type is checked.
 pub(super) struct HelperSignature {
-    pub(super) name: String,
+    /// Declaring module and local name (including specialization arguments).
+    /// Compiler-generated bodies have only their physical IR symbol.
+    pub(super) source_name: Option<(String, String)>,
     pub(super) params: Vec<(String, SourceType)>,
     pub(super) result: SourceType,
 }

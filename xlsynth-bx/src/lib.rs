@@ -43,7 +43,11 @@ pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::{collections::BTreeMap, path::Path, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    rc::Rc,
+};
 use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
@@ -175,6 +179,8 @@ pub struct CompiledModule {
     /// Checked modules and destination symbols for imports that supplied
     /// functions.
     pub imports: Vec<LinkedImport>,
+    /// Original module subjects in the frozen DSLX import graph, including unused imports.
+    pub imported_modules: BTreeSet<String>,
     /// Indexed by the spelling used in BX, including unqualified use bindings.
     pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
 }
@@ -231,5 +237,6 @@ pub fn compile_with_source(
         package,
         imports,
         imported_structs: sources.types,
+        imported_modules: sources.modules,
     })
 }

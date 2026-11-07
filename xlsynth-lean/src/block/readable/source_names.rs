@@ -2,28 +2,57 @@
 
 //! Translate nominal catalogue identities into Lean namespace components.
 
-use anyhow::Result;
-use std::fmt::Write;
+use anyhow::{Result, bail};
+use std::{collections::BTreeSet, fmt::Write};
 
 use super::{SourceType, identifier, lean, product_type};
-use crate::block::source_types::{StructField, TypeDecl};
-
-const STD_RESERVED_ROOTS: &[&str] = include!("std_roots.rs");
+use crate::block::source_types::{StatefulInterface, StructField, TypeDecl};
 
 pub(super) fn declaring_name<'a>(bx_namespace: &'a str, name: &'a str) -> (&'a str, &'a str) {
     name.split_once("::").unwrap_or((bx_namespace, name))
 }
 
-pub(super) fn module_identifier(module: &str) -> Result<String> {
-    // Keep source declarations distinct from the model and from every root
-    // that already owns declarations after `import Std`.
-    if matches!(module, "XlsBlock" | "XlsReadable" | "XlsCodec" | "_root_")
-        || STD_RESERVED_ROOTS.binary_search(&module).is_ok()
-    {
-        identifier(&format!("source:{module}"))
-    } else {
-        identifier(module)
+/// A type owns the namespace for its projections, constructors and other Lean
+/// declarations. An emitted module must not also supply names under that type.
+pub(super) fn check_type_namespaces(
+    declarations: &[TypeDecl],
+    interface: &StatefulInterface,
+) -> Result<()> {
+    let types: BTreeSet<_> = declarations
+        .iter()
+        .map(|decl| declaring_name(&interface.bx_module, decl.name()))
+        .collect();
+    let owners: BTreeSet<_> = types
+        .iter()
+        .map(|&(owner, _)| owner)
+        .chain(std::iter::once(interface.bx_module.as_str()))
+        .chain(
+            interface
+                .helpers
+                .values()
+                .filter_map(|helper| helper.source_name.as_ref().map(|(owner, _)| owner.as_str())),
+        )
+        .collect();
+    for owner in owners {
+        let mut prefix = owner;
+        while let Some((module, local)) = prefix.rsplit_once('.') {
+            if types.contains(&(module, local)) {
+                bail!(
+                    "source module '{owner}' would emit declarations under the Lean namespace of source type '{module}::{local}' (XLS.{prefix}); rename the type or module"
+                );
+            }
+            prefix = module;
+        }
     }
+    Ok(())
+}
+
+pub(super) fn module_identifier(module: &str) -> Result<String> {
+    let mut namespace = String::from("XLS");
+    for component in module.split('.') {
+        write!(namespace, ".{}", identifier(component)?)?;
+    }
+    Ok(namespace)
 }
 
 pub(super) fn nominal_reference(
@@ -34,21 +63,18 @@ pub(super) fn nominal_reference(
 ) -> Result<String> {
     let (owner, local) = declaring_name(bx_namespace, name);
     let local_name = identifier(local)?;
-    if current.is_some_and(|(m, _)| m == owner) && !shadowed(local) {
+    if current.is_some_and(|(module, _)| module == owner) && !shadowed(local) {
         return Ok(local_name);
     }
-    // A dotted name can also start at a declaration in the surrounding
-    // namespace. For example bus.Packet may denote a local bus's projection.
-    let nested = match current {
-        Some((module, decls)) => decls
-            .iter()
-            .any(|d| declaring_name(bx_namespace, d.name()) == (module, owner)),
-        None => matches!(
-            owner,
-            "Helpers" | "EnumDispatch" | "State" | "Input" | "Output" | "Evaluation" | "Assertions"
-        ),
-    };
-    let root = if nested || shadowed(owner) {
+    // Source namespaces may themselves contain a declaration or submodule
+    // named XLS. In the generated evaluator only local binders can hide XLS.
+    let nested_xls = current.is_some_and(|(_, decls)| {
+        decls.iter().any(|decl| {
+            let (module, local) = declaring_name(bx_namespace, decl.name());
+            local == "XLS" || module.split('.').any(|component| component == "XLS")
+        })
+    });
+    let root = if nested_xls || shadowed("XLS") {
         "_root_."
     } else {
         ""
@@ -89,12 +115,12 @@ pub(super) fn write_struct(
     local: &str,
     fields: &[StructField],
     declarations: &[TypeDecl],
-) -> Result<()> {
+) -> Result<String> {
     let names = fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>();
     writeln!(
         out,
         "-- Source struct {}::{} {{ {} }}",
-        lean::comment(module.strip_prefix("bx:").unwrap_or(module)),
+        lean::comment(module),
         lean::comment(local),
         lean::comment(&names.join(", "))
     )?;
@@ -113,6 +139,7 @@ pub(super) fn write_struct(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    out.push_str(&lean::source_record(&identifier(local)?, &rendered)?);
-    Ok(())
+    let name = identifier(local)?;
+    out.push_str(&lean::record_declaration(&name, &rendered, None, &[])?);
+    Ok(lean::record_backing_name(&name, &rendered))
 }

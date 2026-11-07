@@ -391,6 +391,27 @@ pub struct InvocationRewriteRule<'a> {
 }
 
 impl TypecheckedModule {
+    /// Visit the logical subjects of explicit DSLX `import` statements,
+    /// including transitive imports, in the original checked graph.
+    pub fn collect_import_subjects(&self, subjects: &mut std::collections::BTreeSet<String>) {
+        let mut pending = vec![(self.get_module(), self.get_type_info())];
+        while let Some((module, info)) = pending.pop() {
+            for import in
+                (0..module.get_member_count()).filter_map(|i| module.get_member(i).to_import())
+            {
+                if subjects.insert(import.get_subject().join(".")) {
+                    let imported = info
+                        .get_imported_module(&import)
+                        .expect("checked DSLX import");
+                    let context = info
+                        .get_imported_type_info(&imported)
+                        .expect("checked imported module");
+                    pending.push((imported, context));
+                }
+            }
+        }
+    }
+
     /// Converts this module using its original in-memory import graph.
     pub fn to_ir_text(&self) -> Result<String, XlsynthError> {
         let mut error = std::ptr::null_mut();
