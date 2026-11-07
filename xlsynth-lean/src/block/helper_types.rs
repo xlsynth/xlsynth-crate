@@ -1131,7 +1131,7 @@ impl Catalogue<'_> {
                 self.helpers.insert(
                     function.name.clone(),
                     HelperSignature {
-                        name: function.name.clone(),
+                        source_name: None,
                         result: params[1].1.clone(),
                         params,
                         node_bindings,
