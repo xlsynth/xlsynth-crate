@@ -155,10 +155,10 @@ impl CompiledBx {
                 .collect()
         };
         let ports = |port| (graph.port_name(port), graph.port_type(port));
-        let read_type = |(name, ty): (&str, &Type), decls: &mut Vec<TypeDecl>| {
+        let read_type = |kind: &str, (name, ty): (&str, &Type), decls: &mut Vec<TypeDecl>| {
             Ok((
                 name.to_owned(),
-                bx_type(ty, self, decls).with_context(|| format!("BX {name}"))?,
+                bx_type(ty, self, decls).with_context(|| format!("BX {kind} {name}"))?,
             ))
         };
         let inputs = check(
@@ -167,7 +167,7 @@ impl CompiledBx {
                 .into_iter()
                 .map(|name| (name, &Type::Bool))
                 .chain(source.params.iter().map(|p| (p.name.as_str(), &p.ty)))
-                .map(|p| read_type(p, &mut declarations))
+                .map(|p| read_type("input", p, &mut declarations))
                 .collect::<Result<_>>()?,
             graph.input_ports().map(ports).collect(),
             &declarations,
@@ -183,7 +183,7 @@ impl CompiledBx {
                     Stmt::Reg { name, ty, .. } => Some((name.as_str(), ty)),
                     _ => None,
                 })
-                .map(|p| read_type(p, &mut declarations))
+                .map(|p| read_type("register", p, &mut declarations))
                 .collect::<Result<_>>()?,
             graph
                 .registers
@@ -216,7 +216,7 @@ impl CompiledBx {
             output_ports(&source.result, &self.source.structs)
                 .map_err(anyhow::Error::msg)?
                 .iter()
-                .map(|p| read_type((&p.name, &p.ty), &mut declarations))
+                .map(|p| read_type("output", (&p.name, &p.ty), &mut declarations))
                 .collect::<Result<_>>()?
         };
         let outputs = check(
