@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use super::*;
 
+/// Stores the Lean paths used to define and reference helpers and the block,
+/// along with the public aliases that expose their source names when needed.
 pub(super) struct CallableNames<'a> {
     pub(super) helpers: BTreeMap<&'a str, String>,
     pub(super) block: String,
