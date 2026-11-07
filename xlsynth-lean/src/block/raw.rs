@@ -205,7 +205,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     source.push_str(&record_declaration(
         "Assertions",
         &fields,
-        "Repr",
+        Some("Repr"),
         &comments,
     )?);
     source.push_str(&structure_header("Evaluation"));
@@ -431,21 +431,24 @@ pub(super) fn structure_header(name: &str) -> String {
 /// or DSLX source.
 pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
     // Source modules may declare their own type named Repr.
-    record_declaration(name, fields, "_root_.Repr", &[])
+    record_declaration(name, fields, Some("_root_.Repr"), &[])
 }
 
-fn record_declaration(
-    name: &str,
-    fields: &[(String, String)],
-    derived_repr: &str,
-    comments: &[String],
-) -> Result<String> {
-    let exceptional = has_generated_field(fields);
-    let backing = if exceptional {
+pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> String {
+    if has_generated_field(fields) {
         format!("«xls:implementation».{name}")
     } else {
         name.to_owned()
-    };
+    }
+}
+
+pub(super) fn record_declaration(
+    name: &str,
+    fields: &[(String, String)],
+    derived_repr: Option<&str>,
+    comments: &[String],
+) -> Result<String> {
+    let backing = record_backing_name(name, fields);
     let mut out = structure_header(&backing);
     let mut scope = RecordFields::default();
     for (index, (field, ty)) in fields.iter().enumerate() {
@@ -454,8 +457,11 @@ fn record_declaration(
         }
         scope.write(&mut out, &storage_field(field), ty)?;
     }
-    writeln!(out, "  deriving {derived_repr}\n")?;
-    if exceptional {
+    if let Some(repr) = derived_repr {
+        writeln!(out, "  deriving {repr}")?;
+    }
+    out.push('\n');
+    if backing != name {
         writeln!(out, "abbrev {name} := {backing}\n")?;
         for (field, _) in fields {
             writeln!(
@@ -540,7 +546,7 @@ fn record_type<'a>(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    record_declaration(name, &fields, "Repr", &[])
+    record_declaration(name, &fields, Some("Repr"), &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.

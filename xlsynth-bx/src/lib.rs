@@ -19,7 +19,11 @@ pub use lower::lower_module;
 pub use parser::parse_module;
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
-use std::{collections::BTreeMap, path::Path, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    rc::Rc,
+};
 use xlsynth::dslx;
 use xlsynth_pir::ir::{FileTable, Package};
 
@@ -83,6 +87,9 @@ pub struct CompiledModule {
     pub checked: CheckedModule,
     pub package: Package,
     pub imports: Vec<LinkedImport>,
+    /// Full module subjects from BX `use` statements and their transitive DSLX
+    /// `import` statements, including unused imports.
+    pub imported_modules: BTreeSet<String>,
     /// Indexed by the spelling used in BX, including unqualified use bindings.
     pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
 }
@@ -96,12 +103,16 @@ pub fn compile_with_source(
 ) -> Result<CompiledModule, String> {
     let mut modules = Vec::new();
     let mut imported_structs = BTreeMap::new();
+    let mut imported_modules = BTreeSet::new();
     let source = parse_module(source)?;
     let checked = check::check_with_imports(
         &source,
         options,
         |m| modules.push(m),
-        |s| imported_structs = s.into_sources(),
+        |s, modules| {
+            imported_structs = s.into_sources();
+            imported_modules = modules;
+        },
     )?;
     let mut modules = modules.into_iter();
     let mut imports = Vec::new();
@@ -119,5 +130,6 @@ pub fn compile_with_source(
         package,
         imports,
         imported_structs,
+        imported_modules,
     })
 }

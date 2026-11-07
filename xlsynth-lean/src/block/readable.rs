@@ -32,8 +32,26 @@ use xlsynth_pir::{
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type, tuple_element, tuple_value},
-    source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
+    source_types::{
+        HelperSignature, SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape,
+    },
 };
+
+/// Use the same absolute name in definitions, calls and proofs. Compiler
+/// functions such as lowered loop bodies have no DSLX declaration to name.
+fn helper_path(signature: &HelperSignature, symbol: &str) -> Result<String> {
+    match &signature.source_name {
+        Some((module, local)) => Ok(format!(
+            "_root_.{}.{}",
+            module_identifier(module)?,
+            identifier(local)?
+        )),
+        None => Ok(format!(
+            "_root_.XlsReadable.Helpers.{}",
+            identifier(symbol)?
+        )),
+    }
+}
 
 /// Source type annotations and collision-free names for one verified block.
 ///
@@ -62,6 +80,7 @@ pub(super) fn emit(
     declarations: &[TypeDecl],
     interface: &StatefulInterface,
 ) -> Result<LeanBlockBundle> {
+    source_names::check_type_namespaces(declarations, interface)?;
     let raw = lean::emit_with_context(block)?;
     let presentation = Presentation::new(block, declarations, interface, None)?;
     Ok(LeanBlockBundle {
@@ -148,21 +167,8 @@ impl<'a> Presentation<'a> {
             .iter()
             .map(|r| identifier(&r.name))
             .collect::<Result<_>>()?;
-        // A BX file may share its stem and a type name with linked DSLX.
-        // The catalogue keeps BX keys local and DSLX keys module-qualified.
         let bx_module = &interface.bx_module;
-        let names_in_bx: BTreeSet<_> = declarations
-            .iter()
-            .map(TypeDecl::name)
-            .filter(|n| !n.contains("::"))
-            .collect();
-        let clashes = declarations.iter().map(TypeDecl::name).any(|name| {
-            name.split_once("::")
-                .is_some_and(|(m, n)| m == bx_module && names_in_bx.contains(n))
-        });
-        let bx_namespace = if clashes {
-            format!("bx:{bx_module}")
-        } else if bx_module.contains(':') {
+        let bx_namespace = if bx_module.contains(':') {
             format!("file:{bx_module}")
         } else {
             bx_module.clone()
@@ -582,6 +588,9 @@ impl<'a> Presentation<'a> {
     /// source.
     fn types_module(&self) -> Result<String> {
         let mut out = String::from("import Std\n\n");
+        // Deriving beside Packet would occupy its module's source name
+        // instReprPacket. Generate instances in XlsCodec in dependency order.
+        let mut instances = String::new();
         // Source members and generated codecs have disjoint namespaces. A
         // source field named `encode` must remain an ordinary record field.
         for declaration in self.declarations {
@@ -589,7 +598,7 @@ impl<'a> Presentation<'a> {
             let namespace = module_identifier(module)?;
             let name = identifier(local)?;
             writeln!(out, "namespace {namespace}\n")?;
-            match declaration {
+            let derived = match declaration {
                 TypeDecl::Enum { name: original, .. } => {
                     writeln!(out, "inductive {name} where")?;
                     for (member, _) in self.enum_cases(original)? {
@@ -603,10 +612,11 @@ impl<'a> Presentation<'a> {
                         );
                         writeln!(out, "  | {}", identifier(&member)?)?;
                     }
-                    writeln!(out, "  deriving _root_.Repr, _root_.DecidableEq\n")?;
+                    out.push('\n');
+                    Some(("Repr, DecidableEq", name))
                 }
                 TypeDecl::Struct { fields, .. } => {
-                    write_struct(
+                    let backing = write_struct(
                         &mut out,
                         &self.bx_namespace,
                         module,
@@ -614,6 +624,7 @@ impl<'a> Presentation<'a> {
                         fields,
                         self.declarations,
                     )?;
+                    Some(("Repr", backing))
                 }
                 TypeDecl::Alias { target, .. } => {
                     writeln!(
@@ -626,11 +637,20 @@ impl<'a> Presentation<'a> {
                             &|_| false
                         )?
                     )?;
+                    None
                 }
+            };
+            if let Some((classes, target)) = derived {
+                writeln!(
+                    instances,
+                    "deriving instance {classes} for _root_.{namespace}.{target}"
+                )?;
             }
             writeln!(out, "end {namespace}\n")?;
         }
         out.push_str("namespace XlsCodec\n\nattribute [local simp] Function.comp_def\n\n");
+        out.push_str(&instances);
+        out.push('\n');
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
             let name = identifier(declaration.name())?;
@@ -860,10 +880,7 @@ impl<'a> Presentation<'a> {
                 body,
                 invariant_args,
             } if let Some(signature) = self.interface.helpers.get(body) => {
-                let mut step = format!(
-                    "_root_.XlsReadable.Helpers.{}",
-                    identifier(&signature.name)?
-                );
+                let mut step = helper_path(signature, body)?;
                 if !invariant_args.is_empty() {
                     step.push_str(" · ·");
                     for (arg, (_, ty)) in invariant_args.iter().zip(&signature.params[2..]) {
@@ -879,10 +896,7 @@ impl<'a> Presentation<'a> {
                 if self.interface.helpers.contains_key(to_apply) =>
             {
                 let signature = &self.interface.helpers[to_apply];
-                let mut call = format!(
-                    "_root_.XlsReadable.Helpers.{}",
-                    identifier(&signature.name)?
-                );
+                let mut call = helper_path(signature, to_apply)?;
                 for (arg, (_, ty)) in operands.iter().zip(&signature.params) {
                     write!(call, " ({})", self.typed_operand(*arg, Some(ty), depth)?)?;
                 }
@@ -1102,7 +1116,7 @@ impl<'a> Presentation<'a> {
                     Some((index, function)),
                 )?;
                 out.push_str(&model.enum_dispatch_definitions()?);
-                write!(out, "def Helpers.{}", identifier(&signature.name)?)?;
+                write!(out, "def {}", helper_path(signature, &function.name)?)?;
                 for (param, (_, ty)) in function.params.iter().zip(&signature.params) {
                     write!(
                         out,
@@ -1285,6 +1299,12 @@ def eval (q : State) (x : Input) : Evaluation :=
             out.push_str("  eval q x\n");
         }
         out.push_str("\nend XlsReadable\n");
+        writeln!(
+            out,
+            "\nabbrev {}.{} := _root_.XlsReadable.eval",
+            module_identifier(&self.bx_namespace)?,
+            identifier(&block.graph.name)?
+        )?;
         Ok(out)
     }
 
@@ -1636,8 +1656,8 @@ end XlsReadable
             if let Some(signature) = self.interface.helpers.get(&function.name) {
                 write!(
                     helper_rules,
-                    ", _root_.XlsReadable.Helpers.{}, {}",
-                    identifier(&signature.name)?,
+                    ", {}, {}",
+                    helper_path(signature, &function.name)?,
                     lean::helper_path(&function.name)?
                 )?;
             }

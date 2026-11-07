@@ -58,13 +58,13 @@ fn same_layout_extern_uses_the_selected_modules_declarations() {
             .unwrap();
         let signature = executable
             .lines()
-            .find(|line| line.starts_with(&format!("def Helpers.«{owner}::step»")))
+            .find(|line| line.starts_with(&format!("def _root_.XLS.«{owner}».«step»")))
             .unwrap();
         assert!(
-            signature.contains(&format!("«{owner}».«Request»")),
+            signature.contains(&format!("XLS.«{owner}».«Request»")),
             "{signature}"
         );
-        assert!(!executable.contains(&format!("Helpers.«{other}::step»")));
+        assert!(!executable.contains(&format!("XLS.«{other}».«step»")));
         bundle.files.push(("Selected.lean".into(), format!(
             "import ReadableCorrespondence\nopen XlsReadable\nexample (q : State) (input : Input) : observe q input = input.x.{expected} := rfl\n"
         )));
