@@ -20,6 +20,8 @@ pub(super) struct StaticRange {
 pub(super) struct Shadowed {
     name: String,
     value: Option<TypedExpr>,
+    /// A function-local binding in a map can shadow an enclosing loop value.
+    outer_loop_value: Option<TypedExpr>,
     widths: Option<BindingWidths>,
     declared: bool,
 }
@@ -35,7 +37,8 @@ impl BodyChecker<'_, '_> {
 
     /// Both elaborated iterations and counted bodies have lexical loop values.
     pub(super) fn in_loop_scope(&self) -> bool {
-        self.in_counted_body || self.iteration_path.len() > self.map_outer_iterations.unwrap_or(0)
+        self.in_counted_body
+            || self.iteration_path.len() > self.map_scope.map_or(0, |s| s.outer_iterations)
     }
 
     pub(super) fn scoped_widths(&self) -> Option<WidthLookup<'_>> {
@@ -217,33 +220,39 @@ impl BodyChecker<'_, '_> {
         if name == "_" {
             return;
         }
-        let values = if self.in_loop_scope() {
-            &mut self.loop_values
+        let (values, outer_loop_value) = if self.in_loop_scope() {
+            (&mut self.loop_values, None)
         } else {
-            &mut self.function_values
+            (&mut self.function_values, self.loop_values.remove(name))
         };
         saved.push(Shadowed {
             name: name.to_owned(),
             value: values.insert(name.to_owned(), value),
+            outer_loop_value,
             widths: self.inferred_bindings.remove(name),
             declared: self.names.insert(name.to_owned()),
         });
-        if let Some(widths) = widths {
+        if let Some(mut widths) = widths {
+            widths.bind_in_scope(self.width_scope());
             self.inferred_bindings.insert(name.to_owned(), widths);
         }
     }
 
     pub(super) fn leave_scope(&mut self, saved: Vec<Shadowed>) {
-        let values = if self.in_loop_scope() {
-            &mut self.loop_values
-        } else {
-            &mut self.function_values
-        };
+        let in_loop = self.in_loop_scope();
         for old in saved.into_iter().rev() {
+            let values = if in_loop {
+                &mut self.loop_values
+            } else {
+                &mut self.function_values
+            };
             if let Some(value) = old.value {
                 values.insert(old.name.clone(), value);
             } else {
                 values.remove(&old.name);
+            }
+            if let Some(value) = old.outer_loop_value {
+                self.loop_values.insert(old.name.clone(), value);
             }
             if let Some(widths) = old.widths {
                 self.inferred_bindings.insert(old.name.clone(), widths);
@@ -403,31 +412,22 @@ impl BodyChecker<'_, '_> {
     }
 }
 
-/// Value names visible inside one expression. A lambda introduces a new
-/// scope and retains its enclosing names only to diagnose attempted captures.
+/// Value names visible during lexical checking, including zero-trip bodies.
 struct LexicalScope<'a> {
     values: Cow<'a, BTreeSet<String>>,
-    /// An ordinary nested scope sees the bindings in its parent. A lambda
-    /// starts a fresh chain and checks its enclosing scope only for captures.
     parent: Option<&'a LexicalScope<'a>>,
-    enclosing: Option<&'a LexicalScope<'a>>,
-    alias_names: &'a [Option<String>],
+    in_lambda: bool,
     /// Shared across nested scopes in this one lexical walk, including
     /// zero-trip bodies that will never produce a typed expression.
     visited: &'a Cell<usize>,
 }
 
 impl<'a> LexicalScope<'a> {
-    fn root(
-        values: &'a BTreeSet<String>,
-        alias_names: &'a [Option<String>],
-        visited: &'a Cell<usize>,
-    ) -> Self {
+    fn root(values: &'a BTreeSet<String>, visited: &'a Cell<usize>) -> Self {
         Self {
             values: Cow::Borrowed(values),
             parent: None,
-            enclosing: None,
-            alias_names,
+            in_lambda: false,
             visited,
         }
     }
@@ -436,8 +436,7 @@ impl<'a> LexicalScope<'a> {
         LexicalScope {
             values: Cow::Owned(BTreeSet::new()),
             parent: Some(self),
-            enclosing: self.enclosing,
-            alias_names: self.alias_names,
+            in_lambda: self.in_lambda,
             visited: self.visited,
         }
     }
@@ -456,8 +455,7 @@ impl<'a> LexicalScope<'a> {
         }
     }
 
-    /// Look up a binding without crossing a lambda boundary or copying the
-    /// bindings accumulated before a sibling scope.
+    /// Look up a binding in this scope and its enclosing scopes.
     fn contains(&self, name: &str) -> bool {
         let mut scope = Some(self);
         while let Some(current) = scope {
@@ -468,30 +466,11 @@ impl<'a> LexicalScope<'a> {
         }
         false
     }
-
-    fn reject_capture(&self, name: &str) -> Result<(), String> {
-        let head = name.split_once("::").map_or(name, |(head, _)| head);
-        if self.contains(head) {
-            return Ok(());
-        }
-        let mut enclosing = self.enclosing;
-        while let Some(scope) = enclosing {
-            if scope.contains(head) {
-                let source = super::scope::source_binding_name(head, self.alias_names);
-                return Err(format!(
-                    "map lambda cannot capture enclosing value '{source}'"
-                ));
-            }
-            enclosing = scope.enclosing;
-        }
-        Ok(())
-    }
 }
 
 impl BodyChecker<'_, '_> {
     /// A lambda argument is available only on the built-in map.
     fn check_map_target(&self, map: &MapExpr, locals: &LexicalScope<'_>) -> Result<(), String> {
-        locals.reject_capture(&map.target)?;
         if locals.contains(&map.target) {
             return Err("'map' names a local value here".into());
         }
@@ -520,13 +499,8 @@ impl BodyChecker<'_, '_> {
         if let Some(ty) = &map.parameter_type {
             self.check_type_names(ty, enclosing)?;
         }
-        let mut body_scope = LexicalScope {
-            values: Cow::Owned(BTreeSet::new()),
-            parent: None,
-            enclosing: Some(enclosing),
-            alias_names: enclosing.alias_names,
-            visited: enclosing.visited,
-        };
+        let mut body_scope = enclosing.nested();
+        body_scope.in_lambda = true;
         body_scope.bind_pattern_name(&map.parameter);
         if let Some(ty) = &map.result_type {
             self.check_type_names(ty, &body_scope)?;
@@ -538,9 +512,9 @@ impl BodyChecker<'_, '_> {
     /// zero-trip structural loops, before any constants can be substituted.
     pub(super) fn check_map_names(&mut self, map: &MapExpr) -> Result<(), String> {
         let visited = Cell::new(0);
-        let enclosing = LexicalScope::root(&self.names, &self.scope_alias_names, &visited);
+        let enclosing = LexicalScope::root(&self.names, &visited);
         self.check_map_target(map, &enclosing)?;
-        if self.map_outer_iterations.is_none() {
+        if self.map_scope.is_none() {
             self.check_map_body_names(map, &enclosing)?;
             if self.replaying_body() {
                 self.charge_expansion("map lambda", visited.get())?;
@@ -552,12 +526,12 @@ impl BodyChecker<'_, '_> {
     /// DSLX resolves lexical names before unrolling, even when it never
     /// typechecks an iteration. Keep that distinction for an empty range.
     fn check_empty_loop_names(&mut self, fold: &UnrollFor) -> Result<(), String> {
-        if self.map_outer_iterations.is_some() {
+        if self.map_scope.is_some() {
             // The enclosing callback already resolved names in this subtree.
             return Ok(());
         }
         let visited = Cell::new(0);
-        let locals = LexicalScope::root(&self.names, &self.scope_alias_names, &visited);
+        let locals = LexicalScope::root(&self.names, &visited);
         self.check_body_names(fold, &mut locals.nested())?;
         if self.replaying_body() {
             self.charge_expansion("unroll_for!", visited.get())?;
@@ -608,7 +582,6 @@ impl BodyChecker<'_, '_> {
         if locals.contains(name) {
             return Err(format!("'{name}' names a local value here"));
         }
-        locals.reject_capture(name)?;
         let head = name.split_once("::").map_or(name, |(head, _)| head);
         if self.callback_index(head).is_some() {
             return Err(format!(
@@ -659,7 +632,6 @@ impl BodyChecker<'_, '_> {
     /// An unused call still needs a visible callee, but DSLX checks its kind
     /// and arity only when it elaborates an iteration.
     fn check_value_name(&self, name: &str, locals: &LexicalScope<'_>) -> Result<(), String> {
-        locals.reject_capture(name)?;
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
@@ -711,22 +683,21 @@ impl BodyChecker<'_, '_> {
             Expr::Name(name) => self.check_value_name(name, locals)?,
             Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to resolve. */ }
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
-                if matches!(expr, Expr::Zero(_)) {
-                    locals.reject_capture("zero!")?;
-                    if !locals.contains("zero!") && self.callback_index("zero!").is_some() {
-                        return Err("callable parameter 'zero!' requires a direct call".into());
-                    }
+                if matches!(expr, Expr::Zero(_))
+                    && !locals.contains("zero!")
+                    && self.callback_index("zero!").is_some()
+                {
+                    return Err("callable parameter 'zero!' requires a direct call".into());
                 }
                 self.check_type_names(ty, locals)?
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
-                    locals.reject_capture(name)?;
                     if !locals.contains(name)
                         && self.callback_index(name).is_none()
                         && self.decls.is_block(name)
                     {
-                        if self.kind == BodyKind::Function || locals.enclosing.is_some() {
+                        if self.kind == BodyKind::Function || locals.in_lambda {
                             return Err(format!("pure function cannot call block '{name}'"));
                         }
                         self.check_block_callback_list(name, 0, false)?;
@@ -747,17 +718,15 @@ impl BodyChecker<'_, '_> {
                 locals
                     .visited
                     .set(locals.visited.get().saturating_add(callbacks.len()));
-                locals.reject_capture(name)?;
                 if self.decls.is_block(name) && self.callback_index(name).is_none() {
                     self.check_block_callback_list(name, callbacks.len(), locals.contains(name))?;
-                    if self.kind == BodyKind::Function || locals.enclosing.is_some() {
+                    if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
                 } else {
                     self.callable_template(name, locals.contains(name), callbacks.len())?;
                 }
                 for callback in callbacks {
-                    locals.reject_capture(callback)?;
                     self.callback_source(callback, |head| locals.contains(head))?;
                 }
                 for arg in args {

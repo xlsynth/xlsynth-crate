@@ -109,7 +109,7 @@ fn empty_unroll_resolves_pattern_names_before_skipping_type_checks() {
 }
 
 #[test]
-fn guarded_destructuring_restores_outer_names_and_rejects_lambda_captures() -> Result<(), String> {
+fn guarded_destructuring_restores_outer_names_and_permits_lambda_captures() -> Result<(), String> {
     let source = r#"
 block sample(clk, en:bool, x:u8)->bool {
     reg state:u8;
@@ -131,11 +131,7 @@ block sample(clk, en:bool, x:u8)->bool {
         check_module(&parse_module(&source)?)?;
         for name in ["offset", "saved", "selected"] {
             let captures = source.replace("|v| v + v", &format!("|v| v + {name}"));
-            let error = check_module(&parse_module(&captures)?).unwrap_err();
-            assert!(
-                error.contains(&format!("cannot capture enclosing value '{name}'")),
-                "{error}"
-            );
+            check_module(&parse_module(&captures)?)?;
         }
     }
     Ok(())

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Typecheck the capture-free unary callback of the DSLX map builtin.
+//! Typecheck the unary callback of the DSLX map builtin in its lexical scope.
 
 use super::{
-    BodyChecker, BodyKind, K, MAX_ELABORATION_DEPTH, Param, Type, TypedExpr, TypedMap, compatible,
+    BodyChecker, BodyKind, K, MAX_ELABORATION_DEPTH, MapScope, Param, Type, TypedExpr, TypedMap,
+    compatible,
 };
 use crate::ast::{ForIterable, MapExpr};
 use xlsynth_pir::{IrBits, IrValue};
@@ -53,17 +54,21 @@ impl BodyChecker<'_, '_> {
                 .ir_nodes;
             self.charge_expansion("map lambda", nodes)?;
         }
+        let id = self.next_map;
+        self.next_map += 1;
         let parameter = Param {
-            name: "$map_element".into(),
+            name: format!("$map_element_{id}"),
             ty: element.as_ref().clone(),
         };
         let start = self.statements.len();
-        // A closed callback has function-local inference, even when the map
-        // operand is read from a loop. Loops opened inside it bind new values.
+        // Lambda-local bindings have function-local inference even when the
+        // callback captures a loop element or accumulator.
         let outer_kind = std::mem::replace(&mut self.kind, BodyKind::Function);
-        let outer_map = self.map_outer_iterations.replace(self.iteration_path.len());
+        let outer_map = self.map_scope.replace(MapScope {
+            id,
+            outer_iterations: self.iteration_path.len(),
+        });
         let outer_counted = std::mem::take(&mut self.in_counted_body);
-        let outer_loop_values = std::mem::take(&mut self.loop_values);
         let mut saved = Vec::new();
         self.bind_scoped_value(
             &map.parameter,
@@ -83,9 +88,8 @@ impl BodyChecker<'_, '_> {
             self.scoped_result(&map.body, result.as_ref(), false)
         })();
         self.leave_scope(saved);
-        self.loop_values = outer_loop_values;
         self.in_counted_body = outer_counted;
-        self.map_outer_iterations = outer_map;
+        self.map_scope = outer_map;
         self.kind = outer_kind;
         let bindings = self.take_pure_bindings(start);
         let output = output.map_err(|e| format!("map lambda body: {e}"))?;
@@ -99,12 +103,7 @@ impl BodyChecker<'_, '_> {
         }
         Ok((
             ty,
-            K::Map(Box::new(TypedMap {
-                array,
-                element: parameter,
-                bindings,
-                output,
-            })),
+            K::Map(Box::new(TypedMap::new(array, parameter, bindings, output))),
         ))
     }
 

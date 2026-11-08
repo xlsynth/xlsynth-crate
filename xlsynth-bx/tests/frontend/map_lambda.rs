@@ -9,10 +9,13 @@ use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module, compile, empty_package, parse_module,
 };
+use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
+use xlsynth_pir::ir_parser::parse_xls_ir_package;
+use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 #[test]
 fn lambda_annotations_resolve_the_enclosing_block_type_parameter() -> Result<(), Box<dyn Error>> {
@@ -380,67 +383,229 @@ fn map_callback_literal_bindings_infer_independently_of_enclosing_loops()
 }
 
 #[test]
-fn captures_accepted_by_dslx_are_outside_the_bx_map_subset() -> Result<(), Box<dyn Error>> {
-    for (captured, body) in [
-        ("bias", "map(xs, |x| { x + bias })"),
-        ("local", "let local = u8:3; map(xs, |x| { x + local })"),
+fn map_captures_match_dslx_in_functions_and_blocks() -> Result<(), Box<dyn Error>> {
+    let params = "xs: u8[2], bias: u8";
+    let result = "u8[2]";
+    let xs = IrValue::parse_typed("[bits[8]:2, bits[8]:9]")?;
+    for (body, with_three, with_seven) in [
+        ("map(xs, |x| x + bias)", [5, 12], [9, 16]),
+        ("map(u8:0..u8:2, |i| i + bias)", [3, 4], [7, 8]),
         (
-            "hidden",
-            "match bias { u8:0 => { let hidden = u8:2; map(xs, |x| x + hidden) }, _ => xs }",
+            "let local = bias + u8:1; map(xs, |x| x + local)",
+            [6, 13],
+            [10, 17],
         ),
         (
-            "local",
-            "let local = bias; map(xs, |x| { if true { x } else { local } })",
+            "map(xs, |x| { let bias = x + bias; bias + x })",
+            [7, 21],
+            [11, 25],
         ),
         (
-            "outer",
-            "map(xs, |outer| { map([u8:1], |inner| { inner + outer })[u32:0] })",
+            "map(xs, |outer| map([u8:2], |inner| inner + outer + bias)[u32:0])",
+            [7, 14],
+            [11, 18],
         ),
         (
-            "bias",
-            "unroll_for! (i, acc) in u32:0..u32:0 { map(acc, |x| { x + bias }) }(xs)",
+            "for (i, acc) in u8:0..u8:2 { map(acc, |x| x + i + bias) }(xs)",
+            [9, 16],
+            [17, 24],
+        ),
+        (
+            "for (i, acc) in u32:0..u32:2 { map(acc, |i| -> u8 { i + u8:1 }) }(xs)",
+            [4, 11],
+            [4, 11],
+        ),
+        (
+            "map(xs, |x| for (i, a) in u8:0..u8:2 { a + x + i + bias }(u8:0))",
+            [11, 25],
+            [19, 33],
+        ),
+        (
+            "unroll_for! (i, acc) in u8:0..u8:2 { map(acc, |x| x + i) }(xs)",
+            [3, 10],
+            [3, 10],
+        ),
+        (
+            "unroll_for! (_, acc) in u8:0..u8:0 { map(acc, |x| x + bias) }(xs)",
+            [2, 9],
+            [2, 9],
         ),
     ] {
-        let params = "xs: u8[2], bias: u8";
-        let native = dslx_source(params, "u8[2]", body);
-        parse_and_typecheck(&native, "native.x", "native", &mut ImportData::default())?;
+        let native = dslx_source(params, result, body);
         for bx in [
-            bx_source(params, "u8[2]", body),
+            bx_source(params, result, body),
             format!(
-                "fn local({params}) -> u8[2] {{ {body} }}\n{}",
-                bx_source(params, "u8[2]", "local(xs, bias)")
+                "fn local_fn({params}) -> {result} {{ {body} }}\n{}",
+                bx_source(params, result, "local_fn(xs, bias)")
             ),
         ] {
-            let error = check_module(&parse_module(&bx)?).unwrap_err();
-            assert!(
-                error.contains(&format!(
-                    "map lambda cannot capture enclosing value '{captured}'"
-                )),
-                "{error}\n{bx}"
-            );
+            let evaluator = ExpressionEvaluator::compile_block(
+                &bx,
+                &ImportOptions::default(),
+                compile_dslx_module(&native, &[]),
+            )?;
+            for (bias, [a, b]) in [(3, with_three), (7, with_seven)] {
+                let args = [xs.clone(), IrValue::make_ubits(8, bias)?];
+                let expected =
+                    IrValue::make_array(&[IrValue::make_ubits(8, a)?, IrValue::make_ubits(8, b)?])?;
+                assert_eq!(evaluator.compare(&args)?, expected, "{bx}");
+            }
         }
     }
-    for (bx, captured, name) in [
+    Ok(())
+}
+
+#[test]
+fn captured_maps_can_change_the_element_layout() -> Result<(), Box<dyn Error>> {
+    assert_expr_matches_dslx(
+        "xs: u8[2], bias: u16",
+        "(u16[2], bool)[2]",
+        "map(xs, |x| -> (u16[2], bool) { ([x as u16, bias], (x as u16) < bias) })",
+        [(
+            vec![
+                IrValue::parse_typed("[bits[8]:3, bits[8]:10]")?,
+                IrValue::make_ubits(16, 7)?,
+            ],
+            IrValue::parse_typed(
+                "[([bits[16]:3, bits[16]:7], bits[1]:1), ([bits[16]:10, bits[16]:7], bits[1]:0)]",
+            )?,
+        )],
+    );
+    Ok(())
+}
+
+#[test]
+fn captured_maps_with_empty_array_result_fields_survive_optimization() -> Result<(), Box<dyn Error>>
+{
+    let source = r#"
+pub block sample(clk, xs: u8[3], empty: u8[0]) -> (u8, u8[0])[3] {
+    map(xs, |x| -> (u8, u8[0]) { (x, empty) })
+}
+"#;
+    let package = compile(source, empty_package("captures"), ResetBehavior::default())?;
+    let optimized = xlsynth::optimize_ir_text(&package.to_string(), "sample")?;
+    parse_xls_ir_package(&optimized).map_err(|e| format!("{e:?}"))?;
+    Ok(())
+}
+
+#[test]
+fn map_reads_register_and_child_output_at_the_current_cycle() -> xlsynth_vastly::Result<()> {
+    let source = r#"
+block child(clk, d: u8) -> u8 { d + u8:1 }
+pub block sample(clk, rst, en: bool, d: u8) -> (u8, u8) {
+    reg q: u8 = u8:0;
+    if en { q := d; }
+    inst c: child;
+    c.d := d;
+    let ys = map(u8:0..u8:2, |i| i + q + c.out);
+    (ys[u32:0], ys[u32:1])
+}
+"#;
+    let mut package = compile(source, empty_package("captures"), ResetBehavior::default()).unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    let optimized = xlsynth::optimize_ir_text(&package.to_string(), "sample").unwrap();
+    let package = parse_xls_ir_package(&optimized).unwrap();
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let module = compile_pipeline_module(&rtl.system_verilog)?;
+    let mut runner = FixtureRunner::new(&module)?;
+    let ports = runner.port_bindings();
+    let (rst, en, d) = (ports.input("rst")?, ports.input("en")?, ports.input("d")?);
+    for (reset, enable, data, expected) in [(1, 0, 4, 5), (0, 1, 8, 17), (0, 0, 10, 19)] {
+        let edge = runner.step_cycle_with_drive(&mut [], |drive| {
+            drive.set_u64(&rst, reset)?;
+            drive.set_u64(&en, enable)?;
+            drive.set_u64(&d, data)
+        })?;
+        assert_eq!(edge.outputs["out_0"].to_u64_if_known(), Some(expected));
+        assert_eq!(edge.outputs["out_1"].to_u64_if_known(), Some(expected + 1));
+    }
+    Ok(())
+}
+
+#[test]
+fn captures_keep_their_materialized_width_inside_counted_loops() -> Result<(), Box<dyn Error>> {
+    let params = "xs: u8[2]";
+    let source = |ty, body| format!("for (i, acc) in {ty} {{ {body} }}(xs)");
+    // v0.61 can accept these declarations yet pass narrower bits to the
+    // callback. Its converter can abort on the resulting ABI mismatch.
+    for body in [
+        source("u8:0..u8:1", "let a = 1; map(acc, |_| -> u8 { a })"),
+        source("0..2", "map(acc, |x| x + i)"),
+    ] {
+        let bx = bx_source(params, "u8[2]", &body);
+        assert!(check_module(&parse_module(&bx)?).is_err(), "{bx}");
+    }
+    let xs = IrValue::parse_typed("[bits[8]:1, bits[8]:3]")?;
+    for (body, result) in [
         (
-            "block sample(clk, xs:u8[2], x:u8) -> u8[2] { reg q:u8; q := x; map(xs, |e| { e + q }) }",
-            "e + q",
-            "q",
+            source("u8:0..u8:1", "let a = 1; map(acc, |_| -> u8 { a as u8 })"),
+            "[bits[8]:1, bits[8]:1]",
         ),
         (
-            "block child(clk, d:u8)->u8 {d} pub block sample(clk, xs:u8[2], x:u8)->u8[2] { inst c:child; c.d := x; map(xs, |e| { e + c.out }) }",
-            "e + c.out",
-            "c",
+            source("0..2", "map(acc, |x| x + (i as u8))"),
+            "[bits[8]:2, bits[8]:4]",
         ),
     ] {
-        check_module(&parse_module(&bx.replace(captured, "e + e"))?)?;
-        let error = check_module(&parse_module(bx)?).unwrap_err();
-        assert!(
-            error.contains(&format!(
-                "map lambda cannot capture enclosing value '{name}'"
-            )),
-            "{error}\n{bx}"
+        assert_expr_matches_dslx(
+            params,
+            "u8[2]",
+            &body,
+            [(vec![xs.clone()], IrValue::parse_typed(result)?)],
         );
     }
+    Ok(())
+}
+
+#[test]
+fn aliases_preserve_the_materialized_width_of_a_capture() -> Result<(), Box<dyn Error>> {
+    for (result, callback) in [
+        ("u8", "let (b,) = (a,); b"),
+        (
+            "u8",
+            "let b = a; for (_, acc) in u8:0..u8:1 { let c = b; acc + c }(x)",
+        ),
+        ("bool", "let (b,) = (a,); x == b"),
+    ] {
+        let bx = format!(
+            "fn sample(xs: u8[2]) -> {result}[2] {{ let a = 1; map(xs, |x| -> {result} {{ {callback} }}) }}"
+        );
+        let error = check_module(&parse_module(&bx)?).unwrap_err();
+        assert!(error.contains("map lambda body"), "{error}\n{bx}");
+    }
+    // A same-width hex bit pattern can still be compared with signed bits.
+    let body = "let a = 0xff; map(xs, |x| { let (b,) = (a,); x == b })";
+    let params = "xs: s8[2]";
+    let result = "bool[2]";
+    let bx = format!(
+        "fn local_fn({params}) -> {result} {{ {body} }}\n{}",
+        bx_source(params, result, "local_fn(xs)")
+    );
+    let evaluator = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx_source(params, result, body), &[]),
+    )?;
+    let xs = IrValue::parse_typed("[bits[8]:255, bits[8]:0]")?;
+    assert_eq!(
+        evaluator.compare(&[xs])?,
+        IrValue::parse_typed("[bits[1]:1, bits[1]:0]")?,
+    );
+    Ok(())
+}
+
+#[test]
+fn map_lambda_rejects_block_instantiation_in_an_empty_fold() -> Result<(), String> {
+    let source = r#"
+block child(clk, x: u8) -> u8 { x }
+pub block sample(clk, xs: u8[2], bias: u8) -> u8[2] {
+    map(xs, |x| unroll_for! (_, a) in u32:0..u32:0 { child(a + bias) }(x))
+}
+"#;
+    let error = check_module(&parse_module(source)?).unwrap_err();
+    assert!(
+        error.contains("pure function cannot call block 'child'"),
+        "{error}"
+    );
     Ok(())
 }
 
@@ -483,12 +648,13 @@ fn local_map_binding_shadows_the_builtin_in_a_scoped_expression() -> Result<(), 
 }
 
 #[test]
-fn capture_free_map_computes_a_constant_register_reset() -> Result<(), Box<dyn Error>> {
+fn map_computes_a_constant_register_reset_with_a_captured_binding() -> Result<(), Box<dyn Error>> {
     let source = r#"
 block sample(clk, rst, data: u16[3]) -> u16[3] {
+    let offset = u16:1;
     reg q: u16[3] = map([u8:3,u8:5,u8:255], |v| {
         let wide = v as u16;
-        wide + u16:1
+        if true { wide + offset } else { data[u32:0] }
     });
     q := data;
     q
@@ -502,5 +668,8 @@ block sample(clk, rst, data: u16[3]) -> u16[3] {
             .as_ref(),
         Some(&expected)
     );
+    let runtime_reset = source.replace("if true", "if false");
+    let error = check_module(&parse_module(&runtime_reset)?).unwrap_err();
+    assert!(error.contains("must be a compile-time constant"), "{error}");
     Ok(())
 }

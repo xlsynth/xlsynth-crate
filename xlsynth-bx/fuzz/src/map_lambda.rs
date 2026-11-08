@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compare capture-free anonymous `map` calls against the pinned DSLX frontend.
+//! Compare anonymous `map` calls and their lexical captures with pinned DSLX.
 
 use crate::eval::expr_eval::{bx_source, dslx_source};
 use crate::function_oracle::{DslxExecution, FunctionProgram, compare_program};
@@ -9,11 +9,13 @@ use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{check_module, parse_module};
 
-/// Generate array and result shapes independently, including nested maps and
-/// module helpers, and check the BX capture restriction separately.
+/// Vary array and result shapes, lexical captures, nested maps and helpers.
 pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
     let mut bytes = data.iter().copied().chain(std::iter::repeat(0));
-    let shape = bytes.next().unwrap() % 6;
+    let shape = bytes.next().unwrap() % 7;
+    if shape == 6 {
+        return check_counted_captures(data);
+    }
     if shape == 5 {
         return check_constant_result(data);
     }
@@ -48,7 +50,9 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
         leaf_result.clone()
     };
     let result = format!("{result_element}[{length}]");
-    let params = format!("left: {element}[{length}], right: {element}[{length}], pick: bool");
+    let params = format!(
+        "left: {element}[{length}], right: {element}[{length}], pick: bool, bias: {output_bits}"
+    );
     let selected = if shape == 0 && flags & 128 != 0 && in_width >= 4 {
         let start: i32 = if in_sign == 's' { -2 } else { 1 };
         let inclusive = bytes.next().unwrap() % 2 != 0;
@@ -82,9 +86,30 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
         1 => "(value, value == 0)",
         _ => "[value, !value]",
     };
+    let mut enclosing_let = "";
+    let mut outer_lambda_let = "";
+    let value = match mutation {
+        12 => format!("if pick {{ ({value}) + bias }} else {{ !({value}) ^ bias }}"),
+        13 => {
+            // The leaf's let reads this aggregate and then shadows it.
+            enclosing_let = "let value = (pick, bias);";
+            format!("if value.0 {{ ({value}) ^ value.1 }} else {{ ({value}) + value.1 }}")
+        }
+        14 if shape == 2 => {
+            // The inner map reads a different first element for each row.
+            // Only the inner callback refers to the enclosing bias.
+            outer_lambda_let = "let first = item[u32:0];";
+            format!("(({value}) + (first as {output_bits})) ^ bias")
+        }
+        14 => {
+            enclosing_let = "let table = [bias, !bias];";
+            format!("({value}) ^ table[pick as u32]")
+        }
+        _ => value,
+    };
     let leaf_body = format!("let value = {value}; {leaf}");
     let mut body = if shape == 2 {
-        format!("map(item, |item| -> {leaf_result} {{ {leaf_body} }})")
+        format!("{outer_lambda_let} map(item, |item| -> {leaf_result} {{ {leaf_body} }})")
     } else {
         leaf_body
     };
@@ -93,33 +118,20 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
     } else {
         format!(": {element}")
     };
-    let mut return_ty = if flags & 32 == 0 {
+    // Pinned DSLX cannot concretize the result of a captured callback that
+    // returns an inferred tuple or array literal.
+    let captured = (12..=14).contains(&mutation);
+    let needs_result_type = captured && shape != 2 && output_shape != 0;
+    let mut return_ty = if flags & 32 == 0 && !needs_result_type {
         String::new()
     } else {
         format!(" -> {result_element}")
     };
-    let mut enclosing_let = "";
-    let mut capture = None;
     match mutation {
         8 => param_ty = format!(": uN[{}]", in_width + 1),
         9 => return_ty = format!(" -> uN[{}]", out_width + 1),
         10 => argument = "pick",
         11 => body = "unknown_name".into(),
-        12..=14 => {
-            let captured = match mutation {
-                12 => "pick",
-                13 => {
-                    enclosing_let = "let guard = pick;";
-                    "guard"
-                }
-                _ => {
-                    enclosing_let = "let guard = true;";
-                    "guard"
-                }
-            };
-            capture = Some(captured);
-            body = format!("if {captured} {{ {body} }} else {{ {body} }}");
-        }
         _ => { /* Leave the generated lambda intact, including for the empty array case. */ }
     }
     let expression =
@@ -130,32 +142,15 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
         functions.push_str(&format!(
             "\nfn transform({params}) -> {result} {{ {expression} }}"
         ));
-        "transform(left, right, pick)".to_owned()
+        "transform(left, right, pick, bias)".to_owned()
     };
-    if let Some(captured) = capture {
-        // DSLX accepts captures. BX must reject the well-formed body before
-        // lowering.
-        let bx = format!("{functions}\n{}", bx_source(&params, &result, &body));
-        let reference = format!("{functions}\n{}", dslx_source(&params, &result, &body));
-        let module =
-            parse_module(&bx).map_err(|error| format!("BX parse failure: {error}\n{bx}"))?;
-        let expected = format!("map lambda cannot capture enclosing value '{captured}'");
-        match check_module(&module) {
-            Err(error) if error.contains(&expected) => { /* Correct capture diagnostic. */ }
-            Err(error) => return Err(format!("Expected {expected}, got {error}\n{bx}")),
-            Ok(_) => return Err(format!("BX accepted an enclosing capture\n{bx}")),
-        }
-        return parse_and_typecheck(&reference, "oracle.x", "oracle", &mut ImportData::default())
-            .map(|_| ())
-            .map_err(|error| format!("DSLX rejected a capture: {error}\n{reference}"));
-    }
     compare_program(
         FunctionProgram {
             functions,
             params,
             result,
             body,
-            valid: Some(mutation < 8),
+            valid: Some(mutation < 8 || captured),
             // The pinned converter includes an unparsable
             // TypeVariableTypeAnnotation in synthetic function names for
             // inferred tuple/array literals. Concrete DSLX calls still check
@@ -173,7 +168,8 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
 /// pinned DSLX typechecker accepts a wider annotation but passes narrow values.
 fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
     let mut bytes = data.iter().copied().skip(1).chain(std::iter::repeat(0));
-    let mode = bytes.next().unwrap() % 3;
+    let flags = bytes.next().unwrap();
+    let mode = flags % 3;
     let width = 2 + usize::from(bytes.next().unwrap() % 7);
     let high = 1usize << (width - 1);
     let operand = if range {
@@ -194,6 +190,28 @@ fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
     } else {
         format!(": uN[{annotated}]")
     };
+    if mode != 2 && flags & 4 != 0 {
+        let ty = format!("uN[{width}]");
+        let bias = usize::from(bytes.next().unwrap()) % (1 << width);
+        let functions = format!(
+            "fn transform(bias: {ty}) -> {result} {{ map({operand}, |x{annotation}| x ^ bias) }}\n\
+             const MAPPED = transform({ty}:{bias});"
+        );
+        return compare_program(
+            FunctionProgram {
+                functions,
+                params: format!("bias: {ty}"),
+                result: format!("({result}, {result})"),
+                body: "(transform(bias), MAPPED)".into(),
+                valid: Some(true),
+                dslx_ir: true,
+                dynamic_index: None,
+            },
+            input_seed(data),
+            DslxExecution::ConcreteConstants,
+            Vec::new(),
+        );
+    }
     let calculation = if mode == 2 { "x" } else { "x + 1" };
     let body = format!("map({operand}, |x{annotation}| {calculation})");
     if mode != 2 {
@@ -216,6 +234,68 @@ fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
         &bx,
         &reference,
         &format!("map lambda parameter expects {parameter}, got {inferred}"),
+        width,
+    )
+}
+
+/// Compare captures of the counted index, changing carry and loop-local lets.
+fn check_counted_captures(data: &[u8]) -> Result<(), String> {
+    let mut bytes = data.iter().copied().skip(1).chain(std::iter::repeat(0));
+    let mode = bytes.next().unwrap() % 4;
+    let count = 1 + bytes.next().unwrap() % 4;
+    let value = bytes.next().unwrap();
+    let value_width = (u8::BITS - value.leading_zeros()) as usize;
+    let index_width = (u8::BITS - count.leading_zeros()) as usize;
+    let ty = Type::Bits {
+        signed: false,
+        width: value_width.max(index_width) + 1 + usize::from(bytes.next().unwrap() % 96),
+    };
+    let range = if mode == 0 {
+        format!("{ty}:0..{ty}:{count}")
+    } else {
+        format!("0..{count}")
+    };
+    let local = if mode == 0 {
+        format!("acc[u32:1] ^ {ty}:{value}")
+    } else {
+        value.to_string()
+    };
+    let callback = match mode {
+        0 => "((x ^ acc[u32:0]) + local) ^ i".to_owned(),
+        1 => format!("((x ^ acc[u32:0]) + (local as {ty})) ^ (i as {ty})"),
+        2 => "local".to_owned(),
+        _ => "i".to_owned(),
+    };
+    let callback = match bytes.next().unwrap() % 3 {
+        1 => format!("let alias = {callback}; alias"),
+        2 => format!("let (alias,) = ({callback},); alias"),
+        _ => callback,
+    };
+    let result = format!("{ty}[2]");
+    let params = format!("xs: {result}");
+    let body = format!(
+        "for (i, acc) in {range} {{ let local = {local}; map(acc, |x| -> {ty} {{ {callback} }}) }}(xs)"
+    );
+    if mode < 2 {
+        return compare_literal_program(data, &params, result, body, true);
+    }
+    // Pinned DSLX accepts the wider callback result but its bytecode returns
+    // the capture's materialized width. Converting this counted carry can
+    // abort.
+    let bx = bx_source(&params, &result, &body);
+    let reference = format!(
+        "{}\nconst OBSERVED = sample([{ty}:0, {ty}:1]);",
+        dslx_source(&params, &result, &body)
+    );
+    let width = if mode == 2 { value_width } else { index_width };
+    let inferred = Type::Bits {
+        signed: false,
+        width,
+    };
+    check_narrow_native_result(
+        &bx,
+        &reference,
+        &format!("expected {ty}, got {inferred}"),
         width,
     )
 }
@@ -350,13 +430,18 @@ mod tests {
                         flags,
                     ])?;
                 }
-                for mutation in 8..16 {
+                for mutation in [8, 9, 10, 11, 15] {
                     check_map_lambda(&[shape, 127, 7, 15, 3, result, mutation])?;
+                }
+                for mutation in 12..=14 {
+                    for flags in [0, 127, 128, 255] {
+                        check_map_lambda(&[shape, flags, 71, 95, 3, result, mutation])?;
+                    }
                 }
             }
         }
         for shape in 3..5 {
-            for mode in 0..3 {
+            for mode in [0, 1, 2, 4, 6] {
                 for width in [0, 3, 6] {
                     check_map_lambda(&[shape, mode, width, 31, 19, 55])?;
                 }
@@ -366,6 +451,15 @@ mod tests {
             for value in [0, 1, 3, 7, 255] {
                 for declared in [0, 1, 3, 8] {
                     check_map_lambda(&[5, annotated, value, declared])?;
+                }
+            }
+        }
+        for mode in 0..4 {
+            for count in 0..4 {
+                for value in [0, 1, 6, 255] {
+                    for alias in 0..3 {
+                        check_map_lambda(&[6, mode, count, value, 8 + 24 * count, alias])?;
+                    }
                 }
             }
         }

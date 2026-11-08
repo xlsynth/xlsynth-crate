@@ -1440,6 +1440,13 @@ enum BodyKind {
     Block { has_reset: bool },
 }
 
+/// The callback that owns local width inference and any loops opened inside it.
+#[derive(Clone, Copy)]
+struct MapScope {
+    id: usize,
+    outer_iterations: usize,
+}
+
 /// Lexical values, loop elaboration, and any hardware declared in one body.
 struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
@@ -1494,9 +1501,8 @@ struct BodyChecker<'a, 'm> {
     /// Counted bodies bind runtime loop values even outside a structural
     /// unroll.
     in_counted_body: bool,
-    /// Structural iterations enclosing the current closed lambda. They still
-    /// consume expansion work, but do not supply loop-local type inference.
-    map_outer_iterations: Option<usize>,
+    map_scope: Option<MapScope>,
+    next_map: usize,
     next_counted_loop: usize,
     iteration_path: Vec<usize>,
     expansion_work: usize,
@@ -1506,6 +1512,11 @@ struct BodyChecker<'a, 'm> {
 }
 
 impl<'a, 'm> BodyChecker<'a, 'm> {
+    /// The source body has scope zero, and callbacks receive increasing IDs.
+    fn width_scope(&self) -> usize {
+        self.map_scope.map_or(0, |s| s.id)
+    }
+
     /// Generated bodies charge their common registry. Ordinary source bodies
     /// own independent budgets just as they do for structural unrolling.
     fn constant_context(&mut self) -> ConstantContext<'_, 'a> {
@@ -1665,7 +1676,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             scope_alias_names: Vec::new(),
             prepared_counted_iterables: BTreeMap::new(),
             in_counted_body: false,
-            map_outer_iterations: None,
+            map_scope: None,
+            next_map: 1,
             next_counted_loop: 0,
             iteration_path: Vec::new(),
             expansion_work: 0,
@@ -2211,7 +2223,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(v) = constant {
             self.constants.insert(name.to_owned(), v);
         }
-        if let Some(widths) = widths {
+        if let Some(mut widths) = widths {
+            widths.bind_in_scope(self.width_scope());
             self.inferred_bindings.insert(name.to_owned(), widths);
         }
         Ok(CheckedStmt::Let {
@@ -2781,9 +2794,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .specialization
             .is_some_and(|spec| !spec.callbacks.is_empty());
         if self.checking_callback_inputs
-            || ((self.source_template.is_some()
-                || callback_block
-                || self.map_outer_iterations.is_some())
+            || ((self.source_template.is_some() || callback_block || self.map_scope.is_some())
                 && self.replaying_body())
         {
             // Materialize checked IR types incrementally so neither a copied
@@ -2798,7 +2809,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             let body = if self.checking_callback_inputs {
                 "callback block input"
-            } else if self.map_outer_iterations.is_some() {
+            } else if self.map_scope.is_some() {
                 "map lambda"
             } else if callback_block {
                 "block body"
@@ -2807,6 +2818,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             self.charge_expansion(body, nodes.saturating_add(literal_work))?;
         }
+        // A capture keeps its materialized width across a map boundary. Its
+        // literal radix can still determine signedness at that width.
         let scoped_projection = self.reference_type(expr).is_some_and(|(name, _)| {
             self.inferred_bindings
                 .get(name)
@@ -2830,7 +2843,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             && !compatible(&ty, expected)
         {
             if dslx_projection
-                && projected_type_compatible(expr, &ty, expected, dslx_bindings, false)?
+                && projected_type_compatible(expr, &ty, expected, dslx_bindings, None)?
             {
                 // Only signedness differs. Preserve the complete IR layout.
                 return Ok(TypedExpr {
@@ -2839,14 +2852,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 });
             }
             if scoped_projection
-                && projected_type_compatible(expr, &ty, expected, dslx_bindings, true)?
+                && projected_type_compatible(
+                    expr,
+                    &ty,
+                    expected,
+                    dslx_bindings,
+                    Some(self.width_scope()),
+                )?
             {
                 return self.widen_projection(TypedExpr { ty, kind }, expected);
             }
             // DSLX retains the minimum type at the binder and can give a
             // reference to that value a wider concrete type.
             if let Some(locals) = self.scoped_widths()
-                && locals.is_inferred_reference(expr)?
+                && locals.can_widen_reference(expr, self.width_scope())?
                 && let (Some((signed, width)), Some((target_signed, target_width))) =
                     (bits(&ty), bits(expected))
                 && (!signed || target_signed)

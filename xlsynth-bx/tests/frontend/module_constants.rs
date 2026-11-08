@@ -122,16 +122,29 @@ fn lanes(xs: u8[2]) -> (u8[2], u8[2]) {
         IrValue::parse_typed("([bits[8]:11,bits[8]:6],[bits[8]:5,bits[8]:0])")?
     );
 
-    // The enclosing let hides the global even in a callback that disallows
-    // captures.
-    for head in ["fn read(xs:u8[2])", "block read(clk, xs:u8[2])"] {
-        let source = format!(
-            "const OFFSET = u8:7; {head}->u8[2] {{ let OFFSET = xs[0]; map(xs, |item| item + OFFSET) }}"
-        );
-        let error = check_module(&parse_module(&source)?).unwrap_err();
-        assert!(
-            error.contains("cannot capture enclosing value 'OFFSET'"),
-            "{source}\n{error}"
+    let body = "let OFFSET = xs[u32:0]; map(xs, |item| item + OFFSET)";
+    let native = format!(
+        "const OFFSET = u8:7; {}",
+        dslx_source("xs:u8[2]", "u8[2]", body)
+    );
+    for bx in [
+        format!(
+            "const OFFSET = u8:7; {}",
+            bx_source("xs:u8[2]", "u8[2]", body)
+        ),
+        format!(
+            "const OFFSET = u8:7; fn read(xs:u8[2])->u8[2] {{ {body} }} {}",
+            bx_source("xs:u8[2]", "u8[2]", "read(xs)")
+        ),
+    ] {
+        let evaluator = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(&native, &[]),
+        )?;
+        assert_eq!(
+            evaluator.compare(&[IrValue::parse_typed("[bits[8]:4, bits[8]:255]")?])?,
+            IrValue::parse_typed("[bits[8]:8, bits[8]:3]")?
         );
     }
     Ok(())

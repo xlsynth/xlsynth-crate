@@ -11,8 +11,9 @@ use xlsynth_pir::ir_builder::{
 };
 use xlsynth_pir::ir_utils::external_function_references;
 use xlsynth_pir::ir_verify::verify_package;
+use xlsynth_pir::math::ceil_log2;
 use xlsynth_pir::{
-    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, IrValue,
+    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, IrBits, IrValue,
     RegisterWriteOptions, ResetBehavior,
 };
 
@@ -869,27 +870,111 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         self.expr(output)
     }
 
-    /// Build a unary function for the closed lambda and map it over the input.
+    /// Emit a unary IR map for a closed lambda or a counted loop carrying
+    /// the result array when the lambda reads enclosing wires.
     fn map(&mut self, map: &TypedMap) -> Result<BValue, BuilderError> {
         let array = self.expr(&map.array)?;
         let symbol = self.destination.body_symbol("map");
-        let mut body = LowerBody::new(
-            FnBuilder::new(&symbol),
-            self.destination,
-            self.functions,
-            self.layouts,
-        );
-        let element = body
-            .builder
-            .param("element", body.layouts.lower(&map.element.ty)?)?;
+        let mut builder = FnBuilder::new(&symbol);
+        let element = builder.param("element", self.layouts.lower(&map.element.ty)?)?;
+        let mut capture_wires = Vec::new();
+        let captures = self.capture_params(&mut builder, &map.captures, &mut capture_wires)?;
+        let mut body = LowerBody::new(builder, self.destination, self.functions, self.layouts);
+        body.values = captures;
         body.values.insert(map.element.name.clone(), element);
         let result = body.bound_expr(&map.bindings, &map.output)?;
-        let index = body.destination.batch.append(body.builder, result)?;
-        let PackageMember::Function(function) = &self.destination.batch.package().members[index]
+        let member = body.destination.batch.append(body.builder, result)?;
+        let PackageMember::Function(function) = &self.destination.batch.package().members[member]
         else {
-            unreachable!("appended map body is a function");
+            unreachable!("appended map callback is a function");
         };
-        self.builder.map(array, function)
+        if capture_wires.is_empty() {
+            return self.builder.map(array, function);
+        }
+        let callback = InvokeSignature::from_function(function)?;
+        self.captured_map(array, &callback, &capture_wires)
+    }
+
+    /// Broadcast the first real result to seed the output, then replace each
+    /// remaining slot by invoking the same callback on its input element.
+    fn captured_map(
+        &mut self,
+        array: BValue,
+        callback: &InvokeSignature,
+        captures: &[BValue],
+    ) -> Result<BValue, BuilderError> {
+        let ir::Type::Array(input) = self.builder.get_type(array)? else {
+            unreachable!("checked map input is an array");
+        };
+        let count = input.element_count;
+        let zero = self.builder.literal(IrValue::bool(false))?;
+        let first = self.builder.array_index(array, zero)?;
+        let mut args = vec![first];
+        args.extend_from_slice(captures);
+        let result = self.builder.invoke_with_signature(callback, &args)?;
+        let singleton = self
+            .builder
+            .array(self.builder.get_type(result)?.clone(), &[result])?;
+        if count == 1 {
+            return Ok(singleton);
+        }
+        // Saturating array_slice repeats the singleton. This seed also works
+        // for runtime aggregate values that XLS cannot represent as literals.
+        let init = self.builder.array_slice(singleton, zero, count)?;
+        let symbol = self.destination.body_symbol("map_loop");
+        let mut builder = FnBuilder::new(&symbol);
+        let width = ceil_log2(count);
+        let ordinal = builder.param("index", ir::Type::Bits(width))?;
+        let carry = builder.param("carry", self.builder.get_type(init)?.clone())?;
+        let iterable = builder.param("iterable", self.builder.get_type(array)?.clone())?;
+        let params = self.wire_params(&mut builder, captures)?;
+        let one = builder.literal(IrValue::Bits(IrBits::from_lsb_fn(width, |i| i == 0)))?;
+        let index = builder.add(ordinal, one)?;
+        let element = builder.array_index(iterable, index)?;
+        let mut callback_args = vec![element];
+        callback_args.extend(params);
+        let replacement = builder.invoke_with_signature(callback, &callback_args)?;
+        let result = builder.array_update(carry, replacement, &[index])?;
+        let member = self.destination.batch.append(builder, result)?;
+        let PackageMember::Function(function) = &self.destination.batch.package().members[member]
+        else {
+            unreachable!("appended map iteration is a function");
+        };
+        let mut invariants = vec![array];
+        invariants.extend_from_slice(captures);
+        self.builder
+            .counted_for(init, count - 1, 1, function, &invariants)
+    }
+
+    /// Create one capture parameter per enclosing wire, in invariant order.
+    fn wire_params(
+        &self,
+        builder: &mut FnBuilder,
+        wires: &[BValue],
+    ) -> Result<Vec<BValue>, BuilderError> {
+        wires
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &wire)| {
+                builder.param(
+                    &format!("capture_{ordinal}"),
+                    self.builder.get_type(wire)?.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Pair the sorted enclosing wires with body parameters in invariant order.
+    fn capture_params(
+        &self,
+        builder: &mut FnBuilder,
+        captures: &BTreeSet<String>,
+        invariants: &mut Vec<BValue>,
+    ) -> Result<BTreeMap<String, BValue>, BuilderError> {
+        let start = invariants.len();
+        invariants.extend(captures.iter().map(|name| self.values[name]));
+        let params = self.wire_params(builder, &invariants[start..])?;
+        Ok(captures.iter().cloned().zip(params).collect())
     }
 
     /// Build one pure iteration function. Captures become invariant
@@ -904,9 +989,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         let mut builder = FnBuilder::new(&symbol);
         let index_width = match &fold.iterable {
             TypedIterable::Range { start } => start.get_bit_count().max(1),
-            TypedIterable::Array(_) => {
-                (usize::BITS - (fold.trip_count - 1).leading_zeros()).max(1) as usize
-            }
+            TypedIterable::Array(_) => ceil_log2(fold.trip_count).max(1),
         };
         let index = builder.param("index", ir::Type::Bits(index_width))?;
         let accumulator = builder.param("carry", self.builder.get_type(carry)?.clone())?;
@@ -918,18 +1001,11 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             }
             TypedIterable::Range { .. } => None,
         };
+        let captures = self.capture_params(&mut builder, &fold.captures, &mut invariants)?;
         let mut body = LowerBody::new(builder, self.destination, self.functions, self.layouts);
+        body.values = captures;
         body.values
             .insert(fold.accumulator.name.clone(), accumulator);
-        for (ordinal, name) in fold.captures.iter().enumerate() {
-            let wire = self.values[name];
-            invariants.push(wire);
-            let param = body.builder.param(
-                &format!("capture_{ordinal}"),
-                self.builder.get_type(wire)?.clone(),
-            )?;
-            body.values.insert(name.clone(), param);
-        }
         let element = match &fold.iterable {
             TypedIterable::Range { start } if start.get_bit_count() == 0 => {
                 body.builder.literal(IrValue::Bits(start.clone()))?
