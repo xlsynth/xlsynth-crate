@@ -103,6 +103,21 @@ at the binding's use and checks the expected typed result. Provide the matching
 `dslx_interpreter_main` and `typecheck_main` next to `ir_converter_main`.
 A zero prefix embeds any audit-v4 input in the separate audit-v5 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v6` to compare two integer literals
+bound in a tuple or in separate lets. The generator varies literal spelling
+(hexadecimal, binary, or decimal), magnitude, comparison operator, operand
+order, and evaluation in a function body, module constant, or parametric
+argument. For example, `0xff` can represent `-1` when compared at signed
+width eight, while decimal `255` needs nine signed bits.
+
+The worker typechecks the original source. Once it is accepted, the worker
+checks the emitted IR against an independently computed Boolean and executes
+the original expression and an explicitly cast control in separate DSLX
+bytecode tests. This catches wrong bytecode even when IR is correct, and wrong
+constant folding even when the top signature is correct. The same standalone
+tools are required as for audit-v5. Prefix an audit-v5 input with one zero
+byte to preserve it in an audit-v6 corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format

@@ -6,8 +6,8 @@
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
-    nominal_contracts, observable_value_contracts, observer_contracts, pattern_acceptance,
-    scope_contracts, tuple_literal_contracts, unrolled_loop_contracts,
+    mixed_literal_contracts, nominal_contracts, observable_value_contracts, observer_contracts,
+    pattern_acceptance, scope_contracts, tuple_literal_contracts, unrolled_loop_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -40,6 +40,13 @@ pub enum AuditCase {
         case: ContractCase,
         runtime_module: SourceModule,
     },
+    /// Checks inferred operand types against an independent value in IR and
+    /// bytecode.
+    MixedLiteral {
+        case: ContractCase,
+        raw_runtime_module: SourceModule,
+        runtime_module: SourceModule,
+    },
 }
 
 impl AuditCase {
@@ -51,7 +58,7 @@ impl AuditCase {
             }
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
-            Self::TupleLiteral { case, .. } => case.family,
+            Self::TupleLiteral { case, .. } | Self::MixedLiteral { case, .. } => case.family,
         }
     }
 }
@@ -122,6 +129,16 @@ pub fn generate_v5(data: &[u8]) -> Result<AuditCase, String> {
         Ok(tuple_literal_contracts::generate(options))
     } else {
         generate_v4(options)
+    }
+}
+
+/// Decodes audit-v6 inputs. A zero prefix preserves every audit-v5 case.
+pub fn generate_v6(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 4 == 3 {
+        Ok(mixed_literal_contracts::generate(options))
+    } else {
+        generate_v5(options)
     }
 }
 

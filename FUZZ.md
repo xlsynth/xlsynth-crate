@@ -387,6 +387,10 @@ standalone typechecker must convert successfully.
 The `audit-v5` grammar checks the inferred widths of tuple-bound integer
 literals used as return values or function arguments. It converts the
 original source and executes a separately cast control in DSLX bytecode.
+The `audit-v6` grammar compares two bound integer literals of mixed signedness
+in runtime expressions, module constants, and parametric arguments. It checks
+the original IR and both uncast and explicitly cast bytecode against an
+independent Boolean result.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

@@ -121,7 +121,17 @@ pub fn check_audit(
         AuditCase::TupleLiteral {
             case,
             runtime_module,
-        } => check_tuple_literal(case, &runtime_module, converter, stdlib),
+        } => check_literal_bindings(case, &[("Casted", &runtime_module)], converter, stdlib),
+        AuditCase::MixedLiteral {
+            case,
+            raw_runtime_module,
+            runtime_module,
+        } => check_literal_bindings(
+            case,
+            &[("Uncast", &raw_runtime_module), ("Casted", &runtime_module)],
+            converter,
+            stdlib,
+        ),
     }
 }
 
@@ -186,11 +196,11 @@ fn check_pattern_acceptance(
     Ok(EquivResult::Proved)
 }
 
-/// Checks the original binding's type and emitted IR. Only the separate
-/// bytecode comparison adds a cast to the value consumed by the return or call.
-fn check_tuple_literal(
+/// Proves the original literal bindings and runs their independent bytecode
+/// comparisons, preserving an IR finding when both evaluators fail.
+fn check_literal_bindings(
     case: ContractCase,
-    runtime_module: &SourceModule,
+    runtime_modules: &[(&str, &SourceModule)],
     converter: &Path,
     stdlib: &Path,
 ) -> Result<EquivResult, CheckFailure> {
@@ -202,11 +212,15 @@ fn check_tuple_literal(
         return Err(rejection("typecheck_main", &typecheck, &case.modules));
     }
 
-    // Exercise bytecode even when the original converter crashes or emits a
-    // narrow result. Missing tools or an unexecuted test invalidate the check.
-    let runtime = check_literal_runtime(runtime_module, converter, stdlib);
-    if let Err(failure @ CheckFailure::Checker(_)) = runtime {
-        return Err(failure);
+    // Run the cast control even if the raw bytecode comparison fails. Missing
+    // tools or an unexecuted test invalidate the check.
+    let mut runtime = Ok(());
+    for &(label, module) in runtime_modules {
+        let result = check_literal_runtime(module, label, converter, stdlib);
+        if let Err(failure @ CheckFailure::Checker(_)) = result {
+            return Err(failure);
+        }
+        runtime = runtime.and(result);
     }
     let prepared = convert_modules(
         case.modules,
@@ -219,7 +233,7 @@ fn check_tuple_literal(
     )?;
     parse_contract_ir(&prepared)?;
     let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same)?;
-    // Report a failure of the unmodified program first when both programs ran.
+    // Prefer the standalone IR finding, then the first bytecode discrepancy.
     runtime?;
     // Only replay the original in-process after its standalone conversion and
     // proof succeed. A crashing helper call must stay in the child process.
@@ -227,10 +241,11 @@ fn check_tuple_literal(
     Ok(verdict)
 }
 
-/// Executes the casted comparison in the DSLX bytecode interpreter and
-/// verifies that its named unit test actually ran.
+/// Executes a comparison in the DSLX bytecode interpreter and verifies that
+/// its named unit test actually ran.
 fn check_literal_runtime(
     module: &SourceModule,
+    label: &str,
     converter: &Path,
     stdlib: &Path,
 ) -> Result<(), CheckFailure> {
@@ -265,10 +280,16 @@ fn check_literal_runtime(
         && stderr.lines().any(|line| line.contains("^ FailureError:"))
     {
         return Err(CheckFailure::Disproved(format!(
-            "Casted DSLX runtime comparison failed: {stderr}\n{module:#?}"
+            "{label} DSLX runtime comparison failed: {stderr}\n{module:#?}"
         )));
     }
-    Err(rejection("dslx_interpreter_main", &output, modules))
+    let mut failure = rejection("dslx_interpreter_main", &output, modules);
+    if label == "Uncast"
+        && let CheckFailure::ConverterRejected(message) = &mut failure
+    {
+        message.push_str("\nUncast DSLX runtime comparison");
+    }
+    Err(failure)
 }
 
 /// Typechecks the unmodified entry module before the converter is invoked.

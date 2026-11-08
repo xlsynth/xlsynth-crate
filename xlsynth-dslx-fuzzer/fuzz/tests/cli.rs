@@ -219,6 +219,90 @@ exit 1"#,
 }
 
 #[test]
+fn mixed_literal_checks_both_bytecode_results_and_preserves_ir_findings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let tools = directory.path();
+    let converter = tools.join("ir_converter_main");
+    let original = "pub fn main() -> bool { let (lo, hi) = (0x80, -127); lo < hi }";
+    let check_original = format!("set -eu\ntest \"$(cat sample.x)\" = '{original}'");
+    write_tool(
+        &converter.with_file_name("typecheck_main"),
+        &format!("{check_original}\ntouch types.pb"),
+    )?;
+    write_tool(
+        &converter.with_file_name("dslx_interpreter_main"),
+        r#"set -eu
+test ! -e types.pb
+grep -Fxq 'fn literal_runtime() { assert_eq(main(), true); }' sample.x
+if grep -Fq '(lo as s8) < (hi as s8)' sample.x; then kind=cast; else kind=raw; fi
+tools=$(dirname "$0")
+echo "$kind" >> "$tools/runs"
+case "$(cat "$tools/$kind")" in
+  skip) exit 0 ;;
+  fail) echo '[ RUN UNITTEST  ] literal_runtime' >&2
+        echo '~~~~^ FailureError: lhs and rhs were not equal' >&2
+        exit 1 ;;
+  reject) echo '[ RUN UNITTEST  ] literal_runtime' >&2
+          echo 'internal error: Same tag is required for a comparison operation' >&2
+          exit 1 ;;
+  pass) echo '[ RUN UNITTEST  ] literal_runtime' >&2
+        echo '[            OK ]' >&2 ;;
+esac"#,
+    )?;
+    for (value, raw, cast, outcome) in [
+        ("1", "pass", "pass", "proved"),
+        ("1", "fail", "pass", "raw mismatch"),
+        ("1", "reject", "pass", "raw rejection"),
+        ("1", "pass", "fail", "cast mismatch"),
+        ("0", "fail", "pass", "IR mismatch"),
+        ("reject", "fail", "pass", "IR rejection"),
+        ("0", "fail", "skip", "missing cast control"),
+    ] {
+        let output = if value == "reject" {
+            "exit 1".into()
+        } else {
+            format!(
+                "cat <<'IR'\npackage sample\ntop fn __sample__main() -> bits[1] {{\n  ret t: bits[1] = literal(value={value}, id=1)\n}}\nIR"
+            )
+        };
+        write_tool(
+            &converter,
+            &format!("{check_original}\ntest -e types.pb\n{output}"),
+        )?;
+        std::fs::write(tools.join("raw"), raw)?;
+        std::fs::write(tools.join("cast"), cast)?;
+        std::fs::write(tools.join("runs"), "")?;
+        let case = audit_contracts::generate_v6(&[3, 0, 0, 0, 2, 0x7f, 126])?;
+        let result = check_audit(case, &converter, xlsynth::default_dslx_stdlib_path());
+        let matches = match (outcome, &result) {
+            ("proved", Ok(EquivResult::Proved)) => true,
+            ("raw mismatch", Err(CheckFailure::Disproved(message))) => {
+                message.starts_with("Uncast DSLX runtime comparison failed")
+            }
+            ("raw rejection", Err(CheckFailure::ConverterRejected(message))) => {
+                message.starts_with("dslx_interpreter_main failed")
+                    && message.ends_with("Uncast DSLX runtime comparison")
+            }
+            ("cast mismatch", Err(CheckFailure::Disproved(message))) => {
+                message.starts_with("Casted DSLX runtime comparison failed")
+            }
+            ("IR mismatch", Err(CheckFailure::Disproved(message))) => {
+                message.starts_with("equivalence check failed")
+            }
+            ("IR rejection", Err(CheckFailure::ConverterRejected(message))) => {
+                message.starts_with("ir_converter_main failed")
+            }
+            ("missing cast control", Err(CheckFailure::Checker(_))) => true,
+            _ => false,
+        };
+        assert!(matches, "{outcome}: {result:?}");
+        assert_eq!(std::fs::read_to_string(tools.join("runs"))?, "raw\ncast\n");
+    }
+    Ok(())
+}
+
+#[test]
 fn standalone_output_is_the_program_under_proof() -> Result<(), Box<dyn std::error::Error>> {
     let mut lane = Body::new(BitsType {
         signed: false,

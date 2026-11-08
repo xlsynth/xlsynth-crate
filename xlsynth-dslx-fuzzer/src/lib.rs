@@ -19,6 +19,7 @@ pub mod imported_const;
 pub mod imported_struct;
 pub mod map_fragment;
 pub mod mission_expr;
+mod mixed_literal_contracts;
 mod nominal_contracts;
 mod observable_value_contracts;
 mod observer_contracts;
