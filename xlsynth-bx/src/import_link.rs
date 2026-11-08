@@ -11,6 +11,12 @@ use xlsynth_pir::ir_verify::verify_package;
 
 use crate::lower::check_function_purity;
 
+/// Records where imported functions were placed in the destination IR package.
+///
+/// `roots` lists destination member indices in the order the roots were
+/// requested. `symbols` maps each imported function's original name to its
+/// destination name and member index. `node_id_base` is the offset added to
+/// both imported IR node IDs and the node IDs in retained DSLX loop bindings.
 pub(crate) struct ImportLink {
     pub(crate) roots: Vec<usize>,
     pub(crate) symbols: BTreeMap<String, Symbol>,
