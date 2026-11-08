@@ -428,7 +428,8 @@ impl BodyChecker<'_, '_> {
         };
         values.insert(alias.clone(), value);
         self.names.insert(alias.clone());
-        if let Some(widths) = widths {
+        if let Some(mut widths) = widths {
+            widths.bind_in_scope(self.width_scope());
             self.inferred_bindings.insert(alias.clone(), widths);
         }
         alias

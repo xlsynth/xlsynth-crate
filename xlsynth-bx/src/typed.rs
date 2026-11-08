@@ -211,13 +211,15 @@ pub struct TypedFor {
     uses_element: bool,
 }
 
-/// A capture-free array transformation and its statically checked lambda.
+/// An array transformation and the values its checked lambda reads at map
+/// entry.
 #[derive(Clone, Debug)]
 pub struct TypedMap {
     pub array: TypedExpr,
     pub element: Param,
     pub bindings: Vec<CheckedBinding>,
     pub output: TypedExpr,
+    pub(super) captures: BTreeSet<String>,
 }
 
 /// Resolved operations, including field projections in declaration order.
@@ -489,6 +491,27 @@ impl CountedWork<'_, '_> {
     }
 }
 
+/// Collect free value names in source order so a let can read an enclosing
+/// binding before introducing its own. Nested bodies supply their captures.
+fn body_inputs(bindings: &[CheckedBinding], output: &TypedExpr) -> BTreeSet<String> {
+    let mut bound = BTreeSet::new();
+    let mut inputs = BTreeSet::new();
+    let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>| {
+        expr.all_inputs(true, &mut |name| {
+            if !bound.contains(name) {
+                inputs.insert(name.to_owned());
+            }
+            true
+        });
+    };
+    for binding in bindings {
+        record(&binding.value, &bound);
+        bound.insert(binding.name.as_str());
+    }
+    record(output, &bound);
+    inputs
+}
+
 impl TypedFor {
     /// Resolve body dependencies once, removing local binders and retaining
     /// whether constant evaluation needs the induction element.
@@ -501,21 +524,7 @@ impl TypedFor {
         bindings: Vec<CheckedBinding>,
         output: TypedExpr,
     ) -> Self {
-        let mut bound = BTreeSet::new();
-        let mut captures = BTreeSet::new();
-        let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>| {
-            expr.all_inputs(true, &mut |name| {
-                if !bound.contains(name) {
-                    captures.insert(name.to_owned());
-                }
-                true
-            });
-        };
-        for binding in &bindings {
-            record(&binding.value, &bound);
-            bound.insert(&binding.name);
-        }
-        record(&output, &bound);
+        let mut captures = body_inputs(&bindings, &output);
         let uses_element = captures.remove(&element.name);
         captures.remove(&accumulator.name);
         Self {
@@ -592,8 +601,26 @@ impl TypedFor {
 }
 
 impl TypedMap {
-    /// Apply the closed body to each element, sharing the evaluator's work
-    /// limit with any nested maps or counted loops.
+    /// Record the checked body's free names after binding the map element.
+    pub fn new(
+        array: TypedExpr,
+        element: Param,
+        bindings: Vec<CheckedBinding>,
+        output: TypedExpr,
+    ) -> Self {
+        let mut captures = body_inputs(&bindings, &output);
+        captures.remove(&element.name);
+        Self {
+            array,
+            element,
+            bindings,
+            output,
+            captures,
+        }
+    }
+
+    /// Evaluate each element in a child scope of the caller, sharing its work
+    /// limit and resolving captured constants only when the body reads them.
     fn constant(
         &self,
         names: &ConstantScope<'_>,
@@ -753,7 +780,10 @@ impl TypedExpr {
             K::For(fold) if !branches && fold.trip_count == 0 => {
                 fold.seed.all_inputs(branches, accept)
             }
-            K::Map(map) => map.array.all_inputs(branches, accept),
+            K::Map(map) => {
+                map.array.all_inputs(branches, accept)
+                    && (!branches || map.captures.iter().all(|name| accept(name)))
+            }
             K::Call { .. } | K::ImportedCall { .. } if !branches => true,
             K::For(fold) => {
                 fold.seed.all_inputs(branches, accept)

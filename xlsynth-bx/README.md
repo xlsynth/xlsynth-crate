@@ -127,24 +127,36 @@ BX checks the body against its declared signatures, then generates one function 
 Use `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The input supplies the parameter type, and the lambda's result supplies the output element type. The output has the same length as the input.
 
 ```text
-block widen(clk, words: u8[4]) -> u16[4] {
-    map(words, |word| {
-        let wide = word as u16;
-        wide + u16:1
-    })
+block offsets(clk, base: u32) -> u32[4] {
+    map(u32:0..u32:4, |i| base + i)
 }
 ```
 
-The lambda can use its parameter, its own local bindings, and visible pure helpers. Reading a value from an enclosing scope is a capture and produces an error, even for a constant local binding. A nested `map` may use its enclosing lambda's parameter as the array to transform. Its callback gets a fresh parameter of its own.
+The lambda can read enclosing values, including function arguments, earlier
+`let` bindings, register values, and child-block outputs. In `offsets`, every
+element uses the current value of `base`. A nested lambda can also capture
+the outer lambda's element. Parameters and local lets shadow enclosing names.
+The callback is pure and can call visible pure helpers.
+
+Captured values keep the width they had at the binding. For example, use
+`let bias = u8:3` when adding a constant bias to each element of a `u8`
+array. For compatibility with the pinned DSLX typechecker, annotate a
+capturing callback that returns a tuple or array literal, as in
+`map(xs, |x| -> (u8, u8) { (x, bias) })`.
 
 Write `|x: u8| -> u16 { ... }` to give explicit types. Give input literals their intended width before mapping. For example, `[1, 3]` supplies two-bit elements, so `map([1, 3], |x| x + 1)` yields `[2, 0]`. For eight-bit arithmetic, write `map([u8:1, u8:3], |x| x + 1)`. A result annotation is useful for a body that returns an unsized literal, as in `|_| -> u16 { 0 }`. A constant integer range is also a valid input, for example `map(u8:0..=u8:3, |x| x * x)`.
 
-BX emits an XLS IR `map` with a unary body function. If structural unrolling or generic block specialization creates multiple copies of the callback, those copies count toward the elaboration work limit. To emit SystemVerilog from a block that uses `map`, inline the map first.
+BX emits an XLS IR `map` when the callback needs no enclosing wires. For a
+capturing callback, BX evaluates the first element directly and lowers the
+remaining elements to a `counted_for` with the captures as invariant
+arguments. Structural unrolling and generic block specialization
+charge each copy of the callback to the elaboration work limit. Optimize the
+IR to inline maps and unroll counted loops before emitting SystemVerilog.
 
 ```shell
-xlsynth-driver bx2ir widen.bx > widen.ir
-opt_main --passes=map_inlining widen.ir > widen.inlined.ir
-xlsynth-driver block2sv widen.inlined.ir > widen.sv
+xlsynth-driver bx2ir offsets.bx > offsets.ir
+opt_main offsets.ir > offsets.opt.ir
+xlsynth-driver block2sv offsets.opt.ir > offsets.sv
 ```
 
 ### Counted for expressions

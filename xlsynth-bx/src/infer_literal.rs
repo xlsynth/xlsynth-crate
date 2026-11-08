@@ -16,6 +16,9 @@ use crate::typed::bits;
 struct Minimum {
     width: usize,
     signed: bool,
+    /// Outermost scope in which a contributing value was materialized. A
+    /// callback can reuse captured bits' signedness but cannot widen them.
+    bound_scope: Option<usize>,
     /// A single hex or binary literal can spell a signed bit pattern directly.
     has_prefix: bool,
     /// Aliases of one bound prefixed literal share its minimum annotation.
@@ -81,6 +84,7 @@ impl BindingWidths {
         let minimum = Minimum {
             signed,
             width,
+            bound_scope: None,
             has_prefix: false,
             origin: None,
             has_inline_literal: false,
@@ -89,6 +93,14 @@ impl BindingWidths {
         Self {
             members: BTreeMap::from([(Vec::new(), minimum)]),
             infer_at_use: false,
+        }
+    }
+
+    /// Assign a scope to newly bound literals, preserving the origin of each
+    /// member forwarded from an earlier binding.
+    pub(crate) fn bind_in_scope(&mut self, scope: usize) {
+        for minimum in self.members.values_mut() {
+            minimum.bound_scope.get_or_insert(scope);
         }
     }
 }
@@ -165,11 +177,13 @@ impl<'a> WidthLookup<'a> {
         }
     }
 
-    /// Determine whether this use selects an implicitly typed bound value.
-    pub(crate) fn is_inferred_reference(self, expr: &Expr) -> Result<bool, String> {
+    /// Determine whether this use selects a value that can widen in this scope.
+    pub(crate) fn can_widen_reference(self, expr: &Expr, scope: usize) -> Result<bool, String> {
         match expr {
             Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. } => {
-                collect_projected(expr, &[], Some(self), &mut None)
+                let mut minimum = None;
+                Ok(collect_projected(expr, &[], Some(self), &mut minimum)?
+                    && minimum.is_some_and(|m| m.can_widen_in(scope)))
             }
             _ => Ok(false),
         }
@@ -177,6 +191,10 @@ impl<'a> WidthLookup<'a> {
 }
 
 impl Minimum {
+    fn can_widen_in(&self, scope: usize) -> bool {
+        self.bound_scope.is_none_or(|bound| bound == scope)
+    }
+
     fn inferred_type(self) -> Result<Type, String> {
         if let Some(fold) = self.needs_accumulator_type {
             return Err(format!(
@@ -208,6 +226,7 @@ impl Minimum {
         Ok(Self {
             width: usize::try_from(width).map_err(|_| "integer literal is too wide")?,
             signed,
+            bound_scope: None,
             has_prefix: radix != 10,
             origin: None,
             has_inline_literal: true,
@@ -216,12 +235,19 @@ impl Minimum {
     }
 
     /// Unify two minimum annotations as DSLX does for same-type operands.
-    fn merge(self, other: Self) -> Self {
+    fn merge(mut self, other: Self) -> Self {
+        // Map scopes are numbered on entry, so an outer capture has a lower
+        // number than every local constraint with which it can be combined.
+        let bound_scope = match (self.bound_scope, other.bound_scope) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         if let (Some(a), Some(b)) = (&self.origin, &other.origin)
             && Rc::ptr_eq(a, b)
         {
             // The same unsized type constraint can reach both operands
             // through aliases. Applying it twice still denotes one literal.
+            self.bound_scope = bound_scope;
             return self;
         }
         let signed = self.signed || other.signed;
@@ -232,6 +258,7 @@ impl Minimum {
         Self {
             width: width + usize::from(signed && (needs_sign_bit(&self) || needs_sign_bit(&other))),
             signed,
+            bound_scope,
             // A group of distinct minimum annotations loses its radix prefix.
             has_prefix: false,
             origin: None,
@@ -466,6 +493,7 @@ fn collect_projected_with_calls(
             let next = Minimum {
                 signed: bound.signed,
                 width: bound.width,
+                bound_scope: bound.bound_scope,
                 has_prefix: bound.has_prefix && dslx,
                 origin: if dslx { bound.origin.clone() } else { None },
                 has_inline_literal: false,
@@ -891,7 +919,7 @@ pub(crate) fn projected_type_compatible(
     actual: &Type,
     expected: &Type,
     bindings: Option<&InferredBindings>,
-    allow_widen: bool,
+    widen_in_scope: Option<usize>,
 ) -> Result<bool, String> {
     fn member_matches(
         expr: &Expr,
@@ -899,7 +927,7 @@ pub(crate) fn projected_type_compatible(
         actual: &Type,
         expected: &Type,
         bindings: Option<&InferredBindings>,
-        allow_widen: bool,
+        widen_in_scope: Option<usize>,
     ) -> Result<bool, String> {
         if actual == expected {
             return Ok(true);
@@ -908,7 +936,7 @@ pub(crate) fn projected_type_compatible(
             (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
                 for (index, (a, b)) in a.iter().zip(b).enumerate() {
                     path.push(Member::TupleField(index));
-                    let matches = member_matches(expr, path, a, b, bindings, allow_widen)?;
+                    let matches = member_matches(expr, path, a, b, bindings, widen_in_scope)?;
                     path.pop();
                     if !matches {
                         return Ok(false);
@@ -927,7 +955,7 @@ pub(crate) fn projected_type_compatible(
                 },
             ) if n == m => {
                 path.push(Member::ArrayElement);
-                let matches = member_matches(expr, path, a, b, bindings, allow_widen)?;
+                let matches = member_matches(expr, path, a, b, bindings, widen_in_scope)?;
                 path.pop();
                 Ok(matches)
             }
@@ -938,7 +966,7 @@ pub(crate) fn projected_type_compatible(
                     return Ok(false);
                 };
                 if a_width > b_width
-                    || (!allow_widen && a_width != b_width)
+                    || (widen_in_scope.is_none() && a_width != b_width)
                     || a_signed && !b_signed
                 {
                     return Ok(false);
@@ -955,9 +983,13 @@ pub(crate) fn projected_type_compatible(
                     &mut minimum,
                 )?;
                 Ok(inferred
-                    && (a_width < b_width
-                        || minimum
-                            .is_some_and(|m| !m.signed && m.has_prefix && m.width == a_width)))
+                    && minimum.is_some_and(|m| {
+                        if a_width < b_width {
+                            widen_in_scope.is_some_and(|scope| m.can_widen_in(scope))
+                        } else {
+                            !m.signed && m.has_prefix && m.width == a_width
+                        }
+                    }))
             }
         }
     }
@@ -967,7 +999,7 @@ pub(crate) fn projected_type_compatible(
         actual,
         expected,
         bindings,
-        allow_widen,
+        widen_in_scope,
     )
 }
 
