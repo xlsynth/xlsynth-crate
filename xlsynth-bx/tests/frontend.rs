@@ -390,6 +390,35 @@ block call(clk, x: u8) -> u8 {{ {call}(x) }}"#
 }
 
 #[test]
+fn stage_checked_held_register_drives_a_live_adder() {
+    let source = r#"
+block add_held(clk, en: bool @0, x: u8 @0, r: u8 @1) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q + r
+}
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let pipeline = compile_pipeline_module(&rtl.system_verilog).unwrap();
+    let mut runner = FixtureRunner::new(&pipeline).unwrap();
+    let ports = runner.port_bindings();
+    let en = ports.input("en").unwrap();
+    let x = ports.input("x").unwrap();
+    let r = ports.input("r").unwrap();
+    for (enable, data, addend, expected) in [(1, 10, 2, 12), (0, 20, 3, 13), (1, 20, 3, 23)] {
+        let edge = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_u64(&en, enable)?;
+                drive.set_u64(&x, data)?;
+                drive.set_u64(&r, addend)
+            })
+            .unwrap();
+        assert_eq!(edge.outputs["out"].to_u64_if_known(), Some(expected));
+    }
+}
+
+#[test]
 fn a_guard_becomes_a_shared_enable_and_a_self_hold_expression_stays_a_mux() {
     let source = r#"
 block enables(clk, a: bool, b: bool, x: u8) -> (u8, u8, u8) {

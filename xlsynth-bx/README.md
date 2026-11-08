@@ -621,6 +621,39 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 - A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
 - A module with one concrete block declaration selects it as top. With multiple concrete declarations, a single concrete `pub block` selects the top. For other configurations, select the desired block on the returned package.
 
+### Pipeline stage annotations
+
+An output annotation such as `-> u8 @1` opts a block into stage checking. Data
+inputs default to `@0`. An input annotation such as `r: u8 @1` says the caller
+already supplies that input at stage 1.
+
+```text
+block add_held(clk, en: bool @0, x: u8 @0, r: u8 @1) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q + r
+}
+```
+
+The checker follows the output back to its inputs. A `let` adds zero stages,
+combinational operands must align, and a register adds one stage. Each write
+guard must align with the data at the write edge, including enclosing guards
+in nested `if` statements. Literals can be used at any stage. In the example,
+`q` and `r` are both at stage 1. When `en` is low, `q` holds its previous
+value and the sum still responds to `r`. A stage annotation checks alignment
+in the datapath. The block's enable and valid signals determine which
+transactions actually advance.
+
+A uniform result such as `-> Ports @1` checks every output port at stage 1.
+For different stages, use `-> Ports @(live: 0, saved: 1)` and list every
+output port. A tuple's port names are `out_0`, `out_1`, and so on. A field
+read such as `p.saved` follows that field's driver. Each aggregate input
+supplies a single stage shared by its fields.
+
+Register feedback such as `q := q + x;` is legal BX. Following a timed
+output back through that feedback currently produces a diagnostic. Timing
+through child block outputs and extern interfaces is also a follow-up.
+
 ### Calling a block
 
 An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
