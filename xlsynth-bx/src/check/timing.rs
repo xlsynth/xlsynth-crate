@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Opt-in stage inference for BX block outputs.
+//!
+//! Each driver records where a name gets its value. Once the drivers are
+//! indexed, the checker walks backwards from each annotated output.
+//! For `q + r`, it follows `q` to its register write, looks up input `r`,
+//! and checks that both reach the adder at the same stage.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,8 +15,8 @@ use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 
 const BLOCK_SCOPE: usize = 0;
 
-/// Check each declared output stage by following its expression back to the
-/// inputs.
+/// `ports` lists the block's physical outputs in declaration order.
+/// `port_names` contains those same names for validating a per-port annotation.
 pub(super) fn check_outputs(
     block: &CheckedBlock,
     ports: &[Param],
@@ -40,6 +45,8 @@ pub(super) fn check_outputs(
         return check(&[], *cycle);
     }
     for (index, port) in ports.iter().enumerate() {
+        // Suppose `saved` is field 0. In `@(live: 0, saved: 1)`, its stage
+        // is 1. Use its name for the annotation and its index for the value.
         let cycle = match expected {
             OutputCycles::Uniform(cycle) => *cycle,
             OutputCycles::ByPort(cycles) => cycles[&port.name],
@@ -54,12 +61,13 @@ pub(super) fn check_outputs(
     Ok(())
 }
 
-/// Literals are available at any stage. Unsupported expressions have an unknown
-/// stage.
+/// What the checker knows about the stage of an expression.
 #[derive(Clone, Copy)]
 enum Cycle {
     At(u64),
+    /// A literal such as `u8:1` can join `q + u8:1` at whatever stage `q` has.
     Independent,
+    /// The checker has no stage to compare against the output annotation.
     Unknown,
 }
 
@@ -119,6 +127,8 @@ enum Visit {
 /// guard.
 #[derive(Default)]
 struct Scope<'a> {
+    /// The enclosing scope's index and the condition that introduced this body.
+    /// The condition can refer to lets visible in the enclosing scope.
     parent: Option<(usize, &'a TypedExpr)>,
     guard_cycle: Option<Cycle>,
     drivers: BTreeMap<&'a str, Driver<'a>>,
@@ -152,6 +162,9 @@ impl<'a> Checker<'a> {
         for stmt in statements {
             let (binding_scope, name, driver) = match stmt {
                 CheckedStmt::Let { name, value } => (scope, name, Driver::Let(value)),
+                // In `if en { let d = x; q := d; }`, a later output can read
+                // `q` at block scope. Follow the write back into the if body
+                // to resolve `d` and find the enable for that write.
                 CheckedStmt::Write { name, value } => (
                     BLOCK_SCOPE,
                     name,
@@ -181,11 +194,14 @@ impl<'a> Checker<'a> {
     /// parent's enable.
     fn guard_cycle(&mut self, scope: usize, depth: usize) -> Result<Cycle, String> {
         let Some((parent, condition)) = self.scopes[scope].parent else {
+            // An unconditional write has an implicit true enable at any stage.
             return Ok(Cycle::Independent);
         };
         if let Some(cycle) = self.scopes[scope].guard_cycle {
             return Ok(cycle);
         }
+        // In `if a { if b { q := x; } }`, the inner write uses `a && b`.
+        // Infer `b` in the outer body, where its name was in scope.
         let outer = self.guard_cycle(parent, depth)?;
         let inner = self.infer(condition, parent, &[], depth)?;
         let cycle = outer.merge(inner, |a, b| {
@@ -205,6 +221,8 @@ impl<'a> Checker<'a> {
         fields: &[usize],
         depth: usize,
     ) -> Result<Cycle, String> {
+        // Depth counts DFS steps through operands and drivers. A register
+        // write adds a hardware stage.
         if depth > MAX_ELABORATION_DEPTH {
             return Err(format!(
                 "timing dependency depth exceeds {MAX_ELABORATION_DEPTH}"
@@ -245,6 +263,8 @@ impl<'a> Checker<'a> {
                 then_value,
                 else_value,
             } => {
+                // This is a data mux, as in `if sel { x } else { y }`.
+                // A statement such as `if en { q := x; }` uses guard_cycle.
                 let select = operand(condition, &[])?;
                 let left = operand(then_value, fields)?;
                 let right = operand(else_value, fields)?;
@@ -278,8 +298,12 @@ impl<'a> Checker<'a> {
             scope = parent;
         };
 
+        // Include the field path in the cache key because `p.saved` and
+        // `p.live` can come from different stages of the same struct.
         let read = (name, fields.to_vec());
         let reads = &mut self.scopes[scope].reads;
+        // With `q := x`, the second read in `q + q` reuses a finished result.
+        // With `q := q + x`, the RHS reaches `q` while its read is active.
         match reads.get(&read) {
             Some(Visit::Inferred(cycle)) => return Ok(*cycle),
             Some(Visit::Visiting) => {
@@ -292,6 +316,9 @@ impl<'a> Checker<'a> {
         let cycle = match driver {
             Driver::Let(rhs) => self.infer(rhs, scope, fields, depth)?,
             Driver::Register { rhs, write_scope } => {
+                // For `if en { q := x; }`, compare `en` and `x` on the input
+                // side of the edge. If both are @0, `q` is @1. A low enable
+                // holds the previous value in that same stage.
                 let data = self.infer(rhs, write_scope, fields, depth)?;
                 let enable = self.guard_cycle(write_scope, depth)?;
                 let input = enable.merge(data, |en, data| {

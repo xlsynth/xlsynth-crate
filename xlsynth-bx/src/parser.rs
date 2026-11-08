@@ -1463,6 +1463,8 @@ impl<'s> Parser<'s> {
     }
 
     /// Parse the common port list and result of a defined or external block.
+    /// Externs pass the ordinary typed-port parser. A defined block's
+    /// `data_param` also records an optional stage, as in `r: u8 @1`.
     fn block_signature(
         &mut self,
         name: String,
