@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: Apache-2.0
+// BVC sample k3-cone-c0865afd0d0b6b09-2f846be040fc:
+// https://bvc.xlsynth.org/sites/e722321a3221c2c7fb28a62a2799c00eaba175a4d3cefbfceca1ff331a935810/tech-mapped-asap7/?release=0.79.0&cohort=full-corpus&reference=area&sample=k3-cone-c0865afd0d0b6b09-2f846be040fc
+
+package replay_input
+
+fn __k3_cone_c0865afd0d0b6b09(leaf_138: bits[161] id=7034) -> bits[1] {
+  reverse.7035: bits[161] = reverse(leaf_138, id=7035)
+  one_hot.7036: bits[162] = one_hot(reverse.7035, lsb_prio=true, id=7036)
+  encode.7037: bits[8] = encode(one_hot.7036, id=7037)
+  bit_slice.7038: bits[7] = bit_slice(encode.7037, start=1, width=7, id=7038)
+  or_reduce.7039: bits[1] = or_reduce(bit_slice.7038, id=7039)
+  bit_slice.7040: bits[1] = bit_slice(leaf_138, start=160, width=1, id=7040)
+  not.7041: bits[1] = not(bit_slice.7040, id=7041)
+  ret nor.7042: bits[1] = nor(not.7041, or_reduce.7039, id=7042)
+}

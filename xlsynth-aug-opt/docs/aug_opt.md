@@ -253,6 +253,25 @@ scalar predicates too, including slices left after XLS removes a redundant
 reduction. They use the same reachable-ordinal evaluation, including the
 all-zero input sentinel and each arithmetic operation's original width.
 
+When the selected ordinals are the first `K` positions of an LSB-priority
+one-hot value, the same pass reduces the corresponding input bits directly:
+
+```text
+or_reduce(one_hot(x, lsb_prio=true)[0:K]) -> or_reduce(x[0:K])
+clz(x) >= K -> !or_reduce(x[W-K:W])
+```
+
+Here `1 <= K <= W`; the zero-input sentinel is excluded from the selected
+prefix. Reversed inputs use their original high bits. Either a predicate's
+true set or its complement can supply this prefix, even when the other set
+has fewer ordinals. Other truth sets retain the existing one-hot wiring.
+The same sharing and whole-function profitability checks apply to both forms.
+
+The [BVC c0865afd0d0b6b09 sample](https://bvc.xlsynth.org/sites/e722321a3221c2c7fb28a62a2799c00eaba175a4d3cefbfceca1ff331a935810/tech-mapped-asap7/?release=0.79.0&cohort=full-corpus&reference=area&sample=k3-cone-c0865afd0d0b6b09-2f846be040fc)
+tests `clz(x: u161) >= 2` inside a Boolean expression that simplifies to
+`x[160:161]`. The [regression test](../tests/clz_predicate_test.rs) checks
+equivalence and stability through the full optimizer.
+
 Scalar priority predicates that share a count are rewritten as a group only
 when every live use of the intervening count arithmetic is removed. For example,
 two equality tests exposed by bounded shift expansion can use one-hot bits

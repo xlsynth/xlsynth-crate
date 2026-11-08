@@ -626,7 +626,50 @@ fn priority_index_predicate(f: &ir::Fn, root: NodeRef) -> Option<(PriorityIndex,
     Some((priority_index(f, amount)?, predicate))
 }
 
-/// Selects the smaller truth set, using the one-hot invariant to complement it.
+/// A contiguous priority-input prefix that can replace selected one-hot bits.
+struct InputPrefix {
+    arg: NodeRef,
+    start: usize,
+    width: usize,
+}
+
+/// Recognizes the first K LSB-priority positions, excluding the zero sentinel.
+fn priority_input_prefix(
+    f: &ir::Fn,
+    index: &PriorityIndex,
+    sources: &[usize],
+) -> Option<InputPrefix> {
+    if sources.is_empty() || !sources.iter().copied().eq(0..sources.len()) {
+        return None;
+    }
+    let ctx = MatchCtx::new(f);
+    let bindings = ctx.matches(
+        index.encoded,
+        ir_match::encode(ir_match::one_hot(ir_match::any("input"), true)),
+    )?;
+    let input = bindings.get_node("input")?;
+    let input_width = ctx.bits_width(input)?;
+    let width = sources.len();
+    if width > input_width {
+        // The all-zero sentinel is not an input bit and cannot join a prefix.
+        return None;
+    }
+    if let Some(reversed) = ctx.matches(input, ir_match::unop(Unop::Reverse, ir_match::any("x"))) {
+        Some(InputPrefix {
+            arg: reversed.get_node("x")?,
+            start: input_width - width,
+            width,
+        })
+    } else {
+        Some(InputPrefix {
+            arg: input,
+            start: 0,
+            width,
+        })
+    }
+}
+
+/// Uses a direct input prefix, otherwise wiring the smaller one-hot truth set.
 fn wired_predicate(
     f: &mut ir::Fn,
     builder: &mut NodeAppender,
@@ -645,9 +688,32 @@ fn wired_predicate(
     }
     // one_hot sets exactly one of these bits, including its all-zero sentinel.
     // Complementing an arbitrary at-most-one value would be incorrect here.
-    let complement = rejected.len() < accepted.len();
-    let sources = if complement { rejected } else { accepted };
-    let wired = wired_result(f, builder, index.hot, &[sources])?;
+    let (prefix, complement) = if let Some(prefix) = priority_input_prefix(f, index, &accepted) {
+        (Some(prefix), false)
+    } else if let Some(prefix) = priority_input_prefix(f, index, &rejected) {
+        (Some(prefix), true)
+    } else {
+        (None, rejected.len() < accepted.len())
+    };
+    let wired = if let Some(prefix) = prefix {
+        // OR of the first K LSB-priority positions is just OR of the first K
+        // input bits. For reversed inputs this is the original high prefix:
+        // clz(x) >= K becomes NOT(OR(x[W-K:W])). Keep the existing complement
+        // and reachable-ordinal handling for affine arithmetic and sentinels.
+        let slice = builder.push(
+            f,
+            Type::Bits(prefix.width),
+            NodePayload::BitSlice {
+                arg: prefix.arg,
+                start: prefix.start,
+                width: prefix.width,
+            },
+        )?;
+        builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, slice))?
+    } else {
+        let sources = if complement { rejected } else { accepted };
+        wired_result(f, builder, index.hot, &[sources])?
+    };
     if complement {
         builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::Not, wired))
     } else {
@@ -818,7 +884,68 @@ pub fn rewrite_with_evaluator(
 mod tests {
     use super::*;
     use xlsynth_g8r::check_equivalence::check_equivalence_via_toolchain;
+    use xlsynth_pir::ir_eval::eval_fn_in_package_value;
     use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn scalar_priority_prefixes_reduce_input_bits_exhaustively() {
+        for input_width in 1..=8 {
+            let hot_width = input_width + 1;
+            let count_width = ceil_log2(hot_width);
+            for reverse in [false, true] {
+                let input = if reverse { "reversed" } else { "x" };
+                for prefix_width in 1..=input_width {
+                    let source = format!(
+                        r#"package prefix
+
+top fn main(x: bits[{input_width}] id=1) -> bits[1] {{
+  reversed: bits[{input_width}] = reverse(x, id=2)
+  hot: bits[{hot_width}] = one_hot({input}, lsb_prio=true, id=3)
+  count: bits[{count_width}] = encode(hot, id=4)
+  limit: bits[{count_width}] = literal(value={prefix_width}, id=5)
+  ret out: bits[1] = ult(count, limit, id=6)
+}}
+"#
+                    );
+                    let package = Parser::new(&source).parse_and_validate_package().unwrap();
+                    let original = package.get_top_fn().unwrap();
+                    let mut rewritten = original.clone();
+                    assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(1));
+                    ir_utils::compact_and_toposort_in_place(&mut rewritten).unwrap();
+                    let root = rewritten.get_node(rewritten.ret_node_ref.unwrap());
+                    let NodePayload::Unop(Unop::OrReduce, slice) = root.payload else {
+                        panic!("expected direct prefix reduction, got {:?}", root.payload);
+                    };
+                    let NodePayload::BitSlice { arg, start, width } =
+                        rewritten.get_node(slice).payload
+                    else {
+                        panic!("expected input slice");
+                    };
+                    assert!(matches!(
+                        rewritten.get_node(arg).payload,
+                        NodePayload::Param
+                    ));
+                    assert_eq!(
+                        start,
+                        if reverse {
+                            input_width - prefix_width
+                        } else {
+                            0
+                        }
+                    );
+                    assert_eq!(width, prefix_width);
+                    for value in 0..1u64 << input_width {
+                        let args = [IrValue::make_ubits(input_width, value).unwrap()];
+                        assert_eq!(
+                            eval_fn_in_package_value(&package, original, &args),
+                            eval_fn_in_package_value(&package, &rewritten, &args),
+                            "width={input_width}, prefix={prefix_width}, reverse={reverse}, input={value}",
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// Constructs unrelated priority encoders with exact-width affine indices.
     fn affine_case(n: usize, low: bool, form: &str, masked: bool) -> String {
