@@ -522,6 +522,13 @@ impl<'s> Parser<'s> {
         if self.peek(0) == text {
             self.pos += 1;
             true
+        } else if text == ">" && matches!(self.peek(0), ">>" | ">=") {
+            // In a type argument list, consume just the closing angle. This
+            // leaves the outer '>' of zero!<Packet<2>>() or the '=' of a let.
+            let token = &mut self.tokens[self.pos];
+            token.text = &token.text[1..];
+            token.start += 1;
+            true
         } else {
             false
         }
@@ -1124,6 +1131,26 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
+    /// Read the concrete u32 arguments of a DSLX struct application.
+    fn struct_arguments(&mut self) -> Result<Vec<u32>, String> {
+        self.expect("<")?;
+        self.list(">", |p| {
+            if p.eat("u32") {
+                p.expect(":")?;
+            }
+            let value = normalized_integer(p.peek(0))
+                .and_then(|text| {
+                    let (digits, radix) = radix_digits(&text);
+                    u32::from_str_radix(digits, radix).ok()
+                })
+                .ok_or_else(|| {
+                    p.error("expected a concrete nonnegative struct argument that fits u32")
+                })?;
+            p.pos += 1;
+            Ok(value)
+        })
+    }
+
     fn type_atom(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
         if self.eat("(") {
             return self.nested(|parser| {
@@ -1171,7 +1198,19 @@ impl<'s> Parser<'s> {
         } else if self.dslx_type_display {
             return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
         } else {
-            Type::Named(self.name_or_qualified_member()?)
+            // A cast can be followed immediately by a less-than comparison.
+            // Block type parameters can name scalar cast targets, including
+            // in a tuple of comparisons such as (x as T < 1, 2 > (y)).
+            let after_as = self.pos > 0 && self.tokens[self.pos - 1].text == "as";
+            let name = self.name_or_qualified_member()?;
+            if self.peek(0) == "<" && (!after_as || self.struct_arguments_end(self.pos).is_some()) {
+                Type::Applied {
+                    name,
+                    args: self.struct_arguments()?,
+                }
+            } else {
+                Type::Named(name)
+            }
         };
         Ok(ParsedType { value, depth: 0 })
     }
@@ -2050,6 +2089,14 @@ impl<'s> Parser<'s> {
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
         }
+        let struct_args = if self
+            .struct_arguments_end(self.pos)
+            .is_some_and(|end| self.tokens[end].text == ">" && self.tokens[end + 1].text == "{")
+        {
+            Some(self.struct_arguments()?)
+        } else {
+            None
+        };
         if self.peek(0) == "{" && self.struct_braces(braces) {
             self.pos += 1;
             let mut height = 0;
@@ -2063,7 +2110,14 @@ impl<'s> Parser<'s> {
                 height = height.max(value.height);
                 Ok((field, value.value))
             })?;
-            return self.compose(height, Expr::Struct { name, fields });
+            let value = match struct_args {
+                Some(args) => Expr::AppliedStruct { name, args, fields },
+                None => Expr::Struct { name, fields },
+            };
+            return self.compose(height, value);
+        }
+        if struct_args.is_some() {
+            return Err(self.error("parenthesize the struct literal in this expression"));
         }
         if name.contains("::") {
             return Err(
@@ -2097,14 +2151,61 @@ impl<'s> Parser<'s> {
         (self.tokens[end].text == ">" && self.tokens[end + 1].text == "(").then_some(end)
     }
 
-    /// Skip callback argument lists while looking for expression delimiters.
-    /// Offsets still refer to the enclosing token stream.
+    /// Recognize struct argument lists in expressions without consuming the
+    /// comma in a pair of comparisons such as `(x < 1, 2 > y)`.
+    fn struct_arguments_end(&self, angle: usize) -> Option<usize> {
+        if self.tokens[angle].text != "<" {
+            return None;
+        }
+        let count = self.tokens[angle + 1..]
+            .iter()
+            .take_while(|token| number_token(token.text) || matches!(token.text, "u32" | ":" | ","))
+            .count();
+        let end = angle + 1 + count;
+        let close = self.tokens[end].text;
+        if !matches!(close, ">" | ">>" | ">=") {
+            return None;
+        }
+        let next = self.tokens[end + 1].text;
+        if close == ">" && next == "{" {
+            return Some(end);
+        }
+        // Types directly inside zero! or following 'as' can have commas at
+        // expression nesting depth zero. Tuples and arrays delimit their own
+        // contents in expression_lookahead.
+        let (before_name, is_type_param) = match &self.tokens[..angle] {
+            [before @ .., _, separator, _] if separator.text == "::" => (before, false),
+            [before @ .., name] => (before, self.block_type_params.contains(name.text)),
+            [] => return None,
+        };
+        match before_name {
+            [.., zero, open] if zero.text == "zero!" && open.text == "<" => Some(end),
+            [.., cast]
+                if cast.text == "as"
+                    && !is_type_param
+                    && (matches!(
+                        next,
+                        "." | "[" | "as" | "," | ")" | "]" | "}" | ";" | "{" | ".." | "..="
+                    ) || BinaryOp::from_spelling(next).is_some()) =>
+            {
+                Some(end)
+            }
+            _ => None,
+        }
+    }
+
+    /// Skip callback and struct argument lists while looking for expression
+    /// delimiters. Offsets still refer to the enclosing token stream.
     fn expression_lookahead(&self, start: usize) -> impl Iterator<Item = (usize, &Token<'s>)> {
         let mut index = start;
         std::iter::from_fn(move || {
             let token = self.tokens.get(index)?;
             let offset = index - start;
-            index = self.callback_arguments_end(index).unwrap_or(index) + 1;
+            index = self
+                .callback_arguments_end(index)
+                .or_else(|| self.struct_arguments_end(index))
+                .unwrap_or(index)
+                + 1;
             Some((offset, token))
         })
     }
@@ -2739,6 +2840,206 @@ fn cmp_call(x:u8) -> bool { x < zero!<get>() }
         ));
         assert!(
             matches!(&module.functions[5].body, Expr::Binary { op: BinaryOp::Lt, right, .. } if matches!(right.as_ref(), Expr::ParametricCall { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_struct_arguments_parse_in_aggregate_types_and_constructors() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+use packets::Packet;
+fn build(x: u8) -> packets::Packet<u32:0x_f_f, 0b1_0> {
+    packets::Packet<255, u32:2> { x }
+}
+block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> {
+    let empty:Packet<2>=zero!<Packet<2>>();
+    if (Packet<2> { valid: true }).valid { empty } else { xs[u32:0].0 }
+}
+"#,
+        )?;
+        let qualified = Type::Applied {
+            name: "packets::Packet".into(),
+            args: vec![255, 2],
+        };
+        let packet = Type::Applied {
+            name: "Packet".into(),
+            args: vec![2],
+        };
+        let build = &module.functions[0];
+        assert_eq!(build.result, qualified);
+        assert_eq!(
+            build.body,
+            Expr::AppliedStruct {
+                name: "packets::Packet".into(),
+                args: vec![255, 2],
+                fields: vec![("x".into(), Expr::Name("x".into()))],
+            }
+        );
+        let stage = &module.blocks[0];
+        assert_eq!(stage.callback_params[0].result, packet);
+        assert_eq!(stage.result, packet);
+        assert_eq!(
+            stage.params[0].ty,
+            Type::Array {
+                element: Box::new(Type::Tuple(vec![packet.clone(), Type::Bool])),
+                size: 3,
+            }
+        );
+        assert!(
+            matches!(&stage.statements[..], [Stmt::Let { ty: Some(ty), value: Expr::Zero(zero_ty), .. }] if ty == &packet && zero_ty == &packet)
+        );
+        let Expr::If { condition, .. } = &stage.output else {
+            panic!("expected conditional block output");
+        };
+        assert!(
+            matches!(condition.as_ref(), Expr::Field { value, .. } if matches!(value.as_ref(), Expr::AppliedStruct { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn struct_arguments_preserve_expression_operators_and_delimiters() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+block compare<T>(clk, x: T, y: T) -> (bool, bool) {
+    (x as T < 1, 2 > (y >> u32:1))
+}
+block choose(clk, xs: u8[2]) -> u8[2] {
+    let ys = map(Packet<2,3> { xs }.xs, |v| v);
+    let zs = map(zero!<Packet<u32:2,3>>().xs, |v| v);
+    match (u8:1) + Packet<2,3> { tag: u8:0 }.tag { 0 => ys, _ => zs }
+}
+"#,
+        )?;
+        let Expr::Tuple(pair) = &module.blocks[0].output else {
+            panic!("expected a pair of comparisons");
+        };
+        assert!(
+            matches!(&pair[0], Expr::Binary { op: BinaryOp::Lt, left, .. } if matches!(left.as_ref(), Expr::Cast { ty: Type::Named(name), .. } if name == "T"))
+        );
+        assert!(
+            matches!(&pair[1], Expr::Binary { op: BinaryOp::Gt, right, .. } if matches!(right.as_ref(), Expr::Binary { op: BinaryOp::Shr, .. }))
+        );
+        let choose = &module.blocks[1];
+        assert!(matches!(
+            &choose.statements[..],
+            [
+                Stmt::Let {
+                    value: Expr::Map(_),
+                    ..
+                },
+                Stmt::Let {
+                    value: Expr::Map(_),
+                    ..
+                }
+            ]
+        ));
+        assert!(matches!(&choose.output, Expr::Match { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_struct_lookahead_preserves_separate_comparisons() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+use packets::Packet;
+fn compare(Packet:u32, y:u32) -> (bool,bool) {
+    (Packet < u32:1, u32:2 > (y))
+}
+fn both(a:bool, b:bool) -> bool { a && b }
+fn call(x:u32, y:u32) -> bool {
+    let Packet = x;
+    both(Packet < 1, 2 > (y))
+}
+extern fn match(x:u32) -> u32;
+block classify(clk, x:u32, y:u32) -> (bool,bool) {
+    (match(x) < 2, 3 > match y { _ => u32:1 })
+}
+"#,
+        )?;
+        let Expr::Tuple(pair) = &module.functions[0].body else {
+            panic!("expected a pair of comparisons");
+        };
+        let Expr::Scope { result, .. } = &module.functions[2].body else {
+            panic!("expected a shadowing binding");
+        };
+        let Expr::Call { args, .. } = result.as_ref() else {
+            panic!("expected a call with two comparisons");
+        };
+        let Expr::Tuple(dispatch) = &module.blocks[0].output else {
+            panic!("expected the legacy call and a match in separate comparisons");
+        };
+        for values in [pair, args, dispatch] {
+            assert!(matches!(
+                &values[..],
+                [
+                    Expr::Binary {
+                        op: BinaryOp::Lt,
+                        ..
+                    },
+                    Expr::Binary {
+                        op: BinaryOp::Gt,
+                        ..
+                    }
+                ]
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn struct_applications_require_concrete_u32_literals() {
+        for arguments in [
+            "N",
+            "u8:2",
+            "-1",
+            "u32:-1",
+            "4294967296",
+            "0x1_0000_0000",
+            "0b2",
+            "00",
+            "1+2",
+            "u32",
+            "2,,3",
+        ] {
+            for source in [
+                format!("fn f(x: Packet<{arguments}>) {{ }}"),
+                format!("fn f() {{ Packet<{arguments}> {{ x: u8:0 }} }}"),
+            ] {
+                assert!(parse_module(&source).is_err(), "{source}");
+            }
+        }
+        assert!(parse_module("fn f(x: Packet<u32:0xffff_ffff>) { }").is_ok());
+        assert!(
+            parse_module("fn f() -> bool { if Packet<2> { v: true }.v { true } else { false } }")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_struct_arguments_preserve_the_request_for_dslx_defaults() -> Result<(), String> {
+        let module = parse_module("fn f() -> Packet<> { Packet<> { x: zero!<Tag<>>() } }")?;
+        assert_eq!(
+            module.functions[0].result,
+            Type::Applied {
+                name: "Packet".into(),
+                args: vec![]
+            }
+        );
+        assert_eq!(
+            module.functions[0].body,
+            Expr::AppliedStruct {
+                name: "Packet".into(),
+                args: vec![],
+                fields: vec![(
+                    "x".into(),
+                    Expr::Zero(Type::Applied {
+                        name: "Tag".into(),
+                        args: vec![]
+                    })
+                )],
+            }
         );
         Ok(())
     }

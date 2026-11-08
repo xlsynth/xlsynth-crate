@@ -60,7 +60,9 @@ pub(crate) struct ImportResolver {
     bindings: BTreeMap<String, UseBinding>,
     subjects: BTreeSet<String>,
     stdlib_path: PathBuf,
-    imports: Option<ImportData>,
+    /// libxls v0.61 can leave ImportData invalid after a failed typecheck.
+    /// Subsequent native operations report the original resolution error.
+    imports: Result<Option<ImportData>, String>,
     structs: ImportedStructs,
     ids: HashMap<(String, String, Vec<Type>), usize>,
     calls: Vec<ImportedCall>,
@@ -132,7 +134,7 @@ impl ImportResolver {
             structs,
             subjects,
             stdlib_path: stdlib_path.to_owned(),
-            imports,
+            imports: Ok(imports),
             ids: HashMap::new(),
             calls: Vec::new(),
         })
@@ -184,6 +186,42 @@ impl ImportResolver {
         }
     }
 
+    /// Check the base declaration before generating a concrete DSLX type
+    /// witness.
+    pub(crate) fn check_struct_template_name(
+        &self,
+        subject: &str,
+        member: &str,
+    ) -> Result<(), String> {
+        if self.subjects.contains(subject)
+            && self.structs.has_public_struct_template(subject, member)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "type application '{subject}::{member}' requires a public parametric DSLX struct declaration"
+            ))
+        }
+    }
+
+    /// Use the shared native context until the first failed resolution.
+    fn with_imports<T>(
+        &mut self,
+        probe: impl FnOnce(&mut ImportedStructs, &mut ImportData) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let imports = self
+            .imports
+            .as_mut()
+            .map_err(|error| error.clone())?
+            .as_mut()
+            .expect("declared DSLX import graph");
+        let result = probe(&mut self.structs, imports);
+        if let Err(error) = &result {
+            self.imports = Err(error.clone());
+        }
+        result
+    }
+
     /// Resolve a source-level type reference using the declared import graph.
     pub(crate) fn resolve_named(&mut self, subject: &str, member: &str) -> Result<Type, String> {
         if !self.subjects.contains(subject) || !is_dslx_member_name(member) {
@@ -191,11 +229,28 @@ impl ImportResolver {
                 "invalid imported type reference '{subject}::{member}'"
             ));
         }
-        let imports = self.imports.as_mut().expect("declared DSLX import graph");
-        self.structs
-            .resolve_named(subject, member, imports)
-            .map_err(|e| self.structs.remap_diagnostic(e))
-            .map(Type::Named)
+        self.with_imports(|structs, imports| {
+            structs
+                .resolve_named(subject, member, imports)
+                .map_err(|e| structs.remap_diagnostic(e))
+                .map(Type::Named)
+        })
+    }
+
+    /// Resolve an explicitly applied public struct template in the same native
+    /// context as concrete aliases and inferred call results.
+    pub(crate) fn resolve_applied(
+        &mut self,
+        subject: &str,
+        member: &str,
+        args: &[u32],
+    ) -> Result<Type, String> {
+        self.check_struct_template_name(subject, member)?;
+        self.with_imports(|structs, imports| {
+            structs
+                .resolve_applied(subject, member, args, imports)
+                .map(Type::Named)
+        })
     }
 
     /// Struct layouts discovered through named references and inferred call
@@ -243,10 +298,6 @@ impl ImportResolver {
         on_new_inputs()?;
         let id = self.calls.len();
         let mut probe_imports = ProbeImports::default();
-        let data = self
-            .imports
-            .as_mut()
-            .expect("a declared subject has an import graph");
         let (params, expr) =
             probe_call(&mut probe_imports, &self.structs, module, function, &key.2)?;
         let witness = TypeWitness {
@@ -262,18 +313,18 @@ fn probe_{id}({}) {{ capture({}) }}
 "#,
             witness.imports, witness.params, witness.expr,
         );
-        let result = self
-            .structs
-            .check_probe(&source, &format!("0bx_signature_{id}"), data)
-            .and_then(|checked| {
-                let capture = ProbeCapture::new(&checked, |probe| {
-                    effect::diagnose(&checked, probe, &self.structs, module, function)
-                })?;
-                let ty = capture.param_type(0)?;
-                self.structs
-                    .reflect_result(module, function, &ty, data, &witness)
-            })
-            .map_err(|e| format!("{module}::{function}: {}", self.structs.remap_diagnostic(e)))?;
+        let result = self.with_imports(|structs, data| {
+            structs
+                .check_probe(&source, &format!("0bx_signature_{id}"), data)
+                .and_then(|checked| {
+                    let capture = ProbeCapture::new(&checked, |probe| {
+                        effect::diagnose(&checked, probe, structs, module, function)
+                    })?;
+                    let ty = capture.param_type(0)?;
+                    structs.reflect_result(module, function, &ty, data, &witness)
+                })
+                .map_err(|e| format!("{module}::{function}: {}", structs.remap_diagnostic(e)))
+        })?;
         self.calls.push(ImportedCall {
             module: key.0.clone(),
             function: key.1.clone(),
@@ -287,9 +338,9 @@ fn probe_{id}({}) {{ capture({}) }}
     /// Compile each imported module's requested specializations together.
     /// Separate packages keep DSLX names such as `a.b` and `a_b` distinct
     /// until BX links their generated IR symbols into the destination.
-    pub(crate) fn finish(mut self) -> Result<ResolvedImports, String> {
+    pub(crate) fn finish(self) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
-        if let Some(data) = self.imports.as_mut() {
+        if let Some(mut data) = self.imports? {
             let mut groups = BTreeMap::<(&str, bool), Vec<usize>>::new();
             for (id, call) in self.calls.iter().enumerate() {
                 let concrete = call
@@ -311,7 +362,7 @@ fn probe_{id}({}) {{ capture({}) }}
                     },
                     index,
                     &self.calls,
-                    isolated.as_mut().unwrap_or(data),
+                    isolated.as_mut().unwrap_or(&mut data),
                     &self.stdlib_path,
                     &self.structs,
                 )
@@ -349,6 +400,9 @@ fn normalize_import_type(ty: &mut Type, structs: &[StructDef]) -> Result<(), Str
             return Err(format!(
                 "unsupported nominal type '{name}' in imported function signature"
             ));
+        }
+        Type::Applied { name, .. } => {
+            return Err(format!("unresolved imported struct application '{name}'"));
         }
         Type::Bits { .. } | Type::Named(_) => {
             // Bits and resolved DSLX structs already have their canonical type.
@@ -400,6 +454,9 @@ impl ProbeImports {
                 Ok(format!("{}[{size}]", self.render_type(element, structs)?))
             }
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
+            Type::Applied { name, .. } => {
+                Err(format!("unresolved imported struct application '{name}'"))
+            }
         }
     }
 }
@@ -686,6 +743,115 @@ mod tests {
     use tempfile::tempdir;
     use xlsynth_pir::IrValue;
     use xlsynth_pir::ir_eval::eval_fn_in_package_value;
+
+    #[test]
+    fn applied_structs_share_native_layouts_with_aliases_and_inferred_results()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("wire.x"),
+            r#"
+pub struct Tag<N: u32 = {u32:7}, M: u32 = {N + N}> { value: u8 }
+pub type Seven = Tag<7>;
+pub fn make(x: u8) -> Seven { Seven { value: x } }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use wire;")?.uses;
+        for inferred_first in [false, true] {
+            let mut resolver = ImportResolver::new(&uses, &options)?;
+            let byte = Type::Bits {
+                signed: false,
+                width: 8,
+            };
+            let expected = Type::Named("wire::Tag<u32:7, u32:14>".into());
+            if inferred_first {
+                assert_eq!(
+                    resolver.resolve("wire", "make", vec![byte.clone()])?.1,
+                    expected
+                );
+            }
+            for args in [&[][..], &[7], &[7, 14]] {
+                assert_eq!(resolver.resolve_applied("wire", "Tag", args)?, expected);
+            }
+            assert_eq!(resolver.resolve_named("wire", "Tag")?, expected);
+            assert_eq!(resolver.resolve_named("wire", "Seven")?, expected);
+            assert_eq!(resolver.resolve("wire", "make", vec![byte])?.1, expected);
+            assert_eq!(resolver.struct_defs().len(), 1);
+            let probes = resolver.structs.type_witnesses();
+            assert_eq!(resolver.resolve_applied("wire", "Tag", &[7])?, expected);
+            assert_eq!(resolver.structs.type_witnesses(), probes);
+            assert_ne!(resolver.resolve_applied("wire", "Tag", &[7, 15])?, expected);
+            assert_eq!(resolver.struct_defs().len(), 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_applications_validate_the_template_before_probing_and_check_all_bindings()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("wire.x"),
+            r#"#![feature(generics)]
+pub struct Pair<N: u32, M: u32> { x: u8 }
+pub type Alias = Pair<1, 2>;
+pub struct Plain { x: u8 }
+struct Hidden<N: u32> { x: u8 }
+pub fn value() -> u8 { u8:0 }
+pub struct Small<N: u8> { x: u8 }
+pub struct Generic<N: u32, T: type = u8> { x: T }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let uses = crate::parse_module("use wire;")?.uses;
+        let mut resolver = ImportResolver::new(&uses, &options)?;
+        for member in ["Hidden", "Missing", "Plain", "value", "Alias", "Pair<1, 2>"] {
+            assert_eq!(
+                resolver.resolve_applied("wire", member, &[1]).unwrap_err(),
+                format!(
+                    "type application 'wire::{member}' requires a public parametric DSLX struct declaration"
+                )
+            );
+        }
+        assert_eq!(resolver.structs.type_witnesses(), 0);
+        assert_eq!(
+            resolver.resolve_applied("wire", "Pair", &[1, 2])?,
+            Type::Named("wire::Pair<u32:1, u32:2>".into())
+        );
+        for (member, args) in [
+            ("Pair", &[][..]),
+            ("Pair", &[1]),
+            ("Pair", &[1, 2, 3]),
+            ("Small", &[1]),
+            ("Generic", &[1]),
+            ("Generic", &[1, 2]),
+        ] {
+            let mut resolver = ImportResolver::new(&uses, &options)?;
+            let error = resolver.resolve_applied("wire", member, args).unwrap_err();
+            assert!(error.starts_with(&format!("wire::{member}<")), "{error}");
+            // Retrying against failed ImportData can abort inside libxls v0.61.
+            // Every entrypoint that could issue another probe retains the
+            // error.
+            assert_eq!(
+                resolver.resolve_applied("wire", "Pair", &[1]).unwrap_err(),
+                error
+            );
+            assert_eq!(resolver.resolve_named("wire", "Alias").unwrap_err(), error);
+            assert_eq!(
+                resolver.resolve("wire", "value", vec![]).unwrap_err(),
+                error
+            );
+            assert_eq!(resolver.finish().unwrap_err(), error);
+        }
+        Ok(())
+    }
 
     #[test]
     fn import_argument_types_use_dslx_widths_and_reject_nested_nominals() {

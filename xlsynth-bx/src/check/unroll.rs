@@ -597,38 +597,54 @@ impl BodyChecker<'_, '_> {
         self.check_expr_names(&fold.result, locals)
     }
 
+    /// Resolve the base name of an annotation or constructor without
+    /// instantiating a type in a lexical-only walk.
+    fn check_nominal_name(
+        &self,
+        name: &str,
+        applied: bool,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        if locals.contains(name) {
+            return Err(format!("'{name}' names a local value here"));
+        }
+        locals.reject_capture(name)?;
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if self.callback_index(head).is_some() {
+            return Err(format!(
+                "callable parameter '{head}' may only be used as a callee"
+            ));
+        }
+        if let Some(spec) = self.specialization {
+            if !applied && spec.bindings.declares(name) {
+                return Ok(());
+            }
+            spec.bindings.reject_value(name)?;
+        }
+        self.decls
+            .check_type_name_visibility(name, self.function_position)?;
+        if let Some((module, member)) =
+            lookup_use(name, self.resolver, |binding| locals.contains(binding))?
+        {
+            if applied {
+                self.resolver.check_struct_template_name(&module, &member)
+            } else {
+                self.resolver.check_member_name(&module, &member)
+            }
+        } else if applied {
+            Err(format!(
+                "'{name}' requires an imported DSLX struct template"
+            ))
+        } else {
+            self.structs.definition(name).map(|_| ())
+        }
+    }
+
     fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
-            Type::Named(name) if locals.contains(name) => {
-                return Err(format!("'{name}' names a local value here"));
-            }
-            Type::Named(name) => {
-                locals.reject_capture(name)?;
-                let head = name
-                    .split_once("::")
-                    .map_or(name.as_str(), |(head, _)| head);
-                if self.callback_index(head).is_some() {
-                    return Err(format!(
-                        "callable parameter '{head}' may only be used as a callee"
-                    ));
-                }
-                if let Some(spec) = self.specialization {
-                    if spec.bindings.declares(name) {
-                        return Ok(());
-                    }
-                    spec.bindings.reject_value(name)?;
-                }
-                self.decls
-                    .check_type_visibility(ty, self.function_position)?;
-                if let Some((module, member)) =
-                    lookup_use(name, self.resolver, |binding| locals.contains(binding))?
-                {
-                    self.resolver.check_member_name(&module, &member)?;
-                } else {
-                    self.structs.definition(name)?;
-                }
-            }
+            Type::Named(name) => self.check_nominal_name(name, false, locals)?,
+            Type::Applied { name, .. } => self.check_nominal_name(name, true, locals)?,
             Type::Tuple(items) => {
                 for item in items {
                     self.check_type_names(item, locals)?;
@@ -748,8 +764,9 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(arg, locals)?;
                 }
             }
-            Expr::Struct { name, fields } => {
-                self.check_type_names(&Type::Named(name.clone()), locals)?;
+            Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
+                locals.visited.set(locals.visited.get().saturating_add(1));
+                self.check_nominal_name(name, matches!(expr, Expr::AppliedStruct { .. }), locals)?;
                 for (_, value) in fields {
                     self.check_expr_names(value, locals)?;
                 }

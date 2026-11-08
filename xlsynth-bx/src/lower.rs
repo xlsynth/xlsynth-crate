@@ -603,7 +603,9 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         let value = state.expr(&block.output)?;
         for (index, port) in ports.iter().enumerate() {
             let field = match block.result {
-                Type::Named(_) | Type::Tuple(_) => state.project(value, index)?,
+                Type::Named(_) | Type::Applied { .. } | Type::Tuple(_) => {
+                    state.project(value, index)?
+                }
                 Type::Bits { .. } | Type::Bool | Type::Array { .. } => value,
             };
             state.builder.output_port(&port.name, field)?;

@@ -696,7 +696,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
     }
     fn rename_type(ty: &mut Type, aliases: &BTreeMap<String, String>) {
         match ty {
-            Type::Named(name) => rename(name, aliases),
+            Type::Named(name) | Type::Applied { name, .. } => rename(name, aliases),
             Type::Array { element, .. } => rename_type(element, aliases),
             Type::Tuple(fields) => fields.iter_mut().for_each(|f| rename_type(f, aliases)),
             Type::Bits { .. } | Type::Bool => { /* Primitive types have no references. */ }
@@ -731,7 +731,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         Expr::Tuple(fields) | Expr::Array(fields) => {
             fields.iter_mut().for_each(|f| capture_names(f, aliases))
         }
-        Expr::Struct { name, fields } => {
+        Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
             rename(name, aliases);
             for (_, value) in fields {
                 capture_names(value, aliases);

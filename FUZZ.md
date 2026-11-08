@@ -252,7 +252,7 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_graph --
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_imported_struct_parametrics.rs
 
-Generates DSLX structs with two value parameters and two specializations that share a field layout. One parameter can be absent from the fields, or both can contribute to the same field width. BX and native DSLX evaluate calls that consume an aliased input and an inferred, unaliased result. The consumer returns a value derived from both parameters, exposing lost bindings or incorrect specialization reuse. Both frontends must also reject passing or assigning the inferred result to the other specialization.
+Generates DSLX structs with two value parameters and two specializations that share a field layout. One parameter can be absent from the fields, or both can contribute to the same field width. BX blocks and local functions use concrete specializations in signatures, let annotations, and struct constructions alongside public aliases and inferred call results. The generator varies bare and typed `u32` arguments, omitted trailing defaults, and module-qualified and directly imported struct names. The DSLX reference qualifies imported constructors. Both frontends evaluate a consumer that observes both parameters on shared inputs and reject passing or assigning a result of the other specialization. This exposes lost bindings, incorrect specialization reuse, and field layout errors.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct_parametrics --sanitizer none`.
 

@@ -464,11 +464,11 @@ impl OutlineGraph {
 
     /// A concrete alias can expose an instance of a private struct without
     /// exposing its template. Binding inference needs the template itself.
-    pub(super) fn public_parametric_struct(&self, id: &DeclId) -> bool {
+    pub(super) fn public_parametric_struct(&self, subject: &str, name: &str) -> bool {
         self.modules
-            .get(&id.subject)
-            .and_then(|module| module.outline.declarations.get(&id.name))
-            .is_some_and(|decl| decl.is_public_struct_template(&id.name))
+            .get(subject)
+            .and_then(|module| module.outline.declarations.get(name))
+            .is_some_and(|decl| decl.is_public_struct_template(name))
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {
