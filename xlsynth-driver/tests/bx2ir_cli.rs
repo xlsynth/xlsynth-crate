@@ -9,9 +9,11 @@ use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
 use prost::Message;
+use tempfile::TempDir;
 use xlsynth_g8r::netlist::proto::pb;
 use xlsynth_pir::ir::MemberType;
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 fn driver(directory: &Path, arguments: &[&str]) -> std::io::Result<Output> {
@@ -32,6 +34,302 @@ fn stdout(directory: &Path, arguments: &[&str]) -> Result<String> {
         String::from_utf8_lossy(&output.stderr)
     );
     Ok(String::from_utf8(output.stdout)?)
+}
+
+const EFFECT_ARGS: &[&str] = &["bx2ir", "pipeline.bx", "--dslx-path=source files"];
+
+/// Build a named BX callback whose transitive DSLX multiplier has the given
+/// checks.
+fn multiplier_design(checks: &str) -> Result<TempDir> {
+    let directory = tempfile::tempdir()?;
+    let sources = directory.path().join("source files/math");
+    fs::create_dir_all(&sources)?;
+    fs::write(
+        sources.join("multiplier.x"),
+        format!(
+            r#"pub fn unused(x: u8) -> u8 {{
+    assert!(x != u8:0, "not_on_path");
+    x
+}}
+
+pub fn mul<N: u32>(x: uN[N]) -> uN[N] {{
+{checks}
+    x * x
+}}
+"#,
+        ),
+    )?;
+    fs::write(
+        sources.join("stage.x"),
+        r#"import math.multiplier;
+pub fn apply(x: u8) -> u8 { multiplier::mul(x) }
+"#,
+    )?;
+    fs::write(
+        directory.path().join("pipeline.bx"),
+        r#"use math::stage;
+block advance<In, Out, F: fn(In) -> Out>(clk, x: In) -> Out { F(x) }
+pub block pipeline(clk, x: u8) -> u8 {
+    let y = advance<stage::apply>(x);
+    y
+}
+"#,
+    )?;
+    Ok(directory)
+}
+
+/// Return an import rejection after verifying the CLI produced no partial IR.
+fn multiplier_error(directory: &TempDir) -> Result<String> {
+    let output = driver(directory.path(), EFFECT_ARGS)?;
+    anyhow::ensure!(
+        output.status.code() == Some(1),
+        "expected an import error, got {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    anyhow::ensure!(output.stdout.is_empty(), "rejected import emitted IR");
+    Ok(String::from_utf8(output.stderr)?)
+}
+
+#[test]
+fn transitive_runtime_width_assertions_point_at_the_multiplier() -> Result<()> {
+    let directory = multiplier_design(
+        r#"    assert!(N >= u32:2, "min_width");
+    assert!(N <= u32:32, "max_width");"#,
+    )?;
+    compare_golden_text(
+        &multiplier_error(&directory)?,
+        "tests/bx2ir_import_width_assertions.golden.txt",
+    );
+    Ok(())
+}
+
+#[test]
+fn first_effect_follows_dslx_call_order() -> Result<()> {
+    let directory = multiplier_design(r#"    assert!(N >= u32:2, "min_width");"#)?;
+    let call = "    let y = multiplier::mul(x);";
+    let assertion = r#"    assert!(x != u8:0, "stage_check");"#;
+    for (first, second, expected_location) in [
+        (call, assertion, "source files/math/multiplier.x:7:5"),
+        (assertion, call, "source files/math/stage.x:3:5"),
+        (
+            r#"    assert!(multiplier::mul(x) != u8:0, "stage_check");"#,
+            "    let y = x;",
+            "source files/math/multiplier.x:7:5",
+        ),
+    ] {
+        fs::write(
+            directory.path().join("source files/math/stage.x"),
+            format!(
+                r#"import math.multiplier;
+pub fn apply(x: u8) -> u8 {{
+{first}
+{second}
+    y
+}}
+"#
+            ),
+        )?;
+        let error = multiplier_error(&directory)?;
+        let first_location = error
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("--> "));
+        assert_eq!(first_location, Some(expected_location), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn compile_time_width_checks_use_native_dslx_validation() -> Result<()> {
+    let pure = multiplier_design(
+        r#"    const_assert!(N >= u32:2);
+    const_assert!(N <= u32:32);"#,
+    )?;
+    let ir = stdout(pure.path(), EFFECT_ARGS)?;
+    assert_eq!(
+        Parser::new(&ir).parse_and_verify_package()?.top,
+        Some(("pipeline".into(), MemberType::Block)),
+    );
+
+    let invalid = multiplier_design("    const_assert!(N >= u32:16);")?;
+    let error = multiplier_error(&invalid)?;
+    assert!(
+        error.contains("source files/math/multiplier.x:7:5-7:32"),
+        "{error}"
+    );
+    assert!(error.contains("const_assert! failure"), "{error}");
+    assert!(error.contains("N: u32:8"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn imported_coverage_reports_its_call_path() -> Result<()> {
+    let directory = multiplier_design(r#"    cover!("nonzero", x != uN[N]:0);"#)?;
+    compare_golden_text(
+        &multiplier_error(&directory)?,
+        "tests/bx2ir_import_cover.golden.txt",
+    );
+    Ok(())
+}
+
+#[test]
+fn effect_in_an_anonymous_map_reports_the_verified_dslx_path() -> Result<()> {
+    let map = r#"    let _ = map([x], |a: uN[N]| { assert!(a == uN[N]:0, "lambda"); a });"#;
+    for later in ["", r#"    assert!(N >= u32:2, "later_width_check");"#] {
+        let directory = multiplier_design(&format!("{map}\n{later}"))?;
+        compare_golden_text(
+            &multiplier_error(&directory)?,
+            "tests/bx2ir_import_implicit_token_path.golden.txt",
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn compile_time_invocations_can_contribute_to_an_implicit_token() -> Result<()> {
+    let directory = multiplier_design("")?;
+    for (extra_param, statement) in [
+        ("", r#"const K = assert!(true, "constant");"#),
+        ("", "const_assert!(helper(u8:1) != u8:0);"),
+        ("", "let _ = id<{helper(u8:1) as u32}>(x as u8);"),
+        (", M: u32 = {helper(u8:1) as u32}", ""),
+    ] {
+        fs::write(
+            directory.path().join("source files/math/multiplier.x"),
+            format!(
+                r#"fn helper(x: u8) -> u8 {{ assert!(x != u8:0, "helper_data"); x }}
+fn id<K: u32>(x: u8) -> u8 {{ x }}
+pub fn mul<N: u32{extra_param}>(x: uN[N]) -> u8 {{
+    {statement}
+    assert!(N > u32:0, "later_width");
+    helper(x as u8)
+}}"#,
+            ),
+        )?;
+        compare_golden_text(
+            &multiplier_error(&directory)?,
+            "tests/bx2ir_import_implicit_token_path.golden.txt",
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn repeated_builtin_or_callee_cannot_blame_a_later_width_assertion() -> Result<()> {
+    let check_diagnostic = |directory: &TempDir, later_line: usize| -> Result<()> {
+        let error = multiplier_error(directory)?;
+        let first_location = error
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("--> "));
+        let later_check = format!("source files/math/multiplier.x:{later_line}:5");
+        assert_ne!(first_location, Some(later_check.as_str()), "{error}");
+        assert!(!error.contains("const_assert!("), "{error}");
+        assert!(
+            error.contains("math.stage::apply -> math.multiplier::mul"),
+            "{error}"
+        );
+        Ok(())
+    };
+    let earlier_loop = r#"    let _ = for (_, acc): (u32, uN[N]) in u32:0..u32:1 {
+        assert!(acc != uN[N]:0, "loop_data");
+        acc
+    }(x);"#;
+    let width_check = r#"    assert!(N >= u32:2, "later_width");"#;
+    let loop_case = multiplier_design(&format!("{earlier_loop}\n{width_check}"))?;
+    check_diagnostic(&loop_case, 11)?;
+    let call_case = multiplier_design("")?;
+    for (formals, first_call, last_call) in [
+        ("<K: u32>", "helper<{N + u32:1}>(x as u8)", "helper<N>(y)"),
+        ("", "((helper))(x as u8)", "helper(y)"),
+        ("", "map([x as u8], (helper))[u32:0]", "helper(y)"),
+    ] {
+        fs::write(
+            call_case.path().join("source files/math/multiplier.x"),
+            format!(
+                r#"fn helper{formals}(x: u8) -> u8 {{
+    assert!(x != u8:0, "helper_data");
+    x
+}}
+pub fn mul<N: u32>(x: uN[N]) -> u8 {{
+    let y = {first_call};
+    assert!(N >= u32:2, "later_width");
+    {last_call}
+}}"#
+            ),
+        )?;
+        check_diagnostic(&call_case, 7)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_runtime_guard_on_a_transitive_call_suppresses_the_compile_time_hint() -> Result<()> {
+    let directory = multiplier_design(r#"    assert!(N >= u32:16, "min_width");"#)?;
+    fs::write(
+        directory.path().join("source files/math/stage.x"),
+        r#"import math.multiplier;
+pub fn apply(x: u8) -> u8 { if x != u8:0 { multiplier::mul(x) } else { x } }"#,
+    )?;
+    let error = multiplier_error(&directory)?;
+    assert!(
+        error.contains("source files/math/multiplier.x:7:5"),
+        "{error}"
+    );
+    assert!(!error.contains("const_assert!("), "{error}");
+    Ok(())
+}
+
+#[test]
+fn implicit_token_diagnostic_handles_nested_tuple_patterns() -> Result<()> {
+    // The pinned IR converter aborts on this nested singleton pattern.
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("effects.x"),
+        r#"pub fn inner(x: (u8, u8)) -> u8 {
+    let ((a), b) = x;
+    assert!(a == b, "x");
+    a + b
+}
+"#,
+    )?;
+    fs::write(
+        directory.path().join("pipeline.bx"),
+        "use effects; pub block pipeline(clk, x: (u8, u8)) -> u8 { effects::inner(x) }",
+    )?;
+    let output = driver(directory.path(), &["bx2ir", "pipeline.bx", "--dslx-path=."])?;
+    let error = String::from_utf8(output.stderr)?;
+    assert_eq!(output.status.code(), Some(1), "{error}");
+    assert!(error.contains("requires an implicit token"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn data_dependent_assertions_and_failures_report_the_original_operation() -> Result<()> {
+    for (checks, operation) in [
+        (
+            r#"    assert!(x != uN[N]:0, "nonzero_data");"#,
+            r#"assert!(x != uN[N]:0, "nonzero_data")"#,
+        ),
+        (
+            r#"    if x == uN[N]:0 { fail!("zero_data", x) } else { x };"#,
+            r#"fail!("zero_data", x)"#,
+        ),
+        (
+            r#"    if x != uN[N]:0 { assert!(N >= u32:2, "guarded"); x } else { x };"#,
+            r#"assert!(N >= u32:2, "guarded")"#,
+        ),
+    ] {
+        let directory = multiplier_design(checks)?;
+        let error = multiplier_error(&directory)?;
+        assert!(
+            error.contains("source files/math/multiplier.x:7:"),
+            "{error}"
+        );
+        assert!(error.contains(operation), "{error}");
+        // Each assertion predicate or its execution depends on runtime input x.
+        assert!(!error.contains("const_assert!("), "{error}");
+    }
+    Ok(())
 }
 
 #[test]

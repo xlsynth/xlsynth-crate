@@ -2,6 +2,8 @@
 
 //! Resolve DSLX imports and preserve the concrete IR functions selected by BX.
 
+mod effect;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -263,7 +265,9 @@ fn probe_{id}({}) {{ capture({}) }}
             .structs
             .check_probe(&source, &format!("0bx_signature_{id}"), data)
             .and_then(|checked| {
-                let capture = ProbeCapture::new(&checked)?;
+                let capture = ProbeCapture::new(&checked, |probe| {
+                    effect::diagnose(&checked, probe, &self.structs, module, function)
+                })?;
                 let ty = capture.param_type(0)?;
                 self.structs
                     .reflect_result(module, function, &ty, data, &witness)
@@ -486,7 +490,7 @@ fn probe(_bx_array_index: u32, {}) {{ let ({args},) = {}; capture({args}) }}
             self.expr,
         );
         let checked = structs.check_probe(&source, &format!("0bx_tuple_{probe_index}"), imports)?;
-        let capture = ProbeCapture::new(&checked)?;
+        let capture = ProbeCapture::new(&checked, |_| None)?;
         (0..arity).map(|index| capture.param_type(index)).collect()
     }
 }
@@ -498,7 +502,10 @@ struct ProbeCapture {
 }
 
 impl ProbeCapture {
-    fn new(checked: &TypecheckedModule) -> Result<Self, String> {
+    fn new(
+        checked: &TypecheckedModule,
+        effect_diagnostic: impl FnOnce(&dslx::Function) -> Option<String>,
+    ) -> Result<Self, String> {
         let module = checked.get_module();
         let mut functions = (0..module.get_member_count()).filter_map(|i| {
             match module.get_member(i).to_matchable() {
@@ -513,7 +520,9 @@ impl ProbeCapture {
             .requires_implicit_token(&probe)
             .map_err(|e| e.to_string())?
         {
-            return Err("function requires an implicit token and cannot be lifted into BX".into());
+            return Err(effect_diagnostic(&probe).unwrap_or_else(|| {
+                "function requires an implicit token and cannot be lifted into BX".into()
+            }));
         }
         let context = root
             .get_unique_invocation_callee_data(&capture)

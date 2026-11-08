@@ -1,0 +1,3 @@
+xlsynth-driver: bx2ir: pipeline.bx: block 'pipeline': let 'y': callable parameter 'F' of block 'advance': math.stage::apply: error: cannot import this DSLX function into BX because it requires an implicit token
+  |
+  = note: DSLX call path: math.stage::apply -> math.multiplier::mul
