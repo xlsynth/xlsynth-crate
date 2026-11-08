@@ -509,3 +509,6 @@ fn check_bundle(bundle: LeanBlockBundle, _fixture: &str) {
     });
     block_project::compile_project(root, sources);
 }
+
+#[path = "block_native/checked_extern.rs"]
+mod checked_extern;
