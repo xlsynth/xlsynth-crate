@@ -42,6 +42,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_block_callbacks"
+path = "fuzz_targets/fuzz_bx_dslx_block_callbacks.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_module_graph"
 path = "fuzz_targets/fuzz_bx_dslx_module_graph.rs"
 test = false

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod block_callbacks;
 mod counted_for;
 mod eval;
 mod function_calls;
@@ -12,6 +13,7 @@ mod module_graph;
 mod scalar_match;
 mod unroll_types;
 
+pub use block_callbacks::check_block_callbacks;
 pub use counted_for::check_counted_for;
 pub use function_calls::check_function_calls;
 pub use function_parametrics::check_function_parametrics;

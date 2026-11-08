@@ -15,6 +15,9 @@ use super::{
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum CallbackTarget<'m> {
     Local(&'m str),
+    /// The BX declaration supplies the source types. Lowering verifies its
+    /// linked IR function's signature and the purity of its reachable callees.
+    Extern(&'m str),
     Imported(usize),
 }
 

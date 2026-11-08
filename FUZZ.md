@@ -219,6 +219,12 @@ Compares BX functions specialized on named callbacks with independently generate
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_callbacks.rs
+
+Generates type-generic BX blocks with named callbacks, flattens their combinational child instances, and compares acceptance and computed outputs with ordinary DSLX calls using concrete inputs and compiled DSLX IR. It varies signedness, widths, aggregate shapes, callback identity in each position, and imported generic functions at different widths. It catches incorrect forward inference, stale specialization reuse, and mismatched argument or result shapes.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_callbacks --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,
