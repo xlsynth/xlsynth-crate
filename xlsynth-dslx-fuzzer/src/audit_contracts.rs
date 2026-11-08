@@ -7,7 +7,7 @@ use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
     nominal_contracts, observable_value_contracts, observer_contracts, pattern_acceptance,
-    scope_contracts, unrolled_loop_contracts,
+    scope_contracts, tuple_literal_contracts, unrolled_loop_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -34,6 +34,12 @@ pub enum AuditCase {
     PatternAcceptance {
         modules: Vec<SourceModule>,
     },
+    /// Compares the original binding against IR and an explicitly cast DSLX
+    /// runtime control.
+    TupleLiteral {
+        case: ContractCase,
+        runtime_module: SourceModule,
+    },
 }
 
 impl AuditCase {
@@ -45,6 +51,7 @@ impl AuditCase {
             }
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
+            Self::TupleLiteral { case, .. } => case.family,
         }
     }
 }
@@ -104,6 +111,17 @@ pub fn generate_v4(data: &[u8]) -> Result<AuditCase, String> {
         })
     } else {
         generate_v3(options)
+    }
+}
+
+/// Decodes audit-v5 inputs. A zero prefix preserves the source and oracle of
+/// audit-v4.
+pub fn generate_v5(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 4 == 3 {
+        Ok(tuple_literal_contracts::generate(options))
+    } else {
+        generate_v4(options)
     }
 }
 

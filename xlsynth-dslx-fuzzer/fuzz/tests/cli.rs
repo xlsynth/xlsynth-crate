@@ -110,6 +110,115 @@ IR"#,
 }
 
 #[test]
+fn tuple_literal_checks_the_uncasted_cli_and_separate_bytecode_source()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let typechecker = converter.with_file_name("typecheck_main");
+    let interpreter = converter.with_file_name("dslx_interpreter_main");
+    let run = || {
+        let case = audit_contracts::generate_v5(&[3])?;
+        check_audit(case, &converter, xlsynth::default_dslx_stdlib_path())
+    };
+    let original = "pub fn main(x: u8) -> u8 { let (a, _) = (1, x); a }";
+    let check_original = format!("set -eu\ntest \"$(cat sample.x)\" = '{original}'");
+    write_tool(&typechecker, &format!("{check_original}\ntouch types.pb"))?;
+    write_tool(
+        &interpreter,
+        r#"set -eu
+test ! -e types.pb
+grep -Fxq 'pub fn main(x: u8) -> u8 { let (a, _) = (1, x); a as u8 }' sample.x
+grep -Fxq 'fn literal_runtime() {' sample.x
+for flag in --evaluator=dslx-interpreter --compare=none --test_filter=literal_runtime; do
+  printf '%s\n' "$@" | grep -Fxq -- "$flag"
+done
+echo ran >> "$(dirname "$0")/runtime-runs"
+echo '[ RUN UNITTEST  ] literal_runtime' >&2
+echo '[            OK ]' >&2"#,
+    )?;
+    for (width, value, expected) in [(1, 1, 'X'), (8, 0, 'D'), (8, 1, 'P')] {
+        write_tool(
+            &converter,
+            &format!(
+                r#"{check_original}
+test -f types.pb
+cat <<'IR'
+package sample
+top fn __sample__main(x: bits[8] id=1) -> bits[{width}] {{
+  ret result: bits[{width}] = literal(value={value}, id=2)
+}}
+IR"#
+            ),
+        )?;
+        let result = run();
+        assert!(
+            matches!(
+                (expected, &result),
+                ('X', Err(CheckFailure::InvalidOutput(_)))
+                    | ('D', Err(CheckFailure::Disproved(_)))
+                    | ('P', Ok(EquivResult::Proved))
+            ),
+            "{result:?}"
+        );
+    }
+    write_tool(&converter, &format!("{check_original}\nkill -ABRT $$"))?;
+    assert!(
+        matches!(run(), Err(CheckFailure::ConverterRejected(message)) if message.contains("ir_converter_main"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("runtime-runs"))?,
+        "ran\nran\nran\nran\n"
+    );
+    std::fs::remove_file(converter.with_file_name("dslx_interpreter_main"))?;
+    assert!(matches!(run(), Err(CheckFailure::Checker(_))));
+    write_tool(&typechecker, "echo 'invalid source' >&2; exit 1")?;
+    assert!(
+        matches!(run(), Err(CheckFailure::ConverterRejected(message)) if message.contains("typecheck_main"))
+    );
+    Ok(())
+}
+
+#[test]
+fn tuple_literal_requires_a_completed_passing_runtime_comparison()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let interpreter = converter.with_file_name("dslx_interpreter_main");
+    write_tool(&converter.with_file_name("typecheck_main"), "exit 0")?;
+    write_tool(
+        &converter,
+        r#"cat <<'IR'
+package sample
+top fn __sample__main(x: bits[8] id=1) -> bits[8] {
+  ret result: bits[8] = literal(value=1, id=2)
+}
+IR"#,
+    )?;
+    let run = || {
+        let case = audit_contracts::generate_v5(&[3, 2])?;
+        check_audit(case, &converter, xlsynth::default_dslx_stdlib_path())
+    };
+    write_tool(
+        &interpreter,
+        "echo '[===============] 0 test(s) ran; 0 failed; 0 skipped.' >&2",
+    )?;
+    assert!(matches!(run(), Err(CheckFailure::Checker(_))));
+    write_tool(
+        &interpreter,
+        r#"echo '[ RUN UNITTEST  ] literal_runtime' >&2
+echo '~~~~^ FailureError: lhs and rhs were not equal' >&2
+echo '[        FAILED ] literal_runtime' >&2
+exit 1"#,
+    )?;
+    assert!(matches!(run(), Err(CheckFailure::Disproved(_))));
+    write_tool(&interpreter, "kill -ABRT $$")?;
+    assert!(
+        matches!(run(), Err(CheckFailure::ConverterRejected(message)) if message.contains("dslx_interpreter_main"))
+    );
+    Ok(())
+}
+
+#[test]
 fn standalone_output_is_the_program_under_proof() -> Result<(), Box<dyn std::error::Error>> {
     let mut lane = Body::new(BitsType {
         signed: false,

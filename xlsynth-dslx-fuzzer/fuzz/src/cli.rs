@@ -118,6 +118,10 @@ pub fn check_audit(
         AuditCase::PatternAcceptance { modules } => {
             check_pattern_acceptance(&modules, converter, stdlib)
         }
+        AuditCase::TupleLiteral {
+            case,
+            runtime_module,
+        } => check_tuple_literal(case, &runtime_module, converter, stdlib),
     }
 }
 
@@ -131,13 +135,7 @@ fn check_pattern_acceptance(
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let directory = directory.path();
     write_modules(modules, directory)?;
-    let typecheck = run_dslx_tool(
-        &converter.with_file_name("typecheck_main"),
-        stdlib,
-        directory,
-        &["--fatal_on_internal_error=true", "--output_path=types.pb"],
-        None,
-    )?;
+    let typecheck = run_typechecker(converter, stdlib, directory)?;
     if !typecheck.status.success() {
         let stderr = String::from_utf8_lossy(&typecheck.stderr);
         // Independent pattern and value shapes intentionally include type
@@ -188,6 +186,115 @@ fn check_pattern_acceptance(
     Ok(EquivResult::Proved)
 }
 
+/// Checks the original binding's type and emitted IR. Only the separate
+/// bytecode comparison adds a cast to the value consumed by the return or call.
+fn check_tuple_literal(
+    case: ContractCase,
+    runtime_module: &SourceModule,
+    converter: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let directory = directory.path();
+    write_modules(&case.modules, directory)?;
+    let typecheck = run_typechecker(converter, stdlib, directory)?;
+    if !typecheck.status.success() {
+        return Err(rejection("typecheck_main", &typecheck, &case.modules));
+    }
+
+    // Exercise bytecode even when the original converter crashes or emits a
+    // narrow result. Missing tools or an unexecuted test invalidate the check.
+    let runtime = check_literal_runtime(runtime_module, converter, stdlib);
+    if let Err(failure @ CheckFailure::Checker(_)) = runtime {
+        return Err(failure);
+    }
+    let prepared = convert_modules(
+        case.modules,
+        case.expected_ir,
+        converter,
+        stdlib,
+        directory,
+        None,
+        true,
+    )?;
+    parse_contract_ir(&prepared)?;
+    let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same)?;
+    // Report a failure of the unmodified program first when both programs ran.
+    runtime?;
+    // Only replay the original in-process after its standalone conversion and
+    // proof succeed. A crashing helper call must stay in the child process.
+    native_feedback(&prepared, stdlib, directory, None)?;
+    Ok(verdict)
+}
+
+/// Executes the casted comparison in the DSLX bytecode interpreter and
+/// verifies that its named unit test actually ran.
+fn check_literal_runtime(
+    module: &SourceModule,
+    converter: &Path,
+    stdlib: &Path,
+) -> Result<(), CheckFailure> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let modules = std::slice::from_ref(module);
+    write_modules(modules, directory.path())?;
+    let output = run_dslx_tool(
+        &converter.with_file_name("dslx_interpreter_main"),
+        stdlib,
+        directory.path(),
+        &[
+            "--evaluator=dslx-interpreter",
+            "--compare=none",
+            "--test_filter=literal_runtime",
+        ],
+        None,
+    )?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let ran = stderr
+        .lines()
+        .any(|line| line == "[ RUN UNITTEST  ] literal_runtime");
+    if output.status.success() {
+        if ran && stderr.lines().any(|line| line == "[            OK ]") {
+            return Ok(());
+        }
+        return Err(CheckFailure::Checker(format!(
+            "DSLX interpreter did not confirm the literal_runtime test ran: {stderr}\n{module:#?}"
+        )));
+    }
+    if ran
+        && output.status.code() == Some(1)
+        && stderr.lines().any(|line| line.contains("^ FailureError:"))
+    {
+        return Err(CheckFailure::Disproved(format!(
+            "Casted DSLX runtime comparison failed: {stderr}\n{module:#?}"
+        )));
+    }
+    Err(rejection("dslx_interpreter_main", &output, modules))
+}
+
+/// Typechecks the unmodified entry module before the converter is invoked.
+fn run_typechecker(
+    converter: &Path,
+    stdlib: &Path,
+    directory: &Path,
+) -> Result<Output, CheckFailure> {
+    run_dslx_tool(
+        &converter.with_file_name("typecheck_main"),
+        stdlib,
+        directory,
+        &["--fatal_on_internal_error=true", "--output_path=types.pb"],
+        None,
+    )
+}
+
+/// Validates the standalone converter's output before the equivalence proof.
+fn parse_contract_ir(prepared: &PreparedSample) -> Result<xlsynth::IrPackage, CheckFailure> {
+    xlsynth::IrPackage::parse_ir(&prepared.converted_ir, None).map_err(|error| {
+        CheckFailure::InvalidOutput(format!(
+            "C++ IR parser rejected converter output: {error}\n{prepared:#?}"
+        ))
+    })
+}
+
 /// The observable traces expected from a single execution of the converted top.
 #[derive(Debug)]
 enum TraceExpectation<'a> {
@@ -212,11 +319,7 @@ fn check_semantic_contract(
         None,
         true,
     )?;
-    let package = xlsynth::IrPackage::parse_ir(&prepared.converted_ir, None).map_err(|error| {
-        CheckFailure::InvalidOutput(format!(
-            "C++ IR parser rejected converter output: {error}\n{prepared:#?}"
-        ))
-    })?;
+    let package = parse_contract_ir(&prepared)?;
     let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same);
     let feedback = native_feedback(&prepared, stdlib, directory.path(), None);
     let outcome = verdict?;

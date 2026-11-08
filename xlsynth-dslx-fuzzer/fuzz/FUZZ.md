@@ -94,6 +94,15 @@ A crash in either executable or a converter rejection after successful typecheck
 is retained as a finding. For this property `P` means the acceptance check passed.
 Prefix an audit-v3 input with one zero byte to replay it in a separate audit-v4 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v5` to exercise tuple-bound integer
+literals used directly as results or passed to typed helpers. The worker
+typechecks and converts the original source, compares the exact IR signature,
+and proves the value against an independently constructed constant. In a
+separate module, DSLX bytecode executes the same program with an explicit cast
+at the binding's use and checks the expected typed result. Provide the matching
+`dslx_interpreter_main` and `typecheck_main` next to `ir_converter_main`.
+A zero prefix embeds any audit-v4 input in the separate audit-v5 corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format

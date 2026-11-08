@@ -27,6 +27,7 @@ pub mod range_match;
 mod scope_contracts;
 pub mod select_fold;
 pub mod sum_pattern;
+mod tuple_literal_contracts;
 pub mod tuple_pattern;
 mod unrolled_loop_contracts;
 

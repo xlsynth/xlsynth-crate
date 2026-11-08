@@ -384,6 +384,9 @@ casts to declared enum values across bit widths, and derived methods in maps.
 The `audit-v4` grammar independently varies tuple binding patterns and subject
 types. A clean type error is an allowed outcome. A pattern accepted by the
 standalone typechecker must convert successfully.
+The `audit-v5` grammar checks the inferred widths of tuple-bound integer
+literals used as return values or function arguments. It converts the
+original source and executes a separately cast control in DSLX bytecode.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 
