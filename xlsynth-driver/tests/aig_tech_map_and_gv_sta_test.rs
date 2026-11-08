@@ -778,8 +778,9 @@ fn strategies_preserve_default_and_cli_semantics() {
 }
 
 /// Checks default optimization, explicit overrides, budget, and equivalence.
-#[test]
-fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
+#[test_case("area")]
+#[test_case("delay")]
+fn fanout_cli_preserves_equivalence_budget_and_determinism(strategy: &str) {
     let dir = tempfile::tempdir().unwrap();
     let aig_path = dir.path().join("input.aag");
     let lib_path = dir.path().join("cells.textproto");
@@ -793,8 +794,9 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
     let aig = builder.build();
     std::fs::write(&aig_path, emit_aiger(&aig, true).unwrap()).unwrap();
 
-    // Cheap NAND2 violates its drive limit; a slightly larger equivalent cell
-    // improves delay within the default 5% total-area budget.
+    // Cheap NAND2 violates its drive limit; a slightly larger size-only cell
+    // is unavailable to covering but repairs delay within the default 5%
+    // budget.
     let base = make_timing_enabled_inv_nand2_liberty_textproto();
     let start = base.find("cells: {\n  name: \"NAND2\"").unwrap();
     let end = base.find("default_output_load:").unwrap();
@@ -803,7 +805,10 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
         "function_string_id: 5\n    max_capacitance: 0.001",
     );
     let fast = weak
-        .replace("name: \"NAND2\"", "name: \"NAND_FAST\"")
+        .replace(
+            "name: \"NAND2\"",
+            "name: \"NAND_FAST\" use_for_size_only: true",
+        )
         .replace("area: 2.0", "area: 2.1")
         .replace("values: 2.0", "values: 0.2")
         .replace("values: 2.1", "values: 0.3");
@@ -826,12 +831,21 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
         command
             .arg("aig-tech-map")
             .arg(&aig_path)
-            .args(["--strategy", "area", "--liberty_proto"])
+            .args(["--strategy", strategy, "--liberty_proto"])
             .arg(&lib_path)
             .arg("--netlist_out")
             .arg(&netlist_path)
             .arg("--json_out")
             .arg(&report_path);
+        if strategy == "delay" {
+            command.args([
+                "--primary-input-transition",
+                "0.01",
+                "--module-output-load",
+                "0.01",
+                "--area-recovery=false",
+            ]);
+        }
         match mode {
             "disabled" => {
                 command.arg("--fanout-opt=false");
@@ -842,7 +856,7 @@ fn area_fanout_cli_preserves_equivalence_budget_and_determinism() {
             "explicit-enable" => {
                 command.arg("--fanout-opt=true");
             }
-            _ => {} // Exercise implicit area-mode enablement.
+            _ => {} // Exercise implicit strategy-specific enablement.
         }
         if mode == "zero-budget" {
             command.args(["--fanout-max-area-growth", "0"]);
@@ -1865,7 +1879,11 @@ lut_shapes: {{ template_id: 1 index_1_id: 1 dimensions: 2 }}
     )?;
     let lib = load_liberty_from_path(&lib_path)?;
     for (flags, cells, delay) in [
-        (&["--area-recovery=false"][..], &["AND2"][..], 5.0),
+        (
+            &["--area-recovery=false", "--fanout-opt=false"][..],
+            &["AND2"][..],
+            5.0,
+        ),
         (&[][..], &["NAND2", "INV"][..], 3.0),
     ] {
         let report_path = dir.path().join("mapping.json");
@@ -1945,16 +1963,21 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
         )
         .replace("area: 2.0", "area: 1.0");
     std::fs::write(&lib, format!("{text}\ncells: {{{recovery_cell}")).unwrap();
-    for repair in [false, true] {
+    let mut default_result = None;
+    for repair_flag in [None, Some(false), Some(true)] {
+        let repair = repair_flag.unwrap_or(true);
         let run_map = |filename: &str, extra: &[&str]| {
             let netlist = dir.path().join(filename);
             let report = netlist.with_extension("json");
-            let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-                .arg("aig-tech-map")
+            let mut command = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"));
+            command.arg("aig-tech-map");
+            if let Some(repair) = repair_flag {
+                command.arg(format!("--fanout-opt={repair}"));
+            }
+            let output = command
                 .arg(&aig)
                 .args(["--strategy", "delay", "--liberty_proto"])
                 .arg(&lib)
-                .arg(format!("--fanout-opt={repair}"))
                 .args([
                     "--primary-input-transition",
                     "0.03",
@@ -2076,6 +2099,11 @@ fn delay_area_recovery_composes_after_fanout_with_shared_model_and_budgets() {
             String::from_utf8_lossy(&decoded.stderr)
         );
         assert_eq!(decoded.stdout, optimized_gv);
+        match repair_flag {
+            None => default_result = Some((optimized_gv, report)),
+            Some(true) => assert_eq!(Some((optimized_gv, report)), default_result),
+            Some(false) => assert!(report.get("fanout_optimization").is_none()),
+        }
     }
 }
 

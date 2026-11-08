@@ -1076,10 +1076,12 @@ units, frozen for **every cell** during selection. One state per polarity, fixed
 shared boundaries, ideal wires and fixed loads are approximations, not a global
 optimum or hard delay constraint. Every input pin must have applicable timing for
 both output edges; complementary rise/fall arcs are combined. Validate the emitted
-network with `gv-sta` and formal equivalence. Fanout optimization is off by default
-for delay mode; enable it explicitly with `--fanout-opt=true`.
+network with `gv-sta` and formal equivalence. Fanout optimization is enabled by
+default for delay mode to repair the load and slew effects omitted by the
+frozen-reference covering model. Use
+`--fanout-opt=false` to disable it.
 
-Delay mode follows covering (and optional fanout optimization) with bounded
+Delay mode follows covering and fanout optimization with bounded
 area recovery using the native resizer. It substitutes cheaper equivalent cells
 without increasing the boundary delay reached before recovery, and allows no
 area growth. If consumer demands change a shared polarity, the mapper runs the
@@ -1087,9 +1089,10 @@ enabled timing stages on both covers and selects the lower final output arrival,
 using area to break ties. Both covers reuse the same cut search. An explicit
 recovery evaluation budget is shared between them. The JSON optimization reports
 describe the selected cover.
-Use `--area-recovery=false` for the original raw delay cover, or combine it with
-`--fanout-opt=false` to disable both post-mapping stages. Area recovery is off
-by default for area mode and unsupported for nand2.
+Use `--area-recovery=false` to disable recovery while retaining fanout repair.
+Combine it with `--fanout-opt=false` for the original raw delay cover, disabling
+both post-mapping stages. Area recovery is off by default for area mode and
+unsupported for nand2.
 
 - `--area-recovery[=true|false]`: default true for delay, false otherwise.
 - `--area-recovery-rounds <COUNT>`: default 2; zero disables recovery search.
@@ -1146,14 +1149,15 @@ Key flags:
   redirected streams.
   On Unix, a JSON FIFO cannot be combined with a netlist sent to a stdout pipe or socket.
 
-With `--strategy area`, fanout optimization is enabled by default: a bounded
+With `--strategy area` or `--strategy delay`, fanout optimization is enabled by
+default: a bounded
 post-mapping pass tries equivalent
 cell upsizing, buffering, and replication. Each accepted edit improves modeled
 worst delay and the delay/area score. The pass requires timing-enabled Liberty;
 timing uses pin capacitances plus optional affine wire capacitance. Use
 `--fanout-opt=false` for raw area mapping without timing requirements. Bare
 `--fanout-opt` and `--fanout-opt=true` explicitly enable the pass. The default
-`nand2` and `delay` strategies leave it disabled. Enabling it requires
+`nand2` strategy leaves it disabled. Enabling it requires
 `--strategy area` or `--strategy delay`.
 Missing or unusable timing data, or a missing output-load default without an
 explicit `--module-output-load`, causes an error before outputs are written; the
