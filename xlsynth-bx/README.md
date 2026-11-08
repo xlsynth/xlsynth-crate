@@ -266,6 +266,35 @@ block tag_header(clk, h: Header) -> Header {
 
 BX can read fields through a private struct nested inside a public one. To pass the nested value itself as a DSLX function argument, expose its type through a public name or type alias. A public DSLX type alias preserves the identity of its underlying struct. Imported calls accept these structs as arguments and results, alongside bits, booleans, tuples, and fixed-size arrays. Functions must be public and pure. Linked functions and their module path components use letters, digits, and underscores so their generated names are valid XLS IR identifiers. Parametric values must be inferable from the arguments and DSLX defaults. Functions such as `std::lsbs` require an explicit result-width parameter and are outside this syntax.
 
+BX also accepts concrete instances of public DSLX struct templates with `u32`
+value parameters. Use a public DSLX alias to name the instance in a BX port,
+register, or struct literal. For example, `float32::F32` names
+`apfloat::APFloat<8, 23>` in the bundled DSLX standard library.
+
+```text
+use float32::F32;
+use apfloat;
+
+block fp_add(clk, a: F32, b: F32) -> F32 {
+    apfloat::add(a, b)
+}
+```
+
+For a custom port type, declare a DSLX alias such as
+`pub type Half = apfloat::APFloat<5, 10>;` and import `Half`. An imported
+function can return a new instance by naming the public template or a concrete
+alias in its DSLX result type. BX recovers the instance's `u32` bindings from
+the checked value, including parameters that do not appear in any field.
+
+The pinned DSLX converter can emit invalid IR or dispatch to the wrong helper
+when a type-valued parameter such as `T: type` is bound to a struct. When a
+BX call passes or returns a concrete parametric struct, its imported DSLX
+functions can use bits and arrays of bits as type-valued arguments. BX
+diagnoses unsupported aggregate bindings, ambiguous
+native symbols, and method dispatches whose specialization the converter API
+cannot verify. DSLX `map` callbacks and indirect calls are outside this subset.
+Functions such as `apfloat::add` specialize on ordinary value parameters.
+
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 
 BX can follow a direct helper call in the body of a counted loop over a nonempty literal range, such as `for (_, acc) in u32:0..u32:1 { leaf::checked(acc) }(x)`. If the body branches between helpers, the range might be empty, or the initializer could introduce an earlier effect, BX reports the call path it can verify.

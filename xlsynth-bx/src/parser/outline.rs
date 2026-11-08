@@ -41,6 +41,12 @@ impl OutlineDecl {
     pub(crate) fn has_public_spelling(&self, name: &str) -> bool {
         self.public && is_use_identifier(name)
     }
+
+    pub(crate) fn is_public_struct_template(&self, name: &str) -> bool {
+        self.parametric
+            && self.has_public_spelling(name)
+            && matches!(self.kind, OutlineKind::Struct { .. })
+    }
 }
 
 /// Type declarations and ordered members as written, before typechecking.
@@ -82,7 +88,22 @@ pub enum OutlineShape {
 /// Parse declaration syntax while retaining expressions for DSLX to evaluate.
 /// Function bodies are skipped as balanced tokens in the same source snapshot.
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(source, |_, _, _, _| {})
+    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {})
+}
+
+/// Index semantic sums for resolving checked constructor and pattern paths.
+/// They retain their existing opaque representation in the public outline.
+pub(crate) fn outline_with_sum_names(
+    source: &str,
+    sums: &mut BTreeSet<String>,
+) -> Result<DslxOutline, String> {
+    parse_outline_with_functions(
+        source,
+        |_, _, _, _| {},
+        |name| {
+            sums.insert(name.to_owned());
+        },
+    )
 }
 
 /// Original declaration tokens for a checked DSLX function. Defaults and
@@ -100,14 +121,18 @@ pub(crate) fn dslx_function_tokens(
 ) -> Result<BTreeMap<String, DslxFunctionTokens<'_>>, String> {
     let mut functions = BTreeMap::new();
     let mut ambiguous = false;
-    parse_outline_with_functions(source, |name, bindings, signature, body| {
-        let tokens = DslxFunctionTokens {
-            bindings: bindings.to_vec(),
-            signature: signature.to_vec(),
-            body: body.to_vec(),
-        };
-        ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
-    })?;
+    parse_outline_with_functions(
+        source,
+        |name, bindings, signature, body| {
+            let tokens = DslxFunctionTokens {
+                bindings: bindings.to_vec(),
+                signature: signature.to_vec(),
+                body: body.to_vec(),
+            };
+            ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
+        },
+        |_| {},
+    )?;
     if ambiguous {
         return Err("multiple DSLX source declarations for one function name".into());
     }
@@ -117,6 +142,7 @@ pub(crate) fn dslx_function_tokens(
 fn parse_outline_with_functions<'s>(
     source: &'s str,
     mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
+    mut visit_sum: impl FnMut(&str),
 ) -> Result<DslxOutline, String> {
     let mut parser = Parser {
         source,
@@ -203,7 +229,13 @@ fn parse_outline_with_functions<'s>(
                         }
                         OutlineKind::Struct { fields }
                     }
-                    "enum" => parser.outline_enum(&bindings)?,
+                    "enum" => {
+                        let kind = parser.outline_enum(&bindings)?;
+                        if matches!(kind, OutlineKind::Opaque) {
+                            visit_sum(&name);
+                        }
+                        kind
+                    }
                     "fn" => {
                         if public {
                             module.public_values.insert(name.clone());

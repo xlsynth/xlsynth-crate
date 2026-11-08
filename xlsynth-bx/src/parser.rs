@@ -134,6 +134,11 @@ pub(crate) fn is_identifier(text: &str) -> bool {
         && fixed_width(text).is_none()
 }
 
+/// Tokenize checked DSLX source, preserving identifier and call punctuation.
+pub(crate) fn dslx_tokens(source: &str) -> Result<Vec<Token<'_>>, String> {
+    lex(source, Dialect::Dslx, None)
+}
+
 /// Tokenize a module, or a callback span using the lexical rules of a local
 /// function. Offsets always refer to the full source for diagnostics.
 fn lex(

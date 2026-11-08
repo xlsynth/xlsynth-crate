@@ -11,7 +11,9 @@ use xlsynth_pir::IrValue;
 use xlsynth_pir::libxls_bridge::value_to_libxls;
 
 use super::directed_expr_eval::compile_dslx_module;
-use super::expr_eval::{ExpressionEvaluator, bx_source, compile_bundled_module, dslx_source};
+use super::expr_eval::{
+    BlockEvaluator, ExpressionEvaluator, bx_source, compile_bundled_module, dslx_source,
+};
 
 /// Install the declarations used on both sides of each import boundary test.
 fn struct_modules() -> io::Result<TempDir> {
@@ -543,20 +545,139 @@ fn both_frontends_reject_private_names_and_layout_compatible_impostors()
 }
 
 #[test]
-fn parametric_struct_specializations_are_outside_the_bx_import_subset() -> Result<(), Box<dyn Error>>
-{
-    let root = struct_modules()?;
-    let body = "wire::sized(x).data";
-    let reference = format!("import fabric.wire;\n{}", dslx_source("x: u8", "u8", body));
-    compile_dslx_module(&reference, &[root.path()])?;
-    let bx = format!("use fabric::wire;\n{}", bx_source("x: u8", "u8", body));
+fn same_named_templates_require_the_correct_declared_result() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let template = r#"
+enum Event { Idle, Data(u8), }
+pub struct Tag<N: u32> { value: u8 }
+pub fn tag<N: u32>(x: Tag<N>) -> u32 { N + (x.value as u32) }
+"#;
+    fs::write(root.path().join("left.x"), template)?;
+    fs::write(root.path().join("right.x"), template)?;
+    fs::write(
+        root.path().join("factory.x"),
+        r#"#![feature(generics)]
+import right;
+pub fn make<T: type = right::Tag<2>>(_x: u8) -> T { zero!<T>() }
+pub fn declared(x: u8) -> right::Tag<2> { right::Tag<2> { value: x } }
+"#,
+    )?;
+    let source = "use left; use right; use factory; \
+        block sample(clk, x: u8) -> u32 { right::tag(factory::make(x)) }";
     let options = ImportOptions {
         additional_search_paths: vec![root.path()],
         ..Default::default()
     };
+    let declared = source.replace("factory::make", "factory::declared");
+    let checked = check_module_with_options(&parse_module(&declared)?, &options)?;
+    let block = BlockEvaluator::lower(&checked, &declared)?;
+    assert_eq!(
+        block.evaluate(&[IrValue::make_ubits(8, 40)?])?,
+        IrValue::make_ubits(32, 42)?
+    );
+    let wrong = declared.replace("right::tag(", "left::tag(");
+    assert!(check_module_with_options(&parse_module(&wrong)?, &options).is_err());
+    let error = check_module_with_options(&parse_module(source)?, &options)
+        .err()
+        .ok_or("expected an opaque template diagnostic")?;
     assert!(
-        check_module_with_options(&parse_module(&bx)?, &options).is_err(),
-        "{bx}"
+        error.contains("name the concrete struct or a public alias"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn inferred_parametric_struct_result_exposes_its_specialized_field() -> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let expr = struct_expression(
+        root.path(),
+        "use fabric::wire;",
+        "import fabric.wire;",
+        "x: u8",
+        "u8",
+        "wire::sized(x).data",
+    )?;
+    let x = IrValue::make_ubits(8, 42)?;
+    assert_eq!(expr.compare(std::slice::from_ref(&x))?, x);
+    Ok(())
+}
+
+#[test]
+fn apfloat_arithmetic_infers_a_new_format_from_concrete_alias_ports() -> Result<(), Box<dyn Error>>
+{
+    let source = r#"
+use float32;
+use bfloat16;
+use apfloat;
+block sample(clk, x: float32::F32, y: bfloat16::BF16) -> u40 {
+    let sum = apfloat::add(x, float32::one(false));
+    let product = apfloat::full_precision_mul(sum, y);
+    apfloat::flatten(product)
+}"#;
+    let checked = check_module_with_options(&parse_module(source)?, &ImportOptions::default())?;
+    let block = BlockEvaluator::lower(&checked, source)?;
+    // (0.5 + 1.0) * 2.0 = 3.0, with an 8-bit exponent and 31 fraction bits.
+    let x = IrValue::parse_typed("(bits[1]:0, bits[8]:126, bits[23]:0)")?;
+    let y = IrValue::parse_typed("(bits[1]:0, bits[8]:128, bits[7]:0)")?;
+    assert_eq!(
+        block.evaluate(&[x, y])?,
+        IrValue::make_ubits(40, 0x0040_4000_0000)?
+    );
+    Ok(())
+}
+
+#[test]
+fn parametric_struct_aliases_preserve_bindings_across_nested_results_and_lowering()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("tags.x"),
+        r#"
+pub struct Tagged<N: u32> { x: u8 }
+pub type First = Tagged<u32:1>;
+pub type Second = Tagged<u32:2>;
+pub fn tag<N: u32>(_value: Tagged<N>) -> u32 { N }
+pub fn pair(a: First, b: Second) -> (First[1], Second) { ([a], b) }
+"#,
+    )?;
+    fs::write(
+        root.path().join("facade.x"),
+        "import tags; pub type Again = tags::First;",
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let source = r#"
+use tags;
+use facade::Again;
+block sample(clk, a: Again, b: tags::Second) -> (u32, u32, u32) {
+    let p = tags::pair(a, b);
+    let first: tags::First = p.0[u32:0];
+    let copy = Again { x: first.x };
+    (tags::tag(first), tags::tag(copy), tags::tag(p.1))
+}"#;
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    assert_eq!(
+        checked
+            .imported_calls()
+            .iter()
+            .filter(|call| call.function == "tag")
+            .count(),
+        2
+    );
+
+    let wrong = parse_module(
+        "use tags; use facade::Again; block b(clk, a: Again) -> u8 { let b: tags::Second = a; b.x }",
+    )?;
+    assert!(check_module_with_options(&wrong, &options).is_err());
+    root.close()?;
+    let block = BlockEvaluator::lower(&checked, source)?;
+    let value = IrValue::parse_typed("(bits[8]:7)")?;
+    assert_eq!(
+        block.evaluate(&[value.clone(), value])?,
+        IrValue::parse_typed("(bits[32]:1, bits[32]:1, bits[32]:2)")?
     );
     Ok(())
 }
