@@ -58,7 +58,9 @@ pub struct LeanBlockBundle {
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
-    emit_with_context(&BlockContext::new(package, block)?, "XlsBlock")
+    let mut module = emit_with_context(&BlockContext::new(package, block)?, "XlsBlock")?;
+    super::library_notation::add_to_module(&mut module);
+    Ok(module)
 }
 
 /// Write the generated block under `root`. The project supplies its
@@ -71,10 +73,11 @@ pub fn write_to(
     module_name: &LeanModuleName,
     root: &Path,
 ) -> Result<PathBuf> {
-    let source = emit_with_context(
+    let mut source = emit_with_context(
         &BlockContext::new(package, block)?,
         &module_name.lean_identifier(),
     )?;
+    super::library_notation::add_to_module(&mut source);
     let path = module_name.source_path();
     write_file(root, &path, source.as_bytes())?;
     Ok(root.join(path))
@@ -174,9 +177,9 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
     {
         source.push_str(
-            "def countedFor {width : Nat} {α : Type} (tripCount stride : Nat)
-    (body : BitVec width → α → α) (init : α) : α :=
-  Nat.fold tripCount (fun iteration _ carry => body (BitVec.ofNat width (iteration * stride)) carry) init
+            "def countedFor {width : L.Nat} {α : Type} (tripCount stride : L.Nat)
+    (body : L.BitVec width → α → α) (init : α) : α :=
+  L.Nat.fold tripCount (fun iteration _ carry => body (L.BitVec.ofNat width (iteration * stride)) carry) init
 
 ",
         );
@@ -188,7 +191,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         .any(|n| matches!(n.payload, NodePayload::BitSliceUpdate { .. }))
     {
         source.push_str(
-            "abbrev bitSliceUpdate {n s w : Nat} (value : BitVec n) (start : BitVec s) (update : BitVec w) : BitVec n :=\n  _root_.XlsynthLean.IR.bitSliceUpdate value start update\n\n",
+            "abbrev bitSliceUpdate {n s w : L.Nat} (value : L.BitVec n) (start : L.BitVec s) (update : L.BitVec w) : L.BitVec n :=\n  _root_.XlsynthLean.IR.bitSliceUpdate value start update\n\n",
         );
     }
     for helper in &block.helpers {
@@ -230,7 +233,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             ));
             fields.push((
                 identifier(&ir::node_textual_id(graph, *reference))?,
-                "_root_.Bool".to_owned(),
+                "L.Bool".to_owned(),
             ));
         }
     }
@@ -238,7 +241,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         namespace,
         "Assertions",
         &fields,
-        Some("Repr"),
+        Some("L.Repr"),
         &comments,
     )?);
     source.push_str(&structure_header("Evaluation"));
@@ -246,7 +249,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         "  next : State\n\
          \x20 output : Output\n\
          \x20 assertions : Assertions\n\
-         \x20 deriving Repr\n\n\
+         \x20 deriving L.Repr\n\n\
          def eval (q : State) (x : Input) : Evaluation :=\n",
     );
 
@@ -322,8 +325,8 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     let holds = assertion_fields
         .iter()
         .rev()
-        .fold("True".to_string(), |rest, (name, _)| {
-            format!("And (checks.{name} = true) ({rest})")
+        .fold("L.True".to_string(), |rest, (name, _)| {
+            format!("L.And (checks.{name} = true) ({rest})")
         });
     writeln!(
         source,
@@ -337,7 +340,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     if let Some(reset) = &block.graph.reset {
         writeln!(
             source,
-            "  eval q {{ x with {} := BitVec.ofNat 1 {} }}",
+            "  eval q {{ x with {} := L.BitVec.ofNat 1 {} }}",
             storage_field(&identifier(graph.port_name(reset.port))?),
             u8::from(!reset.active_low)
         )?;
@@ -442,7 +445,7 @@ pub(super) fn structure_header(name: &str) -> String {
 /// or DSLX source.
 pub(super) fn source_record(name: &str, fields: &[(String, String)]) -> Result<String> {
     // Source modules may declare their own type named Repr.
-    record_declaration("XlsReadable", name, fields, Some("_root_.Repr"), &[])
+    record_declaration("XlsReadable", name, fields, Some("L.Repr"), &[])
 }
 
 pub(super) fn record_backing_name(name: &str, fields: &[(String, String)]) -> String {
@@ -565,7 +568,7 @@ fn record_type<'a>(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    record_declaration(namespace, name, &fields, Some("Repr"), &[])
+    record_declaration(namespace, name, &fields, Some("L.Repr"), &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.
@@ -585,7 +588,9 @@ const ARRAY_LOCAL: &str = "«indexed array»";
 
 /// XLS clamps reads to the last element of each indexed dimension.
 fn read_bound_array(index: &str) -> String {
-    format!("(_root_.Vector.getD {ARRAY_LOCAL} ({index}).toNat (_root_.Vector.back {ARRAY_LOCAL}))")
+    format!(
+        "(L.Vector.getD {ARRAY_LOCAL} (L.BitVec.toNat ({index})) (L.Vector.back {ARRAY_LOCAL}))"
+    )
 }
 
 /// Share the operand between the lookup and its fallback at each dimension.
@@ -600,11 +605,13 @@ pub(super) fn array_read(array: &str, index: &str) -> String {
 pub(super) fn array_write(array: &str, indices: &[String], value: &str) -> String {
     match indices {
         [] => value.to_owned(),
-        [index] => format!("(_root_.Vector.setIfInBounds ({array}) ({index}).toNat ({value}))"),
+        [index] => {
+            format!("(L.Vector.setIfInBounds ({array}) (L.BitVec.toNat ({index})) ({value}))")
+        }
         [index, remaining @ ..] => {
             let item = array_write(&read_bound_array(index), remaining, value);
             format!(
-                "(let {ARRAY_LOCAL} := {array}; _root_.Vector.setIfInBounds {ARRAY_LOCAL} ({index}).toNat ({item}))"
+                "(let {ARRAY_LOCAL} := {array}; L.Vector.setIfInBounds {ARRAY_LOCAL} (L.BitVec.toNat ({index})) ({item}))"
             )
         }
     }
@@ -612,7 +619,7 @@ pub(super) fn array_write(array: &str, indices: &[String], value: &str) -> Strin
 
 /// Interpret a rendered one-bit value as the Boolean condition that it is set.
 fn predicate(value: &str) -> String {
-    format!("({value} == (BitVec.ofNat 1 1))")
+    format!("({value} == (L.BitVec.ofNat 1 1))")
 }
 
 /// Render one supported graph operation using caller-supplied operand
@@ -714,7 +721,7 @@ fn register_update(
             .as_ref()
             .context("reset register has no reset value")?;
         Ok(format!(
-            "(if {} == (BitVec.ofNat 1 {}) then {} else {enabled})",
+            "(if {} == (L.BitVec.ofNat 1 {}) then {} else {enabled})",
             names[signal.index],
             u8::from(!behavior.active_low),
             LocalRenderer::Block.literal(value)

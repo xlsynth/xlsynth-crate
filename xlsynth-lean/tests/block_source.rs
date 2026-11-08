@@ -312,15 +312,15 @@ block storage(clk, {bx_inputs}, index: u8) -> u8 {{
             .collect();
         let expected = if named {
             [
-                "let «slot» : XLS.«machine».«Slot» := (let «indexed array» := «slots»; (_root_.Vector.getD «indexed array» («index»).toNat (_root_.Vector.back «indexed array»)))",
+                "let «slot» : XLS.«machine».«Slot» := (let «indexed array» := «slots»; (L.Vector.getD «indexed array» (L.BitVec.toNat («index»)) (L.Vector.back «indexed array»)))",
                 "let «slot_write» : XLS.«machine».«Write» := («slot»).«write»",
-                "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).«data»",
+                "let «slot_write_data» : L.BitVec 8 := («slot_write»).«data»",
             ]
         } else {
             [
-                "let «slot» : ((_root_.BitVec 8 × _root_.Unit) × _root_.Unit) := (_root_.XlsynthLean.IR.arrayIndex («slots») («index»).toNat)",
-                "let «slot_write» : (_root_.BitVec 8 × _root_.Unit) := («slot»).1",
-                "let «slot_write_data» : _root_.BitVec 8 := («slot_write»).1",
+                "let «slot» : ((L.BitVec 8 × L.Unit) × L.Unit) := (_root_.XlsynthLean.IR.arrayIndex («slots») (L.BitVec.toNat («index»)))",
+                "let «slot_write» : (L.BitVec 8 × L.Unit) := («slot»).1",
+                "let «slot_write_data» : L.BitVec 8 := («slot_write»).1",
             ]
         };
         assert_eq!(projections, expected, "{source}\n{readable}");

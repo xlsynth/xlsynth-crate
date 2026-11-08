@@ -28,12 +28,12 @@ impl Presentation<'_> {
                 "rfl"
             }
         };
-        out.push_str(r#"private theorem split_prod_ite {α β : Type} (p : Prop) [Decidable p] (x y : α × β) :
+        out.push_str(r#"private theorem split_prod_ite {α β : Type} (p : Prop) [L.Decidable p] (x y : α × β) :
     (if p then x else y) = ((if p then x.1 else y.1), (if p then x.2 else y.2)) := by
   split <;> rfl
 
-private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitVec w → α → α) (z : α) :
-    XlsBlock.countedFor (n+1) stride f z = f (BitVec.ofNat w (n*stride)) (XlsBlock.countedFor n stride f z) := rfl
+private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : L.BitVec w → α → α) (z : α) :
+    XlsBlock.countedFor (n+1) stride f z = f (L.BitVec.ofNat w (n*stride)) (XlsBlock.countedFor n stride f z) := by rfl
 
 "#);
         let mut rules = BTreeMap::new();
@@ -81,7 +81,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
   unfold {raw} {readable}
   xls_normalize [{called}]
   all_goals xls_codecs [{called}]
-  all_goals first | rfl | ((try simp only [split_prod_ite, prod_fst_ite, prod_snd_ite, ite_self]) <;> {helper_close})"#,
+  all_goals first | rfl | ((try simp only [split_prod_ite, prod_fst_ite, prod_snd_ite, L.ite_self]) <;> {helper_close})"#,
                 binders.join(" "),
                 params.join(" ")
             )?;
@@ -98,11 +98,11 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
                 let encoded = self.convert(Some(&sig.result), &fold, true)?;
                 writeln!(
                     out,
-                    r#"private theorem loop_{index} (count stride : Nat) {} :
+                    r#"private theorem loop_{index} (count stride : L.Nat) {} :
     XlsBlock.countedFor count stride ({raw_body}) p1 = {encoded} := by
   induction count with
   | zero =>
-    xls_normalize [XlsBlock.countedFor, Nat.fold_zero]
+    xls_normalize [XlsBlock.countedFor, L.Nat.fold_zero]
     all_goals rfl
   | succ n ih =>
     simp only [countedFor_succ]
@@ -155,7 +155,8 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             VECTOR_MAP_RULES.join(", "),
             BOOL_ENCODE_ITE.into(),
             PROJECTION_ITE_RULES.join(", "),
-            "ite_self, Vector.map_mk, List.map_toArray, List.map_cons, List.map_nil".into(),
+            "L.ite_self, L.Vector.map_mk, L.List.map_toArray, L.List.map_cons, L.List.map_nil"
+                .into(),
         ];
         let mut codecs = Vec::new();
         for decl in self.declarations {
@@ -165,7 +166,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             rules.extend(
                 declaration_functions(self.bx_namespace, decl, &name)?
                     .into_iter()
-                    .map(|f| format!("apply_ite {f}")),
+                    .map(|f| format!("L.apply_ite {f}")),
             );
             codecs.extend([format!("{codec}.encode"), format!("{codec}.decode")]);
         }
@@ -181,10 +182,8 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
             };
             writeln!(
                 out,
-                r#"open Lean.Parser.Tactic in
-local macro "{name}" "[" rs:simpLemma,* "]" : tactic => do
-  let rs : Lean.Syntax.TSepArray [``simpStar, ``simpErase, ``simpLemma] "," := ⟨rs.elemsAndSeps⟩
-  `(tactic| simp (config := {{failIfUnchanged := false}}) only [{prefix}{rules}, $rs,*])
+                r#"local macro "{name}" "[" rs:term,* "]" : tactic =>
+  `(tactic| simp (config := {{failIfUnchanged := false}}) only [{prefix}{rules}, $[$rs:term],*])
 "#
             )?;
         }

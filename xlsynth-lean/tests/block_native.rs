@@ -1675,21 +1675,42 @@ block shift(clk, amount: u64) -> u5 {
 
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
-fn source_binding_named_vector_preserves_physical_array_types() {
+fn library_names_coexist_with_source_bindings_and_record_fields() {
     let bx = r#"
-block pick(clk, Vector: u8, b: u8, index: u8) -> u8 {
-    let slots = [(Vector, u8:0), (b, u8:0)];
+struct Packet { Vector: u8 }
+block pick(clk, Vector: u8, L: Packet, index: u8) -> u8 {
+    let slots = [(Vector, u8:0), (L.Vector, u8:0)];
     slots[index].0
 }
 "#;
-    let bundle = bx_bundle(bx);
+    let mut bundle = bx_bundle(bx);
     let (_, model) = bundle
         .files
         .iter()
         .find(|(name, _)| name == "ReadableGenerated.lean")
         .unwrap();
-    assert!(model.contains("let «Vector» :"), "{model}");
-    check_bundle(bundle, "local Vector and a physical array of tuples");
+    for spelling in [
+        "let «Vector» :",
+        "let «L» :",
+        "(«L»).«Vector»",
+        "_root_.XlsynthLean.IR.arrayIndex",
+        "(L.BitVec.toNat («index»))",
+    ] {
+        assert!(model.contains(spelling), "missing {spelling} in {model}");
+    }
+    bundle.files.push((
+        "CheckPick.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+private def pickAt (index : BitVec 8) :=
+  let L : XLS.design.Packet := { Vector := 37 }
+  observe {} { Vector := 11, L, index }
+#guard pickAt 0 == 11
+#guard pickAt 1 == 37
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "library calls and a source projection on L");
 }
 
 #[test]

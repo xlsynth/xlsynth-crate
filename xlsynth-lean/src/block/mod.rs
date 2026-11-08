@@ -10,6 +10,7 @@ use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod bx;
 mod helper_types;
+mod library_notation;
 mod raw;
 mod readable;
 mod source_types;
