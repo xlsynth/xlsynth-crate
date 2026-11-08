@@ -1,0 +1,7 @@
+xlsynth-driver: bx2ir: pipeline.bx: block 'pipeline': let 'y': callable parameter 'F' of block 'advance': math.stage::apply: error: cannot import an effectful DSLX function into BX (`assert!` requires an implicit token)
+ --> source files/math/multiplier.x:7:5
+  |
+7 |     assert!(N >= u32:2, "min_width");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `assert!` introduces the effect
+  |
+  = note: DSLX call path: math.stage::apply -> math.multiplier::mul

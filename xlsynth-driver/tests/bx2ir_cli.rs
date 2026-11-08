@@ -105,23 +105,104 @@ fn transitive_runtime_width_assertions_point_at_the_multiplier() -> Result<()> {
 }
 
 #[test]
+fn transitive_assertion_in_a_for_loop_points_at_the_callee() -> Result<()> {
+    let directory = multiplier_design(r#"    assert!(N >= u32:2, "min_width");"#)?;
+    for body in [
+        "for (_, acc) in u32:0..u32:1 { multiplier::mul(acc) }(x)",
+        r#"let y = for (_, acc) in u32:0..u32:1 {
+        let next = multiplier::mul(acc);
+        next
+    }(x);
+    y"#,
+    ] {
+        fs::write(
+            directory.path().join("source files/math/stage.x"),
+            format!(
+                r#"import math.multiplier;
+pub fn apply(x: u8) -> u8 {{
+    {body}
+}}
+"#,
+            ),
+        )?;
+        compare_golden_text(
+            &multiplier_error(&directory)?,
+            "tests/bx2ir_import_loop_assertion.golden.txt",
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn uncertain_loop_effect_order_keeps_the_verified_call_path() -> Result<()> {
+    let directory = multiplier_design("")?;
+    for body in [
+        "for (_, acc) in u32:0..u32:1 { checked(acc) }(seed(x))",
+        "for (_, acc) in u32:0..u32:0 { checked(acc) }(x)",
+        "for (_, acc) in u32:0..u32:1 { if false { seed(acc) } else { checked(acc) } }(x)",
+        r#"for (_, acc) in u32:0..u32:1 {
+        let y: uN[seed(u8:8) as u32] = checked(acc);
+        y
+    }(x)"#,
+        r#"let y: uN[seed(u8:8) as u32] = for (_, acc) in u32:0..u32:1 { checked(acc) }(x);
+    y"#,
+        r#"for (_, acc) in u32:0..u32:1 {
+        assert_fmt!(acc != u8:0, "seed {}", seed(u8:1));
+        checked(acc)
+    }(x)"#,
+    ] {
+        fs::write(
+            directory.path().join("source files/math/multiplier.x"),
+            format!(
+                r#"fn seed(x: u8) -> u8 {{
+    assert!(x != u8:0, "seed");
+    x
+}}
+fn checked(x: u8) -> u8 {{
+    assert!(x != u8:0, "body");
+    x
+}}
+pub fn mul(x: u8) -> u8 {{
+    {body}
+}}
+"#
+            ),
+        )?;
+        compare_golden_text(
+            &multiplier_error(&directory)?,
+            "tests/bx2ir_import_implicit_token_path.golden.txt",
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn first_effect_follows_dslx_call_order() -> Result<()> {
     let directory = multiplier_design(r#"    assert!(N >= u32:2, "min_width");"#)?;
     let call = "    let y = multiplier::mul(x);";
     let assertion = r#"    assert!(x != u8:0, "stage_check");"#;
     for (first, second, expected_location) in [
         (call, assertion, "source files/math/multiplier.x:7:5"),
-        (assertion, call, "source files/math/stage.x:3:5"),
+        (assertion, call, "source files/math/stage.x:7:5"),
         (
             r#"    assert!(multiplier::mul(x) != u8:0, "stage_check");"#,
             "    let y = x;",
             "source files/math/multiplier.x:7:5",
+        ),
+        (
+            "    let y = checked(x);",
+            "    let _ = for (_, checked) in u32:0..u32:1 { checked }(y);",
+            "source files/math/stage.x:3:5",
         ),
     ] {
         fs::write(
             directory.path().join("source files/math/stage.x"),
             format!(
                 r#"import math.multiplier;
+fn checked(x: u8) -> u8 {{
+    assert!(x != u8:0, "helper");
+    x
+}}
 pub fn apply(x: u8) -> u8 {{
 {first}
 {second}
