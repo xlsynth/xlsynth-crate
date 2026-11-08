@@ -406,6 +406,7 @@ impl BridgeBuilder for Catalogue<'_> {
         return_annotation: Option<&dslx::TypeAnnotation>,
         _return_type: Option<&dslx::Type>,
     ) -> Result<(), XlsynthError> {
+        // Without a DSLX signature, calls to this helper use its IR types.
         if let Ok(signature) = self.helper_signature(name, params, return_annotation) {
             // Key by the IR symbol so a function of the same name in an import
             // cannot acquire a local function's source types.
