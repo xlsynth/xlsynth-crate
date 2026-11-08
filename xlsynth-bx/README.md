@@ -47,10 +47,42 @@ fn classify(op: u4) -> (u8, bool) {
 ```
 
 Here `op == 2` selects the first arm. Use `a..b` to exclude the upper endpoint
-and `a..=b` to include it. Patterns use literal values or endpoints, `|`
+and `a..=b` to include it. A single scalar pattern can also name a visible
+module constant. Patterns support literal endpoints, `|`
 alternatives, and `_` for any remaining value. The arms must cover the whole
 subject type. For example, `true` and `false` cover a boolean without a
 wildcard.
+
+## Module constants
+
+Declare a value with `const NAME = expression;` or `pub const NAME: Type = expression;`.
+Constants are checked and evaluated in declaration order. Later functions, blocks,
+and constant initializers can read their concrete values. Parameters and local
+bindings can shadow a module constant.
+
+```text
+const STEP: u8 = 3;
+fn advance(x: u8) -> u8 { x + STEP }
+const START = advance(u8:4);
+
+pub block counter(clk, rst) -> u8 {
+    reg q: u8 = START;
+    q := advance(q);
+    q
+}
+```
+
+Give an otherwise unsized integer initializer a type, as in `const STEP = u8:3;`.
+Aggregate elements keep their inferred widths at every use. Write
+`const WORDS: u8[2] = [1, 2];` when a consumer expects an array of bytes.
+BX evaluates pure value expressions and calls to earlier concrete local functions
+within its compile-time work limit. Evaluation follows the dependencies of the
+result. For example, an out-of-bounds access in an unused helper binding can
+go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
+functions, extern functions, and callback-parameter specializations require
+runtime evaluation, including when reached through a local helper. Constants can
+supply loop bounds and width-slice expressions. Array sizes and bit widths in
+type declarations still use literal dimensions.
 
 ## Defining functions
 

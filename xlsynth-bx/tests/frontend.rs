@@ -16,6 +16,8 @@ mod imported_structs;
 mod local_functions;
 #[path = "frontend/map_lambda.rs"]
 mod map_lambda;
+#[path = "frontend/module_constants.rs"]
+mod module_constants;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
 #[path = "frontend/unroll_for.rs"]

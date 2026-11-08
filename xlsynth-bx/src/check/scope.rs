@@ -9,6 +9,7 @@ use crate::infer_literal::{
 };
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use xlsynth_pir::IrValue;
 
 /// An elaborated let initializer and the unsized literals retained at its
@@ -389,13 +390,16 @@ impl BodyChecker<'_, '_> {
                     if aliases.contains_key(name) {
                         return;
                     }
+                    // The temporary alias now owns the local value. Leaving
+                    // the scope below restores any shadowed outer binding.
                     let value = if self.in_loop_scope() {
-                        &self.loop_values[name]
+                        self.loop_values.remove(name)
                     } else {
-                        &self.function_values[name]
-                    };
-                    let widths = self.inferred_bindings.get(name).cloned();
-                    let alias = self.capture_value_alias(Some(name), value.clone(), widths);
+                        self.function_values.remove(name)
+                    }
+                    .expect("bound scoped result");
+                    let widths = self.inferred_bindings.remove(name);
+                    let alias = self.capture_value_alias(Some(name), value, widths);
                     aliases.insert(name.to_owned(), alias);
                 });
             }
@@ -600,6 +604,10 @@ impl BodyChecker<'_, '_> {
                     ));
                 }
                 let mut widths = widths.map(|w| w.tuple_fields(count));
+                let literal_members = match &value.kind {
+                    K::Literal(IrValue::Tuple(fields)) => Some(Arc::clone(fields)),
+                    _ => None,
+                };
                 let mut fields: Box<dyn Iterator<Item = TypedExpr>> = match value.kind {
                     K::Tuple(fields) => Box::new(fields.into_iter()),
                     K::Literal(IrValue::Tuple(fields)) => {
@@ -631,6 +639,11 @@ impl BodyChecker<'_, '_> {
                     } else {
                         i
                     };
+                    if let Some(members) = &literal_members {
+                        // The iterator copies this selected literal into a
+                        // new lexical binding; other tuple fields stay shared.
+                        self.charge_reference_copy(super::literal_copy_work(&members[index]))?;
+                    }
                     let field = fields
                         .nth(index - cursor)
                         .expect("tuple pattern arity checked");

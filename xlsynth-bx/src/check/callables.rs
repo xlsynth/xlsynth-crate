@@ -10,7 +10,7 @@ use std::rc::Rc;
 use super::generic_blocks::TypeArgument;
 use super::{
     Bindings, BlockSpecializations, BodyChecker, BodyKind, CallbackFormal, CallbackTarget, K,
-    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, TypedExpr, callback_type_nodes, compatible, type_deps,
+    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, TypedExpr, compatible, source_type_nodes, type_deps,
 };
 use crate::ast::{CallbackParam, Expr, Function, Type};
 
@@ -351,7 +351,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             let ty = bindings.concrete_type(param)?;
             let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
             input_nodes = input_nodes.saturating_add(shape.ir_nodes);
-            registry.charge_callback_storage(callback_type_nodes(&ty))?;
+            registry.charge_callback_storage(source_type_nodes(&ty))?;
             params.push(ty);
         }
         let (target, result) =
@@ -360,7 +360,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .specializations
             .as_mut()
             .expect("block specialization registry");
-        registry.charge_callback_storage(callback_type_nodes(&result))?;
+        registry.charge_callback_storage(source_type_nodes(&result))?;
         let mut result_bindings = Bindings::new(&formal.result_type_params);
         result_bindings.match_input(&formal.signature.result, &result, self.structs)?;
         for name in &formal.result_type_params {

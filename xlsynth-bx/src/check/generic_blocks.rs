@@ -11,7 +11,7 @@ use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, ImportResolver, MAX_ELABORATION_DEPTH,
-    StructTable, TypeShape, callback_type_nodes, compatible, resolve_type, type_deps,
+    StructTable, TypeShape, compatible, resolve_type, source_type_nodes, type_deps,
 };
 
 /// Check the template's parameter namespace and ensure every type parameter
@@ -293,7 +293,7 @@ impl Bindings {
                     *binding = Some(Rc::new(BoundType {
                         ty,
                         shape,
-                        source_nodes: callback_type_nodes(actual),
+                        source_nodes: source_type_nodes(actual),
                         type_hash: hasher.finish(),
                     }));
                 }

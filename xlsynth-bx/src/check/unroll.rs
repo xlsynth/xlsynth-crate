@@ -663,7 +663,10 @@ impl BodyChecker<'_, '_> {
         if !self.decls.visible(name, self.function_position) {
             return Err(format!("'{name}' is declared later in the module"));
         }
-        if self.decls.functions.contains_key(name) || self.decls.is_block(name) {
+        if self.module_constant(name).is_some()
+            || self.decls.functions.contains_key(name)
+            || self.decls.is_block(name)
+        {
             return Ok(());
         }
         if let Some((module, member)) =
@@ -791,7 +794,11 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(else_value, locals)?;
             }
             Expr::Match { subject, arms } => {
-                for operand in super::match_operands(subject, arms)? {
+                for operand in super::match_operands(subject, arms, |name| {
+                    !locals.contains(name)
+                        && self.callback_index(name).is_none()
+                        && self.module_constant(name).is_some()
+                })? {
                     self.check_expr_names(operand, locals)?;
                 }
                 for arm in arms {

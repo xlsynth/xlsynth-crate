@@ -161,7 +161,10 @@ pub(crate) fn check_sources(
         additional_search_paths: search_paths.to_vec(),
         ..ImportOptions::default()
     };
-    let bx_check = parse_module(bx).and_then(|m| check_module_with_options(&m, &options));
+    let bx_check = parse_module(bx).and_then(|m| {
+        let checked = check_module_with_options(&m, &options)?;
+        Ok((checked, !m.constants.is_empty()))
+    });
     let dslx_check = dslx::parse_and_typecheck(
         reference,
         "oracle.x",
@@ -169,7 +172,13 @@ pub(crate) fn check_sources(
         &mut ImportData::new(None, search_paths),
     );
     match (bx_check, dslx_check) {
-        (Ok(bx), Ok(_)) if valid != Some(false) => Ok(Some(bx)),
+        (Ok((checked, has_constants)), Ok(native)) if valid != Some(false) => {
+            if has_constants {
+                compare_declarations(&checked, &native)
+                    .map_err(|e| format!("{e}\nBX:\n{bx}\nDSLX:\n{reference}"))?;
+            }
+            Ok(Some(checked))
+        }
         // Shared rejection is successful when the generator permits it.
         (Err(_), Err(_)) if valid != Some(true) => Ok(None),
         (bx_result, native_result) => Err(format!(
@@ -178,6 +187,78 @@ pub(crate) fn check_sources(
             native_result.err()
         )),
     }
+}
+
+/// Spell structural BX types as native DSLX metadata does. Its concrete
+/// tuple type API exposes member signedness through this representation.
+fn dslx_structural_type(ty: &Type) -> Option<String> {
+    Some(match ty {
+        Type::Bool => "uN[1]".into(),
+        Type::Bits { signed, width } => format!("{}N[{width}]", if *signed { 's' } else { 'u' }),
+        Type::Tuple(fields) => {
+            let members = fields
+                .iter()
+                .map(dslx_structural_type)
+                .collect::<Option<Vec<_>>>()?;
+            format!("({})", members.join(", "))
+        }
+        Type::Array { element, size } => format!("{}[{size}]", dslx_structural_type(element)?),
+        // Module constants generated here have structural types. Nominal
+        // declarations are compared against DSLX struct metadata in
+        // module_graph.
+        Type::Named(_) => return None,
+    })
+}
+
+/// Compare each shared module constant even when the generated block never
+/// reads it.
+fn compare_declarations(
+    checked: &CheckedModule,
+    native: &dslx::TypecheckedModule,
+) -> Result<(), String> {
+    let module = native.get_module();
+    let info = native.get_type_info();
+    let mut bx = checked.constants().iter();
+    for i in 0..module.get_member_count() {
+        let Some(MatchableModuleMember::ConstantDef(decl)) = module.get_member(i).to_matchable()
+        else {
+            // Only constant declarations have a corresponding BX compile-time
+            // value.
+            continue;
+        };
+        let name = decl.get_name();
+        let item = bx
+            .next()
+            .ok_or_else(|| format!("BX is missing DSLX constant {name}"))?;
+        if item.name != name {
+            return Err(format!(
+                "constant order differs: BX {}, DSLX {name}",
+                item.name
+            ));
+        }
+        if let Some(bx_type) = dslx_structural_type(&item.ty) {
+            let dslx_type = info
+                .get_type_for_constant_def(&decl)
+                .to_string()
+                .map_err(|e| e.to_string())?;
+            if bx_type != dslx_type {
+                return Err(format!(
+                    "constant {name} type: BX {bx_type}, DSLX {dslx_type}"
+                ));
+            }
+        }
+        let value = info
+            .get_const_expr(&decl.get_value())
+            .and_then(|v| v.convert_to_ir())
+            .map_err(|e| format!("DSLX constant {name}: {e}"))?;
+        if value != value_to_libxls(&item.value).map_err(|e| e.to_string())? {
+            return Err(format!("constant {name}: BX {}, DSLX {value}", item.value));
+        }
+    }
+    if let Some(extra) = bx.next() {
+        return Err(format!("DSLX is missing BX constant {}", extra.name));
+    }
+    Ok(())
 }
 
 /// Compare an explicit BX program with independently constructed concrete
