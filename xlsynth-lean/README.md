@@ -84,6 +84,11 @@ one-hot selection over tuples and arrays. Calls to pure functions and fixed-trip
 When starting from saved IR text, call PIR's `Parser::parse_and_validate_package`
 before selecting the block, as in the `export_block` example.
 
+Generated block files use `L.` for Lean library declarations. For example,
+`L.Vector (L.BitVec 8) 2` is an array of two eight-bit words. Each file
+defines its own short spellings. A proof importing the model can use Lean's
+usual library names, and source fields such as `p.Vector` keep their spelling.
+
 The generated `eval` takes arbitrary old registers and current inputs and
 returns outputs, next registers, and assertion results. Outputs read old
 registers; all register writes commit together. For example, if `a` is written
