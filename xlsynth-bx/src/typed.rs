@@ -293,7 +293,7 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
     match ty {
         Type::Bool => Some((false, 1)),
         Type::Bits { signed, width } => Some((*signed, *width)),
-        Type::Tuple(_) | Type::Named(_) | Type::Array { .. } => None,
+        Type::Tuple(_) | Type::Named(_) | Type::Applied { .. } | Type::Array { .. } => None,
     }
 }
 

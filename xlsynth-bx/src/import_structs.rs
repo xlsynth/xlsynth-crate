@@ -262,6 +262,10 @@ impl ImportedStructs {
         self.graph.has_public_function(subject, member)
     }
 
+    pub(crate) fn has_public_struct_template(&self, subject: &str, member: &str) -> bool {
+        self.graph.public_parametric_struct(subject, member)
+    }
+
     #[cfg(test)]
     pub(crate) fn type_witnesses(&self) -> usize {
         self.type_witnesses
@@ -279,6 +283,7 @@ impl ImportedStructs {
                 .is_some_and(|i| self.instance_layouts.contains(i)),
             Type::Array { element, .. } => self.contains_parametric_instance(element),
             Type::Tuple(members) => members.iter().any(|m| self.contains_parametric_instance(m)),
+            Type::Applied { .. } => true,
             Type::Bits { .. } | Type::Bool => false,
         }
     }
@@ -325,14 +330,40 @@ impl ImportedStructs {
         member: &str,
         data: &mut ImportData,
     ) -> Result<String, String> {
+        self.resolve_spelling(subject, member, member, data)
+    }
+
+    /// Supply typed literals so DSLX checks supplied bindings against u32 and
+    /// evaluates defaults in the template's declaration context.
+    pub(crate) fn resolve_applied(
+        &mut self,
+        subject: &str,
+        member: &str,
+        args: &[u32],
+        data: &mut ImportData,
+    ) -> Result<String, String> {
+        let spelling = instance_spelling(member, args);
+        self.resolve_spelling(subject, member, &spelling, data)
+            .map_err(|e| format!("{subject}::{spelling}: {}", self.remap_diagnostic(e)))
+    }
+
+    /// Reflect a named struct or a concrete application. The base declaration
+    /// identifies the template, while DSLX evaluates the written arguments.
+    fn resolve_spelling(
+        &mut self,
+        subject: &str,
+        member: &str,
+        spelling: &str,
+        data: &mut ImportData,
+    ) -> Result<String, String> {
         self.bind_exports(data)?;
-        let path = format!("{subject}::{member}");
+        let path = format!("{subject}::{spelling}");
         if let Some(&index) = self.named_layouts.get(&path) {
             return Ok(self.definitions[index].name.clone());
         }
         let witness = TypeWitness {
             imports: format!("import {subject} as bx_module;\n"),
-            params: format!("value: bx_module::{member}"),
+            params: format!("value: bx_module::{spelling}"),
             expr: "value".into(),
         };
         let ty = if let Some(ty) = self.explicit_types.get(&path) {
@@ -484,7 +515,7 @@ impl ImportedStructs {
         self.bindings.entry(def.clone()).or_default();
         let (template, actuals) = if def.is_parametric() {
             let id = written
-                .filter(|id| self.graph.public_parametric_struct(id))
+                .filter(|id| self.has_public_struct_template(&id.subject, &id.name))
                 .cloned().ok_or_else(|| format!(
                     "cannot identify a public DSLX struct template for '{identifier}'; name the concrete struct or a public alias in the DSLX type annotation"
                 ))?;
@@ -502,15 +533,10 @@ impl ImportedStructs {
             return Ok(self.definitions[index].name.clone());
         }
         let path = if let Some(id) = template {
-            let literals = actuals
-                .iter()
-                .map(|v| format!("u32:{v}"))
-                .collect::<Vec<_>>();
             Some(format!(
-                "{}::{}<{}>",
+                "{}::{}",
                 id.subject,
-                id.name,
-                literals.join(", ")
+                instance_spelling(&id.name, &actuals)
             ))
         } else {
             binding.public_name.clone()
@@ -583,6 +609,17 @@ impl ImportedStructs {
         Ok(name)
     }
 }
+
+/// Render value arguments in the type spelling used for native witnesses and
+/// canonical BX struct identities.
+fn instance_spelling(member: &str, values: &[u32]) -> String {
+    let values = values
+        .iter()
+        .map(|v| format!("u32:{v}"))
+        .collect::<Vec<_>>();
+    format!("{member}<{}>", values.join(", "))
+}
+
 /// The declaration/explicit-type witnesses each contain one function.
 fn probe_function(checked: &dslx::TypecheckedModule) -> Result<dslx::Function, String> {
     let module = checked.get_module();

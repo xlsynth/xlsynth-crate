@@ -266,25 +266,28 @@ block tag_header(clk, h: Header) -> Header {
 
 BX can read fields through a private struct nested inside a public one. To pass the nested value itself as a DSLX function argument, expose its type through a public name or type alias. A public DSLX type alias preserves the identity of its underlying struct. Imported calls accept these structs as arguments and results, alongside bits, booleans, tuples, and fixed-size arrays. Functions must be public and pure. Linked functions and their module path components use letters, digits, and underscores so their generated names are valid XLS IR identifiers. Parametric values must be inferable from the arguments and DSLX defaults. Functions such as `std::lsbs` require an explicit result-width parameter and are outside this syntax.
 
-BX also accepts concrete instances of public DSLX struct templates with `u32`
-value parameters. Use a public DSLX alias to name the instance in a BX port,
-register, or struct literal. For example, `float32::F32` names
-`apfloat::APFloat<8, 23>` in the bundled DSLX standard library.
+BX accepts concrete instances of public DSLX struct templates with `u32` value
+parameters. Write the application directly in a type annotation or struct
+literal. Arguments can be bare integer literals or explicitly typed `u32`
+literals. DSLX supplies defaults for omitted trailing parameters, including
+all parameters in a spelling such as `Packet<>` when each has a default.
 
 ```text
-use float32::F32;
 use apfloat;
 
-block fp_add(clk, a: F32, b: F32) -> F32 {
+block add_half(clk, a: apfloat::APFloat<5, 10>, b: apfloat::APFloat<5, 10>)
+    -> apfloat::APFloat<5, 10> {
     apfloat::add(a, b)
 }
 ```
 
-For a custom port type, declare a DSLX alias such as
-`pub type Half = apfloat::APFloat<5, 10>;` and import `Half`. An imported
-function can return a new instance by naming the public template or a concrete
-alias in its DSLX result type. BX recovers the instance's `u32` bindings from
-the checked value, including parameters that do not appear in any field.
+With `use apfloat::APFloat;`, the same type is `APFloat<5, 10>`, and a
+constructor can use `APFloat<5, 10> { sign: false, bexp: u5:15, fraction: u10:0 }`.
+A public DSLX alias and its direct application are interchangeable, such as
+`float32::F32` and `apfloat::APFloat<8, 23>`. An imported function can
+also return a new instance by naming the public template or a concrete alias
+in its DSLX result type. BX recovers the instance's `u32` bindings from the
+checked value, including parameters that do not appear in any field.
 
 The pinned DSLX converter can emit invalid IR or dispatch to the wrong helper
 when a type-valued parameter such as `T: type` is bound to a struct. When a

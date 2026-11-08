@@ -556,7 +556,8 @@ fn visit_bit_members(
             }
         }
         Type::Bits { .. } | Type::Bool => visit(path, ty)?,
-        Type::Named(_) => { /* A struct declares concrete types for its fields. */ }
+        Type::Named(_) | Type::Applied { .. } => { /* A struct declares concrete types for its fields. */
+        }
     }
     Ok(())
 }
@@ -598,7 +599,8 @@ pub(crate) fn unify_inferred_members(
                     *ty = minimum.inferred_type()?;
                 }
             }
-            Type::Named(_) => { /* Nominal types have concrete member types. */ }
+            Type::Named(_) | Type::Applied { .. } => { /* Nominal types have concrete member types. */
+            }
         }
         Ok(())
     }

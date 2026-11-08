@@ -76,11 +76,22 @@ impl BinaryOp {
 /// parameter.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Type {
-    Bits { signed: bool, width: usize },
+    Bits {
+        signed: bool,
+        width: usize,
+    },
     Bool,
     Tuple(Vec<Type>),
-    Array { element: Box<Type>, size: usize },
+    Array {
+        element: Box<Type>,
+        size: usize,
+    },
     Named(String),
+    /// An imported struct application, before resolving its nominal type.
+    Applied {
+        name: String,
+        args: Vec<u32>,
+    },
 }
 
 /// A typed name in a parameter list or struct declaration.
@@ -251,6 +262,12 @@ pub enum Expr {
     Array(Vec<Expr>),
     Struct {
         name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    /// A struct literal with explicit concrete DSLX value arguments.
+    AppliedStruct {
+        name: String,
+        args: Vec<u32>,
         fields: Vec<(String, Expr)>,
     },
     Field {

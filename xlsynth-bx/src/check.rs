@@ -57,6 +57,16 @@ impl fmt::Display for Type {
             }
             Type::Bool => write!(f, "bool"),
             Type::Named(name) => write!(f, "{name}"),
+            Type::Applied { name, args } => {
+                write!(f, "{name}<")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                write!(f, ">")
+            }
             Type::Array { element, size } => write!(f, "{element}[{size}]"),
             Type::Tuple(items) => {
                 write!(f, "(")?;
@@ -427,6 +437,7 @@ fn source_type_nodes(ty: &Type) -> usize {
     match ty {
         Type::Tuple(fields) => 1 + fields.iter().map(source_type_nodes).sum::<usize>(),
         Type::Array { element, .. } => 1 + source_type_nodes(element),
+        Type::Applied { args, .. } => 1 + args.len(),
         Type::Named(_) | Type::Bool | Type::Bits { .. } => 1,
     }
 }
@@ -474,6 +485,14 @@ impl Declarations<'_> {
         at.zip(position).is_none_or(|(at, &p)| p <= at)
     }
 
+    fn check_type_name_visibility(&self, name: &str, at: Option<usize>) -> Result<(), String> {
+        if self.visible(name, at) {
+            Ok(())
+        } else {
+            Err(format!("type '{name}' is declared later in the module"))
+        }
+    }
+
     fn check_type_visibility(&self, ty: &Type, at: Option<usize>) -> Result<(), String> {
         if at.is_none() {
             return Ok(());
@@ -481,12 +500,12 @@ impl Declarations<'_> {
         let mut pending = vec![ty];
         while let Some(ty) = pending.pop() {
             match ty {
-                Type::Named(name) if !self.visible(name, at) => {
-                    return Err(format!("type '{name}' is declared later in the module"));
+                Type::Named(name) | Type::Applied { name, .. } => {
+                    self.check_type_name_visibility(name, at)?
                 }
                 Type::Tuple(fields) => pending.extend(fields.iter().rev()),
                 Type::Array { element, .. } => pending.push(element),
-                Type::Bool | Type::Bits { .. } | Type::Named(_) => { /* A primitive or visible type. */
+                Type::Bool | Type::Bits { .. } => { /* Primitives have no declaration to look up. */
                 }
             }
         }
@@ -528,12 +547,12 @@ fn resolve_type(
     remaining: usize,
 ) -> Result<Type, String> {
     match ty {
-        Type::Named(name) => {
+        Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
             if let Some(bindings) = bindings {
-                if bindings.declares(name) {
+                if matches!(ty, Type::Named(_)) && bindings.declares(name) {
                     // An actual type is already resolved in the caller's scope.
                     // During template declaration the name is still symbolic.
                     return Ok(bindings.get(name).unwrap_or(ty).clone());
@@ -541,9 +560,17 @@ fn resolve_type(
                 bindings.reject_value(name)?;
             }
             if let Some((subject, member)) = lookup_use(name, resolver, is_local)? {
-                resolver.resolve_named(&subject, &member)
+                if let Type::Applied { args, .. } = ty {
+                    resolver.resolve_applied(&subject, &member, args)
+                } else {
+                    resolver.resolve_named(&subject, &member)
+                }
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
+            } else if matches!(ty, Type::Applied { .. }) {
+                Err(format!(
+                    "'{name}' requires an imported DSLX struct template"
+                ))
             } else {
                 Ok(ty.clone())
             }
@@ -700,7 +727,10 @@ fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
             }
             Type::Array { element, .. } => pending.push(element),
             Type::Tuple(fields) => pending.extend(fields.iter().rev()),
-            Type::Bool | Type::Bits { .. } => { /* Primitive types have no dependencies. */ }
+            Type::Bool | Type::Bits { .. } | Type::Applied { .. } => {
+                // Primitives and concrete imported applications have no local
+                // type dependencies.
+            }
         }
     }
 }
@@ -993,6 +1023,10 @@ impl TypeShape {
                 }
             }
             Type::Named(name) => named_shape(name)?,
+            // Substitution checks visit source annotations before import
+            // resolution. An application is a single nominal leaf there;
+            // the checker validates its full layout after resolution.
+            Type::Applied { .. } => Self::LEAF,
         };
         if shape.depth > remaining {
             return Err(format!(
@@ -1935,7 +1969,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
         });
         match child.result {
-            Type::Tuple(_) | Type::Named(_) => Ok(TypedExpr {
+            Type::Tuple(_) | Type::Named(_) | Type::Applied { .. } => Ok(TypedExpr {
                 ty: child.result.clone(),
                 kind: K::Tuple(outputs.collect()),
             }),
@@ -2268,7 +2302,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields } => self.struct_literal(name, fields),
+            Expr::Struct { name, fields } => self.struct_literal(Type::Named(name.clone()), fields),
+            Expr::AppliedStruct { name, args, fields } => self.struct_literal(
+                Type::Applied {
+                    name: name.clone(),
+                    args: args.clone(),
+                },
+                fields,
+            ),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
             Expr::ParametricCall {
@@ -2402,7 +2443,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         let resolved;
-        let annotation = if let Some(ty @ Type::Named(_)) = annotation {
+        let annotation = if let Some(ty @ (Type::Named(_) | Type::Applied { .. })) = annotation {
             resolved = self.source_type(ty)?;
             Some(&resolved)
         } else {
@@ -2588,32 +2629,32 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve the struct and check its fields in declaration order.
     fn struct_literal(
         &mut self,
-        name: &str,
+        source: Type,
         fields: &[(String, Expr)],
     ) -> Result<(Type, K), String> {
-        let ty = self.source_type(&Type::Named(name.to_owned()))?;
+        let ty = self.source_type(&source)?;
         let Type::Named(canonical) = &ty else {
-            return Err(format!("'{name}' is not a struct"));
+            return Err(format!("'{source}' is not a struct"));
         };
         let members = self.structs.definition(canonical)?.fields.clone();
         let mut supplied = BTreeMap::new();
         for (field, value) in fields {
             if supplied.insert(field.as_str(), value).is_some() {
-                return Err(format!("duplicate field '{name}.{field}'"));
+                return Err(format!("duplicate field '{source}.{field}'"));
             }
         }
         let mut values = Vec::new();
         for p in &members {
             let v = supplied
                 .remove(p.name.as_str())
-                .ok_or_else(|| format!("missing field '{name}.{}'", p.name))?;
+                .ok_or_else(|| format!("missing field '{source}.{}'", p.name))?;
             values.push(
                 self.expr(v, Some(&p.ty))
-                    .map_err(|e| format!("field '{name}.{}': {e}", p.name))?,
+                    .map_err(|e| format!("field '{source}.{}': {e}", p.name))?,
             );
         }
         if let Some(field) = supplied.keys().next() {
-            return Err(format!("unknown field '{name}.{field}'"));
+            return Err(format!("unknown field '{source}.{field}'"));
         }
         Ok((ty, K::Tuple(values)))
     }

@@ -3,6 +3,7 @@
 use std::{error::Error, fs, io, path::Path};
 
 use tempfile::{TempDir, tempdir};
+use xlsynth_bx::check::CheckedStmt;
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module_with_options, empty_package, lower_module,
     parse_module,
@@ -195,6 +196,11 @@ fn swap(h: wire::Header) -> wire::Header { facade::swap(h) }
             used_wire,
             "x: u8",
             "let wire = x; wire::Header { first: x, second: x, bias: s4:0 }.first",
+        ),
+        (
+            used_wire,
+            "x: u8",
+            "let wire = x; wire::Sized<8> { data: x }.data",
         ),
         (
             used_swap,
@@ -628,16 +634,46 @@ block sample(clk, x: float32::F32, y: bfloat16::BF16) -> u40 {
 }
 
 #[test]
+fn apfloat_direct_spelling_and_float32_alias_share_a_function_and_block_signature()
+-> Result<(), Box<dyn Error>> {
+    let helper = r#"fn copy(p: float32::F32) -> apfloat::APFloat<u32:8, 23> {
+    apfloat::APFloat<8, u32:23> { fraction: p.fraction, sign: p.sign, bexp: p.bexp }
+}"#;
+    let params = "x: apfloat::APFloat<8, 23>";
+    let result = "apfloat::APFloat<u32:8, u32:23>";
+    let body = "let copied: float32::F32 = copy(x); float32::negate(copied)";
+    let source = format!(
+        "use float32; use apfloat;\n{helper}\n{}",
+        bx_source(params, result, body)
+    );
+    let native = format!(
+        "import float32; import apfloat;\n{helper}\n{}",
+        dslx_source(params, result, body)
+    );
+    let evaluator = ExpressionEvaluator::compile_block(
+        &source,
+        &ImportOptions::default(),
+        compile_dslx_module(&native, &[]),
+    )?;
+    let x = IrValue::parse_typed("(bits[1]:1, bits[8]:128, bits[23]:0x123456)")?;
+    assert_eq!(
+        evaluator.compare(&[x])?,
+        IrValue::parse_typed("(bits[1]:0, bits[8]:128, bits[23]:0x123456)")?
+    );
+    Ok(())
+}
+
+#[test]
 fn parametric_struct_aliases_preserve_bindings_across_nested_results_and_lowering()
 -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     fs::write(
         root.path().join("tags.x"),
         r#"
-pub struct Tagged<N: u32> { x: u8 }
-pub type First = Tagged<u32:1>;
-pub type Second = Tagged<u32:2>;
-pub fn tag<N: u32>(_value: Tagged<N>) -> u32 { N }
+pub struct Tagged<W: u32, N: u32 = {W + u32:1}> { x: uN[W] }
+pub type First = Tagged<u32:8, u32:9>;
+pub type Second = Tagged<u32:8, u32:10>;
+pub fn tag<W: u32, N: u32>(_value: Tagged<W, N>) -> u32 { N }
 pub fn pair(a: First, b: Second) -> (First[1], Second) { ([a], b) }
 "#,
     )?;
@@ -651,11 +687,12 @@ pub fn pair(a: First, b: Second) -> (First[1], Second) { ([a], b) }
     };
     let source = r#"
 use tags;
+use tags::Tagged;
 use facade::Again;
-block sample(clk, a: Again, b: tags::Second) -> (u32, u32, u32) {
+block sample(clk, a: Again, b: Tagged<u32:8, 10>) -> (u32, u32, u32) {
     let p = tags::pair(a, b);
-    let first: tags::First = p.0[u32:0];
-    let copy = Again { x: first.x };
+    let first: tags::Tagged<8> = p.0[u32:0];
+    let copy = Tagged<8, u32:9> { x: first.x };
     (tags::tag(first), tags::tag(copy), tags::tag(p.1))
 }"#;
     let checked = check_module_with_options(&parse_module(source)?, &options)?;
@@ -668,17 +705,65 @@ block sample(clk, a: Again, b: tags::Second) -> (u32, u32, u32) {
         2
     );
 
-    let wrong = parse_module(
-        "use tags; use facade::Again; block b(clk, a: Again) -> u8 { let b: tags::Second = a; b.x }",
-    )?;
-    assert!(check_module_with_options(&wrong, &options).is_err());
+    for binding in [
+        "let b: tags::Tagged<8, 10> = a;",
+        "let b: tags::Tagged<8> = tags::Tagged<8, 10> { x: a.x };",
+    ] {
+        let wrong = format!(
+            "use tags; use facade::Again; block b(clk, a: Again) -> u8 {{ {binding} b.x }}"
+        );
+        assert!(
+            check_module_with_options(&parse_module(&wrong)?, &options).is_err(),
+            "{wrong}"
+        );
+    }
     root.close()?;
     let block = BlockEvaluator::lower(&checked, source)?;
     let value = IrValue::parse_typed("(bits[8]:7)")?;
     assert_eq!(
         block.evaluate(&[value.clone(), value])?,
-        IrValue::parse_typed("(bits[32]:1, bits[32]:1, bits[32]:2)")?
+        IrValue::parse_typed("(bits[32]:9, bits[32]:9, bits[32]:10)")?
     );
+    Ok(())
+}
+
+#[test]
+fn generic_block_register_resolves_a_direct_struct_type_and_zero_reset()
+-> Result<(), Box<dyn Error>> {
+    let root = struct_modules()?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let source = r#"
+use fabric::wire;
+use fabric::wire::Sized;
+block store<T>(clk, rst, x: T) -> T {
+    reg q: Sized<8> = zero!<wire::Sized<u32:8>>();
+    q := x;
+    q
+}
+pub block sample(clk, rst, x: u8) -> u8 {
+    let saved = store(wire::sized(x));
+    saved.data
+}
+"#;
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    let reset = checked
+        .blocks()
+        .iter()
+        .flat_map(|b| &b.statements)
+        .find_map(|stmt| match stmt {
+            CheckedStmt::Reg { name, reset, .. } if name == "q" => reset.as_ref(),
+            _ => None,
+        });
+    assert_eq!(reset, Some(&IrValue::parse_typed("(bits[8]:0)")?));
+    let ir = lower_module(
+        &checked,
+        empty_package("direct_register"),
+        ResetBehavior::default(),
+    )?;
+    xlsynth::IrPackage::parse_ir(&ir.to_string(), None)?;
     Ok(())
 }
 

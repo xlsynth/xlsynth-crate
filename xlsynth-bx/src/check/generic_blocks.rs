@@ -354,7 +354,7 @@ impl Bindings {
                 element: Box::new(self.substitute(element)),
                 size: *size,
             },
-            Type::Bool | Type::Bits { .. } => formal.clone(),
+            Type::Bool | Type::Bits { .. } | Type::Applied { .. } => formal.clone(),
         }
     }
 
@@ -385,7 +385,7 @@ fn canonical_argument(ty: &Type) -> Type {
             element: Box::new(canonical_argument(element)),
             size: *size,
         },
-        Type::Bits { .. } | Type::Named(_) => ty.clone(),
+        Type::Bits { .. } | Type::Named(_) | Type::Applied { .. } => ty.clone(),
     }
 }
 
