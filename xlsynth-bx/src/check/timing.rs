@@ -5,13 +5,15 @@
 //! Each driver records where a name gets its value. Once the drivers are
 //! indexed, the checker walks backwards from each annotated output.
 //! For `q + r`, it follows `q` to its register write, looks up input `r`,
-//! and checks that both reach the adder at the same stage.
+//! and checks that both reach the adder at the same stage. The pending steps
+//! run in that order. Each read leaves its stage on the value stack, and the
+//! adder replaces its two operand stages with one result.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::MAX_ELABORATION_DEPTH;
-use crate::ast::{OutputCycles, Param, Type};
+use super::StructTable;
+use crate::ast::{BinaryOp, OutputCycles, Param, Type};
 use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 
 const BLOCK_SCOPE: usize = 0;
@@ -22,6 +24,7 @@ pub(super) fn check_outputs(
     block: &CheckedBlock,
     ports: &[Param],
     port_names: &BTreeSet<String>,
+    structs: &StructTable,
 ) -> Result<(), String> {
     let Some(expected) = &block.output_cycles else {
         return Ok(());
@@ -35,12 +38,8 @@ pub(super) fn check_outputs(
         }
     }
 
-    let checker = Checker::new(block);
-    let check = |fields: &[usize], expected| {
-        checker
-            .infer(&block.output, BLOCK_SCOPE, fields, 0)?
-            .check(expected)
-    };
+    let checker = Checker::new(block, structs);
+    let check = |fields: &[usize], expected| checker.infer(&block.output, fields)?.check(expected);
     let aggregate = matches!(block.result, Type::Named(_) | Type::Tuple(_));
     if !aggregate && let OutputCycles::Uniform(cycle) = expected {
         return check(&[], *cycle);
@@ -76,16 +75,6 @@ impl Cycle {
                 Err(format!("expected cycle {expected}, got cycle {actual}"))
             }
             Self::At(_) | Self::Independent => Ok(()),
-        }
-    }
-
-    /// Operands of a combinational operation meet at one stage.
-    fn merge(self, other: Self, mismatch: impl FnOnce(u64, u64) -> String) -> Result<Self, String> {
-        match (self, other) {
-            (Self::Unknown, _) | (_, Self::Unknown) => Ok(Self::Unknown),
-            (Self::Independent, cycle) | (cycle, Self::Independent) => Ok(cycle),
-            (Self::At(a), Self::At(b)) if a == b => Ok(self),
-            (Self::At(a), Self::At(b)) => Err(mismatch(a, b)),
         }
     }
 
@@ -130,16 +119,20 @@ struct Scope<'a> {
 /// outputs.
 struct Checker<'a> {
     scopes: Vec<Scope<'a>>,
+    structs: &'a StructTable,
 }
 
 impl<'a> Checker<'a> {
-    fn new(block: &'a CheckedBlock) -> Self {
+    fn new(block: &'a CheckedBlock, structs: &'a StructTable) -> Self {
         let mut root = Scope::default();
         for param in &block.params {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
             root.names.insert(&param.name, Binding::Input(stage));
         }
-        let mut checker = Self { scopes: vec![root] };
+        let mut checker = Self {
+            scopes: vec![root],
+            structs,
+        };
         checker.collect_drivers(&block.statements, BLOCK_SCOPE);
         checker
     }
@@ -176,136 +169,266 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// In `if a { if b { q := x; } }`, the inner write uses `a && b`. Writes in
-    /// the same body share this result. The root enable is implicitly true.
-    fn guard_cycle(&self, scope: usize, depth: usize) -> Result<Cycle, String> {
-        let scope = &self.scopes[scope];
-        let Some((parent, condition)) = scope.parent else {
-            return Ok(Cycle::Independent);
-        };
-        if let Some(cycle) = scope.guard_cycle.get() {
-            return Ok(cycle);
+    /// A read inside an if body can use a name from any enclosing scope.
+    fn binding(&self, mut scope: usize, name: &str) -> Option<&Binding<'a>> {
+        loop {
+            if let Some(binding) = self.scopes[scope].names.get(name) {
+                return Some(binding);
+            }
+            scope = self.scopes[scope].parent?.0;
         }
-        let outer = self.guard_cycle(parent, depth)?;
-        let inner = self.infer(condition, parent, &[], depth)?;
-        let cycle = outer.merge(inner, |a, b| {
-            format!("nested write guards combine cycle {a} with cycle {b}")
-        })?;
-        scope.guard_cycle.set(Some(cycle));
-        Ok(cycle)
     }
 
-    /// An empty field path reads the whole value. For `p.header.id` the walk
-    /// pushes `id`, then `header`. At the tuple for `p` it selects `header`
-    /// first.
-    fn infer(
+    /// If the selected register value is itself a tuple or struct, read its
+    /// fields separately before merging their stages. Arrays stay a single
+    /// value.
+    fn register_field_count(
         &self,
-        expr: &'a TypedExpr,
-        scope: usize,
-        fields: &[usize],
-        depth: usize,
-    ) -> Result<Cycle, String> {
-        // Depth counts DFS steps through operands and drivers. A register
-        // write adds a hardware stage.
-        if depth > MAX_ELABORATION_DEPTH {
-            return Err(format!(
-                "timing dependency depth exceeds {MAX_ELABORATION_DEPTH}"
-            ));
+        mut ty: &'a Type,
+        path: &[usize],
+    ) -> Result<Option<usize>, String> {
+        for &index in path.iter().rev() {
+            ty = match ty {
+                Type::Tuple(items) => &items[index],
+                Type::Named(name) => &self.structs.definition(name)?.fields[index].ty,
+                _ => unreachable!("field projection has a checked aggregate type"),
+            };
         }
-        let operand = |value, fields: &[usize]| self.infer(value, scope, fields, depth + 1);
+        Ok(match ty {
+            Type::Tuple(items) => Some(items.len()),
+            Type::Named(name) => Some(self.structs.definition(name)?.fields.len()),
+            _ => None,
+        })
+    }
+
+    /// Walk backwards from one output. Each step either schedules its inputs
+    /// or uses stages those inputs have already left on the value stack.
+    fn infer(&self, output: &'a TypedExpr, fields: &[usize]) -> Result<Cycle, String> {
+        let mut walk = Walk {
+            pending: vec![Step::Expr(output, BLOCK_SCOPE, fields.to_vec())],
+            values: Vec::new(),
+        };
+        while let Some(step) = walk.pending.pop() {
+            match step {
+                Step::Expr(expr, scope, fields) => self.visit_expr(&mut walk, expr, scope, fields),
+                Step::Read(name, binding, fields) => {
+                    self.visit_read(&mut walk, name, binding, fields)?
+                }
+                Step::Guard(scope) => {
+                    let body = &self.scopes[scope];
+                    if let Some(stage) = body.guard_cycle.get() {
+                        walk.values.push(stage);
+                    } else if let Some((parent, condition)) = body.parent {
+                        // `if a { if b { ... } }` enables a write with a && b.
+                        walk.schedule([
+                            Step::Guard(parent),
+                            Step::Expr(condition, parent, vec![]),
+                            Step::Join(Join::Guards),
+                            Step::SaveGuard(scope),
+                        ]);
+                    } else {
+                        walk.values.push(Cycle::Independent);
+                    }
+                }
+                Step::Join(rule) => {
+                    let right = walk.values.pop().expect("right operand evaluated");
+                    let left = walk.values.last_mut().expect("left operand evaluated");
+                    *left = rule.apply(*left, right)?;
+                }
+                Step::SaveRead(driver, fields) => {
+                    let stage = *walk.values.last().expect("driver evaluated");
+                    driver.reads.borrow_mut().insert(fields, Some(stage));
+                }
+                Step::SaveGuard(scope) => {
+                    let stage = *walk.values.last().expect("enable evaluated");
+                    self.scopes[scope].guard_cycle.set(Some(stage));
+                }
+            }
+        }
+        debug_assert_eq!(walk.values.len(), 1);
+        Ok(walk.values.pop().expect("output evaluated"))
+    }
+
+    /// Follow the driver in its defining scope. Cache each field separately so
+    /// `q.saved` can depend on `q.live` without reporting feedback.
+    fn visit_read<'s>(
+        &'s self,
+        walk: &mut Walk<'s>,
+        name: &'s str,
+        binding: &'s Binding<'a>,
+        fields: Vec<usize>,
+    ) -> Result<(), String> {
+        let driver = match binding {
+            Binding::Input(stage) => {
+                walk.values.push(Cycle::At(*stage));
+                return Ok(());
+            }
+            Binding::Let(driver) | Binding::Register(driver) => driver,
+        };
+        // In `q + q` the second read reuses the finished stage. In
+        // `q := q + x` it finds the first read still in progress.
+        if let Some(stage) = driver.reads.borrow().get(&fields) {
+            walk.values.push(
+                stage.ok_or_else(|| format!("timing feedback through '{name}' is unsupported"))?,
+            );
+            return Ok(());
+        }
+        driver.reads.borrow_mut().insert(fields.clone(), None);
+        walk.pending.push(Step::SaveRead(driver, fields.clone()));
+        if let Binding::Let(_) = binding {
+            walk.pending
+                .push(Step::Expr(driver.rhs, driver.scope, fields));
+        } else if let Some(count) = self.register_field_count(&driver.rhs.ty, &fields)? {
+            // Reading all of q has the same timing as rebuilding it from its
+            // fields.
+            walk.aggregate((0..count).map(|index| {
+                let mut member = Vec::with_capacity(fields.len() + 1);
+                member.push(index);
+                member.extend_from_slice(&fields);
+                Step::Read(name, binding, member)
+            }));
+        } else {
+            // In `if en { q := x; }`, x and en meet before the clock edge.
+            walk.schedule([
+                Step::Expr(driver.rhs, driver.scope, fields),
+                Step::Guard(driver.scope),
+                Step::Join(Join::Register(name)),
+            ]);
+        }
+        Ok(())
+    }
+
+    /// Schedule operands in BX evaluation order, followed by the timing rule
+    /// that consumes them. A projected tuple needs only its selected member.
+    fn visit_expr<'s>(
+        &'s self,
+        walk: &mut Walk<'s>,
+        expr: &'s TypedExpr,
+        scope: usize,
+        mut fields: Vec<usize>,
+    ) {
+        let operand = |value| Step::Expr(value, scope, vec![]);
         match &expr.kind {
-            K::Name(name) => self.infer_name(name, scope, fields, depth + 1),
-            K::Literal(_) => Ok(Cycle::Independent),
-            K::Unary { value, .. } | K::Cast { value } => operand(value, fields),
+            K::Name(name) => match self.binding(scope, name) {
+                Some(binding) => walk.pending.push(Step::Read(name, binding, fields)),
+                None => walk.values.push(Cycle::Unknown),
+            },
+            K::Literal(_) => walk.values.push(Cycle::Independent),
+            K::Unary { value, .. } | K::Cast { value } => {
+                walk.pending.push(Step::Expr(value, scope, fields));
+            }
             K::TupleIndex { value, index } => {
-                let mut path = Vec::with_capacity(fields.len() + 1);
-                path.extend_from_slice(fields);
-                path.push(*index);
-                operand(value, &path)
+                // For p.header.id, push id and then header. The tuple for p
+                // pops header first.
+                fields.push(*index);
+                walk.pending.push(Step::Expr(value, scope, fields));
             }
             K::Tuple(members) => {
-                if let Some((&index, rest)) = fields.split_last() {
-                    return operand(&members[index], rest);
+                if let Some(index) = fields.pop() {
+                    walk.pending
+                        .push(Step::Expr(&members[index], scope, fields));
+                } else {
+                    walk.aggregate(members.iter().map(operand));
                 }
-                let mut cycle = Cycle::Independent;
-                for member in members {
-                    cycle = cycle.merge(operand(member, &[])?, |a, b| {
-                        format!("aggregate combines cycle {a} with cycle {b}")
-                    })?;
-                }
-                Ok(cycle)
             }
             K::Binary { op, left, right } => {
-                let left = operand(left, &[])?;
-                let right = operand(right, &[])?;
-                left.merge(right, |a, b| {
-                    format!("operator '{op}' combines cycle {a} with cycle {b}")
-                })
+                walk.schedule([
+                    operand(left),
+                    operand(right),
+                    Step::Join(Join::Operator(*op)),
+                ]);
             }
             K::If {
                 condition,
                 then_value,
                 else_value,
             } => {
-                // This is a data mux, as in `if sel { x } else { y }`.
-                // A statement such as `if en { q := x; }` drives an enable.
-                let select = operand(condition, &[])?;
-                let left = operand(then_value, fields)?;
-                let right = operand(else_value, fields)?;
-                let data = left.merge(right, |a, b| {
-                    format!("if branches combine cycle {a} with cycle {b}")
-                })?;
-                select.merge(data, |a, b| {
-                    format!("if expression has condition at cycle {a} and data at cycle {b}")
-                })
+                // `if sel { x } else { y }` is a mux. Check its data arms
+                // together, then check that their stage agrees with sel.
+                walk.schedule([
+                    operand(condition),
+                    Step::Expr(then_value, scope, fields.clone()),
+                    Step::Expr(else_value, scope, fields),
+                    Step::Join(Join::Branches),
+                    Step::Join(Join::Select),
+                ]);
             }
-            _ => Ok(Cycle::Unknown),
+            _ => walk.values.push(Cycle::Unknown),
+        }
+    }
+}
+
+/// Pending DFS work and stages produced so far for one output.
+struct Walk<'a> {
+    pending: Vec<Step<'a>>,
+    values: Vec<Cycle>,
+}
+
+impl<'a> Walk<'a> {
+    /// Callers list steps in execution order. The stack pops the first one
+    /// next.
+    fn schedule<const N: usize>(&mut self, steps: [Step<'a>; N]) {
+        self.pending.extend(steps.into_iter().rev());
+    }
+
+    /// An empty aggregate is stage-independent. Each member joins the running
+    /// stage.
+    fn aggregate(&mut self, members: impl DoubleEndedIterator<Item = Step<'a>>) {
+        self.values.push(Cycle::Independent);
+        for member in members.rev() {
+            self.schedule([member, Step::Join(Join::Fields)]);
+        }
+    }
+}
+
+/// A pending expression, enable, or operation on already evaluated operands.
+enum Step<'a> {
+    Expr(&'a TypedExpr, usize, Vec<usize>),
+    Read(&'a str, &'a Binding<'a>, Vec<usize>),
+    Guard(usize),
+    Join(Join<'a>),
+    SaveRead(&'a Driver<'a>, Vec<usize>),
+    SaveGuard(usize),
+}
+
+/// The hardware operation where two operand stages meet.
+enum Join<'a> {
+    Operator(BinaryOp),
+    Fields,
+    Branches,
+    Select,
+    Guards,
+    Register(&'a str),
+}
+
+impl Join<'_> {
+    /// Check alignment first. Only a register advances the result to the next
+    /// stage.
+    fn apply(self, left: Cycle, right: Cycle) -> Result<Cycle, String> {
+        let stage = match (left, right) {
+            (Cycle::Unknown, _) | (_, Cycle::Unknown) => Cycle::Unknown,
+            (Cycle::Independent, stage) | (stage, Cycle::Independent) => stage,
+            (Cycle::At(a), Cycle::At(b)) if a != b => return Err(self.mismatch(a, b)),
+            (Cycle::At(_), Cycle::At(_)) => left,
+        };
+        match self {
+            Self::Register(name) => stage.registered(name),
+            _ => Ok(stage),
         }
     }
 
-    /// Resolve the name where it was read, then evaluate its driver where it
-    /// was written. Input stages are already known.
-    fn infer_name(
-        &self,
-        name: &str,
-        mut scope: usize,
-        fields: &[usize],
-        depth: usize,
-    ) -> Result<Cycle, String> {
-        let binding = loop {
-            if let Some(binding) = self.scopes[scope].names.get(name) {
-                break binding;
+    fn mismatch(&self, a: u64, b: u64) -> String {
+        match self {
+            Self::Operator(op) => format!("operator '{op}' combines cycle {a} with cycle {b}"),
+            Self::Fields => format!("aggregate combines cycle {a} with cycle {b}"),
+            Self::Branches => format!("if branches combine cycle {a} with cycle {b}"),
+            Self::Select => {
+                format!("if expression has condition at cycle {a} and data at cycle {b}")
             }
-            let Some((parent, _)) = self.scopes[scope].parent else {
-                return Ok(Cycle::Unknown);
-            };
-            scope = parent;
-        };
-        let driver = match binding {
-            Binding::Input(stage) => return Ok(Cycle::At(*stage)),
-            Binding::Let(driver) | Binding::Register(driver) => driver,
-        };
-        // In `q + q` the second read reuses the finished stage. In `q := q + x`
-        // the second read finds None because the first is still in progress.
-        if let Some(stage) = driver.reads.borrow().get(fields) {
-            return stage.ok_or_else(|| format!("timing feedback through '{name}' is unsupported"));
+            Self::Guards => format!("nested write guards combine cycle {a} with cycle {b}"),
+            Self::Register(name) => {
+                format!("write to '{name}' has guard at cycle {b} and data at cycle {a}")
+            }
         }
-        driver.reads.borrow_mut().insert(fields.to_vec(), None);
-        let mut stage = self.infer(driver.rhs, driver.scope, fields, depth)?;
-        if let Binding::Register(_) = binding {
-            // In `if en { q := x; }`, en and x meet before the clock edge.
-            // If both are @0, q is @1 even when its enable holds the old value.
-            let enable = self.guard_cycle(driver.scope, depth)?;
-            stage = enable
-                .merge(stage, |en, data| {
-                    format!("write to '{name}' has guard at cycle {en} and data at cycle {data}")
-                })?
-                .registered(name)?;
-        }
-        driver
-            .reads
-            .borrow_mut()
-            .insert(fields.to_vec(), Some(stage));
-        Ok(stage)
     }
 }
