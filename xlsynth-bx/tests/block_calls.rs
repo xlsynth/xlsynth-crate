@@ -8,6 +8,81 @@ use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 #[test]
+fn nested_let_patterns_require_matching_tuple_members() -> Result<(), String> {
+    for (ty, pattern, result) in [
+        ("((u8,), u8)", "((a), b)", "a + b"),
+        ("(u8, u8)", "(a!, b')", "a! + b'"),
+        ("((), u8)", "((), a)", "a"),
+        ("(u8, u8)", "(a, .., b)", "a + b"),
+    ] {
+        let source = format!("block sample(clk, x: {ty}) -> u8 {{ let {pattern} = x; {result} }}");
+        check_module(&parse_module(&source)?)?;
+    }
+    for pattern in ["((a), b)", "((..), b)", "((), b)"] {
+        let source = format!("block sample(clk, x: (u8, u8)) -> u8 {{ let {pattern} = x; b }}");
+        let error = check_module(&parse_module(&source)?).unwrap_err();
+        assert!(
+            error.contains("tuple pattern requires a tuple"),
+            "{pattern}: {error}"
+        );
+    }
+    let nominal =
+        "struct Pair { a: u8, b: u8 } block sample(clk, x: Pair) -> u8 { let (a,b) = x; a+b }";
+    let error = check_module(&parse_module(nominal)?).unwrap_err();
+    assert!(error.contains("tuple pattern requires a tuple"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn destructuring_a_clocked_callback_block_reads_one_instance() {
+    let source = r#"
+fn widen(x: u8) -> u16 { x as u16 }
+block stage<In, Out, F: fn(In) -> Out>(clk, rst, en: bool, x: In) -> (bool, (In, Out)) {
+    reg valid: bool = false;
+    reg data: Out = zero!<Out>();
+    valid := en;
+    if en { data := F(x); }
+    (valid, (x, data))
+}
+pub block pipeline(clk, rst, en: bool, x: u8) -> (bool, u16) {
+    let (valid, (.., data)): (bool, (u8, u16)) = stage<widen>(en, x);
+    (valid, data)
+}
+"#;
+    let mut package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let parent = package.get_block("pipeline").unwrap();
+    assert_eq!(parent.instantiations.len(), 1);
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let module = compile_pipeline_module(&rtl.system_verilog).unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let ports = runner.port_bindings();
+    let reset = ports.input("rst").unwrap();
+    let enable = ports.input("en").unwrap();
+    let input = ports.input("x").unwrap();
+    for (rst, en, x, expected_valid, expected_data) in [
+        (true, false, 0, 0, 0),
+        (false, true, 37, 1, 37),
+        (false, false, 99, 0, 37),
+        (false, true, 255, 1, 255),
+    ] {
+        let edge = runner
+            .step_cycle_with_drive(&mut [], |drive| {
+                drive.set_bool(&reset, rst)?;
+                drive.set_bool(&enable, en)?;
+                drive.set_u64(&input, x)
+            })
+            .unwrap();
+        assert_eq!(
+            edge.outputs["out_0"].to_u64_if_known(),
+            Some(expected_valid)
+        );
+        assert_eq!(edge.outputs["out_1"].to_u64_if_known(), Some(expected_data));
+    }
+}
+
+#[test]
 fn two_call_bindings_create_the_same_hardware_as_two_explicit_instances() {
     let child = r#"
 block delay(clk, rst, x: u8, en: bool) -> u8 {
@@ -214,6 +289,34 @@ fn unrolled_block_calls_reject_conditional_hardware_and_cycles() {
             compile(&source, empty_package("design"), ResetBehavior::default()).unwrap_err();
         assert!(error.contains(reason), "{body}: {error}");
     }
+}
+
+#[test]
+fn unrolled_tuple_bindings_instantiate_each_child_once() -> Result<(), String> {
+    let source = r#"
+pub block parent(clk, x:u8) -> u8 {
+    let result = unroll_for! (_, a) in u8:0..u8:2 {
+        let (left, right) = split(a);
+        let (_, tail) = split(right);
+        left + tail
+    }(x);
+    let bx_inst_0 = split(result);
+    bx_inst_0.0
+}
+block split(clk, x:u8) -> (u8, u8) { (x, x + u8:1) }
+"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let parent = package.get_block("parent").unwrap();
+    assert_eq!(parent.instantiations.len(), 5);
+    assert!(
+        parent
+            .instantiations
+            .iter()
+            .all(|instance| instance.block == "split")
+    );
+    assert_eq!(parent.instantiations.last().unwrap().name, "bx_inst_0");
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[test]

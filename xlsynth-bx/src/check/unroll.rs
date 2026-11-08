@@ -38,9 +38,9 @@ impl BodyChecker<'_, '_> {
         self.in_counted_body || self.iteration_path.len() > self.map_outer_iterations.unwrap_or(0)
     }
 
-    pub(super) fn loop_widths(&self) -> Option<WidthLookup<'_>> {
-        (!self.loop_values.is_empty())
-            .then(|| WidthLookup::loop_locals(&self.inferred_bindings, &self.loop_values))
+    pub(super) fn scoped_widths(&self) -> Option<WidthLookup<'_>> {
+        (!self.loop_values.is_empty() || !self.function_values.is_empty())
+            .then(|| WidthLookup::scoped_locals(&self.inferred_bindings, &self.loop_values))
     }
 
     /// Charge expanded folds and range operands to their source body.
@@ -104,7 +104,7 @@ impl BodyChecker<'_, '_> {
     /// Check an ordinary binding or elaborate its child instance.
     pub(super) fn let_value(
         &mut self,
-        name: &str,
+        name: Option<&str>,
         expr: &Expr,
         expected: Option<&Type>,
         structural: bool,
@@ -136,15 +136,27 @@ impl BodyChecker<'_, '_> {
             self.check_block_callback_list(
                 target,
                 callbacks.len(),
-                !callbacks.is_empty() && self.names.contains(target),
+                self.function_values.contains_key(target)
+                    || (!callbacks.is_empty() && self.names.contains(target)),
             )?;
-            let binding = if self.iteration_path.is_empty() {
+            let binding = if let Some(name) = name
+                && self.iteration_path.is_empty()
+            {
                 name.to_owned()
             } else {
-                let mut base = name.to_owned();
-                for index in &self.iteration_path {
-                    base.push_str(&format!("_{index}"));
-                }
+                let base = match name {
+                    Some(name) => {
+                        let mut base = name.to_owned();
+                        for index in &self.iteration_path {
+                            base.push_str(&format!("_{index}"));
+                        }
+                        base
+                    }
+                    // A tuple pattern or wildcard has no source name for the
+                    // instance. Unconditional instances occupy distinct
+                    // positions in the checked statement list.
+                    None => format!("bx_inst_{}", self.statements.len()),
+                };
                 let mut binding = base.clone();
                 let mut suffix = 0;
                 while !self.reserved_hardware_names.insert(binding.clone()) {
@@ -349,6 +361,14 @@ impl BodyChecker<'_, '_> {
             self.bind_scoped_value(&fold.index, item, range.widths.clone(), &mut saved);
             self.bind_scoped_value(&fold.accumulator, carry, None, &mut saved);
             for stmt in &fold.body {
+                if let Stmt::LetPattern(binding) = stmt {
+                    let init = self
+                        .pattern_initializer(binding, structural)
+                        .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
+                    self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)
+                        .map_err(|e| format!("unroll_for! iteration {ordinal}: {e}"))?;
+                    continue;
+                }
                 let Stmt::Let {
                     name,
                     ty,
@@ -361,7 +381,7 @@ impl BodyChecker<'_, '_> {
                 };
                 let ty = ty.as_ref().map(|t| self.source_type(t)).transpose()?;
                 let value = self
-                    .let_value(name, expr, ty.as_ref(), structural)
+                    .let_value(Some(name), expr, ty.as_ref(), structural)
                     .map_err(|e| format!("unroll_for! iteration {ordinal}, let '{name}': {e}"))?;
                 let widths = if ty.is_none() {
                     binding_widths(expr, &value.ty, &self.inferred_bindings)?
@@ -556,6 +576,15 @@ impl BodyChecker<'_, '_> {
         locals.bind_pattern_name(&fold.index);
         locals.bind_pattern_name(&fold.accumulator);
         for stmt in &fold.body {
+            if let Stmt::LetPattern(binding) = stmt {
+                self.validate_source_pattern(&binding.pattern)?;
+                if let Some(ty) = &binding.ty {
+                    self.check_type_names(ty, locals)?;
+                }
+                self.check_expr_names(&binding.value, locals)?;
+                locals.bind_pattern(&binding.pattern);
+                continue;
+            }
             let Stmt::Let { name, value, ty } = stmt else {
                 return Err("unroll_for! bodies permit only let bindings before the result".into());
             };

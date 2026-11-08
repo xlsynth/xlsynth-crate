@@ -12,7 +12,7 @@ use std::{
 };
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 use xlsynth_bx::ast::Type;
-use xlsynth_bx::{ImportOptions, check_module_with_options, parse_module};
+use xlsynth_bx::{CheckedModule, ImportOptions, check_module_with_options, parse_module};
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
 use xlsynth_pir::libxls_bridge::value_to_libxls;
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
@@ -149,6 +149,37 @@ pub(crate) fn compare_program(
     compare_bx_program(&bx, program, seed, execution, additional_inputs, &[])
 }
 
+/// Compare the original source types independently of lowering. Some native
+/// execution probes need an explicit conversion for an already checked value.
+pub(crate) fn check_sources(
+    bx: &str,
+    reference: &str,
+    valid: Option<bool>,
+    search_paths: &[&Path],
+) -> Result<Option<CheckedModule>, String> {
+    let options = ImportOptions {
+        additional_search_paths: search_paths.to_vec(),
+        ..ImportOptions::default()
+    };
+    let bx_check = parse_module(bx).and_then(|m| check_module_with_options(&m, &options));
+    let dslx_check = dslx::parse_and_typecheck(
+        reference,
+        "oracle.x",
+        "oracle",
+        &mut ImportData::new(None, search_paths),
+    );
+    match (bx_check, dslx_check) {
+        (Ok(bx), Ok(_)) if valid != Some(false) => Ok(Some(bx)),
+        // Shared rejection is successful when the generator permits it.
+        (Err(_), Err(_)) if valid != Some(true) => Ok(None),
+        (bx_result, native_result) => Err(format!(
+            "expected source acceptance {valid:?}: BX {:?}, DSLX {:?}\nBX:\n{bx}\nDSLX:\n{reference}",
+            bx_result.err(),
+            native_result.err()
+        )),
+    }
+}
+
 /// Compare an explicit BX program with independently constructed concrete
 /// DSLX functions when the BX source uses a language extension.
 pub(crate) fn compare_bx_program(
@@ -164,30 +195,9 @@ pub(crate) fn compare_bx_program(
         program.functions,
         dslx_source(&program.params, &program.result, &program.body)
     );
-    let options = ImportOptions {
-        additional_search_paths: search_paths.to_vec(),
-        ..ImportOptions::default()
-    };
-    let bx_check = parse_module(bx).and_then(|m| check_module_with_options(&m, &options));
-    let dslx_check = dslx::parse_and_typecheck(
-        &reference,
-        "oracle.x",
-        "oracle",
-        &mut ImportData::new(None, search_paths),
-    );
-    let checked = match (bx_check, dslx_check) {
-        (Ok(bx), Ok(_)) if program.valid != Some(false) => bx,
-        // Rejection by both frontends is a successful comparison unless the
-        // generator guarantees acceptance. IR failures are checked separately.
-        (Err(_), Err(_)) if program.valid != Some(true) => return Ok(()),
-        (bx_result, native_result) => {
-            return Err(format!(
-                "expected source acceptance {:?}: BX {:?}, DSLX {:?}\nBX:\n{bx}\nDSLX:\n{reference}",
-                program.valid,
-                bx_result.err(),
-                native_result.err()
-            ));
-        }
+    // Both frontends rejected this source as permitted by the generator.
+    let Some(checked) = check_sources(bx, &reference, program.valid, search_paths)? else {
+        return Ok(());
     };
     let evaluator = BlockEvaluator::lower(&checked, bx)?;
     let native_ir = if program.dslx_ir {

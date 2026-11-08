@@ -37,18 +37,22 @@ pub(crate) enum Member {
 
 /// Minimum annotations retained on a binding's unsized bit members.
 #[derive(Clone, Default)]
-pub(crate) struct BindingWidths(BTreeMap<Vec<Member>, Minimum>);
+pub(crate) struct BindingWidths {
+    members: BTreeMap<Vec<Member>, Minimum>,
+    /// Destructured fields and captured aggregate operands can acquire their
+    /// concrete member types at each use in a block expression.
+    pub(crate) infer_at_use: bool,
+}
 
 impl BindingWidths {
     /// Distribute the inferred widths of a destructured tuple to its members.
     pub(crate) fn tuple_fields(self, count: usize) -> Vec<Option<Self>> {
         let mut fields = (0..count).map(|_| None).collect::<Vec<_>>();
-        for (path, ty) in self.0 {
+        for (path, ty) in self.members {
             if let Some((Member::TupleField(i), rest)) = path.split_first() {
-                fields[*i]
-                    .get_or_insert_with(Self::default)
-                    .0
-                    .insert(rest.to_vec(), ty);
+                let field = fields[*i].get_or_insert_with(Self::default);
+                field.infer_at_use = true;
+                field.members.insert(rest.to_vec(), ty);
             }
         }
         fields
@@ -57,7 +61,7 @@ impl BindingWidths {
     /// Remove the shared array-element prefix when binding an iteration value.
     pub(crate) fn array_element(self) -> Option<Self> {
         let widths = self
-            .0
+            .members
             .into_iter()
             .filter_map(|(path, ty)| {
                 let (Member::ArrayElement, rest) = path.split_first()? else {
@@ -66,7 +70,10 @@ impl BindingWidths {
                 Some((rest.to_vec(), ty))
             })
             .collect::<BTreeMap<_, _>>();
-        (!widths.is_empty()).then_some(Self(widths))
+        (!widths.is_empty()).then_some(Self {
+            members: widths,
+            infer_at_use: self.infer_at_use,
+        })
     }
 
     /// The inferred scalar type of a range element before use-site constraints.
@@ -79,15 +86,18 @@ impl BindingWidths {
             has_inline_literal: false,
             needs_accumulator_type: None,
         };
-        Self(BTreeMap::from([(Vec::new(), minimum)]))
+        Self {
+            members: BTreeMap::from([(Vec::new(), minimum)]),
+            infer_at_use: false,
+        }
     }
 }
 
 pub(crate) type InferredBindings = BTreeMap<String, BindingWidths>;
 
-/// Minimum annotations visible to a type-inference operation. In ordinary
-/// expressions, only values local to an unrolled iteration are retyped
-/// at use sites. Type dimensions also consult preceding outer let bindings.
+/// Minimum annotations visible to a type-inference operation. Block expressions
+/// can retype unrolled locals and destructured inferred values at their use
+/// sites. Type dimensions also consult preceding outer let bindings.
 #[derive(Clone, Copy)]
 pub(crate) enum WidthLookup<'a> {
     Bindings {
@@ -100,13 +110,13 @@ pub(crate) enum WidthLookup<'a> {
 }
 
 impl<'a> WidthLookup<'a> {
-    pub(crate) fn loop_locals(
+    pub(crate) fn scoped_locals(
         widths: &'a InferredBindings,
-        locals: &'a BTreeMap<String, crate::typed::TypedExpr>,
+        loops: &'a BTreeMap<String, crate::typed::TypedExpr>,
     ) -> Self {
         Self::Bindings {
             widths,
-            locals: Some(locals),
+            locals: Some(loops),
         }
     }
 
@@ -120,13 +130,31 @@ impl<'a> WidthLookup<'a> {
     fn get(&self, name: &str) -> Option<&'a BindingWidths> {
         match self {
             Self::Bindings { widths, locals } => {
-                if locals.is_some_and(|locals| !locals.contains_key(name)) {
+                let width = widths.get(name)?;
+                if locals.is_some_and(|loops| !loops.contains_key(name)) && !width.infer_at_use {
                     return None;
                 }
-                widths.get(name)
+                Some(width)
             }
             Self::DslxLiterals(widths) => widths.and_then(|w| w.get(name)),
         }
+    }
+
+    /// Retain the DSLX literal radix for an inferred member when a block
+    /// expression determines the common type of several operands.
+    fn dslx_reference(self, mut expr: &Expr) -> Option<Self> {
+        let Self::Bindings { widths, .. } = self else {
+            return Some(self);
+        };
+        while let Expr::Field { value, .. } | Expr::Index { value, .. } = expr {
+            expr = value;
+        }
+        let Expr::Name(name) = expr else {
+            return None;
+        };
+        self.get(name)?
+            .infer_at_use
+            .then_some(Self::DslxLiterals(Some(widths)))
     }
 
     /// A new lexical scope may shadow an outer binding's minimum.
@@ -298,15 +326,13 @@ fn collect_minimum_with_calls(
         Expr::For(fold) if fold.annotation.is_none() => {
             return collect_fold_seed(&fold.seed, "for", minimum, calls);
         }
-        Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
-            if matches!(bindings, Some(WidthLookup::DslxLiterals(_))) =>
-        {
-            return collect_projected(expr, &[], bindings, minimum);
-        }
         Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. } => {
             let Some(bindings) = bindings else {
                 return Ok(false);
             };
+            if let Some(dslx) = bindings.dslx_reference(expr) {
+                return collect_projected(expr, &[], Some(dslx), minimum);
+            }
             let mut projected = None;
             if !collect_projected(expr, &[], Some(bindings), &mut projected)? {
                 return Ok(false);
@@ -366,9 +392,29 @@ fn collect_minimum_with_calls(
 /// Infer a result width when all operands that constrain it are unsized
 /// integers.
 pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
+    expression_minimum(expr, None)?
+        .map(Minimum::inferred_type)
+        .transpose()
+}
+
+/// An aggregate operand can supply its own literal width unless an implicit
+/// fold seed must first receive a concrete type from another operand.
+pub(crate) fn minimum_operand_type(
+    expr: &Expr,
+    bindings: Option<WidthLookup<'_>>,
+) -> Result<Option<Type>, String> {
+    Ok(expression_minimum(expr, bindings)?
+        .filter(|m| m.needs_accumulator_type.is_none())
+        .map(Minimum::into_type))
+}
+
+fn expression_minimum(
+    expr: &Expr,
+    bindings: Option<WidthLookup<'_>>,
+) -> Result<Option<Minimum>, String> {
     let mut minimum = None;
-    if collect_minimum(expr, None, &mut minimum)? {
-        minimum.map(Minimum::inferred_type).transpose()
+    if collect_minimum(expr, bindings, &mut minimum)? {
+        Ok(minimum)
     } else {
         Ok(None)
     }
@@ -398,7 +444,7 @@ fn collect_projected_with_calls(
         (Expr::Name(name), _) => {
             let Some(bound) = bindings
                 .and_then(|widths| widths.get(name))
-                .and_then(|binding| binding.0.get(path))
+                .and_then(|binding| binding.members.get(path))
             else {
                 return Ok(false);
             };
@@ -501,6 +547,55 @@ fn visit_bit_members(
     Ok(())
 }
 
+/// Apply the scalar literal unification rules to corresponding inferred leaves
+/// of aggregate operands. Concrete leaves already have their operand types.
+pub(crate) fn unify_inferred_members(
+    ty: &mut Type,
+    operands: &[&Expr],
+    bindings: &InferredBindings,
+) -> Result<(), String> {
+    fn visit(
+        ty: &mut Type,
+        path: &mut Vec<Member>,
+        operands: &[&Expr],
+        bindings: WidthLookup<'_>,
+    ) -> Result<(), String> {
+        match ty {
+            Type::Tuple(fields) => {
+                for (i, field) in fields.iter_mut().enumerate() {
+                    path.push(Member::TupleField(i));
+                    visit(field, path, operands, bindings)?;
+                    path.pop();
+                }
+            }
+            Type::Array { element, .. } => {
+                path.push(Member::ArrayElement);
+                visit(element, path, operands, bindings)?;
+                path.pop();
+            }
+            Type::Bits { .. } | Type::Bool => {
+                let mut minimum = None;
+                for operand in operands {
+                    if !collect_projected(operand, path, Some(bindings), &mut minimum)? {
+                        return Ok(());
+                    }
+                }
+                if let Some(minimum) = minimum {
+                    *ty = minimum.inferred_type()?;
+                }
+            }
+            Type::Named(_) => { /* Nominal types have concrete member types. */ }
+        }
+        Ok(())
+    }
+    visit(
+        ty,
+        &mut Vec::new(),
+        operands,
+        WidthLookup::DslxLiterals(Some(bindings)),
+    )
+}
+
 /// Record inferred leaves once, so a later projection can reuse the type of a
 /// bound value without walking its initializer or its dependencies again.
 pub(crate) fn binding_widths(
@@ -526,11 +621,11 @@ pub(crate) fn binding_widths_using(
             if minimum.has_prefix && matches!(lookup, WidthLookup::DslxLiterals(_)) {
                 minimum.origin.get_or_insert_with(|| Rc::new(()));
             }
-            widths.0.insert(path.to_vec(), minimum);
+            widths.members.insert(path.to_vec(), minimum);
         }
         Ok(())
     })?;
-    Ok((!widths.0.is_empty()).then_some(widths))
+    Ok((!widths.members.is_empty()).then_some(widths))
 }
 
 /// Which operands determine the width of a contextual unsigned expression.
@@ -766,13 +861,14 @@ fn check_projected_argument(
     check_signed_minimum(minimum, ty, width)
 }
 
-/// Check whether each differing field of a projection is an unsized hex or
-/// binary literal whose bit pattern already occupies the target signed width.
+/// Check each differing bit member against the minimum type retained by the
+/// projection. At equal widths only a prefixed literal can acquire a sign bit.
 pub(crate) fn projected_type_compatible(
     expr: &Expr,
     actual: &Type,
     expected: &Type,
     bindings: Option<&InferredBindings>,
+    allow_widen: bool,
 ) -> Result<bool, String> {
     fn member_matches(
         expr: &Expr,
@@ -780,6 +876,7 @@ pub(crate) fn projected_type_compatible(
         actual: &Type,
         expected: &Type,
         bindings: Option<&InferredBindings>,
+        allow_widen: bool,
     ) -> Result<bool, String> {
         if actual == expected {
             return Ok(true);
@@ -788,7 +885,7 @@ pub(crate) fn projected_type_compatible(
             (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
                 for (index, (a, b)) in a.iter().zip(b).enumerate() {
                     path.push(Member::TupleField(index));
-                    let matches = member_matches(expr, path, a, b, bindings)?;
+                    let matches = member_matches(expr, path, a, b, bindings, allow_widen)?;
                     path.pop();
                     if !matches {
                         return Ok(false);
@@ -807,7 +904,7 @@ pub(crate) fn projected_type_compatible(
                 },
             ) if n == m => {
                 path.push(Member::ArrayElement);
-                let matches = member_matches(expr, path, a, b, bindings)?;
+                let matches = member_matches(expr, path, a, b, bindings, allow_widen)?;
                 path.pop();
                 Ok(matches)
             }
@@ -817,10 +914,13 @@ pub(crate) fn projected_type_compatible(
                 else {
                     return Ok(false);
                 };
-                if a_width != b_width || a_signed && !b_signed {
+                if a_width > b_width
+                    || (!allow_widen && a_width != b_width)
+                    || a_signed && !b_signed
+                {
                     return Ok(false);
                 }
-                if a_signed == b_signed {
+                if a_width == b_width && a_signed == b_signed {
                     // bool and u1 have the same source representation.
                     return Ok(true);
                 }
@@ -832,11 +932,20 @@ pub(crate) fn projected_type_compatible(
                     &mut minimum,
                 )?;
                 Ok(inferred
-                    && minimum.is_some_and(|m| !m.signed && m.has_prefix && m.width == a_width))
+                    && (a_width < b_width
+                        || minimum
+                            .is_some_and(|m| !m.signed && m.has_prefix && m.width == a_width)))
             }
         }
     }
-    member_matches(expr, &mut Vec::new(), actual, expected, bindings)
+    member_matches(
+        expr,
+        &mut Vec::new(),
+        actual,
+        expected,
+        bindings,
+        allow_widen,
+    )
 }
 
 /// The expression supplying a group's type, or the minimum type of its

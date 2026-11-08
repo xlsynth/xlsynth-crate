@@ -225,6 +225,12 @@ Generates type-generic BX blocks with named callbacks, flattens their combinatio
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_callbacks --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_let_patterns.rs
+
+Compares destructuring lets in BX blocks with the same patterns in DSLX functions. Generated programs vary nested tuple shapes, wildcards, rest spans, type annotations, inferred integer fields, lexical shadowing, and direct or child-block initializers. Invalid patterns exercise duplicate binders, extra rest markers, and shape or type mismatches. Accepted programs return selected fields or compare inferred operands, including decimal and radix-prefixed values of different widths and signs inside structural unrolls. The target compares BX block IR with compiled DSLX IR and native DSLX evaluation on shared inputs. For implicit conversions that can abort the pinned converter, it first checks the original source with both frontends, then uses explicit casts or native array-element unification to give the DSLX execution probe the common operand type.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_let_patterns --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

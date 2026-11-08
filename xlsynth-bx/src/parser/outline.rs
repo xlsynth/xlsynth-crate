@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Dialect, MAX_SYNTAX_DEPTH, Parser, ValueContext, fixed_width, is_dslx_member_name,
-    is_use_identifier, lex,
+    Dialect, ExpressionGrammar, MAX_SYNTAX_DEPTH, Parser, ValueContext, fixed_width,
+    is_dslx_member_name, is_use_identifier, lex,
 };
 
 /// Names, types, and import bindings written in one DSLX source module.
@@ -89,7 +89,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
         depth: 0,
         dslx_type_display: false,
         value_context: ValueContext::Block,
-        in_value_expression: false,
+        expression_grammar: ExpressionGrammar::Block,
         block_type_params: BTreeSet::new(),
         callback_templates: Default::default(),
         hidden_templates: Vec::new(),

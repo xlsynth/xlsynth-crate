@@ -13,10 +13,393 @@ use xlsynth_bx::{
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::ir::MemberType;
+use xlsynth_pir::ir::{MemberType, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 use xlsynth_pir::libxls_bridge::value_from_libxls;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
+
+#[test]
+fn block_tuple_patterns_can_rebind_previous_values_in_lexical_order() -> Result<(), String> {
+    let body = r#"
+        let (x, old) = (x + u8:1, x);
+        let x = x + old;
+        let ((old, x), ..) = ((x, old), false);
+        (old, x)
+    "#;
+    let bx = format!("block sample(clk, x:u8)->(u8,u8) {{ {body} }}");
+    let dslx = format!("fn sample(x:u8)->(u8,u8) {{ {body} }}");
+    let eval = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&dslx, &[]),
+    )?;
+    let actual = eval.compare(&[IrValue::make_ubits(8, 5).unwrap()])?;
+    assert_eq!(
+        actual,
+        IrValue::parse_typed("(bits[8]:11,bits[8]:5)").unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn destructured_inferred_bits_can_widen_at_each_use() -> Result<(), Box<dyn Error>> {
+    let helper = "fn use_part(x:s3)->s3 { x }";
+    let body = r#"
+        let ((raw, _), pair) = ((1, x), ([1,2], x));
+        (use_part(raw), raw, pair)
+    "#;
+    let result = "(s3, u8, (s8[2], u8))";
+    let dslx = format!("{helper} fn sample(x:u8)->{result} {{ {body} }}");
+    dslx::parse_and_typecheck(&dslx, "width.x", "width", &mut ImportData::default())?;
+    // The native checker widens the name references, but its converter
+    // supplies the narrow initializer to the invoke. Spell the same concrete
+    // types explicitly in the reference so it has a valid IR signature.
+    let reference =
+        format!("{helper} fn sample(x:u8)->{result} {{ (use_part(s3:1), u8:1, ([s8:1,s8:2],x)) }}");
+    for bx in [
+        format!("{helper} block sample(clk,x:u8)->{result} {{ {body} }}"),
+        format!(
+            "{helper} fn project(x:u8)->{result} {{ {body} }} block sample(clk,x:u8)->{result} {{ project(x) }}"
+        ),
+    ] {
+        let eval = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(&reference, &[]),
+        )?;
+        let actual = eval.compare(&[IrValue::make_ubits(8, 17)?])?;
+        assert_eq!(
+            actual,
+            IrValue::parse_typed("(bits[3]:1, bits[8]:1, ([bits[8]:1,bits[8]:2],bits[8]:17))")?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn comparisons_unify_destructured_literal_widths_in_blocks_and_unrolls()
+-> Result<(), Box<dyn Error>> {
+    for (initializer, expected) in [
+        ("((1,), (17,))", false),
+        ("((1,), (-1,))", false),
+        ("((0xff,), (-1,))", true),
+        ("((0xff,), (s8:-1,))", true),
+        ("(0xff, -1)", true),
+        ("(([1], [0xff]), ([-1], [-1]))", false),
+    ] {
+        let comparison = format!("let (lo, hi) = {initializer}; lo == hi");
+        for body in [
+            comparison.clone(),
+            format!("unroll_for! (_, a) in u8:0..u8:1 {{ {comparison} }}(flag)"),
+        ] {
+            let bx = format!("block sample(clk, flag:bool)->bool {{ {body} }}");
+            let dslx = format!("fn sample(flag:bool)->bool {{ {body} }}");
+            dslx::parse_and_typecheck(&dslx, "compare.x", "compare", &mut ImportData::default())?;
+            // The native converter reads the narrow binder values even when
+            // DSLX assigns the references wider types for comparison.
+            let reference = format!("fn sample(flag:bool)->bool {{ {expected} }}");
+            let evaluator = ExpressionEvaluator::compile_block(
+                &bx,
+                &ImportOptions::default(),
+                compile_dslx_module(&reference, &[]),
+            )?;
+            assert_eq!(
+                evaluator.compare(&[IrValue::bool(false)])?,
+                IrValue::bool(expected)
+            );
+        }
+    }
+    // Decimal 255 needs nine signed bits; the explicit s8 operand fixes the
+    // comparison width, so the inferred member cannot supply that type.
+    let body = "let (lo, hi) = ((255,), (s8:-1,)); lo == hi";
+    let bx = format!("block sample(clk)->bool {{ {body} }}");
+    let dslx = format!("fn sample()->bool {{ {body} }}");
+    assert!(check_module(&parse_module(&bx)?).is_err());
+    assert!(
+        dslx::parse_and_typecheck(&dslx, "compare.x", "compare", &mut ImportData::default())
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn destructured_aggregates_unify_with_inline_constructors() -> Result<(), Box<dyn Error>> {
+    for (stored, inline, result) in [
+        ("(1,)", "(17,)", "false"),
+        ("(0xff,)", "(-1,)", "true"),
+        ("(1, flag, u8:5)", "(17 + 1, true, u8:5)", "false"),
+        ("(2, flag, u8:5)", "(1 + 1, true, u8:5)", "flag"),
+    ] {
+        for comparison in [format!("lo == {inline}"), format!("{inline} == lo")] {
+            let body = format!("let (lo,) = ({stored},); {comparison}");
+            let bx = format!("block sample(clk, flag:bool)->bool {{ {body} }}");
+            let dslx = format!("fn sample(flag:bool)->bool {{ {body} }}");
+            dslx::parse_and_typecheck(&dslx, "compare.x", "compare", &mut ImportData::default())?;
+            // The converter can use the stored member's original width. The
+            // reference expresses the result at the checked comparison width.
+            let reference = format!("fn sample(flag:bool)->bool {{ {result} }}");
+            let evaluator = ExpressionEvaluator::compile_block(
+                &bx,
+                &ImportOptions::default(),
+                compile_dslx_module(&reference, &[]),
+            )?;
+            for flag in [false, true] {
+                evaluator.compare(&[IrValue::bool(flag)])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn comparisons_infer_destructured_members_across_calls_and_branches() -> Result<(), Box<dyn Error>>
+{
+    let helpers = "fn identity(flag:bool)->bool { flag } fn wide(x:u8)->u8 { x }";
+    for (stored, other, result) in [
+        ("(1, flag)", "(17, !flag)", "false"),
+        ("(1, flag)", "(17, identity(flag))", "false"),
+        ("(1, flag)", "(17, flag && flag)", "false"),
+        ("(1, flag)", "(wide(x), identity(flag))", "x == u8:1"),
+        ("(1, 1)", "(17, wide(x))", "false"),
+        ("(2, 1)", "(1 + 1, wide(x))", "x == u8:1"),
+        ("(1,)", "if flag { (17,) } else { (1,) }", "!flag"),
+        ("(1,)", "match flag { true => (17,), _ => (1,) }", "!flag"),
+        (
+            "((1,), flag)",
+            "(if flag { (17,) } else { (1,) }, identity(flag))",
+            "!flag",
+        ),
+    ] {
+        for comparison in [
+            format!("a == ({other})"),
+            format!("({other}) == a"),
+            format!("(if flag {{ a }} else {{ a }}) == ({other})"),
+            format!("({other}) == (match flag {{ true => a, _ => a }})"),
+        ] {
+            let body = format!("let (a,) = ({stored},); {comparison}");
+            let bx = format!("{helpers} block sample(clk, flag:bool, x:u8)->bool {{ {body} }}");
+            let dslx = format!("{helpers} fn sample(flag:bool, x:u8)->bool {{ {body} }}");
+            dslx::parse_and_typecheck(&dslx, "compare.x", "compare", &mut ImportData::default())?;
+            let reference = format!("fn sample(flag:bool, x:u8)->bool {{ {result} }}");
+            let evaluator = ExpressionEvaluator::compile_block(
+                &bx,
+                &ImportOptions::default(),
+                compile_dslx_module(&reference, &[]),
+            )
+            .map_err(|e| format!("{body}: {e}"))?;
+            for flag in [false, true] {
+                for x in [1, 17] {
+                    evaluator.compare(&[IrValue::bool(flag), IrValue::make_ubits(8, x)?])?;
+                }
+            }
+        }
+    }
+    let source = format!(
+        "{helpers} block sample(clk, flag:bool, x:u8)->bool {{ let (a,) = ((1, flag),); a == (wide(x), identity(flag)) }}"
+    );
+    let package = compile(&source, empty_package("anchors"), ResetBehavior::default())?;
+    let nodes = &package.get_block("sample").unwrap().nodes;
+    for name in ["wide", "identity"] {
+        assert_eq!(nodes.iter().filter(|n| matches!(&n.payload, NodePayload::Invoke { to_apply, .. } if to_apply == name)).count(), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn captured_projections_retain_inferred_literal_widths() -> Result<(), Box<dyn Error>> {
+    for projection in [
+        "((0xff,), true).0",
+        "[(0xff,)][u1:0]",
+        "({ let raw = 0xff; ((raw,), true) }).0",
+    ] {
+        for (target, equal) in [("s8:-1", true), ("s16:255", true), ("s16:-1", false)] {
+            for comparison in [
+                format!("a == (1, {projection})"),
+                format!("(1, {projection}) == a"),
+            ] {
+                let body = format!("let (a,) = ((1, ({target},)),); flag == ({comparison})");
+                let function = format!("fn test(flag:bool)->bool {{ {body} }}");
+                dslx::parse_and_typecheck(
+                    &function,
+                    "capture.x",
+                    "capture",
+                    &mut ImportData::default(),
+                )?;
+                // At wider use sites the native converter can read the original
+                // u8. Its bits represent positive 255 after widening.
+                let reference = format!("fn sample(flag:bool)->bool {{ flag == {equal} }}");
+                for bx in [
+                    format!("{function} block sample(clk, flag:bool)->bool {{ test(flag) }}"),
+                    format!("block sample(clk, flag:bool)->bool {{ {body} }}"),
+                ] {
+                    let evaluator = ExpressionEvaluator::compile_block(
+                        &bx,
+                        &ImportOptions::default(),
+                        compile_dslx_module(&reference, &[]),
+                    )?;
+                    for flag in [false, true] {
+                        evaluator.compare(&[IrValue::bool(flag)])?;
+                    }
+                }
+            }
+        }
+    }
+    for literal in ["255", "u8:0xff"] {
+        let body = format!("let (a,) = ((1, (s8:-1,)),); a == (1, (({literal},), true).0)");
+        let function = format!("fn test()->bool {{ {body} }}");
+        assert!(check_module(&parse_module(&function)?).is_err());
+        assert!(
+            dslx::parse_and_typecheck(
+                &function,
+                "capture.x",
+                "capture",
+                &mut ImportData::default()
+            )
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_projected_constant_can_initialize_a_register() -> Result<(), Box<dyn Error>> {
+    let source = r#"
+        block sample(clk, rst, x:u8) -> u8 {
+            let packet = (u8:1, (false, u8:7));
+            let (_, (.., initial)) = packet;
+            reg q:u8 = initial;
+            q := x;
+            q
+        }
+    "#;
+    let package = compile(source, empty_package("patterns"), ResetBehavior::default())?;
+    assert_eq!(
+        package.get_block("sample").unwrap().registers[0].reset_value,
+        Some(IrValue::make_ubits(8, 7)?)
+    );
+    Ok(())
+}
+
+#[test]
+fn explicit_child_targets_resolve_before_subsequent_tuple_bindings() -> Result<(), String> {
+    let source = r#"
+        block child(clk) -> bool { true }
+        block sample(clk, x:bool) -> bool {
+            inst cell: child;
+            let (child, _) = (x, x);
+            cell.out
+        }
+    "#;
+    check_module(&parse_module(source)?)?;
+    let later = source
+        .replace("inst cell: child;", "")
+        .replace("cell.out", "inst cell: child; cell.out");
+    let error = check_module(&parse_module(&later)?).unwrap_err();
+    assert!(
+        error.contains("'child' names a local value here"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn block_if_arms_destructure_with_the_same_lexical_scope_as_dslx() -> Result<(), Box<dyn Error>> {
+    let conditional = r#"if flag {
+        let (x, ..) = pair;
+        x
+    } else {
+        let (.., x) = pair;
+        x
+    }"#;
+    let params = "flag: bool, pair: (u8, u8), x: u8";
+    for body in [
+        conditional.to_owned(),
+        format!("let y = {conditional}; y + x"),
+        "let (a, b) = { let (x, y) = pair; { (y, x) } }; if flag { a } else { b }".to_owned(),
+    ] {
+        let bx = format!("block sample(clk, {params}) -> u8 {{ {body} }}");
+        let dslx = format!("fn sample({params}) -> u8 {{ {body} }}");
+        let evaluator = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(&dslx, &[]),
+        )?;
+        let pair = IrValue::parse_typed("(bits[8]:13, bits[8]:29)")?;
+        for flag in [false, true] {
+            evaluator.compare(&[
+                IrValue::bool(flag),
+                pair.clone(),
+                IrValue::make_ubits(8, 2)?,
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn bx_value_scopes_preserve_tuple_binder_spellings() -> Result<(), String> {
+    let scope = "let (out, (tail!, flag')) = (x, (x, true)); if flag' { out } else { tail! }";
+    for body in [
+        format!("match x {{ _ => {{ {scope} }} }}"),
+        format!("for (_, a) in u8:0..u8:1 {{ {scope} }}(x)"),
+    ] {
+        let block = format!("block sample(clk, x:u8) -> u8 {{ {body} }}");
+        check_module(&parse_module(&block)?)?;
+    }
+    // Newly introduced block statement patterns use DSLX binder names.
+    for body in [
+        "let (out, _) = (x, x); out",
+        "unroll_for! (_, a) in u8:0..u8:1 { let (out, _) = (a, x); out }(x)",
+    ] {
+        assert!(parse_module(&format!("block sample(clk, x:u8) -> u8 {{ {body} }}")).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn bx_if_arms_preserve_fold_suffixes() -> Result<(), String> {
+    let conditional = r#"if flag {
+        unroll_for! (_, a) in u8:0..u8:1 { a }(x) + x
+    } else {
+        for (_, a) in u8:0..u8:1 { a }((x, x)).0
+    }"#;
+    for body in [conditional.to_owned(), format!("let y = {conditional}; y")] {
+        let bx = format!("block sample(clk, flag:bool, x:u8) -> u8 {{ {body} }}");
+        let reference = "fn sample(flag:bool, x:u8) -> u8 { if flag { x + x } else { x } }";
+        let evaluator = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(reference, &[]),
+        )?;
+        for flag in [false, true] {
+            evaluator.compare(&[IrValue::bool(flag), IrValue::make_ubits(8, 5).unwrap()])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unit_arms_and_shadowed_intrinsics_follow_dslx_pattern_bindings() -> Result<(), Box<dyn Error>> {
+    for body in [
+        "if flag { let (a, _) = pair; } else {}",
+        "if flag { let (a, _) = pair; a; } else { () }",
+        "let u = if flag {} else { let (.., b) = pair; }; u",
+    ] {
+        let params = "flag: bool, pair: (u8, u8)";
+        let bx = format!("block sample(clk, {params}) -> () {{ {body} }}");
+        let dslx = format!("fn sample({params}) -> () {{ {body} }}");
+        check_module(&parse_module(&bx)?)?;
+        dslx::parse_and_typecheck(&dslx, "unit.x", "unit", &mut ImportData::default())?;
+    }
+    let body = "let (zero!, a) = (x, x); zero!<u8>()";
+    let bx = format!("block sample(clk, x: u8) -> u8 {{ {body} }}");
+    let dslx = format!("fn sample(x: u8) -> u8 {{ {body} }}");
+    assert!(check_module(&parse_module(&bx)?).is_err());
+    assert!(
+        dslx::parse_and_typecheck(&dslx, "zero.x", "zero", &mut ImportData::default()).is_err()
+    );
+    Ok(())
+}
 
 #[test]
 fn scoped_if_arms_share_result_types_field_by_field() -> Result<(), Box<dyn Error>> {
@@ -492,6 +875,37 @@ fn after() -> (u8, u8) { (before(), zero!<u8>()) }
             "{invalid}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn block_tuple_patterns_parse_dslx_singleton_annotations_recursively() -> Result<(), Box<dyn Error>>
+{
+    let cases = [
+        "let (x): (u8) = (u8:7,); x",
+        "let ((x), _): ((u8), u8) = ((u8:7,), u8:0); x",
+        "let (xs,): ((u8)[2]) = ([(u8:3,), (u8:7,)],); xs[u32:1].0",
+        "if flag { let (x): (u8) = (u8:7,); x } else { u8:7 }",
+    ];
+    for body in cases {
+        let bx = format!("block sample(clk, flag: bool) -> u8 {{ {body} }}");
+        let dslx = format!("fn sample(flag: bool) -> u8 {{ {body} }}");
+        let evaluator = ExpressionEvaluator::compile_block(
+            &bx,
+            &ImportOptions::default(),
+            compile_dslx_module(&dslx, &[]),
+        )?;
+        assert_eq!(
+            evaluator.compare(&[IrValue::bool(true)])?,
+            IrValue::make_ubits(8, 7)?
+        );
+    }
+    // Existing BX type contexts treat a single parenthesized type as grouping.
+    let grouped = r#"block sample(clk, flag: bool) -> (u8) {
+        let x: (u8) = u8:7;
+        match flag { _ => { let (out, y): ((u8), u8) = (x, u8:0); out + y } }
+    }"#;
+    check_module(&parse_module(grouped)?)?;
     Ok(())
 }
 

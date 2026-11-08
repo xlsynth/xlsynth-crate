@@ -10,15 +10,15 @@ use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, MatchArm, Module, Param,
-    Stmt, StructDef, Type, UnaryOp, WidthSliceType,
+    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, LetBinding, MatchArm,
+    Module, Param, Stmt, StructDef, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
     CommonTypeHint, ContextOperands, InferredBindings, WidthLookup, binding_widths,
     check_argument_widths, check_match_operand_width, check_result_width, common_type_hint,
-    context_operands, has_common_bit_type, has_concrete_element_type, minimum_type,
-    projected_type_compatible,
+    context_operands, has_common_bit_type, has_concrete_element_type, minimum_operand_type,
+    minimum_type, projected_type_compatible, unify_inferred_members,
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
 mod callables;
@@ -1559,12 +1559,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         reserved_hardware_names.insert(block.clock.clone());
         reserved_hardware_names.extend(block.reset.iter().cloned());
         reserved_hardware_names.extend(block.params.iter().map(|p| p.name.clone()));
-        reserved_hardware_names.extend(block.statements.iter().filter_map(|s| match s {
-            Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Inst { name, .. } => {
-                Some(name.clone())
+        for statement in &block.statements {
+            match statement {
+                Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Inst { name, .. } => {
+                    reserved_hardware_names.insert(name.clone());
+                }
+                Stmt::LetPattern(binding) => {
+                    binding.pattern.visit_names(&mut |name| {
+                        reserved_hardware_names.insert(name.to_owned());
+                    });
+                }
+                _ => { /* Drivers and guards introduce no top-level names. */ }
             }
-            _ => None,
-        }));
+        }
         let mut c = Self::new(
             decls,
             resolver,
@@ -1614,7 +1621,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 c.instances.insert(name.clone(), child_block);
             }
         }
-        c.body(&block.statements, false)?;
+        c.body(block, &block.statements, false)?;
         for reg in c.regs.keys() {
             if !c.writes.contains(reg) {
                 return Err(format!("register '{reg}' has no update"));
@@ -1819,8 +1826,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Check statements in lexical order, preserving a single expression per
     /// guard.
-    fn body(&mut self, statements: &[Stmt], conditional: bool) -> Result<(), String> {
+    fn body(
+        &mut self,
+        block: &Block,
+        statements: &[Stmt],
+        conditional: bool,
+    ) -> Result<(), String> {
         let mut locals = Vec::new();
+        let mut pattern_bindings = Vec::new();
         for stmt in statements {
             let checked = match stmt {
                 Stmt::Reg { name, ty, reset } => {
@@ -1858,6 +1871,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 Stmt::Inst { name, block } => {
                     if conditional {
                         return Err(format!("conditional declaration of instance '{name}'"));
+                    }
+                    if self.function_values.contains_key(block) {
+                        return Err(format!("'{block}' names a local value here"));
                     }
                     CheckedStmt::Inst {
                         name: name.clone(),
@@ -1898,10 +1914,51 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     ty,
                     value: initializer,
                 } => {
+                    if self.function_values.contains_key(name) {
+                        // Rebinding a pattern leaf uses the previous lexical
+                        // value in the initializer and gives a child its own
+                        // name.
+                        let init =
+                            self.block_initializer(None, ty.as_ref(), initializer, !conditional)?;
+                        let value = self.share_scoped_value(init.value);
+                        self.bind_scoped_value(name, value, init.widths, &mut pattern_bindings);
+                        if !conditional {
+                            pattern_bindings.clear();
+                        }
+                        continue;
+                    }
                     if conditional {
                         locals.push(name);
                     }
                     self.check_let(name, ty.as_ref(), initializer, !conditional)?
+                }
+                Stmt::LetPattern(binding) => {
+                    let init = self.pattern_initializer(binding, !conditional)?;
+                    let mut collision = None;
+                    binding.pattern.visit_names(&mut |name| {
+                        if name == block.clock
+                            || block.reset.as_deref() == Some(name)
+                            || self.regs.contains_key(name)
+                            || self.instances.contains_key(name)
+                        {
+                            collision = Some(name.to_owned());
+                        }
+                    });
+                    if let Some(name) = collision {
+                        return Err(format!("duplicate name '{name}'"));
+                    }
+                    self.bind_pattern(
+                        &binding.pattern,
+                        init.value,
+                        init.widths,
+                        &mut pattern_bindings,
+                    )?;
+                    if !conditional {
+                        // A top-level rebinding stays visible in the block
+                        // result.
+                        pattern_bindings.clear();
+                    }
+                    continue;
                 }
                 Stmt::Write { name, value } => {
                     let ty = self
@@ -1925,7 +1982,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         .expr(condition, Some(&Type::Bool))
                         .map_err(|e| format!("write guard: {e}"))?;
                     let start = self.statements.len();
-                    self.body(body, true)?;
+                    self.body(block, body, true)?;
                     CheckedStmt::If {
                         condition,
                         body: self.statements.split_off(start),
@@ -1934,6 +1991,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             self.statements.push(checked);
         }
+        self.leave_scope(pattern_bindings);
         for name in locals {
             self.names.remove(name);
             self.values.remove(name);
@@ -1953,14 +2011,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         initializer: &Expr,
         structural: bool,
     ) -> Result<CheckedStmt, String> {
-        let ty = annotation.map(|t| self.source_type(t)).transpose()?;
-        // Preparing a lexical scope exposes its trailing expression, which
-        // still occupies a pure value position inside the original scope.
-        let structural = structural && !matches!(initializer, Expr::Scope { .. });
         let scope::BindingInitializer { value, widths } = self
-            .binding_initializer(initializer, ty.as_ref(), |checker, expr| {
-                checker.let_value(name, expr, ty.as_ref(), structural)
-            })
+            .block_initializer(Some(name), annotation, initializer, structural)
             .map_err(|e| format!("let '{name}': {e}"))?;
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
         let constant = self.fold_constant(&value);
@@ -1978,6 +2030,34 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok(CheckedStmt::Let {
             name: name.to_owned(),
             value,
+        })
+    }
+
+    /// Elaborate a destructured statement's initializer before installing any
+    /// of its names. An unconditional direct block call creates one instance.
+    fn pattern_initializer(
+        &mut self,
+        binding: &LetBinding,
+        structural: bool,
+    ) -> Result<scope::BindingInitializer, String> {
+        self.validate_source_pattern(&binding.pattern)?;
+        self.block_initializer(None, binding.ty.as_ref(), &binding.value, structural)
+    }
+
+    /// Check a block or unrolled let before entering its source names.
+    fn block_initializer(
+        &mut self,
+        name: Option<&str>,
+        annotation: Option<&Type>,
+        initializer: &Expr,
+        structural: bool,
+    ) -> Result<scope::BindingInitializer, String> {
+        let ty = annotation.map(|t| self.source_type(t)).transpose()?;
+        // Preparing a lexical scope exposes its trailing expression, which
+        // still occupies a pure value position inside the original scope.
+        let structural = structural && !matches!(initializer, Expr::Scope { .. });
+        self.binding_initializer(initializer, ty.as_ref(), |checker, expr| {
+            checker.let_value(name, expr, ty.as_ref(), structural)
         })
     }
 
@@ -2480,13 +2560,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             };
             self.charge_expansion(body, nodes.saturating_add(literal_work))?;
         }
-        let dslx_projection = (self.kind == BodyKind::Function || self.dslx_value_context)
-            && matches!(
-                expr,
-                Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
-            );
-        let dslx_bindings = (self.kind == BodyKind::Function || self.dslx_value_context)
-            .then_some(&self.inferred_bindings);
+        let scoped_projection = self.reference_type(expr).is_some_and(|(name, _)| {
+            self.inferred_bindings
+                .get(name)
+                .is_some_and(|widths| widths.infer_at_use)
+        });
+        let dslx_projection =
+            (self.kind == BodyKind::Function || self.dslx_value_context || scoped_projection)
+                && matches!(
+                    expr,
+                    Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. }
+                );
+        let dslx_bindings =
+            (self.kind == BodyKind::Function || self.dslx_value_context || scoped_projection)
+                .then_some(&self.inferred_bindings);
         if dslx_projection {
             // Each nested aggregate infers its fields before a typed sibling
             // or the enclosing expression supplies a signed result type.
@@ -2495,16 +2582,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(expected) = expected
             && !compatible(&ty, expected)
         {
-            if dslx_projection && projected_type_compatible(expr, &ty, expected, dslx_bindings)? {
+            if dslx_projection
+                && projected_type_compatible(expr, &ty, expected, dslx_bindings, false)?
+            {
                 // Only signedness differs. Preserve the complete IR layout.
                 return Ok(TypedExpr {
                     ty: expected.clone(),
                     kind,
                 });
             }
-            // DSLX retains the minimum type of an inferred loop-local value at
-            // its binder but can widen references (including projected fields).
-            if let Some(locals) = self.loop_widths()
+            if scoped_projection
+                && projected_type_compatible(expr, &ty, expected, dslx_bindings, true)?
+            {
+                return self.widen_projection(TypedExpr { ty, kind }, expected);
+            }
+            // DSLX retains the minimum type at the binder and can give a
+            // reference to that value a wider concrete type.
+            if let Some(locals) = self.scoped_widths()
                 && locals.is_inferred_reference(expr)?
                 && let (Some((signed, width)), Some((target_signed, target_width))) =
                     (bits(&ty), bits(expected))
@@ -2550,7 +2644,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     fn common_widths(&self) -> Option<WidthLookup<'_>> {
-        self.dslx_widths().or_else(|| self.loop_widths())
+        self.dslx_widths().or_else(|| self.scoped_widths())
     }
 
     /// Find the stored type and binding behind a reference without evaluating
@@ -2585,16 +2679,28 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// An inferred aggregate can receive a leaf's type from another operand,
     /// including when the binding appears inside a tuple or array constructor.
     fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
-        if self.dslx_widths().is_none() {
-            return false;
-        }
         match expr {
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => {
+                self.contains_inferred_aggregate(then_value)
+                    || self.contains_inferred_aggregate(else_value)
+            }
+            Expr::Match { arms, .. } => arms
+                .iter()
+                .any(|arm| self.contains_inferred_aggregate(&arm.value)),
             _ => self.reference_type(expr).is_some_and(|(name, ty)| {
                 matches!(ty, Type::Array { .. } | Type::Tuple(_))
-                    && self.inferred_bindings.contains_key(name)
+                    && self.inferred_bindings.get(name).is_some_and(|widths| {
+                        self.dslx_widths().is_some()
+                            || self.function_values.contains_key(name)
+                            || widths.infer_at_use
+                    })
             }),
         }
     }
@@ -2619,14 +2725,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// references. Different tuple fields may get their concrete signed type
     /// from different operands. Each operand is subsequently checked against
     /// the result, including the original literal constraint at each leaf.
-    fn bound_aggregate_hint(&self, items: &[&Expr]) -> Option<Type> {
+    fn bound_aggregate_hint(&self, items: &[&Expr]) -> Result<Option<Type>, String> {
         fn merge(ty: &mut Type, other: &Type) -> bool {
             if let (Some((a, width)), Some((b, other_width))) = (bits(ty), bits(other)) {
-                if width != other_width {
-                    return false;
-                }
-                if b && !a {
-                    *ty = other.clone();
+                if other_width != width || b && !a {
+                    *ty = Type::Bits {
+                        signed: a || b,
+                        width: width.max(other_width),
+                    };
                 }
                 return true;
             }
@@ -2647,51 +2753,82 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 (a, b) => a == b,
             }
         }
-        fn operand(checker: &BodyChecker<'_, '_>, expr: &Expr) -> Option<Type> {
+        fn operand(checker: &BodyChecker<'_, '_>, expr: &Expr) -> Result<Option<Type>, String> {
             match expr {
-                Expr::Tuple(fields) => Some(Type::Tuple(
-                    fields
-                        .iter()
-                        .map(|f| operand(checker, f))
-                        .collect::<Option<_>>()?,
-                )),
-                Expr::Array(items) => {
-                    let (first, rest) = items.split_first()?;
-                    let mut element = operand(checker, first)?;
-                    for item in rest {
-                        if !merge(&mut element, &operand(checker, item)?) {
-                            return None;
-                        }
+                Expr::Tuple(fields) => {
+                    let mut types = Vec::with_capacity(fields.len());
+                    for field in fields {
+                        let Some(ty) = operand(checker, field)? else {
+                            return Ok(None);
+                        };
+                        types.push(ty);
                     }
-                    Some(Type::Array {
-                        element: Box::new(element),
-                        size: items.len(),
-                    })
+                    Ok(Some(Type::Tuple(types)))
                 }
+                Expr::Array(items) => {
+                    Ok(
+                        merged_operands(checker, items.iter())?.map(|element| Type::Array {
+                            element: Box::new(element),
+                            size: items.len(),
+                        }),
+                    )
+                }
+                Expr::If {
+                    then_value,
+                    else_value,
+                    ..
+                } => merged_operands(
+                    checker,
+                    [then_value.as_ref(), else_value.as_ref()].into_iter(),
+                ),
+                Expr::Match { arms, .. } => {
+                    merged_operands(checker, arms.iter().map(|arm| &arm.value))
+                }
+                Expr::Bool(_) => Ok(Some(Type::Bool)),
                 Expr::Literal { ty: Some(ty), .. } => {
                     let ty = match (ty, checker.specialization) {
-                        (Type::Named(name), Some(spec)) => spec.bindings.get(name)?,
-                        _ => ty,
+                        (Type::Named(name), Some(spec)) => spec.bindings.get(name),
+                        _ => Some(ty),
                     };
-                    bits(ty).map(|_| ty.clone())
+                    Ok(ty.filter(|ty| bits(ty).is_some()).cloned())
                 }
-                _ => checker.reference_type(expr).map(|(_, ty)| ty.clone()),
+                _ => {
+                    if let Some((_, ty)) = checker.reference_type(expr) {
+                        Ok(Some(ty.clone()))
+                    } else {
+                        minimum_operand_type(expr, checker.common_widths())
+                    }
+                }
             }
+        }
+        fn merged_operands<'e>(
+            checker: &BodyChecker<'_, '_>,
+            mut items: impl Iterator<Item = &'e Expr>,
+        ) -> Result<Option<Type>, String> {
+            let Some(first) = items.next() else {
+                return Ok(None);
+            };
+            let Some(mut ty) = operand(checker, first)? else {
+                return Ok(None);
+            };
+            for item in items {
+                if !operand(checker, item)?.is_some_and(|other| merge(&mut ty, &other)) {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(ty))
         }
         if !items
             .iter()
             .any(|item| self.contains_inferred_aggregate(item))
         {
-            return None;
+            return Ok(None);
         }
-        let (first, rest) = items.split_first()?;
-        let mut ty = operand(self, first)?;
-        for item in rest {
-            if !merge(&mut ty, &operand(self, item)?) {
-                return None;
-            }
-        }
-        Some(ty)
+        let Some(mut ty) = merged_operands(self, items.iter().copied())? else {
+            return Ok(None);
+        };
+        unify_inferred_members(&mut ty, items, &self.inferred_bindings)?;
+        Ok(Some(ty))
     }
 
     /// Check values against a common type, including the corresponding
@@ -2709,7 +2846,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
             return self.with_scoped_results(items, Self::unify_values);
         }
-        if let Some(ty) = self.bound_aggregate_hint(items) {
+        if items.iter().any(|e| self.contains_inferred_aggregate(e))
+            && items.iter().any(|e| has_aggregate_literal(e))
+        {
+            return self.with_aggregate_operands(items, Self::unify_prepared_values);
+        }
+        self.unify_prepared_values(items)
+    }
+
+    /// Elaborate operands while any concrete anchors and lexical scope aliases
+    /// from preparation are still available.
+    fn unify_prepared_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
+        if let Some(ty) = self.bound_aggregate_hint(items)? {
             return items
                 .iter()
                 .map(|item| self.expr(item, Some(&ty)))
@@ -2913,9 +3061,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve the spelling shared by the zero intrinsic and a function.
     fn zero_calls_function(&self) -> Result<bool, String> {
         match self.kind {
-            BodyKind::Function if self.names.contains("zero!") => {
-                Err("'zero!' names a local value here".into())
-            }
+            _ if self.names.contains("zero!") => Err("'zero!' names a local value here".into()),
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
@@ -2982,7 +3128,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(ty) = expected {
             return Ok((0, self.expr_in_group(first, Some(ty))?));
         }
-        if let Some(ty) = self.bound_aggregate_hint(items) {
+        if let Some(ty) = self.bound_aggregate_hint(items)? {
             return Ok((0, self.expr_in_group(first, Some(&ty))?));
         }
         match self.common_hint(items)? {

@@ -97,6 +97,11 @@ fn is_function_identifier(text: &str) -> bool {
     is_use_identifier(text) || text == "self"
 }
 
+/// Pure BX expressions can refer to BX names and DSLX member spellings.
+fn is_value_identifier(text: &str) -> bool {
+    is_identifier(text) || is_function_identifier(text)
+}
+
 /// A local BX binding may use any identifier word other than reserved syntax.
 pub(crate) fn is_identifier(text: &str) -> bool {
     let keyword = matches!(
@@ -333,7 +338,7 @@ struct Parser<'s> {
     value_context: ValueContext,
     /// Pure operands such as counted-loop iterables and map inputs permit
     /// lexical value scopes while keeping the enclosing identifier dialect.
-    in_value_expression: bool,
+    expression_grammar: ExpressionGrammar,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
     /// Local callback-template declarations disambiguate angle brackets from
@@ -351,6 +356,14 @@ enum ValueContext {
     Block,
     Function,
     BlockLambda,
+}
+
+/// Pure block scopes allow lexical lets while retaining BX fold precedence.
+#[derive(Clone, Copy, PartialEq)]
+enum ExpressionGrammar {
+    Block,
+    BlockScope,
+    DslxOperand,
 }
 
 /// The depth of a parsed type includes both tuple and array constructors.
@@ -465,7 +478,7 @@ impl<'s> Parser<'s> {
             depth: 0,
             dslx_type_display,
             value_context: ValueContext::Block,
-            in_value_expression: false,
+            expression_grammar: ExpressionGrammar::Block,
             block_type_params: BTreeSet::new(),
             callback_templates,
             hidden_templates: Vec::new(),
@@ -552,12 +565,16 @@ impl<'s> Parser<'s> {
         }
     }
 
-    fn ident(&mut self) -> Result<String, String> {
+    fn identifier_predicate(&self) -> fn(&str) -> bool {
         if self.dslx_value_grammar() {
-            self.take_identifier(is_function_identifier)
+            is_function_identifier
         } else {
-            self.take_identifier(is_identifier)
+            is_identifier
         }
+    }
+
+    fn ident(&mut self) -> Result<String, String> {
+        self.take_identifier(self.identifier_predicate())
     }
 
     fn take_identifier(&mut self, valid: fn(&str) -> bool) -> Result<String, String> {
@@ -686,7 +703,7 @@ impl<'s> Parser<'s> {
 
     /// Parse a local name or a member of an imported DSLX module.
     fn name_or_qualified_member(&mut self) -> Result<String, String> {
-        let head = self.take_identifier(|word| is_identifier(word) || is_use_identifier(word))?;
+        let head = self.take_identifier(is_value_identifier)?;
         if !self.eat("::") {
             return Ok(head);
         }
@@ -816,10 +833,10 @@ impl<'s> Parser<'s> {
     /// Read a DSLX value block after its opening brace. A trailing semicolon
     /// discards the preceding expression and supplies unit as the result.
     fn value_scope(&mut self) -> Result<ParsedExpr, String> {
-        self.with_name_scope(Self::value_scope_contents)
+        self.with_name_scope(|p| p.value_scope_contents(false))
     }
 
-    fn value_scope_contents(&mut self) -> Result<ParsedExpr, String> {
+    fn value_scope_contents(&mut self, dslx_tuple_patterns: bool) -> Result<ParsedExpr, String> {
         let mut bindings = Vec::new();
         let mut height = 0;
         let output = loop {
@@ -827,18 +844,9 @@ impl<'s> Parser<'s> {
                 break ParsedExpr::leaf(Expr::Tuple(Vec::new()));
             }
             if self.eat("let") {
-                let mut names = BTreeSet::new();
-                let pattern = self.binding_pattern(&mut names)?;
-                let (ty, value) = self.let_initializer()?;
-                for name in names {
-                    self.hide_template(&name);
-                }
-                height = height.max(value.height);
-                bindings.push(LetBinding {
-                    pattern,
-                    ty,
-                    value: value.value,
-                });
+                let (binding, initializer_height) = self.let_binding(dslx_tuple_patterns)?;
+                height = height.max(initializer_height);
+                bindings.push(binding);
                 self.expect(";")?;
             } else {
                 let value = self.expr()?;
@@ -867,7 +875,11 @@ impl<'s> Parser<'s> {
     }
 
     /// Parse nested tuple binders, with at most one rest marker per tuple.
-    fn binding_pattern(&mut self, names: &mut BTreeSet<String>) -> Result<BindingPattern, String> {
+    fn binding_pattern(
+        &mut self,
+        names: &mut BTreeSet<String>,
+        valid_name: fn(&str) -> bool,
+    ) -> Result<BindingPattern, String> {
         if self.eat("(") {
             return self.nested(|parser| {
                 let mut rest = false;
@@ -879,13 +891,13 @@ impl<'s> Parser<'s> {
                         rest = true;
                         Ok(BindingPattern::Rest)
                     } else {
-                        p.binding_pattern(names)
+                        p.binding_pattern(names, valid_name)
                     }
                 })?;
                 Ok(BindingPattern::Tuple(fields))
             });
         }
-        let name = self.ident()?;
+        let name = self.take_identifier(valid_name)?;
         if name != "_" && !names.insert(name.clone()) {
             return Err(self.error(&format!("duplicate name '{name}' in binding pattern")));
         }
@@ -999,7 +1011,8 @@ impl<'s> Parser<'s> {
     }
 
     fn ty(&mut self) -> Result<Type, String> {
-        Ok(self.parsed_ty()?.value)
+        let singleton_tuples = self.dslx_type_display || self.dslx_value_grammar();
+        Ok(self.parsed_ty(singleton_tuples)?.value)
     }
 
     /// Parse a slice result annotation, retaining any expressions that set its
@@ -1038,8 +1051,8 @@ impl<'s> Parser<'s> {
         ))
     }
 
-    fn parsed_ty(&mut self) -> Result<ParsedType, String> {
-        let mut ty = self.type_atom()?;
+    fn parsed_ty(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
+        let mut ty = self.type_atom(singleton_tuples)?;
         while self.eat("[") {
             ty.depth += 1;
             if ty.depth > 64 {
@@ -1070,14 +1083,15 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
-    fn type_atom(&mut self) -> Result<ParsedType, String> {
+    fn type_atom(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
         if self.eat("(") {
             return self.nested(|parser| {
-                if parser.dslx_type_display || parser.dslx_value_grammar() {
-                    let fields = parser.list(")", Self::parsed_ty)?;
+                let member = |p: &mut Self| p.parsed_ty(singleton_tuples);
+                if singleton_tuples {
+                    let fields = parser.list(")", member)?;
                     parser.tuple_type(fields)
                 } else {
-                    parser.parenthesized(Self::parsed_ty, Self::tuple_type)
+                    parser.parenthesized(member, Self::tuple_type)
                 }
             });
         }
@@ -1176,7 +1190,7 @@ impl<'s> Parser<'s> {
                     reset,
                 });
             } else if self.eat("let") {
-                statements.push(self.let_stmt(Self::hide_template)?.0);
+                statements.push(self.let_stmt()?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
                 self.pos += 1;
                 let name = self.ident()?;
@@ -1205,11 +1219,9 @@ impl<'s> Parser<'s> {
                 });
             } else if self.eat("if") {
                 let condition = self.condition()?;
-                let then_body = self.nested(Self::body)?;
-                if self.eat("else") {
-                    let then_value = then_body.value_only().ok_or_else(|| {
-                        self.error("value-producing if requires an expression in each arm")
-                    })?;
+                if self.arm_has_else() {
+                    let then_value = self.nested(Self::expression_scope)?;
+                    self.expect("else")?;
                     let expr = self.if_tail(condition, then_value)?;
                     let output = self.expr_tail(expr, 0, Braces::Struct)?;
                     self.expect("}")?;
@@ -1218,6 +1230,7 @@ impl<'s> Parser<'s> {
                         output: Some(output),
                     });
                 }
+                let then_body = self.nested(Self::body)?;
                 if then_body.output.is_some() {
                     return Err(self.error("value-producing if requires an else arm"));
                 }
@@ -1242,30 +1255,75 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse a simple let after its keyword, retaining the initializer's
-    /// height for bindings that belong to an enclosing expression.
-    fn let_stmt(&mut self, hide_binding: fn(&mut Self, &str)) -> Result<(Stmt, usize), String> {
-        let name = self.ident()?;
-        let (ty, value) = self.let_initializer()?;
-        hide_binding(self, &name);
+    /// A block-level `if` with an `else` has two pure value scopes. A guard
+    /// without an `else` can contain register writes and other statements.
+    /// The opening brace of the first arm has already been consumed.
+    fn arm_has_else(&self) -> bool {
+        let mut depth = 0;
+        for (i, token) in self.tokens[self.pos..].iter().enumerate() {
+            match token.text {
+                "{" => depth += 1,
+                "}" if depth == 0 => return self.peek(i + 1) == "else",
+                "}" => depth -= 1,
+                _ => { /* Only braces delimit the arm. */ }
+            }
+        }
+        false
+    }
+
+    /// Keep the named block statement representation for a simple binding.
+    fn let_stmt(&mut self) -> Result<(Stmt, usize), String> {
+        let (binding, height) = self.let_binding(true)?;
+        let statement = match binding {
+            LetBinding {
+                pattern: BindingPattern::Name(name),
+                ty,
+                value,
+            } if name != "_" => Stmt::Let { name, ty, value },
+            binding => Stmt::LetPattern(binding),
+        };
+        Ok((statement, height))
+    }
+
+    /// Parse block and function let patterns alike. Each name enters scope
+    /// after the entire initializer, including its annotation.
+    fn let_binding(&mut self, dslx_tuple_patterns: bool) -> Result<(LetBinding, usize), String> {
+        let mut names = BTreeSet::new();
+        // Simple block lets can name child instances. Tuple members are
+        // lexical values and can use primes and bangs in either dialect.
+        let tuple_pattern = self.peek(0) == "(";
+        let valid_name = if !tuple_pattern {
+            self.identifier_predicate()
+        } else if dslx_tuple_patterns {
+            is_function_identifier
+        } else {
+            is_value_identifier
+        };
+        let pattern = self.binding_pattern(&mut names, valid_name)?;
+        let ty = if self.eat(":") {
+            // DSLX treats `(T)` as a singleton tuple at every nesting level.
+            // Ordinary BX annotations retain their parenthesized type grammar.
+            Some(if tuple_pattern && dslx_tuple_patterns {
+                self.parsed_ty(true)?.value
+            } else {
+                self.ty()?
+            })
+        } else {
+            None
+        };
+        self.expect("=")?;
+        let value = self.expr()?;
+        for name in names {
+            self.hide_template(&name);
+        }
         Ok((
-            Stmt::Let {
-                name,
+            LetBinding {
+                pattern,
                 ty,
                 value: value.value,
             },
             value.height,
         ))
-    }
-
-    fn let_initializer(&mut self) -> Result<(Option<Type>, ParsedExpr), String> {
-        let ty = if self.eat(":") {
-            Some(self.ty()?)
-        } else {
-            None
-        };
-        self.expect("=")?;
-        Ok((ty, self.expr()?))
     }
 
     fn expr(&mut self) -> Result<ParsedExpr, String> {
@@ -1275,13 +1333,16 @@ impl<'s> Parser<'s> {
     /// DSLX ends a full expression at the closing brace of a standalone scope
     /// or the closing parenthesis of a fold that begins that expression.
     fn full_expr(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
-        if self.in_value_body() && self.eat("{") {
-            return self.nested(Self::value_scope);
+        if self.peek(0) == "{" && (self.in_value_body() || self.peek(1) == "let") {
+            self.pos += 1;
+            return self.nested(Self::expression_scope);
         }
-        if self.in_value_body() && self.eat("unroll_for!") {
+        let dslx_precedence =
+            self.dslx_value_grammar() || self.expression_grammar == ExpressionGrammar::DslxOperand;
+        if dslx_precedence && self.eat("unroll_for!") {
             return self.nested(Self::unroll_for);
         }
-        if self.in_value_body() && self.starts_counted_for() {
+        if dslx_precedence && self.starts_counted_for() {
             self.pos += 1;
             return self.nested(Self::counted_for);
         }
@@ -1298,7 +1359,7 @@ impl<'s> Parser<'s> {
 
     fn if_expr(&mut self) -> Result<ParsedExpr, String> {
         let condition = self.condition()?;
-        let then_value = self.arm_value()?;
+        let then_value = self.expression_scope()?;
         if self.in_value_body() && self.peek(0) != "else" {
             return self.compose(
                 condition.height.max(then_value.height),
@@ -1313,13 +1374,16 @@ impl<'s> Parser<'s> {
         self.if_tail(condition, then_value)
     }
 
-    fn arm_value(&mut self) -> Result<ParsedExpr, String> {
-        if self.in_value_body() {
+    /// Enable DSLX tuple lets in a block's pure expression scope while
+    /// preserving its fold precedence and the grammar of existing operands.
+    fn expression_scope(&mut self) -> Result<ParsedExpr, String> {
+        if self.dslx_value_grammar() || self.expression_grammar == ExpressionGrammar::DslxOperand {
             return self.value_scope();
         }
-        let value = self.expr()?;
-        self.expect("}")?;
-        Ok(value)
+        let outer = std::mem::replace(&mut self.expression_grammar, ExpressionGrammar::BlockScope);
+        let result = self.with_name_scope(|p| p.value_scope_contents(true));
+        self.expression_grammar = outer;
+        result
     }
 
     /// Braced match subjects and arm results introduce a pure value scope
@@ -1519,9 +1583,9 @@ impl<'s> Parser<'s> {
     fn counted_for_contents(&mut self) -> Result<ParsedExpr, String> {
         self.expect("(")?;
         let mut names = BTreeSet::new();
-        let element = self.binding_pattern(&mut names)?;
+        let element = self.binding_pattern(&mut names, self.identifier_predicate())?;
         self.expect(",")?;
-        let accumulator = self.binding_pattern(&mut names)?;
+        let accumulator = self.binding_pattern(&mut names, self.identifier_predicate())?;
         self.eat(",");
         self.expect(")")?;
         let annotation = self.loop_annotation()?;
@@ -1551,7 +1615,7 @@ impl<'s> Parser<'s> {
     }
 
     fn in_value_body(&self) -> bool {
-        self.dslx_value_grammar() || self.in_value_expression
+        self.dslx_value_grammar() || self.expression_grammar != ExpressionGrammar::Block
     }
 
     /// Enable value blocks with pure lets without hiding BX port names.
@@ -1559,9 +1623,9 @@ impl<'s> Parser<'s> {
         &mut self,
         parse: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        let outer = std::mem::replace(&mut self.in_value_expression, true);
+        let outer = std::mem::replace(&mut self.expression_grammar, ExpressionGrammar::DslxOperand);
         let result = parse(self);
-        self.in_value_expression = outer;
+        self.expression_grammar = outer;
         result
     }
 
@@ -1663,15 +1727,17 @@ impl<'s> Parser<'s> {
             p.hide_pattern_name(&index);
             p.hide_pattern_name(&accumulator);
             if p.in_value_body() {
-                return p.value_scope();
+                return p.expression_scope();
             }
             while p.eat("let") {
-                let (stmt, initializer_height) = p.let_stmt(Self::hide_pattern_name)?;
+                let (stmt, initializer_height) = p.let_stmt()?;
                 p.expect(";")?;
                 height = height.max(initializer_height);
                 body.push(stmt);
             }
-            p.arm_value()
+            let value = p.expr()?;
+            p.expect("}")?;
+            Ok(value)
         })?;
         self.expect("(")?;
         let seed = self.expr()?;
@@ -1700,7 +1766,7 @@ impl<'s> Parser<'s> {
             self.nested(Self::if_expr)?
         } else {
             self.expect("{")?;
-            self.arm_value()?
+            self.expression_scope()?
         };
         self.compose(
             condition
@@ -2220,16 +2286,6 @@ pub(crate) fn character_or_bool_digits(text: &str, ty: &Type) -> Result<String, 
         .filter(|(_, len)| *len == text.len())
         .ok_or("invalid byte character literal")?;
     Ok(format!("0x{byte:02x}"))
-}
-
-impl Body {
-    fn value_only(self) -> Option<ParsedExpr> {
-        if self.statements.is_empty() {
-            self.output
-        } else {
-            None
-        }
-    }
 }
 
 /// DSLX retains the outer type spelling, the numeric radix and separators,
