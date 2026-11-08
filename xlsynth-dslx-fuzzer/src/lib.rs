@@ -22,6 +22,7 @@ pub mod mission_expr;
 mod nominal_contracts;
 mod observable_value_contracts;
 mod observer_contracts;
+mod pattern_acceptance;
 pub mod range_match;
 mod scope_contracts;
 pub mod select_fold;

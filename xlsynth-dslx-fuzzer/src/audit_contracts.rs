@@ -6,8 +6,8 @@
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
-    nominal_contracts, observable_value_contracts, observer_contracts, scope_contracts,
-    unrolled_loop_contracts,
+    nominal_contracts, observable_value_contracts, observer_contracts, pattern_acceptance,
+    scope_contracts, unrolled_loop_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -29,6 +29,11 @@ pub enum AuditCase {
     ConstexprFailure {
         modules: Vec<SourceModule>,
     },
+    /// A typechecked tuple binding must convert to IR with the declared Boolean
+    /// result.
+    PatternAcceptance {
+        modules: Vec<SourceModule>,
+    },
 }
 
 impl AuditCase {
@@ -39,6 +44,7 @@ impl AuditCase {
                 case.family
             }
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
+            Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
         }
     }
 }
@@ -85,6 +91,19 @@ pub fn generate_v3(data: &[u8]) -> Result<AuditCase, String> {
         2..=4 => unrolled_loop_contracts::generate(options).map(AuditCase::Semantic),
         5 | 6 => Ok(AuditCase::Semantic(enum_width_contracts::generate(options))),
         _ => aggregate_method_contracts::method_map_derived(options).map(AuditCase::Semantic),
+    }
+}
+
+/// Decodes audit-v4 inputs. A zero prefix preserves any audit-v3 program and
+/// oracle.
+pub fn generate_v4(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 4 == 3 {
+        Ok(AuditCase::PatternAcceptance {
+            modules: pattern_acceptance::generate(options),
+        })
+    } else {
+        generate_v3(options)
     }
 }
 

@@ -381,6 +381,9 @@ derived bit packing, mapped instance methods, assertion labels, and signed
 trace text. Its trace oracle checks the messages produced by the CLI's IR.
 The `audit-v3` grammar also exercises unrolled loop results and assertions,
 casts to declared enum values across bit widths, and derived methods in maps.
+The `audit-v4` grammar independently varies tuple binding patterns and subject
+types. A clean type error is an allowed outcome. A pattern accepted by the
+standalone typechecker must convert successfully.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

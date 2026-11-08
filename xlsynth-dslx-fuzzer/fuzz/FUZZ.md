@@ -84,6 +84,16 @@ Use a separate audit-v3 corpus. Prefixing any audit-v2 input with one zero byte
 retains its original source and oracle. Replay saved bytes with their original
 grammar setting.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v4` to vary tuple binding patterns
+independently of the subject type, including singleton parentheses with and
+without a comma. Install the matching `typecheck_main` next to the standalone
+`ir_converter_main` selected by `DSLX_FUZZ_CONVERTER`. For these samples the
+worker runs the typechecker first. A clean DSLX type error satisfies the check.
+An accepted program must convert and emit parseable IR with a Boolean top result.
+A crash in either executable or a converter rejection after successful typechecking
+is retained as a finding. For this property `P` means the acceptance check passed.
+Prefix an audit-v3 input with one zero byte to replay it in a separate audit-v4 corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format

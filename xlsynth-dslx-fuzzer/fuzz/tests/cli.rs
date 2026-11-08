@@ -3,12 +3,111 @@
 #![cfg(all(unix, feature = "has-bitwuzla"))]
 
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use xlsynth_dslx_fuzzer::ast::{BinaryOp, BitsType, Body, Fragment, ValueRef, Width};
+use xlsynth_dslx_fuzzer::audit_contracts::AuditCase;
 use xlsynth_dslx_fuzzer::converter_contracts::ContractCase;
 use xlsynth_dslx_fuzzer::{Grammar, Sample, SourceModule, audit_contracts};
 use xlsynth_dslx_fuzzer_fuzz::CheckFailure;
 use xlsynth_dslx_fuzzer_fuzz::cli::{check_audit, check_cli, check_contract, classify_cli};
 use xlsynth_prover::prover::types::EquivResult;
+
+fn pattern_case() -> AuditCase {
+    AuditCase::PatternAcceptance {
+        modules: vec![SourceModule {
+            name: "sample".into(),
+            text: "pub fn main(x: (u8, u8)) -> bool { let ((a), b) = x; true }".into(),
+        }],
+    }
+}
+
+fn write_tool(path: &Path, script: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("#!/bin/sh\n{script}\n"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+#[test]
+fn only_a_clean_pattern_type_error_satisfies_the_frontend_contract()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let typechecker = converter.with_file_name("typecheck_main");
+    let run = || {
+        check_audit(
+            pattern_case(),
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        )
+    };
+    assert!(matches!(run(), Err(CheckFailure::Checker(_))));
+    // The converter is intentionally absent. A genuine type rejection ends
+    // the check before conversion, even with independent binding/RHS shapes.
+    let diagnostic = r#"echo '~~~~^ TypeInferenceError: Cannot match a 3-element tuple to 2 values.' >&2
+echo 'Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking.' >&2"#;
+    write_tool(&typechecker, &format!("{diagnostic}\nexit 1"))?;
+    assert!(matches!(run(), Ok(EquivResult::Proved)));
+    for script in [
+        format!("{diagnostic}\nkill -ABRT $$"),
+        String::from("echo 'Error: INTERNAL: tuple type missing' >&2; exit 1"),
+        String::from(
+            "echo '~~~~^ ParseError: missing tuple' >&2; echo 'Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking.' >&2; exit 1",
+        ),
+    ] {
+        write_tool(&typechecker, &script)?;
+        let result = run();
+        assert!(
+            matches!(result, Err(CheckFailure::ConverterRejected(ref message)) if message.contains("typecheck_main failed")),
+            "{result:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn accepted_pattern_requires_successful_conversion_to_a_boolean_function()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    write_tool(
+        &converter.with_file_name("typecheck_main"),
+        "test -s sample.x",
+    )?;
+    let run = || {
+        check_audit(
+            pattern_case(),
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        )
+    };
+    assert!(matches!(run(), Err(CheckFailure::Checker(_))));
+    for script in ["echo 'bits vs. tuple' >&2; kill -ABRT $$", "exit 1"] {
+        write_tool(&converter, script)?;
+        let result = run();
+        assert!(
+            matches!(result, Err(CheckFailure::ConverterRejected(ref message)) if message.contains("ir_converter_main failed")),
+            "{result:?}"
+        );
+    }
+    for output in [
+        "broken IR",
+        "package sample",
+        "package sample\nfn __sample__main() -> bits[8] { ret x: bits[8] = literal(value=1) }",
+    ] {
+        write_tool(&converter, &format!("cat <<'IR'\n{output}\nIR"))?;
+        assert!(matches!(run(), Err(CheckFailure::InvalidOutput(_))));
+    }
+    write_tool(
+        &converter,
+        r#"cat <<'IR'
+package sample
+fn __sample__main(x: (bits[8], bits[8])) -> bits[1] {
+  ret t: bits[1] = literal(value=1)
+}
+IR"#,
+    )?;
+    assert!(matches!(run(), Ok(EquivResult::Proved)));
+    Ok(())
+}
 
 #[test]
 fn standalone_output_is_the_program_under_proof() -> Result<(), Box<dyn std::error::Error>> {

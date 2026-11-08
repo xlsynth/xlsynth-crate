@@ -112,10 +112,80 @@ pub fn check_audit(
             if output.status.code() == Some(1) && (unresolved_block || assertion_failure) {
                 Ok(EquivResult::Proved)
             } else {
-                Err(rejection(&output, &modules))
+                Err(rejection("ir_converter_main", &output, &modules))
             }
         }
+        AuditCase::PatternAcceptance { modules } => {
+            check_pattern_acceptance(&modules, converter, stdlib)
+        }
     }
+}
+
+/// A pattern may be ill-typed. Once typecheck_main accepts it, the standalone
+/// converter must produce valid IR for the declared Boolean main function.
+fn check_pattern_acceptance(
+    modules: &[SourceModule],
+    converter: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let directory = directory.path();
+    write_modules(modules, directory)?;
+    let typecheck = run_dslx_tool(
+        &converter.with_file_name("typecheck_main"),
+        stdlib,
+        directory,
+        &["--fatal_on_internal_error=true", "--output_path=types.pb"],
+        None,
+    )?;
+    if !typecheck.status.success() {
+        let stderr = String::from_utf8_lossy(&typecheck.stderr);
+        // Independent pattern and value shapes intentionally include type
+        // errors. Require the typechecker's source diagnostic and normal exit
+        // so a syntax error, internal error, or crash remains a finding.
+        if typecheck.status.code() == Some(1)
+            && stderr
+                .lines()
+                .any(|line| line.contains("^ TypeInferenceError:"))
+            && stderr.lines().any(|line| {
+                line == "Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking."
+            })
+        {
+            return Ok(EquivResult::Proved);
+        }
+        return Err(rejection("typecheck_main", &typecheck, modules));
+    }
+
+    let output = run_dslx_tool(converter, stdlib, directory, &["--emit_assert=true"], None)?;
+    if !output.status.success() {
+        return Err(rejection("ir_converter_main", &output, modules));
+    }
+    let invalid_output = |message: String| {
+        CheckFailure::InvalidOutput(format!(
+            "Invalid IR for typechecked pattern: {message}\n{modules:#?}"
+        ))
+    };
+    let ir =
+        std::str::from_utf8(&output.stdout).map_err(|error| invalid_output(error.to_string()))?;
+    if ir.contains('\0') {
+        return Err(invalid_output("IR contains a null byte".into()));
+    }
+    let package = xlsynth::IrPackage::parse_ir(ir, None)
+        .map_err(|error| invalid_output(error.to_string()))?;
+    let result = package
+        .get_function("__sample__main")
+        .and_then(|main| main.get_type())
+        .map_err(|error| invalid_output(error.to_string()))?
+        .return_type();
+    if !package
+        .types_eq(&result, &package.get_bits_type(1))
+        .map_err(|error| error.to_string())?
+    {
+        return Err(invalid_output(format!(
+            "main returns {result}, expected bits[1]"
+        )));
+    }
+    Ok(EquivResult::Proved)
 }
 
 /// The observable traces expected from a single execution of the converted top.
@@ -204,7 +274,7 @@ fn convert_modules(
 ) -> Result<PreparedSample, CheckFailure> {
     let output = run_converter(&modules, converter, stdlib, directory, profile, emit_assert)?;
     if !output.status.success() {
-        return Err(rejection(&output, &modules));
+        return Err(rejection("ir_converter_main", &output, &modules));
     }
     Ok(PreparedSample {
         modules,
@@ -215,9 +285,9 @@ fn convert_modules(
     })
 }
 
-fn rejection(output: &Output, modules: &[SourceModule]) -> CheckFailure {
+fn rejection(tool: &str, output: &Output, modules: &[SourceModule]) -> CheckFailure {
     CheckFailure::ConverterRejected(format!(
-        "ir_converter_main failed ({}): {}\n{modules:#?}",
+        "{tool} failed ({}): {}\n{modules:#?}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     ))
@@ -233,6 +303,17 @@ fn run_converter(
     profile: Option<&Path>,
     emit_assert: bool,
 ) -> Result<Output, CheckFailure> {
+    write_modules(modules, directory)?;
+    let flags: &[&str] = if emit_assert {
+        &["--emit_assert=true"]
+    } else {
+        &[]
+    };
+    run_dslx_tool(converter, stdlib, directory, flags, profile)
+}
+
+/// Creates the same entry module and import tree for each CLI stage.
+fn write_modules(modules: &[SourceModule], directory: &Path) -> Result<(), CheckFailure> {
     for module in modules {
         let stem = Path::new(&module.name);
         if !stem
@@ -250,24 +331,30 @@ fn run_converter(
             .map_err(|error| error.to_string())?;
         std::fs::write(file, &module.text).map_err(|error| error.to_string())?;
     }
-    let mut command = Command::new(converter);
+    Ok(())
+}
+
+/// Captures the child status and diagnostic, including termination by signal.
+fn run_dslx_tool(
+    tool: &Path,
+    stdlib: &Path,
+    directory: &Path,
+    flags: &[&str],
+    profile: Option<&Path>,
+) -> Result<Output, CheckFailure> {
+    let mut command = Command::new(tool);
     command
         .current_dir(directory)
         .arg(format!("--dslx_stdlib_path={}", stdlib.display()))
         .arg("--dslx_path=.")
-        .arg("--warnings_as_errors=false");
-    if emit_assert {
-        command.arg("--emit_assert=true");
-    }
-    command.arg("sample.x");
+        .arg("--warnings_as_errors=false")
+        .args(flags)
+        .arg("sample.x");
     if let Some(profile) = profile {
         command.env("LLVM_PROFILE_FILE", profile);
     }
     command.output().map_err(|error| {
-        CheckFailure::Checker(format!(
-            "could not execute {}: {error}",
-            converter.display()
-        ))
+        CheckFailure::Checker(format!("could not execute {}: {error}", tool.display()))
     })
 }
 
