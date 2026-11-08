@@ -60,11 +60,11 @@ top block arrays(a: {array_type}, i: bits[1], v: bits[8], read: bits[8], written
     let source = emit(&package, package.get_top_block().unwrap()).unwrap();
     let read = source
         .lines()
-        .find(|line| line.contains("IR.arrayIndex") && !line.contains("IR.arrayModify"))
+        .find(|line| line.contains("_element :"))
         .unwrap();
     let write = source
         .lines()
-        .find(|line| line.contains("IR.arrayModify"))
+        .find(|line| line.contains("_updated :"))
         .unwrap();
     assert_eq!(read.matches("IR.arrayIndex").count(), rank);
     assert_eq!(write.matches("IR.arrayIndex").count(), 0);

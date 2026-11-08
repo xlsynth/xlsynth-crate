@@ -2010,7 +2010,7 @@ private theorem vector_getD_back_map {α β : Type} {n : L.Nat} [L.NeZero n]
     (f : α → β) (xs : L.Vector α n) (i : L.Nat) :
     L.Vector.getD (L.Vector.map f xs) i (L.Vector.back (L.Vector.map f xs)) =
       f (L.Vector.getD xs i (L.Vector.back xs)) := by
-  by_cases h : i < n <;> simp [L.Vector.getD.eq_def, L.Array.getD.eq_def, L.Vector.back_eq_getElem, h]
+  by_cases h : i < n <;> simp [(L.Vector.getD ·), (L.Array.getD ·), L.Vector.back_eq_getElem, h]
 
 "#;
 

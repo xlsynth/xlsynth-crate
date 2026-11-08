@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 /// `L.something`.
 const TERM_NAMES: &[&str] = &[
     "And",
-    "Array.getD.eq_def",
+    "Array.getD",
     "Array.toVector",
     "BitVec",
     "BitVec.add",
@@ -52,13 +52,9 @@ const TERM_NAMES: &[&str] = &[
     "Eq.trans",
     "Inhabited.default",
     "List.foldl",
-    "List.map_cons",
-    "List.map_nil",
-    "List.map_toArray",
     "List.range",
     "Nat",
     "Nat.fold",
-    "Nat.fold_zero",
     "Nat.min",
     "NeZero",
     "Or.inl",
@@ -68,17 +64,32 @@ const TERM_NAMES: &[&str] = &[
     "Unit",
     "Vector",
     "Vector.back",
-    "Vector.back_eq_getElem",
     "Vector.getD",
-    "Vector.getD.eq_def",
     "Vector.map",
+    "Vector.setIfInBounds",
+    "congrArg",
+];
+
+// These names occur in generator-controlled proof scopes. Commands such as
+// deriving require identifiers, and simp treats a named rewrite rule
+// differently from an elaborated theorem term (e.g. Vector.map_mk on an unknown
+// vector).
+const DECLARATION_NAMES: &[&str] = &[
+    "DecidableEq",
+    "Function.comp_def",
+    "List.map_cons",
+    "List.map_nil",
+    "List.map_toArray",
+    "Nat.fold_zero",
+    "Repr",
+    "Vector.append",
+    "Vector.back_eq_getElem",
+    "Vector.map_append",
     "Vector.map_id'",
     "Vector.map_map",
     "Vector.map_mk",
     "Vector.map_setIfInBounds",
-    "Vector.setIfInBounds",
     "apply_ite",
-    "congrArg",
     "ite_self",
 ];
 
@@ -100,17 +111,15 @@ pub(super) fn add_to_module(module: &mut String) {
         .collect();
 
     let mut prelude = String::new();
-    // Lean's deriving and attribute commands take identifiers rather than
-    // terms.
-    for (name, namespace, member) in [
-        ("DecidableEq", "_root_", "DecidableEq"),
-        ("Vector.append", "_root_.Vector", "append"),
-        ("Vector.map_append", "_root_.Vector", "map_append"),
-        ("Repr", "_root_", "Repr"),
-        ("Function.comp_def", "_root_.Function", "comp_def"),
-    ] {
+    for &name in DECLARATION_NAMES {
         if names.contains(name) {
-            writeln!(prelude, "open {namespace} renaming {member} -> L.{name}").unwrap();
+            let (namespace, member) = name.rsplit_once('.').unwrap_or(("", name));
+            let dot = if namespace.is_empty() { "" } else { "." };
+            writeln!(
+                prelude,
+                "open _root_{dot}{namespace} renaming {member} -> L.{name}"
+            )
+            .unwrap();
         }
     }
     for &name in TERM_NAMES {

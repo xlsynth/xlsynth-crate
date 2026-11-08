@@ -33,7 +33,7 @@ impl Presentation<'_> {
   split <;> rfl
 
 private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : L.BitVec w → α → α) (z : α) :
-    XlsBlock.countedFor (n+1) stride f z = f (L.BitVec.ofNat w (n*stride)) (XlsBlock.countedFor n stride f z) := by rfl
+    XlsBlock.countedFor (n+1) stride f z = f (L.BitVec.ofNat w (n*stride)) (XlsBlock.countedFor n stride f z) := rfl
 
 "#);
         let mut rules = BTreeMap::new();
@@ -182,8 +182,8 @@ private theorem countedFor_succ {w : L.Nat} {α : Type} (n stride : L.Nat) (f : 
             };
             writeln!(
                 out,
-                r#"local macro "{name}" "[" rs:term,* "]" : tactic =>
-  `(tactic| simp (config := {{failIfUnchanged := false}}) only [{prefix}{rules}, $[$rs:term],*])
+                r#"local macro "{name}" "[" rs:ident,* "]" : tactic =>
+  `(tactic| simp (config := {{failIfUnchanged := false}}) only [{prefix}{rules}, $[$rs:ident],*])
 "#
             )?;
         }
