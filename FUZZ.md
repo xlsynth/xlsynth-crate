@@ -379,6 +379,8 @@ guard case also checks the AND-node count after the semantic proof succeeds.
 The `audit-v2` correctness grammar exercises cross-module type specialization,
 derived bit packing, mapped instance methods, assertion labels, and signed
 trace text. Its trace oracle checks the messages produced by the CLI's IR.
+The `audit-v3` grammar also exercises unrolled loop results and assertions,
+casts to declared enum values across bit widths, and derived methods in maps.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

@@ -88,7 +88,7 @@ fn enumerate(data: &[u8]) -> ContractCase {
 }
 
 /// Returns the unchanged input for cancellation and element selection oracles.
-fn scalar_identity(width: u32) -> String {
+pub(crate) fn scalar_identity(width: u32) -> String {
     format!(
         r#"package expected
 

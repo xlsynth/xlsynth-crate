@@ -5,8 +5,9 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, builtin_contracts, nominal_contracts,
-    observable_value_contracts, observer_contracts, scope_contracts,
+    SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
+    nominal_contracts, observable_value_contracts, observer_contracts, scope_contracts,
+    unrolled_loop_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -73,6 +74,17 @@ pub fn generate_v2(data: &[u8]) -> Result<AuditCase, String> {
         4 => aggregate_method_contracts::method_map(options).map(AuditCase::Semantic),
         5 => observable_value_contracts::trace_message(options),
         _ => observable_value_contracts::assertion_label(options),
+    }
+}
+
+/// Decodes audit-v3 programs. A zero prefix replays an entire audit-v2 input.
+pub fn generate_v3(data: &[u8]) -> Result<AuditCase, String> {
+    let (&family, options) = data.split_first().unwrap_or((&0, &[]));
+    match family % 8 {
+        0 | 1 => generate_v2(options),
+        2..=4 => unrolled_loop_contracts::generate(options).map(AuditCase::Semantic),
+        5 | 6 => Ok(AuditCase::Semantic(enum_width_contracts::generate(options))),
+        _ => aggregate_method_contracts::method_map_derived(options).map(AuditCase::Semantic),
     }
 }
 

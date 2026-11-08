@@ -13,6 +13,7 @@ mod builtin_contracts;
 pub mod compound;
 pub mod constexpr;
 pub mod converter_contracts;
+mod enum_width_contracts;
 mod generate;
 pub mod imported_const;
 pub mod imported_struct;
@@ -26,6 +27,7 @@ mod scope_contracts;
 pub mod select_fold;
 pub mod sum_pattern;
 pub mod tuple_pattern;
+mod unrolled_loop_contracts;
 
 pub use generate::{
     GenerateOptions, Grammar, generate, generate_with_grammar, generate_with_options,

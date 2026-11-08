@@ -66,6 +66,24 @@ Prefix an audit-v1 input with one zero byte to reuse its program and semantic
 checks in audit-v2. The v2 grammar checks correctness without a graph-size
 limit.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v3` for the following checks.
+
+- Unrolled loops must preserve the value returned by their body, including
+  when the carry is bound to `_`. The checker also compares assertion failures
+  when the iterable or initializer is a checked function call. It checks folds
+  over enum arrays with both constant and runtime elements. These checks use
+  independent reference IR because DSLX bytecode and IR conversion share the
+  loop expansion.
+- Casting an integer that represents a declared enum member must preserve its
+  value, including when the source and enum widths differ and the expression is
+  evaluated as a constant.
+- An instance method derived by `ToBits` must be usable as a mapper. Controls
+  invoke the method once before the map or implement it explicitly.
+
+Use a separate audit-v3 corpus. Prefixing any audit-v2 input with one zero byte
+retains its original source and oracle. Replay saved bytes with their original
+grammar setting.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
