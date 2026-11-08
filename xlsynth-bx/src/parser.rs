@@ -1008,7 +1008,7 @@ impl<'s> Parser<'s> {
                     let name = self.ident()?;
                     // TODO: 2026-11-06 Parse extern input and output cycles
                     // for checking timing across block instances.
-                    let signature = self.block_signature(name, None)?;
+                    let signature = self.block_signature(name, Self::param)?;
                     module.declaration_order.push(signature.name.clone());
                     self.expect(";")?;
                     module.extern_blocks.push(signature);
@@ -1466,7 +1466,7 @@ impl<'s> Parser<'s> {
     fn block_signature(
         &mut self,
         name: String,
-        mut input_cycles: Option<&mut BTreeMap<String, u64>>,
+        mut data_param: impl FnMut(&mut Self) -> Result<Param, String>,
     ) -> Result<ExternBlock, String> {
         self.expect("(")?;
         self.expect("clk")?;
@@ -1485,14 +1485,7 @@ impl<'s> Parser<'s> {
                 if matches!(parser.peek(0), "clk" | "rst") {
                     return Err(parser.error("clock and reset roles cannot be data ports"));
                 }
-                let param = parser.param()?;
-                if let Some(cycles) = input_cycles.as_deref_mut()
-                    && parser.eat("@")
-                {
-                    let cycle = parser.cycle_number("input")?;
-                    cycles.insert(param.name.clone(), cycle);
-                }
-                Ok(param)
+                data_param(parser)
             })?;
         }
         self.expect("->")?;
@@ -1609,7 +1602,13 @@ impl<'s> Parser<'s> {
         let name = self.ident()?;
         let params = self.block_parametrics()?;
         let mut input_cycles = BTreeMap::new();
-        let signature = self.block_signature(name, Some(&mut input_cycles))?;
+        let signature = self.block_signature(name, |parser| {
+            let param = parser.param()?;
+            if parser.eat("@") {
+                input_cycles.insert(param.name.clone(), parser.cycle_number("input")?);
+            }
+            Ok(param)
+        })?;
         let output_cycles = self.output_cycles()?;
         self.expect("{")?;
         self.bind_local_name(&signature.name);

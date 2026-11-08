@@ -13,7 +13,7 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, OutputCycles, Param, Stmt, StructDef, Type, UnaryOp,
+    LetBinding, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp,
     WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
@@ -42,6 +42,7 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
+mod timing;
 mod tuple_match;
 mod unroll;
 mod value_parametrics;
@@ -1767,327 +1768,6 @@ pub(crate) fn check_sources(
     Ok(checked)
 }
 
-/// A pipeline stage, or a combinational value available at any stage.
-#[derive(Clone, Copy)]
-enum Cycle {
-    At(u64),
-    Independent,
-}
-
-/// The RHS of a binding, its lexical scope, and the stages crossed by a read.
-#[derive(Clone, Copy)]
-struct TimingDriver<'a> {
-    value: &'a TypedExpr,
-    scope: usize,
-    cycle_offset: u64,
-}
-
-/// Each if body has its own lets and an enable evaluated in the parent scope.
-#[derive(Default)]
-struct TimingScope<'a> {
-    parent: Option<(usize, &'a TypedExpr)>,
-    drivers: BTreeMap<&'a str, TimingDriver<'a>>,
-}
-
-/// A resolved binding and the tuple/struct fields selected from it.
-#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
-struct TimingRead<'a> {
-    scope: usize,
-    name: &'a str,
-    fields: Vec<usize>,
-}
-
-/// Infer stages backwards from the outputs. A register's single write site
-/// determines its stage even when its enable makes it hold its value.
-struct TimingChecker<'a> {
-    inputs: BTreeMap<&'a str, Cycle>,
-    scopes: Vec<TimingScope<'a>>,
-    guard_cycles: BTreeMap<usize, Option<Cycle>>,
-    cycles: BTreeMap<TimingRead<'a>, Option<Cycle>>,
-    visiting: BTreeSet<TimingRead<'a>>,
-}
-
-impl<'a> TimingChecker<'a> {
-    fn new(block: &'a CheckedBlock) -> Self {
-        let inputs = block
-            .params
-            .iter()
-            .map(|param| {
-                let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
-                (param.name.as_str(), Cycle::At(stage))
-            })
-            .collect();
-        let mut checker = Self {
-            inputs,
-            scopes: vec![TimingScope::default()],
-            guard_cycles: BTreeMap::new(),
-            cycles: BTreeMap::new(),
-            visiting: BTreeSet::new(),
-        };
-        checker.collect_drivers(&block.statements, 0);
-        checker
-    }
-
-    /// Registers are visible throughout the block. A write inside an if
-    /// resolves its RHS in that if's scope, including any local lets.
-    fn collect_drivers(&mut self, statements: &'a [CheckedStmt], scope: usize) {
-        for stmt in statements {
-            let (binding_scope, name, driver) = match stmt {
-                CheckedStmt::Let { name, value } => (
-                    scope,
-                    name,
-                    TimingDriver {
-                        value,
-                        scope,
-                        cycle_offset: 0,
-                    },
-                ),
-                CheckedStmt::Write { name, value } => (
-                    0,
-                    name,
-                    TimingDriver {
-                        value,
-                        scope,
-                        cycle_offset: 1,
-                    },
-                ),
-                CheckedStmt::If { condition, body } => {
-                    let child = self.scopes.len();
-                    self.scopes.push(TimingScope {
-                        parent: Some((scope, condition)),
-                        drivers: BTreeMap::new(),
-                    });
-                    self.collect_drivers(body, child);
-                    continue;
-                }
-                // Declarations and instance connections supply no inferred
-                // stage.
-                _ => continue,
-            };
-            self.scopes[binding_scope].drivers.insert(name, driver);
-        }
-    }
-
-    /// Resolve a name from the innermost scope outwards.
-    fn driver(&self, name: &str, mut scope: usize) -> Option<(usize, TimingDriver<'a>)> {
-        loop {
-            if let Some(&driver) = self.scopes[scope].drivers.get(name) {
-                return Some((scope, driver));
-            }
-            scope = self.scopes[scope].parent?.0;
-        }
-    }
-
-    /// Nested ifs AND their enables. Every timed operand of that AND must
-    /// arrive at the same stage before a register can capture its RHS.
-    fn guard_cycle(&mut self, scope: usize, depth: usize) -> Result<Option<Cycle>, String> {
-        let Some((parent, condition)) = self.scopes[scope].parent else {
-            return Ok(Some(Cycle::Independent));
-        };
-        if let Some(&cycle) = self.guard_cycles.get(&scope) {
-            return Ok(cycle);
-        }
-        let outer = self.guard_cycle(parent, depth)?;
-        let inner = self.infer(condition, parent, &[], depth)?;
-        let cycle = merge_cycles(outer, inner, |a, b| {
-            format!("nested write guards combine cycle {a} with cycle {b}")
-        })?;
-        self.guard_cycles.insert(scope, cycle);
-        Ok(cycle)
-    }
-
-    /// Follow only the selected field of an aggregate, including through a
-    /// let, register, or mux. An empty field path reads the whole expression.
-    fn infer(
-        &mut self,
-        expr: &'a TypedExpr,
-        scope: usize,
-        fields: &[usize],
-        depth: usize,
-    ) -> Result<Option<Cycle>, String> {
-        if depth > MAX_ELABORATION_DEPTH {
-            return Err(format!(
-                "timing dependency depth exceeds {MAX_ELABORATION_DEPTH}"
-            ));
-        }
-        let depth = depth + 1;
-        match &expr.kind {
-            K::Name(name) => self.infer_name(name, scope, fields, depth),
-            K::Literal(_) => Ok(Some(Cycle::Independent)),
-            K::Unary { value, .. } | K::Cast { value } => self.infer(value, scope, fields, depth),
-            K::TupleIndex { value, index } => {
-                let mut selected = Vec::with_capacity(fields.len() + 1);
-                selected.push(*index);
-                selected.extend_from_slice(fields);
-                self.infer(value, scope, &selected, depth)
-            }
-            K::Tuple(members) => {
-                if let Some((&index, rest)) = fields.split_first() {
-                    return self.infer(&members[index], scope, rest, depth);
-                }
-                let mut cycle = Some(Cycle::Independent);
-                for member in members {
-                    let member_cycle = self.infer(member, scope, &[], depth)?;
-                    cycle = merge_cycles(cycle, member_cycle, |a, b| {
-                        format!("aggregate combines cycle {a} with cycle {b}")
-                    })?;
-                }
-                Ok(cycle)
-            }
-            K::Binary { op, left, right } => {
-                let left = self.infer(left, scope, &[], depth)?;
-                let right = self.infer(right, scope, &[], depth)?;
-                merge_cycles(left, right, |a, b| {
-                    format!("operator '{op}' combines cycle {a} with cycle {b}")
-                })
-            }
-            K::If {
-                condition,
-                then_value,
-                else_value,
-            } => {
-                let select = self.infer(condition, scope, &[], depth)?;
-                let left = self.infer(then_value, scope, fields, depth)?;
-                let right = self.infer(else_value, scope, fields, depth)?;
-                let data = merge_cycles(left, right, |a, b| {
-                    format!("if branches combine cycle {a} with cycle {b}")
-                })?;
-                merge_cycles(select, data, |a, b| {
-                    format!("if expression has condition at cycle {a} and data at cycle {b}")
-                })
-            }
-            _ => Ok(None),
-        }
-    }
-
-    /// A let inherits its RHS stage. A register first aligns its effective
-    /// enable with the RHS, then adds one stage for the clock edge.
-    fn infer_name(
-        &mut self,
-        name: &'a str,
-        scope: usize,
-        fields: &[usize],
-        depth: usize,
-    ) -> Result<Option<Cycle>, String> {
-        let Some((binding_scope, driver)) = self.driver(name, scope) else {
-            return Ok(self.inputs.get(name).copied());
-        };
-        let read = TimingRead {
-            scope: binding_scope,
-            name,
-            fields: fields.to_vec(),
-        };
-        if let Some(&cycle) = self.cycles.get(&read) {
-            return Ok(cycle);
-        }
-        if !self.visiting.insert(read.clone()) {
-            return Err(format!("timing feedback through '{name}' is unsupported"));
-        }
-        let mut cycle = self.infer(driver.value, driver.scope, fields, depth)?;
-        if driver.cycle_offset != 0 {
-            let enable = self.guard_cycle(driver.scope, depth)?;
-            cycle = merge_cycles(enable, cycle, |enable, data| {
-                format!("write to '{name}' has guard at cycle {enable} and data at cycle {data}")
-            })?;
-        }
-        let cycle = apply_cycle_offset(cycle, driver.cycle_offset, name)?;
-        self.visiting.remove(&read);
-        self.cycles.insert(read, cycle);
-        Ok(cycle)
-    }
-}
-
-/// Constants can join any stage. An unknown operand leaves the result unknown.
-fn merge_cycles(
-    left: Option<Cycle>,
-    right: Option<Cycle>,
-    mismatch: impl FnOnce(u64, u64) -> String,
-) -> Result<Option<Cycle>, String> {
-    Ok(match (left, right) {
-        (None, _) | (_, None) => None,
-        (Some(Cycle::Independent), cycle) | (cycle, Some(Cycle::Independent)) => cycle,
-        (Some(Cycle::At(a)), Some(Cycle::At(b))) if a == b => Some(Cycle::At(a)),
-        (Some(Cycle::At(a)), Some(Cycle::At(b))) => return Err(mismatch(a, b)),
-    })
-}
-
-/// Entry point for timing validation of an annotated block.
-fn check_output_cycles(
-    block: &CheckedBlock,
-    ports: &[Param],
-    port_names: &BTreeSet<String>,
-) -> Result<(), String> {
-    let Some(expected) = &block.output_cycles else {
-        return Ok(());
-    };
-    if let OutputCycles::ByPort(expected) = expected {
-        for port in expected.keys() {
-            if !port_names.contains(port) {
-                return Err(format!("unknown output port '{port}' in cycle annotation"));
-            }
-        }
-        for port in port_names {
-            if !expected.contains_key(port) {
-                return Err(format!("missing cycle annotation for output port '{port}'"));
-            }
-        }
-    }
-
-    let mut checker = TimingChecker::new(block);
-    let has_field_ports = matches!(&block.result, Type::Named(_) | Type::Tuple(_));
-    if !has_field_ports && let OutputCycles::Uniform(cycle) = expected {
-        // A scalar or array drives a single port from the whole expression.
-        return check_inferred_cycle(checker.infer(&block.output, 0, &[], 0)?, *cycle);
-    }
-    for (index, port) in ports.iter().enumerate() {
-        let cycle = match expected {
-            OutputCycles::Uniform(cycle) => *cycle,
-            OutputCycles::ByPort(port_cycles) => port_cycles[&port.name],
-        };
-        // Struct and tuple fields follow port declaration order.
-        let fields = if has_field_ports {
-            std::slice::from_ref(&index)
-        } else {
-            &[]
-        };
-        checker
-            .infer(&block.output, 0, fields, 0)
-            .and_then(|actual| check_inferred_cycle(actual, cycle))
-            .map_err(|e| format!("output '{}': {e}", port.name))?;
-    }
-    Ok(())
-}
-
-/// Compare the inferred output cycle with its declaration.
-fn check_inferred_cycle(actual: Option<Cycle>, expected: u64) -> Result<(), String> {
-    let actual = actual.ok_or("cannot infer output cycle for this expression")?;
-    if let Cycle::At(actual) = actual
-        && actual != expected
-    {
-        return Err(format!("expected cycle {expected}, got cycle {actual}"));
-    }
-    Ok(())
-}
-
-/// Apply the cycles added by a driver to its inferred input cycle.
-fn apply_cycle_offset(
-    inferred: Option<Cycle>,
-    cycle_offset: u64,
-    name: &str,
-) -> Result<Option<Cycle>, String> {
-    Ok(match inferred {
-        Some(Cycle::At(cycle)) => {
-            let cycle = cycle
-                .checked_add(cycle_offset)
-                .ok_or_else(|| format!("cycle offset overflow at '{name}'"))?;
-            Some(Cycle::At(cycle))
-        }
-        Some(Cycle::Independent) if cycle_offset == 0 => Some(Cycle::Independent),
-        // A register driven only by constants has no input stage to count from.
-        Some(Cycle::Independent) | None => None,
-    })
-}
-
 /// Controls which declarations and bindings are available in a BX body.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BodyKind {
@@ -2632,7 +2312,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             statements: c.statements,
             output,
         };
-        check_output_cycles(&block, &interface.outputs, &c.outputs)?;
+        timing::check_outputs(&block, &interface.outputs, &c.outputs)?;
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -4899,13 +4579,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BodyChecker, BodyKind, CheckedStmt, ConstantBinding, Declarations, ImportOptions,
-        ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
+        BodyChecker, BodyKind, CheckedModule, CheckedStmt, ConstantBinding, Declarations,
+        ImportOptions, ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
     };
     use crate::ast::{BindingPattern, Expr, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    fn check_bx(source: &str) -> Result<CheckedModule, String> {
+        check_module(&parse_module(source)?)
+    }
+
+    const TAP_PORTS: &str = "Ports { live: x, saved: q }";
+
+    /// Common two-port pipeline used to check result annotations.
+    fn check_tap(annotation: &str, result: &str) -> Result<CheckedModule, String> {
+        check_bx(&format!(
+            r#"
+struct Ports {{ saved: u8, live: u8 }}
+block tap(clk, x: u8) -> Ports {annotation} {{
+    reg q: u8;
+    q := x;
+    {result}
+}}
+"#
+        ))
+    }
 
     #[test]
     fn array_casts_share_the_function_expansion_budget() -> Result<(), String> {
@@ -4993,7 +4693,7 @@ fn fold(seed: (u8, u8)) -> (u8, u8) {
     fn declared_output_cycle_must_match_the_inferred_cycle() {
         let check_delay = |cycle| {
             let source = format!("block b(clk, x: u8) -> u8 @{cycle} {{ reg q: u8; q := x; q }}");
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         check_delay(1).unwrap();
         assert_eq!(
@@ -5004,22 +4704,9 @@ fn fold(seed: (u8, u8)) -> (u8, u8) {
 
     #[test]
     fn uniform_output_cycle_applies_to_each_field() {
-        let check_tap = |live| {
-            let source = format!(
-                r#"
-struct Ports {{ saved: u8, live: u8 }}
-block tap(clk, x: u8) -> Ports @1 {{
-    reg q: u8;
-    q := x;
-    Ports {{ saved: q, live: {live} }}
-}}
-"#
-            );
-            check_module(&parse_module(&source).unwrap())
-        };
-        check_tap("q").unwrap();
+        check_tap("@1", "Ports { saved: q, live: q }").unwrap();
         assert_eq!(
-            check_tap("x").unwrap_err(),
+            check_tap("@1", TAP_PORTS).unwrap_err(),
             "block 'tap': output 'live': expected cycle 1, got cycle 0"
         );
     }
@@ -5030,7 +4717,7 @@ block tap(clk, x: u8) -> Ports @1 {{
 struct Ports { saved: u8, live: u8 }
 block pass(clk, p: Ports @1) -> Ports @1 { p }
 "#;
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
     }
 
     #[test]
@@ -5042,7 +4729,7 @@ struct Ports {{ saved: u8, live: u8 }}
 block pick(clk, p: Ports @1) -> u8 @{cycle} {{ p.saved }}
 "#
             );
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         check_pick(1).unwrap();
         assert_eq!(
@@ -5057,16 +4744,18 @@ block pick(clk, p: Ports @1) -> u8 @{cycle} {{ p.saved }}
             let source = format!(
                 r#"
 struct Ports {{ saved: u8, live: u8 }}
+struct Envelope {{ tag: u8, ports: Ports }}
 block pick(clk, x: u8) -> u8 @{cycle} {{
     reg q: u8;
     q := x;
     let fields = Ports {{ saved: q, live: x }};
-    let p = fields;
-    p.{field}
+    let envelope = Envelope {{ tag: x, ports: fields }};
+    let p = envelope;
+    p.ports.{field}
 }}
 "#
             );
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         check_pick("saved", 1).unwrap();
         check_pick("live", 0).unwrap();
@@ -5091,7 +4780,7 @@ block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
 }}
 "#
             );
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         check_pick("q").unwrap();
         assert_eq!(
@@ -5102,91 +4791,45 @@ block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
 
     #[test]
     fn declared_output_cycles_match_fields_by_port_name() {
-        let check_tap = |saved_cycle| {
-            let source = format!(
-                r#"
-struct Ports {{ saved: u8, live: u8 }}
-block tap(clk, x: u8) -> Ports @(live: 0, saved: {saved_cycle}) {{
-    reg q: u8;
-    q := x;
-    Ports {{ live: x, saved: q }}
-}}
-"#
-            );
-            check_module(&parse_module(&source).unwrap())
-        };
-        check_tap(1).unwrap();
+        check_tap("@(live: 0, saved: 1)", TAP_PORTS).unwrap();
         assert_eq!(
-            check_tap(0).unwrap_err(),
+            check_tap("@(live: 0, saved: 0)", TAP_PORTS).unwrap_err(),
             "block 'tap': output 'saved': expected cycle 0, got cycle 1"
         );
     }
 
     #[test]
     fn per_port_timing_follows_aggregate_let_bindings() {
-        let source = r#"
-struct Ports { saved: u8, live: u8 }
-block tap(clk, x: u8) -> Ports @(saved: 1, live: 0) {
-    reg q: u8;
-    q := x;
-    let ports = Ports { saved: q, live: x };
-    let result = ports;
-    result
-}
-"#;
-        check_module(&parse_module(source).unwrap()).unwrap();
+        let result = "let ports = Ports { saved: q, live: x }; let result = ports; result";
+        check_tap("@(saved: 1, live: 0)", result).unwrap();
     }
 
     #[test]
     fn per_port_timing_projects_a_returned_register() {
-        let check_tap = |saved_cycle| {
-            let source = format!(
-                r#"
-struct Ports {{ saved: u8, live: u8 }}
-block tap(clk, x: u8) -> Ports @(live: 1, saved: {saved_cycle}) {{
-    reg q: u8;
+        let result = r#"
     reg p: Ports;
-    q := x;
-    p := Ports {{ saved: q, live: x }};
+    p := Ports { saved: q, live: x };
     p
-}}
-"#
-            );
-            check_module(&parse_module(&source).unwrap())
-        };
-        check_tap(2).unwrap();
+"#;
+        check_tap("@(live: 1, saved: 2)", result).unwrap();
         assert_eq!(
-            check_tap(1).unwrap_err(),
+            check_tap("@(live: 1, saved: 1)", result).unwrap_err(),
             "block 'tap': output 'saved': expected cycle 1, got cycle 2"
         );
     }
 
     #[test]
     fn output_cycle_annotations_reject_unknown_ports() {
-        let source = r#"
-struct Ports { saved: u8, live: u8 }
-block tap(clk, x: u8) -> Ports @(svaed: 1) {
-    Ports { saved: x, live: x }
-}
-"#;
-        let module = parse_module(source).unwrap();
         assert_eq!(
-            check_module(&module).unwrap_err(),
+            check_tap("@(svaed: 1)", TAP_PORTS).unwrap_err(),
             "block 'tap': unknown output port 'svaed' in cycle annotation"
         );
     }
 
     #[test]
     fn output_cycle_annotations_require_every_port() {
-        let source = r#"
-struct Ports { saved: u8, live: u8 }
-block tap(clk, x: u8) -> Ports @(saved: 1) {
-    Ports { saved: x, live: x }
-}
-"#;
-        let module = parse_module(source).unwrap();
         assert_eq!(
-            check_module(&module).unwrap_err(),
+            check_tap("@(saved: 1)", TAP_PORTS).unwrap_err(),
             "block 'tap': missing cycle annotation for output port 'live'"
         );
     }
@@ -5200,20 +4843,20 @@ block b(clk, x: u8, y: u8 @1) -> u8 @1 {
     q + y
 }
 "#;
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
     }
 
     #[test]
     fn let_binding_inherits_the_cycle_of_its_initializer() {
         let source = "block b(clk, x: u8) -> u8 @1 { reg q: u8; let saved = q; q := x; saved }";
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
     }
 
     #[test]
     fn binary_operands_must_agree_on_cycle() {
         let check_sum = |sum| {
             let source = format!("block b(clk, x: u8) -> u8 @1 {{ reg q: u8; q := x; {sum} }}");
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         check_sum("q + q").unwrap();
         check_sum("q + u8:1").unwrap();
@@ -5236,7 +4879,7 @@ block capture(clk, en: bool @{enable_cycle}, x: u8 @2, y: u8 @2) -> u8 @3 {{
 }}
 "#
             );
-            check_module(&parse_module(&source).unwrap())
+            check_bx(&source)
         };
         assert_eq!(
             check_capture(1).unwrap_err(),
@@ -5254,16 +4897,15 @@ block add_held(clk, en: bool, x: u8, r: u8 @1) -> u8 @1 {
     q + r
 }
 "#;
-        let check = |source: &str| check_module(&parse_module(source).unwrap());
-        check(source).unwrap();
+        check_bx(source).unwrap();
         assert_eq!(
-            check(&source.replace("r: u8 @1", "r: u8 @0")).unwrap_err(),
+            check_bx(&source.replace("r: u8 @1", "r: u8 @0")).unwrap_err(),
             "block 'add_held': operator '+' combines cycle 1 with cycle 0"
         );
         let registered = source
             .replace("-> u8 @1", "-> u8 @2")
             .replace("    q + r", "    reg m: u8;\n    m := q + r;\n    m");
-        check(&registered).unwrap();
+        check_bx(&registered).unwrap();
     }
 
     #[test]
@@ -5288,10 +4930,10 @@ block b(clk, en: bool, x: u8, late_en: bool @1, y: u8 @1)
     (a, b0, c, local)
 }
 "#;
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
         let bad = source.replace("if inner", "if late_en");
         assert_eq!(
-            check_module(&parse_module(&bad).unwrap()).unwrap_err(),
+            check_bx(&bad).unwrap_err(),
             "block 'b': output 'out_0': nested write guards combine cycle 0 with cycle 1"
         );
     }
@@ -5299,10 +4941,10 @@ block b(clk, en: bool, x: u8, late_en: bool @1, y: u8 @1)
     #[test]
     fn guarded_constant_uses_the_enables_stage_and_checks_offset_overflow() {
         let source = "block b(clk, en: bool @2) -> u8 @3 { reg q: u8; if en { q := u8:7; } q }";
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
         let overflow = source.replace("en: bool @2", &format!("en: bool @{}", u64::MAX));
         assert_eq!(
-            check_module(&parse_module(&overflow).unwrap()).unwrap_err(),
+            check_bx(&overflow).unwrap_err(),
             "block 'b': cycle offset overflow at 'q'"
         );
     }
@@ -5311,14 +4953,13 @@ block b(clk, en: bool, x: u8, late_en: bool @1, y: u8 @1)
     fn combinational_if_checks_the_select_and_both_data_inputs() {
         let source =
             "block b(clk, en: bool @1, x: u8 @1, y: u8 @1) -> u8 @1 { if en { x } else { y } }";
-        let check = |source: &str| check_module(&parse_module(source).unwrap());
-        check(source).unwrap();
+        check_bx(source).unwrap();
         assert_eq!(
-            check(&source.replace("en: bool @1", "en: bool @0")).unwrap_err(),
+            check_bx(&source.replace("en: bool @1", "en: bool @0")).unwrap_err(),
             "block 'b': if expression has condition at cycle 0 and data at cycle 1"
         );
         assert_eq!(
-            check(&source.replace("y: u8 @1", "y: u8 @0")).unwrap_err(),
+            check_bx(&source.replace("y: u8 @1", "y: u8 @0")).unwrap_err(),
             "block 'b': if branches combine cycle 1 with cycle 0"
         );
     }
@@ -5334,7 +4975,7 @@ block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
 }
 "#;
         assert_eq!(
-            check_module(&parse_module(source).unwrap()).unwrap_err(),
+            check_bx(source).unwrap_err(),
             "block 'capture': write to 'q' has guard at cycle 1 and data at cycle 2"
         );
     }
@@ -5342,16 +4983,15 @@ block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
     #[test]
     fn unary_and_cast_expressions_inherit_the_operand_cycle() {
         let source = "block b(clk, x: u8) -> u16 @1 { reg q: u8; q := x; (!q) as u16 }";
-        check_module(&parse_module(source).unwrap()).unwrap();
+        check_bx(source).unwrap();
     }
 
     #[test]
     fn annotated_blocks_require_an_inferred_output_cycle() {
-        let plain = parse_module("block b(clk, x: u8[2]) -> u8 { x[u1:0] }").unwrap();
-        check_module(&plain).unwrap();
-        let timed = parse_module("block b(clk, x: u8[2]) -> u8 @0 { x[u1:0] }").unwrap();
+        check_bx("block b(clk, x: u8[2]) -> u8 { x[u1:0] }").unwrap();
+        let timed = "block b(clk, x: u8[2]) -> u8 @0 { x[u1:0] }";
         assert_eq!(
-            check_module(&timed).unwrap_err(),
+            check_bx(timed).unwrap_err(),
             "block 'b': cannot infer output cycle for this expression"
         );
     }
@@ -5360,10 +5000,10 @@ block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
     fn output_cycle_inference_rejects_register_feedback() {
         for rhs in ["q", "q + x"] {
             let source = format!("block b(clk, x: u8) -> u8 {{ reg q: u8; q := {rhs}; q }}");
-            check_module(&parse_module(&source).unwrap()).unwrap();
+            check_bx(&source).unwrap();
             let timed = source.replace("-> u8", "-> u8 @1");
             assert_eq!(
-                check_module(&parse_module(&timed).unwrap()).unwrap_err(),
+                check_bx(&timed).unwrap_err(),
                 "block 'b': timing feedback through 'q' is unsupported"
             );
         }
