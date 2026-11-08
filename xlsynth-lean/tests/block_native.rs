@@ -2007,7 +2007,7 @@ pub fn lanes(xs: u8[3]) -> u8 {
     assert!(
         body.lines()
             .any(|l| l.trim_start().starts_with("let «lane» :")
-                && l.contains("BitVec.add «xls_iteration»")),
+                && l.contains("L.BitVec.add («xls_iteration»)")),
         "{body}"
     );
     bundle.files.push((
@@ -2076,11 +2076,11 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
         .lines()
         .find_map(|line| {
             let (binding, _) = line.trim().strip_prefix("let ")?.split_once(" : ")?;
-            line.ends_with(" := (BitVec.ofNat 32 0x1)")
+            line.ends_with(" := L.BitVec.ofNat 32 0x1")
                 .then_some(binding)
         })
         .expect("the loop offset should be the literal one");
-    let offset_iteration = format!(" := BitVec.add «xls_iteration» {offset}");
+    let offset_iteration = format!(" := L.BitVec.add («xls_iteration») ({offset})");
     assert!(
         body.lines()
             .any(|line| line.trim().starts_with("let «bank» : ")
@@ -2088,8 +2088,8 @@ fn loop_keeps_the_source_index_and_captured_record_fields() {
         "bank should name the offset iteration"
     );
     assert!(body.lines().any(|line| {
-        line.split_once("Vector.getD ")
-            .is_some_and(|(_, args)| args.contains(" («bank»).toNat "))
+        line.split_once("L.Vector.getD ")
+            .is_some_and(|(_, args)| args.contains(" (L.BitVec.toNat («bank»)) "))
     }));
     assert!(body.contains(".«valid»"));
     let checks = r#"import ReadableCorrespondence
