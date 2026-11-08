@@ -4437,6 +4437,7 @@ block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
             check_bx(&source)
         };
         check_pick("q").unwrap();
+        check_pick("p.live").unwrap(); // x -> p.live @1 -> p.saved @2
         assert_eq!(
             check_pick("p.saved").unwrap_err(),
             "block 'pick': output 'saved': timing feedback through 'p' is unsupported"
