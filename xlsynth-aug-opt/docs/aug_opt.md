@@ -264,8 +264,20 @@ clz(x) >= K -> !or_reduce(x[W-K:W])
 Here `1 <= K <= W`; the zero-input sentinel is excluded from the selected
 prefix. Reversed inputs use their original high bits. Either a predicate's
 true set or its complement can supply this prefix, even when the other set
-has fewer ordinals. Other truth sets retain the existing one-hot wiring.
-The same sharing and whole-function profitability checks apply to both forms.
+has fewer ordinals.
+
+A singleton truth set tests that the preceding input bits are zero and the
+selected bit is set. For `0 < K < W`, this gives:
+
+```text
+clz(x) == K -> !or_reduce(x[W-K:W]) && x[W-K-1]
+```
+
+The endpoints already use prefix reductions: `clz(x) == 0` tests the MSB,
+and `clz(x) == W` tests `x == 0`. A singleton false set handles `!=` by
+complementing the same expression. Other truth sets retain the existing
+one-hot wiring. The same sharing and whole-function profitability checks
+apply to all forms.
 
 The [BVC c0865afd0d0b6b09 sample](https://bvc.xlsynth.org/sites/e722321a3221c2c7fb28a62a2799c00eaba175a4d3cefbfceca1ff331a935810/tech-mapped-asap7/?release=0.79.0&cohort=full-corpus&reference=area&sample=k3-cone-c0865afd0d0b6b09-2f846be040fc)
 tests `clz(x: u161) >= 2` inside a Boolean expression that simplifies to

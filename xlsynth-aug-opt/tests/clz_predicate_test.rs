@@ -9,6 +9,53 @@ const BVC_CONE: &str = include_str!("fixtures/clz_predicate_c0865afd0d0b6b09.ir"
 const BVC_TOP: &str = "__k3_cone_c0865afd0d0b6b09";
 
 #[test]
+fn clz_equalities_lower_to_input_bits_in_both_modes() {
+    // The threshold makes the shared-count group strictly cheaper. An isolated
+    // equality can already map as cheaply as the direct input expression.
+    for op in ["eq", "ne"] {
+        let source = format!(
+            r#"package equality
+
+top fn main(x: bits[8] id=1) -> (bits[1], bits[1]) {{
+  reversed: bits[8] = reverse(x, id=2)
+  hot: bits[9] = one_hot(reversed, lsb_prio=true, id=3)
+  count: bits[4] = encode(hot, id=4)
+  limit: bits[4] = literal(value=3, id=5)
+  equality: bits[1] = {op}(count, limit, id=6)
+  high_count: bits[3] = bit_slice(count, start=1, width=3, id=7)
+  at_least_two: bits[1] = or_reduce(high_count, id=8)
+  ret out: (bits[1], bits[1]) = tuple(equality, at_least_two, id=9)
+}}
+"#
+        );
+        for mode in [AugOptMode::PirOnly, AugOptMode::Sandwich] {
+            let rewritten = run_aug_opt_over_ir_text_with_stats(
+                &source,
+                Some("main"),
+                AugOptOptions {
+                    enable: true,
+                    mode,
+                    ..Default::default()
+                },
+            )
+            .expect("aug-opt on CLZ equality");
+            assert_eq!(rewritten.rewrite_stats.priority_results_fused, 2);
+            let pkg = Parser::new(&rewritten.output_text)
+                .parse_and_validate_package()
+                .expect("parse/validate equality output");
+            let f = pkg.get_top_fn().expect("top function");
+            let live = xlsynth_pir::dce::remove_dead_nodes(f);
+            assert!(live.nodes.iter().all(|node| !matches!(
+                node.payload,
+                NodePayload::Encode { .. } | NodePayload::OneHot { .. }
+            )));
+            check_equivalence_with_top_via_toolchain(&source, &rewritten.output_text, Some("main"))
+                .expect("direct equality predicate is equivalent");
+        }
+    }
+}
+
+#[test]
 fn clz_predicate_bvc_cone_reduces_to_input_msb_and_stays_stable() {
     let direct_msb = r#"package direct_msb
 

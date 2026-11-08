@@ -626,22 +626,31 @@ fn priority_index_predicate(f: &ir::Fn, root: NodeRef) -> Option<(PriorityIndex,
     Some((priority_index(f, amount)?, predicate))
 }
 
-/// A contiguous priority-input prefix that can replace selected one-hot bits.
-struct InputPrefix {
+/// An input prefix reduction, optionally guarded by the next priority bit.
+struct InputPredicate {
     arg: NodeRef,
     start: usize,
     width: usize,
+    from_msb: bool,
+    selected_bit: Option<usize>,
 }
 
-/// Recognizes the first K LSB-priority positions, excluding the zero sentinel.
-fn priority_input_prefix(
+/// Recognizes an LSB-priority prefix or singleton, excluding the zero sentinel.
+fn priority_input_predicate(
     f: &ir::Fn,
     index: &PriorityIndex,
     sources: &[usize],
-) -> Option<InputPrefix> {
-    if sources.is_empty() || !sources.iter().copied().eq(0..sources.len()) {
+) -> Option<InputPredicate> {
+    if sources.is_empty() {
         return None;
     }
+    let selected_bit = if sources.iter().copied().eq(0..sources.len()) {
+        None
+    } else if let [ordinal] = sources {
+        Some(*ordinal)
+    } else {
+        return None;
+    };
     let ctx = MatchCtx::new(f);
     let bindings = ctx.matches(
         index.encoded,
@@ -649,27 +658,80 @@ fn priority_input_prefix(
     )?;
     let input = bindings.get_node("input")?;
     let input_width = ctx.bits_width(input)?;
-    let width = sources.len();
-    if width > input_width {
-        // The all-zero sentinel is not an input bit and cannot join a prefix.
+    let width = selected_bit.unwrap_or(sources.len());
+    if width > input_width || selected_bit == Some(input_width) {
+        // The all-zero sentinel cannot join a prefix or select an input bit.
         return None;
     }
     if let Some(reversed) = ctx.matches(input, ir_match::unop(Unop::Reverse, ir_match::any("x"))) {
-        Some(InputPrefix {
+        Some(InputPredicate {
             arg: reversed.get_node("x")?,
             start: input_width - width,
             width,
+            from_msb: true,
+            selected_bit: selected_bit.map(|bit| input_width - bit - 1),
         })
     } else {
-        Some(InputPrefix {
+        Some(InputPredicate {
             arg: input,
             start: 0,
             width,
+            from_msb: false,
+            selected_bit,
         })
     }
 }
 
-/// Uses a direct input prefix, otherwise wiring the smaller one-hot truth set.
+/// Builds shared all-zero input prefixes from aligned power-of-two blocks.
+fn aligned_zero_prefix(
+    f: &mut ir::Fn,
+    builder: &mut NodeAppender,
+    input: &InputPredicate,
+) -> Option<NodeRef> {
+    let mut remaining = input.width;
+    let mut reduced = None;
+    while remaining > 0 {
+        let width = 1usize << remaining.ilog2();
+        let start = if input.from_msb {
+            input.start + remaining - width
+        } else {
+            input.start + input.width - remaining
+        };
+        let slice = builder.push(
+            f,
+            Type::Bits(width),
+            NodePayload::BitSlice {
+                arg: input.arg,
+                start,
+                width,
+            },
+        )?;
+        let reduced_block =
+            builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, slice))?;
+        let block = builder.push(
+            f,
+            Type::Bits(1),
+            NodePayload::Unop(Unop::Not, reduced_block),
+        )?;
+        reduced = Some(if let Some(prefix) = reduced {
+            // A left fold matches the shared Brent-Kung prefixes used by
+            // one_hot. AND of zero-block predicates also keeps g8r preparation
+            // from merging the block reductions into one differently split
+            // tree.
+            builder.push(
+                f,
+                Type::Bits(1),
+                NodePayload::Nary(NaryOp::And, vec![prefix, block]),
+            )?
+        } else {
+            block
+        });
+        remaining -= width;
+    }
+    reduced
+}
+
+/// Uses direct input bits, otherwise wiring the smaller one-hot truth set.
 fn wired_predicate(
     f: &mut ir::Fn,
     builder: &mut NodeAppender,
@@ -688,28 +750,47 @@ fn wired_predicate(
     }
     // one_hot sets exactly one of these bits, including its all-zero sentinel.
     // Complementing an arbitrary at-most-one value would be incorrect here.
-    let (prefix, complement) = if let Some(prefix) = priority_input_prefix(f, index, &accepted) {
-        (Some(prefix), false)
-    } else if let Some(prefix) = priority_input_prefix(f, index, &rejected) {
-        (Some(prefix), true)
+    let (input, complement) = if let Some(input) = priority_input_predicate(f, index, &accepted) {
+        (Some(input), false)
+    } else if let Some(input) = priority_input_predicate(f, index, &rejected) {
+        (Some(input), true)
     } else {
         (None, rejected.len() < accepted.len())
     };
-    let wired = if let Some(prefix) = prefix {
+    let wired = if let Some(input) = input {
         // OR of the first K LSB-priority positions is just OR of the first K
         // input bits. For reversed inputs this is the original high prefix:
         // clz(x) >= K becomes NOT(OR(x[W-K:W])). Keep the existing complement
         // and reachable-ordinal handling for affine arithmetic and sentinels.
-        let slice = builder.push(
-            f,
-            Type::Bits(prefix.width),
-            NodePayload::BitSlice {
-                arg: prefix.arg,
-                start: prefix.start,
-                width: prefix.width,
-            },
-        )?;
-        builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, slice))?
+        if let Some(bit) = input.selected_bit {
+            // clz(x: uW) == K requires K leading zeros and the next bit set.
+            let zero_prefix = aligned_zero_prefix(f, builder, &input)?;
+            let selected = builder.push(
+                f,
+                Type::Bits(1),
+                NodePayload::BitSlice {
+                    arg: input.arg,
+                    start: bit,
+                    width: 1,
+                },
+            )?;
+            builder.push(
+                f,
+                Type::Bits(1),
+                NodePayload::Nary(NaryOp::And, vec![zero_prefix, selected]),
+            )?
+        } else {
+            let slice = builder.push(
+                f,
+                Type::Bits(input.width),
+                NodePayload::BitSlice {
+                    arg: input.arg,
+                    start: input.start,
+                    width: input.width,
+                },
+            )?;
+            builder.push(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, slice))?
+        }
     } else {
         let sources = if complement { rejected } else { accepted };
         wired_result(f, builder, index.hot, &[sources])?
@@ -944,6 +1025,142 @@ top fn main(x: bits[{input_width}] id=1) -> bits[1] {{
                     }
                 }
             }
+        }
+    }
+
+    /// Builds equality against an ordinal, including values past the zero
+    /// sentinel.
+    fn scalar_priority_equality_case(
+        input_width: usize,
+        reverse: bool,
+        ordinal: usize,
+        negated: bool,
+        constant_first: bool,
+    ) -> String {
+        let hot_width = input_width + 1;
+        let count_width = ceil_log2(hot_width);
+        let comparison_width = count_width + 1;
+        let input = if reverse { "reversed" } else { "x" };
+        let op = if negated { "ne" } else { "eq" };
+        let operands = if constant_first {
+            "limit, wide_count"
+        } else {
+            "wide_count, limit"
+        };
+        format!(
+            r#"package equality
+
+top fn main(x: bits[{input_width}] id=1) -> bits[1] {{
+  reversed: bits[{input_width}] = reverse(x, id=2)
+  hot: bits[{hot_width}] = one_hot({input}, lsb_prio=true, id=3)
+  count: bits[{count_width}] = encode(hot, id=4)
+  wide_count: bits[{comparison_width}] = zero_ext(count, new_bit_count={comparison_width}, id=5)
+  limit: bits[{comparison_width}] = literal(value={ordinal}, id=6)
+  ret out: bits[1] = {op}({operands}, id=7)
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn scalar_priority_equalities_use_input_bits_exhaustively() {
+        for input_width in 1..=8 {
+            for reverse in [false, true] {
+                for ordinal in 0..=input_width + 1 {
+                    for negated in [false, true] {
+                        for constant_first in [false, true] {
+                            let source = scalar_priority_equality_case(
+                                input_width,
+                                reverse,
+                                ordinal,
+                                negated,
+                                constant_first,
+                            );
+                            let package =
+                                Parser::new(&source).parse_and_validate_package().unwrap();
+                            let original = package.get_top_fn().unwrap();
+                            let mut rewritten = original.clone();
+                            assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(1));
+                            let rewritten = xlsynth_pir::dce::remove_dead_nodes(&rewritten);
+                            assert!(rewritten.nodes.iter().all(|node| !matches!(
+                                node.payload,
+                                NodePayload::Encode { .. } | NodePayload::OneHot { .. }
+                            )));
+                            if ordinal < input_width {
+                                let selected_bit = if reverse {
+                                    input_width - ordinal - 1
+                                } else {
+                                    ordinal
+                                };
+                                assert!(rewritten.nodes.iter().any(|node| matches!(
+                                    node.payload,
+                                    NodePayload::BitSlice { arg, start, width: 1 }
+                                        if start == selected_bit
+                                            && matches!(rewritten.get_node(arg).payload, NodePayload::Param)
+                                )));
+                            }
+                            let mut used_bits = vec![false; input_width];
+                            for node in &rewritten.nodes {
+                                if let NodePayload::BitSlice { arg, start, width } = node.payload {
+                                    assert!(matches!(
+                                        rewritten.get_node(arg).payload,
+                                        NodePayload::Param
+                                    ));
+                                    used_bits[start..start + width].fill(true);
+                                }
+                            }
+                            let covered = if ordinal <= input_width {
+                                (ordinal + 1).min(input_width)
+                            } else {
+                                0
+                            };
+                            let expected_bits: Vec<_> = (0..input_width)
+                                .map(|bit| {
+                                    if reverse {
+                                        bit >= input_width - covered
+                                    } else {
+                                        bit < covered
+                                    }
+                                })
+                                .collect();
+                            assert_eq!(used_bits, expected_bits);
+                            for value in 0..1u64 << input_width {
+                                let args = [IrValue::make_ubits(input_width, value).unwrap()];
+                                assert_eq!(
+                                    eval_fn_in_package_value(&package, original, &args),
+                                    eval_fn_in_package_value(&package, &rewritten, &args),
+                                    "width={input_width}, ordinal={ordinal}, reverse={reverse}, negated={negated}, constant_first={constant_first}, input={value}",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_priority_equalities_prove_wide_input_bits() {
+        for (input_width, reverse, ordinal, negated, constant_first) in
+            [(65, true, 32, false, false), (129, false, 64, true, true)]
+        {
+            let source = scalar_priority_equality_case(
+                input_width,
+                reverse,
+                ordinal,
+                negated,
+                constant_first,
+            );
+            let package = Parser::new(&source).parse_and_validate_package().unwrap();
+            let mut rewritten = package.get_top_fn().unwrap().clone();
+            assert_eq!(rewrite_priority_predicates(&mut rewritten), Some(1));
+            let rewritten = xlsynth_pir::dce::remove_dead_nodes(&rewritten);
+            assert!(rewritten.nodes.iter().all(|node| !matches!(
+                node.payload,
+                NodePayload::Encode { .. } | NodePayload::OneHot { .. }
+            )));
+            check_equivalence_via_toolchain(&source, &format!("package result\n\ntop {rewritten}"))
+                .unwrap();
         }
     }
 
