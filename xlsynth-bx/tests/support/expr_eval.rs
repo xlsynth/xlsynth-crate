@@ -10,6 +10,7 @@ use xlsynth_bx::{
     CheckedModule, ImportOptions, ResetBehavior, check_module_with_options, compile, empty_package,
     lower_module, parse_module,
 };
+use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::{Fn, Package};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
@@ -61,7 +62,7 @@ pub struct BlockEvaluator {
 impl BlockEvaluator {
     /// Lower the checked block and project its data interface for evaluation.
     pub fn lower(checked: &CheckedModule, block: &str) -> Result<Self, String> {
-        let package = lower_module(
+        let mut package = lower_module(
             checked,
             empty_package("expr_eval"),
             ResetBehavior::default(),
@@ -70,6 +71,13 @@ impl BlockEvaluator {
         #[cfg(test)]
         xlsynth::IrPackage::parse_ir(&package.to_string(), None)
             .map_err(|error| format!("BX emitted invalid IR: {error}\n{block}"))?;
+        if package
+            .get_block("sample")
+            .is_some_and(|b| !b.instantiations.is_empty())
+        {
+            package.set_top_block("sample")?;
+            inline_all_blocks_in_package(&mut package)?;
+        }
         let block = package.get_block("sample").ok_or("BX block is missing")?;
         let bx = combinational_block_to_fn(block)
             .map_err(|error| format!("BX block projection failed: {error}"))?;

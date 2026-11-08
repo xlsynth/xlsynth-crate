@@ -86,7 +86,7 @@ block sum(clk, xs: u16[4]) -> u16 {
 }
 ```
 
-Each callable argument must directly name a visible non-parametric BX function or a public, pure DSLX function from a `use` declaration. For example, `use arithmetic;` lets a caller write `fold4<arithmetic::add16>(xs, seed)`. BX uses the declared callback argument types to resolve an imported DSLX specialization and checks its result type. The import and the callback name are resolved at the call site. Names written directly in the template body follow its declaration scope.
+Each callable argument must directly name a visible non-parametric BX function, a public, pure DSLX function from a `use` declaration, or a declared `extern fn`. For example, `use arithmetic;` lets a caller write `fold4<arithmetic::add16>(xs, seed)`. BX uses the declared callback argument types to resolve an imported DSLX specialization and checks its result type. An extern supplies its BX signature during checking. When lowering into a prelinked package, BX verifies the IR signature and purity of the linked function and its callees. The callback name is resolved at the call site. Names written directly in the template body follow its declaration scope.
 
 BX checks the body against its declared signatures, then generates one function per distinct ordered set of callback identities. Only data arguments appear in the generated function's IR signature. Callable parameters cannot be assigned to a `let`, returned, or forwarded to another template. Inline lambdas remain available in `map` expressions. This function-parametric syntax is a BX extension.
 
@@ -285,9 +285,32 @@ block packet_stage(clk, rst, valid: bool, packet: Packet) -> (bool, Packet) {
 
 Here the type of `packet` gives `T = Packet`. The valid register clears on reset. The data register loads when `valid` is asserted and holds its last payload through bubbles. Calling `pipe_reg` with a `u32` payload creates a second block definition. Calls with the same payload type reuse one definition, and each call creates an instance with its own registers.
 
-Use `<T, U>` to declare multiple type parameters. You can also spell a type parameter `<T: type>`. Each parameter must appear in a data input and can occur within a tuple or fixed-size array, as in `pair: (T, U[2])`. Repeated occurrences must agree on the concrete type, including signedness and struct identity. `bool` and `u1` are equivalent.
+Use `<T, U>` to declare multiple type parameters. You can also spell a type parameter `<T: type>`. Parameters can occur within tuples or fixed-size arrays, as in `pair: (T, U[2])`. Repeated occurrences must agree on the concrete type, including signedness and struct identity. `bool` and `u1` are equivalent.
 
 Use a call binding to supply the arguments for inference. When a payload literal is the only source for its type, give it a width, as in `let stage = pipe_reg(valid, u32:0);`. A concrete wrapper such as `packet_stage` supplies a top for compilation. BX validates each generic signature at declaration time, then checks the body at the concrete types of each instantiated specialization.
+
+### Named callbacks on blocks
+
+A block can declare type and callable parameters together. Supply the callback names in angle brackets at the call site. BX first infers types from data inputs, then resolves callbacks in declaration order. Each callback's input types must already be known. Its return type can supply a new type parameter or must agree with one already bound.
+
+```text
+use math;
+
+block advance<In, Out, F: fn(In) -> Out>(clk, rst, prev: (bool, In)) -> (bool, Out) {
+    let next = pipe_reg(prev.0, F(prev.1));
+    next
+}
+
+block pipeline(clk, rst, packet: (bool, u8)) -> (bool, u32) {
+    let widened = advance<math::widen>(packet);
+    let squared = advance<math::square>(widened);
+    squared
+}
+```
+
+With public DSLX helpers `widen(u8) -> u16` and `square(u16) -> u32`, the first stage produces `(bool, u16)`. That pair supplies both the valid bit and the payload of the second stage. BX emits a direct call to each selected helper. Calls with identical concrete types and callback identities share a block definition. Each call still creates its own hardware instance.
+
+The same syntax accepts local BX functions and signature-checked externs. For example, `extern fn widen(x: u8) -> u16 = "wide_ir";` lets a caller write `advance<widen>(packet)` when lowering into a package containing `wide_ir`. Callable parameters are usable only as direct callees in the block body.
 
 ### Replicating child blocks
 
@@ -329,4 +352,4 @@ The [pipeline fixture](tests/fixtures/mul_add.bx) exercises two stages, a separa
 
 Hierarchy checks use the dependencies in the emitted IR. An `invoke` depends on its arguments, for example, so feedback that relies on a callee ignoring one of its arguments can be rejected. Put the register boundary on the feedback path explicitly.
 
-To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting, local function call chains, and block hierarchies are limited to 64 levels. A module can elaborate up to 4,096 distinct generic block specializations. Their bodies share the module’s generic unroll budget of 1,048,576 work units. Multiple instances of the same specialization count once.
+To bound the size of IR types and register reset values, the checker limits each concrete type to 1,048,576 units. A bit type costs its width, with a minimum of one unit. An aggregate costs one unit plus the costs of its members. An empty array still counts one element because IR retains its element type. Expanded aggregate nesting, local function call chains, and block hierarchies are limited to 64 levels. A module can elaborate up to 4,096 distinct generic block specializations. Their bodies share an expansion budget of 1,048,576 work units. Each distinct body is checked once. Calls to blocks with callbacks also charge the calling body's budget for materializing data arguments and wiring each instance's ports.

@@ -242,7 +242,9 @@ fn lex(
         // DSLX consumes a trailing bang in a name even when '=' immediately
         // follows it. Keep BX's compact inequality spelling in block bodies.
         match text {
-            "fn" if brace_depth == 0 => {
+            // A callback formal uses `F: fn(...)` in either kind of header.
+            // Only a function item introduces DSLX lexical rules for its body.
+            "fn" if brace_depth == 0 && tokens.last().is_none_or(|t: &Token| t.text != ":") => {
                 function_definition = tokens.last().is_none_or(|t: &Token| t.text != "extern");
             }
             "{" => brace_depth += 1,
@@ -335,8 +337,8 @@ struct Parser<'s> {
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
     /// Local callback-template declarations disambiguate angle brackets from
-    /// comparisons in a comma-separated expression list. Blocks can invoke
-    /// functions declared later in the source.
+    /// comparisons in a comma-separated expression list. Block callers can
+    /// use function and block templates declared later in the source.
     callback_templates: BTreeMap<&'s str, usize>,
     /// Entries hidden by currently active data or callable bindings.
     hidden_templates: Vec<(&'s str, usize)>,
@@ -361,6 +363,14 @@ struct ParsedType {
 struct Body {
     statements: Vec<Stmt>,
     output: Option<ParsedExpr>,
+}
+
+/// The inferred types and explicitly supplied callbacks of a block, each in
+/// its own declaration order.
+#[derive(Default)]
+struct BlockParametrics {
+    type_params: Vec<String>,
+    callback_params: Vec<CallbackParam>,
 }
 
 /// Retains the built tree's height until its parent is constructed. Syntactic
@@ -431,11 +441,23 @@ impl ParsedExpr {
 impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
         let tokens = lex(source, Dialect::Bx, None)?;
-        let callback_templates = tokens
-            .windows(3)
-            .filter(|ts| ts[0].text == "fn" && ts[2].text == "<")
-            .map(|ts| (ts[1].text, ts[1].start))
-            .collect();
+        let mut callback_templates = BTreeMap::new();
+        let mut block_header = None;
+        for ts in tokens.windows(3) {
+            match (ts[0].text, ts[1].text, ts[2].text) {
+                ("fn", name, "<") => {
+                    callback_templates.insert(name, ts[1].start);
+                }
+                ("block", _, "<") => block_header = Some(ts[1]),
+                (":", "fn", "(") => {
+                    if let Some(name) = block_header.take() {
+                        callback_templates.insert(name.text, name.start);
+                    }
+                }
+                (">", _, _) => block_header = None,
+                _ => { /* Other tokens do not identify a callable template. */ }
+            }
+        }
         Ok(Self {
             source,
             tokens,
@@ -771,8 +793,8 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse a named callable's concrete signature in a function's
-    /// compile-time parameter list.
+    /// Parse a named callable in a function or block's compile-time parameter
+    /// list.
     fn callback_param(&mut self) -> Result<CallbackParam, String> {
         let name = self.take_identifier(is_use_identifier)?;
         self.expect(":")?;
@@ -903,38 +925,52 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Read the optional type parameters of a block definition.
-    fn block_type_params(&mut self) -> Result<Vec<String>, String> {
+    /// Read block type parameters and callable signatures in one namespace.
+    fn block_parametrics(&mut self) -> Result<BlockParametrics, String> {
+        let mut params = BlockParametrics::default();
         if !self.eat("<") {
-            return Ok(Vec::new());
+            return Ok(params);
         }
         if self.peek(0) == ">" {
             return Err(self.error("expected a block type parameter"));
         }
+        let mut names = BTreeSet::new();
         self.list(">", |p| {
             let token = p.tokens[p.pos];
-            let name = p.ident()?;
-            if !p.block_type_params.insert(token.text) {
+            let callable = p.peek(1) == ":" && p.peek(2) == "fn";
+            if !names.insert(token.text) {
+                let kind = if callable { "callable" } else { "type" };
                 return Err(diagnostic(
                     p.source,
                     token.start,
-                    &format!("duplicate block type parameter '{name}'"),
+                    &format!("duplicate block {kind} parameter '{}'", token.text),
                 ));
             }
-            if p.eat(":") {
-                p.expect("type")?;
+            if callable {
+                params.callback_params.push(p.callback_param()?);
+            } else {
+                let name = p.ident()?;
+                if p.eat(":") {
+                    p.expect("type")?;
+                }
+                p.block_type_params.insert(token.text);
+                params.type_params.push(name);
             }
-            Ok(name)
-        })
+            Ok(())
+        })?;
+        Ok(params)
     }
 
     fn block(&mut self, public: bool) -> Result<Block, String> {
         let name = self.ident()?;
-        let type_params = self.block_type_params()?;
+        let params = self.block_parametrics()?;
         let signature = self.block_signature(name)?;
         self.expect("{")?;
-        for name in &type_params {
+        for name in &params.type_params {
             self.hide_template(name);
+        }
+        for formal in &params.callback_params {
+            self.hide_template(&formal.name);
         }
         self.hide_template(&signature.clock);
         if let Some(reset) = &signature.reset {
@@ -951,7 +987,8 @@ impl<'s> Parser<'s> {
         Ok(Block {
             name: signature.name,
             public,
-            type_params,
+            type_params: params.type_params,
+            callback_params: params.callback_params,
             clock: signature.clock,
             reset: signature.reset,
             params: signature.params,
@@ -2433,7 +2470,7 @@ block wrapped(clk, xs:u8[2])->u8[2] {
             "fn f<F: fn(x:u8) -> u8>(x:u8)->u8 {x}",
             "fn f<F: fn(u8)->fn(u8)->u8>(x:u8)->u8 {x}",
             "fn f(self: fn(u8)->u8)->u8 {u8:0}",
-            "block f<F: fn(u8)->u8>(clk,x:u8)->u8 {x}",
+            "extern block f<F: fn(u8)->u8>(clk,x:u8)->u8;",
         ] {
             assert!(parse_module(declaration).is_err(), "{declaration}");
         }
@@ -2749,10 +2786,93 @@ block i(clk, x: u8) -> u8 { inst(x) }
     }
 
     #[test]
+    fn block_callbacks_preserve_symbolic_signatures_and_named_actuals() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+block chain(clk, rst, packet: (bool, u8)) -> (bool, u32) {
+    let result = advance<math::widen, square>(packet);
+    result
+}
+block advance<In: type, Mid, F: fn(In) -> Mid, Out, G: fn(Mid) -> Out>(
+    clk, rst, prev: (bool, In)
+) -> (bool, Out) {
+    (prev.0, G(F(prev.1)))
+}
+block consume<Sink: fn(u8)>(clk, x: u8) -> () { Sink(x) }
+block compare(clk, advance: u8, x: u8, y: u8, z: u8) -> (bool, bool) {
+    (advance < x, y > (z))
+}
+"#,
+        )?;
+        let advance = &module.blocks[1];
+        assert_eq!(advance.type_params, ["In", "Mid", "Out"]);
+        assert_eq!(
+            advance.callback_params,
+            [
+                CallbackParam {
+                    name: "F".into(),
+                    params: vec![Type::Named("In".into())],
+                    result: Type::Named("Mid".into())
+                },
+                CallbackParam {
+                    name: "G".into(),
+                    params: vec![Type::Named("Mid".into())],
+                    result: Type::Named("Out".into())
+                }
+            ]
+        );
+        assert!(matches!(&module.blocks[0].statements[..],
+            [Stmt::Let {value: Expr::ParametricCall {name, callbacks, args}, ..}]
+                if name == "advance" && callbacks == &["math::widen", "square"] && args == &[Expr::Name("packet".into())]
+        ));
+        assert!(module.blocks[2].type_params.is_empty());
+        assert_eq!(
+            module.blocks[2].callback_params[0].result,
+            Type::Tuple(vec![])
+        );
+        let Expr::Tuple(pair) = &module.blocks[3].output else {
+            panic!("expected comparisons using the shadowing data port");
+        };
+        assert!(matches!(
+            &pair[..],
+            [
+                Expr::Binary {
+                    op: BinaryOp::Lt,
+                    ..
+                },
+                Expr::Binary {
+                    op: BinaryOp::Gt,
+                    ..
+                }
+            ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn callable_formals_preserve_the_lexical_rules_of_the_enclosing_item() -> Result<(), String> {
+        parse_module("block compare<F!: fn(u8) -> u8>(clk, x: u8) -> bool { /* BX */ x!=F!(x) }")?;
+        let error =
+            parse_module("fn compare<F: fn(u8) -> u8>(x: u8) -> bool { /* DSLX */ x != F(x) }")
+                .unwrap_err();
+        assert!(error.contains("use a // comment in a function"), "{error}");
+        Ok(())
+    }
+
+    #[test]
     fn block_type_parameter_lists_require_distinct_type_binders() {
         for (params, error) in [
             ("<>", "expected a block type parameter"),
             ("<T, T: type>", "duplicate block type parameter 'T'"),
+            (
+                "<T, T: fn(u8)->u8>",
+                "duplicate block callable parameter 'T'",
+            ),
+            ("<F: fn(u8), F: type>", "duplicate block type parameter 'F'"),
+            (
+                "<F: fn(u8), F: fn()>",
+                "duplicate block callable parameter 'F'",
+            ),
             ("<N: u32>", "expected 'type'"),
             ("<T = u32>", "expected ','"),
             ("<T,,U>", "expected identifier"),

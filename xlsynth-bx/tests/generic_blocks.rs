@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "generic_blocks/callbacks.rs"]
+mod callbacks;
+
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::thread;
@@ -527,4 +530,97 @@ block fold<T>(clk, x: T) -> T {
         error.contains("generic block specialization expansion limit"),
         "{error}"
     );
+}
+
+/// Build a compact nominal type whose expanded IR shape has thousands of nodes.
+fn tree_payload_declarations(max_depth: usize) -> String {
+    let mut source = String::from("struct Tree0 { bit: u1 }\n");
+    for depth in 1..=max_depth {
+        let child = depth - 1;
+        source.push_str(&format!(
+            "struct Tree{depth} {{ left: Tree{child}, right: Tree{child} }}\n"
+        ));
+    }
+    source
+}
+
+#[test]
+fn each_instance_materializes_ports_even_when_its_callback_specialization_is_cached()
+-> Result<(), String> {
+    let mut source = tree_payload_declarations(14);
+    source.push_str(
+        r#"
+extern fn expand(x: u8) -> (Tree14, Tree14);
+block emit<Out, F: fn(u8) -> Out>(clk, x: u8) -> Out { F(x) }
+block sample(clk, x: u8) -> u8 {
+    unroll_for! (_, acc) in u32:0..u32:64 {
+        let wires = emit<expand>(acc);
+        acc
+    }(x)
+}
+"#,
+    );
+    let error = check_module(&parse_module(&source)?).unwrap_err();
+    assert!(
+        error.contains("child block wiring exceeds the block expansion limit"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn checking_many_nominal_inputs_to_one_callback_block_is_bounded() -> Result<(), String> {
+    let ports = (0..64)
+        .map(|i| format!("p{i}: T"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = ["x"; 64].join(", ");
+    let source = format!(
+        r#"
+{}
+extern fn collapse(x: Tree14) -> u8;
+block many<T, O, F: fn(T) -> O>(clk, {ports}) -> O {{ F(p0) }}
+block sample(clk, x: Tree14) -> u8 {{ let result = many<collapse>({arguments}); result }}
+"#,
+        tree_payload_declarations(14)
+    );
+    let error = check_module(&parse_module(&source)?).unwrap_err();
+    assert!(
+        error.contains("callback block input exceeds the block expansion limit"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn both_child_instance_forms_charge_wiring_in_each_callback_specialization() -> Result<(), String> {
+    let types = tree_payload_declarations(17);
+    for instance in ["inst child: wide;", "let child = wide();"] {
+        let source = format!(
+            r#"
+{types}
+extern block wide(clk) -> Tree17;
+extern fn a(x:u8) -> u8;
+extern fn b(x:u8) -> u8;
+extern fn c(x:u8) -> u8;
+block keep<T,F:fn(T)->T>(clk, x:T) -> T {{ {instance} F(x) }}
+block sample(clk, x:u8) -> u8 {{
+    let first = keep<a>(x);
+    let second = keep<b>(first);
+    let third = keep<a>(second);
+    third
+}}
+"#,
+        );
+        check_module(&parse_module(&source)?)?;
+        let distinct = source.replace("keep<a>(second)", "keep<c>(second)");
+        let error = check_module(&parse_module(&distinct)?).unwrap_err();
+        assert!(
+            error.contains(
+                "child block wiring exceeds the generic block specialization expansion limit"
+            ),
+            "{instance}: {error}"
+        );
+    }
+    Ok(())
 }

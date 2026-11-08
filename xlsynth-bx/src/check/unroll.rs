@@ -109,7 +109,16 @@ impl BodyChecker<'_, '_> {
         expected: Option<&Type>,
         structural: bool,
     ) -> Result<TypedExpr, String> {
-        if let Expr::Call { name: target, args } = expr
+        let call = match expr {
+            Expr::Call { name, args } => Some((name, &[][..], args)),
+            Expr::ParametricCall {
+                name,
+                callbacks,
+                args,
+            } => Some((name, callbacks.as_slice(), args)),
+            _ => None,
+        };
+        if let Some((target, callbacks, args)) = call
             && self.decls.is_block(target)
             && self.callback_index(target).is_none()
         {
@@ -124,6 +133,11 @@ impl BodyChecker<'_, '_> {
             if self.loop_values.contains_key(target) {
                 return Err(format!("'{target}' names a loop-local value"));
             }
+            self.check_block_callback_list(
+                target,
+                callbacks.len(),
+                !callbacks.is_empty() && self.names.contains(target),
+            )?;
             let binding = if self.iteration_path.is_empty() {
                 name.to_owned()
             } else {
@@ -139,7 +153,7 @@ impl BodyChecker<'_, '_> {
                 }
                 binding
             };
-            return self.block_call(&binding, target, args, expected);
+            return self.block_call(&binding, target, callbacks, args, expected);
         }
         self.scoped_result(expr, expected, structural)
     }
@@ -570,11 +584,11 @@ impl BodyChecker<'_, '_> {
                         "callable parameter '{head}' may only be used as a callee"
                     ));
                 }
-                if self
-                    .specialization
-                    .is_some_and(|spec| spec.bindings.declares(name))
-                {
-                    return Ok(());
+                if let Some(spec) = self.specialization {
+                    if spec.bindings.declares(name) {
+                        return Ok(());
+                    }
+                    spec.bindings.reject_value(name)?;
                 }
                 self.decls
                     .check_type_visibility(ty, self.function_position)?;
@@ -613,6 +627,7 @@ impl BodyChecker<'_, '_> {
                 "callable parameter '{head}' may only be used as a callee"
             ));
         }
+        self.reject_type_parameter_value(name)?;
         if name == "update" {
             return Ok(());
         }
@@ -659,12 +674,14 @@ impl BodyChecker<'_, '_> {
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
                     locals.reject_capture(name)?;
-                    if (self.kind == BodyKind::Function || locals.enclosing.is_some())
-                        && !locals.contains(name)
+                    if !locals.contains(name)
                         && self.callback_index(name).is_none()
                         && self.decls.is_block(name)
                     {
-                        return Err(format!("pure function cannot call block '{name}'"));
+                        if self.kind == BodyKind::Function || locals.enclosing.is_some() {
+                            return Err(format!("pure function cannot call block '{name}'"));
+                        }
+                        self.check_block_callback_list(name, 0, false)?;
                     }
                     if self.callback_index(name).is_none() || locals.contains(name) {
                         self.check_value_name(name, locals)?;
@@ -683,7 +700,14 @@ impl BodyChecker<'_, '_> {
                     .visited
                     .set(locals.visited.get().saturating_add(callbacks.len()));
                 locals.reject_capture(name)?;
-                self.callable_template(name, locals.contains(name), callbacks.len())?;
+                if self.decls.is_block(name) && self.callback_index(name).is_none() {
+                    self.check_block_callback_list(name, callbacks.len(), locals.contains(name))?;
+                    if self.kind == BodyKind::Function || locals.enclosing.is_some() {
+                        return Err(format!("pure function cannot call block '{name}'"));
+                    }
+                } else {
+                    self.callable_template(name, locals.contains(name), callbacks.len())?;
+                }
                 for callback in callbacks {
                     locals.reject_capture(callback)?;
                     self.callback_source(callback, |head| locals.contains(head))?;

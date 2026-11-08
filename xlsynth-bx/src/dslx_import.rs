@@ -207,7 +207,19 @@ impl ImportResolver {
         &mut self,
         module: &str,
         function: &str,
+        args: Vec<Type>,
+    ) -> Result<(usize, Type), String> {
+        self.resolve_with_new_inputs(module, function, args, || Ok(()))
+    }
+
+    /// Reserve any caller-specific cost for a new concrete signature before
+    /// asking DSLX to construct its probe. Canonical cache hits reuse that IR.
+    pub(crate) fn resolve_with_new_inputs(
+        &mut self,
+        module: &str,
+        function: &str,
         mut args: Vec<Type>,
+        on_new_inputs: impl FnOnce() -> Result<(), String>,
     ) -> Result<(usize, Type), String> {
         if !self.subjects.contains(module) {
             return Err(format!("undeclared DSLX import {module:?}"));
@@ -225,6 +237,7 @@ impl ImportResolver {
         if let Some(&id) = self.ids.get(&key) {
             return Ok((id, self.calls[id].result.clone()));
         }
+        on_new_inputs()?;
         let id = self.calls.len();
         let mut probe_imports = ProbeImports::default();
         let data = self

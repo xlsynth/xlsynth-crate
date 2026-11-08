@@ -3,13 +3,24 @@
 //! Infer a generic block's type arguments across all of its data inputs.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use crate::ast::{Expr, Param, Type};
 use crate::infer_literal::has_concrete_element_type;
 use crate::typed::{TypedExpr, TypedExprKind as K};
 
 use super::generic_blocks::Bindings;
-use super::{BodyChecker, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, has_aggregate_literal};
+use super::{
+    BlockTemplate, BodyChecker, BoundCallback, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE,
+    has_aggregate_literal,
+};
+
+/// Concrete types, callbacks, and checked port values for one structural call.
+pub(super) struct BlockArguments<'m> {
+    pub(super) bindings: Bindings,
+    pub(super) callbacks: Vec<Rc<BoundCallback<'m>>>,
+    pub(super) values: Vec<TypedExpr>,
+}
 
 /// A call argument after its explicitly typed operands have supplied bindings.
 enum Input<'e> {
@@ -63,16 +74,17 @@ impl<'e> Input<'e> {
     }
 }
 
-impl BodyChecker<'_, '_> {
+impl<'m> BodyChecker<'_, 'm> {
     /// Infer the template's type parameters before checking contextual
     /// literals.
     pub(super) fn generic_inputs(
         &mut self,
-        target: &str,
-        formals: &[Param],
+        template: &BlockTemplate<'m>,
         args: &[Expr],
-        type_params: &[String],
-    ) -> Result<(Bindings, Vec<TypedExpr>), String> {
+        callbacks: &[String],
+    ) -> Result<BlockArguments<'m>, String> {
+        let target = &template.block.name;
+        let formals = &template.params;
         if formals.len() != args.len() {
             return Err(format!(
                 "block '{target}' expects {} data arguments, got {}",
@@ -80,7 +92,9 @@ impl BodyChecker<'_, '_> {
                 args.len()
             ));
         }
-        self.with_scope_aliases(|checker| {
+        let previous = self.checking_callback_inputs;
+        self.checking_callback_inputs |= !callbacks.is_empty();
+        let call = self.with_scope_aliases(|checker| {
             let prepared = formals
                 .iter()
                 .zip(args)
@@ -91,23 +105,26 @@ impl BodyChecker<'_, '_> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             checker.infer_prepared_inputs(
-                target,
-                formals,
+                template,
                 prepared.iter().map(|arg| arg.as_ref()),
-                type_params,
+                callbacks,
             )
-        })
+        });
+        self.checking_callback_inputs = previous;
+        call
     }
 
     /// Infer and elaborate every port while references captured from scoped
     /// match arms still carry their original value and literal constraints.
     fn infer_prepared_inputs<'e>(
         &mut self,
-        target: &str,
-        formals: &[Param],
+        template: &BlockTemplate<'m>,
         args: impl Iterator<Item = &'e Expr>,
-        type_params: &[String],
-    ) -> Result<(Bindings, Vec<TypedExpr>), String> {
+        actuals: &[String],
+    ) -> Result<BlockArguments<'m>, String> {
+        let target = template.block.name.as_str();
+        let formals = &template.params;
+        let type_params = &template.block.type_params;
         let input_error =
             |p: &Param, e: String| format!("input '{}', call to block '{target}': {e}", p.name);
         let mut bindings = Bindings::new(type_params);
@@ -134,6 +151,19 @@ impl BodyChecker<'_, '_> {
                 }
             }
         }
+        let mut callbacks = Vec::with_capacity(actuals.len());
+        for (index, (formal, actual)) in template.callback_params.iter().zip(actuals).enumerate() {
+            let error = |e: String| {
+                format!(
+                    "callable parameter '{}' of block '{target}': {e}",
+                    formal.signature.name
+                )
+            };
+            let callback = self
+                .resolve_block_callback(actual, target, index, formal, &mut bindings)
+                .map_err(error)?;
+            callbacks.push(callback);
+        }
         for name in type_params {
             if bindings.get(name).is_none() {
                 return Err(format!(
@@ -151,7 +181,11 @@ impl BodyChecker<'_, '_> {
                 self.finish_input(input, &ty).map_err(|e| input_error(p, e))
             })
             .collect::<Result<_, _>>()?;
-        Ok((bindings, values))
+        Ok(BlockArguments {
+            bindings,
+            callbacks,
+            values,
+        })
     }
 
     /// Unify corresponding fields and array elements against concrete

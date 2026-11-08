@@ -197,7 +197,8 @@ pub struct Function {
     pub body: Expr,
 }
 
-/// A callable that a function template binds to one named pure function.
+/// A callable that a function or block template binds to a named pure
+/// function. In a block its signature can refer to the block's type parameters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallbackParam {
     pub name: String,
@@ -260,7 +261,7 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
-    /// A BX function specialized with named local or imported functions.
+    /// A BX function or child block specialized with named callback functions.
     ParametricCall {
         name: String,
         callbacks: Vec<String>,
@@ -395,6 +396,8 @@ pub struct Block {
     pub public: bool,
     /// Type parameter names in declaration order.
     pub type_params: Vec<String>,
+    /// Named callable parameters, in the order supplied at a block call site.
+    pub callback_params: Vec<CallbackParam>,
     pub clock: String,
     pub reset: Option<String>,
     pub params: Vec<Param>,
