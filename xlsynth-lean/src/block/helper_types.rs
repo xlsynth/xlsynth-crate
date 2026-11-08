@@ -40,6 +40,7 @@ impl DslxLink {
             .iter()
             .filter_map(|member| match member {
                 ir::PackageMember::Function(function) => Some(function.name.clone()),
+                // Only IR functions can be called as BX helpers.
                 _ => None,
             })
             .collect();
@@ -428,6 +429,7 @@ impl Catalogue<'_> {
                     (root_name.clone(), function.get_identifier()),
                     (root.clone(), function),
                 )),
+                // Only DSLX functions can start a walk of function calls.
                 _ => None,
             })
             .collect();
