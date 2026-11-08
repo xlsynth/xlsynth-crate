@@ -3,20 +3,16 @@
 //! Public block emission contracts, including port and sequential semantics.
 
 use xlsynth_lean::block::{emit, select_block};
-use xlsynth_pir::{ir::Package, ir_parser::Parser};
+use xlsynth_pir::ir_parser::Parser;
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
-
-fn package(text: &str) -> Package {
-    Parser::new(text).parse_and_validate_package().unwrap()
-}
 
 // Verifies: Raw emission preserves old outputs, simultaneous writes, and
 // assertions. Catches: Port adaptation that changes clock-step semantics or
 // drops assertions.
 #[test]
 fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertions() {
-    let package = package(BLOCK);
+    let package = Parser::new(BLOCK).parse_and_validate_package().unwrap();
     let source = emit(&package, package.get_top_block().unwrap()).unwrap();
     // The golden reads output/a and next/b from old_a, next/a from old_b,
     // gives reset precedence over enable, and retains the unused assertion.
@@ -32,7 +28,7 @@ fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertion
 #[test]
 fn raw_emission_rejects_field_names_used_by_lean() {
     let check = |ir: String, owner: &str, field: &str| {
-        let package = package(&ir);
+        let package = Parser::new(&ir).parse_and_validate_package().unwrap();
         let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
         assert_eq!(
             error.root_cause().to_string(),
@@ -79,7 +75,7 @@ fn raw_emission_rejects_field_names_used_by_lean() {
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn qualified_constructors_preserve_port_projections() {
-    let package = package(
+    let package = Parser::new(
         r#"package ports
 
 top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], rec_: bits[1], result: bits[1]) {
@@ -89,7 +85,9 @@ top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], rec_: bits[1], result:
   rec_: bits[1] = input_port(name=rec_, id=4)
   result: () = output_port(mk_, name=result, id=5)
 }"#,
-    );
+    )
+    .parse_and_validate_package()
+    .unwrap();
     let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
     source.push_str(
         r#"
@@ -132,23 +130,27 @@ fn selects_top_or_explicit_block_and_reports_ambiguity() {
         .replace("swap(", "other(")
         .replace("id=", "id=10");
     let multiple = format!("{BLOCK}\nblock{another}");
-    let with_top = package(&multiple);
+    let with_top = Parser::new(&multiple).parse_and_validate_package().unwrap();
     assert_eq!(select_block(&with_top, None).unwrap().name, "swap");
     assert_eq!(
         select_block(&with_top, Some("other")).unwrap().name,
         "other"
     );
     assert!(select_block(&with_top, Some("missing")).is_err());
-    let ambiguous = package(&multiple.replace("top block", "block"));
+    let ambiguous = Parser::new(&multiple.replace("top block", "block"))
+        .parse_and_validate_package()
+        .unwrap();
     assert!(select_block(&ambiguous, None).is_err());
-    let sole = package(&BLOCK.replace("top block", "block"));
+    let sole = Parser::new(&BLOCK.replace("top block", "block"))
+        .parse_and_validate_package()
+        .unwrap();
     assert_eq!(select_block(&sole, None).unwrap().name, "swap");
 }
 
 // A same-named block from a different package would use the wrong file table.
 #[test]
 fn emission_rejects_block_from_another_package() {
-    let original = package(BLOCK);
+    let original = Parser::new(BLOCK).parse_and_validate_package().unwrap();
     let copy = original.clone();
     let error = emit(&original, copy.get_top_block().unwrap()).unwrap_err();
     assert!(error.to_string().contains("does not belong to package"));
@@ -158,14 +160,18 @@ fn emission_rejects_block_from_another_package() {
 // errors.
 #[test]
 fn emission_rejects_asynchronous_reset_and_unsupported_operations() {
-    let asynchronous = package(&BLOCK.replace("asynchronous=false", "asynchronous=true"));
+    let asynchronous = Parser::new(&BLOCK.replace("asynchronous=false", "asynchronous=true"))
+        .parse_and_validate_package()
+        .unwrap();
     let error = emit(&asynchronous, asynchronous.get_top_block().unwrap()).unwrap_err();
     assert!(format!("{error:#}").contains("asynchronous reset"));
     let unsupported = BLOCK.replace("package swap", "package swap\n\nfile_number 0 \"counter.x\"").replace(
         "  out: () = output_port(old_a,",
         "  reversed: bits[2] = reverse(old_a, id=10, pos=[(0,1,2)])\n  out: () = output_port(reversed,",
     );
-    let unsupported = package(&unsupported);
+    let unsupported = Parser::new(&unsupported)
+        .parse_and_validate_package()
+        .unwrap();
     let error = emit(&unsupported, unsupported.get_top_block().unwrap()).unwrap_err();
     assert!(format!("{error:#}").contains("unsupported Lean operation reverse"));
     assert!(format!("{error:#}").contains("counter.x:2:3"));
