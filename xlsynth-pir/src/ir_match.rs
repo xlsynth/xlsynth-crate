@@ -221,7 +221,16 @@ pub enum PatternExpr {
         lhs: Box<PatternExpr>,
         rhs: Box<PatternExpr>,
     },
+    Unop {
+        op: Unop,
+        arg: Box<PatternExpr>,
+    },
     Not(Box<PatternExpr>),
+    Encode(Box<PatternExpr>),
+    OneHot {
+        arg: Box<PatternExpr>,
+        lsb_prio: bool,
+    },
     Commutative {
         op: NaryOp,
         args: Vec<PatternExpr>,
@@ -299,10 +308,38 @@ impl Pattern for PatternExpr {
                 let rhs_first = rhs.match_node(ctx, *node_lhs, bindings)?;
                 lhs.match_node(ctx, *node_rhs, &rhs_first)
             }
+            PatternExpr::Unop { op, arg } => {
+                let NodePayload::Unop(node_op, node_arg) = &ctx.f.get_node(node).payload else {
+                    return None;
+                };
+                if *node_op != *op {
+                    return None;
+                }
+                arg.match_node(ctx, *node_arg, bindings)
+            }
             PatternExpr::Not(arg) => {
                 let NodePayload::Unop(Unop::Not, node_arg) = &ctx.f.get_node(node).payload else {
                     return None;
                 };
+                arg.match_node(ctx, *node_arg, bindings)
+            }
+            PatternExpr::Encode(arg) => {
+                let NodePayload::Encode { arg: node_arg } = &ctx.f.get_node(node).payload else {
+                    return None;
+                };
+                arg.match_node(ctx, *node_arg, bindings)
+            }
+            PatternExpr::OneHot { arg, lsb_prio } => {
+                let NodePayload::OneHot {
+                    arg: node_arg,
+                    lsb_prio: node_lsb_prio,
+                } = &ctx.f.get_node(node).payload
+                else {
+                    return None;
+                };
+                if *node_lsb_prio != *lsb_prio {
+                    return None;
+                }
                 arg.match_node(ctx, *node_arg, bindings)
             }
             PatternExpr::Commutative { op, args } => {
@@ -350,6 +387,27 @@ pub fn commutative_binop<L: IntoPattern, R: IntoPattern>(op: Binop, lhs: L, rhs:
         op,
         lhs: Box::new(lhs.into_pattern()),
         rhs: Box::new(rhs.into_pattern()),
+    }
+}
+
+/// Matches the specified unary operation.
+pub fn unop<P: IntoPattern>(op: Unop, arg: P) -> PatternExpr {
+    PatternExpr::Unop {
+        op,
+        arg: Box::new(arg.into_pattern()),
+    }
+}
+
+/// Matches an encoded bit vector.
+pub fn encode<P: IntoPattern>(arg: P) -> PatternExpr {
+    PatternExpr::Encode(Box::new(arg.into_pattern()))
+}
+
+/// Matches a one-hot operation with the specified priority direction.
+pub fn one_hot<P: IntoPattern>(arg: P, lsb_prio: bool) -> PatternExpr {
+    PatternExpr::OneHot {
+        arg: Box::new(arg.into_pattern()),
+        lsb_prio,
     }
 }
 
@@ -641,6 +699,59 @@ top fn f(count0: bits[4] id=1, count1: bits[4] id=2) -> bits[4] {
         let bindings = ctx.matches(same, pattern()).expect("same should match");
         assert_eq!(bindings.get_node("count"), Some(node_by_name(&f, "count0")));
         assert!(ctx.matches(different, pattern()).is_none());
+    }
+
+    #[test]
+    fn ir_match_encoded_reversed_one_hot_binds_source_and_requires_exact_shape() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(x: bits[4] id=1) -> (bits[3], bits[3], bits[3]) {
+  reversed: bits[4] = reverse(x, id=2)
+  hot_lsb: bits[5] = one_hot(reversed, lsb_prio=true, id=3)
+  hot_msb: bits[5] = one_hot(reversed, lsb_prio=false, id=4)
+  hot_unreversed: bits[5] = one_hot(x, lsb_prio=true, id=5)
+  count_lsb: bits[3] = encode(hot_lsb, id=6)
+  count_msb: bits[3] = encode(hot_msb, id=7)
+  count_unreversed: bits[3] = encode(hot_unreversed, id=8)
+  ret result: (bits[3], bits[3], bits[3]) = tuple(count_lsb, count_msb, count_unreversed, id=9)
+}
+"#,
+        );
+        let ctx = MatchCtx::new(&f);
+        let pattern = || encode(one_hot(unop(Unop::Reverse, any("x")), true));
+        let bindings = ctx
+            .matches(node_by_name(&f, "count_lsb"), pattern())
+            .expect("encoded LSB-priority reversed input should match");
+        assert_eq!(bindings.get_node("x"), Some(node_by_name(&f, "x")));
+        for name in ["count_msb", "count_unreversed", "hot_lsb"] {
+            assert!(ctx.matches(node_by_name(&f, name), pattern()).is_none());
+        }
+    }
+
+    #[test]
+    fn ir_match_generic_unop_preserves_not_helper_behavior() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(x: bits[4] id=1) -> (bits[4], bits[4]) {
+  inverted: bits[4] = not(x, id=2)
+  reversed: bits[4] = reverse(x, id=3)
+  ret result: (bits[4], bits[4]) = tuple(inverted, reversed, id=4)
+}
+"#,
+        );
+        let ctx = MatchCtx::new(&f);
+        let x = node_by_name(&f, "x");
+        let inverted = node_by_name(&f, "inverted");
+        let reversed = node_by_name(&f, "reversed");
+        for pattern in [unop(Unop::Not, any("x")), not(any("x"))] {
+            let bindings = ctx
+                .matches(inverted, pattern.clone())
+                .expect("not should match");
+            assert_eq!(bindings.get_node("x"), Some(x));
+            assert!(ctx.matches(reversed, pattern).is_none());
+        }
     }
 
     #[test]
