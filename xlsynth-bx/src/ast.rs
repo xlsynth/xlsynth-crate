@@ -108,7 +108,8 @@ pub struct ExternFn {
     pub symbol: Option<String>,
 }
 
-/// A local binding in a pure function, evaluated before subsequent bindings.
+/// A let initializer and its pattern, evaluated before introducing the bound
+/// names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LetBinding {
     pub pattern: BindingPattern,
@@ -128,15 +129,17 @@ impl BindingPattern {
     /// Visit the names introduced in source order and return the number of
     /// pattern nodes traversed, including wildcards and rest markers.
     pub(crate) fn visit_names(&self, visit: &mut impl FnMut(&str)) -> usize {
-        let mut nodes = 1;
-        match self {
-            Self::Name(name) if name != "_" => visit(name),
-            Self::Tuple(fields) => {
-                for field in fields {
-                    nodes += field.visit_names(visit);
-                }
+        let mut nodes = 0;
+        let mut pending = Vec::new();
+        let mut next = Some(self);
+        while let Some(pattern) = next {
+            nodes += 1;
+            match pattern {
+                Self::Name(name) if name != "_" => visit(name),
+                Self::Tuple(fields) => pending.extend(fields.iter().rev()),
+                Self::Name(_) | Self::Rest => { /* Wildcards and rest markers bind no value. */ }
             }
-            Self::Name(_) | Self::Rest => { /* Wildcards and rest markers bind no value. */ }
+            next = pending.pop();
         }
         nodes
     }
@@ -369,6 +372,9 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
     },
+    /// Destructure a tuple or discard an initializer using the DSLX let
+    /// grammar.
+    LetPattern(LetBinding),
     Write {
         name: String,
         value: Expr,

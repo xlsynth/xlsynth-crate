@@ -67,6 +67,114 @@ fn unroll_for_arrays_use_the_previous_iteration_and_preserve_empty_seed() {
 }
 
 #[test]
+fn unrolled_tuple_patterns_bind_and_shadow_each_iteration() {
+    for (count, expected) in [(0, 5), (3, 8)] {
+        let body = format!(
+            r#"
+            unroll_for! (i, a) in u32:0..u32:{count} {{
+                let (left, (_, .., tail)): (u8, (u8, u8, u8)) = (a, (x, a, i as u8));
+                let (left, _) = (left + tail, x);
+                left
+            }}(x)
+            "#
+        );
+        assert_expr_matches_dslx(
+            "x: u8",
+            "u8",
+            &body,
+            [(
+                vec![IrValue::make_ubits(8, 5).unwrap()],
+                IrValue::make_ubits(8, expected).unwrap(),
+            )],
+        );
+    }
+}
+
+#[test]
+fn empty_unroll_resolves_pattern_names_before_skipping_type_checks() {
+    let fold = |limit, body| format!("unroll_for! (_, a) in u32:0..u32:{limit} {{ {body} }}(x)");
+    // DSLX never elaborates the scalar-to-tuple mismatch in an empty fold.
+    let mismatch = "let (kept, _) = a; kept";
+    assert_expr_matches_dslx(
+        "x: u8",
+        "u8",
+        &fold(0, mismatch),
+        [(
+            vec![IrValue::make_ubits(8, 9).unwrap()],
+            IrValue::make_ubits(8, 9).unwrap(),
+        )],
+    );
+    assert_expr_rejected_by_both("x: u8", "u8", &fold(1, mismatch));
+    assert_expr_rejected_by_both("x: u8", "u8", &fold(0, "let (kept, _) = (kept, a); kept"));
+}
+
+#[test]
+fn guarded_destructuring_restores_outer_names_and_rejects_lambda_captures() -> Result<(), String> {
+    let source = r#"
+block sample(clk, en:bool, x:u8)->bool {
+    reg state:u8;
+    let (selected, _) = (en, x);
+    if selected {
+        let (selected, saved) = (x, state);
+        let folded = unroll_for! (_, a) in u8:0..u8:0 {
+            let (offset, _) = (selected, saved);
+            let values = map([a], |v| v + v);
+            values[u1:0]
+        }(selected);
+        state := folded + saved;
+    }
+    selected
+}
+"#;
+    for limit in ["u8:0..u8:0", "u8:0..u8:1"] {
+        let source = source.replace("u8:0..u8:0", limit);
+        check_module(&parse_module(&source)?)?;
+        for name in ["offset", "saved", "selected"] {
+            let captures = source.replace("|v| v + v", &format!("|v| v + {name}"));
+            let error = check_module(&parse_module(&captures)?).unwrap_err();
+            assert!(
+                error.contains(&format!("cannot capture enclosing value '{name}'")),
+                "{error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unrolled_tuple_projections_and_call_operands_charge_expanded_ir_types() -> Result<(), String> {
+    let mut types = String::from("struct Tree0 { bit:u1 }\n");
+    for depth in 0..17 {
+        types.push_str(&format!(
+            "struct Tree{} {{ left:Tree{depth}, right:Tree{depth} }}\n",
+            depth + 1
+        ));
+    }
+    let projection = r#"
+block sample(clk, pair:(Tree17,), x:u8)->u8 {
+    unroll_for! (_, a) in u8:0..u8:2 { let (selected,) = pair; a }(x)
+}
+"#;
+    let call = r#"
+fn copy(value:Tree17)->Tree17 { value }
+block sample(clk, value:Tree17)->bool {
+    let (pair,) = ((1, value),);
+    unroll_for! (_, a) in u8:0..u8:2 { pair == (1, copy(value)) }(false)
+}
+"#;
+    for block in [projection, call] {
+        let source = format!("{types}{block}");
+        check_module(&parse_module(&source)?)?;
+        // Each tuple_index or captured invoke retains Tree17's 393,215 IR type
+        // nodes.
+        let large = source.replace("u8:0..u8:2", "u8:0..u8:3");
+        let error = check_module(&parse_module(&large)?).unwrap_err();
+        assert!(error.contains("expansion limit"), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
 fn unroll_for_preserves_indices_above_u64() -> Result<(), String> {
     let fold = r#"unroll_for! (i, acc) in
         uN[96]:0x10000000000000001..uN[96]:0x10000000000000004 {
@@ -140,6 +248,10 @@ fn unroll_for_widens_an_implicit_index_to_its_arithmetic_operand() -> Result<(),
         (
             "let pair = (i, i); a + pair.0",
             "let pair = (i, i); a + (pair.0 as u8)",
+        ),
+        (
+            "let (.., step) = (a, i); a + step",
+            "let (.., step) = (a, i); a + (step as u8)",
         ),
         (
             "let xs = [i, i]; a + xs[u8:0]",

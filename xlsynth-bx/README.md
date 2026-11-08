@@ -247,6 +247,10 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 
 An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
 
+Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. A pattern may rebind a data value. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
+
+A pattern can also bind a child's tuple result directly, as in `let (valid_out, data_out) = pipe_reg(valid, payload);`. This instantiates the child once, and both bindings read that instance's outputs. Patterns also work in guarded register updates, value-producing `if` arms, and `unroll_for!` bodies.
+
 ```text
 struct LaneOut { data: u8, valid: bool }
 extern block lane(clk, rst, x: u8) -> LaneOut;
