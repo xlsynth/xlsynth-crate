@@ -263,14 +263,17 @@ fn collect_minimum(
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
 ) -> Result<bool, String> {
-    collect_minimum_with_calls(expr, bindings, minimum, CallWidth::Concrete)
+    collect_minimum_with_calls(expr, bindings, minimum, MinimumContext::Concrete)
 }
 
-/// Match subjects unify their literal constraints with patterns before an
-/// invocation on a common-type edge supplies its concrete result width.
+/// Which expressions supply a concrete result during minimum-width inference.
 #[derive(Clone, Copy)]
-enum CallWidth<'a> {
+enum MinimumContext<'a> {
     Concrete,
+    /// Module declarations need a concrete result even when an operator
+    /// constrains both implicit operands to one bit.
+    ConstantInitializer,
+    /// Match subjects unify with patterns before a call supplies its result.
     Deferred {
         zero_is_call: &'a dyn Fn() -> Result<bool, String>,
     },
@@ -282,14 +285,14 @@ fn collect_fold_seed(
     seed: &Expr,
     fold_name: &'static str,
     minimum: &mut Option<Minimum>,
-    calls: CallWidth<'_>,
+    calls: MinimumContext<'_>,
 ) -> Result<bool, String> {
     let mut seed_minimum = None;
     if !collect_minimum_with_calls(seed, None, &mut seed_minimum, calls)? {
         return Ok(false);
     }
     let Some(mut seed) = seed_minimum else {
-        return Ok(matches!(calls, CallWidth::Deferred { .. }));
+        return Ok(matches!(calls, MinimumContext::Deferred { .. }));
     };
     seed.needs_accumulator_type = Some(fold_name);
     *minimum = Some(match minimum.take() {
@@ -303,12 +306,12 @@ fn collect_minimum_with_calls(
     expr: &Expr,
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
-    calls: CallWidth<'_>,
+    calls: MinimumContext<'_>,
 ) -> Result<bool, String> {
     let next = match expr {
         Expr::Literal { ty: None, text } => Minimum::from_literal(text)?,
         Expr::Call { .. } | Expr::ParametricCall { .. }
-            if matches!(calls, CallWidth::Deferred { .. }) =>
+            if matches!(calls, MinimumContext::Deferred { .. }) =>
         {
             return Ok(true);
         }
@@ -316,8 +319,8 @@ fn collect_minimum_with_calls(
             // An intrinsic has an explicit result type; a local zero! function
             // has the same delayed result constraint as any other invocation.
             return match calls {
-                CallWidth::Concrete => Ok(false),
-                CallWidth::Deferred { zero_is_call } => zero_is_call(),
+                MinimumContext::Concrete | MinimumContext::ConstantInitializer => Ok(false),
+                MinimumContext::Deferred { zero_is_call } => zero_is_call(),
             };
         }
         Expr::UnrollFor(fold) if fold.annotation.is_none() => {
@@ -360,7 +363,11 @@ fn collect_minimum_with_calls(
             left: value,
             ..
         } => return collect_minimum_with_calls(value, bindings, minimum, calls),
-        Expr::Binary { op, left, right } if has_common_bit_type(*op) => {
+        Expr::Binary { op, left, right }
+            if has_common_bit_type(*op)
+                || (matches!(calls, MinimumContext::ConstantInitializer)
+                    && matches!(op, BinaryOp::LogicalAnd | BinaryOp::LogicalOr)) =>
+        {
             return Ok(collect_minimum_with_calls(left, bindings, minimum, calls)?
                 && collect_minimum_with_calls(right, bindings, minimum, calls)?);
         }
@@ -397,6 +404,13 @@ pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
         .transpose()
 }
 
+/// An unannotated module constant needs at least one concrete constraint on
+/// its scalar result. Logical operators also propagate implicit operands
+/// along this edge, while comparisons supply their own boolean result type.
+pub(crate) fn has_implicit_constant_type(expr: &Expr) -> Result<bool, String> {
+    collect_minimum_with_calls(expr, None, &mut None, MinimumContext::ConstantInitializer)
+}
+
 /// An aggregate operand can supply its own literal width unless an implicit
 /// fold seed must first receive a concrete type from another operand.
 pub(crate) fn minimum_operand_type(
@@ -428,7 +442,7 @@ fn collect_projected(
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
 ) -> Result<bool, String> {
-    collect_projected_with_calls(expr, path, bindings, minimum, CallWidth::Concrete)
+    collect_projected_with_calls(expr, path, bindings, minimum, MinimumContext::Concrete)
 }
 
 /// Collect a member's literal constraints before any deferred invocation
@@ -438,7 +452,7 @@ fn collect_projected_with_calls(
     path: &[Member],
     bindings: Option<WidthLookup<'_>>,
     minimum: &mut Option<Minimum>,
-    calls: CallWidth<'_>,
+    calls: MinimumContext<'_>,
 ) -> Result<bool, String> {
     match (expr, path.split_first()) {
         (Expr::Name(name), _) => {
@@ -731,7 +745,7 @@ pub(crate) fn check_inferred_signed_width(
     ty: &Type,
     bindings: Option<WidthLookup>,
 ) -> Result<(), String> {
-    check_signed_operand_prefix(exprs, ty, bindings, CallWidth::Concrete)
+    check_signed_operand_prefix(exprs, ty, bindings, MinimumContext::Concrete)
 }
 
 /// A direct `s8` argument anchors patterns immediately. With an `s8`
@@ -743,14 +757,19 @@ pub(crate) fn check_match_operand_width(
     bindings: Option<WidthLookup>,
     zero_is_call: &dyn Fn() -> Result<bool, String>,
 ) -> Result<(), String> {
-    check_signed_operand_prefix(operands, ty, bindings, CallWidth::Deferred { zero_is_call })
+    check_signed_operand_prefix(
+        operands,
+        ty,
+        bindings,
+        MinimumContext::Deferred { zero_is_call },
+    )
 }
 
 fn check_signed_operand_prefix(
     exprs: &[&Expr],
     ty: &Type,
     bindings: Option<WidthLookup>,
-    calls: CallWidth<'_>,
+    calls: MinimumContext<'_>,
 ) -> Result<(), String> {
     let Some((true, width)) = bits(ty) else {
         return Ok(());
@@ -848,8 +867,10 @@ fn check_projected_argument(
     }
     let mut minimum = None;
     let calls = match zero_is_call {
-        Some(zero_is_call) if has_match_result(expr, path) => CallWidth::Deferred { zero_is_call },
-        _ => CallWidth::Concrete,
+        Some(zero_is_call) if has_match_result(expr, path) => {
+            MinimumContext::Deferred { zero_is_call }
+        }
+        _ => MinimumContext::Concrete,
     };
     collect_projected_with_calls(
         expr,

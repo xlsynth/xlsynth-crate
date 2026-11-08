@@ -231,6 +231,12 @@ Compares destructuring lets in BX blocks with the same patterns in DSLX function
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_let_patterns --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_constants.rs
+
+Generates module constants with dependent scalar expressions, nested aggregates, and calls to earlier pure functions. BX blocks and local functions read them in expressions, named match patterns, map callbacks, loop bounds, and slice widths. The target compares BX and pinned DSLX acceptance, including shadowing, forward references, duplicate definitions, builtin name collisions, and invalid types. It checks every constant's name, declaration order, concrete type, and computed value against DSLX metadata, including signedness and width inside tuples and arrays. It compares block results on shared inputs against both compiled DSLX IR and concrete DSLX calls.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_constants --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

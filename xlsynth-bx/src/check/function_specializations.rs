@@ -2,6 +2,7 @@
 
 //! Intern and schedule local functions specialized on statically named callees.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::callables::CallbackBinding;
@@ -9,6 +10,7 @@ use super::{
     BodyChecker, BodyKind, CheckedFunction, ConstantBudgets, Declarations, Function,
     ImportResolver, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, StructTable, dependency_order,
 };
+use crate::ast::{ConstDef, Module};
 
 /// An actual callback resolved in the caller's scope. An import ID includes
 /// its concrete DSLX specialization as well as its declaring module.
@@ -45,6 +47,7 @@ pub(super) struct FunctionSpecializations<'m> {
     reserved: BTreeSet<String>,
     next_id: usize,
     pub(super) expansion_work: usize,
+    pub(super) reference_copy_work: Cell<usize>,
     pub(super) constant_budgets: ConstantBudgets,
 }
 
@@ -58,6 +61,7 @@ impl<'m> FunctionSpecializations<'m> {
             reserved,
             next_id: 0,
             expansion_work: 0,
+            reference_copy_work: Cell::new(0),
             constant_budgets: ConstantBudgets::default(),
         }
     }
@@ -123,21 +127,51 @@ impl<'m> FunctionSpecializations<'m> {
         Ok(name)
     }
 
-    /// Check all source definitions in declaration order. A template's
-    /// abstract callback signatures suffice to diagnose errors in an unused
-    /// body. Only concrete calls schedule emitted definitions.
+    /// Check functions and evaluate constants together in declaration order.
+    /// Each initializer can call concrete functions already checked. A
+    /// template's abstract callback signatures suffice to diagnose errors in an
+    /// unused body. Only concrete calls schedule emitted definitions.
     pub(super) fn check_sources(
         &mut self,
-        functions: &'m [Function],
-        decls: &Declarations<'m>,
+        module: &'m Module,
+        decls: &mut Declarations<'m>,
         resolver: &mut ImportResolver,
         structs: &mut StructTable,
     ) -> Result<Vec<FunctionBody>, String> {
-        let mut bodies = Vec::with_capacity(functions.len());
+        enum Definition<'m> {
+            Constant(&'m ConstDef),
+            Function(&'m Function),
+        }
+        let mut definitions = module
+            .constants
+            .iter()
+            .map(|c| (c.name.as_str(), Definition::Constant(c)))
+            .chain(
+                module
+                    .functions
+                    .iter()
+                    .map(|f| (f.name.as_str(), Definition::Function(f))),
+            )
+            .collect::<Vec<_>>();
+        definitions
+            .sort_by_key(|(name, _)| decls.positions.get(name).copied().unwrap_or(usize::MAX));
+        let mut bodies: Vec<FunctionBody> = Vec::with_capacity(module.functions.len());
+        let mut indices = BTreeMap::<&str, usize>::new();
         let mut depths = BTreeMap::new();
-        for function in functions {
+        for (name, definition) in definitions {
+            let earlier = |name: &str| indices.get(name).map(|&i| &bodies[i].function);
             let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
             checker.function_registry = Some(self);
+            let function = match definition {
+                Definition::Function(f) => f,
+                Definition::Constant(c) => {
+                    let value = checker
+                        .check_constant(c, &earlier)
+                        .map_err(|e| format!("const '{name}': {e}"))?;
+                    decls.constants.insert(name, value);
+                    continue;
+                }
+            };
             let body = checker
                 .check_function(function)
                 .map_err(|e| format!("fn '{}': {e}", function.name))?;
@@ -163,6 +197,7 @@ impl<'m> FunctionSpecializations<'m> {
             }
             depths.insert(function.name.as_str(), depth);
             if function.callback_params.is_empty() {
+                indices.insert(name, bodies.len());
                 bodies.push(FunctionBody {
                     function: body,
                     callees,

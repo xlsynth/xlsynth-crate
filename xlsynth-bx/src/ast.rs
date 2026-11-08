@@ -98,6 +98,15 @@ pub struct StructDef {
     pub fields: Vec<Param>,
 }
 
+/// A module-level value evaluated at compile time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstDef {
+    pub name: String,
+    pub public: bool,
+    pub ty: Option<Type>,
+    pub value: Expr,
+}
+
 /// The source signature and optional package symbol for an external function.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternFn {
@@ -152,7 +161,7 @@ pub struct MatchArm {
     pub value: Expr,
 }
 
-/// A wildcard, scalar literal, or range between two scalar literals.
+/// A wildcard, scalar literal or module constant, or range between literals.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MatchPattern {
     Wildcard,
@@ -433,6 +442,7 @@ pub struct Module {
     pub declaration_order: Vec<String>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
+    pub constants: Vec<ConstDef>,
     pub externs: Vec<ExternFn>,
     pub functions: Vec<Function>,
     pub extern_blocks: Vec<ExternBlock>,

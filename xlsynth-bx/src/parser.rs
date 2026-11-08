@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, CallbackParam, Expr, ExternBlock, ExternFn, ForIterable,
-    ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef,
-    Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, Expr, ExternBlock, ExternFn,
+    ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param,
+    Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -147,7 +147,9 @@ fn lex(
     let bytes = &source.as_bytes()[..span.end];
     let mut i = span.start;
     let mut brace_depth = 0usize;
-    let mut function_definition = false;
+    // A pure function ends at its closing brace. A constant ends at its
+    // semicolon, even when its initializer contains braced expressions.
+    let mut dslx_item_end = None;
     while i < bytes.len() {
         let start = i;
         let rest = &source[i..span.end];
@@ -161,8 +163,13 @@ fn lex(
             continue;
         }
         if let Some(comment) = rest.strip_prefix("/*") {
-            if dialect == Dialect::Bx && (function_definition || callback) {
-                return Err(diagnostic(source, start, "use a // comment in a function"));
+            if dialect == Dialect::Bx && (dslx_item_end.is_some() || callback) {
+                let message = if dslx_item_end == Some(";") {
+                    "use a // comment in a constant"
+                } else {
+                    "use a // comment in a function"
+                };
+                return Err(diagnostic(source, start, message));
             }
             let end = comment
                 .find("*/")
@@ -178,7 +185,7 @@ fn lex(
                 // Keep `a!=b` as inequality, and `a.field!==b` as equality
                 // on the DSLX field named `field!`.
                 if dialect == Dialect::Bx
-                    && !function_definition
+                    && dslx_item_end.is_none()
                     && !callback
                     && bytes[i..].starts_with(b"!=")
                     && !bytes[i..].starts_with(b"!==")
@@ -248,20 +255,19 @@ fn lex(
         let text = &source[start..i];
         // DSLX consumes a trailing bang in a name even when '=' immediately
         // follows it. Keep BX's compact inequality spelling in block bodies.
+        let item_start = brace_depth == 0
+            && tokens
+                .last()
+                .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}"));
         match text {
-            // A callback formal uses `F: fn(...)` in either kind of header.
-            // Only a function item introduces DSLX lexical rules for its body.
-            "fn" if brace_depth == 0 && tokens.last().is_none_or(|t: &Token| t.text != ":") => {
-                function_definition = tokens.last().is_none_or(|t: &Token| t.text != "extern");
-            }
+            "fn" if item_start => dslx_item_end = Some("}"),
+            "const" if item_start => dslx_item_end = Some(";"),
             "{" => brace_depth += 1,
-            "}" => {
-                brace_depth = brace_depth.saturating_sub(1);
-                if brace_depth == 0 {
-                    function_definition = false;
-                }
-            }
+            "}" => brace_depth = brace_depth.saturating_sub(1),
             _ => { /* Other tokens do not enter or leave a definition. */ }
+        }
+        if brace_depth == 0 && dslx_item_end == Some(text) {
+            dslx_item_end = None;
         }
         tokens.push(Token {
             text,
@@ -356,7 +362,8 @@ struct Parser<'s> {
 #[derive(Clone, Copy, PartialEq)]
 enum ValueContext {
     Block,
-    Function,
+    /// A local function or a module constant uses the DSLX value grammar.
+    DslxItem,
     BlockLambda,
 }
 
@@ -599,11 +606,17 @@ impl<'s> Parser<'s> {
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
             } else if self.eat("fn") {
-                self.value_context = ValueContext::Function;
+                self.value_context = ValueContext::DslxItem;
                 let function = self.with_name_scope(|p| p.function(public))?;
                 self.value_context = ValueContext::Block;
                 module.declaration_order.push(function.name.clone());
                 module.functions.push(function);
+            } else if self.eat("const") {
+                self.value_context = ValueContext::DslxItem;
+                let constant = self.with_name_scope(|p| p.const_def(public))?;
+                self.value_context = ValueContext::Block;
+                module.declaration_order.push(constant.name.clone());
+                module.constants.push(constant);
             } else if self.eat("struct") {
                 let name = self.ident()?;
                 module.declaration_order.push(name.clone());
@@ -615,7 +628,7 @@ impl<'s> Parser<'s> {
                     fields,
                 });
             } else if public {
-                return Err(self.error("expected block, fn, or struct after pub"));
+                return Err(self.error("expected block, const, fn, or struct after pub"));
             } else if self.eat("use") {
                 let start = module.uses.len();
                 self.use_tree(&mut module.uses, Some(&mut use_bindings))?;
@@ -644,7 +657,9 @@ impl<'s> Parser<'s> {
                     return Err(self.error("expected fn or block after extern"));
                 }
             } else {
-                return Err(self.error("expected a block, fn, struct, extern, or use declaration"));
+                return Err(
+                    self.error("expected a block, const, fn, struct, extern, or use declaration")
+                );
             }
         }
         Ok(module)
@@ -772,6 +787,25 @@ impl<'s> Parser<'s> {
             params,
             result,
             symbol,
+        })
+    }
+
+    /// Parse a module constant with an optional DSLX type annotation.
+    fn const_def(&mut self, public: bool) -> Result<ConstDef, String> {
+        let name = self.ident()?;
+        let ty = if self.eat(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect("=")?;
+        let value = self.expr()?.value;
+        self.expect(";")?;
+        Ok(ConstDef {
+            name,
+            public,
+            ty,
+            value,
         })
     }
 
@@ -1434,6 +1468,12 @@ impl<'s> Parser<'s> {
         if self.eat("_") {
             return Ok(MatchPattern::Wildcard);
         }
+        if is_function_identifier(self.peek(0)) && matches!(self.peek(1), "=>" | "|") {
+            // The checker resolves this name to a scalar module constant.
+            // DSLX requires numeric literals on both sides of a range.
+            let name = self.take_identifier(is_function_identifier)?;
+            return Ok(MatchPattern::Literal(Expr::Name(name)));
+        }
         let first = self.pos;
         let start = self.pattern_literal()?;
         let separator = self.pos;
@@ -2065,10 +2105,11 @@ impl<'s> Parser<'s> {
     }
 
     /// A user template can shadow the `zero!<T>()` intrinsic. A local
-    /// function sees only earlier declarations, while a block sees the module.
+    /// function or constant sees earlier declarations, while a block sees the
+    /// module.
     fn visible_callback_template(&self, name: &str) -> bool {
         self.callback_templates.get(name).is_some_and(|start| {
-            self.value_context != ValueContext::Function || *start <= self.tokens[self.pos].start
+            self.value_context != ValueContext::DslxItem || *start <= self.tokens[self.pos].start
         })
     }
 
@@ -2510,6 +2551,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn module_constants_retain_types_visibility_names_and_declaration_order() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+const base!=u8:3;
+fn read() -> u8 { base! }
+pub const Pair': (u8, bool) = { let n!=read(); (n!, n! != base!) };
+block top(clk, x:u8) -> bool { /* BX */ x!=Pair'.0 }
+"#,
+        )?;
+        let byte = Type::Bits {
+            signed: false,
+            width: 8,
+        };
+        assert_eq!(module.declaration_order, ["base!", "read", "Pair'", "top"]);
+        assert_eq!(
+            module.constants[0],
+            ConstDef {
+                name: "base!".into(),
+                public: false,
+                ty: None,
+                value: Expr::Literal {
+                    ty: Some(byte.clone()),
+                    text: "3".into()
+                },
+            }
+        );
+        let pair = &module.constants[1];
+        assert_eq!(pair.name, "Pair'");
+        assert!(pair.public);
+        assert_eq!(pair.ty, Some(Type::Tuple(vec![byte, Type::Bool])));
+        assert!(matches!(&pair.value, Expr::Scope { bindings, .. } if bindings.len() == 1));
+        assert_eq!(module.functions[0].body, Expr::Name("base!".into()));
+        assert!(matches!(
+            &module.blocks[0].output,
+            Expr::Binary {
+                op: BinaryOp::Ne,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_initializers_keep_dslx_lexical_rules_through_the_semicolon() -> Result<(), String> {
+        parse_module(
+            "const a = if true { u8:0 } else { u8:1 }; block const(clk, const:u8) -> bool { /* BX */ const!=u8:0 }",
+        )?;
+        for source in [
+            "const (x, y) = (u8:0, u8:1);",
+            "pub const fn = u8:1;",
+            "const x: = u8:0;",
+            "const x = ;",
+            "const x = u8:0",
+            "const x = if true { u8:0 } else { /* DSLX */ u8:1 };",
+            "const x = (if true { u8:0 } else { u8:1 }) + { let a=u8:1; a!=u8:0 };",
+            "const x = { reg r: u8; r };",
+        ] {
+            assert!(parse_module(source).is_err(), "{source}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn nonempty_ranges_require_ordered_literal_endpoints() -> Result<(), String> {
         for (source, expected) in [
             ("u32:0..u32:1", true),
@@ -2806,12 +2911,30 @@ block dispatch(clk, match: u8) -> u8 {
             "- 1 => x",
             "(0,) => x",
             "[0] => x",
-            "name => x",
+            "NAME .. u8:1 => x",
             "u8[1]:0 => x",
         ] {
             let src = format!("fn f(x:u8) -> u8 {{ match x {{ {arms} }} }}");
             assert!(parse_module(&src).is_err(), "{src}");
         }
+    }
+
+    #[test]
+    fn scalar_constant_names_are_preserved_in_match_alternatives() -> Result<(), String> {
+        let module = parse_module(
+            "const Lo=u8:1; const Hi!=u8:2; fn f(x:u8) -> bool { match x { Lo | Hi! => true, _ => false } }",
+        )?;
+        let Expr::Match { arms, .. } = &module.functions[0].body else {
+            panic!("expected match");
+        };
+        assert_eq!(
+            arms[0].patterns,
+            [
+                MatchPattern::Literal(Expr::Name("Lo".into())),
+                MatchPattern::Literal(Expr::Name("Hi!".into())),
+            ]
+        );
+        Ok(())
     }
 
     #[test]
@@ -2872,7 +2995,10 @@ block dispatch(clk, match: u8) -> u8 {
             ("use lib::fn;", "expected identifier"),
             ("use lib::u64;", "expected identifier"),
             ("use std", "expected ';'"),
-            ("pub use std;", "expected block, fn, or struct after pub"),
+            (
+                "pub use std;",
+                "expected block, const, fn, or struct after pub",
+            ),
             ("import a.b;", "replace `import` with `use`"),
         ] {
             assert!(
