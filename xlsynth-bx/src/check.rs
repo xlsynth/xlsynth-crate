@@ -2312,7 +2312,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             statements: c.statements,
             output,
         };
-        timing::check_outputs(&block, &interface.outputs, &c.outputs)?;
+        timing::check_outputs(&block, &interface.outputs, &c.outputs, c.structs)?;
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -4796,6 +4796,68 @@ block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
         assert_eq!(
             check_tap("@(live: 0, saved: 0)", TAP_PORTS).unwrap_err(),
             "block 'tap': output 'saved': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn forwarding_a_registered_struct_checks_the_same_fields_as_rebuilding_it() {
+        for result in ["q", "Payload { data: q.data, tag: q.tag }"] {
+            let source = format!(
+                r#"
+struct Payload {{ data: u8, tag: u8 }}
+struct Bus {{ payload: Payload }}
+block b(clk, x: u8) -> Bus @1 {{
+    reg q: Payload;
+    q := Payload {{ data: x, tag: u8:7 }};
+    Bus {{ payload: {result} }}
+}}
+"#
+            );
+            assert_eq!(
+                check_bx(&source).unwrap_err(),
+                "block 'b': output 'payload': cannot infer output cycle for this expression"
+            );
+            check_bx(&source.replace("tag: u8:7", "tag: x")).unwrap();
+        }
+    }
+
+    #[test]
+    fn forwarding_a_registered_tuple_field_uses_its_write_enable() {
+        let source = r#"
+struct Bus { payload: (u8, u8) }
+block b(clk, en: bool @2, x: u8 @2) -> Bus @3 {
+    reg q: (u8, (u8, u8));
+    if en { q := (x, (x, u8:7)); }
+    Bus { payload: q.1 }
+}
+"#;
+        check_bx(source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("if en", "if true")).unwrap_err(),
+            "block 'b': output 'payload': cannot infer output cycle for this expression"
+        );
+    }
+
+    #[test]
+    fn long_timing_dependencies_are_independent_of_operand_order() {
+        let mut aliases = String::from("let v0 = x;");
+        let mut pipeline = String::from("reg q0: u8; q0 := x;");
+        for i in 1..256 {
+            let prev = i - 1;
+            aliases.push_str(&format!("let v{i} = v{prev};"));
+            pipeline.push_str(&format!("reg q{i}: u8; q{i} := q{prev} + u8:1;"));
+        }
+        for sum in ["v1 + v255", "v255 + v1"] {
+            check_bx(&format!(
+                "block b(clk, x: u8) -> u8 @0 {{ {aliases} {sum} }}"
+            ))
+            .unwrap();
+        }
+        let source = format!("block b(clk, x: u8) -> u8 @256 {{ {pipeline} q255 }}");
+        check_bx(&source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("@256", "@255")).unwrap_err(),
+            "block 'b': expected cycle 255, got cycle 256"
         );
     }
 

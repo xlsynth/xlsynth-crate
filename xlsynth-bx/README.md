@@ -650,6 +650,12 @@ output port. A tuple's port names are `out_0`, `out_1`, and so on. A field
 read such as `p.saved` follows that field's driver. Each aggregate input
 supplies a single stage shared by its fields.
 
+A whole registered struct or tuple is checked field by field. For example,
+with `x: u8 @0` and `q := Payload { data: x, tag: u8:7 };`, `q.data` is
+`@1`. The literal supplies no stage for `q.tag`, so forwarding all of `q`
+cannot establish `@1`. If an `@0` enable guards that write, it supplies the
+stage for capturing the tag and both fields are `@1`.
+
 Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic. Timing
 through child block outputs and extern interfaces is also a follow-up.
