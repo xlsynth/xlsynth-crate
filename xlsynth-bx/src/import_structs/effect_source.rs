@@ -5,17 +5,20 @@
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlsynth::dslx::{Function, MatchableModuleMember, Module};
+use xlsynth::dslx::{Function, FunctionCallGraph, MatchableModuleMember, Module, ModuleMember};
 
 use super::ImportedStructs;
-use super::outline_graph::SourceModule;
+use super::outline_graph::{OutlineGraph, SourceModule};
 use crate::effect_diagnostic::{EffectLocation, const_assert_replacement};
 use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens};
-use crate::parser::{Token, is_dslx_member_name, is_use_identifier, nonempty_literal_range};
+use crate::parser::{
+    Token, dslx_tokens, is_dslx_member_name, is_use_identifier, nonempty_literal_range,
+};
 
-/// Lookup by native module identity, built only for a rejected signature probe.
+/// Lookup the frozen source and import bindings by native module identity.
 pub(crate) struct EffectSources<'a> {
     modules: BTreeMap<String, CapturedModule<'a>>,
+    graph: &'a OutlineGraph,
 }
 
 /// Original bytes and a lazily built index of checked top-level declarations.
@@ -65,6 +68,7 @@ impl ImportedStructs {
             .as_ref()
             .expect("DSLX imports have a source snapshot");
         EffectSources {
+            graph: &self.graph,
             modules: self
                 .graph
                 .sources()
@@ -82,7 +86,235 @@ impl ImportedStructs {
     }
 }
 
+/// Written calls whose target the pinned native graph can omit.
+#[derive(Default)]
+pub(crate) struct Dispatches {
+    pub(crate) methods: BTreeMap<String, usize>,
+    pub(crate) indirect: bool,
+}
+
+/// A checked call qualifier after resolving its first component in local scope.
+#[derive(PartialEq, Eq)]
+enum Qualifier {
+    Module,
+    Sum,
+    Other,
+}
+
+/// Pair angle delimiters within each expression group of a checked DSLX
+/// body. Braces, parentheses and brackets isolate operators in actuals from
+/// the enclosing application. The lexer separates adjacent closing angles.
+fn application_angles(body: &[Token<'_>]) -> Vec<Option<usize>> {
+    let mut openings = vec![None; body.len()];
+    let mut scopes = vec![Vec::new()];
+    let mut previous_closing = false;
+    for (i, token) in body.iter().enumerate() {
+        // The v0.61 printer separates binary operators with spaces. A shift
+        // is lexed as two closers, so both take the spacing of the first one.
+        let delimiter = i > 0
+            && body[i - 1].start + body[i - 1].text.len() == token.start
+            && (token.text != ">" || body[i - 1].text != ">" || previous_closing);
+        previous_closing = delimiter && token.text == ">";
+        match token.text {
+            "(" | "[" | "{" => scopes.push(Vec::new()),
+            ")" | "]" | "}" => {
+                scopes.pop();
+            }
+            "<" if delimiter => scopes
+                .last_mut()
+                .expect("checked delimiter nesting")
+                .push(i),
+            ">" if delimiter => {
+                openings[i] = scopes.last_mut().expect("checked delimiter nesting").pop()
+            }
+            ";" => scopes
+                .last_mut()
+                .expect("checked delimiter nesting")
+                .clear(),
+            _ => { /* An actual can contain any token accepted by DSLX. */ }
+        }
+    }
+    openings
+}
+
+/// The operand immediately before a call, qualifier separator, or alias end.
+/// An unmatched `>` in this group is a comparison or shift operator.
+fn application_head(body: &[Token<'_>], angles: &[Option<usize>], end: usize) -> Option<usize> {
+    let previous = end.checked_sub(1)?;
+    if body[previous].text == ">" {
+        angles[previous]?.checked_sub(1)
+    } else {
+        Some(previous)
+    }
+}
+
 impl<'a> EffectSources<'a> {
+    /// Count written method dispatches, including associated-function calls.
+    /// Field projections and module-qualified ordinary calls have no method
+    /// receiver. The native pretty-printer also supplies bodies of impls.
+    pub(crate) fn dispatches(
+        &self,
+        function: &Function,
+        graph: &FunctionCallGraph,
+    ) -> Result<Dispatches, String> {
+        let mut calls = Dispatches::default();
+        let owner = function.get_body().get_owner_module().get_name();
+        let Some(captured) = self.modules.get(&owner) else {
+            return Ok(calls);
+        };
+        let text = function.get_body().to_text();
+        let tokens = dslx_tokens(&text)?;
+        let body = tokens.as_slice();
+        let angles = application_angles(body);
+        let ordinary_map = OnceCell::new();
+        let formals: Vec<_> = function
+            .parametric_bindings()
+            .iter()
+            .map(|binding| binding.get_identifier())
+            .chain((0..function.get_param_count()).map(|i| function.get_param(i).get_name()))
+            .collect();
+        let mut aliases: Vec<BTreeMap<&str, bool>> =
+            vec![formals.iter().map(|name| (name.as_str(), false)).collect()];
+        let mut pending = Vec::new();
+        for (open, token) in body.iter().enumerate() {
+            match token.text {
+                "{" => aliases.push(BTreeMap::new()),
+                "}" => {
+                    aliases.pop();
+                }
+                "type" if body.get(open + 2).is_some_and(|t| t.text == "=") => {
+                    let start = open + 3;
+                    let mut depth = 0usize;
+                    if let Some(end) = body[start..].iter().position(|t| {
+                        match t.text {
+                            "{" | "(" | "[" => depth += 1,
+                            "}" | ")" | "]" => depth = depth.saturating_sub(1),
+                            _ => { /* Ordinary type tokens do not delimit a nested group. */ }
+                        }
+                        depth == 0 && t.text == ";"
+                    }) {
+                        let end = start + end;
+                        let is_sum = self.qualifier(
+                            &captured.module.subject,
+                            body,
+                            &angles,
+                            end,
+                            Some(start),
+                            &aliases,
+                        ) == Qualifier::Sum;
+                        pending.push((end, body[open + 1].text, is_sum));
+                    }
+                }
+                ";" if pending.last().is_some_and(|(end, _, _)| *end == open) => {
+                    let (_, name, is_sum) = pending.pop().expect("matching alias declaration");
+                    if let Some(scope) = aliases.last_mut() {
+                        scope.insert(name, is_sum);
+                    }
+                }
+                _ => { /* Other tokens do not introduce local type aliases. */ }
+            }
+            if token.text != "(" {
+                continue;
+            }
+            let Some(name) = application_head(body, &angles, open) else {
+                // Even if a normalized actual obscures its opening angle, the
+                // pinned printer emits adjacent ">(" for the application.
+                calls.indirect |= open > 0
+                    && body[open - 1].text == ">"
+                    && body[open - 1].start + 1 == token.start;
+                continue;
+            };
+            if !is_dslx_member_name(body[name].text) {
+                // The target of a grouped, indexed or otherwise opaque
+                // parametric application can be absent from the native graph.
+                calls.indirect |= name + 1 != open || matches!(body[name].text, ")" | "]");
+                continue;
+            }
+            if body[name].text == "map" && (name == 0 || !matches!(body[name - 1].text, "." | "::"))
+            {
+                // map's callback need not appear as an ordinary invocation
+                // in the root type context, even if it has a written name.
+                calls.indirect |= !ordinary_map.get_or_init(|| {
+                    let expected = captured.module.call_subject(None, "map");
+                    (0..graph.callee_count(function))
+                        .filter_map(|i| graph.get_callee(function, i))
+                        .any(|callee| {
+                            callee.get_identifier() == "map"
+                                && ModuleMember::try_from(&callee).is_ok()
+                                && self
+                                    .subject(&callee.get_body().get_owner_module())
+                                    .is_some_and(|subject| Some(subject) == expected)
+                        })
+                });
+            }
+            let method = (name >= 1 && body[name - 1].text == ".")
+                || (name >= 2
+                    && body[name - 1].text == "::"
+                    && self.qualifier(
+                        &captured.module.subject,
+                        body,
+                        &angles,
+                        name - 1,
+                        None,
+                        &aliases,
+                    ) == Qualifier::Other);
+            if method {
+                *calls.methods.entry(body[name].text.to_owned()).or_default() += 1;
+            }
+        }
+        Ok(calls)
+    }
+
+    /// Local types shadow imports. Only a complete module path can select an
+    /// ordinary module function, and a complete sum path selects a variant.
+    fn qualifier(
+        &self,
+        subject: &str,
+        body: &[Token<'_>],
+        angles: &[Option<usize>],
+        separator: usize,
+        start: Option<usize>,
+        aliases: &[BTreeMap<&str, bool>],
+    ) -> Qualifier {
+        let Some(mut name) = application_head(body, angles, separator) else {
+            return Qualifier::Other;
+        };
+        if !is_dslx_member_name(body[name].text) {
+            return Qualifier::Other;
+        }
+        let mut applied = name + 1 != separator;
+        let mut path = vec![body[name].text.to_owned()];
+        while name >= 2 && body[name - 1].text == "::" {
+            let Some(previous) = application_head(body, angles, name - 1) else {
+                return Qualifier::Other;
+            };
+            if !is_dslx_member_name(body[previous].text) {
+                return Qualifier::Other;
+            }
+            applied |= previous + 2 != name;
+            name = previous;
+            path.push(body[name].text.to_owned());
+        }
+        if start.is_some_and(|start| start != name) {
+            return Qualifier::Other;
+        }
+        path.reverse();
+        if let Some(local) = aliases.iter().rev().find_map(|s| s.get(path[0].as_str())) {
+            return if path.len() == 1 && *local {
+                Qualifier::Sum
+            } else {
+                Qualifier::Other
+            };
+        }
+        if !applied && self.graph.module_reference(subject, &path).is_some() {
+            Qualifier::Module
+        } else if self.graph.is_sum(subject, &path) {
+            Qualifier::Sum
+        } else {
+            Qualifier::Other
+        }
+    }
+
     pub(crate) fn subject(&self, owner: &Module) -> Option<&'a str> {
         Some(&self.modules.get(&owner.get_name())?.module.subject)
     }
@@ -622,6 +854,57 @@ fn arguments<'a>(source: &'a str, tokens: &[Token<'a>]) -> Vec<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_application_heads_accept_all_argument_tokens() -> Result<(), String> {
+        for (source, expected) in [
+            ("Alias::run<s32:-1>(x)", Some("run")),
+            (
+                "Alias::run<{if x < y { x >> u32:1 } else { x + y }}, u8:'a'>(x)",
+                Some("run"),
+            ),
+            (
+                "Alias::run<owner::Outer<Inner<u8>>, (u8, u16)[2]>(x)",
+                Some("run"),
+            ),
+            ("(Alias::run)<s32:-1>(x)", Some(")")),
+            ("callbacks[u32:0]<s32:-1>(x)", Some("]")),
+            ("x > (y)", None),
+            ("x >> (y)", None),
+            ("let flag = x < y; x > (y)", None),
+        ] {
+            let tokens = dslx_tokens(source)?;
+            let open = tokens
+                .iter()
+                .rposition(|t| t.text == "(")
+                .expect("argument list");
+            let actual = application_head(&tokens, &application_angles(&tokens), open)
+                .map(|i| tokens[i].text);
+            assert_eq!(actual, expected, "{source}");
+        }
+        for (pretty, expected) in [
+            (
+                "Alias::run<if s32:1 > s32:0 { s32:1 } else { s32:2 }>(x)",
+                Some("run"),
+            ),
+            (
+                "Alias::run<if N < u32:1 { s32:1 } else { s32:2 }>(x)",
+                Some("run"),
+            ),
+            ("Alias::run<N >> u32:1>(x)", Some("run")),
+            ("x > (y)", None),
+            ("x >> (y)", None),
+        ] {
+            let tokens = dslx_tokens(pretty)?;
+            let open = tokens
+                .iter()
+                .rposition(|t| t.text == "(")
+                .expect("argument list");
+            let head = application_head(&tokens, &application_angles(&tokens), open);
+            assert_eq!(head.map(|i| tokens[i].text), expected, "{pretty}");
+        }
+        Ok(())
+    }
     use std::error::Error;
     use std::fs;
 

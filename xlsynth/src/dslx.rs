@@ -1425,7 +1425,8 @@ impl TryFrom<&TypeAlias> for ModuleMember {
     }
 }
 
-/// Wrapper for a DSLX function definition.
+/// A DSLX function definition identified by its declaration in the retained
+/// native import graph.
 pub struct Function {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxFunction,
@@ -1493,6 +1494,20 @@ impl ParametricBinding {
     }
 }
 
+impl PartialEq for Function {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for Function {}
+
+impl Hash for Function {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
+}
+
 impl Function {
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_function_to_string(self.ptr)) }
@@ -1501,7 +1516,7 @@ impl Function {
     /// Returns whether two wrappers point at the same DSLX function definition.
     /// Independently parsed definitions and same-named imports are distinct.
     pub fn is_same_definition(&self, other: &Function) -> bool {
-        self.ptr == other.ptr
+        self == other
     }
 
     pub fn get_identifier(&self) -> String {

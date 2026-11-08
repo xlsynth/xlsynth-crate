@@ -5,8 +5,9 @@
 mod effect_source;
 mod outline_graph;
 mod runfiles;
+mod specialization;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
@@ -23,7 +24,9 @@ use outline_graph::{DeclId, NativeSourceFiles, OutlineGraph, ResolvedShape};
 struct StructBinding {
     declaration: Option<DeclId>,
     public_name: Option<String>,
-    layout: Option<usize>,
+    /// Ordered value bindings distinguish instances even when all fields
+    /// coincide.
+    layouts: BTreeMap<Vec<u32>, usize>,
 }
 
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
@@ -32,8 +35,12 @@ pub(crate) struct ImportedStructs {
     graph: OutlineGraph,
     files: Option<NativeSourceFiles>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
-    types: BTreeMap<DeclId, dslx::Type>,
+    declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
+    named_layouts: BTreeMap<String, usize>,
+    /// Reflected layouts that contain a concrete parametric struct, including
+    /// through fields of another struct.
+    instance_layouts: BTreeSet<usize>,
     exports_bound: bool,
     #[cfg(test)]
     type_witnesses: usize,
@@ -58,8 +65,10 @@ impl ImportedStructs {
             graph,
             files,
             bindings: HashMap::new(),
-            types: BTreeMap::new(),
+            declarations: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
+            named_layouts: BTreeMap::new(),
+            instance_layouts: BTreeSet::new(),
             exports_bound: false,
             #[cfg(test)]
             type_witnesses: 0,
@@ -97,8 +106,13 @@ impl ImportedStructs {
         let exports: Vec<_> = self
             .graph
             .struct_exports()
-            .map(|(name, id)| (name, Some(id)))
-            .chain(self.graph.unresolved_aliases().map(|name| (name, None)))
+            .map(|(name, id)| (name.clone(), Some(id.clone())))
+            .chain(
+                self.graph
+                    .unresolved_aliases()
+                    .cloned()
+                    .map(|name| (name, None)),
+            )
             .collect();
         if exports.is_empty() {
             self.exports_bound = true;
@@ -140,34 +154,47 @@ impl ImportedStructs {
                 // associated type). Record any resulting public struct name.
                 if let Ok(def) = ty.get_struct_def() {
                     let name = format!("{}::{}", export.subject, export.name);
-                    self.bindings
-                        .entry(def)
-                        .or_default()
-                        .public_name
-                        .get_or_insert_with(|| name.clone());
+                    if !def.is_parametric() {
+                        self.bindings
+                            .entry(def)
+                            .or_default()
+                            .public_name
+                            .get_or_insert_with(|| name.clone());
+                    }
                     self.explicit_types.insert(name, ty);
                 }
                 continue;
             };
             let def = ty.get_struct_def().map_err(|e| e.to_string())?;
-            let binding = self.bindings.entry(def.clone()).or_default();
-            if def.get_identifier() != target.name
-                || binding.declaration.as_ref().is_some_and(|id| id != target)
-                || self
-                    .types
-                    .get(target)
-                    .is_some_and(|other| other.get_struct_def().ok().as_ref() != Some(&def))
-            {
-                return Err(format!(
-                    "Rust and DSLX resolve '{}::{}' to different struct declarations",
-                    export.subject, export.name
-                ));
-            }
-            binding.declaration = Some(target.clone());
-            binding.public_name = self.graph.public_path(target).map(str::to_owned);
-            self.types.entry(target.clone()).or_insert(ty);
+            self.bind_declaration(&def, &target)?;
+            let binding = self.bindings.get_mut(&def).expect("registered declaration");
+            binding.public_name = self.graph.public_path(&target).map(str::to_owned);
+            self.explicit_types
+                .insert(format!("{}::{}", export.subject, export.name), ty);
         }
         self.exports_bound = true;
+        Ok(())
+    }
+
+    /// Pair an outlined declaration with its native handle in both directions.
+    fn bind_declaration(&mut self, def: &dslx::StructDef, id: &DeclId) -> Result<(), String> {
+        let binding = self.bindings.entry(def.clone()).or_default();
+        if def.get_identifier() != id.name
+            || binding
+                .declaration
+                .as_ref()
+                .is_some_and(|known| known != id)
+            || self.declarations.get(id).is_some_and(|known| known != def)
+        {
+            return Err(format!(
+                "Rust and DSLX disagree on the struct declaration for '{}::{}'",
+                id.subject, id.name
+            ));
+        }
+        binding.declaration.get_or_insert_with(|| id.clone());
+        self.declarations
+            .entry(id.clone())
+            .or_insert_with(|| def.clone());
         Ok(())
     }
 
@@ -200,6 +227,14 @@ impl ImportedStructs {
             .as_ref()
             .expect("imported symbol has a source snapshot")
             .restore_ir_names(ir)
+    }
+
+    /// Start an independent native type context over the same frozen sources.
+    pub(crate) fn fresh_import_data(&self) -> ImportData {
+        self.files
+            .as_ref()
+            .expect("DSLX batch has a source snapshot")
+            .import_data()
     }
 
     pub(crate) fn original_column(&self, path: &Path, line: usize, column: usize) -> usize {
@@ -236,6 +271,18 @@ impl ImportedStructs {
         &self.definitions
     }
 
+    pub(crate) fn contains_parametric_instance(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named(name) => self
+                .named_layouts
+                .get(name)
+                .is_some_and(|i| self.instance_layouts.contains(i)),
+            Type::Array { element, .. } => self.contains_parametric_instance(element),
+            Type::Tuple(members) => members.iter().any(|m| self.contains_parametric_instance(m)),
+            Type::Bits { .. } | Type::Bool => false,
+        }
+    }
+
     /// Names of public layouts are valid directly in a generated parameter.
     pub(crate) fn public_spelling<'a>(&'a self, name: &'a str) -> Result<&'a str, String> {
         if let Some((subject, member)) = name.split_once("::") {
@@ -248,7 +295,7 @@ impl ImportedStructs {
                 if let Some(path) = self
                     .bindings
                     .values()
-                    .find(|binding| binding.layout == Some(index))
+                    .find(|binding| binding.layouts.get(&[][..]) == Some(&index))
                     .and_then(|binding| binding.public_name.as_deref())
                 {
                     return Ok(path);
@@ -257,7 +304,8 @@ impl ImportedStructs {
                     "cannot pass DSLX struct '{member}' to an imported function without a public type name"
                 ));
             }
-            if self.explicit_types.contains_key(name)
+            if self.named_layouts.contains_key(name)
+                || self.explicit_types.contains_key(name)
                 || matches!(
                     self.graph.named(subject, member),
                     Some(ResolvedShape::Struct(_))
@@ -279,49 +327,52 @@ impl ImportedStructs {
     ) -> Result<String, String> {
         self.bind_exports(data)?;
         let path = format!("{subject}::{member}");
+        if let Some(&index) = self.named_layouts.get(&path) {
+            return Ok(self.definitions[index].name.clone());
+        }
         let witness = TypeWitness {
             imports: format!("import {subject} as bx_module;\n"),
             params: format!("value: bx_module::{member}"),
             expr: "value".into(),
         };
-        let ty = match self.graph.named(subject, member) {
-            Some(ResolvedShape::Struct(id)) => self.types.get(&id).cloned().ok_or_else(|| {
-                format!("DSLX type '{path}' is not a concrete non-parametric struct")
-            })?,
-            _ => {
-                // A requested name can be generated by a DSLX attribute or
-                // be an alias whose target requires type evaluation. Ask
-                // about that exact user-written type, never a candidate name.
-                if let Some(ty) = self.explicit_types.get(&path) {
-                    ty.clone()
-                } else {
-                    let source = format!("{}fn inspect({}) {{}}", witness.imports, witness.params);
-                    let probe = format!("0bx_named_{}", self.probe_index);
-                    self.probe_index += 1;
-                    #[cfg(test)]
-                    {
-                        self.type_witnesses += 1;
-                    }
-                    let checked = self.check_probe(&source, &probe, data)?;
-                    let function = probe_function(&checked)?;
-                    let ty = checked
-                        .get_type_info()
-                        .get_type_for_type_annotation(&function.get_param(0).get_type_annotation())
-                        .ok_or_else(|| format!("could not resolve DSLX type '{path}'"))?;
-                    let def = ty
-                        .get_struct_def()
-                        .map_err(|_| format!("DSLX type '{path}' is not a struct"))?;
-                    self.bindings
-                        .entry(def)
-                        .or_default()
-                        .public_name
-                        .get_or_insert_with(|| path.clone());
-                    self.explicit_types.insert(path, ty.clone());
-                    ty
-                }
+        let ty = if let Some(ty) = self.explicit_types.get(&path) {
+            ty.clone()
+        } else {
+            // Resolve the exact requested alias or generated declaration. Its
+            // target may have value bindings that require native evaluation.
+            let source = format!("{}fn inspect({}) {{}}", witness.imports, witness.params);
+            let probe = format!("0bx_named_{}", self.probe_index);
+            self.probe_index += 1;
+            #[cfg(test)]
+            {
+                self.type_witnesses += 1;
             }
+            let checked = self.check_probe(&source, &probe, data)?;
+            let function = probe_function(&checked)?;
+            let ty = checked
+                .get_type_info()
+                .get_type_for_type_annotation(&function.get_param(0).get_type_annotation())
+                .ok_or_else(|| format!("could not resolve DSLX type '{path}'"))?;
+            let def = ty
+                .get_struct_def()
+                .map_err(|_| format!("DSLX type '{path}' is not a struct"))?;
+            if !def.is_parametric() {
+                self.bindings
+                    .entry(def)
+                    .or_default()
+                    .public_name
+                    .get_or_insert_with(|| path.clone());
+            }
+            ty
         };
-        self.reflect_struct(&ty, data, &witness, None, 0)
+        let written = match self.graph.named(subject, member) {
+            Some(ResolvedShape::Struct(id)) => Some(id),
+            _ => None,
+        };
+        let canonical = self.reflect_struct(&ty, data, &witness, written.as_ref(), 0)?;
+        let index = self.named_layouts[&canonical];
+        self.named_layouts.insert(path, index);
+        Ok(canonical)
     }
 
     pub(crate) fn reflect_result(
@@ -430,35 +481,40 @@ impl ImportedStructs {
         self.bind_exports(data)?;
         let def = ty.get_struct_def().map_err(|e| e.to_string())?;
         let identifier = def.get_identifier();
-        if def.is_parametric() {
-            return Err(format!(
-                "parametric DSLX struct '{identifier}' is unsupported in BX"
-            ));
-        }
-        let binding = self.bindings.entry(def.clone()).or_default();
-        if let Some(id) = written {
-            if identifier != id.name
-                || binding
-                    .declaration
-                    .as_ref()
-                    .is_some_and(|known| known != id)
-                || self
-                    .types
-                    .get(id)
-                    .is_some_and(|known| known.get_struct_def().ok().as_ref() != Some(&def))
-            {
-                return Err(format!(
-                    "Rust and DSLX disagree on the struct declaration for '{}::{}'",
-                    id.subject, id.name
-                ));
+        self.bindings.entry(def.clone()).or_default();
+        let (template, actuals) = if def.is_parametric() {
+            let id = written
+                .filter(|id| self.graph.public_parametric_struct(id))
+                .cloned().ok_or_else(|| format!(
+                    "cannot identify a public DSLX struct template for '{identifier}'; name the concrete struct or a public alias in the DSLX type annotation"
+                ))?;
+            let values = self.capture_struct_bindings(&id, &def, witness, data)?;
+            self.bind_declaration(&def, &id)?;
+            (Some(id), values)
+        } else {
+            if let Some(id) = written {
+                self.bind_declaration(&def, id)?;
             }
-            binding.declaration.get_or_insert_with(|| id.clone());
-            self.types.entry(id.clone()).or_insert_with(|| ty.clone());
-        }
-        if let Some(index) = binding.layout {
+            (None, Vec::new())
+        };
+        let binding = &self.bindings[&def];
+        if let Some(&index) = binding.layouts.get(&actuals) {
             return Ok(self.definitions[index].name.clone());
         }
-        let path = binding.public_name.clone();
+        let path = if let Some(id) = template {
+            let literals = actuals
+                .iter()
+                .map(|v| format!("u32:{v}"))
+                .collect::<Vec<_>>();
+            Some(format!(
+                "{}::{}<{}>",
+                id.subject,
+                id.name,
+                literals.join(", ")
+            ))
+        } else {
+            binding.public_name.clone()
+        };
         let label = path.as_deref().unwrap_or(&identifier);
         let members = if let Some(id) = &binding.declaration
             && let Some(fields) = self.graph.fields(id)
@@ -509,7 +565,16 @@ impl ImportedStructs {
         self.bindings
             .get_mut(&def)
             .expect("registered native declaration")
-            .layout = Some(index);
+            .layouts
+            .insert(actuals, index);
+        self.named_layouts.insert(name.clone(), index);
+        if def.is_parametric()
+            || fields
+                .iter()
+                .any(|f| self.contains_parametric_instance(&f.ty))
+        {
+            self.instance_layouts.insert(index);
+        }
         self.definitions.push(StructDef {
             name: name.clone(),
             public,
@@ -540,6 +605,58 @@ mod tests {
         let (registry, data) =
             ImportedStructs::load(&module.uses, xlsynth::default_dslx_stdlib_path(), paths)?;
         Ok((registry, data.ok_or("expected imported modules")?))
+    }
+
+    #[test]
+    fn concrete_alias_reuses_its_layout_and_inferred_defaults()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::write(
+            root.path().join("wire.x"),
+            r#"pub struct Tagged<A: u32, B: u32 = {A + A}> { tag: u8 }
+pub type Short = Tagged<u32:3>;
+pub type Full = Tagged<u32:3, u32:6>;"#,
+        )?;
+        let (mut registry, mut data) = load("use wire;", &[root.path()])?;
+        let expected = "wire::Tagged<u32:3, u32:6>";
+        for alias in ["Short", "Full"] {
+            assert_eq!(registry.resolve_named("wire", alias, &mut data)?, expected);
+        }
+        let witnesses = registry.type_witnesses();
+        for alias in ["Short", "Full"] {
+            assert_eq!(registry.resolve_named("wire", alias, &mut data)?, expected);
+        }
+        assert_eq!(registry.type_witnesses(), witnesses);
+        assert_eq!(registry.definitions().len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_templates_only_affect_references_to_their_instances()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempdir()?;
+        fs::write(
+            root.path().join("formats.x"),
+            r#"pub struct Format<N: u32> { value: uN[N] }
+pub type Byte = Format<8>;
+pub struct Small<N: u8> { value: u8 }
+pub type NarrowBinding = Small<u8:2>;
+struct Hidden<N: u32> { value: u8 }
+pub type HiddenBinding = Hidden<2>;"#,
+        )?;
+        for unsupported in ["NarrowBinding", "HiddenBinding"] {
+            let (mut registry, mut data) = load("use formats;", &[root.path()])?;
+            assert_eq!(
+                registry.resolve_named("formats", "Byte", &mut data)?,
+                "formats::Format<u32:8>"
+            );
+            assert!(
+                registry
+                    .resolve_named("formats", unsupported, &mut data)
+                    .is_err()
+            );
+        }
+        Ok(())
     }
 
     #[test]

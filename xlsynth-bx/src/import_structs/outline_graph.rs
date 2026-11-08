@@ -13,8 +13,9 @@ mod native_files;
 use super::runfiles::XlsRunfiles;
 use crate::ast::UsePath;
 use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
+use crate::parser::outline::outline_with_sum_names;
 use crate::parser::source_bytes::decode_dslx_source;
-use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType, parse_dslx_outline};
+use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
 pub(super) use native_files::NativeSourceFiles;
 
 // XLS generates these names from the stdlib sources of the pinned DSO. A
@@ -72,6 +73,7 @@ pub(super) struct SourceModule {
     pub source_path: PathBuf,
     pub source: Vec<u8>,
     pub outline: DslxOutline,
+    sums: BTreeSet<String>,
     bindings: BTreeMap<String, Binding>,
 }
 
@@ -266,7 +268,8 @@ impl OutlineGraph {
                     source_path.display()
                 )
             })?;
-            let outline = parse_dslx_outline(&decoded).map_err(|e| {
+            let mut sums = BTreeSet::new();
+            let outline = outline_with_sum_names(&decoded, &mut sums).map_err(|e| {
                 format!(
                     "outlining DSLX module '{subject}' at {}: {e}",
                     source_path.display()
@@ -295,6 +298,7 @@ impl OutlineGraph {
                     source_path,
                     source,
                     outline,
+                    sums,
                     bindings,
                 },
             );
@@ -346,13 +350,7 @@ impl OutlineGraph {
     /// syntax).
     fn reference(&self, subject: &str, components: &[String]) -> Option<DeclId> {
         let (name, qualifiers) = components.split_last()?;
-        let mut module = self.modules.get(subject)?;
-        for qualifier in qualifiers {
-            let Binding::Module(target) = module.bindings.get(qualifier)? else {
-                return None;
-            };
-            module = self.modules.get(target)?;
-        }
+        let module = self.module_reference(subject, qualifiers)?;
         if module.outline.declarations.contains_key(name) {
             Some(DeclId {
                 subject: module.subject.clone(),
@@ -363,6 +361,25 @@ impl OutlineGraph {
         } else {
             None
         }
+    }
+
+    /// Resolve every component of a module qualifier in its declaration scope.
+    pub(super) fn module_reference(&self, subject: &str, path: &[String]) -> Option<&SourceModule> {
+        let mut module = self.modules.get(subject)?;
+        for qualifier in path {
+            let Binding::Module(target) = module.bindings.get(qualifier)? else {
+                return None;
+            };
+            module = self.modules.get(target)?;
+        }
+        Some(module)
+    }
+
+    /// Follow a checked qualifier through module imports and type aliases.
+    pub(super) fn is_sum(&self, subject: &str, path: &[String]) -> bool {
+        self.reference(subject, path)
+            .and_then(|id| self.targets.get(&id))
+            .is_some_and(|id| self.modules[&id.subject].sums.contains(&id.name))
     }
 
     /// Collapse name-only alias chains once, without expanding tuple or array
@@ -443,6 +460,15 @@ impl OutlineGraph {
 
     pub(super) fn public_path(&self, id: &DeclId) -> Option<&str> {
         self.exports.get(id).map(String::as_str)
+    }
+
+    /// A concrete alias can expose an instance of a private struct without
+    /// exposing its template. Binding inference needs the template itself.
+    pub(super) fn public_parametric_struct(&self, id: &DeclId) -> bool {
+        self.modules
+            .get(&id.subject)
+            .and_then(|module| module.outline.declarations.get(&id.name))
+            .is_some_and(|decl| decl.is_public_struct_template(&id.name))
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {

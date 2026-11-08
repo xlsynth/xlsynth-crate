@@ -23,6 +23,51 @@ block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
 "#;
 
 #[test]
+fn generic_register_preserves_an_imported_apfloat_instance() -> xlsynth_vastly::Result<()> {
+    let source = r#"
+use float32::F32;
+block hold<T>(clk, rst, en: bool, x: T) -> T {
+    reg q: T = zero!<T>();
+    if en { q := x; }
+    q
+}
+pub block fp_register(clk, rst, en: bool, s: u1, e: u8, f: u23) -> F32 {
+    let input = F32 { fraction: f, sign: s, bexp: e };
+    let saved = hold(en, input);
+    saved
+}
+"#;
+    let mut package = compile(source, empty_package("fp"), ResetBehavior::default()).unwrap();
+    inline_all_blocks_in_package(&mut package).unwrap();
+    let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let module = compile_pipeline_module(&rtl.system_verilog)?;
+    let mut runner = FixtureRunner::new(&module)?;
+    let ports = runner.port_bindings();
+    let rst = ports.input("rst")?;
+    let en = ports.input("en")?;
+    let s = ports.input("s")?;
+    let e = ports.input("e")?;
+    let f = ports.input("f")?;
+    for (reset, enable, [sign, exponent, fraction], expected) in [
+        (true, true, [1, 127, 3], [0, 0, 0]),
+        (false, true, [1, 130, 0x400042], [1, 130, 0x400042]),
+        (false, false, [0, 42, 1], [1, 130, 0x400042]),
+        (true, false, [1, 42, 1], [0, 0, 0]),
+    ] {
+        let edge = runner.step_cycle_with_drive(&mut [], |drive| {
+            drive.set_bool(&rst, reset)?;
+            drive.set_bool(&en, enable)?;
+            drive.set_u64(&s, sign)?;
+            drive.set_u64(&e, exponent)?;
+            drive.set_u64(&f, fraction)
+        })?;
+        let actual = ["sign", "bexp", "fraction"].map(|port| edge.outputs[port].to_u64_if_known());
+        assert_eq!(actual, expected.map(Some));
+    }
+    Ok(())
+}
+
+#[test]
 fn generic_boolean_and_byte_literals_preserve_their_intrinsic_width() -> Result<(), Box<dyn Error>>
 {
     let source = |ty: &str, body: &str| {

@@ -2,6 +2,7 @@
 
 //! Resolve DSLX imports and preserve the concrete IR functions selected by BX.
 
+mod conversion_guard;
 mod effect;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -289,17 +290,28 @@ fn probe_{id}({}) {{ capture({}) }}
     pub(crate) fn finish(mut self) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(data) = self.imports.as_mut() {
-            let mut groups = BTreeMap::<&str, Vec<usize>>::new();
+            let mut groups = BTreeMap::<(&str, bool), Vec<usize>>::new();
             for (id, call) in self.calls.iter().enumerate() {
-                groups.entry(&call.module).or_default().push(id);
+                let concrete = call
+                    .args
+                    .iter()
+                    .chain([&call.result])
+                    .any(|ty| self.structs.contains_parametric_instance(ty));
+                groups.entry((&call.module, concrete)).or_default().push(id);
             }
-            for (index, (subject, ids)) in groups.into_iter().enumerate() {
+            for (index, ((subject, concrete), ids)) in groups.into_iter().enumerate() {
+                // Keep invocation metadata for the supported concrete instances
+                // independent of earlier type probes and ordinary imports.
+                let mut isolated = concrete.then(|| self.structs.fresh_import_data());
                 let batch = compile_batch(
-                    subject,
+                    BatchRoots {
+                        subject,
+                        call_ids: ids,
+                        has_instances: concrete,
+                    },
                     index,
                     &self.calls,
-                    ids,
-                    data,
+                    isolated.as_mut().unwrap_or(data),
                     &self.stdlib_path,
                     &self.structs,
                 )
@@ -496,13 +508,14 @@ fn probe(_bx_array_index: u32, {}) {{ let ({args},) = {}; capture({args}) }}
 }
 
 /// The specialization of the generic capture call in a generated DSLX probe.
-struct ProbeCapture {
+pub(crate) struct ProbeCapture {
     capture: dslx::Function,
     context: dslx::TypeInfo,
+    invocation: dslx::InvocationCalleeData,
 }
 
 impl ProbeCapture {
-    fn new(
+    pub(crate) fn new(
         checked: &TypecheckedModule,
         effect_diagnostic: impl FnOnce(&dslx::Function) -> Option<String>,
     ) -> Result<Self, String> {
@@ -524,31 +537,55 @@ impl ProbeCapture {
                 "function requires an implicit token and cannot be lifted into BX".into()
             }));
         }
-        let context = root
+        let invocation = root
             .get_unique_invocation_callee_data(&capture)
             .and_then(|entries| entries.get(0))
-            .and_then(|entry| entry.derived_type_info())
+            .ok_or("missing DSLX capture invocation")?;
+        let context = invocation
+            .derived_type_info()
             .ok_or("missing DSLX type information for the capture invocation")?;
-        Ok(Self { capture, context })
+        Ok(Self {
+            capture,
+            context,
+            invocation,
+        })
     }
 
-    fn param_type(&self, index: usize) -> Result<dslx::Type, String> {
+    pub(crate) fn param_type(&self, index: usize) -> Result<dslx::Type, String> {
         self.context
             .get_type_for_type_annotation(&self.capture.get_param(index).get_type_annotation())
             .ok_or_else(|| "could not resolve the captured DSLX type".to_string())
     }
+
+    /// Concrete value bindings inferred by DSLX for the capture invocation.
+    pub(crate) fn bindings(&self) -> Result<dslx::ParametricEnv, String> {
+        self.invocation
+            .callee_bindings()
+            .ok_or_else(|| "could not resolve the captured DSLX parametric bindings".to_string())
+    }
+}
+
+/// Calls checked together with one native conversion context.
+struct BatchRoots<'a> {
+    subject: &'a str,
+    call_ids: Vec<usize>,
+    has_instances: bool,
 }
 
 /// Recover each specialization's exact IR symbol from its generated probe.
 fn compile_batch(
-    subject: &str,
+    roots: BatchRoots<'_>,
     index: usize,
     calls: &[ImportedCall],
-    call_ids: Vec<usize>,
     imports: &mut ImportData,
     stdlib_path: &Path,
     structs: &ImportedStructs,
 ) -> Result<ImportBatch, String> {
+    let BatchRoots {
+        subject,
+        call_ids,
+        has_instances,
+    } = roots;
     let mut probe_imports = ProbeImports::default();
     let mut probes = String::new();
     for &id in &call_ids {
@@ -565,6 +602,9 @@ fn compile_batch(
     let source = probe_imports.declarations() + &probes;
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
+    if has_instances {
+        conversion_guard::check(&checked, structs)?;
+    }
     // XLS can embed filenames in generated symbols. Restore the logical
     // names before parsing: a temporary path can contain punctuation that
     // would otherwise turn a valid original identifier into invalid PIR.

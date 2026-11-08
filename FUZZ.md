@@ -250,6 +250,12 @@ value equality.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_graph --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_imported_struct_parametrics.rs
+
+Generates DSLX structs with two value parameters and two specializations that share a field layout. One parameter can be absent from the fields, or both can contribute to the same field width. BX and native DSLX evaluate calls that consume an aliased input and an inferred, unaliased result. The consumer returns a value derived from both parameters, exposing lost bindings or incorrect specialization reuse. Both frontends must also reject passing or assigning the inferred result to the other specialization.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct_parametrics --sanitizer none`.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset
