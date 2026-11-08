@@ -7,6 +7,8 @@ pub(crate) mod source_bytes;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use xlsynth_pir::{IrBits, IrValue};
+
 use crate::ast::{
     BinaryOp, BindingPattern, Block, CallbackParam, Expr, ExternBlock, ExternFn, ForIterable,
     ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef,
@@ -2364,6 +2366,105 @@ fn fixed_width(spelling: &str) -> Option<usize> {
     digits.parse().ok().filter(|width| (1..=64).contains(width))
 }
 
+/// Prove that a checked DSLX literal range executes its loop body at least
+/// once.
+pub(crate) fn nonempty_literal_range(tokens: &[Token<'_>]) -> bool {
+    // The DSLX outline lexer keeps each dot and the optional '=' separate.
+    let Some(separator) = tokens
+        .windows(2)
+        .position(|t| t[0].text == "." && t[1].text == ".")
+    else {
+        return false;
+    };
+    let upper = &tokens[separator + 2..];
+    let inclusive = upper.first().is_some_and(|t| t.text == "=");
+    let (Some(lower), Some(upper)) = (
+        range_literal(&tokens[..separator]),
+        range_literal(&upper[usize::from(inclusive)..]),
+    ) else {
+        return false;
+    };
+    let annotation = lower.annotation.or(upper.annotation);
+    if annotation.is_none()
+        && !(is_canonical_decimal(lower.spelling) && is_canonical_decimal(upper.spelling))
+    {
+        // A surrounding binder can supply a signed width for prefixed or
+        // negated literals. Positive decimal literals must fit either way.
+        return false;
+    }
+    // Each digit needs at most four bits. Once both magnitudes and a sign bit
+    // fit, additional leading bits cannot affect the ordering.
+    let enough_bits = lower
+        .spelling
+        .len()
+        .max(upper.spelling.len())
+        .saturating_mul(4)
+        .saturating_add(1);
+    let (signed, width) = annotation.unwrap_or((false, enough_bits));
+    let width = width.min(enough_bits);
+    let (Some(lower), Some(upper)) = (lower.bits(width), upper.bits(width)) else {
+        return false;
+    };
+    if lower.equals(&upper) {
+        inclusive
+    } else if signed {
+        lower.slt(&upper)
+    } else {
+        lower.ult(&upper)
+    }
+}
+
+/// Numeric spelling and optional concrete (signedness, width) of a range bound.
+struct RangeLiteral<'s> {
+    spelling: &'s str,
+    annotation: Option<(bool, usize)>,
+}
+
+/// Recognize a bare or bit-annotated literal, allowing checked grouping
+/// parentheses.
+fn range_literal<'s>(tokens: &[Token<'s>]) -> Option<RangeLiteral<'s>> {
+    // Parentheses can group the whole range, either bound, or an annotated
+    // literal. The typechecker has already checked their placement.
+    let words: Vec<_> = tokens
+        .iter()
+        .map(|t| t.text)
+        .filter(|t| !matches!(*t, "(" | ")"))
+        .take(7)
+        .collect();
+    let (&spelling, prefix) = words.split_last()?;
+    let annotation = match prefix {
+        [] => None,
+        [ty, ":"] => Some((ty.starts_with('s'), fixed_width(ty)?)),
+        [ty @ ("bits" | "uN" | "sN"), "[", width, "]", ":"] => {
+            let width = normalized_integer(width)?;
+            let (digits, radix) = radix_digits(&width);
+            Some((*ty == "sN", usize::from_str_radix(digits, radix).ok()?))
+        }
+        _ => return None,
+    };
+    Some(RangeLiteral {
+        spelling,
+        annotation,
+    })
+}
+
+impl RangeLiteral<'_> {
+    /// DSLX negates a width-checked literal magnitude, so s3:-7 represents 1.
+    fn bits(&self, width: usize) -> Option<IrBits> {
+        let text = normalized_integer(self.spelling)?;
+        let digits = text.strip_prefix('-').unwrap_or(&text);
+        let bits = IrValue::parse_typed(&format!("bits[{width}]:{digits}"))
+            .ok()?
+            .to_bits()
+            .ok()?;
+        Some(if text.starts_with('-') {
+            bits.negate()
+        } else {
+            bits
+        })
+    }
+}
+
 /// Recognize DSLX expressions whose inputs are all literals or known constants.
 /// The native typechecker has already accepted the syntax.
 pub(crate) fn uses_only_const_assert_operands(expr: &str, constant_names: &[String]) -> bool {
@@ -2407,6 +2508,39 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonempty_ranges_require_ordered_literal_endpoints() -> Result<(), String> {
+        for (source, expected) in [
+            ("u32:0..u32:1", true),
+            ("u32:0..u32:0", false),
+            ("(u32:1)..(u32:0)", false),
+            ("((u8:(1))..=(u8:1))", true),
+            ("u8:255..=u8:255", true),
+            ("0..1", true),
+            ("0..0x1", false),
+            ("s8:0x_ff..0b0", true),
+            ("s8:-128..s8:0x80", false),
+            ("s3:-7..s3:1", false),
+            ("uN[1000000000]:0..uN[1000000000]:1", true),
+            (
+                "uN[96]:0x10000000000000000..uN[96]:0x10000000000000001",
+                true,
+            ),
+            ("LIMIT..u32:1", false),
+            ("u32:0..(u32:1+u32:2)", false),
+            ("[u32:1]", false),
+            ("", false),
+        ] {
+            let tokens = lex(source, Dialect::Dslx, None)?;
+            assert_eq!(
+                nonempty_literal_range(&tokens[..tokens.len() - 1]),
+                expected,
+                "{source}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn callback_signatures_and_named_actuals_are_separate_from_data_arguments() -> Result<(), String>

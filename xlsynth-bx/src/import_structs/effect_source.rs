@@ -11,7 +11,7 @@ use super::ImportedStructs;
 use super::outline_graph::SourceModule;
 use crate::effect_diagnostic::{EffectLocation, const_assert_replacement};
 use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens};
-use crate::parser::{Token, is_dslx_member_name, is_use_identifier};
+use crate::parser::{Token, is_dslx_member_name, is_use_identifier, nonempty_literal_range};
 
 /// Lookup by native module identity, built only for a rejected signature probe.
 pub(crate) struct EffectSources<'a> {
@@ -331,6 +331,7 @@ struct WrittenCall {
     name: Option<usize>,
     open: usize,
     close: usize,
+    enclosing_group: Option<usize>,
     unconditional: bool,
     opaque: bool,
 }
@@ -363,12 +364,21 @@ fn declaration_calls<'d, 's>(
 fn written_calls(body: &[Token<'_>]) -> Vec<WrittenCall> {
     let mut calls: Vec<WrittenCall> = Vec::new();
     let mut stack = Vec::new();
+    let mut group_ends = Vec::new();
+    let mut loops = Vec::new();
     let mut first_call = 0;
     let mut statement_start = 1;
     let mut opaque_statement = false;
     for (i, token) in body.iter().enumerate() {
         let ambiguous = match token.text {
-            "for" | "unroll_for!" | "const" | "const_assert!" => true,
+            "for" => {
+                if group_ends.is_empty() {
+                    group_ends.resize(body.len(), 0);
+                }
+                loops.push((i, stack.last().copied()));
+                false
+            }
+            "unroll_for!" | "const" | "const_assert!" => true,
             "|" | "||" => !body[..i].last().is_some_and(|prev| {
                 let text = prev.text;
                 matches!(text, ")" | "]" | "}")
@@ -399,6 +409,9 @@ fn written_calls(body: &[Token<'_>]) -> Vec<WrittenCall> {
             }
             ")" | "]" | "}" => {
                 let open = stack.pop().expect("DSLX outline groups are balanced");
+                if let Some(end) = group_ends.get_mut(open) {
+                    *end = i;
+                }
                 if token.text == ")"
                     && let Some(name) = call_name(body, open)
                 {
@@ -413,6 +426,7 @@ fn written_calls(body: &[Token<'_>]) -> Vec<WrittenCall> {
                             name: Some(name),
                             open,
                             close: i,
+                            enclosing_group: stack.last().copied(),
                             opaque: false,
                             unconditional: stack.len() == 1
                                 && (start == statement_start
@@ -432,6 +446,7 @@ fn written_calls(body: &[Token<'_>]) -> Vec<WrittenCall> {
                         name: None,
                         open,
                         close: i,
+                        enclosing_group: stack.last().copied(),
                         opaque: true,
                         unconditional: false,
                     });
@@ -440,18 +455,91 @@ fn written_calls(body: &[Token<'_>]) -> Vec<WrittenCall> {
             _ => { /* Other tokens cannot complete an invocation. */ }
         }
         if (token.text == ";" && stack.len() == 1) || stack.is_empty() {
-            if opaque_statement {
+            if opaque_statement
+                || (!loops.is_empty()
+                    && !loop_calls_follow_source_order(
+                        &body[..=i],
+                        &loops,
+                        &group_ends,
+                        &calls[first_call..],
+                    ))
+            {
                 for call in &mut calls[first_call..] {
                     call.opaque = true;
                     call.unconditional = false;
                 }
             }
+            loops.clear();
             first_call = calls.len();
             statement_start = i + 1;
             opaque_statement = false;
         }
     }
     calls
+}
+
+/// Follow direct statements and let initializers in proven loop bodies. Calls
+/// in other groups can belong to a conditional arm, a type expression or the
+/// initializer that executes before the body.
+fn loop_calls_follow_source_order(
+    tokens: &[Token<'_>],
+    loops: &[(usize, Option<usize>)],
+    group_ends: &[usize],
+    calls: &[WrittenCall],
+) -> bool {
+    let mut bodies = BTreeSet::new();
+    for &(start, enclosing) in loops {
+        if enclosing != Some(0) && !enclosing.is_some_and(|group| bodies.contains(&group)) {
+            return false;
+        }
+        let Some(open) = nonempty_loop_body(tokens, start, group_ends) else {
+            return false;
+        };
+        bodies.insert(open);
+    }
+    calls.iter().all(|call| {
+        call.enclosing_group
+            .is_some_and(|group| bodies.contains(&group))
+            && is_statement_value(tokens, call.start, call.close)
+    })
+}
+
+/// The expression occupies a statement or the entire right side of a binding.
+fn is_statement_value(tokens: &[Token<'_>], start: usize, end: usize) -> bool {
+    start > 0
+        && matches!(tokens[start - 1].text, "{" | ";" | "=")
+        && tokens
+            .get(end + 1)
+            .is_some_and(|t| matches!(t.text, "}" | ";"))
+}
+
+/// Identify the body of a counted loop with a statically nonempty literal
+/// range.
+fn nonempty_loop_body(tokens: &[Token<'_>], start: usize, group_ends: &[usize]) -> Option<usize> {
+    let mut cursor = start + 1;
+    // Skip the binder and its optional type annotation to the iterable.
+    while let Some(token) = tokens.get(cursor) {
+        match token.text {
+            "in" => break,
+            "(" | "[" if group_ends[cursor] > cursor => cursor = group_ends[cursor] + 1,
+            "(" | "[" | "{" | "}" | ")" | "]" | ";" => return None,
+            _ => cursor += 1,
+        }
+    }
+    let iterable = tokens.get(cursor + 1..)?;
+    let length = iterable
+        .iter()
+        .position(|t| matches!(t.text, "{" | "for" | "unroll_for!"))?;
+    if iterable[length].text != "{" || !nonempty_literal_range(&iterable[..length]) {
+        return None;
+    }
+    let body_open = cursor + 1 + length;
+    let body_close = group_ends[body_open];
+    let seed_open = body_close + 1;
+    if tokens.get(seed_open).is_none_or(|t| t.text != "(") || group_ends[seed_open] <= seed_open {
+        return None;
+    }
+    is_statement_value(tokens, start, group_ends[seed_open]).then_some(body_open)
 }
 
 /// Recognize a bare name or skip explicit DSLX value/type arguments. Angle
@@ -542,6 +630,10 @@ mod tests {
         let source = r#"fn f<N: u32, M: u32 = {width(u8:1)}>(x: uN[{dim(N)}]) -> uN[{dim(M)}] {
     let callback = |y: u8| { fail!("nested", y) };
     for (_, acc): (u32, u8) in u32:0..u32:0 { trace!(acc) }(x);
+    for (_, acc) in u32:0..N { maybe(acc) }(x);
+    for (_, acc): (u32, u8) in u32:2..u32:4 {
+        for (_, inner) in u32:0..u32:1 { checked(inner) }(acc)
+    }(x);
     const_assert!(true);
     const K = assert!(true, "constant");
     const_assert!(helper(u8:1) != u8:0);
@@ -569,6 +661,8 @@ mod tests {
                 ("dim", true, false),
                 ("fail!", true, false),
                 ("trace!", true, false),
+                ("maybe", true, false),
+                ("checked", false, false),
                 ("assert!", true, false),
                 ("helper", true, false),
                 ("helper", false, false),

@@ -236,6 +236,8 @@ BX can read fields through a private struct nested inside a public one. To pass 
 
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 
+BX can follow a direct helper call in the body of a counted loop over a nonempty literal range, such as `for (_, acc) in u32:0..u32:1 { leaf::checked(acc) }(x)`. If the body branches between helpers, the range might be empty, or the initializer could introduce an earlier effect, BX reports the call path it can verify.
+
 Lowering emits an ordinary IR `invoke` and includes the specialized function and its callees. Some functions, including `std::popcount`, contain a loop in their original IR. Consumers such as `xlsynth-codegen` that require unrolled loops need an optimization step for those bodies before RTL emission.
 
 ## Clocked blocks
