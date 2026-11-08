@@ -1,0 +1,7 @@
+xlsynth-driver: bx2ir: pipeline.bx: block 'pipeline': let 'y': callable parameter 'F' of block 'advance': math.stage::apply: error: cannot import an effectful DSLX function into BX (`cover!` requires an implicit token)
+ --> source files/math/multiplier.x:7:5
+  |
+7 |     cover!("nonzero", x != uN[N]:0);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `cover!` introduces the effect
+  |
+  = note: DSLX call path: math.stage::apply -> math.multiplier::mul

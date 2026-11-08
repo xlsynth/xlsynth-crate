@@ -75,6 +75,18 @@ pub(super) struct SourceModule {
     bindings: BTreeMap<String, Binding>,
 }
 
+impl SourceModule {
+    /// Resolve the qualifier or imported member in an ordinary function call.
+    pub(super) fn call_subject(&self, qualifier: Option<&str>, name: &str) -> Option<&str> {
+        match (qualifier, self.bindings.get(qualifier.unwrap_or(name))) {
+            (None, Some(Binding::Member(id))) if id.name == name => Some(&id.subject),
+            (None, None) => Some(&self.subject),
+            (Some(_), Some(Binding::Module(subject))) => Some(subject),
+            _ => None,
+        }
+    }
+}
+
 /// Native logical and physical filenames can differ for Bazel runfiles.
 struct SourcePath {
     logical: PathBuf,

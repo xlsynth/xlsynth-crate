@@ -18,9 +18,9 @@ pub(crate) const MAX_SYNTAX_DEPTH: usize = 64;
 
 /// A borrowed spelling and byte offset in the original UTF-8 input.
 #[derive(Clone, Copy)]
-struct Token<'s> {
-    text: &'s str,
-    start: usize,
+pub(crate) struct Token<'s> {
+    pub(crate) text: &'s str,
+    pub(crate) start: usize,
     character: Option<u8>,
 }
 
@@ -2362,6 +2362,39 @@ fn fixed_width(spelling: &str) -> Option<usize> {
         return None;
     }
     digits.parse().ok().filter(|width| (1..=64).contains(width))
+}
+
+/// Recognize DSLX expressions whose inputs are all literals or known constants.
+/// The native typechecker has already accepted the syntax.
+pub(crate) fn uses_only_const_assert_operands(expr: &str, constant_names: &[String]) -> bool {
+    let Ok(tokens) = lex(expr, Dialect::Dslx, None) else {
+        return false;
+    };
+    let operands = &tokens[..tokens.len() - 1]; // Exclude the EOF token.
+    !operands.is_empty()
+        && operands.iter().all(|token| {
+            let word = token.text;
+            number_token(word)
+                || fixed_width(word).is_some()
+                || BinaryOp::from_spelling(word).is_some()
+                || matches!(
+                    word,
+                    "true"
+                        | "false"
+                        | "as"
+                        | "bool"
+                        | "bits"
+                        | "uN"
+                        | "sN"
+                        | "!"
+                        | ":"
+                        | "("
+                        | ")"
+                        | "["
+                        | "]"
+                )
+                || constant_names.iter().any(|name| name == word)
+        })
 }
 
 /// A migration hint for an unresolved zero-width or wide bit shorthand.

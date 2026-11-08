@@ -2,6 +2,7 @@
 
 //! Bridge Rust's DSLX declaration identities to concrete types in libxls.
 
+mod effect_source;
 mod outline_graph;
 mod runfiles;
 
@@ -14,6 +15,7 @@ use crate::ast::{Param, StructDef, Type, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
+pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
 use outline_graph::{DeclId, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
 /// The Rust declaration and BX layout associated with a checked native type.

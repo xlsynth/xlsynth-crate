@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Dialect, ExpressionGrammar, MAX_SYNTAX_DEPTH, Parser, ValueContext, fixed_width,
+    Dialect, ExpressionGrammar, MAX_SYNTAX_DEPTH, Parser, Token, ValueContext, fixed_width,
     is_dslx_member_name, is_use_identifier, lex,
 };
 
@@ -82,6 +82,42 @@ pub enum OutlineShape {
 /// Parse declaration syntax while retaining expressions for DSLX to evaluate.
 /// Function bodies are skipped as balanced tokens in the same source snapshot.
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
+    parse_outline_with_functions(source, |_, _, _, _| {})
+}
+
+/// Original declaration tokens for a checked DSLX function. Defaults and
+/// signature types can contain calls that affect its calling convention.
+pub(crate) struct DslxFunctionTokens<'s> {
+    pub(crate) bindings: Vec<Token<'s>>,
+    pub(crate) signature: Vec<Token<'s>>,
+    pub(crate) body: Vec<Token<'s>>,
+}
+
+/// Index the original tokens of top-level functions on the diagnostic
+/// path.
+pub(crate) fn dslx_function_tokens(
+    source: &str,
+) -> Result<BTreeMap<String, DslxFunctionTokens<'_>>, String> {
+    let mut functions = BTreeMap::new();
+    let mut ambiguous = false;
+    parse_outline_with_functions(source, |name, bindings, signature, body| {
+        let tokens = DslxFunctionTokens {
+            bindings: bindings.to_vec(),
+            signature: signature.to_vec(),
+            body: body.to_vec(),
+        };
+        ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
+    })?;
+    if ambiguous {
+        return Err("multiple DSLX source declarations for one function name".into());
+    }
+    Ok(functions)
+}
+
+fn parse_outline_with_functions<'s>(
+    source: &'s str,
+    mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
+) -> Result<DslxOutline, String> {
     let mut parser = Parser {
         source,
         tokens: lex(source, Dialect::Dslx, None)?,
@@ -137,6 +173,7 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
                 let keyword = parser.peek(0);
                 parser.pos += 1;
                 let name = parser.outline_identifier()?;
+                let bindings_start = parser.pos;
                 let bindings = parser.outline_bindings()?;
                 let kind = match keyword {
                     "type" => {
@@ -172,13 +209,23 @@ pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
                             module.public_values.insert(name.clone());
                             module.public_functions.insert(name.clone());
                         }
+                        let signature_start = parser.pos;
                         parser.outline_group("(")?;
-                        if parser.eat("->") {
-                            module
-                                .functions
-                                .insert(name, parser.outline_type(&bindings)?);
-                        }
+                        let result = parser
+                            .eat("->")
+                            .then(|| parser.outline_type(&bindings))
+                            .transpose()?;
+                        let body_start = parser.pos;
                         parser.outline_group("{")?;
+                        visit(
+                            &name,
+                            &parser.tokens[bindings_start..signature_start],
+                            &parser.tokens[signature_start..body_start],
+                            &parser.tokens[body_start..parser.pos],
+                        );
+                        if let Some(result) = result {
+                            module.functions.insert(name, result);
+                        }
                         continue;
                     }
                     "proc" => {

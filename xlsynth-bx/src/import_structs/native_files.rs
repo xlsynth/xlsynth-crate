@@ -152,6 +152,15 @@ impl NativeSourceFiles {
         .expect("inserting ASCII module paths preserves UTF-8")
     }
 
+    /// The exact native DSLX module name assigned to a captured subject.
+    pub(crate) fn native_module_name(&self, subject: &str) -> String {
+        format!(
+            "{0}.{0}.{1}",
+            self.namespace,
+            encode_subject(subject, &self.short_components)
+        )
+    }
+
     pub(crate) fn logical_path(&self, physical: &Path) -> Option<&Path> {
         self.sources.get(physical).map(|s| s.logical.as_path())
     }
