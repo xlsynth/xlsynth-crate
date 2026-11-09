@@ -985,9 +985,10 @@ fn bx2lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()
     let root = directory.path();
     fs::write(
         root.join("design.bx"),
-        r#"pub block passthrough(clk, x: u8) -> u8 { x }
+        r#"#[allow(combinational_block)]
+pub block passthrough(clk, x: u8) -> u8 { x }
 struct Outputs { seen: u8, valid: bool }
-block counter(clk, rst, x: u8) -> Outputs {
+block counter(clk, x: u8) -> Outputs {
     reg count: u8 = 0;
     count := x;
     Outputs { seen: count, valid: true }
