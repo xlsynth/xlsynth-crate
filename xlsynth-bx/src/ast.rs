@@ -438,7 +438,7 @@ pub struct Block {
     pub output: Expr,
 }
 
-/// One leaf of a DSLX `use` declaration. Its final component is bound in BX.
+/// One leaf of a BX or DSLX module import. Its final component is bound in BX.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsePath {
     /// All path components in order, including the prefixes of enclosing

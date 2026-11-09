@@ -1,0 +1,740 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{error::Error, fs, io, path::Path};
+
+use tempfile::tempdir;
+use xlsynth_bx::ast::{Expr, Stmt};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_module_with_options, compile_with_options, empty_package,
+    lower_module, parse_module,
+};
+use xlsynth_pir::IrValue;
+use xlsynth_pir::block_inline::inline_all_blocks_in_package;
+use xlsynth_pir::block2fn::combinational_block_to_fn;
+use xlsynth_pir::ir::Package;
+use xlsynth_pir::ir_eval::eval_fn_in_package_value;
+use xlsynth_pir::ir_parser::Parser;
+
+/// Write a BX or DSLX module in a test-specific import tree.
+fn write_module(root: &Path, name: &str, source: &str) -> io::Result<()> {
+    let path = root.join(name);
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, source)
+}
+
+fn search_paths<'a>(roots: &[&'a Path]) -> ImportOptions<'a> {
+    ImportOptions {
+        additional_search_paths: roots.to_vec(),
+        ..Default::default()
+    }
+}
+
+fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, String> {
+    compile_with_options(
+        source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        options,
+    )
+}
+
+/// Evaluate the selected block, including its imported child instances.
+fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    inline_all_blocks_in_package(&mut package)?;
+    let top = package.get_top_block().ok_or("missing top block")?;
+    let function = combinational_block_to_fn(top)?;
+    let input = IrValue::make_ubits(8, u64::from(x))?;
+    Ok(eval_fn_in_package_value(&package, &function, &[input]))
+}
+
+#[test]
+fn nested_module_and_grouped_members_share_structs_and_child_blocks() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "device/lanes.bx",
+        r#"
+pub const BIAS = u8:4;
+pub struct Sample { value: u8 }
+fn bump(x: u8) -> u8 { let (BIAS, extra) = (x, BIAS); BIAS + extra }
+pub fn pack(x: u8) -> Sample { Sample { value: bump(x) } }
+pub block stage(clk, x: u8) -> u8 { pack(x).value }
+"#,
+    )?;
+    let source = r#"
+use device::lanes;
+use device::lanes::{Sample, pack, BIAS};
+block circuit(clk, x: u8) -> (u8, u8, u8) {
+    let first = lanes::stage(x);
+    inst second: lanes::stage;
+    second.x := first;
+    let p: Sample = pack(x);
+    let q: lanes::Sample = Sample { value: BIAS + lanes::BIAS };
+    (second.out, p.value, q.value)
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let package = compile_design(source, &options)?;
+    assert_eq!(
+        package.get_top_block().ok_or("missing top")?.name,
+        "circuit"
+    );
+    assert_eq!(
+        run(package, 5)?,
+        IrValue::parse_typed("(bits[8]:13, bits[8]:9, bits[8]:8)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn diamond_dependencies_keep_private_bindings_and_dslx_imports_in_their_own_modules()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    for (name, body) in [
+        (
+            "common/shared.bx",
+            "fn helper(x: u8) -> u8 { x + u8:1 } pub fn base(x: u8) -> u8 { helper(x) }",
+        ),
+        ("west/arithmetic.x", "pub fn step(x: u8) -> u8 { x + u8:2 }"),
+        ("east/arithmetic.x", "pub fn step(x: u8) -> u8 { x * u8:3 }"),
+        (
+            "left.bx",
+            r#"
+use common::shared;
+use west::arithmetic;
+fn helper(x: u8) -> u8 { arithmetic::step(x) }
+pub fn apply(x: u8) -> u8 { helper(shared::base(x)) }"#,
+        ),
+        (
+            "right.bx",
+            r#"
+use common::shared::base;
+use east::arithmetic;
+fn helper(x: u8) -> u8 { arithmetic::step(x) }
+pub fn apply(x: u8) -> u8 { helper(base(x)) }"#,
+        ),
+    ] {
+        write_module(root.path(), name, body)?;
+    }
+    let source = r#"
+use left;
+use right;
+fn helper(x: u8) -> u8 { !x }
+block circuit(clk, x: u8) -> (u8, u8, u8) {
+    (left::apply(x), right::apply(x), helper(x))
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    assert_eq!(checked.functions().len(), 7);
+    assert_eq!(checked.imported_calls().len(), 2);
+    let fresh = compile_design(source, &options)?;
+    drop(root);
+    let saved = lower_module(&checked, empty_package("test"), ResetBehavior::default())?;
+    assert_eq!(saved.to_string(), fresh.to_string());
+    assert_eq!(
+        run(saved, 5)?,
+        IrValue::parse_typed("(bits[8]:8, bits[8]:18, bits[8]:250)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn imported_block_templates_distinguish_callbacks_with_the_same_signature()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "pipe.bx",
+        r#"
+pub block apply<In, Out, F: fn(In) -> Out>(clk, x: In) -> Out { F(x) }
+pub fn widen(x: u8) -> u16 { (x as u16) + u16:1 }
+"#,
+    )?;
+    let source = r#"
+use pipe;
+fn widen(x: u8) -> u16 { (x as u16) + u16:2 }
+pub block circuit(clk, x: u8) -> (u16, u16) {
+    let a = pipe::apply<pipe::widen>(x);
+    let b = pipe::apply<widen>(x);
+    (a, b)
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let package = compile_design(source, &options)?;
+    assert_eq!(
+        run(package, 255)?,
+        IrValue::parse_typed("(bits[16]:256, bits[16]:257)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn bx_libraries_keep_their_extern_link_symbols() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "ops.bx",
+        r#"
+extern fn unused(x: u8) -> u8;
+extern fn adjust(x: u8) -> u8 = "linked_adjust";
+extern fn identity(x: u8) -> u8;
+extern fn chip::invert(x: u8) -> u8;
+extern block bridge(clk, x: u8) -> u8;
+pub block apply(clk, x: u8) -> u8 {
+    let y = bridge(identity(x));
+    adjust(chip::invert(y))
+}
+"#,
+    )?;
+    write_module(
+        root.path(),
+        "other.bx",
+        r#"
+extern fn adjust(x: u8) -> u8 = "identity";
+extern fn bump(x: u8) -> u8;
+extern block bridge(clk, x: u8) -> u8;
+pub block apply(clk, x: u8) -> u8 {
+    let y = bridge(x);
+    adjust(bump(y))
+}
+"#,
+    )?;
+    let source = r#"
+use ops;
+use other;
+fn adjust(x: u8) -> u8 { x }
+block circuit(clk, x: u8) -> (u8, u8, u8) {
+    let y = ops::apply(x);
+    let z = other::apply(x);
+    (adjust(x), y, z)
+}
+"#;
+    let supplied = Parser::new(
+        r#"package test
+fn linked_adjust(x: bits[8] id=1) -> bits[8] { ret n: bits[8] = not(x, id=2) }
+fn identity(x: bits[8] id=3) -> bits[8] { ret v: bits[8] = identity(x, id=4) }
+fn __chip__invert(x: bits[8] id=5) -> bits[8] { ret n: bits[8] = not(x, id=6) }
+block bridge(clk: clock, x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=7)
+  v: bits[8] = neg(x, id=8)
+  out: () = output_port(v, name=out, id=9)
+}
+fn __test__bump(x: bits[8] id=10) -> bits[8] {
+  one: bits[8] = literal(value=1, id=11)
+  ret sum: bits[8] = add(x, one, id=12)
+}
+"#,
+    )
+    .parse_and_verify_package()?;
+    let options = search_paths(&[root.path()]);
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    assert_eq!(
+        checked
+            .externs()
+            .iter()
+            .map(|f| (f.name.as_str(), f.symbol.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            ("adjust", Some("linked_adjust")),
+            ("identity", None),
+            ("chip::invert", None),
+            ("adjust", Some("identity")),
+            ("bump", None),
+        ]
+    );
+    assert_eq!(
+        checked
+            .extern_blocks()
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>(),
+        ["bridge", "bridge"]
+    );
+    let package = lower_module(&checked, supplied, ResetBehavior::default())?;
+    assert_eq!(
+        run(package, 3)?,
+        IrValue::parse_typed("(bits[8]:3, bits[8]:253, bits[8]:254)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn private_members_missing_members_and_implicit_transitive_imports_are_rejected()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(root.path(), "hidden.bx", "pub fn marker(x: u8) -> u8 { x }")?;
+    write_module(
+        root.path(),
+        "lib.bx",
+        r#"
+use hidden::marker;
+const BIAS = u8:1;
+struct Payload { value: u8 }
+fn adjust(x: u8) -> u8 { marker(x) }
+block child(clk, x: u8) -> u8 { adjust(x) }
+pub fn expose(x: u8) -> u8 { adjust(x) + BIAS }
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    for member in ["BIAS", "Payload", "adjust", "child", "marker", "absent"] {
+        let source = format!("use lib::{member}; block circuit(clk, x: u8) -> u8 {{ x }}");
+        let error = check_module_with_options(&parse_module(&source)?, &options).unwrap_err();
+        assert!(error.contains(member), "{source}\n{error}");
+    }
+    for callee in ["lib::adjust", "lib::marker", "marker"] {
+        let source = format!("use lib; block circuit(clk, x: u8) -> u8 {{ {callee}(x) }}");
+        assert!(
+            check_module_with_options(&parse_module(&source)?, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn transitive_bx_use_cycles_report_the_modules_involved() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(root.path(), "first.bx", "use second;")?;
+    write_module(root.path(), "second.bx", "use first;")?;
+    let options = search_paths(&[root.path()]);
+    let module = parse_module("use first; block circuit(clk, x: u8) -> u8 { x }")?;
+    let error = check_module_with_options(&module, &options).unwrap_err();
+    assert!(
+        error.contains("cyclic BX import: first -> second -> first"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_independent_export_omits_unused_functions_blocks_and_prelinked_externs()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "arithmetic.x",
+        r#"
+pub fn increment(x: u8) -> u8 { x + u8:1 }
+pub fn subtract(x: u8) -> u8 { x - u8:1 }
+"#,
+    )?;
+    write_module(
+        root.path(),
+        "lanes.bx",
+        r#"
+use arithmetic;
+extern fn external_score(x: u8) -> u8;
+extern block external_stage(clk, x: u8) -> u8;
+fn score(x: u8) -> u8 { external_score(arithmetic::subtract(x)) }
+pub block scoring(clk, x: u8) -> u8 { let y = external_stage(x); score(y) }
+fn step(x: u8) -> u8 { arithmetic::increment(x) }
+pub fn adjust(xs: u8[1]) -> u8[1] {
+    map(xs, |x| for (i, carry) in u8:0..u8:1 {
+        match x {
+            u8:0..u8:0 => external_score(x),
+            _ => step(carry + i),
+            u8:9 => external_score(x),
+        }
+    }(x))
+}
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let source = "use lanes; block circuit(clk, x: u8) -> u8 { lanes::adjust([x])[u32:0] }";
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    assert_eq!(checked.functions().len(), 2);
+    assert_eq!(checked.blocks().len(), 1);
+    assert!(checked.extern_blocks().is_empty() && checked.externs().is_empty());
+    let package = lower_module(&checked, empty_package("test"), ResetBehavior::default())?;
+    assert!(package.get_fn("__arithmetic__subtract").is_none());
+    assert_eq!(run(package, 73)?, IrValue::make_ubits(8, 74)?);
+
+    let source = source.replace("lanes::adjust([x])[u32:0]", "let y = lanes::scoring(x); y");
+    assert!(
+        compile_design(&source, &options)
+            .unwrap_err()
+            .contains("external_score")
+    );
+    let root_extern =
+        "use lanes; extern fn root_score(x: u8) -> u8; block circuit(clk, x: u8) -> u8 { x }";
+    assert!(
+        compile_design(root_extern, &options)
+            .unwrap_err()
+            .contains("root_score")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_member_use_ignores_an_unrelated_bx_file_named_after_the_member() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    let caller = "use arithmetic::bump; block circuit(clk, x: u8) -> u8 { bump(x) }";
+    write_module(root.path(), "bump.bx", caller)?;
+    let options = search_paths(&[root.path()]);
+    for ext in ["bx", "x"] {
+        write_module(
+            root.path(),
+            &format!("arithmetic.{ext}"),
+            "pub fn bump(x: u8) -> u8 { x + u8:1 }",
+        )?;
+        assert_eq!(
+            run(compile_design(caller, &options)?, 3)?,
+            IrValue::make_ubits(8, 4)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn search_order_prefers_full_module_paths_and_existing_dslx_modules() -> Result<(), Box<dyn Error>>
+{
+    let first = tempdir()?;
+    let second = tempdir()?;
+    let source = "use device::probe; block circuit(clk, x: u8) -> u8 { probe::tag(x) }";
+    for (dir, offset) in [(first.path(), 1), (second.path(), 7)] {
+        write_module(
+            dir,
+            "device/probe.bx",
+            &format!("pub fn tag(x: u8) -> u8 {{ x + u8:{offset} }}"),
+        )?;
+    }
+    // A full module path wins over the same member name in a parent module.
+    write_module(first.path(), "device.x", "pub fn probe(x: u8) -> u8 { x }")?;
+    for (paths, expected) in [
+        ([first.path(), second.path()], 4),
+        ([second.path(), first.path()], 10),
+    ] {
+        let package = compile_design(source, &search_paths(&paths))?;
+        assert_eq!(run(package, 3)?, IrValue::make_ubits(8, expected)?);
+    }
+    write_module(
+        second.path(),
+        "device/probe.x",
+        "pub fn tag(x: u8) -> u8 { !x }",
+    )?;
+    let package = compile_design(source, &search_paths(&[first.path(), second.path()]))?;
+    assert_eq!(run(package, 3)?, IrValue::make_ubits(8, 252)?);
+    Ok(())
+}
+
+#[test]
+fn matching_struct_layouts_in_different_libraries_remain_distinct_types()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let library = r#"
+pub struct Tag { value: u8 }
+pub fn make(x: u8) -> Tag { Tag { value: x } }
+pub fn read(x: Tag) -> u8 { x.value + u8:1 }
+"#;
+    write_module(root.path(), "a/b.bx", library)?;
+    write_module(root.path(), "a_b.bx", &library.replace("u8:1", "u8:7"))?;
+    let options = search_paths(&[root.path()]);
+    let source = "use a::b; use a_b; block circuit(clk, x: u8) -> u8 { b::read(a_b::make(x)) }";
+    assert!(
+        check_module_with_options(&parse_module(source)?, &options).is_err(),
+        "{source}"
+    );
+    let source = r#"
+use a::b;
+use a_b;
+block circuit(clk, x: u8) -> (u8, u8) {
+    (b::read(b::make(x)), a_b::read(a_b::make(x)))
+}
+"#;
+    assert_eq!(
+        run(compile_design(source, &options)?, 47)?,
+        IrValue::parse_typed("(bits[8]:48, bits[8]:54)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn builtin_calls_follow_their_defining_module_and_use_order() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "ops.bx",
+        r#"
+pub fn map() -> u8 { u8:4 }
+pub fn update() -> u8 { u8:5 }
+pub fn zero!() -> u8 { u8:6 }
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "lib.bx",
+        r#"
+pub fn original(x: u8) -> u8 {
+    let xs = map([x], |v| v + u8:1);
+    let ys = update([zero!<u8>()], u32:0, xs[u32:0]);
+    ys[u32:0]
+}
+use ops::{map, update, zero!};
+pub fn overridden() -> u8 { map() + update() + zero!<u8>() }
+"#,
+    )?;
+    let source = r#"
+use lib;
+fn map() -> u8 { u8:7 }
+fn update() -> u8 { u8:8 }
+fn zero!() -> u8 { u8:9 }
+block circuit(clk, x: u8) -> (u8, u8) { (lib::original(x), lib::overridden()) }
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    assert_eq!(
+        run(package, 10)?,
+        IrValue::parse_typed("(bits[8]:11,bits[8]:15)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn signatures_bind_each_parameter_before_qualifying_its_type() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    for module in ["helper", "clk", "rst"] {
+        write_module(
+            root.path(),
+            &format!("{module}.bx"),
+            "pub struct Tag { value: u8 }",
+        )?;
+    }
+    let options = search_paths(&[root.path()]);
+    for (module, declaration) in [
+        (
+            "helper",
+            "fn read(helper: u8, x: helper::Tag) -> u8 { x.value }",
+        ),
+        (
+            "helper",
+            "fn read(helper: helper::Tag) -> u8 { helper.value }",
+        ),
+        ("helper", "extern fn read(helper: u8) -> helper::Tag;"),
+        (
+            "helper",
+            "block read(clk, helper: u8, x: helper::Tag) -> u8 { x.value }",
+        ),
+        (
+            "helper",
+            "fn read<helper: fn(u8) -> u8>(x: helper::Tag) -> u8 { x.value }",
+        ),
+        ("clk", "block read(clk, x: clk::Tag) -> u8 { x.value }"),
+        ("rst", "extern block read(clk, rst, x: rst::Tag) -> u8;"),
+    ] {
+        let source = format!("use {module}; {declaration}");
+        let error = check_module_with_options(&parse_module(&source)?, &options).unwrap_err();
+        assert!(
+            error.contains(&format!("'{module}' names a local value here")),
+            "{source}\n{error}"
+        );
+    }
+    let source = "use helper::Tag; fn read(Tag: Tag) -> u8 { Tag.value }";
+    let error = check_module_with_options(&parse_module(source)?, &options).unwrap_err();
+    assert!(error.contains("'Tag' names a local value here"), "{error}");
+    write_module(
+        root.path(),
+        "hidden.bx",
+        "struct Tag { value: u8 } pub fn read(Tag: Tag) -> u8 { Tag.value }",
+    )?;
+    let error = check_module_with_options(&parse_module("use hidden;")?, &options).unwrap_err();
+    assert!(error.contains("'Tag' names a local value here"), "{error}");
+
+    // A field named helper leaves the module visible to the next field, and a
+    // type parameter remains a type inside a generic block signature.
+    let source = r#"
+use helper;
+struct Payload { helper: u8, tag: helper::Tag }
+block identity<T>(clk, data: T) -> T { data }
+block circuit(clk, x: u8) -> u8 {
+    let p = Payload { helper: x, tag: helper::Tag { value: x } };
+    let result = identity(p);
+    result.tag.value
+}
+"#;
+    assert_eq!(
+        run(compile_design(source, &options)?, 47)?,
+        IrValue::make_ubits(8, 47)?
+    );
+    Ok(())
+}
+
+#[test]
+fn qualified_extern_calls_and_underscore_hardware_ports_keep_their_source_bindings()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "device.bx",
+        r#"
+extern fn chip::invert(x: u8) -> u8;
+fn invert(chip: u8) -> u8 { chip::invert(chip) }
+pub block drive(clk, _: u8) -> u8 { invert(_) }
+"#,
+    )?;
+    let source = r#"
+use device;
+extern fn chip::invert(x: u8) -> u8;
+pub block circuit(clk, chip: u8) -> (u8, u8) {
+    let y = device::drive(chip);
+    (y, chip::invert(chip))
+}
+"#;
+    let linked = Parser::new(
+        r#"package test
+fn __chip__invert(x: bits[8] id=1) -> bits[8] { ret v: bits[8] = not(x, id=2) }
+"#,
+    )
+    .parse_and_verify_package()?;
+    let package = compile_with_options(
+        source,
+        linked,
+        ResetBehavior::default(),
+        &search_paths(&[dir.path()]),
+    )?;
+    assert_eq!(
+        run(package, 5)?,
+        IrValue::parse_typed("(bits[8]:250, bits[8]:250)")?
+    );
+    Ok(())
+}
+
+#[test]
+fn calls_on_local_values_are_checked_when_a_loop_iteration_elaborates() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let library = r#"
+pub block stage(clk, x: u8) -> u8 {
+    unroll_for! (i, a) in u8:0..u8:0 { let y = x(a); y }(x)
+}
+"#;
+    // The root has a block named x. A skipped call only needs its local x to
+    // be in scope, and an elaborated call cannot instantiate the root block.
+    let root = r#"
+use device;
+block x(clk, data: u8) -> u8 { !data }
+pub block circuit(clk, data: u8) -> u8 { let y = device::stage(data); y }
+"#;
+    write_module(dir.path(), "device.bx", library)?;
+    assert_eq!(
+        run(compile_design(root, &options)?, 5)?,
+        IrValue::make_ubits(8, 5)?
+    );
+    write_module(
+        dir.path(),
+        "device.bx",
+        &library.replace("..u8:0", "..u8:1"),
+    )?;
+    let error = compile_design(root, &options).unwrap_err();
+    assert!(error.contains("'x' names a local value here"), "{error}");
+
+    let loop_binder = library.replace("x(a)", "i(a)");
+    write_module(dir.path(), "device.bx", &loop_binder)?;
+    assert_eq!(
+        run(compile_design(root, &options)?, 5)?,
+        IrValue::make_ubits(8, 5)?
+    );
+    write_module(
+        dir.path(),
+        "device.bx",
+        &loop_binder.replace("..u8:0", "..u8:1"),
+    )?;
+    let error = compile_design(root, &options).unwrap_err();
+    assert!(error.contains("'i' names a loop-local value"), "{error}");
+
+    // A name absent from the library is still invalid in a skipped loop,
+    // even if the root declares that name.
+    write_module(
+        dir.path(),
+        "device.bx",
+        &library
+            .replace("clk, x:", "clk, v:")
+            .replace("}(x)", "}(v)"),
+    )?;
+    let error = compile_design(root, &options).unwrap_err();
+    assert!(
+        error.contains("unknown name 'x' in BX module 'device'"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_simple_block_let_rebinding_a_tuple_pattern_still_shadows_an_extern()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "device.bx",
+        r#"
+extern fn chip(x: u8) -> u8;
+pub block stage(clk, x: u8) -> u8 {
+    let (chip, _) = (x, x);
+    let chip = x;
+    chip(chip)
+}
+"#,
+    )?;
+    let module = parse_module("use device;")?;
+    let error = check_module_with_options(&module, &search_paths(&[dir.path()])).unwrap_err();
+    assert!(error.contains("'chip' names a local value here"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn a_scoped_callee_keeps_its_binding_when_prepared_for_a_loop() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(dir.path(), "unused.bx", "")?;
+    let options = search_paths(&[dir.path()]);
+    let source = r#"
+fn ident(x: u8) -> u8 { x }
+block circuit(clk, x: u8) -> u8 {
+    ident({ let w = x; unroll_for! (i, a) in u8:0..u8:0 { let y = w(a); y }(x) })
+}
+"#;
+    for uses in ["", "use unused;"] {
+        let source = format!("{uses}\n{source}");
+        assert_eq!(
+            run(compile_design(&source, &options)?, 9)?,
+            IrValue::make_ubits(8, 9)?
+        );
+        let error = compile_design(&source.replace("..u8:0", "..u8:1"), &options).unwrap_err();
+        assert!(error.contains("'w' names a local value"), "{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn import_qualification_bounds_guard_nesting_independently_of_expression_height()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(dir.path(), "unused.bx", "")?;
+    let options = search_paths(&[dir.path()]);
+    let sum = ["x"; 63].join("+");
+    for guards in [3, 55] {
+        let source = format!(
+            "block circuit(clk, x: u8) -> u8 {{ reg r: u8; {} r := {sum}; {} r }}",
+            "if true { ".repeat(guards),
+            "} ".repeat(guards),
+        );
+        let standalone = compile_design(&source, &options)?;
+        let imported = compile_design(&format!("use unused; {source}"), &options)?;
+        assert_eq!(imported.to_string(), standalone.to_string());
+    }
+
+    let mut module = parse_module("use unused; block circuit(clk) -> () { () }")?;
+    let statements = &mut module.blocks[0].statements;
+    for _ in 0..128 {
+        let body = std::mem::take(statements);
+        statements.push(Stmt::If {
+            condition: Expr::Bool(true),
+            body,
+        });
+    }
+    let error = check_module_with_options(&module, &options).unwrap_err();
+    assert_eq!(error, "BX import guard exceeds 64 levels");
+    Ok(())
+}

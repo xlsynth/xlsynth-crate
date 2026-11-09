@@ -474,12 +474,13 @@ impl BodyChecker<'_, '_> {
         if locals.contains(&map.target) {
             return Err("'map' names a local value here".into());
         }
-        let module_binding = self.decls.visible("map", self.function_position)
+        let module_binding = map.target == "map"
+            && self.decls.visible("map", self.function_position)
             && (self.decls.functions.contains_key("map")
                 || self.decls.is_block("map")
                 || self.structs.indices.contains_key("map")
                 || self.resolver.lookup("map")?.is_some());
-        if map.target != "map"
+        if !matches!(map.target.as_str(), "map" | crate::bx_import::BUILTIN_MAP)
             || self.callback_index("map").is_some()
             || module_binding
             || self
@@ -632,6 +633,7 @@ impl BodyChecker<'_, '_> {
     /// An unused call still needs a visible callee, but DSLX checks its kind
     /// and arity only when it elaborates an iteration.
     fn check_value_name(&self, name: &str, locals: &LexicalScope<'_>) -> Result<(), String> {
+        let name = crate::bx_import::local_callee_name(name).unwrap_or(name);
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
@@ -645,7 +647,7 @@ impl BodyChecker<'_, '_> {
             ));
         }
         self.reject_type_parameter_value(name)?;
-        if name == "update" {
+        if matches!(name, "update" | crate::bx_import::BUILTIN_UPDATE) {
             return Ok(());
         }
         if !self.decls.visible(name, self.function_position) {

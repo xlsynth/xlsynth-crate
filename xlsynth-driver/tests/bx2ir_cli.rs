@@ -92,6 +92,31 @@ fn multiplier_error(directory: &TempDir) -> Result<String> {
 }
 
 #[test]
+fn bx_library_next_to_the_input_is_visible_from_another_working_directory() -> Result<()> {
+    let directory = TempDir::new()?;
+    let source_dir = directory.path().join("design");
+    fs::create_dir(&source_dir)?;
+    fs::write(
+        source_dir.join("stages.bx"),
+        "pub block identity<T>(clk, x: T) -> T { x }",
+    )?;
+    fs::write(
+        source_dir.join("circuit.bx"),
+        r#"
+use stages;
+block circuit(clk, x: u8) -> u8 { let y = stages::identity(x); y }
+"#,
+    )?;
+    let ir = stdout(directory.path(), &["bx2ir", "design/circuit.bx"])?;
+    let package = Parser::new(&ir).parse_and_verify_package()?;
+    assert_eq!(
+        package.get_top_block().map(|b| b.name.as_str()),
+        Some("circuit")
+    );
+    Ok(())
+}
+
+#[test]
 fn transitive_runtime_width_assertions_point_at_the_multiplier() -> Result<()> {
     let directory = multiplier_design(
         r#"    assert!(N >= u32:2, "min_width");

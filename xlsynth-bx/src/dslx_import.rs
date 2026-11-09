@@ -16,7 +16,7 @@ use crate::ImportOptions;
 use crate::ast::{StructDef, Type, UsePath};
 use crate::check::MAX_TYPE_SIZE;
 use crate::import_structs::ImportedStructs;
-use crate::parser::{MAX_SYNTAX_DEPTH, is_dslx_member_name, is_identifier_word, is_use_identifier};
+use crate::parser::{is_dslx_member_name, is_identifier_word};
 
 /// An imported DSLX function specialized for one set of BX argument types.
 #[derive(Clone, Debug)]
@@ -52,7 +52,7 @@ pub(crate) struct ImportBatch {
 /// A use leaf names either a module or a member of its parent module.
 enum UseBinding {
     Module(String),
-    MemberOf(String),
+    Member { subject: String, name: String },
 }
 
 /// Per-check import graph and memoized concrete function signatures.
@@ -75,6 +75,16 @@ impl ImportResolver {
         declarations: &[UsePath],
         options: &ImportOptions<'_>,
     ) -> Result<Self, String> {
+        Self::with_bindings(declarations, options, None)
+    }
+
+    /// Source paths remain intact for native typechecking. Each BX file can
+    /// bind the same leaf to a different native module or member.
+    pub(crate) fn with_bindings(
+        declarations: &[UsePath],
+        options: &ImportOptions<'_>,
+        aliases: Option<&[String]>,
+    ) -> Result<Self, String> {
         let stdlib_path = options
             .dslx_stdlib_path
             .unwrap_or(xlsynth::default_dslx_stdlib_path());
@@ -89,34 +99,19 @@ impl ImportResolver {
             }
         }
         let mut names = BTreeSet::new();
-        for declaration in declarations {
-            let Some(leaf) = declaration.components.last() else {
-                return Err("empty DSLX use path".into());
-            };
-            if declaration.components.len() > MAX_SYNTAX_DEPTH {
-                return Err(format!(
-                    "DSLX use path exceeds {MAX_SYNTAX_DEPTH} components"
-                ));
-            }
-            if !declaration
-                .components
-                .iter()
-                .all(|name| is_use_identifier(name))
-            {
-                return Err(format!(
-                    "invalid DSLX use path {:?}",
-                    declaration.components
-                ));
-            }
-            if !names.insert(leaf) {
-                return Err(format!("duplicate use binding '{leaf}'"));
+        for (i, declaration) in declarations.iter().enumerate() {
+            crate::bx_import::validate_use_path(declaration)?;
+            let leaf = declaration.binding().expect("validated use");
+            let binding = aliases.map_or(leaf, |a| a[i].as_str());
+            if !names.insert(binding) {
+                return Err(format!("duplicate use binding '{binding}'"));
             }
         }
         let (structs, imports) =
             ImportedStructs::load(declarations, stdlib_path, &options.additional_search_paths)?;
         let mut bindings = BTreeMap::new();
         let mut subjects = BTreeSet::new();
-        for declaration in declarations {
+        for (i, declaration) in declarations.iter().enumerate() {
             let (leaf, parents) = declaration.components.split_last().expect("validated use");
             let subject = declaration.components.join(".");
             let binding = if structs.has_module(&subject) {
@@ -125,9 +120,12 @@ impl ImportResolver {
             } else {
                 let parent = parents.join(".");
                 subjects.insert(parent.clone());
-                UseBinding::MemberOf(parent)
+                UseBinding::Member {
+                    subject: parent,
+                    name: leaf.clone(),
+                }
             };
-            bindings.insert(leaf.clone(), binding);
+            bindings.insert(aliases.map_or(leaf, |a| &a[i]).clone(), binding);
         }
         Ok(Self {
             bindings,
@@ -146,16 +144,14 @@ impl ImportResolver {
         if let Some((head, member)) = source_name.split_once("::") {
             return match self.bindings.get(head) {
                 Some(UseBinding::Module(subject)) => Ok(Some((subject.clone(), member.to_owned()))),
-                Some(UseBinding::MemberOf(_)) => Err(format!(
+                Some(UseBinding::Member { .. }) => Err(format!(
                     "use binding '{head}' is a DSLX member and cannot qualify '{source_name}'"
                 )),
                 None => Ok(None),
             };
         }
         match self.bindings.get(source_name) {
-            Some(UseBinding::MemberOf(subject)) => {
-                Ok(Some((subject.clone(), source_name.to_owned())))
-            }
+            Some(UseBinding::Member { subject, name }) => Ok(Some((subject.clone(), name.clone()))),
             Some(UseBinding::Module(_)) => Err(format!(
                 "use binding '{source_name}' names a DSLX module and requires a member"
             )),
@@ -339,10 +335,21 @@ fn probe_{id}({}) {{ capture({}) }}
     /// Separate packages keep DSLX names such as `a.b` and `a_b` distinct
     /// until BX links their generated IR symbols into the destination.
     pub(crate) fn finish(self) -> Result<ResolvedImports, String> {
+        self.finish_with_calls(None)
+    }
+
+    /// Convert only the concrete DSLX calls used by retained BX definitions.
+    pub(crate) fn finish_with_calls(
+        self,
+        used: Option<&BTreeSet<usize>>,
+    ) -> Result<ResolvedImports, String> {
         let mut batches = Vec::new();
         if let Some(mut data) = self.imports? {
             let mut groups = BTreeMap::<(&str, bool), Vec<usize>>::new();
             for (id, call) in self.calls.iter().enumerate() {
+                if used.is_some_and(|used| !used.contains(&id)) {
+                    continue;
+                }
                 let concrete = call
                     .args
                     .iter()
@@ -738,6 +745,7 @@ fn compile_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::MAX_SYNTAX_DEPTH;
     use std::error::Error;
     use std::fs;
     use tempfile::tempdir;

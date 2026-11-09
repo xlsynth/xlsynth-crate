@@ -687,7 +687,11 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         return;
     }
     fn rename(name: &mut String, aliases: &BTreeMap<String, String>) {
-        if let Some((head, member)) = name.split_once("::") {
+        if let Some(local) = crate::bx_import::local_callee_name(name) {
+            if let Some(alias) = aliases.get(local) {
+                *name = crate::bx_import::mark_local_callee(alias);
+            }
+        } else if let Some((head, member)) = name.split_once("::") {
             if let Some(alias) = aliases.get(head) {
                 *name = format!("{alias}::{member}");
             }

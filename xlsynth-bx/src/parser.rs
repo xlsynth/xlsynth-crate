@@ -324,9 +324,29 @@ fn scan_character(source: &str) -> Option<(u8, usize)> {
     }
 }
 
-/// Parse a source module. Syntax diagnostics carry one-based line and column.
+/// Parse a source module without loading its imports. Imported spellings of
+/// `f<a,b>(x)` are parsed as calls. Use [`crate::parse_module_with_options`] to
+/// distinguish these calls from tuples of comparisons on imported constants,
+/// or an imported `zero!<callback>()` from the intrinsic `zero!<Type>()`.
+/// Syntax diagnostics carry one-based line and column.
 pub fn parse_module(source: &str) -> Result<Module, String> {
-    Parser::new(source, false)?.module()
+    Parser::new(source, false)?.module_with_imports(None)
+}
+
+/// Parse with the callable templates exported by the module's imports. Their
+/// source spellings distinguish callback arguments from pairs of comparisons.
+pub(crate) fn parse_with_templates(
+    source: &str,
+    templates: &BTreeSet<String>,
+) -> Result<Module, String> {
+    Parser::new(source, false)?.module_with_imports(Some(templates))
+}
+
+/// Collect use leaves before parsing expressions that depend on import kinds.
+pub(crate) fn module_uses(source: &str) -> Result<Vec<UsePath>, String> {
+    let mut paths = Vec::new();
+    Parser::new(source, false)?.visit_uses(|path, _| paths.push(path))?;
+    Ok(paths)
 }
 
 /// Parse a concrete value type printed by the DSLX type checker. In this
@@ -357,9 +377,25 @@ struct Parser<'s> {
     /// Local callback-template declarations disambiguate angle brackets from
     /// comparisons in a comma-separated expression list. Block callers can
     /// use function and block templates declared later in the source.
-    callback_templates: BTreeMap<&'s str, usize>,
+    callback_templates: BTreeMap<String, TemplateBinding>,
     /// Entries hidden by currently active data or callable bindings.
-    hidden_templates: Vec<(&'s str, usize)>,
+    hidden_templates: Vec<(String, TemplateBinding)>,
+}
+
+/// A binding can be a callable template itself, or a module exporting
+/// templates. The syntax-only parser has no member list for a use binding.
+struct TemplateBinding {
+    direct: Option<usize>,
+    members: Option<BTreeSet<String>>,
+}
+
+impl TemplateBinding {
+    fn local(start: usize) -> Self {
+        Self {
+            direct: Some(start),
+            members: Some(BTreeSet::new()),
+        }
+    }
 }
 
 /// Lambdas use DSLX function grammar. Inside a BX block they can also name
@@ -473,12 +509,13 @@ impl<'s> Parser<'s> {
         for ts in tokens.windows(3) {
             match (ts[0].text, ts[1].text, ts[2].text) {
                 ("fn", name, "<") => {
-                    callback_templates.insert(name, ts[1].start);
+                    callback_templates.insert(name.to_owned(), TemplateBinding::local(ts[1].start));
                 }
                 ("block", _, "<") => block_header = Some(ts[1]),
                 (":", "fn", "(") => {
                     if let Some(name) = block_header.take() {
-                        callback_templates.insert(name.text, name.start);
+                        callback_templates
+                            .insert(name.text.to_owned(), TemplateBinding::local(name.start));
                     }
                 }
                 (">", _, _) => block_header = None,
@@ -606,6 +643,66 @@ impl<'s> Parser<'s> {
         } else {
             Err(self.error("expected identifier"))
         }
+    }
+
+    /// Walk only top-level use declarations, sharing use-tree parsing and
+    /// duplicate binding checks with the complete module parse.
+    fn visit_uses(&mut self, mut visit: impl FnMut(UsePath, usize)) -> Result<(), String> {
+        let mut depth = 0usize;
+        let mut bindings = BTreeSet::new();
+        let mut paths = Vec::new();
+        while !self.peek(0).is_empty() {
+            let token = self.tokens[self.pos];
+            self.pos += 1;
+            match token.text {
+                "{" => depth += 1,
+                "}" => depth = depth.saturating_sub(1),
+                "use"
+                    if depth == 0
+                        && (self.pos == 1
+                            || matches!(self.tokens[self.pos - 2].text, ";" | "}")) =>
+                {
+                    self.use_tree(&mut paths, Some(&mut bindings))?;
+                    self.expect(";")?;
+                    for path in paths.drain(..) {
+                        visit(path, token.start);
+                    }
+                }
+                _ => { /* The module parser checks all other syntax. */ }
+            }
+        }
+        self.pos = 0;
+        Ok(())
+    }
+
+    /// Install visible import names before parsing, including uses declared
+    /// after a block. Local value bindings shadow a module and all its members.
+    fn module_with_imports(
+        &mut self,
+        templates: Option<&BTreeSet<String>>,
+    ) -> Result<Module, String> {
+        if self.tokens.iter().any(|token| token.text == "<") {
+            let mut imports = BTreeMap::new();
+            self.visit_uses(|mut path, start| {
+                let name = path.components.pop().expect("parsed use leaf");
+                let binding = TemplateBinding {
+                    direct: templates
+                        .is_none_or(|known| known.contains(&name))
+                        .then_some(start),
+                    members: templates.map(|_| BTreeSet::new()),
+                };
+                imports.insert(name, binding);
+            })?;
+            for name in templates.into_iter().flatten() {
+                if let Some((head, member)) = name.split_once("::")
+                    && let Some(members) = imports.get_mut(head).and_then(|b| b.members.as_mut())
+                {
+                    members.insert(member.to_owned());
+                }
+            }
+            self.callback_templates.extend(imports);
+        }
+        self.module()
     }
 
     fn module(&mut self) -> Result<Module, String> {
@@ -1278,7 +1375,11 @@ impl<'s> Parser<'s> {
                 self.hide_template(&name);
                 statements.push(Stmt::Inst {
                     name,
-                    block: self.ident()?,
+                    block: if self.peek(1) == "::" {
+                        self.name_or_qualified_member()?
+                    } else {
+                        self.ident()?
+                    },
                 });
             } else if self.peek(1) == ":=" {
                 let name = self.ident()?;
@@ -1512,10 +1613,15 @@ impl<'s> Parser<'s> {
         if self.eat("_") {
             return Ok(MatchPattern::Wildcard);
         }
-        if is_function_identifier(self.peek(0)) && matches!(self.peek(1), "=>" | "|") {
+        let end = if self.peek(1) == "::" && is_function_identifier(self.peek(2)) {
+            3
+        } else {
+            1
+        };
+        if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|") {
             // The checker resolves this name to a scalar module constant.
             // DSLX requires numeric literals on both sides of a range.
-            let name = self.take_identifier(is_function_identifier)?;
+            let name = self.name_or_qualified_member()?;
             return Ok(MatchPattern::Literal(Expr::Name(name)));
         }
         let first = self.pos;
@@ -2037,7 +2143,7 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return self.counted_for();
         }
-        if text == "zero!" && self.peek(1) == "<" && !self.visible_callback_template(text) {
+        if text == "zero!" && self.peek(1) == "<" && !self.zero_callback_call() {
             self.pos += 2;
             let ty = self.ty()?;
             self.expect(">")?;
@@ -2119,11 +2225,6 @@ impl<'s> Parser<'s> {
         if struct_args.is_some() {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
-        if name.contains("::") {
-            return Err(
-                self.error("expected a call or struct literal after a module-qualified name")
-            );
-        }
         Ok(ParsedExpr::leaf(Expr::Name(name)))
     }
 
@@ -2137,8 +2238,16 @@ impl<'s> Parser<'s> {
         // In `pair(x < y, z > (w))` the comma separates two comparisons.
         // Only a declared template can consume it as a callback separator.
         let name = self.tokens[angle - 1].text;
-        let allow_comma = self.callback_templates.contains_key(name)
-            && (angle < 2 || self.tokens[angle - 2].text != "::");
+        let allow_comma = match &self.tokens[..angle] {
+            [.., head, separator, _] if separator.text == "::" => self
+                .callback_templates
+                .get(head.text)
+                .is_some_and(|binding| binding.members.as_ref().is_none_or(|m| m.contains(name))),
+            _ => self
+                .callback_templates
+                .get(name)
+                .is_some_and(|binding| binding.direct.is_some()),
+        };
         let names = self.tokens[angle + 1..]
             .iter()
             .take_while(|token| {
@@ -2210,12 +2319,26 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// A user template can shadow the `zero!<T>()` intrinsic. A local
-    /// function or constant sees earlier declarations, while a block sees the
-    /// module.
-    fn visible_callback_template(&self, name: &str) -> bool {
-        self.callback_templates.get(name).is_some_and(|start| {
-            self.value_context != ValueContext::DslxItem || *start <= self.tokens[self.pos].start
+    /// Distinguish the typed zero intrinsic from a visible callback template
+    /// with the same name. Without import hints, preserve the intrinsic for a
+    /// single type argument and no value arguments.
+    fn zero_callback_call(&self) -> bool {
+        let Some(binding) = self.callback_templates.get("zero!") else {
+            return false;
+        };
+        let Some(start) = binding.direct else {
+            return false;
+        };
+        if self.value_context == ValueContext::DslxItem && start > self.tokens[self.pos].start {
+            return false;
+        }
+        if binding.members.is_some() {
+            return true;
+        }
+        let angle = self.pos + 1;
+        self.callback_arguments_end(angle).is_some_and(|end| {
+            self.tokens[end + 2].text != ")"
+                || self.tokens[angle + 1..end].iter().any(|t| t.text == ",")
         })
     }
 
@@ -3097,6 +3220,78 @@ block wrapped(clk, xs:u8[2])->u8[2] {
     }
 
     #[test]
+    fn imported_template_hints_disambiguate_callback_lists_and_constant_comparisons()
+    -> Result<(), String> {
+        let source = r#"
+extern fn hardware::use(x:u8) -> u8;
+use lib;
+use other::{apply, K};
+fn invoke(x: u8) -> u8 { lib::compose<left,right>(apply<left,right>(x)) }
+fn compare(a:u8, b:u8, x:u8) -> (bool,bool) { (lib::K<a,b>(x)) }
+fn compare_member(a:u8, b:u8, x:u8) -> (bool,bool) { (K < a, b > (x)) }
+fn shadow(apply:u8, a:u8, b:u8, x:u8) -> (bool,bool) { (apply < a, b > (x)) }
+"#;
+        let templates = BTreeSet::from(["lib::compose".to_string(), "apply".to_string()]);
+        let module = parse_with_templates(source, &templates)?;
+        assert_eq!(module_uses(source)?, module.uses);
+        let Expr::ParametricCall { name, args, .. } = &module.functions[0].body else {
+            panic!("expected qualified template call");
+        };
+        assert_eq!(name, "lib::compose");
+        assert!(matches!(&args[..], [Expr::ParametricCall { name, .. }] if name == "apply"));
+        for function in &module.functions[1..] {
+            assert!(matches!(
+                &function.body,
+                Expr::Tuple(fields) if matches!(&fields[..], [
+                    Expr::Binary { op: BinaryOp::Lt, .. },
+                    Expr::Binary { op: BinaryOp::Gt, .. },
+                ])
+            ));
+        }
+        // Syntax-only parsing can recognize an imported call before loading
+        // its file, including when the use is declared after a block.
+        let provisional = parse_module("block top(clk, x:u8) -> u8 { lib::f<a,b>(x) } use lib;")?;
+        assert!(
+            matches!(&provisional.blocks[0].output, Expr::ParametricCall { name, .. } if name == "lib::f")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn syntax_only_imported_zero_preserves_the_intrinsic_and_unambiguous_calls()
+    -> Result<(), String> {
+        let source = r#"
+use wire::zero!;
+block probe(clk) -> u8 { zero!<u8>() }
+fn named() -> Tag { zero!<Tag>() }
+fn pair() -> u8 { zero!<left,right>() }
+fn apply(x: u8) -> u8 { zero!<left>(x) }
+"#;
+        let module = parse_module(source)?;
+        assert!(matches!(&module.blocks[0].output, Expr::Zero(_)));
+        assert_eq!(
+            module.functions[0].body,
+            Expr::Zero(Type::Named("Tag".into()))
+        );
+        assert!(matches!(
+            &module.functions[1].body,
+            Expr::ParametricCall { callbacks, .. } if callbacks == &["left", "right"]
+        ));
+        assert!(matches!(
+            &module.functions[2].body,
+            Expr::ParametricCall { callbacks, args, .. } if callbacks == &["left"] && args.len() == 1
+        ));
+        let ambiguous = "use wire::zero!; fn f() -> u8 { zero!<Tag>() }";
+        let templates = BTreeSet::from(["zero!".to_string()]);
+        let hinted = parse_with_templates(ambiguous, &templates)?;
+        assert!(matches!(
+            &hinted.functions[0].body,
+            Expr::ParametricCall { callbacks, .. } if callbacks == &["Tag"]
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn callback_parametrics_require_function_signatures_and_named_actuals() {
         for declaration in [
             "fn f<>(x:u8)->u8 {x}",
@@ -3649,7 +3844,7 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
     }
 
     #[test]
-    fn rejects_malformed_paths_qualified_values_and_qualified_declarations() {
+    fn rejects_malformed_paths_and_qualified_declarations() {
         for name in [
             "::mul_wide",
             "arithmetic::",
@@ -3662,12 +3857,37 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
             assert!(parse_module(&declaration).is_err(), "{declaration}");
             assert!(parse_module(&call).is_err(), "{call}");
         }
-        for source in [
-            "block b(clk) -> u8 { arithmetic::value }",
-            "struct arithmetic::Payload { x: u8 }",
-        ] {
-            assert!(parse_module(source).is_err(), "{source}");
-        }
+        assert!(parse_module("struct arithmetic::Payload { x: u8 }").is_err());
+    }
+
+    #[test]
+    fn qualified_names_can_refer_to_bx_blocks_and_constants() -> Result<(), String> {
+        let module = parse_module(
+            r#"use library;
+block top(clk, x: u8) -> u8 {
+    inst child: library::pipe;
+    child.x := library::OFFSET;
+    match x { library::OFFSET | library::LIMIT => child.out, _ => u8:0 }
+}"#,
+        )?;
+        let block = &module.blocks[0];
+        assert!(
+            matches!(&block.statements[0], Stmt::Inst { block, .. } if block == "library::pipe")
+        );
+        assert!(
+            matches!(&block.statements[1], Stmt::Connect { value: Expr::Name(name), .. } if name == "library::OFFSET")
+        );
+        let Expr::Match { arms, .. } = &block.output else {
+            panic!("expected a match on the input");
+        };
+        assert_eq!(
+            arms[0].patterns,
+            [
+                MatchPattern::Literal(Expr::Name("library::OFFSET".into())),
+                MatchPattern::Literal(Expr::Name("library::LIMIT".into())),
+            ]
+        );
+        Ok(())
     }
 
     #[test]
