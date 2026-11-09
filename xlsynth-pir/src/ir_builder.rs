@@ -437,20 +437,30 @@ impl<S: sealed::State> Builder<S> {
 
     /// Apply a unary function independently to every array element.
     pub fn map(&mut self, array: BValue, body: &ir::Fn) -> Result<BValue, BuilderError> {
-        self.check_callee(body)?;
+        self.map_with_signature(array, &InvokeSignature::from_function(body)?)
+    }
+
+    /// Map a previously checked unary signature, resolving its callee when
+    /// the caller is inserted in the destination package.
+    pub fn map_with_signature(
+        &mut self,
+        array: BValue,
+        body: &InvokeSignature,
+    ) -> Result<BValue, BuilderError> {
+        self.check_callee_type(&body.name, &body.ty)?;
         let array = self.node(array)?;
         let Type::Array(input) = self.graph.get_node_ty(array) else {
             return Err(BuilderError::InvalidOperation(
                 "map requires an array".into(),
             ));
         };
-        if body.params.len() != 1 || &body.get_param(0).ty != input.element_type.as_ref() {
+        if body.ty.param_types.as_slice() != std::slice::from_ref(input.element_type.as_ref()) {
             return Err(BuilderError::InvalidOperation(format!(
                 "map body '{}' requires one parameter of type {}",
                 body.name, input.element_type
             )));
         }
-        let result = Type::new_array(body.ret_ty.clone(), input.element_count);
+        let result = Type::new_array(body.ty.return_type.clone(), input.element_count);
         let value = self.add_node(
             NodePayload::Map {
                 array,
@@ -460,7 +470,7 @@ impl<S: sealed::State> Builder<S> {
         )?;
         self.callees
             .entry(body.name.clone())
-            .or_insert_with(|| body.get_type());
+            .or_insert_with(|| body.ty.clone());
         Ok(value)
     }
 

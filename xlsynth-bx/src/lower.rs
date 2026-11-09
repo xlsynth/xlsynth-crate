@@ -35,6 +35,27 @@ struct LinkedFunctions {
     signatures: HashMap<usize, InvokeSignature>,
 }
 
+impl LinkedFunctions {
+    /// Recognize a map body that passes its element directly to one linked
+    /// function. The IR map can use that function's cached signature.
+    fn forwarded_map_target(&self, map: &TypedMap) -> Option<&InvokeSignature> {
+        if !map.bindings.is_empty() || !map.captures.is_empty() {
+            return None;
+        }
+        let (index, args) = match &map.output.kind {
+            TypedExprKind::Call { name, args } => (self.named[name], args),
+            TypedExprKind::ImportedCall { id, args } => (self.imported[id], args),
+            _ => return None,
+        };
+        match args.as_slice() {
+            [arg] if matches!(&arg.kind, TypedExprKind::Name(name) if *name == map.element.name) => {
+                Some(&self.signatures[&index])
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Captures the checked signature once per distinct linked function.
 fn invoke_signature(package: &Package, index: usize) -> Result<InvokeSignature, String> {
     let PackageMember::Function(function) = &package.members[index] else {
@@ -902,6 +923,9 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     /// the result array when the lambda reads enclosing wires.
     fn map(&mut self, map: &TypedMap) -> Result<BValue, BuilderError> {
         let array = self.expr(&map.array)?;
+        if let Some(target) = self.functions.forwarded_map_target(map) {
+            return self.builder.map_with_signature(array, target);
+        }
         let symbol = self.destination.body_symbol("map");
         let mut builder = FnBuilder::new(&symbol);
         let element = builder.param("element", self.layouts.lower(&map.element.ty)?)?;

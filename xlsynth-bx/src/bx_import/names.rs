@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::Names;
+use super::{BUILTIN_MAP, Names};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, Expr, ExternBlock, ExternFn, ForIterable,
     ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef,
@@ -273,7 +273,20 @@ impl<'a> Scope<'a> {
             Some(Local::Lexical | Local::Hardware) => {
                 Err(format!("'{name}' names a local value here"))
             }
+            None if site == CallSite::Direct && name == "map" => self
+                .names
+                .resolve_with_root_fallback(name, self.at, BUILTIN_MAP),
             Some(Local::Formal) | None => self.reference(name, self.at),
+        }
+    }
+
+    /// Resolve qualified map callbacks like direct calls, including a qualified
+    /// extern whose prefix happens to name a local value.
+    fn map_callback(&self, name: &str) -> Result<String, String> {
+        if name.contains("::") {
+            self.callee(name, CallSite::Direct)
+        } else {
+            self.reference(name, self.at)
         }
     }
 
@@ -567,10 +580,25 @@ impl<'a> Scope<'a> {
                     },
                 },
             },
-            Expr::Call { name, args } => Expr::Call {
-                name: self.callee(name, CallSite::Direct)?,
-                args: self.expressions(args)?,
-            },
+            Expr::Call { name, args } => {
+                let callee = self.callee(name, CallSite::Direct)?;
+                // A block may reference a function imported later in this file.
+                // Resolve the callback at the same position as a direct call.
+                let args = if callee == BUILTIN_MAP {
+                    args.iter()
+                        .enumerate()
+                        .map(|(index, arg)| match (index, arg) {
+                            (1, Expr::Name(callback)) => {
+                                Ok(Expr::Name(self.map_callback(callback)?))
+                            }
+                            _ => self.expr(arg),
+                        })
+                        .collect::<Result<_, String>>()?
+                } else {
+                    self.expressions(args)?
+                };
+                Expr::Call { name: callee, args }
+            }
             Expr::ParametricCall {
                 name,
                 callbacks,
@@ -593,6 +621,15 @@ impl<'a> Scope<'a> {
                 args: self.expressions(args)?,
             },
             Expr::Map(map) => Expr::Map(Box::new(self.map(map)?)),
+            Expr::NamedMap {
+                target,
+                iterable,
+                callback,
+            } => Expr::NamedMap {
+                target: self.reference(target, self.at)?,
+                iterable: Box::new(self.iterable(iterable)?),
+                callback: self.map_callback(callback)?,
+            },
             Expr::Unary { op, value } => Expr::Unary {
                 op: *op,
                 value: Box::new(self.expr(value)?),

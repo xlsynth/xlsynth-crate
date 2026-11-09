@@ -2368,6 +2368,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 });
             }
             Expr::Map(map) => self.with_dslx_value_context(|checker| checker.map_lambda(map)),
+            Expr::NamedMap {
+                target,
+                iterable,
+                callback,
+            } => self.with_dslx_value_context(|checker| {
+                checker.named_range_map(target, iterable, callback)
+            }),
             Expr::Name(name) => self.named_value(name),
             Expr::Bool(value) => Ok((Type::Bool, K::Literal(IrValue::bool(*value)))),
             Expr::Zero(ty) => self.zero_value(ty),
@@ -3503,6 +3510,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve a local or extern signature or infer an imported DSLX
     /// specialization.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
+        let name = self.qualified_extern(name).unwrap_or(name);
         let local = crate::bx_import::local_callee_name(name);
         let binding = local.unwrap_or(name);
         let source_name = scope::source_binding_name(binding, &self.scope_alias_names);
@@ -3526,6 +3534,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         self.reject_type_parameter_value(name)?;
+        if self.is_builtin_map(name, |target| self.names.contains(target))? {
+            return self.with_dslx_value_context(|checker| checker.named_array_map(args));
+        }
         let visible = self.decls.visible(name, self.function_position);
         if !visible && name != "update" {
             return Err(format!("function '{name}' is declared later in the module"));

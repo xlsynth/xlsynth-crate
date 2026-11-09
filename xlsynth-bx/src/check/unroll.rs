@@ -473,24 +473,38 @@ impl<'a> LexicalScope<'a> {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Preserve ordinary calls to visible declarations named `map`.
+    pub(super) fn is_builtin_map(
+        &self,
+        target: &str,
+        is_local: impl FnOnce(&str) -> bool,
+    ) -> Result<bool, String> {
+        if target == crate::bx_import::BUILTIN_MAP {
+            return Ok(true);
+        }
+        if target != "map"
+            || is_local(target)
+            || self.callback_index(target).is_some()
+            || self
+                .specialization
+                .is_some_and(|spec| spec.bindings.declares(target))
+        {
+            return Ok(false);
+        }
+        Ok(!self.decls.visible(target, self.function_position)
+            || !(self.decls.functions.contains_key(target)
+                || self.decls.is_block(target)
+                || self.structs.indices.contains_key(target)
+                || self.module_constant(target).is_some()
+                || self.resolver.lookup(target)?.is_some()))
+    }
+
     /// A lambda argument is available only on the built-in map.
     fn check_map_target(&self, map: &MapExpr, locals: &LexicalScope<'_>) -> Result<(), String> {
         if locals.contains(&map.target) {
             return Err("'map' names a local value here".into());
         }
-        let module_binding = map.target == "map"
-            && self.decls.visible("map", self.function_position)
-            && (self.decls.functions.contains_key("map")
-                || self.decls.is_block("map")
-                || self.structs.indices.contains_key("map")
-                || self.resolver.lookup("map")?.is_some());
-        if !matches!(map.target.as_str(), "map" | crate::bx_import::BUILTIN_MAP)
-            || self.callback_index("map").is_some()
-            || module_binding
-            || self
-                .specialization
-                .is_some_and(|spec| spec.bindings.declares("map"))
-        {
+        if !self.is_builtin_map(&map.target, |_| false)? {
             return Err("an inline lambda argument requires the built-in map".into());
         }
         Ok(())
@@ -638,6 +652,7 @@ impl BodyChecker<'_, '_> {
     /// and arity only when it elaborates an iteration.
     fn check_value_name(&self, name: &str, locals: &LexicalScope<'_>) -> Result<(), String> {
         let name = crate::bx_import::local_callee_name(name).unwrap_or(name);
+        let name = self.qualified_extern(name).unwrap_or(name);
         if name == "_" {
             return Err("cannot read the wildcard binding '_'".into());
         }
@@ -696,6 +711,20 @@ impl BodyChecker<'_, '_> {
                     return Err("callable parameter 'zero!' requires a direct call".into());
                 }
                 self.check_type_names(ty, locals)?
+            }
+            Expr::Call { name, args }
+                if self.is_builtin_map(name, |target| locals.contains(target))? =>
+            {
+                // A skipped iteration resolves names without checking call
+                // arity.
+                for (index, arg) in args.iter().enumerate() {
+                    match (index, arg) {
+                        (1, Expr::Name(callback)) => {
+                            self.check_map_callee_name(callback, locals)?
+                        }
+                        _ => self.check_expr_names(arg, locals)?,
+                    }
+                }
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
@@ -824,23 +853,22 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Map(map) => {
                 self.check_map_target(map, locals)?;
-                match &map.iterable {
-                    ForIterable::Range { start, limit, .. } => {
-                        self.check_expr_names(start, locals)?;
-                        self.check_expr_names(limit, locals)?;
-                    }
-                    ForIterable::Array(array) => self.check_expr_names(array, locals)?,
-                }
+                self.check_iterable_names(&map.iterable, locals)?;
                 self.check_map_body_names(map, locals)?;
             }
-            Expr::For(fold) => {
-                match &fold.iterable {
-                    ForIterable::Range { start, limit, .. } => {
-                        self.check_expr_names(start, locals)?;
-                        self.check_expr_names(limit, locals)?;
-                    }
-                    ForIterable::Array(expr) => self.check_expr_names(expr, locals)?,
+            Expr::NamedMap {
+                target,
+                iterable,
+                callback,
+            } => {
+                if !self.is_builtin_map(target, |target| locals.contains(target))? {
+                    return Err("a range operand requires the built-in map".into());
                 }
+                self.check_iterable_names(iterable, locals)?;
+                self.check_map_callee_name(callback, locals)?;
+            }
+            Expr::For(fold) => {
+                self.check_iterable_names(&fold.iterable, locals)?;
                 if let Some((element, carry)) = &fold.annotation {
                     self.check_type_names(element, locals)?;
                     self.check_type_names(carry, locals)?;
@@ -855,6 +883,30 @@ impl BodyChecker<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    fn check_map_callee_name(
+        &self,
+        callback: &str,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        locals.visited.set(locals.visited.get().saturating_add(1));
+        self.map_callee(callback, |head| locals.contains(head))
+            .map(|_| ())
+    }
+
+    fn check_iterable_names(
+        &self,
+        iterable: &ForIterable,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        match iterable {
+            ForIterable::Range { start, limit, .. } => {
+                self.check_expr_names(start, locals)?;
+                self.check_expr_names(limit, locals)
+            }
+            ForIterable::Array(array) => self.check_expr_names(array, locals),
+        }
     }
 }
 
