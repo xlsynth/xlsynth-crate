@@ -354,8 +354,8 @@ impl ImportResolver {
         self.structs.written_types = capture.then(Default::default);
     }
 
-    pub(crate) fn take_written_types(&mut self) -> crate::import_structs::WrittenTypes {
-        self.structs.written_types.take().unwrap_or_default()
+    pub(crate) fn take_sources(&mut self) -> crate::import_structs::CapturedSources {
+        self.structs.take_sources()
     }
 
     pub(crate) fn record_written_type(

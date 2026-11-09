@@ -212,6 +212,14 @@ impl CompiledBx {
                 .iter()
                 .map(|f| (f.name.clone(), f.source_type.clone()))
                 .collect()
+        } else if let Type::Named(key) = &source.result
+            && self.source.enums.iter().any(|decl| decl.name == *key)
+        {
+            vec![read_type(
+                "output",
+                ("out", &source.result),
+                &mut declarations,
+            )?]
         } else {
             output_ports(&source.result, &self.source.structs)
                 .map_err(anyhow::Error::msg)?

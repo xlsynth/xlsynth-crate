@@ -1813,7 +1813,7 @@ pub(crate) fn check_sources_with_tests(
     options: &ImportOptions<'_>,
     mut tests: Option<&mut crate::test_runner::TestSuite>,
     on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
-    written_types: Option<&mut crate::import_structs::WrittenTypes>,
+    captured_sources: Option<&mut crate::import_structs::CapturedSources>,
 ) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
     let module = linked.map_or(root, |l| &l.module);
@@ -1857,7 +1857,7 @@ pub(crate) fn check_sources_with_tests(
     for order in imports.declaration_orders {
         order.verify(&resolver)?;
     }
-    resolver.capture_written_types(written_types.is_some());
+    resolver.capture_written_types(captured_sources.is_some());
     let mut structs = StructTable::default();
     for alias in &module.type_aliases {
         let name =
@@ -2310,8 +2310,8 @@ pub(crate) fn check_sources_with_tests(
     } else {
         None
     };
-    if let Some(written) = written_types {
-        *written = resolver.take_written_types();
+    if let Some(sources) = captured_sources {
+        *sources = resolver.take_sources();
     }
     checked.imports = resolver.finish_with_calls(used.as_ref(), on_import)?;
     Ok(checked)

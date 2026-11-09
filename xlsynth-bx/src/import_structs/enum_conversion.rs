@@ -50,7 +50,10 @@ impl ImportedStructs {
             .map_err(|e| files.remap_diagnostic(e.to_string()))?;
             (files, checked)
         } else {
-            let files = self.files.as_ref().expect("imported batch has a snapshot");
+            let files = self
+                .files
+                .as_deref()
+                .expect("imported batch has a snapshot");
             (files, checked.clone())
         };
         Ok(ConversionProbe { checked, files })

@@ -17,6 +17,7 @@ use xlsynth::{
         convert_named_type_definition,
     },
 };
+use xlsynth_bx::ImportNames;
 use xlsynth_pir::{ir, ir_parser::Parser};
 
 /// The owner of the checked declarations and the functions emitted from them.
@@ -24,6 +25,7 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// these functions.
 pub(super) struct DslxLink {
     module: dslx::TypecheckedModule,
+    module_names: Option<ImportNames>,
     symbols: BTreeMap<String, String>,
 }
 
@@ -31,6 +33,7 @@ impl DslxLink {
     pub(super) fn from_import(import: xlsynth_bx::LinkedImport) -> Self {
         Self {
             module: import.module,
+            module_names: Some(import.module_names),
             symbols: import.symbols,
         }
     }
@@ -53,7 +56,14 @@ impl DslxLink {
                 _ => None,
             })
             .collect();
-        Ok((package, Self { module, symbols }))
+        Ok((
+            package,
+            Self {
+                module,
+                module_names: None,
+                symbols,
+            },
+        ))
     }
 
     pub(super) fn add_signatures(
@@ -72,7 +82,7 @@ impl DslxLink {
         if reachable.is_empty() {
             return Ok(());
         }
-        let mut catalogue = Catalogue::new(&self.module, reachable);
+        let mut catalogue = Catalogue::new(&self.module, self.module_names.as_ref(), reachable);
         catalogue.collect_helpers()?;
         catalogue.helpers = catalogue
             .helpers
@@ -262,6 +272,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
 
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
+    module_names: Option<&'a ImportNames>,
     entry: ModuleContext,
     declarations: Vec<TypeDecl>,
     reachable: BTreeSet<&'a str>,
@@ -304,7 +315,7 @@ pub(super) fn imported_struct(
     source: &xlsynth_bx::LinkedStruct,
     declarations: &mut Vec<TypeDecl>,
 ) -> Result<SourceType> {
-    let mut catalogue = Catalogue::new(&source.module, BTreeSet::new());
+    let mut catalogue = Catalogue::new(&source.module, Some(&source.module_names), BTreeSet::new());
     catalogue.declarations = std::mem::take(declarations);
     let ty = catalogue.annotation_type(&source.annotation)?;
     *declarations = catalogue.declarations;
@@ -312,7 +323,11 @@ pub(super) fn imported_struct(
 }
 
 impl<'a> Catalogue<'a> {
-    fn new(module: &dslx::TypecheckedModule, reachable: BTreeSet<&'a str>) -> Self {
+    fn new(
+        module: &dslx::TypecheckedModule,
+        module_names: Option<&'a ImportNames>,
+        reachable: BTreeSet<&'a str>,
+    ) -> Self {
         let root = ModuleContext {
             module: module.get_module(),
             qualifier: module.get_module().get_name(),
@@ -320,6 +335,7 @@ impl<'a> Catalogue<'a> {
         };
         Self {
             context: root.clone(),
+            module_names,
             reachable,
             declarations: Vec::new(),
             helpers: BTreeMap::new(),
@@ -328,8 +344,21 @@ impl<'a> Catalogue<'a> {
         }
     }
 
+    fn source_qualifier(&self) -> &str {
+        let native = self.context.qualifier.as_str();
+        self.module_names
+            .map_or(native, |names| names.source_module_name(native))
+    }
+
+    fn linked_symbol(&self, native: String) -> String {
+        match self.module_names {
+            Some(names) => names.restore_ir_name(&native),
+            None => native,
+        }
+    }
+
     fn qualified_name(&self, local: &str) -> String {
-        format!("{}::{local}", self.context.qualifier)
+        format!("{}::{local}", self.source_qualifier())
     }
 
     // Visit imported declarations on demand. The compiler already resolved each
@@ -691,6 +720,7 @@ impl BridgeBuilder for Catalogue<'_> {
             // Key by the IR symbol so a function of the same name in an import
             // cannot acquire a local function's source types.
             let symbol = xlsynth::mangle_dslx_name(&self.context.module.get_name(), name)?;
+            let symbol = self.linked_symbol(symbol);
             self.helpers.insert(symbol, signature);
         }
         Ok(())
@@ -722,6 +752,7 @@ impl Catalogue<'_> {
             }
             if caller.get_parametric_binding_count() == 0 {
                 let symbol = xlsynth::mangle_dslx_name(&module_name, &function_name)?;
+                let symbol = self.linked_symbol(symbol);
                 if self.reachable.contains(symbol.as_str()) {
                     self.context = owner.clone();
                     convert_function(&caller, &owner.type_info, self)?;
@@ -809,6 +840,7 @@ impl Catalogue<'_> {
                 Some(&env),
                 None,
             )?;
+            let symbol = self.linked_symbol(symbol);
             if self.helpers.contains_key(&symbol) || !self.reachable.contains(symbol.as_str()) {
                 continue;
             }

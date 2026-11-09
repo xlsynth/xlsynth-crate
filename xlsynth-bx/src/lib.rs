@@ -22,6 +22,7 @@ mod warnings;
 
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
+pub use import_structs::ImportNames;
 pub use lower::lower_module;
 pub use parser::outline::{
     DslxOutline, OutlineDecl, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType,
@@ -139,6 +140,7 @@ pub fn empty_package(name: impl Into<String>) -> Package {
 /// declarations, even if the source files change after BX compilation.
 pub struct LinkedImport {
     pub module: dslx::TypecheckedModule,
+    pub module_names: ImportNames,
     /// Each original IR function symbol and its actual destination symbol.
     pub symbols: BTreeMap<String, String>,
 }
@@ -146,6 +148,7 @@ pub struct LinkedImport {
 /// A written DSLX struct reference resolved by the same import graph as BX.
 pub struct LinkedStruct {
     pub module: dslx::TypecheckedModule,
+    pub module_names: ImportNames,
     pub annotation: dslx::TypeAnnotation,
 }
 
@@ -169,7 +172,7 @@ pub fn compile_with_source(
     options: &ImportOptions<'_>,
 ) -> Result<CompiledModule, String> {
     let mut modules = Vec::new();
-    let mut imported_structs = BTreeMap::new();
+    let mut sources = import_structs::CapturedSources::default();
     let (source, libraries) = bx_import::read(source, options)?;
     let checked = check::check_sources_with_tests(
         &source,
@@ -177,7 +180,7 @@ pub fn compile_with_source(
         options,
         None,
         |m| modules.push(m),
-        Some(&mut imported_structs),
+        Some(&mut sources),
     )
     .map_err(bx_import::diagnostic)?;
     let mut modules = modules.into_iter();
@@ -188,13 +191,20 @@ pub fn compile_with_source(
             .into_iter()
             .map(|(old, new)| (old, new.name))
             .collect();
-        imports.push(LinkedImport { module, symbols });
+        imports.push(LinkedImport {
+            module,
+            symbols,
+            module_names: sources
+                .names
+                .clone()
+                .expect("linked DSLX batch has a snapshot"),
+        });
     })?;
     Ok(CompiledModule {
         source,
         checked,
         package,
         imports,
-        imported_structs,
+        imported_structs: sources.types,
     })
 }

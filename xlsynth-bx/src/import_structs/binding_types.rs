@@ -203,7 +203,7 @@ impl ImportedStructs {
         let files = NativeSourceFiles::capture_with_overrides(&self.graph, overrides)?;
         let isolated = files.import_data();
         Ok((
-            Self::for_snapshot(Rc::clone(&self.graph), Some(files)),
+            Self::for_snapshot(Rc::clone(&self.graph), Some(Rc::new(files))),
             isolated,
         ))
     }
