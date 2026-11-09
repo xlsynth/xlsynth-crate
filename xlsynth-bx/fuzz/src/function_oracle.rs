@@ -129,6 +129,10 @@ fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String> {
             let comma = if types.len() == 1 { "," } else { "" };
             Ok(format!("({}{comma})", elements.join(", ")))
         }
+        Type::Enum { name, width, .. } => Ok(format!(
+            "(uN[{width}]:{} as {name})",
+            value.to_string_fmt_no_prefix(IrFormatPreference::Hex)
+        )),
         Type::Named(_) | Type::Applied { .. } => {
             Err(format!("cannot render fuzz input of named type {ty}"))
         }
@@ -208,7 +212,7 @@ fn dslx_structural_type(ty: &Type) -> Option<String> {
         // Module constants generated here have structural types. Nominal
         // declarations are compared against DSLX struct metadata in
         // module_graph.
-        Type::Named(_) | Type::Applied { .. } => return None,
+        Type::Named(_) | Type::Enum { .. } | Type::Applied { .. } => return None,
     })
 }
 

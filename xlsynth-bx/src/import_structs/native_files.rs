@@ -13,7 +13,7 @@ use xlsynth::dslx::ImportData;
 
 use super::OutlineGraph;
 use super::XlsRunfiles;
-use crate::parser::source_bytes::{SourceColumns, relocate_dslx_imports};
+use crate::parser::source_bytes::{RelocatedSource, SourceColumns, relocate_dslx_imports};
 
 /// Source identity and positions before injecting private import components.
 struct SourceMap {
@@ -40,6 +40,15 @@ impl NativeSourceFiles {
     /// Namespacing twice keeps both native full and depot-stripped searches
     /// inside private module names, including when a source lives in CWD.
     pub(super) fn capture(graph: &OutlineGraph) -> Result<Self, String> {
+        Self::capture_with_overrides(graph, BTreeMap::new())
+    }
+
+    /// Create an independent typechecking snapshot with selected source bodies
+    /// replaced.
+    pub(in crate::import_structs) fn capture_with_overrides(
+        graph: &OutlineGraph,
+        mut overrides: BTreeMap<String, RelocatedSource>,
+    ) -> Result<Self, String> {
         let runfiles = XlsRunfiles::from_env();
         let (directory, namespace) = loop {
             let directory = tempfile::Builder::new()
@@ -101,8 +110,15 @@ impl NativeSourceFiles {
                 .join(&namespace)
                 .join(relative);
             *index += 1;
-            let relocated =
-                relocate_dslx_imports(&source.source, &namespace, &short_components, &subjects);
+            let rewritten = overrides.remove(&source.subject);
+            let bytes = rewritten
+                .as_ref()
+                .map_or(source.source.as_slice(), |s| &s.bytes);
+            let mut relocated =
+                relocate_dslx_imports(bytes, &namespace, &short_components, &subjects);
+            if let Some(rewritten) = rewritten {
+                relocated.columns = relocated.columns.with_original(rewritten.columns);
+            }
             fs::create_dir_all(physical.parent().expect("snapshot source has a parent"))
                 .and_then(|()| fs::write(&physical, &relocated.bytes))
                 .map_err(|e| format!("writing frozen DSLX module '{}': {e}", source.subject))?;
@@ -139,17 +155,33 @@ impl NativeSourceFiles {
         ImportData::new(Some(self.directory.path()), &paths)
     }
 
+    /// Map the qualified name of a native declaration's owner back to its
+    /// source module.
+    pub(in crate::import_structs) fn original_subject(&self, native: &str) -> Option<&str> {
+        let relative = native
+            .strip_prefix(&self.namespace)?
+            .strip_prefix('.')?
+            .strip_prefix(&self.namespace)?
+            .strip_prefix('.')?;
+        self.renamed_modules
+            .iter()
+            .find(|(encoded, _)| encoded == relative)
+            .map(|(_, subject)| subject.as_str())
+            .or_else(|| self.subjects.get(relative).map(String::as_str))
+    }
+
     pub(crate) fn native_source(&self, source: &str) -> String {
-        String::from_utf8(
-            relocate_dslx_imports(
-                source.as_bytes(),
-                &self.namespace,
-                &self.short_components,
-                &self.subjects,
-            )
-            .bytes,
+        String::from_utf8(self.relocate_source(source).bytes)
+            .expect("inserting ASCII module paths preserves UTF-8")
+    }
+
+    pub(in crate::import_structs) fn relocate_source(&self, source: &str) -> RelocatedSource {
+        relocate_dslx_imports(
+            source.as_bytes(),
+            &self.namespace,
+            &self.short_components,
+            &self.subjects,
         )
-        .expect("inserting ASCII module paths preserves UTF-8")
     }
 
     /// The exact native DSLX module name assigned to a captured subject.

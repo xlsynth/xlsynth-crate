@@ -11,6 +11,64 @@ use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::NodePayload;
 
 #[test]
+fn enum_match_preserves_the_compiled_default_for_undeclared_encodings() -> Result<(), Box<dyn Error>>
+{
+    let declarations = r#"
+enum State:s8 { Negative = -3, Ready = 4, Alias = 4 }
+const READY = State::Alias;
+fn classify(x: State) -> (u8, u8) {
+    let implicit = match x { State::Negative => u8:9, READY => u8:5 };
+    let explicit = match x { State::Negative | State::Ready => u8:2, _ => u8:99 };
+    (implicit, explicit)
+}
+"#;
+    let native = format!("{declarations}\nfn sample(x:State)->(u8,u8) {{ classify(x) }}");
+    let bx = format!("{declarations}\nblock sample(clk, x:State)->(u8,u8) {{ classify(x) }}");
+    let eval = ExpressionEvaluator::compile_block(
+        &bx,
+        &ImportOptions::default(),
+        compile_dslx_module(&native, &[]),
+    )?;
+    for (raw, expected) in [(253, (9, 2)), (4, (5, 2)), (0, (5, 99)), (255, (5, 99))] {
+        assert_eq!(
+            eval.compare(&[IrValue::make_ubits(8, raw)?])?,
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(8, expected.0)?,
+                IrValue::make_ubits(8, expected.1)?
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn enum_match_exhaustiveness_and_nominal_patterns_agree_with_dslx() {
+    for (arms, valid) in [
+        ("State::A => u8:1, State::Alias => u8:2", true),
+        ("State::A | State::B => u8:1", true),
+        ("State::A => u8:1", false),
+        ("State::B => u8:1, State::Alias => u8:2, _ => u8:0", false),
+        ("_ => u8:1, State::A => u8:2, _ => u8:0", false),
+        ("Other::A => u8:1, _ => u8:0", false),
+        ("u8:1 => u8:1, _ => u8:0", false),
+        ("1 => u8:1, _ => u8:0", false),
+    ] {
+        let source = format!(
+            "enum State:u8 {{ A=1, B=2, Alias=2 }} enum Other:u8 {{ A=1 }} fn f(x:State)->u8 {{ match x {{ {arms} }} }}"
+        );
+        let bx = parse_module(&source).and_then(|module| check_module(&module));
+        let native = dslx::parse_and_typecheck(
+            &source,
+            "match_enum.x",
+            "match_enum",
+            &mut ImportData::default(),
+        );
+        assert_eq!(native.is_ok(), valid, "DSLX {:?}\n{source}", native.err());
+        assert_eq!(bx.is_ok(), valid, "BX {:?}\n{source}", bx.err());
+    }
+}
+
+#[test]
 fn match_shares_the_subject_and_infers_scoped_tuple_results() -> Result<(), Box<dyn Error>> {
     let helpers = r#"
 fn key(x: sN[96]) -> sN[96] { x }

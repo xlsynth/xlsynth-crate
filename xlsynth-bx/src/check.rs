@@ -6,9 +6,9 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::rc::Rc;
-use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Type as IrType;
 use xlsynth_pir::ir_value_utils::{ir_bits_to_usize, zero_ir_value_for_type};
+use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ImportOptions;
 use crate::ast::{
@@ -26,6 +26,7 @@ use crate::parser::{character_or_bool_digits, explicit_width_hint};
 use crate::warnings::WarningCollector;
 mod callables;
 mod counted_for;
+mod enums;
 mod function_specializations;
 mod generic_blocks;
 mod generic_inputs;
@@ -36,10 +37,13 @@ mod scope;
 mod unroll;
 
 pub use crate::typed::{
-    CheckedBinding, CheckedBlock, CheckedConstant, CheckedFunction, CheckedModule, CheckedStmt,
-    ScalarPattern, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap, TypedMatchArm,
+    CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
+    CheckedStmt, ScalarPattern, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap,
+    TypedMatchArm,
 };
-use crate::typed::{ConstantBinding, ConstantFailure, ConstantFunctions, TypedExprKind as K, bits};
+use crate::typed::{
+    ConstantBinding, ConstantFailure, ConstantFunctions, TypedExprKind as K, bits, repr_bits,
+};
 use callables::{BlockCallbackBinding, BlockCallbackFormal, BoundCallback};
 use counted_for::CarryContext;
 use function_specializations::{CallbackTarget, FunctionSpecialization, FunctionSpecializations};
@@ -57,7 +61,7 @@ impl fmt::Display for Type {
                 }
             }
             Type::Bool => write!(f, "bool"),
-            Type::Named(name) => write!(f, "{name}"),
+            Type::Named(name) | Type::Enum { name, .. } => write!(f, "{name}"),
             Type::Applied { name, args } => {
                 write!(f, "{name}<")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -175,7 +179,7 @@ enum BranchSelector {
 fn match_operands<'e>(
     subject: &'e Expr,
     arms: &'e [MatchArm],
-    is_module_constant: impl Fn(&str) -> bool,
+    is_named_pattern: impl Fn(&str) -> Result<bool, String>,
 ) -> Result<Vec<&'e Expr>, String> {
     if arms.is_empty() || arms.iter().any(|arm| arm.patterns.is_empty()) {
         return Err("match requires at least one arm and a pattern for each arm".into());
@@ -184,10 +188,10 @@ fn match_operands<'e>(
     for pattern in arms.iter().flat_map(|arm| &arm.patterns) {
         for literal in pattern.literals() {
             if !matches!(literal, Expr::Bool(_) | Expr::Literal { .. })
-                && !matches!(pattern, MatchPattern::Literal(Expr::Name(name)) if is_module_constant(name))
+                && !matches!(pattern, MatchPattern::Literal(Expr::Name(name)) if is_named_pattern(name)?)
             {
                 return Err(
-                    "scalar match patterns require literal values or a visible module constant"
+                    "scalar match patterns require literal values, a visible module constant, or an enum member"
                         .into(),
                 );
             }
@@ -204,6 +208,7 @@ fn compatible(a: &Type, b: &Type) -> bool {
             x.len() == y.len() && x.iter().zip(y).all(|(x, y)| compatible(x, y))
         }
         (Type::Named(x), Type::Named(y)) => x == y,
+        (Type::Enum { .. }, Type::Enum { .. }) => a == b,
         (
             Type::Array {
                 element: x,
@@ -274,6 +279,7 @@ impl Default for ConstantBudgets {
 /// Lexical constants and their checked definitions share the active body's
 /// budgets. Statements precede every initializer that can depend on them.
 struct ConstantContext<'a, 'f> {
+    enums: &'a BTreeMap<String, CheckedEnum>,
     names: &'a mut BTreeMap<String, ConstantBinding>,
     statements: &'a [CheckedStmt],
     budgets: &'a mut ConstantBudgets,
@@ -439,7 +445,7 @@ fn source_type_nodes(ty: &Type) -> usize {
         Type::Tuple(fields) => 1 + fields.iter().map(source_type_nodes).sum::<usize>(),
         Type::Array { element, .. } => 1 + source_type_nodes(element),
         Type::Applied { args, .. } => 1 + args.len(),
-        Type::Named(_) | Type::Bool | Type::Bits { .. } => 1,
+        Type::Named(_) | Type::Enum { .. } | Type::Bool | Type::Bits { .. } => 1,
     }
 }
 
@@ -454,15 +460,22 @@ fn literal_copy_work(value: &IrValue) -> usize {
         }
     }
     match value {
-        IrValue::Bits(bits) if bits.get_bit_count() > 64 => bits.get_bit_count().div_ceil(64),
+        IrValue::Bits(bits) => bits_copy_work(bits),
         IrValue::Array(array) => descendants(array.element_type()),
         _ => 0,
     }
 }
 
+/// A cloned scalar only allocates when its bits exceed one inline limb.
+fn bits_copy_work(bits: &IrBits) -> usize {
+    let width = bits.get_bit_count();
+    if width > 64 { width.div_ceil(64) } else { 0 }
+}
+
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
+    block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
     constants: BTreeMap<&'a str, CheckedConstant>,
@@ -483,7 +496,9 @@ impl Declarations<'_> {
     }
 
     fn is_block(&self, name: &str) -> bool {
-        self.blocks.contains_key(name) || self.templates.contains_key(name)
+        self.block_names.contains(name)
+            || self.blocks.contains_key(name)
+            || self.templates.contains_key(name)
     }
     /// Qualified imports are visible from their use binding; qualified
     /// externs are introduced by their full source name.
@@ -516,7 +531,7 @@ impl Declarations<'_> {
                 }
                 Type::Tuple(fields) => pending.extend(fields.iter().rev()),
                 Type::Array { element, .. } => pending.push(element),
-                Type::Bool | Type::Bits { .. } => { /* Primitives have no declaration to look up. */
+                Type::Bool | Type::Bits { .. } | Type::Enum { .. } => { /* Resolved types have no declaration to look up. */
                 }
             }
         }
@@ -524,10 +539,11 @@ impl Declarations<'_> {
     }
 }
 
-/// Checked BX and imported DSLX structs, with cached sizes for layout
-/// validation.
+/// Checked nominal BX and DSLX types, with cached sizes for struct layouts.
 #[derive(Default)]
 struct StructTable {
+    enums: BTreeMap<String, CheckedEnum>,
+    imported_enum_count: usize,
     definitions: Vec<StructDef>,
     indices: BTreeMap<String, (usize, TypeShape)>,
     imported_count: usize,
@@ -555,6 +571,7 @@ fn resolve_type(
     is_local: &dyn Fn(&str) -> bool,
     bindings: Option<&Bindings>,
     resolver: &mut ImportResolver,
+    structs: &StructTable,
     remaining: usize,
 ) -> Result<Type, String> {
     match ty {
@@ -583,7 +600,10 @@ fn resolve_type(
                     "'{name}' requires an imported DSLX struct template"
                 ))
             } else {
-                Ok(ty.clone())
+                Ok(structs
+                    .enums
+                    .get(name)
+                    .map_or_else(|| ty.clone(), CheckedEnum::ty))
             }
         }
         Type::Array { element, size } => Ok(Type::Array {
@@ -592,6 +612,7 @@ fn resolve_type(
                 is_local,
                 bindings,
                 resolver,
+                structs,
                 child_type_budget(remaining)?,
             )?),
             size: *size,
@@ -600,22 +621,52 @@ fn resolve_type(
             let child_budget = child_type_budget(remaining)?;
             items
                 .iter()
-                .map(|item| resolve_type(item, is_local, bindings, resolver, child_budget))
+                .map(|item| resolve_type(item, is_local, bindings, resolver, structs, child_budget))
                 .collect::<Result<_, _>>()
                 .map(Type::Tuple)
+        }
+        Type::Enum {
+            name,
+            signed,
+            width,
+        } => {
+            let definition = structs.enums.get(name).or_else(|| {
+                resolver
+                    .enum_definitions()
+                    .iter()
+                    .find(|def| def.name == *name)
+            });
+            if definition.is_some_and(|def| def.signed == *signed && def.width == *width) {
+                Ok(ty.clone())
+            } else {
+                Err(format!(
+                    "enum '{name}' has no matching declaration for its representation"
+                ))
+            }
         }
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
 
 /// Resolve struct fields in the enclosing module scope.
-fn resolve_fields(params: &[Param], resolver: &mut ImportResolver) -> Result<Vec<Param>, String> {
+fn resolve_fields(
+    params: &[Param],
+    resolver: &mut ImportResolver,
+    structs: &StructTable,
+) -> Result<Vec<Param>, String> {
     params
         .iter()
         .map(|p| {
             Ok(Param {
                 name: p.name.clone(),
-                ty: resolve_type(&p.ty, &|_| false, None, resolver, MAX_ELABORATION_DEPTH)?,
+                ty: resolve_type(
+                    &p.ty,
+                    &|_| false,
+                    None,
+                    resolver,
+                    structs,
+                    MAX_ELABORATION_DEPTH,
+                )?,
             })
         })
         .collect()
@@ -629,6 +680,7 @@ fn resolve_signature<'a>(
     timing_ports: impl IntoIterator<Item = &'a String>,
     bindings: Option<&Bindings>,
     resolver: &mut ImportResolver,
+    structs: &StructTable,
 ) -> Result<(Vec<Param>, Type), String> {
     let mut scope: BTreeSet<_> = timing_ports.into_iter().cloned().collect();
     let mut resolved = Vec::with_capacity(params.len());
@@ -641,6 +693,7 @@ fn resolve_signature<'a>(
                 &|name| scope.contains(name),
                 bindings,
                 resolver,
+                structs,
                 MAX_ELABORATION_DEPTH,
             )?,
         });
@@ -650,6 +703,7 @@ fn resolve_signature<'a>(
         &|name| scope.contains(name),
         bindings,
         resolver,
+        structs,
         MAX_ELABORATION_DEPTH,
     )?;
     Ok((resolved, result))
@@ -731,7 +785,7 @@ fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
         match ty {
-            Type::Named(name) => {
+            Type::Named(name) | Type::Enum { name, .. } => {
                 if !name.contains("::") {
                     result.push(name);
                 }
@@ -789,6 +843,7 @@ impl<'a> Declarations<'a> {
                         &|name| names.contains(name),
                         None,
                         resolver,
+                        structs,
                         MAX_ELABORATION_DEPTH,
                     )
                 };
@@ -806,7 +861,7 @@ impl<'a> Declarations<'a> {
                 self.function_templates.insert(name, function);
             }
         }
-        let (params, result) = resolve_signature(params, result, &names, None, resolver)?;
+        let (params, result) = resolve_signature(params, result, &names, None, resolver, structs)?;
         structs.update_imports(resolver)?;
         let callback_params = callback_params
             .into_iter()
@@ -955,6 +1010,10 @@ impl StructTable {
     /// introduce a type even when the BX source has no explicit annotation
     /// for its result.
     fn update_imports(&mut self, resolver: &ImportResolver) -> Result<(), String> {
+        for def in &resolver.enum_definitions()[self.imported_enum_count..] {
+            self.enums.insert(def.name.clone(), def.clone());
+            self.imported_enum_count += 1;
+        }
         for def in &resolver.struct_defs()[self.imported_count..] {
             let index = self.definitions.len();
             self.definitions.push(def.clone());
@@ -1020,7 +1079,7 @@ impl TypeShape {
     ) -> Result<Self, String> {
         let shape = match ty {
             Type::Bool => Self::LEAF,
-            Type::Bits { width, .. } => TypeShape {
+            Type::Bits { width, .. } | Type::Enum { width, .. } => TypeShape {
                 size: (*width).max(1),
                 ..Self::LEAF
             },
@@ -1218,6 +1277,13 @@ pub(crate) fn check_sources(
         ImportResolver::new(&module.uses, options)?
     };
     let mut structs = StructTable::default();
+    for def in &module.enums {
+        let name = crate::bx_import::library_item(&def.name).map_or(def.name.as_str(), |(_, n)| n);
+        if !(crate::parser::is_use_identifier(name) || name == "self") {
+            return Err(format!("invalid enum name '{name}'"));
+        }
+        declare(&mut names, &def.name)?;
+    }
     for def in &module.structs {
         declare(&mut names, &def.name)?;
         if def.name.contains("::") {
@@ -1233,24 +1299,17 @@ pub(crate) fn check_sources(
         structs.definitions.push(StructDef {
             name: def.name.clone(),
             public: def.public,
-            fields: resolve_fields(&def.fields, &mut resolver)?,
+            // Reserve local indices before reflection appends imported layouts.
+            fields: Vec::new(),
         });
     }
-    let mut struct_graph = Vec::new();
-    for def in &structs.definitions {
-        let mut deps = Vec::new();
-        for field in &def.fields {
-            type_deps(&field.ty, &mut deps);
-        }
-        struct_graph.push((def.name.as_str(), deps));
-    }
-    let struct_order = dependency_order("struct", &struct_graph)?;
-    structs.update_imports(&resolver)?;
-    for index in struct_order {
-        structs.index(index)?;
-    }
-
     let mut declarations = Declarations {
+        block_names: module
+            .blocks
+            .iter()
+            .map(|b| b.name.as_str())
+            .chain(module.extern_blocks.iter().map(|b| b.name.as_str()))
+            .collect(),
         zero_uses: linked.map(|l| &l.zero_uses),
         positions: module
             .declaration_order
@@ -1265,34 +1324,18 @@ pub(crate) fn check_sources(
     if declarations.positions.is_empty() {
         declarations.positions.extend(
             module
-                .constants
+                .enums
                 .iter()
-                .map(|c| c.name.as_str())
+                .map(|e| e.name.as_str())
+                .chain(module.externs.iter().map(|f| f.name.as_str()))
+                .chain(module.constants.iter().map(|c| c.name.as_str()))
                 .chain(module.functions.iter().map(|f| f.name.as_str()))
                 .enumerate()
                 .map(|(i, name)| (name, i)),
         );
     }
-    let mut externs = Vec::with_capacity(module.externs.len());
     for f in &module.externs {
         declare(&mut names, &f.name)?;
-        declarations
-            .add_function(
-                &f.name,
-                &f.params,
-                &f.result,
-                None,
-                &mut resolver,
-                &mut structs,
-            )
-            .map_err(|e| format!("extern '{}': {e}", f.name))?;
-        let interface = &declarations.functions[f.name.as_str()];
-        externs.push(ExternFn {
-            name: f.name.clone(),
-            params: interface.params.clone(),
-            result: interface.result.clone(),
-            symbol: f.symbol.clone(),
-        });
     }
     for f in &module.functions {
         declare(&mut names, &f.name)?;
@@ -1302,23 +1345,32 @@ pub(crate) fn check_sources(
                 f.name
             ));
         }
-        let at = declarations.positions.get(f.name.as_str()).copied();
-        for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
-            declarations.check_type_visibility(ty, at)?;
-        }
-        declarations
-            .add_function(
-                &f.name,
-                &f.params,
-                &f.result,
-                Some(f),
-                &mut resolver,
-                &mut structs,
-            )
-            .map_err(|e| format!("fn '{}': {e}", f.name))?;
     }
+    for name in module
+        .blocks
+        .iter()
+        .map(|b| &b.name)
+        .chain(module.extern_blocks.iter().map(|b| &b.name))
+    {
+        declare(&mut names, name)?;
+    }
+    let mut function_registry = FunctionSpecializations::new(names.clone());
+    let function_bodies =
+        function_registry.check_sources(module, &mut declarations, &mut resolver, &mut structs)?;
+    let externs = module
+        .externs
+        .iter()
+        .map(|f| {
+            let interface = &declarations.functions[f.name.as_str()];
+            ExternFn {
+                name: f.name.clone(),
+                params: interface.params.clone(),
+                result: interface.result.clone(),
+                symbol: f.symbol.clone(),
+            }
+        })
+        .collect();
     for b in &module.blocks {
-        declare(&mut names, &b.name)?;
         let reserved_ports = std::iter::once(&b.clock)
             .chain(&b.reset)
             .chain(b.callback_params.iter().map(|p| &p.name));
@@ -1335,6 +1387,7 @@ pub(crate) fn check_sources(
             reserved_ports,
             symbolic.as_ref(),
             &mut resolver,
+            &structs,
         )?;
         if let Some(bindings) = &symbolic {
             declarations.templates.insert(
@@ -1358,10 +1411,15 @@ pub(crate) fn check_sources(
     }
     let mut extern_blocks = Vec::with_capacity(module.extern_blocks.len());
     for b in &module.extern_blocks {
-        declare(&mut names, &b.name)?;
         let timing_ports = std::iter::once(&b.clock).chain(&b.reset);
-        let (params, result) =
-            resolve_signature(&b.params, &b.result, timing_ports, None, &mut resolver)?;
+        let (params, result) = resolve_signature(
+            &b.params,
+            &b.result,
+            timing_ports,
+            None,
+            &mut resolver,
+            &structs,
+        )?;
         structs.update_imports(&resolver)?;
         declarations
             .add_block(
@@ -1381,9 +1439,6 @@ pub(crate) fn check_sources(
             result,
         });
     }
-    let mut function_registry = FunctionSpecializations::new(names.clone());
-    let function_bodies =
-        function_registry.check_sources(module, &mut declarations, &mut resolver, &mut structs)?;
     // Static loops can instantiate children. Order the checked blocks using
     // the instances actually elaborated, including children declared later.
     let mut specializations = BlockSpecializations::new(names);
@@ -1448,6 +1503,7 @@ pub(crate) fn check_sources(
     let mut checked = CheckedModule {
         warnings,
         structs: structs.definitions,
+        enums: structs.enums,
         constants: module
             .constants
             .iter()
@@ -1586,6 +1642,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             _ => &mut self.constant_budgets,
         };
         ConstantContext {
+            enums: &self.structs.enums,
             names: &mut self.constants,
             statements: &self.statements,
             budgets,
@@ -1601,7 +1658,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         // A projected wide scalar owns its limbs in the speculative cache.
         // Avoid materializing it once the remaining allowance cannot retain it.
         if !ctx.charge_values
-            && bits(&value.ty).is_some_and(|(_, width)| {
+            && repr_bits(&value.ty).is_some_and(|(_, width)| {
                 width > 64 && width.div_ceil(64) > ctx.budgets.speculative
             })
         {
@@ -1612,6 +1669,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             &mut ctx.budgets.speculative,
             ctx.charge_values,
             ctx.functions,
+            ctx.enums,
         ) {
             Ok(Some(value)) if !ctx.charge_values => {
                 // Ordinary bodies retain the result without charging other
@@ -1658,6 +1716,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 &mut ctx.budgets.required,
                 charge_values,
                 ctx.functions.as_deref_mut(),
+                ctx.enums,
             ) {
                 Ok(result) => {
                     let Some(name) = name else { return Ok(result) };
@@ -1679,6 +1738,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             .is_some_and(|i| *i < definition.unwrap_or(ctx.statements.len()))
                     );
                     pending.extend(earlier.into_iter().rev());
+                }
+                Err(ConstantFailure::InvalidEnumCast(name)) => {
+                    return Err(format!(
+                        "constant cast to enum '{name}' requires bits of its declared width encoding a member"
+                    ));
                 }
                 Err(ConstantFailure::WorkLimit) => {
                     return Err(format!(
@@ -1928,6 +1992,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
             self.specialization.map(|s| &s.bindings),
             self.resolver,
+            self.structs,
             MAX_ELABORATION_DEPTH,
         )?;
         self.structs.update_imports(self.resolver)?;
@@ -2050,7 +2115,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 ty: child.result.clone(),
                 kind: K::Tuple(outputs.collect()),
             }),
-            Type::Bool | Type::Bits { .. } | Type::Array { .. } => Ok(outputs
+            Type::Bool | Type::Bits { .. } | Type::Enum { .. } | Type::Array { .. } => Ok(outputs
                 .next()
                 .expect("scalar and array interfaces have one output")),
         }
@@ -2397,6 +2462,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
+            Expr::MapBeforeUse {
+                name,
+                args,
+                builtin_args,
+            } => {
+                if self.is_builtin_map(name, |target| self.names.contains(target))? {
+                    let args = builtin_args
+                        .as_deref()
+                        .ok_or("invalid operand syntax for the built-in map")?;
+                    self.with_dslx_value_context(|checker| checker.named_array_map(args))
+                } else {
+                    self.function_call(name, args)
+                }
+            }
             Expr::ParametricCall {
                 name,
                 callbacks,
@@ -2432,7 +2511,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Look up a lexical value before consulting the block interface.
-    fn named_value(&self, name: &str) -> Result<(Type, K), String> {
+    fn named_value(&mut self, name: &str) -> Result<(Type, K), String> {
         if name == "_" && (self.kind == BodyKind::Function || self.in_loop_scope()) {
             return Err("cannot read the wildcard binding '_'".into());
         }
@@ -2462,6 +2541,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             let work = source_type_nodes(&value.ty) - 1 + literal_copy_work(&value.value);
             self.charge_reference_copy(work)?;
             return Ok((value.ty.clone(), K::Literal(value.value.clone())));
+        }
+        if let Some((ty, value)) = self.enum_member(name)? {
+            return Ok((ty, K::Literal(IrValue::Bits(value))));
         }
         Err(format!("unknown value '{name}'"))
     }
@@ -2513,6 +2595,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.zero_calls_function()? {
             self.function_call(&self.zero_binding.clone(), &[])
         } else {
+            self.structs.check_zero_members(&ty)?;
             let layout = crate::layout::Layouts::new(&self.structs.definitions)
                 .lower(&ty)
                 .map_err(|e| e.to_string())?;
@@ -2805,7 +2888,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn bit_cast(&mut self, value: &Expr, ty: &Type) -> Result<(Type, K), String> {
         let ty = self.source_type(ty)?;
         let v = self.inferred_expr(value)?;
-        if bits(&v.ty).is_none() || bits(&ty).is_none() {
+        if matches!((&v.ty, &ty), (Type::Enum { .. }, Type::Enum { .. })) && v.ty != ty {
+            return Err(format!(
+                "cannot cast between distinct enum types {} and {ty}",
+                v.ty
+            ));
+        }
+        if repr_bits(&v.ty).is_none() || repr_bits(&ty).is_none() {
             return Err(format!("cast from {} to {ty} requires bit types", v.ty));
         }
         Ok((ty, K::Cast { value: Box::new(v) }))
@@ -3402,6 +3491,17 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
+            _ if self.decls.visible(
+                &self.zero_binding,
+                self.function_position.or(self.block_position),
+            ) && (self.structs.enums.contains_key(&self.zero_binding)
+                || self
+                    .resolver
+                    .lookup_enum_prefix(&self.zero_binding)?
+                    .is_some_and(|(module, name)| self.resolver.is_enum_type(&module, &name))) =>
+            {
+                Err("enum 'zero!' cannot be called as a function".into())
+            }
             BodyKind::Function => Ok(self
                 .decls
                 .visible(&self.zero_binding, self.function_position)
@@ -3428,16 +3528,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<MatchSelector, String> {
         self.with_prepared_value(subject, |checker, subject| {
             let operands = match_operands(subject, arms, |name| {
-                !checker.names.contains(name)
-                    && checker.callback_index(name).is_none()
-                    && checker.module_constant(name).is_some()
+                let head = name.split_once("::").map_or(name, |(head, _)| head);
+                Ok(!checker.names.contains(head)
+                    && checker.callback_index(head).is_none()
+                    && (checker.module_constant(name).is_some()
+                        || checker.is_enum_member_name(name)?))
             })?;
             let mut values = checker.check_results(&operands, None)?.into_iter();
             let subject = values.next().expect("subject is the first operand");
             check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
                 checker.zero_calls_function()
             })?;
-            let patterns = match_patterns::check_patterns(&subject.ty, arms, values)?;
+            let patterns = if let Type::Enum { name, .. } = &subject.ty {
+                let def = checker
+                    .structs
+                    .enums
+                    .get(name)
+                    .ok_or_else(|| format!("unknown enum '{name}'"))?;
+                match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
+            } else {
+                match_patterns::check_patterns(&subject.ty, arms, values)?
+            };
             Ok(MatchSelector { subject, patterns })
         })
     }
@@ -3545,6 +3656,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             && let Some((subject, function)) =
                 lookup_use(name, self.resolver, |binding| self.names.contains(binding))?
         {
+            let spelling = crate::bx_import::library_item(name).map_or(name, |(_, item)| item);
+            if spelling == "update" && self.resolver.is_enum_type(&subject, &function) {
+                if !self
+                    .decls
+                    .visible(name, self.function_position.or(self.block_position))
+                {
+                    return self.array_update(args);
+                }
+                return Err("enum 'update' cannot be called as a function".into());
+            }
             let args = args
                 .iter()
                 .enumerate()
@@ -3561,6 +3682,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         if visible && self.decls.is_block(name) {
             return Err(self.block_in_value_error(name));
+        }
+        if self.structs.enums.contains_key(name)
+            && self
+                .decls
+                .visible(name, self.function_position.or(self.block_position))
+        {
+            return Err(format!("enum '{name}' cannot be called as a function"));
         }
         if name == crate::bx_import::BUILTIN_UPDATE
             || name == "update" && (!visible || !self.decls.functions.contains_key(name))
@@ -3656,7 +3784,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .checked_constant(&selector.subject)?
                     .ok_or("slice type dimension must be a compile-time constant")?;
                 let value = subject.as_bits().map_err(|e| e.to_string())?;
-                let signed = bits(&selector.subject.ty).expect("checked scalar match").0;
+                let (signed, _) = repr_bits(&selector.subject.ty).expect("checked scalar match");
                 let selected = selector
                     .patterns
                     .iter()
@@ -3908,6 +4036,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             | BinaryOp::Ge => {
                 let (l, r) = self.comparison_pair(left, right)?;
                 if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) && bits(&l.ty).is_none() {
+                    if matches!(l.ty, Type::Enum { .. }) {
+                        return Err(format!(
+                            "ordered comparison of enum values requires an explicit cast to bits before '{op}'"
+                        ));
+                    }
                     return Err(format!("comparison '{op}' requires bit operands"));
                 }
                 (Type::Bool, l, r)
@@ -3944,11 +4077,34 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckedStmt, MAX_ELABORATION_DEPTH, check_module};
+    use super::{
+        BodyChecker, BodyKind, CheckedStmt, ConstantBinding, Declarations, ImportOptions,
+        ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
+    };
     use crate::ast::{BindingPattern, Expr, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn speculative_fold_preserves_work_when_a_wide_enum_will_not_fit() -> Result<(), String> {
+        let source = r#"
+enum Mode:uN[65] { Idle=0 }
+fn wide()->Mode { for (_, state) in u32:0..u32:1 { state }(Mode::Idle) }
+"#;
+        let module = check_module(&parse_module(source)?)?;
+        let decls = Declarations::default();
+        let mut resolver = ImportResolver::new(&[], &ImportOptions::default())?;
+        let mut structs = StructTable::default();
+        let mut checker = BodyChecker::new(&decls, &mut resolver, &mut structs, BodyKind::Function);
+        checker.constant_budgets.speculative = 1;
+        assert!(matches!(
+            checker.fold_constant(&module.functions()[0].output),
+            Some(ConstantBinding::Deferred(0))
+        ));
+        assert_eq!(checker.constant_budgets.speculative, 1);
+        Ok(())
+    }
 
     #[test]
     fn function_unrolls_resolve_calls_without_elaborating_hardware() {

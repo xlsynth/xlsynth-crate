@@ -992,9 +992,25 @@ impl fmt::Debug for Expr {
 
 // -- EnumDef
 
+/// Identity of an enum declaration in its owning native typechecking context.
+#[derive(Clone)]
 pub struct EnumDef {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxEnumDef,
+}
+
+impl PartialEq for EnumDef {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for EnumDef {}
+
+impl Hash for EnumDef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
 }
 
 impl EnumDef {
@@ -2442,12 +2458,18 @@ impl TypeInfo {
     }
 
     pub fn get_type_for_constant_def(&self, constant_def: &ConstantDef) -> Type {
-        Type {
+        self.try_get_type_for_constant_def(constant_def)
+            .expect("no type recorded for the DSLX constant in this context")
+    }
+
+    /// Returns the recorded type of a constant in this typechecking context.
+    pub fn try_get_type_for_constant_def(&self, constant_def: &ConstantDef) -> Option<Type> {
+        let ptr =
+            unsafe { sys::xls_dslx_type_info_get_type_constant_def(self.ptr, constant_def.ptr) };
+        (!ptr.is_null()).then(|| Type {
             parent: self.parent.clone(),
-            ptr: unsafe {
-                sys::xls_dslx_type_info_get_type_constant_def(self.ptr, constant_def.ptr)
-            },
-        }
+            ptr,
+        })
     }
 
     pub fn get_unique_invocation_callee_data(

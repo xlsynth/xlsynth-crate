@@ -3,6 +3,9 @@
 //! Bridge Rust's DSLX declaration identities to concrete types in libxls.
 
 mod effect_source;
+mod enum_conversion;
+mod enum_order;
+mod enums;
 mod outline_graph;
 mod runfiles;
 mod specialization;
@@ -16,9 +19,10 @@ use crate::ast::{Param, StructDef, Type, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
+use crate::typed::CheckedEnum;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
 pub(crate) use outline_graph::ModuleSearch;
-use outline_graph::{DeclId, NativeSourceFiles, OutlineGraph, ResolvedShape};
+use outline_graph::{DeclId, ImportFeatures, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
 /// The Rust declaration and BX layout associated with a checked native type.
 #[derive(Default)]
@@ -46,6 +50,9 @@ pub(crate) struct ImportedStructs {
     #[cfg(test)]
     type_witnesses: usize,
     definitions: Vec<StructDef>,
+    enums: enums::ImportedEnums,
+    enum_conversion_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
+    enum_order_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
     probe_index: usize,
 }
 
@@ -74,6 +81,9 @@ impl ImportedStructs {
             #[cfg(test)]
             type_witnesses: 0,
             definitions: Vec::new(),
+            enums: Default::default(),
+            enum_conversion_snapshot: Default::default(),
+            enum_order_snapshot: Default::default(),
             probe_index: 0,
         };
         if let Some(data) = data.as_mut() {
@@ -98,15 +108,15 @@ impl ImportedStructs {
         Ok((registry, data))
     }
 
-    /// Pair every addressable non-parametric struct and its aliases with DSLX
-    /// declaration handles. A name here is an actual outlined export.
+    /// Pair public, concrete structs and enums, including aliases, with their
+    /// native DSLX declaration handles.
     fn bind_exports(&mut self, data: &mut ImportData) -> Result<(), String> {
         if self.exports_bound {
             return Ok(());
         }
         let exports: Vec<_> = self
             .graph
-            .struct_exports()
+            .nominal_exports()
             .map(|(name, id)| (name.clone(), Some(id.clone())))
             .chain(
                 self.graph
@@ -150,6 +160,30 @@ impl ImportedStructs {
                         export.subject, export.name
                     )
                 })?;
+            if ty.is_enum() {
+                let path = format!("{}::{}", export.subject, export.name);
+                let def = ty.get_enum_def().map_err(|e| e.to_string())?;
+                let canonical = target
+                    .as_ref()
+                    .and_then(|id| self.graph.public_path(id))
+                    .unwrap_or(&path);
+                if target.is_none() {
+                    self.enums
+                        .native_member_names
+                        .entry(def.clone())
+                        .or_insert_with(|| {
+                            (0..def.get_member_count())
+                                .map(|i| def.get_member(i).get_name())
+                                .collect()
+                        });
+                }
+                self.enums
+                    .exports
+                    .entry(def)
+                    .or_insert_with(|| canonical.to_owned());
+                self.explicit_types.insert(path, ty);
+                continue;
+            }
             let Some(target) = target else {
                 // This declared alias needs DSLX evaluation (e.g. an
                 // associated type). Record any resulting public struct name.
@@ -223,13 +257,6 @@ impl ImportedStructs {
             .map_err(|e| self.remap_diagnostic(e.to_string()))
     }
 
-    pub(crate) fn restore_ir_names(&self, ir: &str) -> String {
-        self.files
-            .as_ref()
-            .expect("imported symbol has a source snapshot")
-            .restore_ir_names(ir)
-    }
-
     /// Start an independent native type context over the same frozen sources.
     pub(crate) fn fresh_import_data(&self) -> ImportData {
         self.files
@@ -238,21 +265,12 @@ impl ImportedStructs {
             .import_data()
     }
 
-    pub(crate) fn original_column(&self, path: &Path, line: usize, column: usize) -> usize {
-        self.files
-            .as_ref()
-            .map_or(column, |files| files.original_column(path, line, column))
-    }
-
-    pub(crate) fn logical_path<'a>(&'a self, path: &'a Path) -> &'a Path {
-        self.files
-            .as_ref()
-            .and_then(|f| f.logical_path(path))
-            .unwrap_or(path)
-    }
-
     pub(crate) fn has_module(&self, subject: &str) -> bool {
         self.graph.has_module(subject)
+    }
+
+    pub(crate) fn import_features(&self, subject: &str) -> ImportFeatures {
+        self.graph.features(subject)
     }
 
     pub(crate) fn has_public_member(&self, subject: &str, member: &str) -> bool {
@@ -267,6 +285,28 @@ impl ImportedStructs {
         self.graph.public_parametric_struct(subject, member)
     }
 
+    pub(crate) fn has_enum_member(&self, subject: &str, member: &str, variant: &str) -> bool {
+        self.graph.has_enum_member(subject, member, variant)
+            || self
+                .explicit_types
+                .get(&format!("{subject}::{member}"))
+                .and_then(|ty| ty.get_enum_def().ok())
+                .and_then(|def| self.enums.native_member_names.get(&def))
+                .is_some_and(|names| names.contains(variant))
+    }
+
+    /// Identify enum declarations and aliases without elaborating a skipped
+    /// expression.
+    pub(crate) fn is_enum_type(&self, subject: &str, member: &str) -> bool {
+        matches!(
+            self.graph.named(subject, member),
+            Some(ResolvedShape::Enum(_))
+        ) || self
+            .explicit_types
+            .get(&format!("{subject}::{member}"))
+            .is_some_and(dslx::Type::is_enum)
+    }
+
     #[cfg(test)]
     pub(crate) fn type_witnesses(&self) -> usize {
         self.type_witnesses
@@ -274,6 +314,10 @@ impl ImportedStructs {
 
     pub(crate) fn definitions(&self) -> &[StructDef] {
         &self.definitions
+    }
+
+    pub(crate) fn enum_definitions(&self) -> &[CheckedEnum] {
+        &self.enums.definitions
     }
 
     pub(crate) fn contains_parametric_instance(&self, ty: &Type) -> bool {
@@ -285,7 +329,7 @@ impl ImportedStructs {
             Type::Array { element, .. } => self.contains_parametric_instance(element),
             Type::Tuple(members) => members.iter().any(|m| self.contains_parametric_instance(m)),
             Type::Applied { .. } => true,
-            Type::Bits { .. } | Type::Bool => false,
+            Type::Bits { .. } | Type::Bool | Type::Enum { .. } => false,
         }
     }
 
@@ -325,7 +369,33 @@ impl ImportedStructs {
         ))
     }
 
-    pub(crate) fn resolve_named(
+    pub(crate) fn resolve_nominal_type(
+        &mut self,
+        subject: &str,
+        member: &str,
+        data: &mut ImportData,
+    ) -> Result<Type, String> {
+        if self.graph.has_public_member(subject, member)
+            && self.graph.is_sum(subject, &[member.to_owned()])
+        {
+            return Err(format!(
+                "BX supports numeric enums and '{subject}::{member}' is a DSLX sum enum"
+            ));
+        }
+        self.bind_exports(data)?;
+        let path = format!("{subject}::{member}");
+        if let Some(ty) = self
+            .explicit_types
+            .get(&path)
+            .filter(|ty| ty.is_enum())
+            .cloned()
+        {
+            return self.reflect_enum(&ty, data);
+        }
+        self.resolve_named(subject, member, data).map(Type::Named)
+    }
+
+    fn resolve_named(
         &mut self,
         subject: &str,
         member: &str,
@@ -434,11 +504,8 @@ impl ImportedStructs {
             ));
         }
         if ty.is_enum() {
-            let def = ty.get_enum_def().map_err(|e| e.to_string())?;
-            return Err(format!(
-                "unsupported result type '{}' (DSLX enum)",
-                def.get_identifier()
-            ));
+            self.bind_exports(data)?;
+            return self.reflect_enum(ty, data);
         }
         if let Some((signed, width)) = ty.is_bits_like() {
             return Ok(Type::Bits { signed, width });
@@ -900,10 +967,60 @@ pub type Header = Outer;"#,
         )?;
         let paths = [root.path()];
         let (mut registry, mut data) = load("use ambig;", &paths)?;
-        let result = registry.resolve_named("ambig", "Envelope", &mut data);
+        registry.resolve_named("ambig", "Envelope", &mut data)?;
         assert_eq!(
-            result.unwrap_err(),
-            "DSLX struct field 'ambig::Envelope.item': unsupported result type 'u84' (DSLX enum)"
+            registry.definitions()[0].fields[0].ty,
+            Type::Tuple(vec![
+                Type::Enum {
+                    name: "ambig::u84".into(),
+                    signed: false,
+                    width: 8
+                },
+                Type::Bits {
+                    signed: false,
+                    width: 8
+                }
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn enum_aliases_use_the_owner_module_values_and_nominal_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        fs::create_dir(dir.path().join("pkg"))?;
+        fs::write(
+            dir.path().join("pkg/flags.x"),
+            r#"
+const HIGH = sN[129]:-2;
+enum Hidden : sN[129] { Clear = 0, Set = HIGH }
+pub type Mode = Hidden;
+pub enum Empty : sN[33] {}
+"#,
+        )?;
+        fs::write(
+            dir.path().join("forward.x"),
+            "import pkg.flags; pub type Forward = flags::Mode;",
+        )?;
+        let (mut registry, mut data) = load("use forward; use pkg::flags;", &[dir.path()])?;
+        let first = registry.resolve_nominal_type("forward", "Forward", &mut data)?;
+        let second = registry.resolve_nominal_type("pkg.flags", "Mode", &mut data)?;
+        assert_eq!(first, second);
+        let def = &registry.enum_definitions()[0];
+        assert!(def.signed);
+        assert_eq!(def.width, 129);
+        assert_eq!(
+            def.members["Set"].to_le_bytes(),
+            [vec![254], vec![255; 15], vec![1]].concat()
+        );
+        assert_eq!(
+            registry.resolve_nominal_type("pkg.flags", "Empty", &mut data)?,
+            Type::Enum {
+                name: "pkg.flags::Empty".into(),
+                signed: true,
+                width: 33
+            }
         );
         Ok(())
     }

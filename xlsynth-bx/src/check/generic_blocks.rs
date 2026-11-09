@@ -112,6 +112,7 @@ impl<'m> BlockTemplate<'m> {
                     &|name| callback_indices.contains_key(name),
                     Some(bindings),
                     resolver,
+                    structs,
                     MAX_ELABORATION_DEPTH,
                 )
             };
@@ -354,7 +355,9 @@ impl Bindings {
                 element: Box::new(self.substitute(element)),
                 size: *size,
             },
-            Type::Bool | Type::Bits { .. } | Type::Applied { .. } => formal.clone(),
+            Type::Bool | Type::Bits { .. } | Type::Enum { .. } | Type::Applied { .. } => {
+                formal.clone()
+            }
         }
     }
 
@@ -385,7 +388,7 @@ fn canonical_argument(ty: &Type) -> Type {
             element: Box::new(canonical_argument(element)),
             size: *size,
         },
-        Type::Bits { .. } | Type::Named(_) | Type::Applied { .. } => ty.clone(),
+        Type::Bits { .. } | Type::Enum { .. } | Type::Named(_) | Type::Applied { .. } => ty.clone(),
     }
 }
 

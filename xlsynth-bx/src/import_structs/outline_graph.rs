@@ -13,6 +13,7 @@ mod native_files;
 use super::runfiles::XlsRunfiles;
 use crate::ast::UsePath;
 use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
+use crate::parser::dslx_tokens;
 use crate::parser::outline::outline_with_sum_names;
 use crate::parser::source_bytes::decode_dslx_source;
 use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
@@ -75,6 +76,14 @@ pub(super) struct SourceModule {
     pub outline: DslxOutline,
     sums: BTreeSet<String>,
     bindings: BTreeMap<String, Binding>,
+    features: ImportFeatures,
+}
+
+/// Declarations in a captured module and its transitive DSLX dependencies.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ImportFeatures {
+    pub(crate) type_parameters: bool,
+    pub(crate) numeric_enums: bool,
 }
 
 impl SourceModule {
@@ -247,15 +256,21 @@ impl OutlineGraph {
     fn capture(roots: Vec<String>, locator: &mut SourceLocator<'_>) -> Result<Self, String> {
         enum Visit {
             Enter(String),
-            Finish(String),
+            Finish(String, BTreeSet<String>),
         }
         let mut pending: Vec<_> = roots.into_iter().rev().map(Visit::Enter).collect();
         let mut active = BTreeSet::new();
-        let mut modules = BTreeMap::new();
+        let mut modules = BTreeMap::<String, SourceModule>::new();
         let mut order = Vec::new();
         while let Some(visit) = pending.pop() {
             let subject = match visit {
-                Visit::Finish(subject) => {
+                Visit::Finish(subject, dependencies) => {
+                    let mut features = modules[&subject].features;
+                    for dependency in dependencies {
+                        features.type_parameters |= modules[&dependency].features.type_parameters;
+                        features.numeric_enums |= modules[&dependency].features.numeric_enums;
+                    }
+                    modules.get_mut(&subject).expect("captured module").features = features;
                     active.remove(&subject);
                     order.push(subject);
                     continue;
@@ -285,12 +300,19 @@ impl OutlineGraph {
                 )
             })?;
             let mut sums = BTreeSet::new();
-            let outline = outline_with_sum_names(&decoded, &mut sums).map_err(|e| {
+            let mut outline = outline_with_sum_names(&decoded, &mut sums).map_err(|e| {
                 format!(
                     "outlining DSLX module '{subject}' at {}: {e}",
                     source_path.display()
                 )
             })?;
+            // This private snapshot uses enum members for lookup. DSLX
+            // evaluates discriminants from the original, source-ordered text.
+            for declaration in outline.declarations.values_mut() {
+                if let OutlineKind::Enum { members, .. } = &mut declaration.kind {
+                    members.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                }
+            }
             let mut bindings: BTreeMap<_, _> = outline
                 .imports
                 .iter()
@@ -304,9 +326,26 @@ impl OutlineGraph {
                 dependencies.insert(binding.subject().to_owned());
                 bindings.insert(leaf.last().ok_or("empty DSLX use leaf")?.clone(), binding);
             }
+            // v0.61 requires the generics feature for a `T: type` binding.
+            // Tokens distinguish declarations, including methods, from inert
+            // appearances of the feature name in comments or strings.
+            let type_parameters = decoded.contains("generics")
+                && dslx_tokens(&decoded)?
+                    .windows(2)
+                    .any(|tokens| tokens[0].text == ":" && tokens[1].text == "type");
+            let numeric_enums = outline
+                .declarations
+                .values()
+                .any(|decl| matches!(decl.kind, OutlineKind::Enum { .. }));
             active.insert(subject.clone());
-            pending.push(Visit::Finish(subject.clone()));
-            pending.extend(dependencies.into_iter().rev().map(Visit::Enter));
+            let next: Vec<_> = dependencies
+                .iter()
+                .rev()
+                .cloned()
+                .map(Visit::Enter)
+                .collect();
+            pending.push(Visit::Finish(subject.clone(), dependencies));
+            pending.extend(next);
             modules.insert(
                 subject.clone(),
                 SourceModule {
@@ -316,6 +355,10 @@ impl OutlineGraph {
                     outline,
                     sums,
                     bindings,
+                    features: ImportFeatures {
+                        type_parameters,
+                        numeric_enums,
+                    },
                 },
             );
         }
@@ -342,6 +385,12 @@ impl OutlineGraph {
 
     pub(super) fn has_module(&self, subject: &str) -> bool {
         self.modules.contains_key(subject)
+    }
+
+    pub(super) fn features(&self, subject: &str) -> ImportFeatures {
+        self.modules
+            .get(subject)
+            .map_or_else(ImportFeatures::default, |m| m.features)
     }
 
     pub(super) fn has_public_member(&self, subject: &str, name: &str) -> bool {
@@ -452,9 +501,9 @@ impl OutlineGraph {
         }
     }
 
-    /// Every public declaration or alias whose resolved original is a concrete
-    /// struct.
-    pub(super) fn struct_exports(&self) -> impl Iterator<Item = (&DeclId, &DeclId)> {
+    /// Every public declaration or alias whose original is a concrete nominal
+    /// type.
+    pub(super) fn nominal_exports(&self) -> impl Iterator<Item = (&DeclId, &DeclId)> {
         self.targets.iter().filter(|(id, target)| {
             let decl = &self.modules[&id.subject].outline.declarations[&id.name];
             let original = &self.modules[&target.subject].outline.declarations[&target.name];
@@ -463,7 +512,9 @@ impl OutlineGraph {
                 && !original.parametric
                 && matches!(
                     original.kind,
-                    OutlineKind::Struct { .. } | OutlineKind::GeneratedStruct
+                    OutlineKind::Struct { .. }
+                        | OutlineKind::GeneratedStruct
+                        | OutlineKind::Enum { .. }
                 )
         })
     }
@@ -476,6 +527,16 @@ impl OutlineGraph {
 
     pub(super) fn public_path(&self, id: &DeclId) -> Option<&str> {
         self.exports.get(id).map(String::as_str)
+    }
+
+    /// Follow public enum aliases to the variant names in the frozen
+    /// declaration.
+    pub(super) fn has_enum_member(&self, subject: &str, member: &str, variant: &str) -> bool {
+        let Some(ResolvedShape::Enum(id)) = self.named(subject, member) else {
+            return false;
+        };
+        matches!(&self.modules[&id.subject].outline.declarations[&id.name].kind, OutlineKind::Enum { members, .. }
+            if members.binary_search_by(|(name, _)| name.as_str().cmp(variant)).is_ok())
     }
 
     /// A concrete alias can expose an instance of a private struct without

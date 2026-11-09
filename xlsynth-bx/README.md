@@ -26,13 +26,38 @@ pub block transform_pipe(clk, rst, valid_in: bool, x: u8) -> ResultPorts {
 }
 ```
 
-BX supports concrete bit types, booleans, tuples, named structs, and fixed-size arrays. Bit types of width 1 through 64 have shorthand names `u1` through `u64` and `s1` through `s64`. For width zero or widths above 64, use `uN[width]` or `sN[width]`, as in `uN[0]` or `sN[84]`.
+BX supports concrete bit types, booleans, numeric enums, tuples, named structs, and fixed-size arrays. Bit types of width 1 through 64 have shorthand names `u1` through `u64` and `s1` through `s64`. For width zero or widths above 64, use `uN[width]` or `sN[width]`, as in `uN[0]` or `sN[84]`.
 
 The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
+### Numeric enums
+
+Declare each member's encoding and refer to it by name in functions and blocks.
+
+```text
+pub enum State : u3 { Idle = 0, Busy = 5 }
+
+block controller(clk, rst, start: bool) -> State {
+    reg state: State = State::Idle;
+    state := match state {
+        State::Idle => if start { State::Busy } else { State::Idle },
+        State::Busy => State::Idle,
+    };
+    state
+}
+```
+
+Members can use constant expressions, including earlier constants and pure local functions. Omitting the underlying type makes BX infer a common bit type from the members. Multiple names can share an encoding. A match covers an enum when it covers every distinct declared encoding. Use a wildcard arm to specify the hardware result for other bit patterns.
+
+Enum types retain their declaration identity in ports, registers, arrays, structs, and function signatures. Compare values of the same enum with `==` or `!=`. Cast to a bit type for arithmetic or ordering, for example `state as u3`. A runtime cast from bits to an enum uses the same bit conversion as compiled DSLX IR. A required compile-time cast from bits needs the enum's exact width and a declared encoding. `zero!<State>()` requires a zero-valued member.
+
+Use public numeric enums from BX or DSLX libraries with `use protocol;` and `protocol::State::Idle`, or `use protocol::State;` and `State::Idle`.
+
+In imported DSLX, cast both operands to the backing type before an ordered comparison, for example `(a as u3) < (b as u3)`. The pinned XLS converter aborts on direct enum ordering. BX checks before conversion and reports an import error if it cannot verify a comparison in a selected function. DSLX can also instantiate a comparison while checking a `#[fuzz_domain]` method, a non-scalar module constant, an enum discriminant, a type width, or a `const_assert!`. Such declarations can trigger the diagnostic even when the selected function never calls the comparison. A scalar module constant computed by direct enum ordering may have no constexpr value in the pinned interpreter. Reading it then produces the native missing-value error.
+
 ### Scalar match expressions
 
-Use `match` on a boolean or a signed or unsigned bit value in a function or
+Use `match` on a boolean, numeric enum, or signed or unsigned bit value in a function or
 block. The first matching arm supplies the result. All arms share a result
 type, which can also be an array, tuple, or struct.
 
@@ -283,7 +308,7 @@ pub block delay(clk, rst, valid: bool, data: u16) -> (bool, u16) {
 ```
 
 `use stages::pipe_reg;` binds the block directly. Module, member, and grouped
-imports work for public blocks, functions, structs, and constants. Library
+imports work for public blocks, functions, structs, numeric enums, and constants. Library
 declarations can use private helpers and import other BX or DSLX modules.
 Transitive imports stay in the file that declares them. The root file's blocks
 determine the implicit top. BX links library blocks, functions, and externs reached
@@ -298,7 +323,7 @@ directory. Library API callers supply directories in
 
 ### Using DSLX modules and members
 
-`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions and struct types available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
+`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
 
 ```text
 use std;
@@ -385,6 +410,15 @@ diagnoses unsupported aggregate bindings, ambiguous
 native symbols, and method dispatches whose specialization the converter API
 cannot verify. DSLX `map` callbacks and indirect calls are outside this subset.
 Functions such as `apfloat::add` specialize on ordinary value parameters.
+
+For imports that enable DSLX generics, BX checks the native symbols of the
+selected specializations. Distinct numeric enums can specialize the same
+helper even when their source names match. The pinned mangler can give nested
+tuples such as `(E, (u8, u8), u8)` and `(E, (u8, u8, u8))` the same symbol.
+BX diagnoses that collision when both specializations occur in one conversion
+batch. When the batch can specialize a numeric enum, BX also reports an
+import error if the native call graph omits a method or indirect call target
+inside a specialized function and BX cannot verify its symbols.
 
 If an imported function requires an implicit token, BX reports the DSLX call path and highlights the effectful operation when it can locate it in the original source. For example, a runtime `assert!(N >= u32:2, "min_width")` in a helper makes its caller effectful. When `N` is a width parametric, `const_assert!(N >= u32:2)` checks the invariant during DSLX typechecking and keeps the helper pure.
 

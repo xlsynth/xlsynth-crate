@@ -138,11 +138,6 @@ block rounding(clk, x: u32) -> u32 {
 fn invalid_imported_calls_report_the_function_and_the_reason() {
     for (expression, callee, reason) in [
         ("std::lsbs(x)", "std::lsbs", "Could not infer parametric"),
-        (
-            "std::compare(x, x)",
-            "std::compare",
-            "unsupported result type 'Ordering'",
-        ),
         ("std::clzt_pow2_1(u1:0)", "std::clzt_pow2_1", "public"),
         (
             "std::umul(x, 3)",

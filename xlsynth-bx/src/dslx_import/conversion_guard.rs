@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Check the supported libxls conversion subset for concrete struct imports.
+//! Check specialization symbols and the supported subset for concrete struct
+//! imports.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 
 use xlsynth::dslx::{Function, ModuleMember, ParametricEnv, Type, TypeInfo, TypecheckedModule};
 use xlsynth::{DslxCallingConvention, mangle_dslx_name_with_env};
 
-use crate::import_structs::ImportedStructs;
+use crate::import_structs::EffectSources;
 
 /// One function declaration under the value/type bindings of a checked call.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -159,9 +160,22 @@ fn named_sibling(instances: &HashSet<Instance>) -> Result<Option<String>, String
     Ok(collisions.pop_first().map(|(name, sibling)| format!("DSLX specialization of '{name}' can share a native IR symbol with '{sibling}'; this combination is unsupported with libxls v0.61")))
 }
 
+/// Native specialization checks applicable to the current import batch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum GuardMode {
+    ConcreteStructs,
+    NumericEnums,
+    TypeBindings,
+}
+
 /// Guard the checked batch before conversion, where an unsupported symbol
 /// can abort the native process before any Rust error can be returned.
-pub(super) fn check(checked: &TypecheckedModule, structs: &ImportedStructs) -> Result<(), String> {
+pub(super) fn check(
+    checked: &TypecheckedModule,
+    sources: &EffectSources<'_>,
+    mode: GuardMode,
+) -> Result<(), String> {
+    let has_concrete_structs = mode == GuardMode::ConcreteStructs;
     let info = checked.get_type_info();
     let graph = info
         .build_function_call_graph(&checked.get_module())
@@ -176,14 +190,16 @@ pub(super) fn check(checked: &TypecheckedModule, structs: &ImportedStructs) -> R
         .collect();
     let mut seen = HashSet::new();
     let mut by_callee = HashMap::new();
-    let sources = structs.effect_sources();
     let mut written = HashMap::new();
     let mut errors = BTreeSet::new();
     while let Some(caller) = work.pop() {
         if !seen.insert(caller.clone()) {
             continue;
         }
+        let inspect_dispatch =
+            has_concrete_structs || (mode == GuardMode::NumericEnums && !caller.env.is_empty());
         let mut visible_methods = BTreeMap::<String, usize>::new();
+        let mut visible_callees = BTreeSet::new();
         for i in 0..graph.callee_count(&caller.function) {
             let callee = graph
                 .get_callee(&caller.function, i)
@@ -196,19 +212,28 @@ pub(super) fn check(checked: &TypecheckedModule, structs: &ImportedStructs) -> R
                 Entry::Occupied(entry) => entry.into_mut(),
             };
             if let Some(sites) = indexed.get(&caller) {
-                if ModuleMember::try_from(&callee).is_err() {
+                if inspect_dispatch {
+                    visible_callees.insert(callee.get_identifier());
+                }
+                if inspect_dispatch && ModuleMember::try_from(&callee).is_err() {
                     let count = visible_methods.entry(callee.get_identifier()).or_default();
                     let distinct = sites.iter().map(|s| s.invocation).collect::<HashSet<_>>();
                     *count = count.saturating_add(distinct.len());
                 }
                 for site in sites {
-                    if let Some(error) = unsupported_type_binding(site) {
+                    if has_concrete_structs && let Some(error) = unsupported_type_binding(site) {
                         errors.insert(error);
                     }
                     work.push(site.callee.clone());
                 }
             } else if !callee.is_parametric() {
-                if caller.env.is_empty() && ModuleMember::try_from(&callee).is_err() {
+                if inspect_dispatch {
+                    visible_callees.insert(callee.get_identifier());
+                }
+                if inspect_dispatch
+                    && caller.env.is_empty()
+                    && ModuleMember::try_from(&callee).is_err()
+                {
                     visible_methods.insert(callee.get_identifier(), usize::MAX);
                 }
                 work.push(Instance {
@@ -217,24 +242,83 @@ pub(super) fn check(checked: &TypecheckedModule, structs: &ImportedStructs) -> R
                 });
             }
         }
+        if !inspect_dispatch {
+            // The native root context supplies the concrete callees of an
+            // ordinary caller. A specialized caller can omit impl dispatch.
+            continue;
+        }
         let calls = match written.entry(caller.function.clone()) {
             Entry::Vacant(entry) => entry.insert(sources.dispatches(&caller.function, &graph)?),
             Entry::Occupied(entry) => entry.into_mut(),
         };
-        if calls.indirect {
+        if has_concrete_structs && calls.indirect {
             errors.insert(format!("DSLX function '{}' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs with libxls v0.61", caller.function.get_identifier()));
+        }
+        if !has_concrete_structs
+            && (calls.unknown_indirect || !calls.indirect_names.is_subset(&visible_callees))
+        {
+            errors.insert(format!("libxls v0.61 does not expose the indirect dispatch inside specialized DSLX function '{}'; BX cannot verify its native specialization symbols", caller.function.get_identifier()));
         }
         for (name, count) in &calls.methods {
             if visible_methods.get(name).copied().unwrap_or(0) < *count {
-                errors.insert(format!("libxls v0.61 does not expose the concrete method dispatch to '{name}' inside DSLX function '{}'; BX cannot verify this specialization before converting imported parametric structs", caller.function.get_identifier()));
+                let detail = if has_concrete_structs {
+                    "BX cannot verify this specialization before converting imported parametric structs"
+                } else {
+                    "BX cannot verify its native specialization symbols"
+                };
+                errors.insert(format!("libxls v0.61 does not expose the concrete method dispatch to '{name}' inside DSLX function '{}'; {detail}", caller.function.get_identifier()));
             }
         }
     }
-    if let Some(error) = errors.pop_first().or(named_sibling(&seen)?) {
+    if let Some(error) = errors.pop_first() {
+        Err(error)
+    } else if has_concrete_structs && let Some(error) = named_sibling(&seen)? {
         Err(error)
     } else {
-        Ok(())
+        check_type_symbols(&seen)
     }
+}
+
+/// v0.61 drops closing tuple delimiters from type-valued arguments. Distinct
+/// bindings of the same declaration must still have distinct native symbols.
+fn check_type_symbols(instances: &HashSet<Instance>) -> Result<(), String> {
+    let mut functions = HashMap::<&Function, Vec<&ParametricEnv>>::new();
+    for instance in instances {
+        if !instance.env.is_empty() {
+            functions
+                .entry(&instance.function)
+                .or_default()
+                .push(&instance.env);
+        }
+    }
+    let mut collisions = BTreeSet::new();
+    for (function, bindings) in functions {
+        if bindings.len() < 2 {
+            continue;
+        }
+        let mut symbols = BTreeSet::new();
+        let name = function.get_identifier();
+        for env in bindings {
+            let symbol = mangle_dslx_name_with_env(
+                "bx",
+                &name,
+                DslxCallingConvention::Typical,
+                &[],
+                Some(env),
+                None,
+            )
+            .map_err(|e| e.to_string())?;
+            if !symbols.insert(symbol) {
+                collisions.insert(name.clone());
+            }
+        }
+    }
+    if let Some(name) = collisions.first() {
+        return Err(format!(
+            "distinct specializations of DSLX function '{name}' have the same native IR symbol with libxls v0.61"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -243,10 +327,45 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    use super::{GuardMode, check};
+    use crate::import_structs::ImportedStructs;
     use crate::{
         ImportOptions, ResetBehavior, check_module_with_options, compile_with_options,
         empty_package, parse_module,
     };
+
+    #[test]
+    fn truncated_native_body_cannot_hide_a_spaced_method_application() -> Result<(), Box<dyn Error>>
+    {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("ops.x"),
+            r#"#![feature(generics)]
+pub enum Mode:u2 { A=0 }
+struct Pair<N:u32> { x:uN[N] }
+impl Pair<N> { fn choose<K:u32>(x:Mode)->bool { x==Mode::A } }
+pub fn via<N:u32>(v:uN[N],x:Mode)->bool {
+    let _ = '\x00';
+    type P=Pair<N>;
+    P::choose <u32:1> (x)
+}"#,
+        )?;
+        let (structs, imports) = ImportedStructs::load(
+            &parse_module("use ops;")?.uses,
+            xlsynth::default_dslx_stdlib_path(),
+            &[dir.path()],
+        )?;
+        let checked = structs.check_probe(
+            "import ops; fn sample(x:ops::Mode)->bool { ops::via(u2:0,x) }",
+            "bx_dispatch",
+            &mut imports.ok_or("missing native import data")?,
+        )?;
+        assert_eq!(
+            check(&checked, &structs.effect_sources(), GuardMode::NumericEnums).unwrap_err(),
+            "libxls v0.61 does not expose the indirect dispatch inside specialized DSLX function 'via'; BX cannot verify its native specialization symbols"
+        );
+        Ok(())
+    }
 
     #[test]
     fn ordinary_map_and_sum_constructors_remain_direct() -> Result<(), Box<dyn Error>> {

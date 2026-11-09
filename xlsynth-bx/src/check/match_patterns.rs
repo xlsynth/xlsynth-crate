@@ -10,7 +10,7 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
 use crate::infer_literal::check_inferred_signed_width;
-use crate::typed::{ScalarPattern, TypedExpr, TypedExprKind, bits};
+use crate::typed::{CheckedEnum, ScalarPattern, TypedExpr, TypedExprKind, bits};
 
 /// Disjoint, half-open gaps in the unsigned bit-pattern space, plus the
 /// nonempty source intervals needed to distinguish exact duplicates.
@@ -92,7 +92,7 @@ fn next_literal(
 ) -> Result<IrBits, String> {
     check_inferred_signed_width(&[source], subject_ty, None)?;
     let value = literals.next().ok_or("missing checked pattern literal")?;
-    if bits(&value.ty) != bits(subject_ty) {
+    if !super::compatible(&value.ty, subject_ty) {
         return Err(format!(
             "match pattern has type {}, expected {subject_ty}",
             value.ty
@@ -102,6 +102,61 @@ fn next_literal(
         TypedExprKind::Literal(IrValue::Bits(value)) => Ok(value),
         _ => Err("scalar match patterns require literal values".into()),
     }
+}
+
+/// Check nominal alternatives against the declared encodings. XLS IR uses
+/// the last source arm as its default even if an earlier arm exhausts the
+/// enum; this is observable when hardware supplies an undeclared encoding.
+pub(super) fn check_enum_patterns(
+    def: &CheckedEnum,
+    subject_ty: &Type,
+    arms: &[MatchArm],
+    mut literals: impl Iterator<Item = TypedExpr>,
+) -> Result<Vec<Vec<ScalarPattern>>, String> {
+    let mut seen = HashSet::new();
+    let mut saw_wildcard = false;
+    let mut checked = Vec::with_capacity(arms.len());
+    for (index, arm) in arms.iter().enumerate() {
+        let mut patterns = Vec::with_capacity(arm.patterns.len());
+        let mut unconditional = index + 1 == arms.len();
+        for pattern in &arm.patterns {
+            match pattern {
+                MatchPattern::Wildcard => {
+                    if saw_wildcard {
+                        return Err("exact-duplicate wildcard match pattern".into());
+                    }
+                    saw_wildcard = true;
+                    unconditional = true;
+                }
+                MatchPattern::Literal(source @ Expr::Name(_)) => {
+                    let value = next_literal(source, &mut literals, subject_ty)?;
+                    if !def.contains(&value) {
+                        return Err(format!(
+                            "enum match pattern is not a declared value of {subject_ty}"
+                        ));
+                    }
+                    if !seen.insert(value.clone()) {
+                        return Err("exact-duplicate match pattern".into());
+                    }
+                    patterns.push(ScalarPattern::Literal(value));
+                }
+                MatchPattern::Literal(_) | MatchPattern::Range { .. } => {
+                    return Err(format!(
+                        "enum match pattern must name a value of {subject_ty}"
+                    ));
+                }
+            }
+        }
+        checked.push(if unconditional {
+            vec![ScalarPattern::Wildcard]
+        } else {
+            patterns
+        });
+    }
+    if !saw_wildcard && seen.len() != def.value_count() {
+        return Err("match patterns are not exhaustive".into());
+    }
+    Ok(checked)
 }
 
 /// Check all source alternatives, including ones after coverage becomes

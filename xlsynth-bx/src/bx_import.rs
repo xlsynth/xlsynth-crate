@@ -42,6 +42,18 @@ pub(crate) const BUILTIN_UPDATE: &str = "$builtin$update";
 struct Export {
     name: String,
     callback_template: bool,
+    is_enum: bool,
+}
+
+impl Export {
+    /// Enum members inherit the visibility of their declaring type.
+    fn reference(&self, member: Option<&str>) -> Option<String> {
+        match member {
+            None => Some(self.name.clone()),
+            Some(member) if self.is_enum => Some(format!("{}::{member}", self.name)),
+            Some(_) => None,
+        }
+    }
 }
 
 /// Public members of one physical BX file, shared by all incoming imports.
@@ -62,6 +74,7 @@ enum Binding {
 struct Names {
     subject: Option<String>,
     definitions: BTreeSet<String>,
+    enums: BTreeSet<String>,
     uses: BTreeMap<String, Binding>,
     positions: BTreeMap<String, usize>,
 }
@@ -77,6 +90,7 @@ impl Names {
             .structs
             .iter()
             .map(|d| &d.name)
+            .chain(module.enums.iter().map(|d| &d.name))
             .chain(module.functions.iter().map(|d| &d.name))
             .chain(module.constants.iter().map(|d| &d.name))
             .chain(module.blocks.iter().map(|d| &d.name))
@@ -103,6 +117,7 @@ impl Names {
         Ok(Self {
             subject: subject.map(str::to_owned),
             definitions,
+            enums: module.enums.iter().map(|d| d.name.clone()).collect(),
             uses,
             positions: module
                 .declaration_order
@@ -153,23 +168,33 @@ impl Names {
             }
             return match (binding, member) {
                 (Binding::Module(lib), Some(m)) => {
-                    lib.exports.get(m).map(|e| e.name.clone()).ok_or_else(|| {
-                        format!("unknown or private BX member '{}::{m}'", lib.subject)
-                    })
+                    let (name, member) = m
+                        .split_once("::")
+                        .map_or((m, None), |(name, member)| (name, Some(member)));
+                    lib.exports
+                        .get(name)
+                        .and_then(|e| e.reference(member))
+                        .ok_or_else(|| {
+                            format!("unknown or private BX member '{}::{m}'", lib.subject)
+                        })
                 }
                 (Binding::Module(_), None) => Err(format!(
                     "use binding '{head}' names a BX module and requires a member"
                 )),
-                (Binding::Member(e), None) => Ok(e.name.clone()),
-                (Binding::Member(_), Some(_)) => Err(format!(
-                    "use binding '{head}' is a BX member and cannot qualify '{name}'"
-                )),
+                (Binding::Member(e), member) => e.reference(member).ok_or_else(|| {
+                    format!("use binding '{head}' is a BX member and cannot qualify '{name}'")
+                }),
                 (Binding::Dslx(alias), Some(m)) => Ok(format!("{alias}::{m}")),
                 (Binding::Dslx(alias), None) => Ok(alias.clone()),
             };
         }
         if self.definitions.contains(name) && (visible || !matches!(name, "map" | "update")) {
             return Ok(self.declared(name));
+        }
+        if let Some(member) = member
+            && self.enums.contains(head)
+        {
+            return Ok(format!("{}::{member}", self.declared(head)));
         }
         if let Some(subject) = &self.subject {
             return match name {
@@ -383,6 +408,7 @@ impl<'a> Graph<'a> {
             .structs
             .iter()
             .map(|d| (&d.name, d.public, false))
+            .chain(module.enums.iter().map(|d| (&d.name, d.public, false)))
             .chain(module.constants.iter().map(|d| (&d.name, d.public, false)))
             .chain(
                 module
@@ -403,6 +429,7 @@ impl<'a> Graph<'a> {
                     Export {
                         name: names.declared(name),
                         callback_template,
+                        is_enum: names.enums.contains(name),
                     },
                 )
             })
@@ -429,9 +456,10 @@ impl<'a> Graph<'a> {
                 .iter()
                 .map(|d| (&d.name, false))
                 .chain(source.constants.iter().map(|d| (&d.name, false)))
+                .chain(source.enums.iter().map(|d| (&d.name, false)))
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
             {
-                if block
+                if block && !export.is_enum
                     || use_pos
                         .zip(names.positions.get(owner))
                         .is_none_or(|(u, &d)| u <= d)
@@ -460,13 +488,16 @@ impl<'a> Graph<'a> {
         }
         if source.declaration_order.is_empty() {
             linked.declaration_order.extend(
-                m.constants
+                m.enums
                     .iter()
                     .map(|d| d.name.clone())
+                    .chain(m.externs.iter().map(|d| d.name.clone()))
+                    .chain(m.constants.iter().map(|d| d.name.clone()))
                     .chain(m.functions.iter().map(|d| d.name.clone())),
             );
         }
         linked.structs.append(&mut m.structs);
+        linked.enums.append(&mut m.enums);
         linked.constants.append(&mut m.constants);
         linked.externs.append(&mut m.externs);
         linked.functions.append(&mut m.functions);
