@@ -100,7 +100,7 @@ example (q : XlsBlock.State) (x : XlsBlock.Input) :
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn bx_counter_reset_polarities() {
     let source = r#"
-block counter(clk, rst) -> u8 {
+block counter(clk) -> u8 {
     reg count: u8 = 3;
     count := count + u8:1;
     count
@@ -145,7 +145,7 @@ open XlsReadable
 fn bx_positional_outputs_and_simultaneous_registers() {
     let source = r#"
 struct InputPacket { sample: (bool, u8) }
-block swap(clk, rst, x: InputPacket) -> (bool, u8) {
+block swap(clk, x: InputPacket) -> (bool, u8) {
     reg left: u8 = 0;
     reg right: u8 = 3;
     left := right;
@@ -174,7 +174,7 @@ example (q : State) (x : Input) : (reset q x).next = ⟨0, 3⟩ := by rfl
 fn bx_unit_output_and_singleton_tuple_register() {
     let mut bundle = bx_bundle(
         r#"
-block machine(clk, rst, x: (bool,)) -> () {
+block machine(clk, x: (bool,)) -> () {
     reg one: (bool,) = (false,);
     one := x;
     ()
@@ -202,7 +202,7 @@ fn bx_fields_keep_lean_names() {
         r#"
 struct Word { mk: u8 }
 struct Packet { XlsSource: u8, _root_: u8, word: Word }
-block machine(clk, rst, BitVec: u8, packet: Packet) -> (u8, Packet) {
+block machine(clk, BitVec: u8, packet: Packet) -> (u8, Packet) {
     reg mk: Packet;
     mk := packet;
     (BitVec, mk)

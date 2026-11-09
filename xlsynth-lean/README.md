@@ -104,7 +104,7 @@ ports. For example, this block exposes its old count on output and increments
 it on each clock unless reset is asserted.
 
 ```
-pub block counter(clk, rst, take: bool) -> u8 {
+pub block counter(clk, take: bool) -> u8 {
     reg count: u8 = 0;
     if take { count := count + u8:1; }
     count
