@@ -6,7 +6,8 @@
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
-    mixed_literal_contracts, nominal_contracts, observable_value_contracts, observer_contracts,
+    inferred_flow_contracts, literal_order_contracts, mixed_literal_contracts,
+    nested_scope_contracts, nominal_contracts, observable_value_contracts, observer_contracts,
     pattern_acceptance, scope_contracts, tuple_literal_contracts, unrolled_loop_contracts,
 };
 
@@ -142,6 +143,19 @@ pub fn generate_v6(data: &[u8]) -> Result<AuditCase, String> {
     }
 }
 
+/// Decodes nested scope, literal-order and inferred-flow cases. A zero prefix
+/// embeds an audit-v6 input with the same source and oracle.
+pub fn generate_v7(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    let case = match selector % 8 {
+        5 => nested_scope_contracts::generate(options)?,
+        6 => literal_order_contracts::generate(options),
+        7 => inferred_flow_contracts::generate(options),
+        _ => return generate_v6(options),
+    };
+    Ok(AuditCase::Semantic(case))
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -189,7 +203,32 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditCase, generate, generate_v2};
+    use super::{AuditCase, generate, generate_v2, generate_v6, generate_v7};
+
+    #[test]
+    fn zero_prefix_preserves_mixed_literal_source_and_both_runtime_oracles() -> Result<(), String> {
+        let bytes = [3, 1, 2, 2, 5];
+        let prefixed = [&[0][..], &bytes].concat();
+        let unpack = |case| match case {
+            AuditCase::MixedLiteral {
+                case,
+                raw_runtime_module,
+                runtime_module,
+            } => Ok((
+                case.family,
+                case.modules,
+                case.expected_ir,
+                raw_runtime_module,
+                runtime_module,
+            )),
+            _ => Err("expected a mixed-literal contract".to_string()),
+        };
+        assert_eq!(
+            unpack(generate_v6(&bytes)?)?,
+            unpack(generate_v7(&prefixed)?)?
+        );
+        Ok(())
+    }
 
     #[test]
     fn embedded_guard_keeps_its_program_and_only_checks_correctness() -> Result<(), String> {

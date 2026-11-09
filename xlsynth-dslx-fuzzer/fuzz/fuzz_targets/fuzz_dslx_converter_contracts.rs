@@ -34,6 +34,7 @@ fuzz_target!(init: {
         Some(name) if name == "audit-v4" => audit_contracts::generate_v4,
         Some(name) if name == "audit-v5" => audit_contracts::generate_v5,
         Some(name) if name == "audit-v6" => audit_contracts::generate_v6,
+        Some(name) if name == "audit-v7" => audit_contracts::generate_v7,
         Some(name) => panic!("unknown DSLX_FUZZ_CONTRACT_GRAMMAR {name:?}"),
     };
     let config = Config { converter, stdlib, campaign: Campaign::from_env(true), generate };

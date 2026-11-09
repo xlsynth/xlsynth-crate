@@ -391,6 +391,10 @@ The `audit-v6` grammar compares two bound integer literals of mixed signedness
 in runtime expressions, module constants, and parametric arguments. It checks
 the original IR and both uncast and explicitly cast bytecode against an
 independent Boolean result.
+The `audit-v7` grammar checks nested lexical bindings in constant expressions,
+the inferred common type after permuting array elements or disjoint match arms,
+and width-sensitive computations over values selected by ordinary `if` or
+`match`. Each family compares the emitted IR with an independent reference.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

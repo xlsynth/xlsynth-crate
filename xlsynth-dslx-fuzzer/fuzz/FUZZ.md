@@ -118,6 +118,26 @@ constant folding even when the top signature is correct. The same standalone
 tools are required as for audit-v5. Prefix an audit-v5 input with one zero
 byte to preserve it in an audit-v6 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v7` to exercise three more wrong-value
+properties with the standalone converter and independent reference IR.
+
+- An expression that reads an inner binding inside its block and an outer
+  binding outside it must respect both lexical scopes. Generate module
+  constants, value arguments, type dimensions and runtime controls.
+- Permuting three or more literals in an array while remapping the observed
+  index, or reordering disjoint match arms while preserving the fallback,
+  must preserve the widened value. Vary the literal spellings and include
+  explicitly typed controls.
+- A value selected by an ordinary `if` or `match` and used at a wider
+  declared type must compute with that width. Compare inferred and explicitly
+  typed producers in runtime and folded contexts. Signed match patterns and
+  signed helper returns also check whether widening preserves the sign, even
+  when the original IR has the expected width.
+
+Use a separate audit-v7 corpus. Prefix an audit-v6 input with one zero byte to
+preserve its source and oracle. Replay archived audit-v6 inputs directly with
+their original grammar setting.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
