@@ -89,6 +89,16 @@ pub fn compile_bx_with_dslx(
 }
 
 impl CompiledBx {
+    /// BX records each imported struct under its written type, including all
+    /// arguments of a parametric application.
+    fn imported_struct(&self, ty: &Type) -> Option<&LinkedStruct> {
+        match ty {
+            Type::Named(name) => self.imported_structs.get(name),
+            Type::Applied { .. } => self.imported_structs.get(&ty.to_string()),
+            _ => None,
+        }
+        .map(Rc::as_ref)
+    }
     /// Borrow the warnings from checking the BX source that produced this
     /// package.
     ///
@@ -222,12 +232,10 @@ impl CompiledBx {
         )?
         .into_iter()
         .collect();
-        let outputs = if let Type::Named(key) = &source.result
-            && let Some(import) = self.imported_structs.get(key)
-        {
+        let outputs = if let Some(import) = self.imported_struct(&source.result) {
             let ty = super::helper_types::imported_struct(import, &mut declarations)?;
             let SourceType::Struct { name } = resolve_aliases(&ty, &declarations)? else {
-                bail!("expected imported BX result struct {key}");
+                bail!("expected imported BX result struct {}", source.result);
             };
             let fields = declarations
                 .iter()
@@ -282,6 +290,9 @@ impl CompiledBx {
 /// Descending through array elements and tuple fields emits each nested struct
 /// before the Lean declaration that uses it.
 fn bx_type(ty: &Type, module: &CompiledBx, declarations: &mut Vec<TypeDecl>) -> Result<SourceType> {
+    if let Some(import) = module.imported_struct(ty) {
+        return super::helper_types::imported_struct(import, declarations);
+    }
     Ok(match ty {
         Type::Bool
         | Type::Bits {
@@ -314,9 +325,6 @@ fn bx_type(ty: &Type, module: &CompiledBx, declarations: &mut Vec<TypeDecl>) -> 
         Type::Named(key) => {
             if module.source.enums.iter().any(|decl| decl.name == *key) {
                 bail!("BX numeric enum {ty} is unsupported by readable Lean");
-            }
-            if let Some(import) = module.imported_structs.get(key) {
-                return super::helper_types::imported_struct(import, declarations);
             }
             if !declarations.iter().any(|d| d.name() == key) {
                 let def = module
