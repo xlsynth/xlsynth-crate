@@ -704,7 +704,8 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             Type::Named(name) | Type::Applied { name, .. } => rename(name, aliases),
             Type::Array { element, .. } => rename_type(element, aliases),
             Type::Tuple(fields) => fields.iter_mut().for_each(|f| rename_type(f, aliases)),
-            Type::Bits { .. } | Type::Bool => { /* Primitive types have no references. */ }
+            Type::Bits { .. } | Type::Enum { .. } | Type::Bool => { /* Primitive types have no references. */
+            }
         }
     }
     fn capture_iterable(iterable: &mut ForIterable, aliases: &mut BTreeMap<String, String>) {
@@ -754,6 +755,16 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         Expr::Call { name, args } => {
             rename(name, aliases);
             for arg in args {
+                capture_names(arg, aliases);
+            }
+        }
+        Expr::MapBeforeUse {
+            name,
+            args,
+            builtin_args,
+        } => {
+            rename(name, aliases);
+            for arg in args.iter_mut().chain(builtin_args.iter_mut().flatten()) {
                 capture_names(arg, aliases);
             }
         }

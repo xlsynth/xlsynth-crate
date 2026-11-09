@@ -20,6 +20,8 @@ mod map_lambda;
 mod module_constants;
 #[path = "frontend/named_map.rs"]
 mod named_map;
+#[path = "frontend/numeric_enums.rs"]
+mod numeric_enums;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
 #[path = "frontend/unroll_for.rs"]

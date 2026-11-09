@@ -45,7 +45,7 @@ impl BodyChecker<'_, '_> {
         callback: &str,
     ) -> Result<(Type, K), String> {
         if !self.is_builtin_map(target, |target| self.names.contains(target))? {
-            return Err("a range operand requires the built-in map".into());
+            return Err("this named map requires the built-in map".into());
         }
         let array = self.map_iterable(iterable)?;
         self.map(array, MapCallback::Named(callback))

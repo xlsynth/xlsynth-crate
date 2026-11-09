@@ -17,6 +17,7 @@ use crate::ast::{StructDef, Type, UsePath};
 use crate::check::MAX_TYPE_SIZE;
 use crate::import_structs::ImportedStructs;
 use crate::parser::{is_dslx_member_name, is_identifier_word};
+use crate::typed::CheckedEnum;
 
 /// An imported DSLX function specialized for one set of BX argument types.
 #[derive(Clone, Debug)]
@@ -159,6 +160,35 @@ impl ImportResolver {
         }
     }
 
+    /// A bare module prefix qualifies an ordinary member, not an enum variant.
+    pub(crate) fn lookup_enum_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<(String, String)>, String> {
+        if matches!(self.bindings.get(prefix), Some(UseBinding::Module(_))) {
+            return Ok(None);
+        }
+        self.lookup(prefix)
+    }
+
+    /// Resolve a written enum variant during lexical checking of an
+    /// unelaborated body.
+    pub(crate) fn check_enum_member_name(
+        &self,
+        subject: &str,
+        member: &str,
+        variant: &str,
+    ) -> Result<(), String> {
+        if self.subjects.contains(subject) && self.structs.has_enum_member(subject, member, variant)
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "unknown DSLX enum member '{subject}::{member}::{variant}'"
+            ))
+        }
+    }
+
     /// Check visibility without typechecking an invocation in an empty fold.
     pub(crate) fn check_member_name(&self, subject: &str, member: &str) -> Result<(), String> {
         if self.structs.has_public_member(subject, member) {
@@ -168,6 +198,10 @@ impl ImportResolver {
                 "unknown or private DSLX member '{subject}::{member}'"
             ))
         }
+    }
+
+    pub(crate) fn is_enum_type(&self, subject: &str, member: &str) -> bool {
+        self.structs.is_enum_type(subject, member)
     }
 
     /// Check a static callback's declaration even when an empty structural
@@ -227,9 +261,8 @@ impl ImportResolver {
         }
         self.with_imports(|structs, imports| {
             structs
-                .resolve_named(subject, member, imports)
+                .resolve_nominal_type(subject, member, imports)
                 .map_err(|e| structs.remap_diagnostic(e))
-                .map(Type::Named)
         })
     }
 
@@ -253,6 +286,10 @@ impl ImportResolver {
     /// results.
     pub(crate) fn struct_defs(&self) -> &[StructDef] {
         self.structs.definitions()
+    }
+
+    pub(crate) fn enum_definitions(&self) -> &[CheckedEnum] {
+        self.structs.enum_definitions()
     }
 
     /// Ask the DSLX typechecker to specialize the function from concrete data
@@ -284,7 +321,7 @@ impl ImportResolver {
             ));
         }
         for arg in &mut args {
-            normalize_import_type(arg, self.struct_defs())
+            normalize_import_type(arg, self.struct_defs(), self.enum_definitions())
                 .map_err(|e| format!("{module}::{function}: {e}"))?;
         }
         let key = (module.to_owned(), function.to_owned(), args);
@@ -391,7 +428,11 @@ fn probe_{id}({}) {{ capture({}) }}
     }
 }
 
-fn normalize_import_type(ty: &mut Type, structs: &[StructDef]) -> Result<(), String> {
+fn normalize_import_type(
+    ty: &mut Type,
+    structs: &[StructDef],
+    enums: &[CheckedEnum],
+) -> Result<(), String> {
     match ty {
         Type::Bool => {
             *ty = Type::Bits {
@@ -401,8 +442,20 @@ fn normalize_import_type(ty: &mut Type, structs: &[StructDef]) -> Result<(), Str
         }
         Type::Tuple(items) => items
             .iter_mut()
-            .try_for_each(|item| normalize_import_type(item, structs))?,
-        Type::Array { element, .. } => normalize_import_type(element, structs)?,
+            .try_for_each(|item| normalize_import_type(item, structs, enums))?,
+        Type::Array { element, .. } => normalize_import_type(element, structs, enums)?,
+        Type::Enum {
+            name,
+            signed,
+            width,
+        } if !enums.iter().any(|def| {
+            def.name == *name && def.signed == *signed && def.width == *width && def.public
+        }) =>
+        {
+            return Err(format!(
+                "unsupported nominal type '{name}' in imported function signature"
+            ));
+        }
         Type::Named(name) if !structs.iter().any(|s| s.name == *name) => {
             return Err(format!(
                 "unsupported nominal type '{name}' in imported function signature"
@@ -411,8 +464,9 @@ fn normalize_import_type(ty: &mut Type, structs: &[StructDef]) -> Result<(), Str
         Type::Applied { name, .. } => {
             return Err(format!("unresolved imported struct application '{name}'"));
         }
-        Type::Bits { .. } | Type::Named(_) => {
-            // Bits and resolved DSLX structs already have their canonical type.
+        Type::Bits { .. } | Type::Named(_) | Type::Enum { .. } => {
+            // Bits and resolved DSLX nominal types already have their canonical
+            // type.
         }
     }
     Ok(())
@@ -442,6 +496,12 @@ impl ProbeImports {
     /// Render nominal arguments using aliases valid in the generated module.
     fn render_type(&mut self, ty: &Type, structs: &ImportedStructs) -> Result<String, String> {
         match ty {
+            Type::Enum { name, .. } => {
+                let (subject, member) = name
+                    .split_once("::")
+                    .ok_or_else(|| format!("missing DSLX import for enum '{name}'"))?;
+                Ok(self.qualify(subject, member))
+            }
             Type::Named(name) => {
                 let (subject, member) = structs
                     .public_spelling(name)?
@@ -666,13 +726,42 @@ fn compile_batch(
     let source = probe_imports.declarations() + &probes;
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
+    structs.check_enum_order(&source, &module)?;
     if has_instances {
-        conversion_guard::check(&checked, structs)?;
+        conversion_guard::check(
+            &checked,
+            &structs.effect_sources(),
+            conversion_guard::GuardMode::ConcreteStructs,
+        )?;
     }
     // XLS can embed filenames in generated symbols. Restore the logical
     // names before parsing: a temporary path can contain punctuation that
     // would otherwise turn a valid original identifier into invalid PIR.
-    let mut ir = structs.restore_ir_names(&checked.to_ir_text().map_err(|e| e.to_string())?);
+    let type_parameters = structs.import_features(subject).type_parameters;
+    // The probe imports the selected subject and the public spellings of
+    // nominal arguments, including types nested in arrays and tuples.
+    let enum_specializations = type_parameters
+        && probe_imports
+            .aliases
+            .keys()
+            .any(|owner| structs.import_features(owner).numeric_enums);
+    let converted = structs.conversion_probe(&checked, &source, &module, enum_specializations)?;
+    if !has_instances && type_parameters {
+        conversion_guard::check(
+            &converted.checked,
+            &structs.effect_sources_for(converted.files),
+            if enum_specializations {
+                conversion_guard::GuardMode::NumericEnums
+            } else {
+                conversion_guard::GuardMode::TypeBindings
+            },
+        )?;
+    }
+    let ir = converted
+        .checked
+        .to_ir_text()
+        .map_err(|e| converted.files.remap_diagnostic(e.to_string()))?;
+    let mut ir = converted.files.restore_ir_names(&ir);
     // libxls accepts a numeric initial in a synthetic DSLX module name.
     // Give just the enclosing PIR package a legal initial; the generated
     // function symbols retain their collision-free prefix.
@@ -684,19 +773,22 @@ fn compile_batch(
     let mut package = ir_parser::Parser::new(&ir)
         .parse_xls_package()
         .map_err(|e| format!("reading imported functions as PIR: {e}"))?;
-    // Relocation only inserts path components in import/use declarations.
-    // Undo their column offsets before restoring the filenames themselves.
+    // Undo source edits in the conversion snapshot before restoring filenames.
     for member in &mut package.members {
         for node in &mut member.graph_mut().nodes {
             for pos in node.pos.iter_mut().flatten() {
                 if let Some(path) = package.file_table.id_to_path.get(&pos.fileno) {
-                    pos.colno = structs.original_column(Path::new(path), pos.lineno, pos.colno);
+                    pos.colno =
+                        converted
+                            .files
+                            .original_column(Path::new(path), pos.lineno, pos.colno);
                 }
             }
         }
     }
     for path in package.file_table.id_to_path.values_mut() {
-        let logical = structs.logical_path(Path::new(path));
+        let physical = Path::new(path);
+        let logical = converted.files.logical_path(physical).unwrap_or(physical);
         if let Ok(relative) = logical.strip_prefix(stdlib_path) {
             let relative = relative
                 .to_string_lossy()
@@ -869,7 +961,7 @@ pub struct Generic<N: u32, T: type = u8> { x: T }
         let mut ty = module.externs[0].params[0].ty.clone();
         assert_eq!(ty.to_string(), "(uN[0], s64, uN[65], (Packet,)[2])");
         assert_eq!(
-            normalize_import_type(&mut ty, &[]).unwrap_err(),
+            normalize_import_type(&mut ty, &[], &[]).unwrap_err(),
             "unsupported nominal type 'Packet' in imported function signature"
         );
     }

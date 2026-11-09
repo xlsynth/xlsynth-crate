@@ -9,6 +9,16 @@ use std::ops::Range;
 
 use super::{dslx_identifier_tail, identifier_start};
 
+/// Keep a native-printed non-UTF-8 byte character as one token for lexical
+/// inspection. Neither the original source nor the evaluated value is changed.
+pub(crate) fn native_display_tokens_source(text: &str) -> Cow<'_, str> {
+    if text.contains("'\u{fffd}'") {
+        Cow::Owned(text.replace("'\u{fffd}'", "'?'"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Lexical contexts where the native byte scanner treats a non-UTF-8 byte
 /// differently. In particular a prime on an identifier never opens a literal.
 #[derive(Clone, Copy)]
@@ -28,7 +38,10 @@ pub(crate) struct RelocatedSource {
 
 /// Changed token ranges on each line, in increasing source order.
 #[derive(Default)]
-pub(crate) struct SourceColumns(Vec<ColumnEdit>);
+pub(crate) struct SourceColumns {
+    edits: Vec<ColumnEdit>,
+    original: Option<Box<SourceColumns>>,
+}
 
 /// One path edit, with zero-based byte columns in both source views.
 struct ColumnEdit {
@@ -38,12 +51,27 @@ struct ColumnEdit {
 }
 
 impl SourceColumns {
+    /// Compose two line-preserving rewrites, newest to oldest.
+    pub(crate) fn with_original(mut self, original: Self) -> Self {
+        if self.edits.is_empty() {
+            return original;
+        }
+        if !original.edits.is_empty() {
+            let original = match self.original.take() {
+                Some(prior) => prior.with_original(original),
+                None => original,
+            };
+            self.original = Some(Box::new(original));
+        }
+        self
+    }
+
     /// Translate a native zero-based byte column back to the input file.
     pub(crate) fn original_column(&self, line: usize, column: usize) -> usize {
         let prior = self
-            .0
+            .edits
             .partition_point(|i| (i.line, i.relocated.start) <= (line, column));
-        match self.0[..prior].last() {
+        let column = match self.edits[..prior].last() {
             Some(i) if i.line == line && column >= i.relocated.end => {
                 i.original.end + (column - i.relocated.end)
             }
@@ -51,19 +79,22 @@ impl SourceColumns {
                 i.original.start + (column - i.relocated.start).min(i.original.len())
             }
             _ => column,
-        }
+        };
+        self.original
+            .as_ref()
+            .map_or(column, |original| original.original_column(line, column))
     }
 }
 
-/// A path token to rewrite or a zero-width point at which to insert a prefix.
-struct PathEdit {
-    range: Range<usize>,
-    text: String,
+/// Replace a source byte range with single-line text, retaining its newlines.
+pub(crate) struct SourceEdit {
+    pub(crate) range: Range<usize>,
+    pub(crate) text: String,
 }
 
 /// Splice only the selected tokens, preserving newlines and tracking columns
 /// across multiple expansions or contractions on the same line.
-fn apply_path_edits(bytes: &[u8], edits: Vec<PathEdit>) -> RelocatedSource {
+pub(crate) fn apply_source_edits(bytes: &[u8], edits: Vec<SourceEdit>) -> RelocatedSource {
     let mut output = Vec::with_capacity(bytes.len());
     let mut columns = SourceColumns::default();
     let (mut line, mut original_col, mut relocated_col) = (0, 0, 0);
@@ -79,14 +110,24 @@ fn apply_path_edits(bytes: &[u8], edits: Vec<PathEdit>) -> RelocatedSource {
             original_col += unchanged.len();
             relocated_col += unchanged.len();
         }
-        columns.0.push(ColumnEdit {
-            line,
-            original: original_col..original_col + edit.range.len(),
-            relocated: relocated_col..relocated_col + edit.text.len(),
-        });
-        original_col += edit.range.len();
-        relocated_col += edit.text.len();
-        output.extend_from_slice(edit.text.as_bytes());
+        let mut replacement = edit.text.as_bytes();
+        for (i, part) in bytes[edit.range.clone()].split(|&b| b == b'\n').enumerate() {
+            if i != 0 {
+                output.push(b'\n');
+                line += 1;
+                original_col = 0;
+                relocated_col = 0;
+            }
+            columns.edits.push(ColumnEdit {
+                line,
+                original: original_col..original_col + part.len(),
+                relocated: relocated_col..relocated_col + replacement.len(),
+            });
+            original_col += part.len();
+            relocated_col += replacement.len();
+            output.extend_from_slice(replacement);
+            replacement = &[];
+        }
         copied = edit.range.end;
     }
     output.extend_from_slice(&bytes[copied..]);
@@ -165,7 +206,7 @@ pub(crate) fn relocate_dslx_imports(
                             } else {
                                 &import_prefix
                             };
-                            edits.push(PathEdit {
+                            edits.push(SourceEdit {
                                 range: offset..offset,
                                 text: prefix.clone(),
                             });
@@ -188,12 +229,12 @@ pub(crate) fn relocate_dslx_imports(
                                         // alias. Leave
                                         // its identifier and source position
                                         // intact.
-                                        PathEdit {
+                                        SourceEdit {
                                             range: offset..offset,
                                             text: format!("{short} as "),
                                         }
                                     } else {
-                                        PathEdit {
+                                        SourceEdit {
                                             range: offset..offset + len,
                                             text: short.clone(),
                                         }
@@ -214,7 +255,7 @@ pub(crate) fn relocate_dslx_imports(
         }
         region = advance(region, byte, offset, bytes);
     }
-    apply_path_edits(bytes, edits)
+    apply_source_edits(bytes, edits)
 }
 
 /// Present a byte-oriented DSLX module as UTF-8 for outlining. The native
@@ -222,13 +263,27 @@ pub(crate) fn relocate_dslx_imports(
 /// positions. Invalid UTF-8 in literals keeps its value through DSLX's hex
 /// escape. An invalid byte in a comment or a Latin-1 space occupies one space.
 pub(crate) fn decode_dslx_source(bytes: &[u8]) -> Result<Cow<'_, str>, String> {
+    decode_dslx_source_with_columns(bytes).map(|(source, _)| source)
+}
+
+/// Keep the original byte columns of legacy bytes expanded into DSLX escapes.
+pub(crate) fn decode_dslx_source_with_columns(
+    bytes: &[u8],
+) -> Result<(Cow<'_, str>, SourceColumns), String> {
     if let Ok(text) = std::str::from_utf8(bytes) {
-        return Ok(Cow::Borrowed(text));
+        return Ok((Cow::Borrowed(text), SourceColumns::default()));
     }
+    let mut columns = SourceColumns::default();
+    let (mut line, mut raw_start, mut decoded_start) = (0, 0, 0);
     let mut output = String::with_capacity(bytes.len());
     let mut region = Region::Code;
     let mut offset = 0;
     for chunk in bytes.utf8_chunks() {
+        if let Some(last) = chunk.valid().rfind('\n') {
+            line += chunk.valid().bytes().filter(|&b| b == b'\n').count();
+            raw_start = offset + last + 1;
+            decoded_start = output.len() + last + 1;
+        }
         output.push_str(chunk.valid());
         for &byte in chunk.valid().as_bytes() {
             region = advance(region, byte, offset, bytes);
@@ -239,7 +294,13 @@ pub(crate) fn decode_dslx_source(bytes: &[u8]) -> Result<Cow<'_, str>, String> {
                 Region::LineComment => output.push(' '),
                 Region::Code | Region::Identifier if byte == 0xa0 => output.push(' '),
                 Region::Character { .. } | Region::Quoted { escaped: false, .. } => {
+                    let begin = output.len() - decoded_start;
                     write!(output, "\\x{byte:02x}").expect("writing to a String");
+                    columns.edits.push(ColumnEdit {
+                        line,
+                        original: offset - raw_start..offset - raw_start + 1,
+                        relocated: begin..output.len() - decoded_start,
+                    });
                 }
                 _ => {
                     return Err(format!(
@@ -251,7 +312,7 @@ pub(crate) fn decode_dslx_source(bytes: &[u8]) -> Result<Cow<'_, str>, String> {
             offset += 1;
         }
     }
-    Ok(Cow::Owned(output))
+    Ok((Cow::Owned(output), columns))
 }
 
 /// Follow DSLX quoting and line comments without decoding valid source text.

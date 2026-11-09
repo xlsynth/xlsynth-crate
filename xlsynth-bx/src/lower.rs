@@ -656,7 +656,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 Type::Named(_) | Type::Applied { .. } | Type::Tuple(_) => {
                     state.project(value, index)?
                 }
-                Type::Bits { .. } | Type::Bool | Type::Array { .. } => value,
+                Type::Bits { .. } | Type::Enum { .. } | Type::Bool | Type::Array { .. } => value,
             };
             state.builder.output_port(&port.name, field)?;
         }
@@ -1163,7 +1163,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 let src = self.expr(value)?;
                 let src_width = self.builder.get_type(src)?.bit_count();
                 let dst_width = match expr.ty {
-                    Type::Bits { width, .. } => width,
+                    Type::Bits { width, .. } | Type::Enum { width, .. } => width,
                     Type::Bool => 1,
                     _ => {
                         return Err(BuilderError::InvalidOperation(
@@ -1175,7 +1175,12 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                     Ok(src)
                 } else if dst_width < src_width {
                     self.builder.bit_slice(src, 0, dst_width)
-                } else if src_width > 0 && matches!(value.ty, Type::Bits { signed: true, .. }) {
+                } else if src_width > 0
+                    && matches!(
+                        value.ty,
+                        Type::Bits { signed: true, .. } | Type::Enum { signed: true, .. }
+                    )
+                {
                     self.builder.sign_extend(src, dst_width)
                 } else {
                     self.builder.zero_extend(src, dst_width)

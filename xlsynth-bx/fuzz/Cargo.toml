@@ -18,6 +18,12 @@ xlsynth-pir = { path = "../../xlsynth-pir", version = "0.81.0" }
 members = ["."]
 
 [[bin]]
+name = "fuzz_bx_dslx_enums"
+path = "fuzz_targets/fuzz_bx_dslx_enums.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_expr_eval_equiv"
 path = "fuzz_targets/fuzz_bx_dslx_expr_eval_equiv.rs"
 test = false

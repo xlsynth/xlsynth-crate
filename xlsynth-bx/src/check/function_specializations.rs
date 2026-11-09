@@ -10,7 +10,7 @@ use super::{
     BodyChecker, BodyKind, CheckedFunction, ConstantBudgets, Declarations, Function,
     ImportResolver, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, StructTable, dependency_order,
 };
-use crate::ast::{ConstDef, Module};
+use crate::ast::{ConstDef, EnumDef, ExternFn, Module};
 
 /// An actual callback resolved in the caller's scope. An import ID includes
 /// its concrete DSLX specialization as well as its declaring module.
@@ -139,39 +139,105 @@ impl<'m> FunctionSpecializations<'m> {
         structs: &mut StructTable,
     ) -> Result<Vec<FunctionBody>, String> {
         enum Definition<'m> {
+            Struct(usize),
+            Extern(&'m ExternFn),
+            Enum(&'m EnumDef),
             Constant(&'m ConstDef),
             Function(&'m Function),
         }
+        let position = |name: &str| {
+            decls
+                .positions
+                .get(name)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(1)
+        };
         let mut definitions = module
-            .constants
+            .enums
             .iter()
-            .map(|c| (c.name.as_str(), Definition::Constant(c)))
+            .map(|e| (position(&e.name), Definition::Enum(e)))
+            .chain(
+                module
+                    .externs
+                    .iter()
+                    .map(|f| (position(&f.name), Definition::Extern(f))),
+            )
+            .chain(
+                module
+                    .constants
+                    .iter()
+                    .map(|c| (position(&c.name), Definition::Constant(c))),
+            )
             .chain(
                 module
                     .functions
                     .iter()
-                    .map(|f| (f.name.as_str(), Definition::Function(f))),
+                    .map(|f| (position(&f.name), Definition::Function(f))),
             )
             .collect::<Vec<_>>();
-        definitions
-            .sort_by_key(|(name, _)| decls.positions.get(name).copied().unwrap_or(usize::MAX));
+        // A struct can refer to another local struct declared later. Index it
+        // in dependency order once the representations of its enums are known.
+        definitions.extend(
+            StructTable::struct_schedule(module, position)?
+                .into_iter()
+                .map(|(at, index)| (at, Definition::Struct(index))),
+        );
+        definitions.sort_by_key(|(position, _)| *position);
+        structs.update_imports(resolver)?;
         let mut bodies: Vec<FunctionBody> = Vec::with_capacity(module.functions.len());
         let mut indices = BTreeMap::<&str, usize>::new();
         let mut depths = BTreeMap::new();
-        for (name, definition) in definitions {
+        for (_, definition) in definitions {
             let earlier = |name: &str| indices.get(name).map(|&i| &bodies[i].function);
-            let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
-            checker.function_registry = Some(self);
             let function = match definition {
-                Definition::Function(f) => f,
+                Definition::Struct(index) => {
+                    structs.definitions[index].fields =
+                        super::resolve_fields(&module.structs[index].fields, resolver, structs)?;
+                    structs.update_imports(resolver)?;
+                    structs.index(index)?;
+                    continue;
+                }
+                Definition::Extern(f) => {
+                    decls
+                        .add_function(&f.name, &f.params, &f.result, None, resolver, structs)
+                        .map_err(|e| format!("extern '{}': {e}", f.name))?;
+                    continue;
+                }
+                Definition::Function(f) => {
+                    let at = decls.positions.get(f.name.as_str()).copied();
+                    for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
+                        decls.check_type_visibility(ty, at)?;
+                    }
+                    decls
+                        .add_function(&f.name, &f.params, &f.result, Some(f), resolver, structs)
+                        .map_err(|e| format!("fn '{}': {e}", f.name))?;
+                    f
+                }
                 Definition::Constant(c) => {
+                    let mut checker =
+                        BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                    checker.function_registry = Some(self);
                     let value = checker
                         .check_constant(c, &earlier)
-                        .map_err(|e| format!("const '{name}': {e}"))?;
-                    decls.constants.insert(name, value);
+                        .map_err(|e| format!("const '{}': {e}", c.name))?;
+                    decls.constants.insert(&c.name, value);
+                    continue;
+                }
+                Definition::Enum(e) => {
+                    let mut checker =
+                        BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                    checker.function_registry = Some(self);
+                    let checked = checker
+                        .check_enum(e, &earlier)
+                        .map_err(|err| format!("enum '{}': {err}", e.name))?;
+                    structs.enums.insert(e.name.clone(), checked);
                     continue;
                 }
             };
+            let name = function.name.as_str();
+            let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+            checker.function_registry = Some(self);
             let body = checker
                 .check_function(function)
                 .map_err(|e| format!("fn '{}': {e}", function.name))?;

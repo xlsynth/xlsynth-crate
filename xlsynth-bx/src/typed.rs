@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use xlsynth_pir::{
     IrBits, IrValue,
     ir::Type as IrType,
@@ -19,6 +19,7 @@ use TypedExprKind as K;
 pub struct CheckedModule {
     pub(crate) warnings: Vec<BxWarning>,
     pub(crate) structs: Vec<StructDef>,
+    pub(crate) enums: BTreeMap<String, CheckedEnum>,
     pub(crate) constants: Vec<CheckedConstant>,
     pub(crate) externs: Vec<ExternFn>,
     /// Qualified call targets of imported extern functions, by declaration
@@ -39,6 +40,11 @@ pub struct CheckedModule {
 }
 
 impl CheckedModule {
+    /// Numeric BX and imported DSLX enum definitions, keyed by their nominal
+    /// names.
+    pub fn enums(&self) -> &BTreeMap<String, CheckedEnum> {
+        &self.enums
+    }
     /// Restore source spellings after filtering unreachable externs. Calls and
     /// instances keep their qualified keys to distinguish library declarations.
     pub(crate) fn restore_extern_names(&mut self) {
@@ -100,6 +106,65 @@ fn take_qualified_names<'a>(
             Some((i, std::mem::replace(name, source)))
         })
         .collect()
+}
+
+/// A nominal hardware enum and the bit patterns of its named members.
+#[derive(Clone, Debug)]
+pub struct CheckedEnum {
+    pub name: String,
+    pub public: bool,
+    pub signed: bool,
+    pub width: usize,
+    pub members: BTreeMap<String, IrBits>,
+    values: HashSet<IrBits>,
+}
+
+impl CheckedEnum {
+    /// Bound storage before materializing the discriminants and their lookup
+    /// index.
+    pub(crate) fn validate_size(width: usize, count: usize) -> Result<(), String> {
+        let limit = crate::check::MAX_TYPE_SIZE;
+        if width > limit || width.div_ceil(64).max(1).saturating_mul(count) > limit {
+            return Err(format!(
+                "enum representation exceeds the size limit of {limit}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn new(
+        name: String,
+        public: bool,
+        signed: bool,
+        width: usize,
+        members: BTreeMap<String, IrBits>,
+    ) -> Self {
+        let values = members.values().cloned().collect();
+        Self {
+            name,
+            public,
+            signed,
+            width,
+            members,
+            values,
+        }
+    }
+
+    pub(crate) fn ty(&self) -> Type {
+        Type::Enum {
+            name: self.name.clone(),
+            signed: self.signed,
+            width: self.width,
+        }
+    }
+
+    pub(crate) fn value_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub(crate) fn contains(&self, value: &IrBits) -> bool {
+        self.values.contains(value)
+    }
 }
 
 /// A typed module constant, evaluated before checking its consumers.
@@ -337,7 +402,19 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
     match ty {
         Type::Bool => Some((false, 1)),
         Type::Bits { signed, width } => Some((*signed, *width)),
-        Type::Tuple(_) | Type::Named(_) | Type::Applied { .. } | Type::Array { .. } => None,
+        Type::Enum { .. }
+        | Type::Tuple(_)
+        | Type::Named(_)
+        | Type::Applied { .. }
+        | Type::Array { .. } => None,
+    }
+}
+
+/// Scalar IR representation, including nominal enum types.
+pub(crate) fn repr_bits(ty: &Type) -> Option<(bool, usize)> {
+    match ty {
+        Type::Enum { signed, width, .. } => Some((*signed, *width)),
+        _ => bits(ty),
     }
 }
 
@@ -351,6 +428,7 @@ pub(super) enum ConstantBinding {
 /// Evaluation either exceeded its work budget or needs an earlier let.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ConstantFailure {
+    InvalidEnumCast(String),
     WorkLimit,
     Deferred(usize),
 }
@@ -445,6 +523,7 @@ impl ConstantScope<'_> {
 /// One constant evaluation charges loop and map iterations to its caller's
 /// budget.
 struct CountedWork<'a, 'f> {
+    enums: &'a BTreeMap<String, CheckedEnum>,
     remaining: &'a mut usize,
     inside_loop: bool,
     failure: Option<ConstantFailure>,
@@ -912,9 +991,11 @@ impl TypedExpr {
         remaining: &mut usize,
         replaying: bool,
         functions: Option<&mut ConstantFunctions<'_>>,
+        enums: &BTreeMap<String, CheckedEnum>,
     ) -> Result<Option<IrValue>, ConstantFailure> {
         let may_call = functions.is_some();
         let mut work = CountedWork {
+            enums,
             remaining,
             inside_loop: replaying,
             failure: None,
@@ -1033,7 +1114,7 @@ impl TypedExpr {
             K::Match { subject, arms } => {
                 let value = subject.constant_with_budget(names, remaining)?;
                 let bits_value = value.as_bits().ok()?;
-                let signed = bits(&subject.ty)?.0;
+                let signed = repr_bits(&subject.ty)?.0;
                 constant_match_arm(arms, bits_value, signed, remaining)?
                     .constant_with_budget(names, remaining)
             }
@@ -1057,8 +1138,19 @@ impl TypedExpr {
                     .constant_with_budget(names, remaining)?
                     .to_bits()
                     .ok()?;
-                let fill = bits(&value.ty)?.0 && source.is_negative();
-                let width = bits(&self.ty)?.1;
+                if let Type::Enum { name, .. } = &self.ty {
+                    // DSLX bytecode checks the original bits before
+                    // constructing an enum. Hardware IR uses the ordinary bit
+                    // conversion.
+                    if matches!(value.ty, Type::Enum { .. })
+                        || !remaining.enums.get(name)?.contains(&source)
+                    {
+                        remaining.failure = Some(ConstantFailure::InvalidEnumCast(name.clone()));
+                        return None;
+                    }
+                }
+                let fill = repr_bits(&value.ty)?.0 && source.is_negative();
+                let width = repr_bits(&self.ty)?.1;
                 Some(IrValue::Bits(IrBits::from_lsb_fn(width, |i| {
                     source.get_bit(i).unwrap_or(fill)
                 })))
@@ -1162,6 +1254,7 @@ mod tests {
                         &mut remaining,
                         true,
                         Some(&mut calls),
+                        &BTreeMap::new(),
                     ),
                     Ok(Some(IrValue::make_ubits(8, 254).unwrap()))
                 );
@@ -1241,9 +1334,13 @@ block folded(clk) -> u16 {{
             let module = check_module(&parse_module(&source)?)?;
             let mut remaining = 128;
             assert_eq!(
-                module.blocks()[0]
-                    .output
-                    .constant(&BTreeMap::new(), &mut remaining, false, None),
+                module.blocks()[0].output.constant(
+                    &BTreeMap::new(),
+                    &mut remaining,
+                    false,
+                    None,
+                    &BTreeMap::new()
+                ),
                 expected
             );
         }
@@ -1272,12 +1369,12 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
         let names = BTreeMap::from([("rows".to_string(), ConstantBinding::Known(input))]);
         let mut ample = 1024;
         assert_eq!(
-            output.constant(&names, &mut ample, false, None),
+            output.constant(&names, &mut ample, false, None, &BTreeMap::new()),
             Ok(Some(expected))
         );
         let mut limited = 26;
         assert_eq!(
-            output.constant(&names, &mut limited, false, None),
+            output.constant(&names, &mut limited, false, None, &BTreeMap::new()),
             Err(ConstantFailure::WorkLimit)
         );
         Ok(())
@@ -1448,7 +1545,9 @@ block wide_capture(clk, data: Payload) -> bool {
         for block in checked.blocks() {
             let mut remaining = crate::check::MAX_TYPE_SIZE;
             assert_eq!(
-                block.output.constant(&values, &mut remaining, false, None),
+                block
+                    .output
+                    .constant(&values, &mut remaining, false, None, &BTreeMap::new()),
                 Err(ConstantFailure::WorkLimit),
                 "{}",
                 block.name

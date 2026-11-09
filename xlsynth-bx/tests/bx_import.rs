@@ -49,6 +49,149 @@ fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
 }
 
 #[test]
+fn imported_bx_enum_members_resolve_through_module_and_member_uses() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "device/phase.bx",
+        r#"
+const BASE = u8:2;
+fn step(x:u8) -> u8 { x + u8:1 }
+pub enum Mode : u8 { First = BASE, Next = step(BASE) }
+enum Hidden : u8 { A = 0 }
+pub fn decode(x:Mode) -> u8 { x as u8 }
+"#,
+    )?;
+    let options = search_paths(&[dir.path()]);
+    let bx = r#"
+use device::phase;
+use device::phase::Mode;
+#[allow(combinational_block)]
+block circuit(clk, x:u8) -> u8 {
+    let m = if x == u8:0 { Mode::First } else { phase::Mode::Next };
+    match m { phase::Mode::First => phase::decode(m), _ => Mode::Next as u8 }
+}
+
+"#;
+    let package = compile_design(bx, &options)?;
+    assert_eq!(run(package.clone(), 0)?, IrValue::make_ubits(8, 2)?);
+    assert_eq!(run(package, 1)?, IrValue::make_ubits(8, 3)?);
+
+    for source in [
+        "use device::phase; fn bad() -> u8 { phase::Hidden::A as u8 }",
+        "use device::phase; fn bad(phase:u8) -> u8 { phase::Mode::First as u8 }",
+        "use device::phase; enum Mode:u8 { Next=3 } fn bad() -> u8 { phase::decode(Mode::Next) }",
+    ] {
+        assert!(
+            check_source_with_options(source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_library_enum_hides_map_starting_at_its_declaration() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "lib.bx",
+        r#"
+fn inc(x:u8)->u8 { x+u8:1 }
+#[allow(combinational_block)]
+pub block earlier(clk, x:u8)->u8 { map({ [x] }, inc)[u32:0] }
+pub enum map:u8 { A=0 }
+"#,
+    )?;
+    let source = r#"
+use lib;
+block circuit(clk, x:u8)->u8 { let y=lib::earlier(x); y }
+"#;
+    let options = search_paths(&[dir.path()]);
+    assert_eq!(
+        run(compile_design(source, &options)?, 12)?,
+        IrValue::make_ubits(8, 13)?
+    );
+    let hidden =
+        "fn inc(x:u8)->u8 { x } enum map:u8 { A=0 } fn f(xs:u8[1])->u8[1] { map(xs, inc) }";
+    assert!(check_source_with_options(hidden, &options).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_dslx_enum_use_shadows_map_in_block_declaration_order() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    write_module(dir.path(), "ops.x", "pub enum map:u8 { A=0 }")?;
+    write_module(dir.path(), "math.x", "pub fn inc(x:u8)->u8 { x+u8:1 }")?;
+    write_module(
+        dir.path(),
+        "types.x",
+        "pub struct Box<N:u32> { x:uN[N] } pub fn two(x:Box<2>)->u8 { (x.x as u8)+u8:2 }",
+    )?;
+    let check_both = |source: &str, accepted: bool| -> Result<(), Box<dyn Error>> {
+        write_module(dir.path(), "helper.bx", source)?;
+        let root = "use helper; block run(clk,x:u8)->u8 { let y=helper::circuit(x); y }";
+        for program in [source, root] {
+            let result = compile_design(program, &options);
+            if accepted {
+                assert_eq!(run(result?, 1)?, IrValue::make_ubits(8, 2)?);
+            } else {
+                assert!(result.is_err(), "{source}");
+            }
+        }
+        Ok(())
+    };
+    for (call, callback_use) in [
+        ("map([x], |v| v+u8:1)", ""),
+        ("map([x], math::inc)", "use math;"),
+        ("map({ [x] }, math::inc)", "use math;"),
+        // In a pure operand, (u8) groups the first field of this tuple
+        // annotation.
+        (
+            "map({ let (y,_):((u8),u8)=(x,x); [y] }, math::inc)",
+            "use math;",
+        ),
+        ("map((u8:1..u8:2), math::inc)", "use math;"),
+        ("map([zero!<types::Box<2>>()], types::two)", "use types;"),
+    ] {
+        let body = format!(
+            "#[allow(combinational_block)] pub block circuit(clk,x:u8)->u8 {{ {call}[u32:0] }}"
+        );
+        for (source, accepted) in [
+            (format!("{body}\nuse ops::map; {callback_use}"), true),
+            (format!("use ops::map;\n{body}\n{callback_use}"), false),
+        ] {
+            check_both(&source, accepted)?;
+        }
+    }
+    let fold = "unroll_for! (_,a) in u32:0..u32:0 { a }";
+    // In a pure map operand, postfix indexing of the whole fold requires
+    // parentheses. Ordinary BX call arguments permit the index directly.
+    check_both(
+        &format!(
+            "use math; #[allow(combinational_block)] pub block circuit(clk,x:u8)->u8 {{ map({fold}([[x]])[u32:0], math::inc)[u32:0] }} use ops::map;"
+        ),
+        false,
+    )?;
+    write_module(dir.path(), "ops.x", "pub fn map(a:u8,b:u8)->u8 { a+b }")?;
+    let ordinary_fold = format!("map({fold}([x])[u32:0],x)");
+    for (body, accepted) in [
+        ("map(x,x)", true),
+        (&ordinary_fold, true),
+        // Ordinary block tuple patterns treat (u8) as a singleton tuple.
+        ("map({ let (y,_):((u8),u8)=((x,),x); y.0 },x)", true),
+        ("map({ x },x)", false),
+    ] {
+        let source = format!(
+            "#[allow(combinational_block)] pub block circuit(clk,x:u8)->u8 {{ {body} }} use ops::map;"
+        );
+        check_both(&source, accepted)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn nested_module_and_grouped_members_share_structs_and_child_blocks() -> Result<(), Box<dyn Error>>
 {
     let root = tempdir()?;
@@ -493,6 +636,90 @@ block circuit(clk, x: u8) -> (u8, u8) { (lib::original(x), lib::overridden()) }
         run(package, 10)?,
         IrValue::parse_typed("(bits[8]:11,bits[8]:15)")?
     );
+    Ok(())
+}
+
+#[test]
+fn enums_shadow_zero_and_update_in_declaration_order() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    for (name, call) in [
+        ("zero!", "zero!<u8>()"),
+        ("update", "update([u8:0], u32:0, u8:7)[u32:0]"),
+    ] {
+        let declaration = format!("pub enum {name}:u8 {{ A=0 }}");
+        write_module(dir.path(), "ops_bx.bx", &declaration)?;
+        write_module(dir.path(), "ops_dslx.x", &declaration)?;
+        for binding in [
+            declaration,
+            format!("use ops_bx::{name};"),
+            format!("use ops_dslx::{name};"),
+        ] {
+            for callable in ["fn run()", "block run(clk)"] {
+                let body = format!("{callable}->u8 {{ {call} }}");
+                for (source, accepted) in [
+                    (format!("{body}\n{binding}"), true),
+                    (format!("{binding}\n{body}"), false),
+                ] {
+                    write_module(dir.path(), "helper.bx", &source)?;
+                    for program in [source.as_str(), "use helper;"] {
+                        let module = parse_module(program)?;
+                        let result = check_module_with_options(&module, &options);
+                        if accepted {
+                            result?;
+                        } else {
+                            let error = result.unwrap_err();
+                            assert!(
+                                error.contains("cannot be called as a function"),
+                                "{source}: {error}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn skipped_loops_distinguish_enum_annotations_from_struct_constructors()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    write_module(
+        dir.path(),
+        "wire.x",
+        "enum Hidden:u8 { Idle=0 } pub type State = Hidden;",
+    )?;
+    for (declarations, name, permits_unused_read) in [
+        ("enum State:u8 { Idle=0 }", "State", false),
+        ("use wire;", "wire::State", false),
+        ("use wire::State;", "State", true),
+    ] {
+        let loop_body = |result: &str| {
+            format!(
+                "{declarations}\nfn f()->u8 {{ unroll_for! (_i, v) in u32:0..u32:0 {{ {result} }}(u8:0) }}"
+            )
+        };
+        let valid = loop_body(&format!("let state:{name}={name}::Idle; state as u8"));
+        check_module_with_options(&parse_module(&valid)?, &options)?;
+        let invalid = loop_body(&format!("{name} {{ value:v }}"));
+        assert!(
+            check_module_with_options(&parse_module(&invalid)?, &options).is_err(),
+            "{invalid}"
+        );
+        let unused_call = loop_body(&format!("{name}()"));
+        check_module_with_options(&parse_module(&unused_call)?, &options)?;
+        // Native DSLX resolves a direct use binding in an unelaborated body.
+        // A local type name and a module-qualified type still require a member.
+        let bare_type = loop_body(name);
+        assert_eq!(
+            check_module_with_options(&parse_module(&bare_type)?, &options).is_ok(),
+            permits_unused_read,
+            "{bare_type}"
+        );
+    }
     Ok(())
 }
 

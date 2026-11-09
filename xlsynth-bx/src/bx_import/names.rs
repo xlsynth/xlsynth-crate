@@ -4,11 +4,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BUILTIN_MAP, Names};
+use super::{BUILTIN_MAP, BUILTIN_UPDATE, Binding, Names};
 use crate::ast::{
-    BindingPattern, Block, CallbackParam, ConstDef, Expr, ExternBlock, ExternFn, ForIterable,
-    ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param, Stmt, StructDef,
-    Type, UnrollFor, WidthSliceType,
+    BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
+    ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module,
+    Param, Stmt, StructDef, Type, UnrollFor, WidthSliceType,
 };
 use crate::parser::MAX_SYNTAX_DEPTH;
 
@@ -37,6 +37,25 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
             name: names.declared(&def.name),
             public: def.public,
             fields: Scope::new(names, None, None).fields(&def.fields)?,
+        });
+    }
+    for def in &module.enums {
+        let at = position(&def.name);
+        let mut scope = Scope::new(names, at, at);
+        out.enums.push(EnumDef {
+            name: names.declared(&def.name),
+            public: def.public,
+            underlying: scope.optional_type(&def.underlying)?,
+            members: def
+                .members
+                .iter()
+                .map(|member| {
+                    Ok(EnumMember {
+                        name: member.name.clone(),
+                        value: scope.expr(&member.value)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
         });
     }
     for def in &module.constants {
@@ -275,8 +294,23 @@ impl<'a> Scope<'a> {
             }
             None if site == CallSite::Direct && name == "map" => self
                 .names
-                .resolve_with_root_fallback(name, self.at, BUILTIN_MAP),
+                .resolve_with_root_fallback(name, self.builtin_at(name), BUILTIN_MAP),
+            None if site == CallSite::Direct && name == "update" => self
+                .names
+                .resolve_with_root_fallback(name, self.builtin_at(name), BUILTIN_UPDATE),
             Some(Local::Formal) | None => self.reference(name, self.at),
+        }
+    }
+
+    /// A block sees callable declarations throughout its module. Enum names
+    /// that shadow the builtin follow the order of value declarations.
+    fn builtin_at(&self, name: &str) -> Option<usize> {
+        if self.names.enums.contains(name)
+            || matches!(self.names.uses.get(name), Some(Binding::Member(export)) if export.is_enum)
+        {
+            self.value_at
+        } else {
+            self.at
         }
     }
 
@@ -300,6 +334,15 @@ impl<'a> Scope<'a> {
         }
         Ok(match ty {
             Type::Named(name) => Type::Named(self.reference(name, self.at)?),
+            Type::Enum {
+                name,
+                signed,
+                width,
+            } => Type::Enum {
+                name: self.reference(name, self.at)?,
+                signed: *signed,
+                width: *width,
+            },
             Type::Applied { name, args } => Type::Applied {
                 name: self.reference(name, self.at)?,
                 args: args.clone(),
@@ -532,7 +575,15 @@ impl<'a> Scope<'a> {
                     result: Box::new(scope.expr(result)?),
                 })
             })?,
-            Expr::Name(name) => Expr::Name(self.reference(name, self.value_at)?),
+            Expr::Name(name) => {
+                let reference = self.reference(name, self.value_at)?;
+                if reference.contains("::") {
+                    // Qualification can remove the distinction between `_::A`
+                    // and `module::_::A`. Check the original value path first.
+                    crate::parser::validate_enum_member_path(name)?;
+                }
+                Expr::Name(reference)
+            }
             Expr::Bool(value) => Expr::Bool(*value),
             Expr::Literal { ty, text } => Expr::Literal {
                 ty: self.optional_type(ty)?,
@@ -580,12 +631,20 @@ impl<'a> Scope<'a> {
                     },
                 },
             },
-            Expr::Call { name, args } => {
+            Expr::Call { name, args } | Expr::MapBeforeUse { name, args, .. } => {
                 let callee = self.callee(name, CallSite::Direct)?;
-                // A block may reference a function imported later in this file.
-                // Resolve the callback at the same position as a direct call.
-                let args = if callee == BUILTIN_MAP {
-                    args.iter()
+                let builtin_args = match expr {
+                    Expr::MapBeforeUse { builtin_args, .. } => builtin_args.as_deref(),
+                    _ => Some(args.as_slice()),
+                };
+                if callee == BUILTIN_MAP
+                    && let Some(args) = builtin_args
+                {
+                    // A block may reference a function imported later in this
+                    // file. Resolve the callback at the same position as a
+                    // direct call.
+                    let args = args
+                        .iter()
                         .enumerate()
                         .map(|(index, arg)| match (index, arg) {
                             (1, Expr::Name(callback)) => {
@@ -593,11 +652,42 @@ impl<'a> Scope<'a> {
                             }
                             _ => self.expr(arg),
                         })
-                        .collect::<Result<_, String>>()?
+                        .collect::<Result<_, String>>()?;
+                    return Ok(Expr::Call { name: callee, args });
+                }
+                let later_dslx_map = name == "map"
+                    && matches!(self.names.uses.get(name), Some(Binding::Dslx(alias)) if alias == &callee)
+                    && self
+                        .value_at
+                        .zip(self.names.positions.get(name))
+                        .is_some_and(|(at, &pos)| at < pos);
+                // A later DSLX use named map can denote a function or an enum.
+                // A callback visible only in callable scope requires the
+                // builtin.
+                if later_dslx_map && let Some([array, Expr::Name(callback)]) = builtin_args {
+                    let callable = self.map_callback(callback)?;
+                    if self.reference(callback, self.value_at).as_ref() != Ok(&callable) {
+                        return Ok(Expr::NamedMap {
+                            target: callee,
+                            iterable: Box::new(ForIterable::Array(self.expr(array)?)),
+                            callback: callable,
+                        });
+                    }
+                }
+                let args = self.expressions(args)?;
+                if matches!(expr, Expr::MapBeforeUse { .. })
+                    && (later_dslx_map || callee == BUILTIN_MAP)
+                {
+                    Expr::MapBeforeUse {
+                        name: callee,
+                        args,
+                        builtin_args: builtin_args
+                            .map(|args| self.expressions(args))
+                            .transpose()?,
+                    }
                 } else {
-                    self.expressions(args)?
-                };
-                Expr::Call { name: callee, args }
+                    Expr::Call { name: callee, args }
+                }
             }
             Expr::ParametricCall {
                 name,
@@ -626,7 +716,7 @@ impl<'a> Scope<'a> {
                 iterable,
                 callback,
             } => Expr::NamedMap {
-                target: self.reference(target, self.at)?,
+                target: self.reference(target, self.builtin_at(target))?,
                 iterable: Box::new(self.iterable(iterable)?),
                 callback: self.map_callback(callback)?,
             },
@@ -692,7 +782,7 @@ impl<'a> Scope<'a> {
 
     /// The map element is visible in the result annotation and body.
     fn map(&mut self, map: &MapExpr) -> Result<MapExpr, String> {
-        let target = self.reference(&map.target, self.at)?;
+        let target = self.reference(&map.target, self.builtin_at(&map.target))?;
         let iterable = self.iterable(&map.iterable)?;
         let parameter_type = self.optional_type(&map.parameter_type)?;
         let outer_hardware = self.hardware_callees.take();

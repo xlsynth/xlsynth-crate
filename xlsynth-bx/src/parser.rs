@@ -11,9 +11,10 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::BxWarningKind;
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, Expr, ExternBlock, ExternFn,
-    ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param,
-    SourcePosition, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr,
+    ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
+    MatchPattern, Module, Param, SourcePosition, Stmt, StructDef, Type, UnaryOp, UnrollFor,
+    UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -110,6 +111,19 @@ fn is_function_identifier(text: &str) -> bool {
     is_use_identifier(text) || text == "self"
 }
 
+/// DSLX permits `self` only at the head of an enum path and `_` only after
+/// a qualifier. Both spellings are valid in declarations.
+pub(crate) fn validate_enum_member_path(name: &str) -> Result<(), String> {
+    let mut components = name.split("::");
+    if components.next() == Some("_") {
+        return Err("wildcard pattern '_' cannot be used as a reference".into());
+    }
+    if components.any(|member| member == "self") {
+        return Err("expected an identifier after '::', got 'self'".into());
+    }
+    Ok(())
+}
+
 /// Pure BX expressions can refer to BX names and DSLX member spellings.
 fn is_value_identifier(text: &str) -> bool {
     is_identifier(text) || is_function_identifier(text)
@@ -163,9 +177,9 @@ fn lex(
     let bytes = &source.as_bytes()[..span.end];
     let mut i = span.start;
     let mut brace_depth = 0usize;
-    // A pure function ends at its closing brace. A constant ends at its
+    // A function or enum ends at its closing brace. A constant ends at its
     // semicolon, even when its initializer contains braced expressions.
-    let mut dslx_item_end = None;
+    let mut dslx_item = None;
     while i < bytes.len() {
         let start = i;
         let rest = &source[i..span.end];
@@ -179,11 +193,11 @@ fn lex(
             continue;
         }
         if let Some(comment) = rest.strip_prefix("/*") {
-            if dialect == Dialect::Bx && (dslx_item_end.is_some() || callback) {
-                let message = if dslx_item_end == Some(";") {
-                    "use a // comment in a constant"
-                } else {
-                    "use a // comment in a function"
+            if dialect == Dialect::Bx && (dslx_item.is_some() || callback) {
+                let message = match dslx_item {
+                    Some("const") => "use a // comment in a constant",
+                    Some("enum") => "use a // comment in an enum",
+                    _ => "use a // comment in a function",
                 };
                 return Err(diagnostic(source, start, message));
             }
@@ -201,7 +215,7 @@ fn lex(
                 // Keep `a!=b` as inequality, and `a.field!==b` as equality
                 // on the DSLX field named `field!`.
                 if dialect == Dialect::Bx
-                    && dslx_item_end.is_none()
+                    && dslx_item.is_none()
                     && !callback
                     && bytes[i..].starts_with(b"!=")
                     && !bytes[i..].starts_with(b"!==")
@@ -276,14 +290,18 @@ fn lex(
                 .last()
                 .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}"));
         match text {
-            "fn" if item_start => dslx_item_end = Some("}"),
-            "const" if item_start => dslx_item_end = Some(";"),
+            "fn" | "const" | "enum" if item_start => dslx_item = Some(text),
             "{" => brace_depth += 1,
             "}" => brace_depth = brace_depth.saturating_sub(1),
             _ => { /* Other tokens do not enter or leave a definition. */ }
         }
-        if brace_depth == 0 && dslx_item_end == Some(text) {
-            dslx_item_end = None;
+        if brace_depth == 0
+            && matches!(
+                (dslx_item, text),
+                (Some("fn" | "enum"), "}") | (Some("const"), ";")
+            )
+        {
+            dslx_item = None;
         }
         tokens.push(Token {
             text,
@@ -386,6 +404,8 @@ struct Parser<'s> {
     expression_grammar: ExpressionGrammar,
     /// Tracks module and lexical bindings that hide the builtin map in a block.
     block_map_shadowed: bool,
+    /// Until its use is reached, an imported map may be a callable or an enum.
+    forward_map_import: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
     /// Local callback-template declarations disambiguate angle brackets from
@@ -417,7 +437,8 @@ impl TemplateBinding {
 #[derive(Clone, Copy, PartialEq)]
 enum ValueContext {
     Block,
-    /// A local function or a module constant uses the DSLX value grammar.
+    /// Functions, module constants, and enum initializers use DSLX value
+    /// grammar.
     DslxItem,
     BlockLambda,
 }
@@ -546,6 +567,7 @@ impl<'s> Parser<'s> {
             value_context: ValueContext::Block,
             expression_grammar: ExpressionGrammar::Block,
             block_map_shadowed: false,
+            forward_map_import: false,
             block_type_params: BTreeSet::new(),
             callback_templates,
             hidden_templates: Vec::new(),
@@ -705,7 +727,7 @@ impl<'s> Parser<'s> {
                     self.use_tree(&mut paths, Some(&mut bindings))?;
                     self.expect(";")?;
                     for path in paths.drain(..) {
-                        self.block_map_shadowed |= path.binding() == Some("map");
+                        self.forward_map_import |= path.binding() == Some("map");
                         visit(path, token.start);
                     }
                 }
@@ -792,11 +814,21 @@ impl<'s> Parser<'s> {
                     public,
                     fields,
                 });
+            } else if self.eat("enum") {
+                self.value_context = ValueContext::DslxItem;
+                let def = self.with_name_scope(|p| p.enum_def(public))?;
+                self.value_context = ValueContext::Block;
+                self.block_map_shadowed |= def.name == "map";
+                module.declaration_order.push(def.name.clone());
+                module.enums.push(def);
             } else if public {
-                return Err(self.error("expected block, const, fn, or struct after pub"));
+                return Err(self.error("expected block, const, enum, fn, or struct after pub"));
             } else if self.eat("use") {
                 let start = module.uses.len();
                 self.use_tree(&mut module.uses, Some(&mut use_bindings))?;
+                self.block_map_shadowed |= module.uses[start..]
+                    .iter()
+                    .any(|path| path.binding() == Some("map"));
                 module.declaration_order.extend(
                     module.uses[start..]
                         .iter()
@@ -822,9 +854,9 @@ impl<'s> Parser<'s> {
                     return Err(self.error("expected fn or block after extern"));
                 }
             } else {
-                return Err(
-                    self.error("expected a block, const, fn, struct, extern, or use declaration")
-                );
+                return Err(self.error(
+                    "expected a block, const, enum, fn, struct, extern, or use declaration",
+                ));
             }
         }
         Ok(module)
@@ -920,6 +952,16 @@ impl<'s> Parser<'s> {
         Ok(format!("{head}::{member}"))
     }
 
+    /// An imported enum value can have a module, type, and member component.
+    fn named_value(&mut self, mut name: String) -> Result<Expr, String> {
+        if self.eat("::") {
+            let member = self.take_identifier(is_function_identifier)?;
+            name.push_str("::");
+            name.push_str(&member);
+        }
+        Ok(Expr::Name(name))
+    }
+
     /// Parse comma-separated items, allowing an empty list and a trailing
     /// comma.
     fn list<T>(
@@ -998,6 +1040,34 @@ impl<'s> Parser<'s> {
             public,
             ty,
             value,
+        })
+    }
+
+    /// Parse DSLX's numeric enum declaration and its compile-time values.
+    fn enum_def(&mut self, public: bool) -> Result<EnumDef, String> {
+        let name = self.ident()?;
+        let underlying = if self.eat(":") {
+            Some(self.ty()?)
+        } else {
+            None
+        };
+        self.expect("{")?;
+        let members = self.list("}", |p| {
+            let name = p.ident()?;
+            p.expect("=")?;
+            Ok(EnumMember {
+                name,
+                value: p.expr()?.value,
+            })
+        })?;
+        if underlying.is_none() && members.is_empty() {
+            return Err(self.error("an empty numeric enum requires an explicit underlying type"));
+        }
+        Ok(EnumDef {
+            name,
+            public,
+            underlying,
+            members,
         })
     }
 
@@ -1703,16 +1773,15 @@ impl<'s> Parser<'s> {
         if self.eat("_") {
             return Ok(MatchPattern::Wildcard);
         }
-        let end = if self.peek(1) == "::" && is_function_identifier(self.peek(2)) {
-            3
-        } else {
-            1
-        };
+        let mut end = 1;
+        while end < 5 && self.peek(end) == "::" && is_function_identifier(self.peek(end + 1)) {
+            end += 2;
+        }
         if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|") {
-            // The checker resolves this name to a scalar module constant.
-            // DSLX requires numeric literals on both sides of a range.
+            // The checker resolves this name to a scalar constant or enum
+            // member. DSLX requires numeric literals on both sides of a range.
             let name = self.name_or_qualified_member()?;
-            return Ok(MatchPattern::Literal(Expr::Name(name)));
+            return Ok(MatchPattern::Literal(self.named_value(name)?));
         }
         let first = self.pos;
         let start = self.pattern_literal()?;
@@ -2281,8 +2350,14 @@ impl<'s> Parser<'s> {
         if self.eat("(") {
             if name == "map" && self.peek(0) != ")" {
                 let lambda = self.has_lambda_argument();
-                if lambda || self.dslx_value_grammar() || !self.block_map_shadowed {
-                    return self.map_call(name, lambda);
+                if lambda || self.dslx_value_grammar() {
+                    return self.map_call(name, lambda, false);
+                }
+                if !self.block_map_shadowed {
+                    if self.forward_map_import {
+                        return self.map_before_use(name);
+                    }
+                    return self.map_call(name, false, false);
                 }
             }
             let args = self.list(")", Self::expr)?;
@@ -2318,7 +2393,7 @@ impl<'s> Parser<'s> {
         if struct_args.is_some() {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
-        Ok(ParsedExpr::leaf(Expr::Name(name)))
+        Ok(ParsedExpr::leaf(self.named_value(name)?))
     }
 
     /// A less-than begins callback arguments only when a list of names and
@@ -2435,11 +2510,87 @@ impl<'s> Parser<'s> {
         })
     }
 
+    /// An imported callable keeps ordinary block argument syntax. An enum
+    /// imported later leaves the builtin's pure operand and range syntax
+    /// available. Try each interpretation once for the whole call, including
+    /// nested calls in its arguments, then let the checker resolve the use.
+    fn map_before_use(&mut self, target: String) -> Result<ParsedExpr, String> {
+        let start = self.pos;
+        // A type argument can consume the first character of >> or >= in
+        // place. Save just those tokens inside this argument list so both
+        // interpretations see the same input.
+        let mut split_candidates = Vec::new();
+        let mut depth = 0;
+        for (index, &token) in self.tokens.iter().enumerate().skip(start) {
+            match token.text {
+                "(" => depth += 1,
+                ")" if depth == 0 => break,
+                ")" => depth -= 1,
+                ">>" | ">=" => split_candidates.push((index, token)),
+                _ => { /* Other tokens are immutable during parsing. */ }
+            }
+        }
+        self.block_map_shadowed = true;
+        let ordinary = self.list(")", Self::expr);
+        self.block_map_shadowed = false;
+        let ordinary_end = self.pos;
+        for &(index, token) in &split_candidates {
+            self.tokens[index] = token;
+        }
+        self.pos = start;
+        self.forward_map_import = false;
+        let builtin = self.map_call(target.clone(), false, ordinary.is_err());
+        self.forward_map_import = true;
+        match ordinary {
+            Ok(args) => {
+                self.pos = ordinary_end;
+                for (index, token) in split_candidates {
+                    self.tokens[index] = token;
+                }
+                let height = args.iter().map(|arg| arg.height).max().unwrap_or(0);
+                let args: Vec<_> = args.into_iter().map(|arg| arg.value).collect();
+                let (builtin_args, builtin_height) = match builtin {
+                    Ok(ParsedExpr {
+                        value: Expr::Call { args: pure, .. },
+                        height,
+                        ..
+                    }) => {
+                        if pure == args {
+                            return self.compose(height - 1, Expr::Call { name: target, args });
+                        }
+                        (Some(pure), height - 1)
+                    }
+                    // A range operand cannot also parse as an ordinary
+                    // argument.
+                    Ok(_) => return Err(self.error("expected ordinary map arguments")),
+                    Err(_) => (None, 0),
+                };
+                self.compose(
+                    height.max(builtin_height),
+                    Expr::MapBeforeUse {
+                        name: target,
+                        args,
+                        builtin_args,
+                    },
+                )
+            }
+            Err(_) => builtin,
+        }
+    }
+
     /// Accept a range in the first operand and an inline lambda in the second.
     /// Calls with ordinary arguments retain their usual grammar and resolution.
-    fn map_call(&mut self, target: String, lambda: bool) -> Result<ParsedExpr, String> {
+    fn map_call(
+        &mut self,
+        target: String,
+        lambda: bool,
+        builtin_only: bool,
+    ) -> Result<ParsedExpr, String> {
         let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
-        if !lambda && let ParsedIterable::Array(first) = iterable {
+        if !lambda
+            && !builtin_only
+            && let ParsedIterable::Array(first) = iterable
+        {
             let mut args = vec![first];
             if !self.eat(")") {
                 self.expect(",")?;
@@ -2898,6 +3049,61 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_enum_members_retain_expressions_and_module_qualified_references()
+    -> Result<(), String> {
+        let module = parse_module(
+            r#"
+const BASE = u8:2;
+pub enum Phase' : u8 { First = BASE, Next! = BASE + u8:1, }
+enum Inferred { Zero = 0, Two = 2 }
+fn from_library(x: lib::Phase') -> lib::Phase' {
+    match x { lib::Phase'::First | lib::Phase'::Next! => x, _ => lib::Phase'::First }
+}
+"#,
+        )?;
+        assert_eq!(
+            module.declaration_order,
+            ["BASE", "Phase'", "Inferred", "from_library"]
+        );
+        let def = &module.enums[0];
+        assert!(def.public);
+        assert_eq!(
+            def.underlying,
+            Some(Type::Bits {
+                signed: false,
+                width: 8
+            })
+        );
+        assert_eq!(def.members[0].value, Expr::Name("BASE".into()));
+        assert!(matches!(
+            &def.members[1].value,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+        assert!(module.enums[1].underlying.is_none());
+        let Expr::Match { arms, .. } = &module.functions[0].body else {
+            panic!("expected a match")
+        };
+        assert_eq!(
+            arms[0].patterns[1],
+            MatchPattern::Literal(Expr::Name("lib::Phase'::Next!".into()))
+        );
+        assert_eq!(arms[1].value, Expr::Name("lib::Phase'::First".into()));
+        for source in [
+            "enum E { A }",
+            "enum E { A(u8) }",
+            "enum E { }",
+            "enum E:u8 { A=0 B=1 }",
+            "enum E:u8 { A = /* comment */ 0 }",
+        ] {
+            assert!(parse_module(source).is_err(), "{source}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn block_warning_attributes_and_name_positions_are_per_declaration() -> Result<(), String> {
@@ -3691,7 +3897,7 @@ block dispatch(clk, match: u8) -> u8 {
             ("use std", "expected ';'"),
             (
                 "pub use std;",
-                "expected block, const, fn, or struct after pub",
+                "expected block, const, enum, fn, or struct after pub",
             ),
             ("import a.b;", "replace `import` with `use`"),
         ] {
@@ -4231,7 +4437,6 @@ block wrapper(clk, x: u8, y: u8) -> u8 { map(x, (x | y)) }
     #[test]
     fn block_map_grammar_follows_imports_externs_and_callback_formals() -> Result<(), String> {
         for (formals, declaration) in [
-            ("", "use ops::{other, map};"),
             ("", "extern fn map(a:u8, b:u8) -> u8;"),
             ("", "block map(clk, a:u8, b:u8) -> u8 { a }"),
             ("<map: fn(u8, u8) -> u8>", ""),
@@ -4242,6 +4447,9 @@ block wrapper(clk, x: u8, y: u8) -> u8 { map(x, (x | y)) }
             assert!(parse_module(&source).is_err(), "{source}");
             parse_module(&source.replace("{ u8:0 }", "u8:0"))?;
         }
+        let later_use = "block apply(clk,x:u8)->u8 { map({ u8:0 }, x) } use ops::{other, map};";
+        let parsed = parse_module(later_use)?;
+        assert!(matches!(parsed.blocks[0].output, Expr::NamedMap { .. }));
         parse_module(
             "extern fn map::step(x:u8) -> u8; block apply(clk,x:u8) -> u8[1] { map({[x]}, map::step) }",
         )?;

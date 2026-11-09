@@ -113,7 +113,9 @@ impl BodyChecker<'_, '_> {
         structural: bool,
     ) -> Result<TypedExpr, String> {
         let call = match expr {
-            Expr::Call { name, args } => Some((name, &[][..], args)),
+            Expr::Call { name, args } | Expr::MapBeforeUse { name, args, .. } => {
+                Some((name, &[][..], args))
+            }
             Expr::ParametricCall {
                 name,
                 callbacks,
@@ -472,6 +474,14 @@ impl<'a> LexicalScope<'a> {
     }
 }
 
+/// The syntactic role of a nominal name in a skipped loop body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NominalUse {
+    Annotation,
+    Constructor,
+    AppliedStruct,
+}
+
 impl BodyChecker<'_, '_> {
     /// Preserve ordinary calls to visible declarations named `map`.
     pub(super) fn is_builtin_map(
@@ -482,7 +492,8 @@ impl BodyChecker<'_, '_> {
         if target == crate::bx_import::BUILTIN_MAP {
             return Ok(true);
         }
-        if target != "map"
+        let spelling = crate::bx_import::library_item(target).map_or(target, |(_, name)| name);
+        if spelling != "map"
             || is_local(target)
             || self.callback_index(target).is_some()
             || self
@@ -491,10 +502,25 @@ impl BodyChecker<'_, '_> {
         {
             return Ok(false);
         }
+        // A block can call imported functions declared later. An imported
+        // enum only shadows the builtin once its use enters value scope.
+        if !self.decls.visible(target, self.block_position)
+            && let Some((subject, member)) = self.resolver.lookup_enum_prefix(target)?
+            && self.resolver.is_enum_type(&subject, &member)
+        {
+            return Ok(true);
+        }
+        if target != "map" {
+            return Ok(false);
+        }
         Ok(!self.decls.visible(target, self.function_position)
             || !(self.decls.functions.contains_key(target)
                 || self.decls.is_block(target)
                 || self.structs.indices.contains_key(target)
+                || self.structs.enums.contains_key(target)
+                    && self
+                        .decls
+                        .visible(target, self.function_position.or(self.block_position))
                 || self.module_constant(target).is_some()
                 || self.resolver.lookup(target)?.is_some()))
     }
@@ -595,7 +621,7 @@ impl BodyChecker<'_, '_> {
     fn check_nominal_name(
         &self,
         name: &str,
-        applied: bool,
+        usage: NominalUse,
         locals: &LexicalScope<'_>,
     ) -> Result<(), String> {
         if locals.contains(name) {
@@ -608,7 +634,12 @@ impl BodyChecker<'_, '_> {
             ));
         }
         if let Some(spec) = self.specialization {
-            if !applied && spec.bindings.declares(name) {
+            if usage != NominalUse::AppliedStruct && spec.bindings.declares(name) {
+                if usage == NominalUse::Constructor
+                    && matches!(spec.bindings.get(name), Some(Type::Enum { .. }))
+                {
+                    return Err(format!("cannot construct enum '{name}' as a struct"));
+                }
                 return Ok(());
             }
             spec.bindings.reject_value(name)?;
@@ -618,15 +649,21 @@ impl BodyChecker<'_, '_> {
         if let Some((module, member)) =
             lookup_use(name, self.resolver, |binding| locals.contains(binding))?
         {
-            if applied {
+            if usage == NominalUse::AppliedStruct {
                 self.resolver.check_struct_template_name(&module, &member)
+            } else if usage == NominalUse::Constructor
+                && self.resolver.is_enum_type(&module, &member)
+            {
+                Err(format!("cannot construct enum '{name}' as a struct"))
             } else {
                 self.resolver.check_member_name(&module, &member)
             }
-        } else if applied {
+        } else if usage == NominalUse::AppliedStruct {
             Err(format!(
                 "'{name}' requires an imported DSLX struct template"
             ))
+        } else if usage == NominalUse::Annotation && self.structs.local_enum(name).is_some() {
+            Ok(())
         } else {
             self.structs.definition(name).map(|_| ())
         }
@@ -635,8 +672,10 @@ impl BodyChecker<'_, '_> {
     fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
-            Type::Named(name) => self.check_nominal_name(name, false, locals)?,
-            Type::Applied { name, .. } => self.check_nominal_name(name, true, locals)?,
+            Type::Named(name) => self.check_nominal_name(name, NominalUse::Annotation, locals)?,
+            Type::Applied { name, .. } => {
+                self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?
+            }
             Type::Tuple(items) => {
                 for item in items {
                     self.check_type_names(item, locals)?;
@@ -650,7 +689,12 @@ impl BodyChecker<'_, '_> {
 
     /// An unused call still needs a visible callee, but DSLX checks its kind
     /// and arity only when it elaborates an iteration.
-    fn check_value_name(&self, name: &str, locals: &LexicalScope<'_>) -> Result<(), String> {
+    fn check_value_name(
+        &self,
+        name: &str,
+        locals: &LexicalScope<'_>,
+        callee: bool,
+    ) -> Result<(), String> {
         let name = crate::bx_import::local_callee_name(name).unwrap_or(name);
         let name = self.qualified_extern(name).unwrap_or(name);
         if name == "_" {
@@ -675,12 +719,26 @@ impl BodyChecker<'_, '_> {
         if self.module_constant(name).is_some()
             || self.decls.functions.contains_key(name)
             || self.decls.is_block(name)
+            || callee
+                && self.structs.local_enum(name).is_some()
+                && self
+                    .decls
+                    .visible(name, self.function_position.or(self.block_position))
         {
+            return Ok(());
+        }
+        if self.is_enum_member_name(name)? {
+            if locals.contains(head) {
+                return Err(format!("'{head}' names a local value here"));
+            }
             return Ok(());
         }
         if let Some((module, member)) =
             lookup_use(name, self.resolver, |binding| locals.contains(binding))?
         {
+            if !callee && name.contains("::") && self.resolver.is_enum_type(&module, &member) {
+                return Err(format!("enum '{name}' cannot be used as a value"));
+            }
             return self.resolver.check_member_name(&module, &member);
         }
         Err(format!("unknown value '{name}'"))
@@ -701,7 +759,7 @@ impl BodyChecker<'_, '_> {
                 }
                 self.check_expr_names(result, &names)?;
             }
-            Expr::Name(name) => self.check_value_name(name, locals)?,
+            Expr::Name(name) => self.check_value_name(name, locals, /* callee= */ false)?,
             Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to resolve. */ }
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
                 if matches!(expr, Expr::Zero(_))
@@ -713,8 +771,11 @@ impl BodyChecker<'_, '_> {
                 self.check_type_names(ty, locals)?
             }
             Expr::Call { name, args }
-                if self.is_builtin_map(name, |target| locals.contains(target))? =>
-            {
+            | Expr::MapBeforeUse {
+                name,
+                builtin_args: Some(args),
+                ..
+            } if self.is_builtin_map(name, |target| locals.contains(target))? => {
                 // A skipped iteration resolves names without checking call
                 // arity.
                 for (index, arg) in args.iter().enumerate() {
@@ -726,8 +787,16 @@ impl BodyChecker<'_, '_> {
                     }
                 }
             }
-            Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
-                if let Expr::Call { name, .. } = expr {
+            Expr::MapBeforeUse { name, .. }
+                if self.is_builtin_map(name, |target| locals.contains(target))? =>
+            {
+                return Err("invalid operand syntax for the built-in map".into());
+            }
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::Call { args: items, .. }
+            | Expr::MapBeforeUse { args: items, .. } => {
+                if let Expr::Call { name, .. } | Expr::MapBeforeUse { name, .. } = expr {
                     let local = locals.lookup(name);
                     if self.callback_index(name).is_none() && self.decls.is_block(name) {
                         if local.is_none() {
@@ -749,7 +818,7 @@ impl BodyChecker<'_, '_> {
                         }
                     }
                     if self.callback_index(name).is_none() || local.is_some() {
-                        self.check_value_name(name, locals)?;
+                        self.check_value_name(name, locals, /* callee= */ true)?;
                     }
                 }
                 for item in items {
@@ -782,7 +851,12 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
                 locals.visited.set(locals.visited.get().saturating_add(1));
-                self.check_nominal_name(name, matches!(expr, Expr::AppliedStruct { .. }), locals)?;
+                let usage = if matches!(expr, Expr::AppliedStruct { .. }) {
+                    NominalUse::AppliedStruct
+                } else {
+                    NominalUse::Constructor
+                };
+                self.check_nominal_name(name, usage, locals)?;
                 for (_, value) in fields {
                     self.check_expr_names(value, locals)?;
                 }
@@ -828,9 +902,11 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Match { subject, arms } => {
                 for operand in super::match_operands(subject, arms, |name| {
-                    !locals.contains(name)
-                        && self.callback_index(name).is_none()
-                        && self.module_constant(name).is_some()
+                    let head = name.split_once("::").map_or(name, |(head, _)| head);
+                    Ok(!locals.contains(head)
+                        && self.callback_index(head).is_none()
+                        && (self.module_constant(name).is_some()
+                            || self.is_enum_member_name(name)?))
                 })? {
                     self.check_expr_names(operand, locals)?;
                 }
@@ -862,7 +938,7 @@ impl BodyChecker<'_, '_> {
                 callback,
             } => {
                 if !self.is_builtin_map(target, |target| locals.contains(target))? {
-                    return Err("a range operand requires the built-in map".into());
+                    return Err("this named map requires the built-in map".into());
                 }
                 self.check_iterable_names(iterable, locals)?;
                 self.check_map_callee_name(callback, locals)?;

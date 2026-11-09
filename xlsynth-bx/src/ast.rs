@@ -89,6 +89,12 @@ pub enum Type {
         size: usize,
     },
     Named(String),
+    /// A resolved numeric enum with its nominal identity and IR representation.
+    Enum {
+        name: String,
+        signed: bool,
+        width: usize,
+    },
     /// An imported struct application, before resolving its nominal type.
     Applied {
         name: String,
@@ -109,6 +115,22 @@ pub struct StructDef {
     pub name: String,
     pub public: bool,
     pub fields: Vec<Param>,
+}
+
+/// One named value in a numeric enum, before constant evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumMember {
+    pub name: String,
+    pub value: Expr,
+}
+
+/// A nominal bits-backed type with ordered member initializers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumDef {
+    pub name: String,
+    pub public: bool,
+    pub underlying: Option<Type>,
+    pub members: Vec<EnumMember>,
 }
 
 /// A module-level value evaluated at compile time.
@@ -174,7 +196,7 @@ pub struct MatchArm {
     pub value: Expr,
 }
 
-/// A wildcard, scalar literal or module constant, or range between literals.
+/// A wildcard, scalar literal, module constant, enum member, or literal range.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MatchPattern {
     Wildcard,
@@ -292,6 +314,15 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// A call before a later `map` import. The imported callable takes ordinary
+    /// block arguments. A later enum leaves the builtin visible, with its own
+    /// operand grammar. Absent builtin arguments mean that grammar rejected
+    /// the source.
+    MapBeforeUse {
+        name: String,
+        args: Vec<Expr>,
+        builtin_args: Option<Vec<Expr>>,
+    },
     /// A BX function or child block specialized with named callback functions.
     ParametricCall {
         name: String,
@@ -299,8 +330,8 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     Map(Box<MapExpr>),
-    /// A named callback over a range. Array operands use ordinary call syntax
-    /// until checking resolves the callee and callback in their lexical scope.
+    /// A named callback with an iterable or binding that requires the builtin.
+    /// Ordinary array arguments can also be represented as a call.
     NamedMap {
         target: String,
         iterable: Box<ForIterable>,
@@ -479,6 +510,7 @@ pub struct Module {
     pub declaration_order: Vec<String>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub constants: Vec<ConstDef>,
     pub externs: Vec<ExternFn>,
     pub functions: Vec<Function>,

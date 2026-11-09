@@ -88,7 +88,7 @@ pub enum OutlineShape {
 /// Parse declaration syntax while retaining expressions for DSLX to evaluate.
 /// Function bodies are skipped as balanced tokens in the same source snapshot.
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {})
+    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {}, |_, _, _| {})
 }
 
 /// Index semantic sums for resolving checked constructor and pattern paths.
@@ -103,7 +103,18 @@ pub(crate) fn outline_with_sum_names(
         |name| {
             sums.insert(name.to_owned());
         },
+        |_, _, _| {},
     )
+}
+
+/// Visit numeric enum names and the byte after each declaration's closing
+/// brace.
+pub(crate) fn visit_numeric_enums(
+    source: &str,
+    visit: impl FnMut(Token<'_>, usize, bool),
+) -> Result<(), String> {
+    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {}, visit)?;
+    Ok(())
 }
 
 /// Original declaration tokens for a checked DSLX function. Defaults and
@@ -132,6 +143,7 @@ pub(crate) fn dslx_function_tokens(
             ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
         },
         |_| {},
+        |_, _, _| {},
     )?;
     if ambiguous {
         return Err("multiple DSLX source declarations for one function name".into());
@@ -139,12 +151,8 @@ pub(crate) fn dslx_function_tokens(
     Ok(functions)
 }
 
-fn parse_outline_with_functions<'s>(
-    source: &'s str,
-    mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
-    mut visit_sum: impl FnMut(&str),
-) -> Result<DslxOutline, String> {
-    let mut parser = Parser {
+fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
+    Ok(Parser {
         source,
         dialect: Dialect::Dslx,
         tokens: lex(source, Dialect::Dslx, None)?,
@@ -157,7 +165,120 @@ fn parse_outline_with_functions<'s>(
         callback_templates: Default::default(),
         hidden_templates: Vec::new(),
         block_map_shadowed: false,
-    };
+        forward_map_import: false,
+    })
+}
+
+/// Source ranges needed to defer a declaration and guard its comparisons in
+/// an isolated, typecheck-only copy of a DSLX module.
+pub(crate) struct ConversionItem<'a, 's> {
+    pub kind: &'s str,
+    pub name: Token<'s>,
+    pub associated: bool,
+    pub parametric: bool,
+    pub fuzz_domain: bool,
+    pub test_attributes: &'a [std::ops::Range<usize>],
+    pub body: &'a [Token<'s>],
+}
+
+/// Visit functions, impl methods, struct definitions and module constant
+/// initializers without resolving references or typechecking their bodies.
+/// Return the insertion point for a declaration after leading module
+/// attributes.
+pub(crate) fn visit_conversion_items<'s>(
+    source: &'s str,
+    mut visit: impl FnMut(ConversionItem<'_, 's>),
+) -> Result<usize, String> {
+    let mut p = outline_parser(source)?;
+    while p.peek(0) == "#" && p.peek(1) == "!" {
+        p.pos += 2;
+        p.outline_group("[")?;
+    }
+    let declarations_start = p.tokens.get(p.pos).map_or(source.len(), |t| t.start);
+    let mut scope_depth = 0usize;
+    let mut test_attributes = Vec::new();
+    let mut fuzz_domain = false;
+    while !p.peek(0).is_empty() {
+        let kind = p.tokens[p.pos].text;
+        let start = p.tokens[p.pos].start;
+        p.pos += 1;
+        if kind == "#" {
+            let inner = p.eat("!");
+            let test = !inner && matches!(p.peek(1), "test" | "quickcheck" | "test_proc");
+            fuzz_domain |= !inner && p.peek(1) == "fuzz_domain";
+            p.outline_group("[")?;
+            if test {
+                let last = &p.tokens[p.pos - 1];
+                test_attributes.push(start..last.start + last.text.len());
+            }
+            continue;
+        }
+        match kind {
+            "{" => scope_depth += 1,
+            "}" => scope_depth = scope_depth.saturating_sub(1),
+            "pub" => continue,
+            _ => { /* Other declaration tokens do not open an impl scope. */ }
+        }
+        if !(matches!(kind, "fn" | "struct" | "impl" | "proc")
+            || kind == "const" && scope_depth == 0)
+            || !is_dslx_member_name(p.peek(0))
+        {
+            test_attributes.clear();
+            fuzz_domain = false;
+            continue;
+        }
+        let name = p.tokens[p.pos];
+        p.pos += 1;
+        let parametric = p.peek(0) == "<";
+        let mut body = None;
+        if kind == "const" {
+            while !p.eat("=") {
+                match p.peek(0) {
+                    "(" | "[" | "{" | "<" => p.outline_group(p.peek(0))?,
+                    "" | ";" => return Err(p.error("expected DSLX constant initializer")),
+                    _ => p.pos += 1,
+                }
+            }
+            body = Some(p.pos);
+            p.skip_outline_item(false)?;
+        }
+        while !matches!(kind, "impl" | "const") && !p.peek(0).is_empty() {
+            match p.peek(0) {
+                ";" => {
+                    p.pos += 1;
+                    break;
+                }
+                "{" => {
+                    body = Some(p.pos);
+                    p.outline_group("{")?;
+                    break;
+                }
+                "(" | "[" | "<" => p.outline_group(p.peek(0))?,
+                _ => p.pos += 1,
+            }
+        }
+        visit(ConversionItem {
+            kind,
+            name,
+            associated: scope_depth > 0,
+            parametric,
+            fuzz_domain,
+            test_attributes: &test_attributes,
+            body: &p.tokens[body.unwrap_or(p.pos)..p.pos - usize::from(kind == "const")],
+        });
+        test_attributes.clear();
+        fuzz_domain = false;
+    }
+    Ok(declarations_start)
+}
+
+fn parse_outline_with_functions<'s>(
+    source: &'s str,
+    mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
+    mut visit_sum: impl FnMut(&str),
+    mut visit_enum: impl FnMut(Token<'s>, usize, bool),
+) -> Result<DslxOutline, String> {
+    let mut parser = outline_parser(source)?;
     let mut module = DslxOutline::default();
     let mut uses = Vec::new();
     let mut pending_domain = None;
@@ -201,6 +322,7 @@ fn parse_outline_with_functions<'s>(
                 let keyword = parser.peek(0);
                 parser.pos += 1;
                 let name = parser.outline_identifier()?;
+                let name_token = parser.tokens[parser.pos - 1];
                 let bindings_start = parser.pos;
                 let bindings = parser.outline_bindings()?;
                 let kind = match keyword {
@@ -235,6 +357,9 @@ fn parse_outline_with_functions<'s>(
                         let kind = parser.outline_enum(&bindings)?;
                         if matches!(kind, OutlineKind::Opaque) {
                             visit_sum(&name);
+                        } else {
+                            let close = parser.tokens[parser.pos - 1];
+                            visit_enum(name_token, close.start + close.text.len(), public);
                         }
                         kind
                     }

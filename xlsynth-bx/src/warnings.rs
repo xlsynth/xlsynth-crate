@@ -216,7 +216,9 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 pending.extend([start, limit].map(SourceNode::Expression));
             }
             SourceNode::Expression(expr) => match expr {
-                Expr::Call { name, args } | Expr::ParametricCall { name, args, .. } => {
+                Expr::Call { name, args }
+                | Expr::MapBeforeUse { name, args, .. }
+                | Expr::ParametricCall { name, args, .. } => {
                     if !formals.contains(name.as_str()) && is_block(name) {
                         callees.insert(name.as_str());
                     }

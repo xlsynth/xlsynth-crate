@@ -7,10 +7,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::dslx::{Function, FunctionCallGraph, MatchableModuleMember, Module, ModuleMember};
 
-use super::ImportedStructs;
 use super::outline_graph::{OutlineGraph, SourceModule};
+use super::{ImportedStructs, NativeSourceFiles};
 use crate::effect_diagnostic::{EffectLocation, const_assert_replacement};
-use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens};
+use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens, visit_conversion_items};
+use crate::parser::source_bytes::{decode_dslx_source, native_display_tokens_source};
 use crate::parser::{
     Token, dslx_tokens, is_dslx_member_name, is_use_identifier, nonempty_literal_range,
 };
@@ -67,6 +68,10 @@ impl ImportedStructs {
             .files
             .as_ref()
             .expect("DSLX imports have a source snapshot");
+        self.effect_sources_for(files)
+    }
+
+    pub(crate) fn effect_sources_for(&self, files: &NativeSourceFiles) -> EffectSources<'_> {
         EffectSources {
             graph: &self.graph,
             modules: self
@@ -91,6 +96,8 @@ impl ImportedStructs {
 pub(crate) struct Dispatches {
     pub(crate) methods: BTreeMap<String, usize>,
     pub(crate) indirect: bool,
+    pub(crate) indirect_names: BTreeSet<String>,
+    pub(crate) unknown_indirect: bool,
 }
 
 /// A checked call qualifier after resolving its first component in local scope.
@@ -148,6 +155,42 @@ fn application_head(body: &[Token<'_>], angles: &[Option<usize>], end: usize) ->
     }
 }
 
+/// Locate the final name of a checked callback, including grouped references
+/// and explicit parametric arguments. Native lambdas end in their `call`
+/// method.
+fn callback_head(body: &[Token<'_>], angles: &[Option<usize>], mut end: usize) -> Option<usize> {
+    while end > 0 && body[end - 1].text == ")" {
+        end -= 1;
+    }
+    application_head(body, angles, end).filter(|&i| is_dslx_member_name(body[i].text))
+}
+
+/// A C string ending inside a byte literal can lose all following calls.
+/// Accept the native token stream only when the entire outer block closes.
+fn complete_native_body(tokens: &[Token<'_>]) -> bool {
+    if tokens.first().is_none_or(|t| t.text != "{") {
+        return false;
+    }
+    let mut ends = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        match token.text {
+            "{" => ends.push("}"),
+            "(" => ends.push(")"),
+            "[" => ends.push("]"),
+            ")" | "]" | "}" => {
+                if ends.pop() != Some(token.text) {
+                    return false;
+                }
+                if ends.is_empty() {
+                    return tokens.get(i + 1).is_some_and(|t| t.text.is_empty());
+                }
+            }
+            _ => { /* Literals and names do not close the checked block. */ }
+        }
+    }
+    false
+}
+
 impl<'a> EffectSources<'a> {
     /// Count written method dispatches, including associated-function calls.
     /// Field projections and module-qualified ordinary calls have no method
@@ -163,9 +206,42 @@ impl<'a> EffectSources<'a> {
             return Ok(calls);
         };
         let text = function.get_body().to_text();
-        let tokens = dslx_tokens(&text)?;
-        let body = tokens.as_slice();
+        let native = native_display_tokens_source(&text);
+        let tokens = dslx_tokens(&native)
+            .ok()
+            .filter(|tokens| complete_native_body(tokens));
+        let written;
+        let original;
+        let body = if let Some(tokens) = &tokens {
+            tokens.as_slice()
+        } else {
+            written = decode_dslx_source(&captured.module.source)?;
+            let name = function.get_identifier();
+            let mut body = None;
+            if ModuleMember::try_from(function).is_ok() {
+                // A top-level declaration has a unique name. Impl methods can
+                // share names with other impls or with generated lambda calls.
+                visit_conversion_items(&written, |item| {
+                    if item.kind == "fn" && item.name.text == name && !item.associated {
+                        body = Some(item.body.to_vec());
+                    }
+                })?;
+            }
+            original = body.ok_or_else(|| format!("cannot verify dispatch in DSLX function '{name}': libxls v0.61 returned an incomplete function body without an identifiable source declaration"))?;
+            original.as_slice()
+        };
         let angles = application_angles(body);
+        let mut closes = vec![0; body.len()];
+        let mut opens = Vec::new();
+        for (i, t) in body.iter().enumerate() {
+            if t.text == "(" {
+                opens.push(i);
+            } else if t.text == ")"
+                && let Some(open) = opens.pop()
+            {
+                closes[open] = i;
+            }
+        }
         let ordinary_map = OnceCell::new();
         let formals: Vec<_> = function
             .parametric_bindings()
@@ -216,25 +292,39 @@ impl<'a> EffectSources<'a> {
             if token.text != "(" {
                 continue;
             }
+            if tokens.is_none() && open > 0 && body[open - 1].text == ">" {
+                // The original source can give comparisons and type arguments
+                // identical spacing. An angle from an earlier expression may
+                // appear to pair with this closer when the native display is
+                // truncated.
+                calls.indirect = true;
+                calls.unknown_indirect = true;
+                continue;
+            }
             let Some(name) = application_head(body, &angles, open) else {
                 // Even if a normalized actual obscures its opening angle, the
                 // pinned printer emits adjacent ">(" for the application.
-                calls.indirect |= open > 0
+                let unknown = open > 0
                     && body[open - 1].text == ">"
                     && body[open - 1].start + 1 == token.start;
+                calls.indirect |= unknown;
+                calls.unknown_indirect |= unknown;
                 continue;
             };
-            if !is_dslx_member_name(body[name].text) {
+            let (indirect, target) = if !is_dslx_member_name(body[name].text) {
                 // The target of a grouped, indexed or otherwise opaque
                 // parametric application can be absent from the native graph.
-                calls.indirect |= name + 1 != open || matches!(body[name].text, ")" | "]");
-                continue;
-            }
-            if body[name].text == "map" && (name == 0 || !matches!(body[name - 1].text, "." | "::"))
+                if name + 1 != open || matches!(body[name].text, ")" | "]") {
+                    (true, callback_head(body, &angles, name + 1))
+                } else {
+                    continue;
+                }
+            } else if body[name].text == "map"
+                && (name == 0 || !matches!(body[name - 1].text, "." | "::"))
             {
                 // map's callback need not appear as an ordinary invocation
                 // in the root type context, even if it has a written name.
-                calls.indirect |= !ordinary_map.get_or_init(|| {
+                let builtin = !ordinary_map.get_or_init(|| {
                     let expected = captured.module.call_subject(None, "map");
                     (0..graph.callee_count(function))
                         .filter_map(|i| graph.get_callee(function, i))
@@ -246,6 +336,21 @@ impl<'a> EffectSources<'a> {
                                     .is_some_and(|subject| Some(subject) == expected)
                         })
                 });
+                if builtin {
+                    (true, callback_head(body, &angles, closes[open]))
+                } else {
+                    (false, Some(name))
+                }
+            } else {
+                (false, Some(name))
+            };
+            calls.indirect |= indirect;
+            let Some(name) = target else {
+                calls.unknown_indirect = true;
+                continue;
+            };
+            if indirect {
+                calls.indirect_names.insert(body[name].text.to_owned());
             }
             let method = (name >= 1 && body[name - 1].text == ".")
                 || (name >= 2
