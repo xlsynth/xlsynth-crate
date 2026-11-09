@@ -431,6 +431,53 @@ pub(crate) fn minimum_type(expr: &Expr) -> Result<Option<Type>, String> {
         .transpose()
 }
 
+/// Supply the literal constraints of a BX data operand to a native DSLX
+/// type probe. Its runtime value is elaborated separately at the selected
+/// width. Signedness and decimal versus bit-pattern spelling affect inference.
+pub(crate) fn import_literal_witness(expr: &Expr) -> Result<Option<String>, String> {
+    let Some(minimum) = expression_minimum(expr, None)? else {
+        return Ok(None);
+    };
+    literal_witness(minimum).map(Some)
+}
+
+/// A named literal supplies independent evidence if no parametric fixed its
+/// width, and its radix can permit reinterpretation at the same width.
+pub(crate) fn import_bound_literal_witness(
+    expr: &Expr,
+    ty: &Type,
+    lookup: WidthLookup<'_>,
+    scope: usize,
+) -> Result<Option<String>, String> {
+    if !lookup.can_widen_reference(expr, scope)? {
+        return Ok(None);
+    }
+    let Some(minimum) = expression_minimum(expr, Some(lookup))? else {
+        return Ok(None);
+    };
+    if bits(ty) != Some((minimum.signed, minimum.width)) {
+        return Ok(None);
+    }
+    literal_witness(minimum).map(Some)
+}
+
+fn literal_witness(minimum: Minimum) -> Result<String, String> {
+    if minimum.width > crate::check::MAX_TYPE_SIZE {
+        return Err("integer literal exceeds maximum concrete type size".into());
+    }
+    let magnitude = if minimum.width == 0 {
+        BigUint::from(0u8)
+    } else {
+        BigUint::from(1u8) << (minimum.width - 1)
+    };
+    let sign = if minimum.signed { "-" } else { "" };
+    Ok(if minimum.has_prefix {
+        format!("{sign}{magnitude:#x}")
+    } else {
+        format!("{sign}{magnitude}")
+    })
+}
+
 /// An unannotated module constant needs at least one concrete constraint on
 /// its scalar result. Logical operators also propagate implicit operands
 /// along this edge, while comparisons supply their own boolean result type.
@@ -584,6 +631,9 @@ fn visit_bit_members(
             }
         }
         Type::Bits { .. } | Type::Bool => visit(path, ty)?,
+        Type::ParametricArray { .. } | Type::ParametricBits { .. } => {
+            return Err("literal inference requires resolved type dimensions".into());
+        }
         Type::Enum { .. } | Type::Named(_) | Type::Applied { .. } => { /* A struct declares concrete types for its fields. */
         }
     }
@@ -628,6 +678,9 @@ pub(crate) fn unify_inferred_members(
                 }
             }
             Type::Enum { .. } | Type::Named(_) | Type::Applied { .. } => { /* Nominal types have concrete member types. */
+            }
+            Type::ParametricArray { .. } | Type::ParametricBits { .. } => {
+                return Err("literal inference requires resolved type dimensions".into());
             }
         }
         Ok(())

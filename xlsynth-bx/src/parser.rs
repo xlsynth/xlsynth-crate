@@ -13,8 +13,8 @@ use crate::BxWarningKind;
 use crate::ast::{
     BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr,
     ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, SourcePosition, Stmt, StructDef, Type, UnaryOp, UnrollFor,
-    UsePath, WidthSliceType,
+    MatchPattern, Module, Param, ParametricBinding, SourcePosition, Stmt, StructDef, Type, UnaryOp,
+    UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -40,7 +40,7 @@ fn advance_position(start: SourcePosition, text: &str) -> SourcePosition {
     SourcePosition { line, column }
 }
 
-fn diagnostic(source: &str, offset: usize, message: &str) -> String {
+pub(crate) fn diagnostic(source: &str, offset: usize, message: &str) -> String {
     let SourcePosition { line, column } = advance_position(SOURCE_START, &source[..offset]);
     format!("{line}:{column}: {message}")
 }
@@ -180,6 +180,8 @@ fn lex(
     // A function or enum ends at its closing brace. A constant ends at its
     // semicolon, even when its initializer contains braced expressions.
     let mut dslx_item = None;
+    let mut signature_depth = 0usize;
+    let mut in_function_body = false;
     while i < bytes.len() {
         let start = i;
         let rest = &source[i..span.end];
@@ -290,18 +292,34 @@ fn lex(
                 .last()
                 .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}"));
         match text {
-            "fn" | "const" | "enum" if item_start => dslx_item = Some(text),
-            "{" => brace_depth += 1,
+            "fn" | "const" | "enum" if item_start && dslx_item.is_none() => dslx_item = Some(text),
+            "(" | "[" if dslx_item == Some("fn") && !in_function_body => signature_depth += 1,
+            ")" | "]" if dslx_item == Some("fn") && !in_function_body => {
+                signature_depth = signature_depth.saturating_sub(1);
+            }
+            "{" => {
+                // Defaults (= {expr}) and type dimensions can contain braces
+                // before the function body. Keep DSLX lexing through both.
+                if dslx_item == Some("fn")
+                    && brace_depth == 0
+                    && signature_depth == 0
+                    && tokens.last().is_some_and(|t| t.text != "=")
+                {
+                    in_function_body = true;
+                }
+                brace_depth += 1;
+            }
             "}" => brace_depth = brace_depth.saturating_sub(1),
             _ => { /* Other tokens do not enter or leave a definition. */ }
         }
         if brace_depth == 0
-            && matches!(
+            && (matches!(
                 (dslx_item, text),
-                (Some("fn" | "enum"), "}") | (Some("const"), ";")
-            )
+                (Some("enum"), "}") | (Some("const"), ";")
+            ) || (in_function_body && text == "}"))
         {
             dslx_item = None;
+            in_function_body = false;
         }
         tokens.push(Token {
             text,
@@ -363,7 +381,7 @@ pub fn parse_module(source: &str) -> Result<Module, String> {
 }
 
 /// Parse with the callable templates exported by the module's imports. Their
-/// source spellings distinguish callback arguments from pairs of comparisons.
+/// source spellings distinguish parametric arguments from pairs of comparisons.
 pub(crate) fn parse_with_templates(
     source: &str,
     templates: &BTreeSet<String>,
@@ -408,10 +426,13 @@ struct Parser<'s> {
     forward_map_import: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
-    /// Local callback-template declarations disambiguate angle brackets from
+    /// Function value parametrics permit expressions in bit and array
+    /// dimensions.
+    dependent_types: bool,
+    /// Local template declarations disambiguate angle brackets from
     /// comparisons in a comma-separated expression list. Block callers can
     /// use function and block templates declared later in the source.
-    callback_templates: BTreeMap<String, TemplateBinding>,
+    callable_templates: BTreeMap<String, TemplateBinding>,
     /// Entries hidden by currently active data or callable bindings.
     hidden_templates: Vec<(String, TemplateBinding)>,
 }
@@ -539,17 +560,17 @@ impl ParsedExpr {
 impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
         let tokens = lex(source, Dialect::Bx, None)?;
-        let mut callback_templates = BTreeMap::new();
+        let mut callable_templates = BTreeMap::new();
         let mut block_header = None;
         for ts in tokens.windows(3) {
             match (ts[0].text, ts[1].text, ts[2].text) {
                 ("fn", name, "<") => {
-                    callback_templates.insert(name.to_owned(), TemplateBinding::local(ts[1].start));
+                    callable_templates.insert(name.to_owned(), TemplateBinding::local(ts[1].start));
                 }
                 ("block", _, "<") => block_header = Some(ts[1]),
                 (":", "fn", "(") => {
                     if let Some(name) = block_header.take() {
-                        callback_templates
+                        callable_templates
                             .insert(name.text.to_owned(), TemplateBinding::local(name.start));
                     }
                 }
@@ -569,7 +590,8 @@ impl<'s> Parser<'s> {
             block_map_shadowed: false,
             forward_map_import: false,
             block_type_params: BTreeSet::new(),
-            callback_templates,
+            dependent_types: false,
+            callable_templates,
             hidden_templates: Vec::new(),
         })
     }
@@ -656,14 +678,14 @@ impl<'s> Parser<'s> {
         let map_shadowed = self.block_map_shadowed;
         let result = parse(self);
         self.block_map_shadowed = map_shadowed;
-        self.callback_templates
+        self.callable_templates
             .extend(self.hidden_templates.drain(first..));
         result
     }
 
     fn shadow_callable(&mut self, name: &str) {
         self.block_map_shadowed |= name == "map";
-        if let Some(entry) = self.callback_templates.remove_entry(name) {
+        if let Some(entry) = self.callable_templates.remove_entry(name) {
             self.hidden_templates.push(entry);
         }
     }
@@ -767,7 +789,7 @@ impl<'s> Parser<'s> {
                     members.insert(member.to_owned());
                 }
             }
-            self.callback_templates.extend(imports);
+            self.callable_templates.extend(imports);
         }
         self.module()
     }
@@ -1075,14 +1097,45 @@ impl<'s> Parser<'s> {
     /// semicolon or an empty body returns unit, as in DSLX.
     fn function(&mut self, public: bool) -> Result<Function, String> {
         let name = self.ident()?;
-        let callback_params = if self.eat("<") {
+        let mut value_parametrics = Vec::new();
+        let mut callback_params = Vec::new();
+        if self.eat("<") {
+            // An early callback annotation may use a module constant even
+            // when the first value parametric is declared later in this list.
+            self.dependent_types = true;
             if self.peek(0) == ">" {
                 return Err(self.error("expected a function parameter"));
             }
-            self.list(">", Self::callback_param)?
-        } else {
-            Vec::new()
-        };
+            self.list(">", |p| {
+                if p.peek(1) == ":" && p.peek(2) == "fn" {
+                    let param = p.callback_param()?;
+                    p.shadow_callable(&param.name);
+                    callback_params.push(param);
+                } else {
+                    // DSLX permits `self` as a value parametric even though a
+                    // data parameter named `self` requires an impl method.
+                    let name = p.ident()?;
+                    p.expect(":")?;
+                    let ty = p.ty()?;
+                    let default = if p.eat("=") {
+                        p.expect("{")?;
+                        let value = p.expr()?.value;
+                        p.expect("}")?;
+                        Some(value)
+                    } else {
+                        None
+                    };
+                    p.shadow_callable(&name);
+                    value_parametrics.push(ParametricBinding {
+                        name,
+                        ty,
+                        default,
+                        index: value_parametrics.len() + callback_params.len(),
+                    });
+                }
+                Ok(())
+            })?;
+        }
         self.expect("(")?;
         let params = self.list(")", Self::param)?;
         let result = if self.eat("->") {
@@ -1091,17 +1144,16 @@ impl<'s> Parser<'s> {
             Type::Tuple(Vec::new())
         };
         self.expect("{")?;
-        for formal in &callback_params {
-            self.shadow_callable(&formal.name);
-        }
         for param in &params {
             self.shadow_callable(&param.name);
         }
         let body = self.value_scope()?.value;
+        self.dependent_types = false;
         Ok(Function {
             name,
             public,
             callback_params,
+            value_parametrics,
             params,
             result,
             body,
@@ -1335,6 +1387,20 @@ impl<'s> Parser<'s> {
             };
             return Ok((WidthSliceType::Concrete(ty), 0));
         }
+        let (signed, bit_count) = self.bit_type_expressions()?;
+        Ok((
+            WidthSliceType::Bits {
+                signed: Box::new(signed.value),
+                bit_count: Box::new(bit_count.value),
+            },
+            signed.height.max(bit_count.height),
+        ))
+    }
+
+    /// Read the expressions controlling signedness and width in a bits
+    /// annotation.
+    fn bit_type_expressions(&mut self) -> Result<(ParsedExpr, ParsedExpr), String> {
+        let spelling = self.peek(0);
         self.pos += 1;
         let signed = if spelling == "xN" {
             self.expect("[")?;
@@ -1347,30 +1413,39 @@ impl<'s> Parser<'s> {
         self.expect("[")?;
         let bit_count = self.expr()?;
         self.expect("]")?;
-        Ok((
-            WidthSliceType::Bits {
-                signed: Box::new(signed.value),
-                bit_count: Box::new(bit_count.value),
-            },
-            signed.height.max(bit_count.height),
-        ))
+        Ok((signed, bit_count))
     }
 
     fn parsed_ty(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
         let mut ty = self.type_atom(singleton_tuples)?;
         while self.eat("[") {
+            let element = Box::new(ty.value);
+            ty.value = if self.dependent_types && !self.plain_dimension(0) {
+                let size = self.expr()?;
+                ty.depth = ty.depth.max(size.height);
+                Type::ParametricArray {
+                    element,
+                    size: Box::new(size.value),
+                }
+            } else {
+                Type::Array {
+                    element,
+                    size: self.dimension()?,
+                }
+            };
             ty.depth += 1;
-            if ty.depth > 64 {
+            if ty.depth > MAX_SYNTAX_DEPTH {
                 return Err(self.error("type nesting exceeds 64 levels"));
             }
-            let size = self.dimension()?;
             self.expect("]")?;
-            ty.value = Type::Array {
-                element: Box::new(ty.value),
-                size,
-            };
         }
         Ok(ty)
+    }
+
+    /// The original concrete dimension syntax is one numeric token and a
+    /// bracket.
+    fn plain_dimension(&self, offset: usize) -> bool {
+        number_token(self.peek(offset)) && self.peek(offset + 1) == "]"
     }
 
     /// Read a concrete bit width or array dimension without truncation.
@@ -1424,6 +1499,23 @@ impl<'s> Parser<'s> {
         let value = if self.eat("bool") {
             Type::Bool
         } else if matches!(spelling, "bits" | "uN" | "sN" | "xN") {
+            let concrete = if spelling == "xN" {
+                matches!(self.peek(2), "true" | "false")
+                    && self.peek(3) == "]"
+                    && self.plain_dimension(5)
+            } else {
+                self.plain_dimension(2)
+            };
+            if self.dependent_types && !concrete {
+                let (signed, width) = self.bit_type_expressions()?;
+                return Ok(ParsedType {
+                    value: Type::ParametricBits {
+                        signed: Box::new(signed.value),
+                        width: Box::new(width.value),
+                    },
+                    depth: signed.height.max(width.height),
+                });
+            }
             self.pos += 1;
             let signed = if spelling == "xN" {
                 self.expect("[")?;
@@ -1778,7 +1870,7 @@ impl<'s> Parser<'s> {
             end += 2;
         }
         if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|") {
-            // The checker resolves this name to a scalar constant or enum
+            // The checker resolves a scalar constant, value parametric, or enum
             // member. DSLX requires numeric literals on both sides of a range.
             let name = self.name_or_qualified_member()?;
             return Ok(MatchPattern::Literal(self.named_value(name)?));
@@ -1824,8 +1916,10 @@ impl<'s> Parser<'s> {
         }
         let literal = if self.starts_bit_literal()? {
             let ty = self.ty()?;
-            if !matches!(ty, Type::Bool | Type::Bits { .. })
-                && !matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
+            if !matches!(
+                ty,
+                Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. }
+            ) && !matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
             {
                 return Err(self.error("match patterns require a scalar literal type"));
             }
@@ -2302,7 +2396,7 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return self.counted_for();
         }
-        if text == "zero!" && self.peek(1) == "<" && !self.zero_callback_call() {
+        if text == "zero!" && self.peek(1) == "<" && !self.zero_parametric_call() {
             self.pos += 2;
             let ty = self.ty()?;
             self.expect(">")?;
@@ -2333,19 +2427,24 @@ impl<'s> Parser<'s> {
             return self.literal(None);
         }
         let name = self.name_or_qualified_member()?;
-        if self.callback_arguments_end(self.pos).is_some() {
+        if self.parametric_arguments_end(self.pos, &["("]).is_some() {
             self.expect("<")?;
-            if self.peek(0) == ">" {
-                return Err(self.error("expected a named function argument"));
-            }
-            let callbacks = self.list(">", Self::name_or_qualified_member)?;
+            let mut height = 0;
+            let parametrics = self.parametric_arguments(&mut height)?;
             self.expect("(")?;
-            let args = self.list(")", Self::expr)?;
-            return self.aggregate(args, |args| Expr::ParametricCall {
-                name,
-                callbacks,
-                args,
-            });
+            let args = self.list(")", |p| {
+                let arg = p.expr()?;
+                height = height.max(arg.height);
+                Ok(arg.value)
+            })?;
+            return self.compose(
+                height,
+                Expr::ParametricCall {
+                    name,
+                    parametrics,
+                    args,
+                },
+            );
         }
         if self.eat("(") {
             if name == "map" && self.peek(0) != ")" {
@@ -2396,36 +2495,103 @@ impl<'s> Parser<'s> {
         Ok(ParsedExpr::leaf(self.named_value(name)?))
     }
 
-    /// A less-than begins callback arguments only when a list of names and
-    /// path separators ends in `>(`. The ordinary list parser checks each
-    /// name, comma, and qualifier once this call spelling is recognized.
-    fn callback_arguments_end(&self, angle: usize) -> Option<usize> {
+    /// Read actuals after the opening angle and include their heights in the
+    /// parent.
+    fn parametric_arguments(&mut self, height: &mut usize) -> Result<Vec<Expr>, String> {
+        self.list(">", |p| {
+            let actual = p.parametric_argument()?;
+            *height = (*height).max(actual.height);
+            Ok(actual.value)
+        })
+    }
+
+    /// DSLX accepts bare names, numbers and typed literals. Braces enclose
+    /// other value expressions so their operators cannot consume the closing
+    /// angle.
+    fn parametric_argument(&mut self) -> Result<ParsedExpr, String> {
+        if self.eat("{") {
+            // A scoped expression in an explicit DSLX actual is parenthesized,
+            // as in f<{({ let k = u32:1; k })}>(x).
+            if self.peek(0) == "{" {
+                return Err(self.error("parenthesize a scoped parametric argument"));
+            }
+            let expr = self.with_value_grammar(Self::expr)?;
+            self.expect("}")?;
+            return Ok(expr);
+        }
+        let text = self.peek(0);
+        if self.eat("true") || self.eat("false") {
+            return Ok(ParsedExpr::leaf(Expr::Bool(text == "true")));
+        }
+        if number_token(text) {
+            return self.literal(None);
+        }
+        if self.starts_bit_literal()? {
+            let ty = self.ty()?;
+            self.expect(":")?;
+            return self.annotated_literal(ty);
+        }
+        let name = self.name_or_qualified_member()?;
+        Ok(ParsedExpr::leaf(self.named_value(name)?))
+    }
+
+    /// Find the closing angle of a call or map callback reference, skipping
+    /// braced expressions, dependent dimensions and parenthesized typed
+    /// literals.
+    fn parametric_arguments_end(&self, angle: usize, following: &[&str]) -> Option<usize> {
         if self.tokens[angle].text != "<" || angle == 0 {
             return None;
         }
-        // In `pair(x < y, z > (w))` the comma separates two comparisons.
-        // Only a declared template can consume it as a callback separator.
+        // In `pair(x < y, z > (w))` a comma can separate two comparisons.
+        // At the start of a standalone expression it can only belong to the
+        // parametric list, even if a nearer value shadows the function name.
         let name = self.tokens[angle - 1].text;
-        let allow_comma = match &self.tokens[..angle] {
-            [.., head, separator, _] if separator.text == "::" => self
-                .callback_templates
-                .get(head.text)
-                .is_some_and(|binding| binding.members.as_ref().is_none_or(|m| m.contains(name))),
-            _ => self
-                .callback_templates
-                .get(name)
-                .is_some_and(|binding| binding.direct.is_some()),
+        let head = if angle >= 3 && self.tokens[angle - 2].text == "::" {
+            angle - 3
+        } else {
+            angle - 1
         };
-        let names = self.tokens[angle + 1..]
-            .iter()
-            .take_while(|token| {
-                is_dslx_member_name(token.text)
-                    || token.text == "::"
-                    || (allow_comma && token.text == ",")
-            })
-            .count();
-        let end = angle + names + 1;
-        (self.tokens[end].text == ">" && self.tokens[end + 1].text == "(").then_some(end)
+        let standalone = head
+            .checked_sub(1)
+            .is_some_and(|i| matches!(self.tokens[i].text, "{" | ";" | "="));
+        let allow_comma = standalone
+            || match &self.tokens[..angle] {
+                [.., head, separator, _] if separator.text == "::" => self
+                    .callable_templates
+                    .get(head.text)
+                    .is_some_and(|binding| {
+                        binding.members.as_ref().is_none_or(|m| m.contains(name))
+                    }),
+                _ => self
+                    .callable_templates
+                    .get(name)
+                    .is_some_and(|binding| binding.direct.is_some()),
+            };
+        let mut depth = 0usize;
+        for index in angle + 1..self.tokens.len() {
+            let token = &self.tokens[index];
+            match token.text {
+                "" => return None,
+                ">" if depth == 0 => {
+                    return following
+                        .contains(&self.tokens[index + 1].text)
+                        .then_some(index);
+                }
+                "{" if depth != 0 || matches!(self.tokens[index - 1].text, "<" | ",") => depth += 1,
+                "(" if depth != 0 || self.tokens[index - 1].text == ":" => depth += 1,
+                "[" => depth += 1,
+                ")" | "]" | "}" if depth != 0 => depth -= 1,
+                _ if depth != 0 => { /* A delimited expression can contain any value operator. */ }
+                "," if allow_comma => { /* The template owns this separator. */ }
+                text if is_dslx_member_name(text)
+                    || number_token(text)
+                    || token.character.is_some()
+                    || matches!(text, ":" | "::") =>
+                { /* Part of an unbraced name or literal. */ }
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// Recognize struct argument lists in expressions without consuming the
@@ -2479,7 +2645,7 @@ impl<'s> Parser<'s> {
             let token = self.tokens.get(index)?;
             let offset = index - start;
             index = self
-                .callback_arguments_end(index)
+                .parametric_arguments_end(index, &["("])
                 .or_else(|| self.struct_arguments_end(index))
                 .unwrap_or(index)
                 + 1;
@@ -2490,8 +2656,8 @@ impl<'s> Parser<'s> {
     /// Distinguish the typed zero intrinsic from a visible callback template
     /// with the same name. Without import hints, preserve the intrinsic for a
     /// single type argument and no value arguments.
-    fn zero_callback_call(&self) -> bool {
-        let Some(binding) = self.callback_templates.get("zero!") else {
+    fn zero_parametric_call(&self) -> bool {
+        let Some(binding) = self.callable_templates.get("zero!") else {
             return false;
         };
         let Some(start) = binding.direct else {
@@ -2504,10 +2670,22 @@ impl<'s> Parser<'s> {
             return true;
         }
         let angle = self.pos + 1;
-        self.callback_arguments_end(angle).is_some_and(|end| {
-            self.tokens[end + 2].text != ")"
-                || self.tokens[angle + 1..end].iter().any(|t| t.text == ",")
-        })
+        self.parametric_arguments_end(angle, &["("])
+            .is_some_and(|end| {
+                let mut depth = 0usize;
+                self.tokens[end + 2].text != ")"
+                    || matches!(self.tokens[angle + 1].text, "{" | "true" | "false" | ">")
+                    || number_token(self.tokens[angle + 1].text)
+                    || self.tokens[angle + 1..end].iter().any(|t| {
+                        match t.text {
+                            "[" | "(" => depth += 1,
+                            "]" | ")" => depth = depth.saturating_sub(1),
+                            "," | ":" if depth == 0 => return true,
+                            _ => { /* A single type can have expressions inside its dimensions. */ }
+                        }
+                        false
+                    })
+            })
     }
 
     /// An imported callable keeps ordinary block argument syntax. An enum
@@ -2587,8 +2765,10 @@ impl<'s> Parser<'s> {
         builtin_only: bool,
     ) -> Result<ParsedExpr, String> {
         let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
+        let specialized = !lambda && self.specialized_map_callback_ahead();
         if !lambda
             && !builtin_only
+            && !specialized
             && let ParsedIterable::Array(first) = iterable
         {
             let mut args = vec![first];
@@ -2599,7 +2779,9 @@ impl<'s> Parser<'s> {
             return self.aggregate(args, |args| Expr::Call { name: target, args });
         }
         self.expect(",")?;
-        let mapped = if !lambda {
+        let mapped = if specialized {
+            self.specialized_named_map(target, iterable)?
+        } else if !lambda {
             let offset = self.tokens[self.pos].start;
             let callback = self.expr()?;
             let Expr::Name(callback) = callback.value else {
@@ -2616,6 +2798,7 @@ impl<'s> Parser<'s> {
                     target,
                     iterable: Box::new(iterable),
                     callback,
+                    parametrics: Vec::new(),
                 },
             )?
         } else if self.value_context == ValueContext::Block {
@@ -2626,6 +2809,53 @@ impl<'s> Parser<'s> {
         self.eat(",");
         self.expect(")")?;
         Ok(mapped)
+    }
+
+    /// Only map's second operand permits a specialized function name without
+    /// a following call. An invocation here is still an ordinary value
+    /// argument.
+    fn specialized_map_callback_ahead(&self) -> bool {
+        if self.peek(0) != "," {
+            return false;
+        }
+        let mut offset = 1;
+        while self.peek(offset) == "(" {
+            offset += 1;
+        }
+        if self.peek(offset + 1) == "::" {
+            offset += 2;
+        }
+        let angle = offset + 1;
+        self.peek(angle) == "<"
+            && self
+                .parametric_arguments_end(self.pos + angle, &[",", ")"])
+                .is_some()
+    }
+
+    /// Parse a grouped or bare specialization of a map callback.
+    fn specialized_named_map(
+        &mut self,
+        target: String,
+        iterable: ParsedIterable,
+    ) -> Result<ParsedExpr, String> {
+        if self.eat("(") {
+            let map = self.nested(|p| p.specialized_named_map(target, iterable))?;
+            self.expect(")")?;
+            return Ok(map);
+        }
+        let callback = self.name_or_qualified_member()?;
+        self.expect("<")?;
+        let (iterable, mut height) = iterable.into_ast();
+        let parametrics = self.parametric_arguments(&mut height)?;
+        self.compose(
+            height,
+            Expr::NamedMap {
+                target,
+                iterable: Box::new(iterable),
+                callback,
+                parametrics,
+            },
+        )
     }
 
     /// The module lexer used BX rules here. Re-lex the callback once using
@@ -2790,7 +3020,8 @@ impl<'s> Parser<'s> {
             } else {
                 Type::Bool
             });
-            let text = if matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
+            let text = if matches!(&ty, Type::ParametricBits { .. })
+                || matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
             {
                 // Preserve the intrinsic width requirement until the call binds
                 // this type.
@@ -3049,6 +3280,10 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn names<const N: usize>(names: [&str; N]) -> [Expr; N] {
+        names.map(|name| Expr::Name(name.to_owned()))
+    }
 
     #[test]
     fn numeric_enum_members_retain_expressions_and_module_qualified_references()
@@ -3313,14 +3548,14 @@ fn transform<F: fn(u8[2], (bool, u8)) -> u8[2], G: fn() -> bool, H: fn(u8),>(x: 
         };
         let Expr::ParametricCall {
             name,
-            callbacks,
+            parametrics,
             args,
         } = value.as_ref()
         else {
             panic!("expected a callback-parametric call");
         };
         assert_eq!(name, "transform");
-        assert_eq!(callbacks, &["ops::step", "ready", "sink"]);
+        assert_eq!(parametrics, &names(["ops::step", "ready", "sink"]));
         assert_eq!(args, &[Expr::Name("x".into())]);
         assert!(
             matches!(&module.functions[0].body, Expr::Call { name, args } if name == "F" && args.len() == 2)
@@ -3342,7 +3577,7 @@ fn cmp_call(x:u8) -> bool { x < zero!<get>() }
         )?;
         assert!(matches!(&module.functions[0].body, Expr::Zero(_)));
         assert!(
-            matches!(&module.functions[3].body, Expr::ParametricCall { name, callbacks, args } if name == "zero!" && callbacks == &["get"] && args.is_empty())
+            matches!(&module.functions[3].body, Expr::ParametricCall { name, parametrics, args } if name == "zero!" && parametrics == &names(["get"]) && args.is_empty())
         );
         let Expr::Tuple(comparisons) = &module.functions[4].body else {
             panic!("expected a pair of comparisons");
@@ -3362,6 +3597,105 @@ fn cmp_call(x:u8) -> bool { x < zero!<get>() }
         ));
         assert!(
             matches!(&module.functions[5].body, Expr::Binary { op: BinaryOp::Lt, right, .. } if matches!(right.as_ref(), Expr::ParametricCall { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn value_parametrics_retain_order_defaults_and_dependent_types() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn transform<N:u32, F:fn(uN[N])->sN[N], S:bool={false}, M:u32={N + u32:1}>
+    (xs: (bits[N], xN[S][M])[N + M]) -> xN[S][M] {
+    let init: sN[M] = sN[M]:-1;
+    init as xN[S][M]
+}
+fn concrete(x:uN[8][4])->sN[8] { x[u32:0] as s8 }
+"#,
+        )?;
+        let f = &module.functions[0];
+        assert_eq!(
+            f.value_parametrics
+                .iter()
+                .map(|p| p.index)
+                .collect::<Vec<_>>(),
+            [0, 2, 3]
+        );
+        assert_eq!(
+            f.parametric_bindings()
+                .map(|p| match p {
+                    crate::ast::FunctionParametricRef::Value(v) => v.name.as_str(),
+                    crate::ast::FunctionParametricRef::Callback(c) => c.name.as_str(),
+                })
+                .collect::<Vec<_>>(),
+            ["N", "F", "S", "M"]
+        );
+        assert_eq!(f.value_parametrics[1].default, Some(Expr::Bool(false)));
+        assert!(matches!(
+            f.value_parametrics[2].default,
+            Some(Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            })
+        ));
+        let Type::ParametricArray { element, size } = &f.params[0].ty else {
+            panic!("expected a dependent array dimension");
+        };
+        assert!(matches!(
+            size.as_ref(),
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ));
+        assert!(matches!(element.as_ref(), Type::Tuple(fields) if fields[1] == f.result));
+        assert!(matches!(&f.result, Type::ParametricBits { signed, width }
+            if signed.as_ref() == &Expr::Name("S".into()) && width.as_ref() == &Expr::Name("M".into())));
+        let Expr::Scope { bindings, result } = &f.body else {
+            panic!("expected a binding for the dependent literal");
+        };
+        assert!(
+            matches!(&bindings[0].value, Expr::Literal { ty, text } if ty == &bindings[0].ty && text == "-1")
+        );
+        assert!(matches!(result.as_ref(), Expr::Cast { ty, .. } if *ty == f.result));
+        assert!(matches!(
+            module.functions[1].params[0].ty,
+            Type::Array { size: 4, .. }
+        ));
+        let self_binding = parse_module("fn f<self:u32>(x:uN[self])->uN[self]{x}")?;
+        assert_eq!(self_binding.functions[0].value_parametrics[0].name, "self");
+        assert!(parse_module("fn f<N:u32={8}>(x:u8)->u8 { /* still DSLX */ x }").is_err());
+        assert!(
+            parse_module("fn f<N:u32>(x:uN[N])->uN[N] {x} block bad(clk,x:uN[N])->u8{x}").is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_parametric_arguments_keep_expressions_and_nested_delimiters() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+use lib;
+fn f<N:u32>(x:uN[N])->uN[N] { x }
+fn g(x:u8)->u8 {
+    lib::apply<{if true { f<8,>(x) } else { x }}, u32:8, true, lib::Enum::Member,>(f<>(x))
+}
+"#,
+        )?;
+        let Expr::ParametricCall {
+            parametrics, args, ..
+        } = &module.functions[1].body
+        else {
+            panic!("expected explicit parametric arguments");
+        };
+        assert!(matches!(parametrics.as_slice(), [
+            Expr::If { then_value, .. }, Expr::Literal { ty: Some(Type::Bits { width: 32, .. }), text },
+            Expr::Bool(true), Expr::Name(name),
+        ] if matches!(then_value.as_ref(), Expr::ParametricCall { parametrics, .. } if parametrics.len() == 1)
+          && text == "8" && name == "lib::Enum::Member"));
+        assert!(
+            matches!(args.as_slice(), [Expr::ParametricCall { parametrics, .. }] if parametrics.is_empty())
         );
         Ok(())
     }
@@ -3609,7 +3943,7 @@ block wrapped(clk, xs:u8[2])->u8[2] {
             matches!(&bindings[0].value, Expr::Scope { result, .. } if matches!(result.as_ref(), Expr::Tuple(pair) if pair.len() == 2))
         );
         assert!(
-            matches!(result.as_ref(), Expr::ParametricCall { callbacks, .. } if callbacks == &["id", "id"])
+            matches!(result.as_ref(), Expr::ParametricCall { parametrics, .. } if parametrics == &names(["id", "id"]))
         );
         assert!(
             matches!(&module.blocks[0].statements[0], Stmt::Let { value: Expr::Map(map), .. } if matches!(&map.iterable, ForIterable::Array(Expr::ParametricCall { .. })))
@@ -3674,27 +4008,27 @@ fn apply(x: u8) -> u8 { zero!<left>(x) }
         );
         assert!(matches!(
             &module.functions[1].body,
-            Expr::ParametricCall { callbacks, .. } if callbacks == &["left", "right"]
+            Expr::ParametricCall { parametrics, .. } if parametrics == &names(["left", "right"])
         ));
         assert!(matches!(
             &module.functions[2].body,
-            Expr::ParametricCall { callbacks, args, .. } if callbacks == &["left"] && args.len() == 1
+            Expr::ParametricCall { parametrics, args, .. } if parametrics == &names(["left"]) && args.len() == 1
         ));
         let ambiguous = "use wire::zero!; fn f() -> u8 { zero!<Tag>() }";
         let templates = BTreeSet::from(["zero!".to_string()]);
         let hinted = parse_with_templates(ambiguous, &templates)?;
         assert!(matches!(
             &hinted.functions[0].body,
-            Expr::ParametricCall { callbacks, .. } if callbacks == &["Tag"]
+            Expr::ParametricCall { parametrics, .. } if parametrics == &names(["Tag"])
         ));
         Ok(())
     }
 
     #[test]
-    fn callback_parametrics_require_function_signatures_and_named_actuals() {
+    fn parametrics_require_well_formed_bindings_and_braced_computed_actuals() {
         for declaration in [
             "fn f<>(x:u8)->u8 {x}",
-            "fn f<F: u8>(x:u8)->u8 {x}",
+            "fn f<N:u32=u32:8>(x:u8)->u8 {x}",
             "fn f<F: fn(x:u8) -> u8>(x:u8)->u8 {x}",
             "fn f<F: fn(u8)->fn(u8)->u8>(x:u8)->u8 {x}",
             "fn f(self: fn(u8)->u8)->u8 {u8:0}",
@@ -3703,13 +4037,13 @@ fn apply(x: u8) -> u8 { zero!<left>(x) }
             assert!(parse_module(declaration).is_err(), "{declaration}");
         }
         for call in [
-            "f<>(x)",
             "f<|v| v>(x)",
             "f<(helper)>(x)",
             "f<helper(x)>(x)",
             "f<if x { a } else { b }>(x)",
             "f<u8>(x)",
-            "f<a::b::c>(x)",
+            "f<{let a = u32:1; a}>(x)",
+            "f<{{let a = u32:1; a}}>(x)",
             "f<,helper>(x)",
             "f<helper,,>(x)",
         ] {
@@ -4071,8 +4405,8 @@ block compare(clk, advance: u8, x: u8, y: u8, z: u8) -> (bool, bool) {
             ]
         );
         assert!(matches!(&module.blocks[0].statements[..],
-            [Stmt::Let {value: Expr::ParametricCall {name, callbacks, args}, ..}]
-                if name == "advance" && callbacks == &["math::widen", "square"] && args == &[Expr::Name("packet".into())]
+            [Stmt::Let {value: Expr::ParametricCall {name, parametrics, args}, ..}]
+                if name == "advance" && parametrics == &names(["math::widen", "square"]) && args == &[Expr::Name("packet".into())]
         ));
         assert!(module.blocks[2].type_params.is_empty());
         assert_eq!(
@@ -4468,12 +4802,14 @@ fn by_array(xs: u8[3]) -> u8[3] { map(map(xs, twice), helpers::twice) }
             target,
             iterable,
             callback,
+            parametrics,
         } = &module.functions[0].body
         else {
             panic!("expected a map over a range")
         };
         assert_eq!(target, "map");
         assert_eq!(callback, "helpers::twice");
+        assert!(parametrics.is_empty());
         assert!(matches!(
             iterable.as_ref(),
             ForIterable::Range {
@@ -4496,6 +4832,50 @@ fn by_array(xs: u8[3]) -> u8[3] { map(map(xs, twice), helpers::twice) }
                 "{value}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn named_map_callbacks_accept_explicit_parametric_arguments() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+use lib;
+fn f<N:u32>(x:uN[N])->uN[N] { x }
+fn by_array<K:u32>(xs:u8[2])->u8[2] { map(xs, f<{K + u32:1}>) }
+fn by_range()->u8[2] { map(u8:0..u8:2, ((lib::f<8,>)),) }
+block before(clk, xs:u8[2])->u8[2] { map(xs, f<8>) }
+"#,
+        )?;
+        let Expr::NamedMap {
+            iterable,
+            callback,
+            parametrics,
+            ..
+        } = &module.functions[1].body
+        else {
+            panic!("expected an explicit specialization on the map callback");
+        };
+        assert!(matches!(iterable.as_ref(), ForIterable::Array(Expr::Name(name)) if name == "xs"));
+        assert_eq!(callback, "f");
+        assert!(matches!(
+            &parametrics[..],
+            [Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }]
+        ));
+        assert!(
+            matches!(&module.functions[2].body, Expr::NamedMap { callback, parametrics, .. }
+            if callback == "lib::f" && matches!(&parametrics[..], [Expr::Literal { ty: None, text }] if text == "8"))
+        );
+        assert!(
+            matches!(&module.blocks[0].output, Expr::NamedMap { callback, .. } if callback == "f")
+        );
+        assert!(parse_module("fn g()->u8 { f<8> }").is_err());
+        let shadowed =
+            parse_module("fn map(x:u8, b:bool)->u8{x} block b(clk,x:u8,y:u8)->u8{map(x, x < y)}")?;
+        assert!(matches!(&shadowed.blocks[0].output, Expr::Call { args, .. }
+            if matches!(&args[1], Expr::Binary { op: BinaryOp::Lt, .. })));
         Ok(())
     }
 

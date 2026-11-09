@@ -20,9 +20,11 @@ pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
 pub use lower::lower_module;
 pub use parser::outline::{
-    DslxOutline, OutlineDecl, OutlineKind, OutlineShape, OutlineType, parse_dslx_outline,
+    DslxOutline, OutlineDecl, OutlineFunctionParametric, OutlineKind, OutlineShape, OutlineType,
+    parse_dslx_outline,
 };
 pub use parser::parse_module;
+pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
@@ -45,7 +47,8 @@ pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<P
 }
 
 /// Parse a BX source file with its imported template signatures available to
-/// distinguish multi-callback calls from comma-separated comparisons.
+/// distinguish calls with multiple parametrics from comma-separated
+/// comparisons.
 pub fn parse_module_with_options(
     source: &str,
     options: &ImportOptions<'_>,
@@ -59,8 +62,8 @@ pub fn check_source_with_options(
     source: &str,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    let (module, libraries) = bx_import::read(source, options)?;
-    check::check_sources(&module, libraries.as_ref(), options).map_err(bx_import::diagnostic)
+    let (module, imports) = bx_import::read(source, options)?;
+    check::check_sources(&module, imports, options).map_err(bx_import::diagnostic)
 }
 
 /// Compile BX source with the specified module search paths and treat

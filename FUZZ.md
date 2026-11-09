@@ -229,6 +229,12 @@ Compares BX functions specialized on named callbacks with independently generate
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_value_parametrics.rs
+
+Generates direct calls and named maps over value-parametric BX functions and imported DSLX functions. It compares acceptance, BX block IR, native DSLX IR, and concrete DSLX evaluation. Calls vary positional prefixes, inferred widths and signedness, dependent defaults, and scalar or nominal values. Inputs include nested aggregates, inline literals, and let-bound values. Repeated calls with equal runtime signatures exercise specialization reuse, including bindings that differ above bit 63. Rejected cases check conflicting or missing dimensions, nonconstant actuals, and nominal values from the wrong declaration.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_value_parametrics --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_callbacks.rs
 
 Generates type-generic BX blocks with named callbacks, flattens their combinational child instances, and compares acceptance and computed outputs with ordinary DSLX calls using concrete inputs and compiled DSLX IR. It varies signedness, widths, aggregate shapes, callback identity in each position, and imported generic functions at different widths. It catches incorrect forward inference, stale specialization reuse, and mismatched argument or result shapes.

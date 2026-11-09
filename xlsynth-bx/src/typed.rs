@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use xlsynth_pir::{
     IrBits, IrValue,
     ir::Type as IrType,
@@ -165,6 +167,14 @@ impl CheckedEnum {
     pub(crate) fn contains(&self, value: &IrBits) -> bool {
         self.values.contains(value)
     }
+}
+
+/// A function value parametric after its source type and constexpr value
+/// have been resolved in BX or DSLX.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct BoundParametricValue {
+    pub ty: Type,
+    pub value: IrValue,
 }
 
 /// A typed module constant, evaluated before checking its consumers.
@@ -406,6 +416,8 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
         | Type::Tuple(_)
         | Type::Named(_)
         | Type::Applied { .. }
+        | Type::ParametricBits { .. }
+        | Type::ParametricArray { .. }
         | Type::Array { .. } => None,
     }
 }
@@ -418,27 +430,47 @@ pub(crate) fn repr_bits(ty: &Type) -> Option<(bool, usize)> {
     }
 }
 
+/// A value parametric follows DSLX's constexpr rules for lexical inputs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConstantUse {
+    Bx,
+    ValueParametric,
+}
+
 /// A known lexical constant, or the checked let to replay if a required
 /// constant later needs a value that speculative folding deferred.
 pub(super) enum ConstantBinding {
     Known(IrValue),
+    /// BX folded a selected path. DSLX may need to inspect other inputs
+    /// when this let is used as a value parametric.
+    Selected {
+        value: IrValue,
+        definition: usize,
+    },
     Deferred(usize),
 }
 
-/// Evaluation either exceeded its work budget or needs an earlier let.
+/// A checked expression could not finish evaluating in the current context.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ConstantFailure {
     InvalidEnumCast(String),
     WorkLimit,
     Deferred(usize),
+    /// An ordinary speculative fold reached a call. A value-parametric use
+    /// can replay the let with the module's concrete functions available.
+    NeedsFunctions,
 }
 
-/// Memoized calls to the concrete local functions preceding one module
-/// initializer. Repeated calls in a diamond of helpers share their value.
-pub(super) struct ConstantFunctions<'f> {
-    lookup: &'f dyn Fn(&str) -> Option<&'f CheckedFunction>,
+/// Memoize concrete local function calls while evaluating an initializer or
+/// a value-parametric binding in its lexical scope.
+pub(super) struct ConstantFunctions {
+    available: AvailableFunctions,
     values: HashMap<ConstantCall, IrValue>,
 }
+
+/// Concrete checked functions available to constexpr evaluation, including
+/// specializations first requested within the initializer itself.
+pub(super) type AvailableFunctions = Rc<RefCell<BTreeMap<String, Rc<CheckedFunction>>>>;
 
 /// The cache key for a pure local helper applied to concrete arguments.
 #[derive(Eq, PartialEq, Hash)]
@@ -447,23 +479,34 @@ struct ConstantCall {
     arguments: Vec<IrValue>,
 }
 
-impl<'f> ConstantFunctions<'f> {
-    pub(super) fn new(lookup: &'f dyn Fn(&str) -> Option<&'f CheckedFunction>) -> Self {
+impl ConstantFunctions {
+    pub(super) fn new(available: AvailableFunctions) -> Self {
         Self {
-            lookup,
+            available,
             values: HashMap::new(),
         }
     }
 }
 
 impl ConstantBinding {
-    fn read(&self, work: &mut CountedWork<'_, '_>) -> Option<&IrValue> {
+    pub(super) fn deferred_definition(&self, usage: ConstantUse) -> Option<usize> {
         match self {
-            Self::Known(value) => Some(value),
-            Self::Deferred(index) => {
-                work.failure = Some(ConstantFailure::Deferred(*index));
-                None
+            Self::Deferred(index) => Some(*index),
+            Self::Selected { definition, .. } if usage == ConstantUse::ValueParametric => {
+                Some(*definition)
             }
+            _ => None,
+        }
+    }
+
+    fn read(&self, work: &mut CountedWork<'_>) -> Option<&IrValue> {
+        if let Some(index) = self.deferred_definition(work.usage) {
+            work.failure = Some(ConstantFailure::Deferred(index));
+            return None;
+        }
+        match self {
+            Self::Known(value) | Self::Selected { value, .. } => Some(value),
+            Self::Deferred(_) => unreachable!("deferred definition handled above"),
         }
     }
 }
@@ -490,7 +533,7 @@ impl ConstantScope<'_> {
         }
     }
 
-    fn read(&self, name: &str, work: &mut CountedWork<'_, '_>) -> Option<&IrValue> {
+    fn read(&self, name: &str, work: &mut CountedWork<'_>) -> Option<&IrValue> {
         let mut scope = self;
         loop {
             match scope {
@@ -522,13 +565,14 @@ impl ConstantScope<'_> {
 
 /// One constant evaluation charges loop and map iterations to its caller's
 /// budget.
-struct CountedWork<'a, 'f> {
+struct CountedWork<'a> {
     enums: &'a BTreeMap<String, CheckedEnum>,
     remaining: &'a mut usize,
     inside_loop: bool,
+    usage: ConstantUse,
     failure: Option<ConstantFailure>,
     missing_local: Option<(usize, usize)>,
-    functions: Option<&'a mut ConstantFunctions<'f>>,
+    functions: Option<&'a mut ConstantFunctions>,
 }
 
 /// Reserve room for one syntax-depth-limited expression tree at initializer
@@ -540,7 +584,7 @@ fn on_constant_stack<T>(evaluate: impl FnOnce() -> T) -> T {
     stacker::maybe_grow(RED_ZONE, 2 * RED_ZONE, evaluate)
 }
 
-impl CountedWork<'_, '_> {
+impl CountedWork<'_> {
     fn charge(&mut self, work: usize) -> Option<()> {
         if let Some(rest) = self.remaining.checked_sub(work) {
             *self.remaining = rest;
@@ -560,8 +604,11 @@ impl CountedWork<'_, '_> {
         args: &[TypedExpr],
         names: &ConstantScope<'_>,
     ) -> Option<IrValue> {
-        let lookup = self.functions.as_ref()?.lookup;
-        let function = lookup(name)?;
+        let Some(functions) = self.functions.as_ref() else {
+            self.failure = Some(ConstantFailure::NeedsFunctions);
+            return None;
+        };
+        let function = functions.available.borrow().get(name)?.clone();
         let args = args
             .iter()
             .map(|arg| arg.constant_with_budget(names, self))
@@ -577,7 +624,7 @@ impl CountedWork<'_, '_> {
         if let Some(value) = self.functions.as_ref()?.values.get(&call) {
             return Some(value.clone());
         }
-        let value = on_constant_stack(|| self.function_body(function, &call.arguments))?;
+        let value = on_constant_stack(|| self.function_body(&function, &call.arguments))?;
         self.functions.as_mut()?.values.insert(call, value.clone());
         Some(value)
     }
@@ -667,7 +714,7 @@ impl TypedFor {
     fn constant(
         &self,
         names: &ConstantScope<'_>,
-        remaining: &mut CountedWork<'_, '_>,
+        remaining: &mut CountedWork<'_>,
     ) -> Option<IrValue> {
         remaining.charge(1)?;
         let mut carry = self.seed.constant_with_budget(names, remaining)?;
@@ -742,11 +789,7 @@ impl TypedMap {
 
     /// Evaluate each element in a child scope of the caller, sharing its work
     /// limit and resolving captured constants only when the body reads them.
-    fn constant(
-        &self,
-        names: &ConstantScope<'_>,
-        work: &mut CountedWork<'_, '_>,
-    ) -> Option<IrValue> {
+    fn constant(&self, names: &ConstantScope<'_>, work: &mut CountedWork<'_>) -> Option<IrValue> {
         let array = self.array.constant_with_budget(names, work)?;
         let elements = array.as_elements().ok()?;
         work.charge(elements.len())?;
@@ -783,7 +826,7 @@ fn constant_iteration<'a>(
     parent: &ConstantScope<'_>,
     locals: &mut BTreeMap<&'a str, IrValue>,
     definitions: &BTreeMap<&str, usize>,
-    work: &mut CountedWork<'_, '_>,
+    work: &mut CountedWork<'_>,
 ) -> Option<IrValue> {
     let depth = parent.depth() + 1;
     let mut pending: Vec<usize> = Vec::new();
@@ -866,7 +909,7 @@ fn constant_match_arm<'a>(
     arms: &'a [TypedMatchArm],
     value: &IrBits,
     signed: bool,
-    work: &mut CountedWork<'_, '_>,
+    work: &mut CountedWork<'_>,
 ) -> Option<&'a TypedExpr> {
     let words = value.get_bit_count().div_ceil(64).max(1);
     for arm in arms {
@@ -969,10 +1012,11 @@ impl TypedExpr {
         &self,
         names: &BTreeMap<String, ConstantBinding>,
         pending: &mut BTreeSet<usize>,
+        usage: ConstantUse,
     ) {
         self.all_inputs(false, &mut |name| {
-            if let Some(ConstantBinding::Deferred(index)) = names.get(name) {
-                pending.insert(*index);
+            if let Some(index) = names.get(name).and_then(|b| b.deferred_definition(usage)) {
+                pending.insert(index);
             }
             true
         });
@@ -990,7 +1034,8 @@ impl TypedExpr {
         names: &BTreeMap<String, ConstantBinding>,
         remaining: &mut usize,
         replaying: bool,
-        functions: Option<&mut ConstantFunctions<'_>>,
+        usage: ConstantUse,
+        functions: Option<&mut ConstantFunctions>,
         enums: &BTreeMap<String, CheckedEnum>,
     ) -> Result<Option<IrValue>, ConstantFailure> {
         let may_call = functions.is_some();
@@ -998,6 +1043,7 @@ impl TypedExpr {
             enums,
             remaining,
             inside_loop: replaying,
+            usage,
             failure: None,
             missing_local: None,
             functions,
@@ -1021,8 +1067,20 @@ impl TypedExpr {
     fn constant_with_budget(
         &self,
         names: &ConstantScope<'_>,
-        remaining: &mut CountedWork<'_, '_>,
+        remaining: &mut CountedWork<'_>,
     ) -> Option<IrValue> {
+        // DSLX emits bytecode for a constexpr match or loop with bindings for
+        // all its free names, including unselected arms. A helper's parameters
+        // and iteration locals already have concrete values when executed.
+        if remaining.usage == ConstantUse::ValueParametric
+            && names.depth() == 0
+            && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
+            && !self.all_inputs(true, &mut |name| {
+                remaining.charge(1).is_some() && names.read(name, remaining).is_some()
+            })
+        {
+            return None;
+        }
         let value = match &self.kind {
             K::Map(map) => {
                 let outer = std::mem::replace(&mut remaining.inside_loop, true);
@@ -1056,9 +1114,9 @@ impl TypedExpr {
                 let size = array.get_element_count().ok()?;
                 let index = index.constant_with_budget(names, remaining)?;
                 let bits = index.as_bits().ok()?;
-                let i = if names.depth() > 0 {
-                    // An iteration can make an index constant for the first
-                    // time. Apply the same bounds check as a constant BX index.
+                let i = if names.depth() > 0 || remaining.usage == ConstantUse::ValueParametric {
+                    // An iteration or constexpr actual can make an index
+                    // constant for the first time. Check its array bounds.
                     ir_bits_to_usize_in_range(bits, size)?
                 } else {
                     let last = size.checked_sub(1)?;
@@ -1228,7 +1286,8 @@ mod tests {
     use xlsynth_pir::{IrBits, IrValue};
 
     use super::{
-        CheckedStmt, ConstantBinding, ConstantFailure, ConstantFunctions, TypedExpr, TypedExprKind,
+        CheckedStmt, ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse, TypedExpr,
+        TypedExprKind,
     };
     use crate::{check_module, parse_module};
 
@@ -1245,14 +1304,21 @@ mod tests {
         std::thread::Builder::new()
             .stack_size(512 * 1024)
             .spawn(move || {
-                let lookup = |name: &str| functions.iter().find(|f| f.name == name);
-                let mut calls = ConstantFunctions::new(&lookup);
+                let available: super::AvailableFunctions = Default::default();
+                for f in functions {
+                    available
+                        .borrow_mut()
+                        .insert(f.name.clone(), super::Rc::new(f));
+                }
+                let result = available.borrow()["result"].clone();
+                let mut calls = ConstantFunctions::new(available);
                 let mut remaining = crate::check::MAX_TYPE_SIZE;
                 assert_eq!(
-                    lookup("result").unwrap().output.constant(
+                    result.output.constant(
                         &BTreeMap::new(),
                         &mut remaining,
                         true,
+                        ConstantUse::Bx,
                         Some(&mut calls),
                         &BTreeMap::new(),
                     ),
@@ -1338,6 +1404,7 @@ block folded(clk) -> u16 {{
                     &BTreeMap::new(),
                     &mut remaining,
                     false,
+                    ConstantUse::Bx,
                     None,
                     &BTreeMap::new()
                 ),
@@ -1369,12 +1436,26 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
         let names = BTreeMap::from([("rows".to_string(), ConstantBinding::Known(input))]);
         let mut ample = 1024;
         assert_eq!(
-            output.constant(&names, &mut ample, false, None, &BTreeMap::new()),
+            output.constant(
+                &names,
+                &mut ample,
+                false,
+                ConstantUse::Bx,
+                None,
+                &BTreeMap::new()
+            ),
             Ok(Some(expected))
         );
         let mut limited = 26;
         assert_eq!(
-            output.constant(&names, &mut limited, false, None, &BTreeMap::new()),
+            output.constant(
+                &names,
+                &mut limited,
+                false,
+                ConstantUse::Bx,
+                None,
+                &BTreeMap::new()
+            ),
             Err(ConstantFailure::WorkLimit)
         );
         Ok(())
@@ -1545,9 +1626,14 @@ block wide_capture(clk, data: Payload) -> bool {
         for block in checked.blocks() {
             let mut remaining = crate::check::MAX_TYPE_SIZE;
             assert_eq!(
-                block
-                    .output
-                    .constant(&values, &mut remaining, false, None, &BTreeMap::new()),
+                block.output.constant(
+                    &values,
+                    &mut remaining,
+                    false,
+                    ConstantUse::Bx,
+                    None,
+                    &BTreeMap::new()
+                ),
                 Err(ConstantFailure::WorkLimit),
                 "{}",
                 block.name

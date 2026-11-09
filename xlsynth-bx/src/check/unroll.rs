@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::generic_blocks::callback_argument_name;
 use super::*;
-use crate::ast::{BindingPattern, ForIterable, MapExpr, UnrollFor};
+use crate::ast::{BindingPattern, ForIterable, FunctionParametricRef, MapExpr, UnrollFor};
 use crate::infer_literal::BindingWidths;
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -24,6 +25,9 @@ pub(super) struct Shadowed {
     outer_loop_value: Option<TypedExpr>,
     widths: Option<BindingWidths>,
     declared: bool,
+    /// A nearer data binding hides the name's use as a parametric match
+    /// pattern.
+    outer_parametric: Option<String>,
 }
 
 impl BodyChecker<'_, '_> {
@@ -59,7 +63,7 @@ impl BodyChecker<'_, '_> {
             (Some(registry), Some(_), _, _, _) => {
                 (&mut registry.expansion_work, "generic block specialization")
             }
-            (_, _, Some(registry), Some(_), _) => {
+            (_, _, Some(registry), spec, _) if spec.is_some() || registry.checking_definition() => {
                 (&mut registry.expansion_work, "function specialization")
             }
             (_, _, _, _, BodyKind::Block { .. }) => (&mut self.expansion_work, "block"),
@@ -118,9 +122,9 @@ impl BodyChecker<'_, '_> {
             }
             Expr::ParametricCall {
                 name,
-                callbacks,
+                parametrics,
                 args,
-            } => Some((name, callbacks.as_slice(), args)),
+            } => Some((name, parametrics.as_slice(), args)),
             _ => None,
         };
         if let Some((target, callbacks, args)) = call
@@ -170,7 +174,11 @@ impl BodyChecker<'_, '_> {
                 }
                 binding
             };
-            return self.block_call(&binding, target, callbacks, args, expected);
+            let callbacks = callbacks
+                .iter()
+                .map(|expr| callback_argument_name(expr).map(str::to_owned))
+                .collect::<Result<Vec<_>, _>>()?;
+            return self.block_call(&binding, target, &callbacks, args, expected);
         }
         self.scoped_result(expr, expected, structural)
     }
@@ -233,6 +241,7 @@ impl BodyChecker<'_, '_> {
             outer_loop_value,
             widths: self.inferred_bindings.remove(name),
             declared: self.names.insert(name.to_owned()),
+            outer_parametric: self.value_parametric_names.take(name),
         });
         if let Some(mut widths) = widths {
             widths.bind_in_scope(self.width_scope());
@@ -243,6 +252,9 @@ impl BodyChecker<'_, '_> {
     pub(super) fn leave_scope(&mut self, saved: Vec<Shadowed>) {
         let in_loop = self.in_loop_scope();
         for old in saved.into_iter().rev() {
+            if let Some(name) = old.outer_parametric {
+                self.value_parametric_names.insert(name);
+            }
             let values = if in_loop {
                 &mut self.loop_values
             } else {
@@ -483,6 +495,72 @@ enum NominalUse {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Resolve names at a template's declaration while leaving concrete types
+    /// and evaluation to the call that supplies its parametric values.
+    pub(super) fn check_value_template_names(&mut self, f: &Function) -> Result<(), String> {
+        let position = self.decls.positions.get(f.name.as_str()).copied();
+        // The signature precedes the binding of the function name.
+        self.function_position = position.map(|at| at.saturating_sub(1));
+        self.zero_binding = self.decls.zero_binding(&f.name);
+        self.template_name_depth = Some(Cell::new(0));
+        let visited = Cell::new(0);
+        let mut locals = LexicalScope::root(&self.names, &visited);
+        for formal in f.parametric_bindings() {
+            match formal {
+                FunctionParametricRef::Value(binding) => {
+                    self.check_type_names(&binding.ty, &locals)?;
+                    // DSLX resolves the formal inside its own default. Its
+                    // value is unavailable if a call actually selects it.
+                    locals.bind_pattern_name(&binding.name);
+                    self.value_parametric_names.insert(binding.name.clone());
+                    if let Some(default) = &binding.default {
+                        self.check_expr_names(default, &locals)?;
+                    }
+                }
+                FunctionParametricRef::Callback(callback) => {
+                    for ty in callback.params.iter().chain([&callback.result]) {
+                        self.check_type_names(ty, &locals)?;
+                    }
+                    locals.bind_pattern_name(&callback.name);
+                }
+            }
+        }
+        // From here each callback has its declared callable role, including as
+        // a named map operand. A nearer local may still shadow that binding.
+        for callback in &f.callback_params {
+            locals.values.to_mut().remove(&callback.name);
+        }
+        self.template_callbacks = Some(&self.decls.value_template_callbacks[f.name.as_str()]);
+        for param in &f.params {
+            self.check_type_names(&param.ty, &locals)?;
+            locals.bind_pattern_name(&param.name);
+        }
+        self.check_type_names(&f.result, &locals)?;
+        self.function_position = position;
+        self.check_expr_names(&f.body, &locals)
+    }
+
+    /// Expressions and symbolic types can contain one another. Bound their
+    /// combined nesting before a template signature is retained or evaluated.
+    fn with_template_name_depth(
+        &self,
+        check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let Some(depth) = &self.template_name_depth else {
+            return check();
+        };
+        let prior = depth.get();
+        if prior > MAX_ELABORATION_DEPTH {
+            return Err(format!(
+                "value-parametric template nesting exceeds {MAX_ELABORATION_DEPTH} levels"
+            ));
+        }
+        depth.set(prior + 1);
+        let result = check();
+        depth.set(prior);
+        result
+    }
+
     /// Preserve ordinary calls to visible declarations named `map`.
     pub(super) fn is_builtin_map(
         &self,
@@ -514,7 +592,7 @@ impl BodyChecker<'_, '_> {
             return Ok(false);
         }
         Ok(!self.decls.visible(target, self.function_position)
-            || !(self.decls.functions.contains_key(target)
+            || !(self.decls.declares_function(target)
                 || self.decls.is_block(target)
                 || self.structs.indices.contains_key(target)
                 || self.structs.enums.contains_key(target)
@@ -670,6 +748,14 @@ impl BodyChecker<'_, '_> {
     }
 
     fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
+        self.with_template_name_depth(|| self.check_type_names_at_depth(ty, locals))
+    }
+
+    fn check_type_names_at_depth(
+        &self,
+        ty: &Type,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
             Type::Named(name) => self.check_nominal_name(name, NominalUse::Annotation, locals)?,
@@ -682,7 +768,17 @@ impl BodyChecker<'_, '_> {
                 }
             }
             Type::Array { element, .. } => self.check_type_names(element, locals)?,
-            _ => { /* Built-in type name. */ }
+            Type::ParametricArray { element, size } => {
+                self.check_type_names(element, locals)?;
+                self.check_expr_names(size, locals)?;
+            }
+            Type::ParametricBits { signed, width } => {
+                self.check_expr_names(signed, locals)?;
+                self.check_expr_names(width, locals)?;
+            }
+            Type::Bool | Type::Bits { .. } | Type::Enum { .. } => {
+                // Built-in types and resolved enums require no lexical lookup.
+            }
         }
         Ok(())
     }
@@ -717,7 +813,7 @@ impl BodyChecker<'_, '_> {
             return Err(format!("'{name}' is declared later in the module"));
         }
         if self.module_constant(name).is_some()
-            || self.decls.functions.contains_key(name)
+            || self.decls.declares_function(name)
             || self.decls.is_block(name)
             || callee
                 && self.structs.local_enum(name).is_some()
@@ -745,6 +841,14 @@ impl BodyChecker<'_, '_> {
     }
 
     fn check_expr_names(&self, expr: &Expr, locals: &LexicalScope<'_>) -> Result<(), String> {
+        self.with_template_name_depth(|| self.check_expr_names_at_depth(expr, locals))
+    }
+
+    fn check_expr_names_at_depth(
+        &self,
+        expr: &Expr,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match expr {
             Expr::Scope { bindings, result } => {
@@ -827,23 +931,29 @@ impl BodyChecker<'_, '_> {
             }
             Expr::ParametricCall {
                 name,
-                callbacks,
+                parametrics,
                 args,
             } => {
-                locals
-                    .visited
-                    .set(locals.visited.get().saturating_add(callbacks.len()));
-                if self.decls.is_block(name) && self.callback_index(name).is_none() {
-                    self.check_block_callback_list(name, callbacks.len(), locals.contains(name))?;
+                let block = self.decls.is_block(name) && self.callback_index(name).is_none();
+                let template = self.decls.function_templates.get(name.as_str());
+                if block {
+                    self.check_block_callback_list(name, parametrics.len(), locals.contains(name))?;
                     self.uses_child.set(true);
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
+                } else if template.is_some_and(|f| f.value_parametrics.is_empty()) {
+                    self.callable_template(name, locals.contains(name), parametrics.len())?;
                 } else {
-                    self.callable_template(name, locals.contains(name), callbacks.len())?;
+                    self.check_value_name(name, locals, /* callee= */ true)?;
                 }
-                for callback in callbacks {
-                    self.callback_source(callback, |head| locals.contains(head))?;
+                let mut formals = template.into_iter().flat_map(|f| f.parametric_bindings());
+                for actual in parametrics {
+                    if block || matches!(formals.next(), Some(FunctionParametricRef::Callback(_))) {
+                        self.check_callback_argument_names(actual, locals)?;
+                    } else {
+                        self.check_expr_names(actual, locals)?;
+                    }
                 }
                 for arg in args {
                     self.check_expr_names(arg, locals)?;
@@ -903,8 +1013,12 @@ impl BodyChecker<'_, '_> {
             Expr::Match { subject, arms } => {
                 for operand in super::match_operands(subject, arms, |name| {
                     let head = name.split_once("::").map_or(name, |(head, _)| head);
-                    Ok(!locals.contains(head)
-                        && self.callback_index(head).is_none()
+                    if let Some(scope) = locals.lookup(head) {
+                        return Ok(
+                            scope.parent.is_none() && self.value_parametric_names.contains(name)
+                        );
+                    }
+                    Ok(self.callback_index(head).is_none()
                         && (self.module_constant(name).is_some()
                             || self.is_enum_member_name(name)?))
                 })? {
@@ -936,12 +1050,16 @@ impl BodyChecker<'_, '_> {
                 target,
                 iterable,
                 callback,
+                parametrics,
             } => {
                 if !self.is_builtin_map(target, |target| locals.contains(target))? {
                     return Err("this named map requires the built-in map".into());
                 }
                 self.check_iterable_names(iterable, locals)?;
                 self.check_map_callee_name(callback, locals)?;
+                for actual in parametrics {
+                    self.check_expr_names(actual, locals)?;
+                }
             }
             Expr::For(fold) => {
                 self.check_iterable_names(&fold.iterable, locals)?;
@@ -971,6 +1089,20 @@ impl BodyChecker<'_, '_> {
             .map(|_| ())
     }
 
+    /// Resolve a named callable in a skipped body without binding its
+    /// signature.
+    fn check_callback_argument_names(
+        &self,
+        actual: &Expr,
+        locals: &LexicalScope<'_>,
+    ) -> Result<(), String> {
+        locals.visited.set(locals.visited.get().saturating_add(1));
+        self.callback_source(callback_argument_name(actual)?, |head| {
+            locals.contains(head)
+        })
+        .map(|_| ())
+    }
+
     fn check_iterable_names(
         &self,
         iterable: &ForIterable,
@@ -991,6 +1123,65 @@ mod tests {
     use crate::{ImportOptions, check_module, check_module_with_options, parse_module};
     use std::fs;
     use xlsynth::dslx::{ImportData, parse_and_typecheck};
+
+    #[test]
+    fn unused_value_templates_resolve_lexical_names_in_declaration_order() {
+        let declarations = "const BASE = u32:4; fn value<N:u32>(x:u32)->u32 { x + N }";
+        for (function, valid) in [
+            (
+                "fn f<N:u32={BASE}, M:u32={N+BASE}>(x:uN[M])->u32 { value<{M+N}>(x as u32) }",
+                true,
+            ),
+            ("fn f<N:u32>(x:uN[N])->u32 { value<N>() }", true),
+            ("fn f<N:u32={N}>(x:u32)->u32 { x + N }", true),
+            ("fn f<N:u32={M}, M:u32>(x:u32)->u32 { x }", false),
+            ("fn f<N:u32>(x:uN[M])->u32 { x as u32 }", false),
+            ("fn f<N:u32>(x:u32)->u32 { value<{M+N}>(x) }", false),
+            (
+                "fn f<N:u32>(x:u32)->u32 { later(x) } fn later(x:u32)->u32 { x }",
+                false,
+            ),
+        ] {
+            let source = format!("{declarations}\n{function}");
+            let bx = parse_module(&source).and_then(|module| check_module(&module));
+            let dslx = parse_and_typecheck(&source, "scope.x", "scope", &mut ImportData::default());
+            assert_eq!(dslx.is_ok(), valid, "{source}: {:?}", dslx.err());
+            assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+        }
+    }
+
+    #[test]
+    fn template_name_enters_scope_after_its_signature() {
+        for (source, valid) in [
+            ("fn f<N:u32={f<3>()}>()->u32 { N }", false),
+            ("fn f<N:u32>(x:uN[f<3>(u32:0)])->u32 { N }", false),
+            ("fn f<N:u32>(x:u32)->u32 { f<N>(x) }", true),
+        ] {
+            let bx = parse_module(source).and_then(|module| check_module(&module));
+            let dslx = parse_and_typecheck(source, "scope.x", "scope", &mut ImportData::default());
+            assert_eq!(dslx.is_ok(), valid, "{source}: {:?}", dslx.err());
+            assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+        }
+    }
+
+    #[test]
+    fn empty_loops_resolve_names_in_parametric_arguments_and_dimensions() {
+        let declarations = "fn value<N:u32>(x:u32)->u32 { x + N }";
+        for (expression, valid) in [
+            ("value<{i+u32:1}>(a)", true),
+            ("value<{missing+u32:1}>(a)", false),
+            ("a as uN[i+u32:1]", true),
+            ("a as uN[missing+u32:1]", false),
+        ] {
+            let source = format!(
+                "{declarations}\nfn f<N:u32>(x:u32)->u32 {{ unroll_for! (i,a) in u32:0..N {{ let _ = {expression}; a }}(x) }}\nfn sample(x:u32)->u32 {{ f<0>(x) }}"
+            );
+            let bx = parse_module(&source).and_then(|module| check_module(&module));
+            let dslx = parse_and_typecheck(&source, "scope.x", "scope", &mut ImportData::default());
+            assert_eq!(dslx.is_ok(), valid, "{source}: {:?}", dslx.err());
+            assert_eq!(bx.is_ok(), valid, "{source}: {:?}", bx.err());
+        }
+    }
 
     #[test]
     fn a_loop_local_value_shadows_a_struct_name_even_in_an_empty_range() {
@@ -1049,6 +1240,50 @@ pub const VALUE = u8:0;
                 accepted,
                 "{bx}"
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn skipped_native_specializations_check_names_without_evaluating_actuals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        fs::write(
+            dir.path().join("math.x"),
+            "pub fn resize<W:u32, N:u32>(x:uN[W])->uN[N] { x as uN[N] }",
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        for (expr, valid) in [
+            ("math::resize<x, W>()", true),
+            ("({ let resize = x; resize<u32:8>(x) })", true),
+            ("({ let resize = x; resize<u32:8,u32:8>(x) })", true),
+            ("map([x], resize<x, W>)", true),
+            ("math::resize<missing, W>(x)", false),
+            ("map([x], resize<x, missing>)", false),
+            ("math::missing<W>(x)", false),
+            ("map([x], math::missing<W>)", false),
+        ] {
+            for body in [
+                format!("pub fn cold<W:u32>(x:u8)->u8 {{ let _ = {expr}; x }}"),
+                format!(
+                    "const W=u32:8; pub fn cold(x:u8)->u8 {{ unroll_for! (_,a) in u8:0..u8:0 {{ let _ = {expr}; a }}(x) }}"
+                ),
+            ] {
+                let source = format!("use math; use math::resize; {body}");
+                fs::write(dir.path().join("wrapper.bx"), &source)?;
+                for root in [source.as_str(), "use wrapper;"] {
+                    let result = crate::check_source_with_options(root, &options);
+                    assert_eq!(
+                        result.is_ok(),
+                        valid,
+                        "{root} / {source}: {:?}",
+                        result.err()
+                    );
+                }
+            }
         }
         Ok(())
     }

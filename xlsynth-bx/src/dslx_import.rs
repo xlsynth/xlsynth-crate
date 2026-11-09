@@ -4,6 +4,10 @@
 
 mod conversion_guard;
 mod effect;
+mod value_parametrics;
+
+use crate::typed::BoundParametricValue;
+pub(crate) use value_parametrics::NativeDataArg;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -14,12 +18,13 @@ use xlsynth_pir::ir_parser;
 
 use crate::ImportOptions;
 use crate::ast::{StructDef, Type, UsePath};
-use crate::check::MAX_TYPE_SIZE;
-use crate::import_structs::ImportedStructs;
+use crate::check::{MAX_SPECIALIZATIONS, MAX_TYPE_SIZE, source_type_nodes};
+use crate::import_structs::{DslxSourceLoader, ImportedStructs};
 use crate::parser::{is_dslx_member_name, is_identifier_word};
 use crate::typed::CheckedEnum;
 
-/// An imported DSLX function specialized for one set of BX argument types.
+/// An imported DSLX function specialized for concrete data types and value
+/// bindings.
 #[derive(Clone, Debug)]
 pub struct ImportedCall {
     /// Full dotted DSLX module name, independent of the BX use spelling.
@@ -28,6 +33,8 @@ pub struct ImportedCall {
     pub function: String,
     /// Concrete argument types in call order.
     pub args: Vec<Type>,
+    /// Explicit compile-time arguments in declaration order.
+    pub parametrics: Vec<BoundParametricValue>,
     /// Concrete result type inferred by DSLX.
     pub result: Type,
 }
@@ -56,6 +63,15 @@ enum UseBinding {
     Member { subject: String, name: String },
 }
 
+/// Inputs selecting a native function invocation before DSLX supplies defaults.
+#[derive(Eq, Hash, PartialEq)]
+struct CallInputs {
+    module: String,
+    function: String,
+    args: Vec<Type>,
+    parametrics: Vec<BoundParametricValue>,
+}
+
 /// Per-check import graph and memoized concrete function signatures.
 pub(crate) struct ImportResolver {
     bindings: BTreeMap<String, UseBinding>,
@@ -65,18 +81,27 @@ pub(crate) struct ImportResolver {
     /// Subsequent native operations report the original resolution error.
     imports: Result<Option<ImportData>, String>,
     structs: ImportedStructs,
-    ids: HashMap<(String, String, Vec<Type>), usize>,
+    ids: HashMap<CallInputs, usize>,
+    binding_types: BTreeMap<(String, String), Vec<Type>>,
+    context_types: HashMap<value_parametrics::ContextInputs, Vec<Type>>,
     calls: Vec<ImportedCall>,
+    explicit_count: usize,
+    explicit_work: usize,
 }
 
 impl ImportResolver {
     /// Typecheck every import up front, including unused modules, so all calls
     /// in this BX module use a single snapshot of the DSLX sources.
+    #[cfg(test)]
     pub(crate) fn new(
         declarations: &[UsePath],
         options: &ImportOptions<'_>,
     ) -> Result<Self, String> {
-        Self::with_bindings(declarations, options, None)
+        let stdlib = options
+            .dslx_stdlib_path
+            .unwrap_or(xlsynth::default_dslx_stdlib_path());
+        let native = DslxSourceLoader::new(stdlib, &options.additional_search_paths);
+        Self::with_bindings(declarations, options, None, native)
     }
 
     /// Source paths remain intact for native typechecking. Each BX file can
@@ -85,6 +110,7 @@ impl ImportResolver {
         declarations: &[UsePath],
         options: &ImportOptions<'_>,
         aliases: Option<&[String]>,
+        native: DslxSourceLoader<'_>,
     ) -> Result<Self, String> {
         let stdlib_path = options
             .dslx_stdlib_path
@@ -108,8 +134,7 @@ impl ImportResolver {
                 return Err(format!("duplicate use binding '{binding}'"));
             }
         }
-        let (structs, imports) =
-            ImportedStructs::load(declarations, stdlib_path, &options.additional_search_paths)?;
+        let (structs, imports) = ImportedStructs::from_sources(declarations, native)?;
         let mut bindings = BTreeMap::new();
         let mut subjects = BTreeSet::new();
         for (i, declaration) in declarations.iter().enumerate() {
@@ -135,8 +160,16 @@ impl ImportResolver {
             stdlib_path: stdlib_path.to_owned(),
             imports: Ok(imports),
             ids: HashMap::new(),
+            binding_types: BTreeMap::new(),
+            context_types: HashMap::new(),
             calls: Vec::new(),
+            explicit_count: 0,
+            explicit_work: 0,
         })
+    }
+
+    pub(crate) fn has_imports(&self) -> bool {
+        !self.subjects.is_empty()
     }
 
     /// Map a qualified module use or an unqualified member use to its DSLX
@@ -309,7 +342,30 @@ impl ImportResolver {
         &mut self,
         module: &str,
         function: &str,
+        args: Vec<Type>,
+        on_new_inputs: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(usize, Type), String> {
+        self.resolve_inputs(module, function, args, Vec::new(), on_new_inputs)
+    }
+
+    /// Resolve an invocation with an explicit prefix of positional value
+    /// bindings.
+    pub(crate) fn resolve_explicit(
+        &mut self,
+        module: &str,
+        function: &str,
+        args: Vec<Type>,
+        parametrics: Vec<BoundParametricValue>,
+    ) -> Result<(usize, Type), String> {
+        self.resolve_inputs(module, function, args, parametrics, || Ok(()))
+    }
+
+    fn resolve_inputs(
+        &mut self,
+        module: &str,
+        function: &str,
         mut args: Vec<Type>,
+        mut parametrics: Vec<BoundParametricValue>,
         on_new_inputs: impl FnOnce() -> Result<(), String>,
     ) -> Result<(usize, Type), String> {
         if !self.subjects.contains(module) {
@@ -320,19 +376,43 @@ impl ImportResolver {
                 "cannot link '{module}::{function}': XLS IR function symbols require module and function names made of letters, digits, and underscores"
             ));
         }
-        for arg in &mut args {
+        for arg in args
+            .iter_mut()
+            .chain(parametrics.iter_mut().map(|p| &mut p.ty))
+        {
             normalize_import_type(arg, self.struct_defs(), self.enum_definitions())
                 .map_err(|e| format!("{module}::{function}: {e}"))?;
         }
-        let key = (module.to_owned(), function.to_owned(), args);
+        let key = CallInputs {
+            module: module.to_owned(),
+            function: function.to_owned(),
+            args,
+            parametrics,
+        };
         if let Some(&id) = self.ids.get(&key) {
             return Ok((id, self.calls[id].result.clone()));
         }
         on_new_inputs()?;
+        if !key.parametrics.is_empty() {
+            let work = key
+                .args
+                .iter()
+                .fold(0usize, |sum, ty| sum.saturating_add(source_type_nodes(ty)));
+            // The call table and cache key each retain the input types and
+            // bindings.
+            self.reserve_explicit_probe(self.explicit_count, &key.parametrics, work, 2)?;
+            self.explicit_count += 1;
+        }
         let id = self.calls.len();
         let mut probe_imports = ProbeImports::default();
-        let (params, expr) =
-            probe_call(&mut probe_imports, &self.structs, module, function, &key.2)?;
+        let (params, expr) = probe_call(
+            &mut probe_imports,
+            &self.structs,
+            module,
+            function,
+            &key.args,
+            &key.parametrics,
+        )?;
         let witness = TypeWitness {
             imports: probe_imports.declarations(),
             params,
@@ -359,13 +439,46 @@ fn probe_{id}({}) {{ capture({}) }}
                 .map_err(|e| format!("{module}::{function}: {}", structs.remap_diagnostic(e)))
         })?;
         self.calls.push(ImportedCall {
-            module: key.0.clone(),
-            function: key.1.clone(),
-            args: key.2.clone(),
+            module: key.module.clone(),
+            function: key.function.clone(),
+            args: key.args.clone(),
+            parametrics: key.parametrics.clone(),
             result: result.clone(),
         });
         self.ids.insert(key, id);
         Ok((id, result))
+    }
+
+    /// Reserve memory for a new explicit invocation or literal-context probe
+    /// before generating native source or asking libxls to specialize the
+    /// callee.
+    fn reserve_explicit_probe(
+        &mut self,
+        count: usize,
+        values: &[BoundParametricValue],
+        data_work: usize,
+        copies: usize,
+    ) -> Result<(), String> {
+        if count >= MAX_SPECIALIZATIONS {
+            return Err(format!(
+                "native DSLX function specialization limit of {MAX_SPECIALIZATIONS} exceeded"
+            ));
+        }
+        let work = values
+            .iter()
+            .fold(data_work, |sum, v| {
+                sum.saturating_add(source_type_nodes(&v.ty))
+                    .saturating_add(crate::typed::constant_work(&v.value))
+            })
+            .saturating_mul(copies);
+        let total = self.explicit_work.saturating_add(work);
+        if total > MAX_TYPE_SIZE {
+            return Err(format!(
+                "native DSLX parametric bindings exceed the function specialization expansion limit of {MAX_TYPE_SIZE}"
+            ));
+        }
+        self.explicit_work = total;
+        Ok(())
     }
 
     /// Compile each imported module's requested specializations together.
@@ -391,6 +504,7 @@ fn probe_{id}({}) {{ capture({}) }}
                     .args
                     .iter()
                     .chain([&call.result])
+                    .chain(call.parametrics.iter().map(|p| &p.ty))
                     .any(|ty| self.structs.contains_parametric_instance(ty));
                 groups.entry((&call.module, concrete)).or_default().push(id);
             }
@@ -464,6 +578,11 @@ fn normalize_import_type(
         Type::Applied { name, .. } => {
             return Err(format!("unresolved imported struct application '{name}'"));
         }
+        Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
+            return Err(format!(
+                "unresolved dimensions in imported function signature '{ty}'"
+            ));
+        }
         Type::Bits { .. } | Type::Named(_) | Type::Enum { .. } => {
             // Bits and resolved DSLX nominal types already have their canonical
             // type.
@@ -524,6 +643,9 @@ impl ProbeImports {
             Type::Applied { name, .. } => {
                 Err(format!("unresolved imported struct application '{name}'"))
             }
+            Type::ParametricBits { .. } | Type::ParametricArray { .. } => Err(format!(
+                "unresolved dimensions in imported function signature '{ty}'"
+            )),
         }
     }
 }
@@ -535,8 +657,9 @@ fn probe_call(
     subject: &str,
     function: &str,
     args: &[Type],
+    parametrics: &[BoundParametricValue],
 ) -> Result<(String, String), String> {
-    let function = imports.qualify(subject, function);
+    let function = imports.specialized_name(subject, function, parametrics, structs)?;
     let mut params = Vec::with_capacity(args.len());
     let mut arguments = Vec::with_capacity(args.len());
     for (i, ty) in args.iter().enumerate() {
@@ -720,6 +843,7 @@ fn compile_batch(
             subject,
             &call.function,
             &call.args,
+            &call.parametrics,
         )?;
         probes.push_str(&format!("fn probe_{id}({params}) {{ let _ = {expr}; }}\n"));
     }
@@ -727,11 +851,13 @@ fn compile_batch(
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
     structs.check_enum_order(&source, &module)?;
+    let explicit_values = call_ids.iter().any(|&id| !calls[id].parametrics.is_empty());
     if has_instances {
         conversion_guard::check(
             &checked,
             &structs.effect_sources(),
             conversion_guard::GuardMode::ConcreteStructs,
+            explicit_values,
         )?;
     }
     // XLS can embed filenames in generated symbols. Restore the logical
@@ -746,7 +872,7 @@ fn compile_batch(
             .keys()
             .any(|owner| structs.import_features(owner).numeric_enums);
     let converted = structs.conversion_probe(&checked, &source, &module, enum_specializations)?;
-    if !has_instances && type_parameters {
+    if !has_instances && (type_parameters || explicit_values) {
         conversion_guard::check(
             &converted.checked,
             &structs.effect_sources_for(converted.files),
@@ -755,6 +881,7 @@ fn compile_batch(
             } else {
                 conversion_guard::GuardMode::TypeBindings
             },
+            explicit_values,
         )?;
     }
     let ir = converted

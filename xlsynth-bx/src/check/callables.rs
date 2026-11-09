@@ -24,6 +24,7 @@ pub(super) enum CallbackSource<'m> {
 /// A map may directly invoke a formal in the current specialization.
 pub(super) enum MapCallee<'m> {
     Formal(usize),
+    ValueTemplate(&'m Function),
     Declaration(CallbackSource<'m>),
 }
 
@@ -98,6 +99,9 @@ impl BlockSpecializations<'_> {
 impl<'a, 'm> BodyChecker<'a, 'm> {
     /// The declaration-site lookup table is shared by all specializations.
     pub(super) fn callback_indices(&self) -> Option<&'a BTreeMap<String, usize>> {
+        if let Some(indices) = self.template_callbacks {
+            return Some(indices);
+        }
         if let Some(template) = self.source_template {
             return Some(&template.callback_indices);
         }
@@ -138,6 +142,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .function_templates
             .get(name)
             .ok_or_else(|| format!("'{name}' is not a function with callable parameters"))?;
+        if !template.value_parametrics.is_empty() {
+            let count = template.callback_params.len() + template.value_parametrics.len();
+            if callback_count > count {
+                return Err(format!(
+                    "'{name}' expects at most {count} parametric arguments, got {callback_count}"
+                ));
+            }
+            if template
+                .parametric_bindings()
+                .skip(callback_count)
+                .any(|p| matches!(p, crate::ast::FunctionParametricRef::Callback(_)))
+            {
+                return Err(format!("'{name}' requires an explicit callable argument"));
+            }
+            return Ok(template);
+        }
         if callback_count != template.callback_params.len() {
             return Err(format!(
                 "'{name}' expects {} callable arguments, got {callback_count}",
@@ -170,8 +190,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.resolver.check_function_name(&module, &member)?;
             return Ok(CallbackSource::Imported { module, member });
         }
-        if let Some((&callee, f)) = self.decls.functions.get_key_value(name)
-            && f.callback_params.is_empty()
+        if let Some((&callee, _)) = self.decls.functions.get_key_value(name)
+            && !self.decls.function_templates.contains_key(callee)
         {
             return Ok(CallbackSource::Named(callee));
         }
@@ -182,7 +202,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Resolve the actual from the formal input types. Function templates
     /// compare its return type, while block templates use it for inference.
-    fn callback_result(
+    pub(super) fn callback_result(
         &mut self,
         params: &[Type],
         source: &CallbackSource<'m>,
@@ -391,10 +411,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     pub(super) fn parametric_call(
         &mut self,
         name: &str,
-        callbacks: &[String],
+        parametrics: &[Expr],
         args: &[Expr],
     ) -> Result<(Type, K), String> {
-        let template = self.callable_template(name, self.names.contains(name), callbacks.len())?;
+        if parametrics.is_empty() && !self.decls.function_templates.contains_key(name) {
+            return self.function_call(name, args);
+        }
+        if !self.decls.function_templates.contains_key(name)
+            && self.resolver.lookup(name)?.is_some()
+            && let CallbackSource::Imported { module, member } =
+                self.callback_source(name, |head| self.names.contains(head))?
+        {
+            let value = self.explicit_import_call(&module, &member, parametrics, args)?;
+            return Ok((value.ty, value.kind));
+        }
+        let template =
+            self.callable_template(name, self.names.contains(name), parametrics.len())?;
+        if !template.value_parametrics.is_empty() {
+            return self.value_function_call(template, parametrics, args);
+        }
+        let callbacks = parametrics
+            .iter()
+            .map(super::generic_blocks::callback_argument_name)
+            .collect::<Result<Vec<_>, _>>()?;
         let interface = &self.decls.functions[name];
         if self.replaying_body() {
             self.charge_expansion("callback bindings", callbacks.len())?;
@@ -422,7 +461,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .map(|p| (Some(p.name.as_str()), &p.ty)),
             true,
         )?;
-        let symbol = self.intern_function(template, targets)?;
+        let symbol = self.intern_function(template, targets, None)?;
         Ok((interface.result.clone(), K::Call { name: symbol, args }))
     }
 
@@ -472,6 +511,17 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .callback_source(callee, |_| false)
                 .map(MapCallee::Declaration);
         }
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if let Some(&template) = self.decls.function_templates.get(name)
+            && !template.value_parametrics.is_empty()
+            && template.callback_params.is_empty()
+            && !is_local(head)
+            && self.callback_index(head).is_none()
+            && self.decls.visible(name, self.function_position)
+        {
+            self.reject_type_parameter_value(head)?;
+            return Ok(MapCallee::ValueTemplate(template));
+        }
         self.callback_source(name, is_local)
             .map(MapCallee::Declaration)
     }
@@ -494,9 +544,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     pub(super) fn map_element_call(
         &mut self,
         name: &str,
+        parametrics: &[Expr],
         element: TypedExpr,
     ) -> Result<TypedExpr, String> {
         let (target, ty) = match self.map_callee(name, |head| self.names.contains(head))? {
+            MapCallee::ValueTemplate(template) => {
+                return self.value_map_call_with_actuals(template, parametrics, element);
+            }
+            MapCallee::Declaration(CallbackSource::Imported { module, member })
+                if !parametrics.is_empty() =>
+            {
+                let values = self.imported_value_parametrics(&module, &member, parametrics)?;
+                return self.apply_explicit_import(&module, &member, values, vec![element]);
+            }
+            _ if !parametrics.is_empty() => {
+                return Err(format!(
+                    "map callback '{name}' requires a value-parametric function for explicit arguments"
+                ));
+            }
             MapCallee::Formal(index) => {
                 let (formal, target) = self.bound_formal(index);
                 let [input] = formal.params.as_slice() else {
