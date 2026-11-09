@@ -30,6 +30,185 @@ fn run_block(package: &Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
     Ok(eval_fn_in_package_value(package, &function, &[input]))
 }
 
+/// Compare rejection at the public BX compiler and native DSLX typechecker.
+fn assert_import_rejected(module: &str, body: &str, result: &str, options: &ImportOptions) {
+    let bx = format!(
+        "use {module}; #[allow(combinational_block)] block b(clk,x:u8)->{result} {{ {body} }}"
+    );
+    let native = format!("import {module}; fn sample(x:u8)->{result} {{ {body} }}");
+    assert!(
+        compile_with_options(
+            &bx,
+            empty_package("test"),
+            ResetBehavior::default(),
+            options
+        )
+        .is_err(),
+        "{bx}"
+    );
+    assert!(
+        parse_and_typecheck(
+            &native,
+            "sample.x",
+            "sample",
+            &mut ImportData::new(None, &options.additional_search_paths)
+        )
+        .is_err(),
+        "{native}"
+    );
+}
+
+#[test]
+fn direct_and_mapped_imports_bind_values_in_the_callers_scope() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "math.x",
+        "pub fn mix<K:uN[81], N:u32>(x:uN[N])->uN[81] { (x as uN[81]) ^ K }",
+    )?;
+    write_module(
+        root.path(),
+        "lanes.bx",
+        r#"
+use math::mix;
+const HIGH = uN[81]:0x1_0000_0000_0000_0000;
+pub fn mapped<K:uN[81]>(x:u8)->uN[81][2] {
+    map([x, x], mix<{HIGH + K}>)
+}"#,
+    )?;
+    let source = r#"
+use lanes;
+use math;
+use std::{lsbs, msbs};
+const HIGH = uN[81]:1;
+#[allow(combinational_block)]
+block sample(clk, x:u8)->(u3, u4[2], uN[81], uN[81][2], uN[81]) {
+    let n = u32:2 + u32:1;
+    (lsbs<n>(x), map([x, x], msbs<{n+u32:1}>), math::mix<HIGH>(x), lanes::mapped<HIGH>(x), math::mix<1>(x))
+}
+"#;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let package = compile_with_options(
+        source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    assert_eq!(
+        run_block(&package, 0xc6)?,
+        IrValue::parse_typed(
+            "(bits[3]:6,[bits[4]:12,bits[4]:12],bits[81]:199,[bits[81]:0x100000000000000c7,bits[81]:0x100000000000000c7],bits[81]:199)"
+        )?
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_explicit_import_arguments_are_rejected_for_direct_and_mapped_calls()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "logic.x",
+        "pub fn flip<K:u8, N:u32>(x:uN[N])->uN[N] { x ^ (K as uN[N]) }",
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    for actuals in ["<u16:3>", "<x>", "<3,7>", "<3,8,true>", "<256>"] {
+        for (call, result) in [
+            (format!("logic::flip{actuals}(x)"), "u8"),
+            (format!("map([x],logic::flip{actuals})"), "u8[1]"),
+        ] {
+            assert_import_rejected("logic", &call, result, &options);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn native_value_arguments_supply_context_to_scalar_and_aggregate_data_literals()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "data.x",
+        r#"
+pub fn scalar<N:u32>(x:uN[N])->uN[N] { x + uN[N]:1 }
+pub fn pair<N:u32>(p:(uN[N],uN[N]))->uN[N] { p.0 - p.1 }
+pub fn lanes<N:u32>(xs:uN[N][2])->uN[N] { xs[u32:0] ^ xs[u32:1] }
+pub fn width<K:u32,N:u32>(x:uN[N])->u32 { N + K }
+"#,
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let helper = "fn increment(v:u32)->u32 { v + u32:1 }";
+    let body = r#"
+    let width = increment(u32:7);
+    let literal = 3;
+    (data::scalar<width>(3), data::pair<8>((x, 7)), data::lanes<8>([9, 2]),
+     data::pair<8>(if x == u8:7 { (10, x) } else { (x, 5) }), data::width<2>(literal),
+     data::pair<8>(for (_, acc) in u32:0..u32:3 { (acc.0+2, acc.1+1) }((0, 0))))
+"#;
+    let result = "(u8,u8,u8,u8,u32,u8)";
+    let source = format!(
+        "use data; {helper} #[allow(combinational_block)] block b(clk,x:u8)->{result} {{ {body} }}"
+    );
+    let package = compile_with_options(
+        &source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+    let reference = format!("import data; {helper} fn sample(x:u8)->{result} {{ {body} }}");
+    let reference = xlsynth::convert_dslx_to_ir(
+        &reference,
+        Path::new("sample.x"),
+        &xlsynth::DslxConvertOptions {
+            additional_search_paths: vec![root.path()],
+            ..Default::default()
+        },
+    )?
+    .ir
+    .get_function("__sample__sample")?;
+    for (x, expected) in [
+        (
+            7,
+            "(bits[8]:4,bits[8]:0,bits[8]:11,bits[8]:3,bits[32]:4,bits[8]:3)",
+        ),
+        (
+            11,
+            "(bits[8]:4,bits[8]:4,bits[8]:11,bits[8]:6,bits[32]:4,bits[8]:3)",
+        ),
+    ] {
+        let actual = run_block(&package, x)?;
+        assert_eq!(actual, IrValue::parse_typed(expected)?);
+        assert_eq!(
+            xlsynth_pir::libxls_bridge::value_to_libxls(&actual)?,
+            reference.interpret(&[xlsynth::XlsIrValue::make_ubits(8, u64::from(x))?])?
+        );
+    }
+    for body in [
+        "data::scalar<8>(256)",
+        "data::width<2>(3) as u8",
+        "data::pair<8>((x, u7:3))",
+        "data::lanes<8>([1, u9:2])",
+        "data::pair<8>(if x == u8:0 { (x, 1) } else { (u7:2, x) })",
+        "let n=match true { true=>u32:8, _=>x as u32 }; let alias=n; data::scalar<alias>(3)",
+    ] {
+        assert_import_rejected("data", body, "u8", &options);
+    }
+    Ok(())
+}
+
 #[test]
 fn ordered_roots_select_the_body_and_qualified_and_direct_calls_share_one_specialization()
 -> Result<(), Box<dyn Error>> {
@@ -376,5 +555,35 @@ block seed(clk, x: u8) -> u32 { acm_random::rng_deterministic_seed() + (x as u32
         .map(|pos| package.file_table.id_to_path[&pos.fileno].as_str())
         .collect();
     assert_eq!(paths, ["xls/dslx/stdlib/acm_random.x"]);
+    Ok(())
+}
+
+#[test]
+fn native_callbacks_can_compute_explicit_values_inside_imported_functions()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "bias.x",
+        r#"
+struct Config { offset: u8 }
+fn add<K: u8>(x: u8) -> u8 { x + K }
+pub fn shifted<K: u8>(x: u8) -> u8 {
+    let xs = map([x], add<{zero!<u8>()}>);
+    map(xs, add<{Config { offset: K }.offset}>)[u32:0]
+}
+"#,
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let package = compile_with_options(
+        "use bias; #[allow(combinational_block)] block b(clk, x:u8)->u8 { bias::shifted<2>(x) }",
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(run_block(&package, 4)?, IrValue::make_ubits(8, 6)?);
     Ok(())
 }

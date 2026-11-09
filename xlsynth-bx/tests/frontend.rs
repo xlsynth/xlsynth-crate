@@ -10,6 +10,8 @@ mod directed_expr_eval;
 mod expr_eval;
 #[path = "frontend/function_parametrics.rs"]
 mod function_parametrics;
+#[path = "frontend/function_value_parametrics.rs"]
+mod function_value_parametrics;
 #[path = "frontend/imported_structs.rs"]
 mod imported_structs;
 #[path = "frontend/local_functions.rs"]

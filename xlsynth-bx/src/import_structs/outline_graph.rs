@@ -99,9 +99,9 @@ impl SourceModule {
 }
 
 /// Native logical and physical filenames can differ for Bazel runfiles.
-pub(crate) struct SourcePath {
+struct SourcePath {
     logical: PathBuf,
-    pub(crate) physical: PathBuf,
+    physical: PathBuf,
 }
 
 /// BX module paths are root-relative. Native DSLX additionally tries the
@@ -116,7 +116,7 @@ fn module_suffixes(subject: &str, extension: &str) -> (PathBuf, Option<PathBuf>)
 }
 
 /// Search roots and lazily discovered Bazel runfiles for module imports.
-pub(crate) struct ModuleSearch<'a> {
+struct ModuleSearch<'a> {
     stdlib: &'a Path,
     roots: &'a [&'a Path],
     runfiles: OnceCell<XlsRunfiles>,
@@ -155,7 +155,7 @@ fn implicit_source(
 }
 
 impl<'a> ModuleSearch<'a> {
-    pub(crate) fn new(stdlib: &'a Path, roots: &'a [&'a Path]) -> Self {
+    fn new(stdlib: &'a Path, roots: &'a [&'a Path]) -> Self {
         Self {
             stdlib,
             roots,
@@ -164,7 +164,7 @@ impl<'a> ModuleSearch<'a> {
     }
 
     /// Look up a dotted module subject using the native DSLX search order.
-    pub(crate) fn file(&self, subject: &str, extension: &str) -> Option<SourcePath> {
+    fn file(&self, subject: &str, extension: &str) -> Option<SourcePath> {
         let (full, stripped) = if extension == "x" && STDLIB_MODULES.contains(&subject) {
             (self.stdlib.join(format!("{subject}.x")), None)
         } else {
@@ -220,6 +220,7 @@ impl SourceLocator<'_> {
 
 /// Reachable outlines, their dependency order, and the resolved aliases of
 /// one immutable import graph.
+#[derive(Default)]
 pub(super) struct OutlineGraph {
     modules: BTreeMap<String, SourceModule>,
     order: Vec<String>,
@@ -229,39 +230,102 @@ pub(super) struct OutlineGraph {
     member_use_names: BTreeSet<String>,
 }
 
+/// A single source snapshot shared by BX syntax disambiguation and native
+/// typechecking. Each BX library can introduce additional DSLX roots.
+pub(crate) struct DslxSourceLoader<'a> {
+    locator: SourceLocator<'a>,
+    graph: OutlineGraph,
+}
+
+impl<'a> DslxSourceLoader<'a> {
+    pub(crate) fn new(stdlib: &'a Path, search_paths: &'a [&'a Path]) -> Self {
+        Self {
+            locator: SourceLocator {
+                search: ModuleSearch::new(stdlib, search_paths),
+                locations: BTreeMap::new(),
+                member_use_names: BTreeSet::new(),
+            },
+            graph: OutlineGraph::default(),
+        }
+    }
+
+    pub(crate) fn has_dslx_file(&mut self, subject: &str) -> bool {
+        self.locator.lookup(subject).is_some()
+    }
+
+    pub(crate) fn bx_file(&self, subject: &str) -> Option<PathBuf> {
+        self.locator.search.file(subject, "bx").map(|p| p.physical)
+    }
+
+    /// Identify angle lists belonging to public DSLX functions. Missing imports
+    /// receive their ordinary diagnostic when all uses are checked.
+    pub(crate) fn template_names(
+        &mut self,
+        path: &UsePath,
+        names: &mut BTreeSet<String>,
+    ) -> Result<(), String> {
+        let Ok(binding) = self.locator.use_binding(&path.components) else {
+            return Ok(());
+        };
+        let subject = binding.subject();
+        self.graph
+            .capture(vec![subject.to_owned()], &mut self.locator)?;
+        let templates = &self.graph.modules[subject].outline.function_parametrics;
+        match binding {
+            Binding::Module(_) => {
+                let head = path.binding().expect("validated use");
+                names.extend(templates.keys().map(|name| format!("{head}::{name}")));
+            }
+            Binding::Member(id) if templates.contains_key(&id.name) => {
+                names.insert(id.name);
+            }
+            Binding::Member(_) => { /* Non-template members keep their expression grammar. */ }
+        }
+        Ok(())
+    }
+
+    /// Capture remaining roots and resolve nominal identities after every
+    /// module has been outlined.
+    pub(super) fn finish(mut self, uses: &[UsePath]) -> Result<OutlineGraph, String> {
+        let roots = uses
+            .iter()
+            .map(|path| {
+                self.locator
+                    .use_binding(&path.components)
+                    .map(|binding| binding.subject().to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.graph.capture(roots, &mut self.locator)?;
+        self.graph.member_use_names = self.locator.member_use_names;
+        self.graph.index_declarations();
+        Ok(self.graph)
+    }
+}
+
 impl OutlineGraph {
+    #[cfg(test)]
     pub(super) fn load_uses(
         uses: &[UsePath],
         stdlib: &Path,
         search_paths: &[&Path],
     ) -> Result<Self, String> {
-        let mut locator = SourceLocator {
-            search: ModuleSearch::new(stdlib, search_paths),
-            locations: BTreeMap::new(),
-            member_use_names: BTreeSet::new(),
-        };
-        let roots = uses
-            .iter()
-            .map(|path| {
-                locator
-                    .use_binding(&path.components)
-                    .map(|binding| binding.subject().to_owned())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::capture(roots, &mut locator)
+        DslxSourceLoader::new(stdlib, search_paths).finish(uses)
     }
 
     /// Freeze each module once. Finishing a DFS node after its dependencies
     /// gives the installation order for the native import graph.
-    fn capture(roots: Vec<String>, locator: &mut SourceLocator<'_>) -> Result<Self, String> {
+    fn capture(
+        &mut self,
+        roots: Vec<String>,
+        locator: &mut SourceLocator<'_>,
+    ) -> Result<(), String> {
         enum Visit {
             Enter(String),
             Finish(String, BTreeSet<String>),
         }
         let mut pending: Vec<_> = roots.into_iter().rev().map(Visit::Enter).collect();
         let mut active = BTreeSet::new();
-        let mut modules = BTreeMap::<String, SourceModule>::new();
-        let mut order = Vec::new();
+        let modules = &mut self.modules;
         while let Some(visit) = pending.pop() {
             let subject = match visit {
                 Visit::Finish(subject, dependencies) => {
@@ -272,7 +336,7 @@ impl OutlineGraph {
                     }
                     modules.get_mut(&subject).expect("captured module").features = features;
                     active.remove(&subject);
-                    order.push(subject);
+                    self.order.push(subject);
                     continue;
                 }
                 Visit::Enter(subject) => subject,
@@ -362,16 +426,7 @@ impl OutlineGraph {
                 },
             );
         }
-        let mut result = Self {
-            modules,
-            order,
-            targets: BTreeMap::new(),
-            exports: BTreeMap::new(),
-            unresolved_aliases: BTreeSet::new(),
-            member_use_names: std::mem::take(&mut locator.member_use_names),
-        };
-        result.index_declarations();
-        Ok(result)
+        Ok(())
     }
 
     pub(super) fn sources(&self) -> impl Iterator<Item = &SourceModule> {
@@ -413,7 +468,7 @@ impl OutlineGraph {
     /// Resolve a type name in the module that wrote it. Native typechecking
     /// enforces access rules at each source reference (including v1 use
     /// syntax).
-    fn reference(&self, subject: &str, components: &[String]) -> Option<DeclId> {
+    pub(super) fn reference(&self, subject: &str, components: &[String]) -> Option<DeclId> {
         let (name, qualifiers) = components.split_last()?;
         let module = self.module_reference(subject, qualifiers)?;
         if module.outline.declarations.contains_key(name) {

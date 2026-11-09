@@ -174,6 +174,7 @@ pub(super) fn check(
     checked: &TypecheckedModule,
     sources: &EffectSources<'_>,
     mode: GuardMode,
+    explicit_values: bool,
 ) -> Result<(), String> {
     let has_concrete_structs = mode == GuardMode::ConcreteStructs;
     let info = checked.get_type_info();
@@ -272,7 +273,9 @@ pub(super) fn check(
     }
     if let Some(error) = errors.pop_first() {
         Err(error)
-    } else if has_concrete_structs && let Some(error) = named_sibling(&seen)? {
+    } else if (has_concrete_structs || explicit_values)
+        && let Some(error) = named_sibling(&seen)?
+    {
         Err(error)
     } else {
         check_type_symbols(&seen)
@@ -361,7 +364,13 @@ pub fn via<N:u32>(v:uN[N],x:Mode)->bool {
             &mut imports.ok_or("missing native import data")?,
         )?;
         assert_eq!(
-            check(&checked, &structs.effect_sources(), GuardMode::NumericEnums).unwrap_err(),
+            check(
+                &checked,
+                &structs.effect_sources(),
+                GuardMode::NumericEnums,
+                false
+            )
+            .unwrap_err(),
             "libxls v0.61 does not expose the indirect dispatch inside specialized DSLX function 'via'; BX cannot verify its native specialization symbols"
         );
         Ok(())

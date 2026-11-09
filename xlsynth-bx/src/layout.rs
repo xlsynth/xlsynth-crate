@@ -30,6 +30,11 @@ impl<'a> Layouts<'a> {
                     "unresolved DSLX struct type '{ty}'"
                 )));
             }
+            Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
+                return Err(BuilderError::InvalidOperation(format!(
+                    "cannot lower unresolved dimensions in type '{ty}'"
+                )));
+            }
             Type::Array { element, size } => ir::Type::new_array(self.lower(element)?, *size),
             Type::Tuple(items) => ir::Type::Tuple(
                 items

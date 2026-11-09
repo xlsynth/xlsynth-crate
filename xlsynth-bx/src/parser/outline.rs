@@ -22,8 +22,17 @@ pub struct DslxOutline {
     pub public_values: BTreeSet<String>,
     /// Directly declared public functions, including implicit unit results.
     pub public_functions: BTreeSet<String>,
+    /// Ordered formal annotations for public functions with explicit bindings.
+    pub function_parametrics: BTreeMap<String, Vec<OutlineFunctionParametric>>,
     /// Explicit function return annotations in their declaration scope.
     pub functions: BTreeMap<String, OutlineType>,
+}
+
+/// A function parametric and its written annotation in the declaring module.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutlineFunctionParametric {
+    pub name: String,
+    pub ty: OutlineType,
 }
 
 /// A module-level DSLX type declaration and its visibility.
@@ -151,6 +160,62 @@ pub(crate) fn dslx_function_tokens(
     Ok(functions)
 }
 
+/// Copy a public function's binding and parameter declarations for a type
+/// witness that returns one operand under the original inference constraints.
+pub(crate) fn argument_identity(
+    source: &str,
+    function: &str,
+    index: usize,
+    witness_name: &str,
+) -> Result<(String, OutlineType), String> {
+    let functions = dslx_function_tokens(source)?;
+    let declaration = functions
+        .get(function)
+        .ok_or("missing DSLX function declaration")?;
+    let start = declaration
+        .bindings
+        .first()
+        .or(declaration.signature.first())
+        .ok_or("missing DSLX function signature")?
+        .start;
+    let end = declaration
+        .signature
+        .last()
+        .ok_or("missing DSLX function parameters")?;
+    let mut p = outline_parser(&source[start..end.start + end.text.len()])?;
+    let bindings = p.outline_bindings(None)?;
+    p.expect("(")?;
+    let params = p.list(")", |p| {
+        let name = p.tokens[p.pos];
+        p.outline_identifier()?;
+        p.expect(":")?;
+        Ok((name, p.outline_type(&bindings)?))
+    })?;
+    let (name, annotation) = params
+        .get(index)
+        .ok_or("missing native argument annotation")?;
+    let mut signature = p.outline_syntax(0);
+    // A discarded parameter can still constrain another operand. Give it a
+    // fresh binding when this witness needs to return it.
+    let mut value_name = format!("{witness_name}_value");
+    let name = if name.text == "_" {
+        while p.tokens.iter().any(|t| t.text == value_name) {
+            value_name.push('_');
+        }
+        signature.replace_range(name.start..name.start + 1, &value_name);
+        &value_name
+    } else {
+        name.text
+    };
+    Ok((
+        format!(
+            "pub fn {witness_name}{signature} -> {} {{ {name} }}",
+            annotation.syntax
+        ),
+        annotation.clone(),
+    ))
+}
+
 fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
     Ok(Parser {
         source,
@@ -162,7 +227,8 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         value_context: ValueContext::Block,
         expression_grammar: ExpressionGrammar::Block,
         block_type_params: BTreeSet::new(),
-        callback_templates: Default::default(),
+        dependent_types: false,
+        callable_templates: Default::default(),
         hidden_templates: Vec::new(),
         block_map_shadowed: false,
         forward_map_import: false,
@@ -324,7 +390,10 @@ fn parse_outline_with_functions<'s>(
                 let name = parser.outline_identifier()?;
                 let name_token = parser.tokens[parser.pos - 1];
                 let bindings_start = parser.pos;
-                let bindings = parser.outline_bindings()?;
+                let mut function_parametrics = Vec::new();
+                let bindings = parser.outline_bindings(
+                    (public && keyword == "fn").then_some(&mut function_parametrics),
+                )?;
                 let kind = match keyword {
                     "type" => {
                         parser.expect("=")?;
@@ -367,6 +436,11 @@ fn parse_outline_with_functions<'s>(
                         if public {
                             module.public_values.insert(name.clone());
                             module.public_functions.insert(name.clone());
+                            if !function_parametrics.is_empty() {
+                                module
+                                    .function_parametrics
+                                    .insert(name.clone(), function_parametrics);
+                            }
                         }
                         let signature_start = parser.pos;
                         parser.outline_group("(")?;
@@ -500,23 +574,62 @@ impl Parser<'_> {
     }
 
     /// Parametric bindings shadow module-level names in annotations.
-    fn outline_bindings(&mut self) -> Result<BTreeSet<String>, String> {
+    fn outline_bindings(
+        &mut self,
+        mut formals: Option<&mut Vec<OutlineFunctionParametric>>,
+    ) -> Result<BTreeSet<String>, String> {
         let mut names = BTreeSet::new();
         if self.eat("<") {
             self.list(">", |p| {
-                names.insert(p.outline_identifier()?);
+                let name = p.outline_identifier()?;
                 p.expect(":")?;
+                if let Some(formals) = &mut formals {
+                    let start = p.pos;
+                    let ty = match p.outline_type(&names) {
+                        Ok(ty) if matches!(p.peek(0), "=" | "," | ">") => ty,
+                        _ => {
+                            // Preserve annotations outside the nominal-value
+                            // grammar,
+                            // including function types. DSLX checks them when
+                            // used.
+                            p.pos = start;
+                            while !matches!(p.peek(0), "=" | "," | ">") {
+                                p.skip_binding_token()?;
+                            }
+                            if p.pos == start {
+                                return Err(p.error("expected a parametric binding type"));
+                            }
+                            OutlineType {
+                                syntax: p.outline_syntax(start),
+                                shape: OutlineShape::Other,
+                            }
+                        }
+                    };
+                    formals.push(OutlineFunctionParametric {
+                        name: name.clone(),
+                        ty,
+                    });
+                }
+                names.insert(name);
                 while !matches!(p.peek(0), "," | ">") {
-                    match p.peek(0) {
-                        "(" | "[" | "{" | "<" => p.outline_group(p.peek(0))?,
-                        "" => return Err(p.error("expected end of parametric bindings")),
-                        _ => p.pos += 1,
-                    }
+                    p.skip_binding_token()?;
                 }
                 Ok(())
             })?;
         }
         Ok(names)
+    }
+
+    /// A grouped type or default may contain its own commas and comparisons.
+    fn skip_binding_token(&mut self) -> Result<(), String> {
+        match self.peek(0) {
+            "(" | "[" | "{" | "<" => self.outline_group(self.peek(0)),
+            "" => Err(self.error("expected end of parametric bindings")),
+            _ => {
+                self.pos += 1;
+                Ok(())
+            }
+        }
     }
 
     /// Read a type using DSLX's tuple, reference, parametric and dimension
@@ -757,6 +870,13 @@ const X = if true { u8:0 } else { u8:1 };
             ]
         );
         assert_eq!(parsed.declarations["Choice"].kind, OutlineKind::Opaque);
+        assert_eq!(
+            parsed.function_parametrics["build"]
+                .iter()
+                .map(|p| (p.name.as_str(), p.ty.syntax.as_str()))
+                .collect::<Vec<_>>(),
+            [("T", "type"), ("N", "u32")]
+        );
         let OutlineShape::Tuple(result) = &parsed.functions["build"].shape else {
             panic!("expected tuple");
         };

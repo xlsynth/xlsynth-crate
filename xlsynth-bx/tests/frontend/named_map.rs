@@ -51,6 +51,76 @@ block sample(clk, rst, xs: s8[3]) -> (s16, bool)[3] {
 }
 
 #[test]
+fn named_map_infers_signedness_and_width_for_each_element_type() -> Result<(), Box<dyn Error>> {
+    let helper = r#"
+fn widen<S: bool, N: u32, W: u32 = {N + 1}>(x: xN[S][N]) -> xN[S][W] {
+    x as xN[S][W]
+}
+"#;
+    let params = "a: u8[2], b: s8[2]";
+    let result = "-> (u9[2], s9[2]) { (map(a, widen), map(b, widen)) }";
+    let bx = format!("{helper} block sample(clk, {params}) {result}");
+    let native = format!("{helper} fn sample({params}) {result}");
+    let evaluator = BlockEvaluator::lower(&check_module(&parse_module(&bx)?)?, &bx)?;
+    let reference = compile_dslx_module(&native, &[])?;
+    let lanes = IrValue::parse_typed("[bits[8]:128, bits[8]:255]")?;
+    assert_eq!(
+        evaluator.compare_ir(&reference, &[lanes.clone(), lanes])?,
+        IrValue::parse_typed("([bits[9]:128,bits[9]:255],[bits[9]:384,bits[9]:511])")?
+    );
+    Ok(())
+}
+
+#[test]
+fn named_map_binds_explicit_values_before_inferring_the_element_width() -> Result<(), Box<dyn Error>>
+{
+    let helpers = r#"
+fn offset<B: u8, N: u32>(x: uN[N]) -> uN[N] { x + (B as uN[N]) }
+fn shifted(xs: u4[2]) -> u4[2] {
+    let bias = u8:1 + u8:1;
+    map(xs, offset<bias>)
+}
+"#;
+    let result = "-> (u4[2], u8[2]) { (shifted(xs), map(u8:4..u8:6, offset<3>)) }";
+    let native = format!("{helpers} fn sample(xs: u4[2]) {result}");
+    let reference = compile_dslx_module(&native, &[])?;
+    let expected = IrValue::parse_typed("([bits[4]:3,bits[4]:1],[bits[8]:7,bits[8]:8])")?;
+    // The pinned DSLX IR converter crashes on arithmetic in a map callback's
+    // explicit argument. Its equivalent local constant provides the oracle.
+    let inline = helpers
+        .replace("let bias = u8:1 + u8:1;", "let bias = u8:1;")
+        .replace("offset<bias>", "offset<{bias + u8:1}>");
+    for helpers in [helpers, inline.as_str()] {
+        let bx = format!("{helpers} block sample(clk, xs: u4[2]) {result}");
+        let evaluator = BlockEvaluator::lower(&check_module(&parse_module(&bx)?)?, &bx)?;
+        assert_eq!(
+            evaluator.compare_ir(
+                &reference,
+                &[IrValue::parse_typed("[bits[4]:1, bits[4]:15]")?]
+            )?,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_unspecialized_value_template_cannot_supply_an_explicit_callable_argument()
+-> Result<(), Box<dyn Error>> {
+    let bx = r#"
+fn offset<K: u8 = {1}>(x: u8) -> u8 { x + K }
+fn apply<F: fn(u8) -> u8>(x: u8) -> u8 { F(x) }
+block sample(clk, x: u8) -> u8 { apply<offset>(x) }
+"#;
+    let error = check_module(&parse_module(bx)?).unwrap_err();
+    assert!(
+        error.contains("must name a concrete BX function"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn function_and_block_formals_map_to_the_selected_callback() -> Result<(), Box<dyn Error>> {
     let bx = r#"
 fn add1(x:u8) -> u16 { (x as u16) + u16:1 }

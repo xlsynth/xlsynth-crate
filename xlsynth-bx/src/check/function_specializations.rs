@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Intern and schedule local functions specialized on statically named callees.
+//! Intern and schedule local functions specialized on named callees and values.
 
 use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 use super::callables::CallbackBinding;
 use super::{
     BodyChecker, BodyKind, CheckedFunction, ConstantBudgets, Declarations, Function,
-    ImportResolver, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, StructTable, dependency_order,
+    FunctionInterface, ImportResolver, MAX_ELABORATION_DEPTH, MAX_SPECIALIZATIONS, MAX_TYPE_SIZE,
+    StructTable, dependency_order, literal_copy_work, source_type_nodes,
 };
 use crate::ast::{ConstDef, EnumDef, ExternFn, Module};
+use crate::typed::BoundParametricValue;
+use crate::typed::{AvailableFunctions, constant_work};
 
 /// An actual callback resolved in the caller's scope. An import ID includes
 /// its concrete DSLX specialization as well as its declaring module.
@@ -25,24 +29,43 @@ pub(super) enum CallbackTarget<'m> {
 
 /// One emitted local function and its callbacks in formal declaration order.
 pub(super) struct FunctionSpecialization<'m> {
-    pub(super) template: &'m Function,
     pub(super) name: String,
     pub(super) targets: Vec<CallbackTarget<'m>>,
+    pub(super) value_signature: Option<Rc<BoundValueSignature>>,
+}
+
+/// Values and signature resolved in the template's definition scope. Callers
+/// sharing supplied values also share the evaluation of dependent defaults.
+pub(super) struct BoundValueSignature {
+    pub(super) values: Vec<BoundParametricValue>,
+    pub(super) interface: FunctionInterface,
+}
+
+/// Nominal callback identities and typed constexpr values in formal order.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct FunctionKey<'m> {
+    template: &'m str,
+    targets: Vec<CallbackTarget<'m>>,
+    values: Vec<BoundParametricValue>,
 }
 
 /// Keep concrete call edges until all block- and function-initiated
 /// specializations have been discovered.
 pub(super) struct FunctionBody {
-    function: CheckedFunction,
+    function: Rc<CheckedFunction>,
     callees: BTreeSet<String>,
 }
 
 /// Share a single specialized function and elaboration budget across all
 /// call sites in this module.
 pub(super) struct FunctionSpecializations<'m> {
-    cache: HashMap<(&'m str, Vec<CallbackTarget<'m>>), String>,
+    cache: HashMap<FunctionKey<'m>, String>,
+    value_signatures:
+        HashMap<&'m str, HashMap<Vec<Option<BoundParametricValue>>, Rc<BoundValueSignature>>>,
     validated: HashMap<CallbackBinding<'m>, CallbackTarget<'m>>,
-    pending: VecDeque<FunctionSpecialization<'m>>,
+    active: Vec<&'m str>,
+    generated: Vec<FunctionBody>,
+    pub(super) available: AvailableFunctions,
     sources: BTreeMap<String, &'m str>,
     reserved: BTreeSet<String>,
     next_id: usize,
@@ -55,8 +78,11 @@ impl<'m> FunctionSpecializations<'m> {
     pub(super) fn new(reserved: BTreeSet<String>) -> Self {
         Self {
             cache: HashMap::new(),
+            value_signatures: HashMap::new(),
             validated: HashMap::new(),
-            pending: VecDeque::new(),
+            active: Vec::new(),
+            generated: Vec::new(),
+            available: Default::default(),
             sources: BTreeMap::new(),
             reserved,
             next_id: 0,
@@ -86,45 +112,107 @@ impl<'m> FunctionSpecializations<'m> {
         self.expansion_work = self.expansion_work.saturating_add(count);
         if self.expansion_work > MAX_TYPE_SIZE {
             return Err(format!(
-                "callback bindings exceed the function specialization expansion limit of {MAX_TYPE_SIZE}"
+                "parametric bindings exceed the function specialization expansion limit of {MAX_TYPE_SIZE}"
             ));
         }
         Ok(())
     }
 
-    /// Queue the first use of a concrete template/callback tuple. Generated
-    /// function names and generated block names use disjoint suffixes.
-    fn intern(
+    /// Resolve each partial value environment once. The definition's defaults
+    /// and dimensions can themselves instantiate previously declared templates.
+    pub(super) fn cached_value_signature(
         &mut self,
-        template: &'m Function,
-        targets: Vec<CallbackTarget<'m>>,
-    ) -> Result<String, String> {
-        let key = (template.name.as_str(), targets);
-        if let Some(name) = self.cache.get(&key) {
-            return Ok(name.clone());
+        f: &'m Function,
+        provided: &[Option<BoundParametricValue>],
+    ) -> Result<Option<Rc<BoundValueSignature>>, String> {
+        let work = provided.iter().flatten().fold(provided.len(), |sum, v| {
+            sum.saturating_add(constant_work(&v.value))
+        });
+        self.charge_bindings(work)?;
+        Ok(self
+            .value_signatures
+            .get(f.name.as_str())
+            .and_then(|signatures| signatures.get(provided))
+            .cloned())
+    }
+
+    /// Retain a resolved signature after its definition and all nested defaults
+    /// have been checked. Charge the types and concrete values held by the
+    /// cache.
+    pub(super) fn cache_value_signature(
+        &mut self,
+        f: &'m Function,
+        provided: Vec<Option<BoundParametricValue>>,
+        bound: BoundValueSignature,
+    ) -> Result<Rc<BoundValueSignature>, String> {
+        let interface = &bound.interface;
+        let mut work = source_type_nodes(&interface.result);
+        for param in &interface.params {
+            work = work.saturating_add(source_type_nodes(&param.ty));
         }
-        const MAX_SPECIALIZATIONS: usize = 4096;
+        for callback in &interface.callback_params {
+            work = work.saturating_add(callback.binding_work);
+        }
+        for value in &bound.values {
+            work = work.saturating_add(1 + literal_copy_work(&value.value));
+        }
+        self.charge_bindings(work)?;
+        let bound = Rc::new(bound);
+        self.value_signatures
+            .entry(&f.name)
+            .or_default()
+            .insert(provided, Rc::clone(&bound));
+        Ok(bound)
+    }
+
+    /// During definition checking, defaults and dimensions consume the same
+    /// module-wide budgets as the body that uses their concrete values.
+    pub(super) fn checking_definition(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    pub(super) fn enter(&mut self, name: &'m str) -> Result<(), String> {
+        if self.active.contains(&name) {
+            return Err(format!("recursive function dependency involving '{name}'"));
+        }
+        if self.active.len() >= MAX_ELABORATION_DEPTH {
+            return Err(format!(
+                "function dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{name}'"
+            ));
+        }
+        self.active.push(name);
+        Ok(())
+    }
+
+    pub(super) fn leave(&mut self) {
+        self.active.pop();
+    }
+
+    /// Allocate a unique symbol after accounting for the specialization key.
+    fn allocate(&mut self, key: &FunctionKey<'m>) -> Result<String, String> {
         if self.cache.len() >= MAX_SPECIALIZATIONS {
             return Err(format!(
                 "function specialization limit of {MAX_SPECIALIZATIONS} exceeded"
             ));
         }
-        self.charge_bindings(key.1.len())?;
         let name = loop {
-            let candidate = format!("{}__fn{}", template.name, self.next_id);
+            let candidate = format!("{}__fn{}", key.template, self.next_id);
             self.next_id += 1;
             if !self.reserved.contains(&candidate) {
                 break candidate;
             }
         };
-        self.pending.push_back(FunctionSpecialization {
-            template,
-            name: name.clone(),
-            targets: key.1.clone(),
-        });
-        self.sources.insert(name.clone(), key.0);
-        self.cache.insert(key, name.clone());
+        self.sources.insert(name.clone(), key.template);
+        self.cache.insert(key.clone(), name.clone());
         Ok(name)
+    }
+
+    fn record_body(&self, function: CheckedFunction, callees: BTreeSet<String>) -> FunctionBody {
+        let function = Rc::new(function);
+        self.available
+            .borrow_mut()
+            .insert(function.name.clone(), Rc::clone(&function));
+        FunctionBody { function, callees }
     }
 
     /// Check functions and evaluate constants together in declaration order.
@@ -145,14 +233,7 @@ impl<'m> FunctionSpecializations<'m> {
             Constant(&'m ConstDef),
             Function(&'m Function),
         }
-        let position = |name: &str| {
-            decls
-                .positions
-                .get(name)
-                .copied()
-                .unwrap_or(usize::MAX)
-                .saturating_add(1)
-        };
+        let position = |name: &str| decls.positions.get(name).copied().unwrap_or(usize::MAX);
         let mut definitions = module
             .enums
             .iter()
@@ -186,10 +267,8 @@ impl<'m> FunctionSpecializations<'m> {
         definitions.sort_by_key(|(position, _)| *position);
         structs.update_imports(resolver)?;
         let mut bodies: Vec<FunctionBody> = Vec::with_capacity(module.functions.len());
-        let mut indices = BTreeMap::<&str, usize>::new();
         let mut depths = BTreeMap::new();
         for (_, definition) in definitions {
-            let earlier = |name: &str| indices.get(name).map(|&i| &bodies[i].function);
             let function = match definition {
                 Definition::Struct(index) => {
                     structs.definitions[index].fields =
@@ -219,7 +298,7 @@ impl<'m> FunctionSpecializations<'m> {
                         BodyChecker::new(decls, resolver, structs, BodyKind::Function);
                     checker.function_registry = Some(self);
                     let value = checker
-                        .check_constant(c, &earlier)
+                        .check_constant(c)
                         .map_err(|e| format!("const '{}': {e}", c.name))?;
                     decls.constants.insert(&c.name, value);
                     continue;
@@ -229,13 +308,22 @@ impl<'m> FunctionSpecializations<'m> {
                         BodyChecker::new(decls, resolver, structs, BodyKind::Function);
                     checker.function_registry = Some(self);
                     let checked = checker
-                        .check_enum(e, &earlier)
+                        .check_enum(e)
                         .map_err(|err| format!("enum '{}': {err}", e.name))?;
                     structs.enums.insert(e.name.clone(), checked);
                     continue;
                 }
             };
-            let name = function.name.as_str();
+            if !function.value_parametrics.is_empty() {
+                // Dimensions and the function body are checked with the actual
+                // bindings of each instantiation, as in DSLX.
+                let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                checker
+                    .check_value_template_names(function)
+                    .map_err(|e| format!("fn '{}': {e}", function.name))?;
+                depths.insert(function.name.as_str(), 1);
+                continue;
+            }
             let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
             checker.function_registry = Some(self);
             let body = checker
@@ -263,11 +351,7 @@ impl<'m> FunctionSpecializations<'m> {
             }
             depths.insert(function.name.as_str(), depth);
             if function.callback_params.is_empty() {
-                indices.insert(name, bodies.len());
-                bodies.push(FunctionBody {
-                    function: body,
-                    callees,
-                });
+                bodies.push(self.record_body(body, callees));
             }
         }
         Ok(bodies)
@@ -278,22 +362,9 @@ impl<'m> FunctionSpecializations<'m> {
     pub(super) fn finish(
         &mut self,
         mut bodies: Vec<FunctionBody>,
-        decls: &Declarations<'m>,
-        resolver: &mut ImportResolver,
-        structs: &mut StructTable,
     ) -> Result<Vec<CheckedFunction>, String> {
-        while let Some(spec) = self.pending.pop_front() {
-            let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
-            checker.function_registry = Some(self);
-            checker.function_spec = Some(&spec);
-            let function = checker
-                .check_function(spec.template)
-                .map_err(|e| format!("fn '{}' ({}): {e}", spec.template.name, spec.name))?;
-            bodies.push(FunctionBody {
-                function,
-                callees: checker.local_callees,
-            });
-        }
+        bodies.append(&mut self.generated);
+        self.available.borrow_mut().clear();
         let graph = bodies
             .iter()
             .map(|body| {
@@ -304,7 +375,10 @@ impl<'m> FunctionSpecializations<'m> {
             })
             .collect::<Vec<_>>();
         let order = dependency_order("function", &graph)?;
-        let mut functions: Vec<_> = bodies.into_iter().map(|b| Some(b.function)).collect();
+        let mut functions: Vec<_> = bodies
+            .into_iter()
+            .map(|b| Some(Rc::unwrap_or_clone(b.function)))
+            .collect();
         Ok(order
             .into_iter()
             .map(|i| functions[i].take().expect("unique function order"))
@@ -324,14 +398,68 @@ impl<'m> BodyChecker<'_, 'm> {
         &mut self,
         template: &'m Function,
         targets: Vec<CallbackTarget<'m>>,
+        value_signature: Option<Rc<BoundValueSignature>>,
     ) -> Result<String, String> {
-        let name = if self.source_template.is_some() && self.function_spec.is_none() {
+        // Abstract callback bodies normally validate calls without emitting
+        // them. A constexpr actual still needs its concrete callee to run.
+        let name = if self.source_template.is_some()
+            && self.function_spec.is_none()
+            && self.constant_functions.is_none()
+        {
             template.name.clone()
         } else {
-            self.function_registry
-                .as_mut()
-                .expect("module function registry")
-                .intern(template, targets)?
+            let registry = self
+                .function_registry
+                .as_deref_mut()
+                .expect("module function registry");
+            if registry.active.contains(&template.name.as_str()) {
+                return Err(format!(
+                    "recursive function dependency involving '{}'",
+                    template.name
+                ));
+            }
+            let values = value_signature
+                .as_ref()
+                .map_or(&[][..], |s| s.values.as_slice());
+            let work = values.iter().fold(targets.len() + values.len(), |sum, v| {
+                sum.saturating_add(constant_work(&v.value))
+            });
+            registry.charge_bindings(work)?;
+            let key = FunctionKey {
+                template: &template.name,
+                targets,
+                values: values.to_vec(),
+            };
+            if let Some(name) = registry.cache.get(&key) {
+                name.clone()
+            } else {
+                let name = registry.allocate(&key)?;
+                registry.enter(&template.name)?;
+                let spec = FunctionSpecialization {
+                    name: name.clone(),
+                    targets: key.targets,
+                    value_signature,
+                };
+                let body = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
+                    let mut checker = BodyChecker::new(
+                        self.decls,
+                        self.resolver,
+                        self.structs,
+                        BodyKind::Function,
+                    );
+                    checker.function_registry = Some(registry);
+                    checker.function_spec = Some(&spec);
+                    checker
+                        .check_function(template)
+                        .map(|body| (body, checker.local_callees))
+                });
+                registry.leave();
+                let (body, callees) =
+                    body.map_err(|e| format!("fn '{}' ({name}): {e}", template.name))?;
+                let body = registry.record_body(body, callees);
+                registry.generated.push(body);
+                name
+            }
         };
         if self.source_kind == BodyKind::Function {
             self.local_callees.insert(name.clone());
@@ -342,7 +470,10 @@ impl<'m> BodyChecker<'_, 'm> {
 
 #[cfg(test)]
 mod tests {
+    use crate::ast::{Expr, Type};
     use crate::{check_module, parse_module};
+    use std::fmt::Write;
+    use xlsynth_pir::IrValue;
 
     /// S16 expands to 262,143 IR type nodes from one nominal BX reference.
     fn wide_struct_declarations() -> String {
@@ -371,6 +502,54 @@ block sample(clk, x: u8) -> u8 {{ let result = stage(x); result }}
         );
         let checked = check_module(&parse_module(&source)?)?;
         assert_eq!(checked.functions().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn calls_in_dependent_defaults_share_resolved_signatures() -> Result<(), String> {
+        let mut source = String::from("fn f0<N:u32={u32:1}>()->u32{N}\n");
+        for level in 1..31 {
+            writeln!(
+                source,
+                "fn f{level}<N:u32={{f{prev}()+f{prev}()}}>()->u32{{N}}",
+                prev = level - 1
+            )
+            .unwrap();
+        }
+        source.push_str("const ANSWER = f30();");
+        let module = check_module(&parse_module(&source)?)?;
+        assert_eq!(module.functions().len(), 31);
+        assert_eq!(
+            module.constants()[0].value,
+            IrValue::make_ubits(32, 1 << 30).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn programmatic_symbolic_signatures_are_bounded_before_copying() -> Result<(), String> {
+        let mut module = parse_module("fn probe<N:u32>(x:uN[N])->u32{N}")?;
+        let input = &mut module.functions[0].params[0].ty;
+        for _ in 0..16_384 {
+            let inner = std::mem::replace(input, Type::Bool);
+            *input = Type::ParametricBits {
+                signed: Box::new(Expr::Bool(false)),
+                width: Box::new(Expr::Zero(inner)),
+            };
+        }
+        let checked = check_module(&module);
+        // Dismantle the synthetic input iteratively on the test thread too.
+        let input = &mut module.functions[0].params[0].ty;
+        while let Type::ParametricBits { width, .. } = std::mem::replace(input, Type::Bool) {
+            let Expr::Zero(inner) = *width else {
+                break;
+            };
+            *input = inner;
+        }
+        assert_eq!(
+            checked.unwrap_err(),
+            "fn 'probe': value-parametric template nesting exceeds 64 levels"
+        );
         Ok(())
     }
 

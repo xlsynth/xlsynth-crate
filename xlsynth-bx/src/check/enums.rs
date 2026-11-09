@@ -7,10 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::IrBits;
 
-use super::{
-    BodyChecker, CheckedEnum, CheckedFunction, ConstantFunctions, StructTable, bits,
-    dependency_order, type_deps,
-};
+use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_deps};
 use crate::ast::{EnumDef, Module, Type};
 
 impl StructTable {
@@ -104,14 +101,10 @@ impl StructTable {
 impl<'a> BodyChecker<'a, '_> {
     /// Infer a common underlying bit type and evaluate every discriminant in
     /// the scope immediately preceding the declaration.
-    pub(super) fn check_enum(
-        &mut self,
-        def: &EnumDef,
-        functions: &'a dyn Fn(&str) -> Option<&'a CheckedFunction>,
-    ) -> Result<CheckedEnum, String> {
+    pub(super) fn check_enum(&mut self, def: &EnumDef) -> Result<CheckedEnum, String> {
         self.zero_binding = self.decls.zero_binding(&def.name);
         self.function_position = self.decls.positions.get(def.name.as_str()).copied();
-        self.constant_functions = Some(ConstantFunctions::new(functions));
+        self.enable_constant_functions();
         let underlying = def
             .underlying
             .as_ref()

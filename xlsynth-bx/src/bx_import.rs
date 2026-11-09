@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::ImportOptions;
-use crate::ast::{Module, UsePath};
+use crate::ast::{FunctionParametricRef, Module, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
+use crate::import_structs::DslxSourceLoader;
 use crate::parser;
 use lookup::{BxUse, UseLookup};
 
@@ -41,8 +42,16 @@ pub(crate) const BUILTIN_UPDATE: &str = "$builtin$update";
 #[derive(Clone)]
 struct Export {
     name: String,
-    callback_template: bool,
+    parametrics: Vec<ParametricKind>,
     is_enum: bool,
+}
+
+/// Callable arguments have the visibility of calls. Value arguments have
+/// the visibility of expressions at the same site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ParametricKind {
+    Value,
+    Callback,
 }
 
 impl Export {
@@ -75,6 +84,7 @@ struct Names {
     subject: Option<String>,
     definitions: BTreeSet<String>,
     enums: BTreeSet<String>,
+    templates: BTreeMap<String, Vec<ParametricKind>>,
     uses: BTreeMap<String, Binding>,
     positions: BTreeMap<String, usize>,
 }
@@ -114,10 +124,33 @@ impl Names {
                 ));
             }
         }
+        let mut templates = BTreeMap::new();
+        for f in &module.functions {
+            if !f.value_parametrics.is_empty() || !f.callback_params.is_empty() {
+                templates.insert(
+                    f.name.clone(),
+                    f.parametric_bindings()
+                        .map(|p| match p {
+                            FunctionParametricRef::Value(_) => ParametricKind::Value,
+                            FunctionParametricRef::Callback(_) => ParametricKind::Callback,
+                        })
+                        .collect(),
+                );
+            }
+        }
+        for b in &module.blocks {
+            if !b.callback_params.is_empty() {
+                templates.insert(
+                    b.name.clone(),
+                    vec![ParametricKind::Callback; b.callback_params.len()],
+                );
+            }
+        }
         Ok(Self {
             subject: subject.map(str::to_owned),
             definitions,
             enums: module.enums.iter().map(|d| d.name.clone()).collect(),
+            templates,
             uses,
             positions: module
                 .declaration_order
@@ -130,6 +163,20 @@ impl Names {
 
     fn declared(&self, name: &str) -> String {
         qualified(self.subject.as_deref(), name)
+    }
+
+    /// Look up the formals under the spelling used in this source file.
+    fn parametrics(&self, name: &str) -> &[ParametricKind] {
+        if let Some((head, member)) = name.split_once("::")
+            && let Some(Binding::Module(library)) = self.uses.get(head)
+            && let Some(export) = library.exports.get(member)
+        {
+            &export.parametrics
+        } else if let Some(Binding::Member(export)) = self.uses.get(name) {
+            &export.parametrics
+        } else {
+            self.templates.get(name).map(Vec::as_slice).unwrap_or(&[])
+        }
     }
 
     /// Resolve one free reference before it can see another file's bindings.
@@ -221,12 +268,19 @@ pub(crate) struct LinkedSources {
     pub zero_uses: BTreeMap<String, String>,
 }
 
+/// BX declarations and the DSLX source snapshot used to parse their calls.
+pub(crate) struct SourceImports<'a> {
+    pub libraries: Option<LinkedSources>,
+    pub native: DslxSourceLoader<'a>,
+}
+
 /// An imported file awaiting resolution of its uses before its body is parsed.
 struct LibrarySource {
     target: BxUse,
     canonical_path: PathBuf,
     binding: String,
     text: String,
+    uses: Vec<UsePath>,
 }
 
 /// The remaining uses and completed bindings of one active module. The root
@@ -389,6 +443,7 @@ impl<'a> Graph<'a> {
                     canonical_path,
                     binding: leaf,
                     text,
+                    uses: uses.clone(),
                 }),
                 uses,
             ));
@@ -402,33 +457,23 @@ impl<'a> Graph<'a> {
         bindings: BTreeMap<String, Binding>,
         depth: usize,
     ) -> Result<Library, String> {
-        let module = parser::parse_with_templates(&source.text, &template_names(&bindings))?;
+        let module = self.parse_with_bindings(&source.text, &source.uses, &bindings)?;
         let names = Names::new(&module, Some(&source.target.subject), bindings)?;
         let exports = module
             .structs
             .iter()
-            .map(|d| (&d.name, d.public, false))
-            .chain(module.enums.iter().map(|d| (&d.name, d.public, false)))
-            .chain(module.constants.iter().map(|d| (&d.name, d.public, false)))
-            .chain(
-                module
-                    .functions
-                    .iter()
-                    .map(|d| (&d.name, d.public, !d.callback_params.is_empty())),
-            )
-            .chain(
-                module
-                    .blocks
-                    .iter()
-                    .map(|d| (&d.name, d.public, !d.callback_params.is_empty())),
-            )
-            .filter(|(_, public, _)| *public)
-            .map(|(name, _, callback_template)| {
+            .map(|d| (&d.name, d.public))
+            .chain(module.enums.iter().map(|d| (&d.name, d.public)))
+            .chain(module.constants.iter().map(|d| (&d.name, d.public)))
+            .chain(module.functions.iter().map(|d| (&d.name, d.public)))
+            .chain(module.blocks.iter().map(|d| (&d.name, d.public)))
+            .filter(|(_, public)| *public)
+            .map(|(name, _)| {
                 (
                     name.clone(),
                     Export {
                         name: names.declared(name),
-                        callback_template,
+                        parametrics: names.parametrics(name).to_vec(),
                         is_enum: names.enums.contains(name),
                     },
                 )
@@ -505,48 +550,60 @@ impl<'a> Graph<'a> {
         linked.blocks.append(&mut m.blocks);
         Ok(())
     }
-}
 
-/// Imported template names disambiguate a comma inside angle brackets from a
-/// comma separating two comparisons.
-fn template_names(bindings: &BTreeMap<String, Binding>) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for (head, binding) in bindings {
-        match binding {
-            Binding::Member(e) if e.callback_template => {
-                names.insert(head.clone());
+    /// Imported template names disambiguate a comma inside angle brackets
+    /// from a comma separating two comparisons.
+    fn parse_with_bindings(
+        &mut self,
+        source: &str,
+        uses: &[UsePath],
+        bindings: &BTreeMap<String, Binding>,
+    ) -> Result<Module, String> {
+        let mut names = BTreeSet::new();
+        if source.contains('<') {
+            for path in uses {
+                let head = path.binding().expect("validated use");
+                match &bindings[head] {
+                    Binding::Member(e) if !e.parametrics.is_empty() => {
+                        names.insert(head.to_owned());
+                    }
+                    Binding::Module(lib) => {
+                        names.extend(
+                            lib.exports
+                                .iter()
+                                .filter(|(_, e)| !e.parametrics.is_empty())
+                                .map(|(n, _)| format!("{head}::{n}")),
+                        );
+                    }
+                    Binding::Dslx(_) => self.lookup.native.template_names(path, &mut names)?,
+                    Binding::Member(_) => { /* Other members retain expression syntax. */ }
+                }
             }
-            Binding::Module(lib) => {
-                names.extend(
-                    lib.exports
-                        .iter()
-                        .filter(|(_, e)| e.callback_template)
-                        .map(|(n, _)| format!("{head}::{n}")),
-                );
-            }
-            _ => { /* A non-template binding does not disambiguate an angle list. */ }
+        }
+        parser::parse_with_templates(source, &names)
+    }
+
+    fn finish(self) -> SourceImports<'a> {
+        SourceImports {
+            libraries: (!self.loaded.is_empty()).then_some(self.linked),
+            native: self.lookup.native,
         }
     }
-    names
 }
 
 /// Resolve a parsed module's BX libraries, leaving pure DSLX import graphs on
 /// the existing checker path.
-pub(crate) fn link(
+pub(crate) fn link<'a>(
     module: &Module,
-    options: &ImportOptions<'_>,
-) -> Result<Option<LinkedSources>, String> {
-    if module.uses.is_empty() {
-        return Ok(None);
-    }
+    options: &'a ImportOptions<'a>,
+) -> Result<SourceImports<'a>, String> {
     let mut graph = Graph::new(options);
     let bindings = graph.bindings(module.uses.clone())?;
-    if graph.loaded.is_empty() {
-        return Ok(None);
+    if !graph.loaded.is_empty() {
+        let names = Names::new(module, None, bindings)?;
+        graph.append(module, &names)?;
     }
-    let names = Names::new(module, None, bindings)?;
-    graph.append(module, &names)?;
-    Ok(Some(graph.linked))
+    Ok(graph.finish())
 }
 
 impl Graph<'_> {
@@ -557,8 +614,8 @@ impl Graph<'_> {
             return Ok((parser::parse_module(source)?, BTreeMap::new()));
         }
         let uses = parser::module_uses(source)?;
-        let bindings = self.bindings(uses)?;
-        let module = parser::parse_with_templates(source, &template_names(&bindings))?;
+        let bindings = self.bindings(uses.clone())?;
+        let module = self.parse_with_bindings(source, &uses, &bindings)?;
         Ok((module, bindings))
     }
 }
@@ -572,17 +629,16 @@ pub(crate) fn parse_source(source: &str, options: &ImportOptions<'_>) -> Result<
 }
 
 /// Parse and resolve the caller against the same BX library snapshot.
-pub(crate) fn read(
+pub(crate) fn read<'a>(
     source: &str,
-    options: &ImportOptions<'_>,
-) -> Result<(Module, Option<LinkedSources>), String> {
+    options: &'a ImportOptions<'a>,
+) -> Result<(Module, SourceImports<'a>), String> {
     let mut graph = Graph::new(options);
     let (module, bindings) = graph.parse_root(source)?;
-    if graph.loaded.is_empty() {
-        return Ok((module, None));
+    if !graph.loaded.is_empty() {
+        graph.append(&module, &Names::new(&module, None, bindings)?)?;
     }
-    graph.append(&module, &Names::new(&module, None, bindings)?)?;
-    Ok((module, Some(graph.linked)))
+    Ok((module, graph.finish()))
 }
 
 /// Render internal module-qualified symbols using BX source spelling.
@@ -613,7 +669,90 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ImportOptions, MAX_ELABORATION_DEPTH, read};
+    use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read};
+    use crate::ast::{BinaryOp, Expr};
+
+    #[test]
+    fn native_function_hints_distinguish_calls_and_comparisons() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("math.x"),
+            r#"
+pub fn resize<W: u32, N: u32>(x: uN[W]) -> uN[N] { x as uN[N] }
+pub const LIMIT = u8:7;
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let module = parse_source(
+            r#"
+use math;
+use math::{resize, LIMIT};
+fn direct(x:u8)->u12 { resize<8,12>(x) }
+fn qualified(xs:u8[1])->u12[1] { map(xs, math::resize<8,12>) }
+fn compare(x:u8, y:u8)->(bool,bool) { (math::LIMIT<x, y>(x)) }
+fn compare_direct(x:u8, y:u8)->(bool,bool) { (LIMIT<x, y>(x)) }
+fn shadow(resize:u8, x:u8, y:u8)->(bool,bool) { (resize<x, y>(x)) }
+"#,
+            &options,
+        )?;
+        assert!(
+            matches!(&module.functions[0].body, Expr::ParametricCall { name, parametrics, .. } if name == "resize" && parametrics.len() == 2)
+        );
+        assert!(
+            matches!(&module.functions[1].body, Expr::NamedMap { callback, parametrics, .. } if callback == "math::resize" && parametrics.len() == 2)
+        );
+        for function in &module.functions[2..] {
+            assert!(
+                matches!(&function.body, Expr::Tuple(pair) if matches!(&pair[..], [
+                    Expr::Binary { op: BinaryOp::Lt, .. },
+                    Expr::Binary { op: BinaryOp::Gt, .. }
+                ])),
+                "{}",
+                function.name
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_parametrics_in_bx_libraries_use_one_source_snapshot() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        let math = dir.path().join("math.x");
+        fs::write(
+            &math,
+            "pub fn resize<W: u32, N: u32>(x: uN[W]) -> uN[N] { x as uN[N] }",
+        )?;
+        fs::write(
+            dir.path().join("lib.bx"),
+            r#"
+use math::resize;
+use math;
+const W = u32:8;
+const N = u32:12;
+pub fn apply(x:u8)->(u12,u12[1]) { (resize<W,N>(x), map([x], math::resize<W,N>)) }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let (module, imports) = read(
+            "use lib; fn f(x:u8)->(u12,u12[1]) { lib::apply(x) }",
+            &options,
+        )?;
+        fs::remove_file(math)?;
+        let checked = crate::check::check_sources(&module, imports, &options)?;
+        let package = crate::lower_module(
+            &checked,
+            crate::empty_package("circuit"),
+            crate::ResetBehavior::default(),
+        )?;
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
+        Ok(())
+    }
 
     #[test]
     fn import_depth_limit_includes_cached_dependencies_on_a_worker_stack()
@@ -636,7 +775,12 @@ mod tests {
                 };
                 let (_, linked) = read("use lib1;", &options)?;
                 assert_eq!(
-                    linked.expect("loaded libraries").module.functions.len(),
+                    linked
+                        .libraries
+                        .expect("loaded libraries")
+                        .module
+                        .functions
+                        .len(),
                     MAX_ELABORATION_DEPTH
                 );
                 for (source, failing_import) in [

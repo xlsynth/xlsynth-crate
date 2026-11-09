@@ -73,7 +73,7 @@ fn classify(op: u4) -> (u8, bool) {
 
 Here `op == 2` selects the first arm. Use `a..b` to exclude the upper endpoint
 and `a..=b` to include it. A single scalar pattern can also name a visible
-module constant. Patterns support literal endpoints, `|`
+module constant, enum member, or function value parametric. Patterns support literal endpoints, `|`
 alternatives, and `_` for any remaining value. The arms must cover the whole
 subject type. For example, `true` and `false` cover a boolean without a
 wildcard.
@@ -100,18 +100,18 @@ pub block counter(clk, rst) -> u8 {
 Give an otherwise unsized integer initializer a type, as in `const STEP = u8:3;`.
 Aggregate elements keep their inferred widths at every use. Write
 `const WORDS: u8[2] = [1, 2];` when a consumer expects an array of bytes.
-BX evaluates pure value expressions and calls to earlier concrete local functions
-within its compile-time work limit. Evaluation follows the dependencies of the
-result. For example, an out-of-bounds access in an unused helper binding can
+BX evaluates pure value expressions and calls to earlier local functions,
+including value-parametric specializations, within its compile-time work limit.
+Evaluation follows the dependencies of the result. For example, an
+out-of-bounds access in an unused helper binding can
 go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
-functions, extern functions, and callback-parameter specializations require
-runtime evaluation, including when reached through a local helper. Constants can
-supply loop bounds and width-slice expressions. Array sizes and bit widths in
-type declarations still use literal dimensions.
+DSLX functions and extern functions require runtime evaluation, including when
+reached through a local helper. Constants can supply loop bounds, width-slice
+expressions, and dimensions in value-parametric function signatures.
 
 ## Defining functions
 
-Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Use concrete types in the signature, including structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
+Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Function signatures can include bits, structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
 
 Inside a function, `let` can bind a name or destructure a tuple, as in `let (data, valid) = packet;`. Braced expressions and `if` arms can introduce their own local bindings. The final expression supplies the result. A function that returns `()` may omit the result annotation and end with a semicolon or an empty body.
 
@@ -123,11 +123,49 @@ can fail on the mismatched signature.
 
 Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
 
-For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. For functions with type or integer parametrics, define the function in DSLX and import it with `use`.
+For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. A function that takes a type as a parameter can be defined in DSLX and imported with `use`.
 
 BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
 
 ### Compile-time function parameters
+
+#### Value parametrics
+
+Declare DSLX value parametrics between angle brackets. Each binding has a
+bits, boolean, numeric enum, or struct type and is available as a constant in
+the signature and body.
+
+```text
+fn resize<N: u32, M: u32 = {N + u32:1}>(x: uN[N]) -> uN[M] {
+    x as uN[M]
+}
+
+fn widths(x: u8) -> (u9, u16) { (resize(x), resize<8, 16>(x)) }
+```
+
+In `resize(x)`, the input width binds `N` to 8 and the default binds `M` to 9.
+BX can infer a directly named width or array length (`u32`) and signedness
+(`bool`) from the data arguments, including tuple members and array elements.
+For example, `xs: xN[S][N][L]` supplies the signedness, element width, and
+array length. In a computed dimension such as `uN[N + u32:1]`, supply `N`
+explicitly, give it a default, or infer it from another parameter.
+
+Explicit arguments bind a prefix of the declared parameters in source order.
+Use a bare name, number, boolean, or typed literal for a simple argument.
+Enclose a computed argument in braces, as in `resize<8, {width + u32:4}>(x)`.
+These expressions use the caller's scope and must evaluate at compile time.
+Defaults use the function's declaration scope and can depend on earlier
+bindings. A binding such as `K: uN[N] = {uN[N]:1}` can use an inferred width
+when evaluating its default. Explicit actuals require a binding type that
+can be resolved before instantiation, including widths from module constants.
+Each distinct set of bound values and callback identities produces one
+concrete IR function with only its data parameters.
+
+Nominal values retain their declared type. For a binding `P: Phase`, pass a
+member such as `Phase::Ready`. For `C: Config`, pass a constant of that
+struct type or a braced constructor such as `{Config { gain: u8:4 }}`.
+
+#### Callable parameters
 
 Declare callable parameters between angle brackets in the order callers will supply them. Give each callback its argument and result types. As with a local function declaration, omitting the result annotation means `()`. Inside the function body, invoke the parameter directly or pass a unary parameter as the callback in `map(xs, F)`.
 
@@ -145,7 +183,13 @@ fn sum(xs: u16[4]) -> u16 {
 
 Each callable argument must directly name a visible non-parametric BX function, a public, pure DSLX function from a `use` declaration, or a declared `extern fn`. For example, `use arithmetic;` lets a caller write `fold4<arithmetic::add16>(xs, seed)`. BX uses the declared callback argument types to resolve an imported DSLX specialization and checks its result type. An extern supplies its BX signature during checking. When lowering into a prelinked package, BX verifies the IR signature and purity of the linked function and its callees. The callback name is resolved at the call site. Names written directly in the template body follow its declaration scope.
 
-BX checks the body against its declared signatures, then generates one function per distinct ordered set of callback identities. Only data arguments appear in the generated function's IR signature. Callable parameters cannot be assigned to a `let`, returned, or forwarded to another template. Inline lambdas remain available in `map` expressions. This function-parametric syntax is a BX extension.
+Callable parameters can share a declaration with value parametrics. For example,
+`apply<N: u32, F: fn(uN[N]) -> uN[N]>` takes the width and the callback in
+that order at `apply<8, inc>(x)`. Invoke the callback in the function body.
+Defaults and type dimensions can call earlier pure BX functions, including
+helpers from imported BX modules. Callable parameters cannot be assigned to a
+`let`, returned, or forwarded to another template. Inline lambdas remain
+available in `map` expressions. Callable parameters are a BX extension.
 
 ### Map expressions
 
@@ -156,7 +200,7 @@ fn widen(x: u8) -> u16 { x as u16 }
 fn widen_all(xs: u8[4]) -> u16[4] { map(xs, widen) }
 ```
 
-A named callback can be a visible concrete BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX uses the input element type to infer imported DSLX function specializations. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
+A named callback can be a visible BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX can infer a value-parametric callback's signature from the input element type. Supply explicit values on a BX or DSLX callback, as in `map(xs, resize<8, 16>)` or `map(xs, std::msbs<4>)`. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
 
 ```text
 #[allow(combinational_block)]
@@ -367,6 +411,24 @@ The importer consults the additional directories in the supplied order. `dslx_st
 
 BX checks the arguments, then asks the DSLX typechecker to infer the concrete function signature. Here `std::umul` returns `u13` because its result width is the sum of the operand widths. A call with `u8` and `u12` in the same block gets a separate `u20` specialization. Write a standalone integer argument with its type, as in `std::round_up_to_nearest(x, u32:4)`.
 
+An imported DSLX function accepts an explicit prefix of value parametrics.
+For example, `std::lsbs<R, S, N>(x)` takes the result width first. In this
+BX function, DSLX infers signedness and input width from `x` and from each
+element of `xs`:
+
+```text
+use std;
+
+fn nibbles(x: u8, xs: u8[2]) -> (u4, u4[2]) {
+    (std::lsbs<4>(x), map(xs, std::msbs<4>))
+}
+```
+
+A member imported with `use std::lsbs;` also accepts `lsbs<4>(x)`. BX
+evaluates each supplied expression in caller scope with the declared DSLX
+binding type. Omitted bindings use native DSLX inference and defaults. The selected
+signature supplies the context for unsized data literals.
+
 BX can name public, non-parametric DSLX structs in ports, registers, and expressions. For example, given `pub struct Header { tag: u8, valid: bool }` in `packet.x`:
 
 ```text
@@ -377,7 +439,7 @@ fn tag_header(h: Header) -> Header {
 }
 ```
 
-BX can read fields through a private struct nested inside a public one. To pass the nested value itself as a DSLX function argument, expose its type through a public name or type alias. A public DSLX type alias preserves the identity of its underlying struct. Imported calls accept these structs as arguments and results, alongside bits, booleans, tuples, and fixed-size arrays. Functions must be public and pure. Linked functions and their module path components use letters, digits, and underscores so their generated names are valid XLS IR identifiers. Parametric values must be inferable from the arguments and DSLX defaults. Functions such as `std::lsbs` require an explicit result-width parameter and are outside this syntax.
+BX can read fields through a private struct nested inside a public one. To pass the nested value itself as a DSLX function argument, expose its type through a public name or type alias. A public DSLX type alias preserves the identity of its underlying struct. Imported calls accept these structs as arguments and results, alongside bits, booleans, tuples, and fixed-size arrays. Functions must be public and pure. Linked functions and their module path components use letters, digits, and underscores so their generated names are valid XLS IR identifiers.
 
 BX accepts concrete instances of public DSLX struct templates with `u32` value
 parameters. Write the application directly in a type annotation or struct

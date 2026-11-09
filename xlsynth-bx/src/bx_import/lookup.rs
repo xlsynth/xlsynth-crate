@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::ImportOptions;
 use crate::ast::UsePath;
-use crate::import_structs::ModuleSearch;
+use crate::import_structs::DslxSourceLoader;
 use crate::parser::{MAX_SYNTAX_DEPTH, is_use_identifier};
 
 /// A BX file selected for a module or a member import.
@@ -17,16 +17,10 @@ pub(super) struct BxUse {
     pub member: Option<String>,
 }
 
-/// A discovered module, before deciding whether a use refers to a member.
-enum ModuleFile {
-    Bx(PathBuf),
-    Dslx,
-}
-
 /// File lookup decisions shared by all BX modules in one compilation.
 pub(super) struct UseLookup<'a> {
-    search: ModuleSearch<'a>,
-    files: BTreeMap<String, Option<ModuleFile>>,
+    pub(super) native: DslxSourceLoader<'a>,
+    bx_files: BTreeMap<String, Option<PathBuf>>,
 }
 
 /// Check a programmatically constructed use path before treating its names as
@@ -52,8 +46,8 @@ impl<'a> UseLookup<'a> {
             .dslx_stdlib_path
             .unwrap_or(xlsynth::default_dslx_stdlib_path());
         Self {
-            search: ModuleSearch::new(stdlib, &options.additional_search_paths),
-            files: BTreeMap::new(),
+            native: DslxSourceLoader::new(stdlib, &options.additional_search_paths),
+            bx_files: BTreeMap::new(),
         }
     }
 
@@ -67,25 +61,19 @@ impl<'a> UseLookup<'a> {
                 continue;
             }
             let subject = components.join(".");
-            let file = self.files.entry(subject.clone()).or_insert_with(|| {
-                if self.search.file(&subject, "x").is_some() {
-                    Some(ModuleFile::Dslx)
-                } else {
-                    self.search
-                        .file(&subject, "bx")
-                        .map(|file| ModuleFile::Bx(file.physical))
-                }
-            });
-            match file {
-                Some(ModuleFile::Dslx) => return Ok(None),
-                Some(ModuleFile::Bx(path)) => {
-                    return Ok(Some(BxUse {
-                        subject,
-                        path: path.clone(),
-                        member: member.cloned(),
-                    }));
-                }
-                None => { /* A missing full module can still name a parent member. */ }
+            if self.native.has_dslx_file(&subject) {
+                return Ok(None);
+            }
+            if let Some(path) = self
+                .bx_files
+                .entry(subject.clone())
+                .or_insert_with(|| self.native.bx_file(&subject))
+            {
+                return Ok(Some(BxUse {
+                    subject,
+                    path: path.clone(),
+                    member: member.cloned(),
+                }));
             }
         }
         // The native import pass diagnoses a missing source after the checker

@@ -699,10 +699,18 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             name.clone_from(alias);
         }
     }
-    fn rename_type(ty: &mut Type, aliases: &BTreeMap<String, String>) {
+    fn rename_type(ty: &mut Type, aliases: &mut BTreeMap<String, String>) {
         match ty {
             Type::Named(name) | Type::Applied { name, .. } => rename(name, aliases),
             Type::Array { element, .. } => rename_type(element, aliases),
+            Type::ParametricArray { element, size } => {
+                rename_type(element, aliases);
+                capture_names(size, aliases);
+            }
+            Type::ParametricBits { signed, width } => {
+                capture_names(signed, aliases);
+                capture_names(width, aliases);
+            }
             Type::Tuple(fields) => fields.iter_mut().for_each(|f| rename_type(f, aliases)),
             Type::Bits { .. } | Type::Enum { .. } | Type::Bool => { /* Primitive types have no references. */
             }
@@ -770,14 +778,11 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::ParametricCall {
             name,
-            callbacks,
+            parametrics,
             args,
         } => {
             rename(name, aliases);
-            for callback in callbacks {
-                rename(callback, aliases);
-            }
-            for arg in args {
+            for arg in parametrics.iter_mut().chain(args) {
                 capture_names(arg, aliases);
             }
         }
@@ -892,10 +897,14 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             target,
             iterable,
             callback,
+            parametrics,
         } => {
             rename(target, aliases);
             capture_iterable(iterable, aliases);
             rename(callback, aliases);
+            for arg in parametrics {
+                capture_names(arg, aliases);
+            }
         }
     }
 }

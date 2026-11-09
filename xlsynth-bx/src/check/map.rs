@@ -12,7 +12,7 @@ use xlsynth_pir::{IrBits, IrValue};
 /// The callback spelling determines how to construct the map's pure body.
 enum MapCallback<'e> {
     Lambda(&'e MapExpr),
-    Named(&'e str),
+    Named(&'e str, &'e [Expr]),
 }
 
 impl BodyChecker<'_, '_> {
@@ -35,7 +35,7 @@ impl BodyChecker<'_, '_> {
             return Err("map callback must be a named function or an inline lambda".into());
         };
         let array = self.map_array_operand(array)?;
-        self.map(array, MapCallback::Named(name))
+        self.map(array, MapCallback::Named(name, &[]))
     }
 
     pub(super) fn named_range_map(
@@ -43,12 +43,13 @@ impl BodyChecker<'_, '_> {
         target: &str,
         iterable: &ForIterable,
         callback: &str,
+        parametrics: &[Expr],
     ) -> Result<(Type, K), String> {
         if !self.is_builtin_map(target, |target| self.names.contains(target))? {
             return Err("this named map requires the built-in map".into());
         }
         let array = self.map_iterable(iterable)?;
-        self.map(array, MapCallback::Named(callback))
+        self.map(array, MapCallback::Named(callback, parametrics))
     }
 
     fn map_array_operand(&mut self, expr: &Expr) -> Result<TypedExpr, String> {
@@ -82,7 +83,7 @@ impl BodyChecker<'_, '_> {
         }
         let budget = match callback {
             MapCallback::Lambda(_) => "map lambda",
-            MapCallback::Named(_) => "map",
+            MapCallback::Named(..) => "map",
         };
         if self.replaying_body() {
             // Account for the callback parameter even if the body ignores it.
@@ -100,12 +101,15 @@ impl BodyChecker<'_, '_> {
         };
         let (bindings, output) = match callback {
             MapCallback::Lambda(map) => self.map_lambda_body(map, &parameter, id)?,
-            MapCallback::Named(name) => {
+            MapCallback::Named(name, parametrics) => {
                 let argument = TypedExpr {
                     ty: parameter.ty.clone(),
                     kind: K::Name(parameter.name.clone()),
                 };
-                (Vec::new(), self.map_element_call(name, argument)?)
+                (
+                    Vec::new(),
+                    self.map_element_call(name, parametrics, argument)?,
+                )
             }
         };
         let ty = Type::Array {

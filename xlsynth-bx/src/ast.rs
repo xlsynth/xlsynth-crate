@@ -82,11 +82,23 @@ pub enum Type {
         signed: bool,
         width: usize,
     },
+    /// Signedness and width evaluated when a function's value parameters are
+    /// bound.
+    ParametricBits {
+        signed: Box<Expr>,
+        width: Box<Expr>,
+    },
     Bool,
     Tuple(Vec<Type>),
     Array {
         element: Box<Type>,
         size: usize,
+    },
+    /// Array dimension evaluated in a specialized function's parametric
+    /// environment.
+    ParametricArray {
+        element: Box<Type>,
+        size: Box<Expr>,
     },
     Named(String),
     /// A resolved numeric enum with its nominal identity and IR representation.
@@ -154,7 +166,7 @@ pub struct ExternFn {
 
 /// A let initializer and its pattern, evaluated before introducing the bound
 /// names.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct LetBinding {
     pub pattern: BindingPattern,
     pub ty: Option<Type>,
@@ -162,7 +174,7 @@ pub struct LetBinding {
 }
 
 /// A DSLX let pattern. A rest marker consumes any remaining tuple members.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum BindingPattern {
     Name(String),
     Tuple(Vec<BindingPattern>),
@@ -190,14 +202,15 @@ impl BindingPattern {
 }
 
 /// Alternatives in one match arm share a result expression.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MatchArm {
     pub patterns: Vec<MatchPattern>,
     pub value: Expr,
 }
 
-/// A wildcard, scalar literal, module constant, enum member, or literal range.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A wildcard, scalar literal, value parametric, module constant, enum member,
+/// or literal range.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MatchPattern {
     Wildcard,
     Literal(Expr),
@@ -239,9 +252,47 @@ pub struct Function {
     pub public: bool,
     /// Named, compile-time function parameters in declaration order.
     pub callback_params: Vec<CallbackParam>,
+    /// Compile-time values in declaration order.
+    pub value_parametrics: Vec<ParametricBinding>,
     pub params: Vec<Param>,
     pub result: Type,
     pub body: Expr,
+}
+
+/// A DSLX value parametric, optionally derived from earlier compile-time
+/// bindings.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParametricBinding {
+    pub name: String,
+    pub ty: Type,
+    pub default: Option<Expr>,
+    /// Position in the declaration's combined list of value and callback
+    /// parameters.
+    pub index: usize,
+}
+
+/// One compile-time formal in the source order of a function's declaration.
+#[derive(Clone, Copy, Debug)]
+pub enum FunctionParametricRef<'a> {
+    Value(&'a ParametricBinding),
+    Callback(&'a CallbackParam),
+}
+
+impl Function {
+    /// Visit interleaved value and callback formals in call-site argument
+    /// order.
+    pub fn parametric_bindings(&self) -> impl Iterator<Item = FunctionParametricRef<'_>> {
+        let mut values = self.value_parametrics.iter().peekable();
+        let mut callbacks = self.callback_params.iter();
+        let count = self.value_parametrics.len() + self.callback_params.len();
+        (0..count).filter_map(move |index| {
+            if let Some(value) = values.next_if(|p| p.index == index) {
+                Some(FunctionParametricRef::Value(value))
+            } else {
+                callbacks.next().map(FunctionParametricRef::Callback)
+            }
+        })
+    }
 }
 
 /// A callable that a function or block template binds to a named pure
@@ -265,7 +316,7 @@ pub struct ExternBlock {
 }
 
 /// A value computed from this cycle's ports and register contents.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Expr {
     /// A lexical value scope, evaluated in source order.
     Scope {
@@ -323,10 +374,11 @@ pub enum Expr {
         args: Vec<Expr>,
         builtin_args: Option<Vec<Expr>>,
     },
-    /// A BX function or child block specialized with named callback functions.
+    /// Explicit compile-time arguments to a function or child block. A callback
+    /// argument is represented by the name of its function.
     ParametricCall {
         name: String,
-        callbacks: Vec<String>,
+        parametrics: Vec<Expr>,
         args: Vec<Expr>,
     },
     Map(Box<MapExpr>),
@@ -336,6 +388,8 @@ pub enum Expr {
         target: String,
         iterable: Box<ForIterable>,
         callback: String,
+        /// Explicit compile-time arguments on the callback reference.
+        parametrics: Vec<Expr>,
     },
     Unary {
         op: UnaryOp,
@@ -365,7 +419,7 @@ pub enum Expr {
 
 /// An array mapped by an inline unary lambda. The checker verifies that the
 /// body is closed over its parameter and visible module declarations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct MapExpr {
     /// The callee name, retained so lexical scope preparation preserves
     /// shadowing.
@@ -378,7 +432,7 @@ pub struct MapExpr {
 }
 
 /// A counted fold, with an iteration element and a loop-carried accumulator.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ForLoop {
     pub element: BindingPattern,
     pub accumulator: BindingPattern,
@@ -390,7 +444,7 @@ pub struct ForLoop {
 
 /// A counted loop or map visits a statically bounded integer range or an array
 /// value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ForIterable {
     Range {
         start: Expr,
@@ -402,7 +456,7 @@ pub enum ForIterable {
 
 /// A fold over a compile-time half-open range. Each iteration's local lets
 /// and result expression can use the index and accumulator bindings.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UnrollFor {
     pub index: String,
     pub accumulator: String,
@@ -416,7 +470,7 @@ pub struct UnrollFor {
 
 /// The result type in `value[start+:type]`, before resolving its constant
 /// parameters.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum WidthSliceType {
     Concrete(Type),
     Bits {
@@ -426,7 +480,7 @@ pub enum WidthSliceType {
 }
 
 /// Structural declarations, value bindings, and register or child port drivers.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Stmt {
     Reg {
         name: String,

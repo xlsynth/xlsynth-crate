@@ -6,13 +6,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use crate::ast::{Block, CallbackParam, Param, Type};
+use crate::ast::{Block, CallbackParam, Expr, Param, Type};
 use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, ImportResolver, MAX_ELABORATION_DEPTH,
     StructTable, TypeShape, compatible, resolve_type, source_type_nodes, type_deps,
 };
+
+/// A callable argument identifies a function in the caller's lexical scope.
+pub(super) fn callback_argument_name(expr: &Expr) -> Result<&str, String> {
+    match expr {
+        Expr::Name(name) => Ok(name),
+        _ => Err("callable argument must name a function".into()),
+    }
+}
 
 /// Check the template's parameter namespace and ensure every type parameter
 /// can be inferred from data inputs and then callback results, in order.
@@ -355,9 +363,12 @@ impl Bindings {
                 element: Box::new(self.substitute(element)),
                 size: *size,
             },
-            Type::Bool | Type::Bits { .. } | Type::Enum { .. } | Type::Applied { .. } => {
-                formal.clone()
-            }
+            Type::Bool
+            | Type::Bits { .. }
+            | Type::Enum { .. }
+            | Type::ParametricBits { .. }
+            | Type::ParametricArray { .. }
+            | Type::Applied { .. } => formal.clone(),
         }
     }
 
@@ -388,7 +399,12 @@ fn canonical_argument(ty: &Type) -> Type {
             element: Box::new(canonical_argument(element)),
             size: *size,
         },
-        Type::Bits { .. } | Type::Enum { .. } | Type::Named(_) | Type::Applied { .. } => ty.clone(),
+        Type::Bits { .. }
+        | Type::Enum { .. }
+        | Type::Named(_)
+        | Type::ParametricBits { .. }
+        | Type::ParametricArray { .. }
+        | Type::Applied { .. } => ty.clone(),
     }
 }
 

@@ -2,21 +2,16 @@
 
 use crate::ast::ConstDef;
 use crate::infer_literal::has_implicit_constant_type;
-use crate::typed::ConstantFunctions;
 
-use super::{BodyChecker, CheckedConstant, CheckedFunction};
+use super::{BodyChecker, CheckedConstant};
 
 impl<'a> BodyChecker<'a, '_> {
     /// Resolve a pure initializer in declaration order and retain its concrete
     /// type and value for subsequent uses.
-    pub(super) fn check_constant(
-        &mut self,
-        decl: &ConstDef,
-        functions: &'a dyn Fn(&str) -> Option<&'a CheckedFunction>,
-    ) -> Result<CheckedConstant, String> {
+    pub(super) fn check_constant(&mut self, decl: &ConstDef) -> Result<CheckedConstant, String> {
         self.zero_binding = self.decls.zero_binding(&decl.name);
         self.function_position = self.decls.positions.get(decl.name.as_str()).copied();
-        self.constant_functions = Some(ConstantFunctions::new(functions));
+        self.enable_constant_functions();
         let annotation = decl
             .ty
             .as_ref()

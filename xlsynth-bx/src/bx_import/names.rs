@@ -4,11 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BUILTIN_MAP, BUILTIN_UPDATE, Binding, Names};
+use super::{BUILTIN_MAP, BUILTIN_UPDATE, Binding, Names, ParametricKind};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
-    ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module,
-    Param, Stmt, StructDef, Type, UnrollFor, WidthSliceType,
+    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
+    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, Type, UnrollFor,
+    WidthSliceType,
 };
 use crate::parser::MAX_SYNTAX_DEPTH;
 
@@ -91,13 +92,34 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     for def in &module.functions {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, at);
-        let callback_params = scope.callbacks(&def.callback_params)?;
+        let mut callback_params = Vec::with_capacity(def.callback_params.len());
+        let mut value_parametrics = Vec::with_capacity(def.value_parametrics.len());
+        for formal in def.parametric_bindings() {
+            match formal {
+                FunctionParametricRef::Value(value) => {
+                    let ty = scope.ty(&value.ty)?;
+                    // A binding shadows an outer constant even in its own
+                    // default. Reading that value before it is bound fails.
+                    scope.bind(&value.name);
+                    value_parametrics.push(ParametricBinding {
+                        name: value.name.clone(),
+                        ty,
+                        default: value.default.as_ref().map(|e| scope.expr(e)).transpose()?,
+                        index: value.index,
+                    });
+                }
+                FunctionParametricRef::Callback(callback) => {
+                    callback_params.push(scope.callback(callback)?);
+                }
+            }
+        }
         let params = scope.params(&def.params, Local::Lexical)?;
         let result = scope.ty(&def.result)?;
         out.functions.push(Function {
             name: names.declared(&def.name),
             public: def.public,
             callback_params,
+            value_parametrics,
             params,
             result,
             body: scope.expr(&def.body)?,
@@ -286,7 +308,14 @@ impl<'a> Scope<'a> {
             {
                 self.names.resolve(name, self.at)
             }
-            Some(Local::Lexical | Local::Hardware) if site == CallSite::Direct => {
+            Some(Local::Lexical | Local::Hardware)
+                if site == CallSite::Direct
+                    || site == CallSite::Parametric
+                        && matches!(self.names.uses.get(name), Some(Binding::Dslx(_))) =>
+            {
+                // An imported function can be hidden by a data binding. DSLX
+                // resolves that local in a skipped loop and diagnoses calling
+                // it only when an iteration is typechecked.
                 Ok(mark_local_callee(name))
             }
             Some(Local::Lexical | Local::Hardware) => {
@@ -324,11 +353,11 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn ty(&self, ty: &Type) -> Result<Type, String> {
+    fn ty(&mut self, ty: &Type) -> Result<Type, String> {
         self.type_at_depth(ty, 0)
     }
 
-    fn type_at_depth(&self, ty: &Type, depth: usize) -> Result<Type, String> {
+    fn type_at_depth(&mut self, ty: &Type, depth: usize) -> Result<Type, String> {
         if depth > MAX_SYNTAX_DEPTH {
             return Err(format!("BX import type exceeds {MAX_SYNTAX_DEPTH} levels"));
         }
@@ -357,20 +386,37 @@ impl<'a> Scope<'a> {
                 element: Box::new(self.type_at_depth(element, depth + 1)?),
                 size: *size,
             },
+            Type::ParametricArray { element, size } => Type::ParametricArray {
+                element: Box::new(self.type_at_depth(element, depth + 1)?),
+                size: self.dimension(size, depth)?,
+            },
+            Type::ParametricBits { signed, width } => Type::ParametricBits {
+                signed: self.dimension(signed, depth)?,
+                width: self.dimension(width, depth)?,
+            },
             Type::Bits { .. } | Type::Bool => ty.clone(),
         })
     }
 
-    fn optional_type(&self, ty: &Option<Type>) -> Result<Option<Type>, String> {
+    /// Carry type nesting across a dimension expression that can itself
+    /// contain type annotations.
+    fn dimension(&mut self, expr: &Expr, depth: usize) -> Result<Box<Expr>, String> {
+        self.expression_depth += depth + 1;
+        let result = self.expr(expr);
+        self.expression_depth -= depth + 1;
+        result.map(Box::new)
+    }
+
+    fn optional_type(&mut self, ty: &Option<Type>) -> Result<Option<Type>, String> {
         ty.as_ref().map(|ty| self.ty(ty)).transpose()
     }
 
     /// Struct field names do not shadow other field types.
-    fn fields(&self, fields: &[Param]) -> Result<Vec<Param>, String> {
+    fn fields(&mut self, fields: &[Param]) -> Result<Vec<Param>, String> {
         fields.iter().map(|p| self.param(p)).collect()
     }
 
-    fn param(&self, p: &Param) -> Result<Param, String> {
+    fn param(&mut self, p: &Param) -> Result<Param, String> {
         Ok(Param {
             name: p.name.clone(),
             ty: self.ty(&p.ty)?,
@@ -395,22 +441,17 @@ impl<'a> Scope<'a> {
         }
     }
 
-    fn callbacks(&mut self, params: &[CallbackParam]) -> Result<Vec<CallbackParam>, String> {
-        params
-            .iter()
-            .map(|p| {
-                self.bind_as(&p.name, Local::Formal);
-                Ok(CallbackParam {
-                    name: p.name.clone(),
-                    params: p
-                        .params
-                        .iter()
-                        .map(|ty| self.ty(ty))
-                        .collect::<Result<_, _>>()?,
-                    result: self.ty(&p.result)?,
-                })
-            })
-            .collect()
+    fn callback(&mut self, param: &CallbackParam) -> Result<CallbackParam, String> {
+        self.bind_as(&param.name, Local::Formal);
+        Ok(CallbackParam {
+            name: param.name.clone(),
+            params: param
+                .params
+                .iter()
+                .map(|ty| self.ty(ty))
+                .collect::<Result<_, _>>()?,
+            result: self.ty(&param.result)?,
+        })
     }
 
     fn binding(&mut self, binding: &LetBinding) -> Result<LetBinding, String> {
@@ -429,7 +470,11 @@ impl<'a> Scope<'a> {
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
-        let callback_params = self.callbacks(&def.callback_params)?;
+        let callback_params = def
+            .callback_params
+            .iter()
+            .map(|p| self.callback(p))
+            .collect::<Result<_, _>>()?;
         self.timing_ports(&def.clock, def.reset.as_deref());
         let params = self.params(&def.params, Local::Hardware)?;
         let result = self.ty(&def.result)?;
@@ -535,7 +580,7 @@ impl<'a> Scope<'a> {
     }
 
     fn loop_annotation(
-        &self,
+        &mut self,
         annotation: &Option<(Type, Type)>,
     ) -> Result<Option<(Type, Type)>, String> {
         annotation
@@ -671,6 +716,7 @@ impl<'a> Scope<'a> {
                             target: callee,
                             iterable: Box::new(ForIterable::Array(self.expr(array)?)),
                             callback: callable,
+                            parametrics: Vec::new(),
                         });
                     }
                 }
@@ -691,12 +737,12 @@ impl<'a> Scope<'a> {
             }
             Expr::ParametricCall {
                 name,
-                callbacks,
+                parametrics,
                 args,
             } => Expr::ParametricCall {
                 name: self.callee(
                     name,
-                    if callbacks.is_empty() {
+                    if parametrics.is_empty() {
                         // AST callers may represent a plain structural call
                         // this way.
                         CallSite::Structural
@@ -704,9 +750,17 @@ impl<'a> Scope<'a> {
                         CallSite::Parametric
                     },
                 )?,
-                callbacks: callbacks
+                parametrics: parametrics
                     .iter()
-                    .map(|name| self.reference(name, self.at))
+                    .enumerate()
+                    .map(
+                        |(i, actual)| match (self.names.parametrics(name).get(i), actual) {
+                            (Some(ParametricKind::Callback), Expr::Name(callback)) => {
+                                Ok(Expr::Name(self.reference(callback, self.at)?))
+                            }
+                            _ => self.expr(actual),
+                        },
+                    )
                     .collect::<Result<_, _>>()?,
                 args: self.expressions(args)?,
             },
@@ -715,10 +769,12 @@ impl<'a> Scope<'a> {
                 target,
                 iterable,
                 callback,
+                parametrics,
             } => Expr::NamedMap {
                 target: self.reference(target, self.builtin_at(target))?,
                 iterable: Box::new(self.iterable(iterable)?),
                 callback: self.map_callback(callback)?,
+                parametrics: self.expressions(parametrics)?,
             },
             Expr::Unary { op, value } => Expr::Unary {
                 op: *op,

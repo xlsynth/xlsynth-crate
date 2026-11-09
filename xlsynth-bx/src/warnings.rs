@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Block, Expr, ForIterable, Module, SourcePosition, Stmt, WidthSliceType};
+use crate::ast::{Block, Expr, ForIterable, Module, SourcePosition, Stmt, Type, WidthSliceType};
 use crate::bx_import::{LinkedSources, UnlinkedBlockScope, library_item};
 
 /// A BX warning category, also used in source-level `#[allow(...)]` attributes.
@@ -160,6 +160,7 @@ enum SourceNode<'a> {
     Statement(&'a Stmt),
     Expression(&'a Expr),
     Iterable(&'a ForIterable),
+    Annotation(&'a Type),
 }
 
 /// A child call in an unchecked body can share its spelling with a local
@@ -194,15 +195,17 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 | Stmt::Connect { .. } => {
                     return TemplateHardware::Known(true);
                 }
-                Stmt::Let { name, value, .. } => {
+                Stmt::Let { name, value, ty } => {
                     binders.insert(name.clone());
                     pending.push(SourceNode::Expression(value));
+                    pending.extend(ty.iter().map(SourceNode::Annotation));
                 }
                 Stmt::LetPattern(binding) => {
                     binding.pattern.visit_names(&mut |name| {
                         binders.insert(name.to_owned());
                     });
                     pending.push(SourceNode::Expression(&binding.value));
+                    pending.extend(binding.ty.iter().map(SourceNode::Annotation));
                 }
                 Stmt::If { condition, body } => {
                     pending.push(SourceNode::Expression(condition));
@@ -215,6 +218,18 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
             SourceNode::Iterable(ForIterable::Range { start, limit, .. }) => {
                 pending.extend([start, limit].map(SourceNode::Expression));
             }
+            SourceNode::Annotation(ty) => match ty {
+                Type::ParametricBits { signed, width } => {
+                    pending.extend([signed.as_ref(), width.as_ref()].map(SourceNode::Expression));
+                }
+                Type::ParametricArray { element, size } => {
+                    pending.push(SourceNode::Annotation(element));
+                    pending.push(SourceNode::Expression(size));
+                }
+                Type::Array { element, .. } => pending.push(SourceNode::Annotation(element)),
+                Type::Tuple(fields) => pending.extend(fields.iter().map(SourceNode::Annotation)),
+                _ => { /* Concrete scalar and nominal annotations introduce no expressions. */ }
+            },
             SourceNode::Expression(expr) => match expr {
                 Expr::Call { name, args }
                 | Expr::MapBeforeUse { name, args, .. }
@@ -223,11 +238,17 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                         callees.insert(name.as_str());
                     }
                     pending.extend(args.iter().map(SourceNode::Expression));
+                    if let Expr::ParametricCall { parametrics, .. } = expr {
+                        pending.extend(parametrics.iter().map(SourceNode::Expression));
+                    }
                 }
                 Expr::UnrollFor(fold) => {
                     binders.insert(fold.index.clone());
                     binders.insert(fold.accumulator.clone());
                     pending.extend(fold.body.iter().map(SourceNode::Statement));
+                    if let Some((element, accumulator)) = &fold.annotation {
+                        pending.extend([element, accumulator].map(SourceNode::Annotation));
+                    }
                     pending.extend(
                         [&fold.start, &fold.limit, &fold.seed, &fold.result]
                             .map(SourceNode::Expression),
@@ -240,14 +261,30 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                         });
                     }
                     pending.push(SourceNode::Iterable(&fold.iterable));
+                    if let Some((element, accumulator)) = &fold.annotation {
+                        pending.extend([element, accumulator].map(SourceNode::Annotation));
+                    }
                     pending.extend([&fold.seed, &fold.body].map(SourceNode::Expression));
                 }
                 Expr::Map(map) => {
                     binders.insert(map.parameter.clone());
                     pending.push(SourceNode::Iterable(&map.iterable));
                     pending.push(SourceNode::Expression(&map.body));
+                    pending.extend(
+                        map.parameter_type
+                            .iter()
+                            .chain(&map.result_type)
+                            .map(SourceNode::Annotation),
+                    );
                 }
-                Expr::NamedMap { iterable, .. } => pending.push(SourceNode::Iterable(iterable)),
+                Expr::NamedMap {
+                    iterable,
+                    parametrics,
+                    ..
+                } => {
+                    pending.push(SourceNode::Iterable(iterable));
+                    pending.extend(parametrics.iter().map(SourceNode::Expression));
+                }
                 Expr::Scope { bindings, result } => {
                     for binding in bindings {
                         binding.pattern.visit_names(&mut |name| {
@@ -256,6 +293,12 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                     }
                     pending.push(SourceNode::Expression(result));
                     pending.extend(bindings.iter().map(|b| SourceNode::Expression(&b.value)));
+                    pending.extend(
+                        bindings
+                            .iter()
+                            .filter_map(|b| b.ty.as_ref())
+                            .map(SourceNode::Annotation),
+                    );
                 }
                 Expr::If {
                     condition,
@@ -288,10 +331,12 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                             .map(|(_, value)| SourceNode::Expression(value)),
                     );
                 }
-                Expr::Field { value, .. }
-                | Expr::Unary { value, .. }
-                | Expr::Cast { value, .. } => {
+                Expr::Field { value, .. } | Expr::Unary { value, .. } => {
                     pending.push(SourceNode::Expression(value));
+                }
+                Expr::Cast { value, ty } => {
+                    pending.push(SourceNode::Expression(value));
+                    pending.push(SourceNode::Annotation(ty));
                 }
                 Expr::Index { value, index }
                 | Expr::Binary {
@@ -307,13 +352,17 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                     width,
                 } => {
                     pending.extend([value.as_ref(), start.as_ref()].map(SourceNode::Expression));
-                    if let WidthSliceType::Bits { signed, bit_count } = width {
-                        pending.extend(
+                    match width {
+                        WidthSliceType::Bits { signed, bit_count } => pending.extend(
                             [signed.as_ref(), bit_count.as_ref()].map(SourceNode::Expression),
-                        );
+                        ),
+                        WidthSliceType::Concrete(ty) => pending.push(SourceNode::Annotation(ty)),
                     }
                 }
-                Expr::Name(_) | Expr::Bool(_) | Expr::Literal { .. } | Expr::Zero(_) => {
+                Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
+                    pending.push(SourceNode::Annotation(ty));
+                }
+                Expr::Name(_) | Expr::Bool(_) | Expr::Literal { ty: None, .. } => {
                     // Leaf values introduce no hardware.
                 }
             },

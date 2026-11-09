@@ -2,6 +2,7 @@
 
 //! Bridge Rust's DSLX declaration identities to concrete types in libxls.
 
+mod binding_types;
 mod effect_source;
 mod enum_conversion;
 mod enum_order;
@@ -11,7 +12,9 @@ mod runfiles;
 mod specialization;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+#[cfg(test)]
 use std::path::Path;
+use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 
@@ -21,7 +24,7 @@ use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
 use crate::typed::CheckedEnum;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
-pub(crate) use outline_graph::ModuleSearch;
+pub(crate) use outline_graph::DslxSourceLoader;
 use outline_graph::{DeclId, ImportFeatures, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
 /// The Rust declaration and BX layout associated with a checked native type.
@@ -37,7 +40,7 @@ struct StructBinding {
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
-    graph: OutlineGraph,
+    graph: Rc<OutlineGraph>,
     files: Option<NativeSourceFiles>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
@@ -59,33 +62,25 @@ pub(crate) struct ImportedStructs {
 impl ImportedStructs {
     /// Capture the reachable sources and validate the requested BX uses with
     /// native dependency-import semantics.
+    #[cfg(test)]
     pub(crate) fn load(
         uses: &[UsePath],
         stdlib: &Path,
         paths: &[&Path],
     ) -> Result<(Self, Option<ImportData>), String> {
-        let graph = OutlineGraph::load_uses(uses, stdlib, paths)?;
+        Self::from_sources(uses, DslxSourceLoader::new(stdlib, paths))
+    }
+
+    pub(crate) fn from_sources(
+        uses: &[UsePath],
+        loader: DslxSourceLoader<'_>,
+    ) -> Result<(Self, Option<ImportData>), String> {
+        let graph = loader.finish(uses)?;
         let files = (!uses.is_empty())
             .then(|| graph.native_source_files())
             .transpose()?;
         let mut data = files.as_ref().map(NativeSourceFiles::import_data);
-        let registry = Self {
-            graph,
-            files,
-            bindings: HashMap::new(),
-            declarations: BTreeMap::new(),
-            explicit_types: BTreeMap::new(),
-            named_layouts: BTreeMap::new(),
-            instance_layouts: BTreeSet::new(),
-            exports_bound: false,
-            #[cfg(test)]
-            type_witnesses: 0,
-            definitions: Vec::new(),
-            enums: Default::default(),
-            enum_conversion_snapshot: Default::default(),
-            enum_order_snapshot: Default::default(),
-            probe_index: 0,
-        };
+        let registry = Self::for_snapshot(Rc::new(graph), files);
         if let Some(data) = data.as_mut() {
             for (index, path) in uses.iter().enumerate() {
                 let subject = path.components.join(".");
@@ -106,6 +101,28 @@ impl ImportedStructs {
             }
         }
         Ok((registry, data))
+    }
+
+    /// Pair the frozen declaration graph with the native handles of one
+    /// snapshot.
+    fn for_snapshot(graph: Rc<OutlineGraph>, files: Option<NativeSourceFiles>) -> Self {
+        Self {
+            graph,
+            files,
+            bindings: HashMap::new(),
+            declarations: BTreeMap::new(),
+            explicit_types: BTreeMap::new(),
+            named_layouts: BTreeMap::new(),
+            instance_layouts: BTreeSet::new(),
+            exports_bound: false,
+            #[cfg(test)]
+            type_witnesses: 0,
+            definitions: Vec::new(),
+            enums: Default::default(),
+            enum_conversion_snapshot: Default::default(),
+            enum_order_snapshot: Default::default(),
+            probe_index: 0,
+        }
     }
 
     /// Pair public, concrete structs and enums, including aliases, with their
@@ -316,6 +333,10 @@ impl ImportedStructs {
         &self.definitions
     }
 
+    pub(crate) fn definition(&self, name: &str) -> Option<&StructDef> {
+        self.named_layouts.get(name).map(|&i| &self.definitions[i])
+    }
+
     pub(crate) fn enum_definitions(&self) -> &[CheckedEnum] {
         &self.enums.definitions
     }
@@ -326,10 +347,14 @@ impl ImportedStructs {
                 .named_layouts
                 .get(name)
                 .is_some_and(|i| self.instance_layouts.contains(i)),
-            Type::Array { element, .. } => self.contains_parametric_instance(element),
+            Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
+                self.contains_parametric_instance(element)
+            }
             Type::Tuple(members) => members.iter().any(|m| self.contains_parametric_instance(m)),
             Type::Applied { .. } => true,
-            Type::Bits { .. } | Type::Bool | Type::Enum { .. } => false,
+            Type::Bits { .. } | Type::ParametricBits { .. } | Type::Bool | Type::Enum { .. } => {
+                false
+            }
         }
     }
 
@@ -582,7 +607,7 @@ impl ImportedStructs {
         let identifier = def.get_identifier();
         self.bindings.entry(def.clone()).or_default();
         let (template, actuals) = if def.is_parametric() {
-            let id = written
+            let id = written.or(self.bindings[&def].declaration.as_ref())
                 .filter(|id| self.has_public_struct_template(&id.subject, &id.name))
                 .cloned().ok_or_else(|| format!(
                     "cannot identify a public DSLX struct template for '{identifier}'; name the concrete struct or a public alias in the DSLX type annotation"
@@ -689,7 +714,7 @@ fn instance_spelling(member: &str, values: &[u32]) -> String {
 }
 
 /// The declaration/explicit-type witnesses each contain one function.
-fn probe_function(checked: &dslx::TypecheckedModule) -> Result<dslx::Function, String> {
+pub(crate) fn probe_function(checked: &dslx::TypecheckedModule) -> Result<dslx::Function, String> {
     let module = checked.get_module();
     (0..module.get_member_count())
         .find_map(|i| match module.get_member(i).to_matchable() {

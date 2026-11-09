@@ -657,6 +657,12 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     state.project(value, index)?
                 }
                 Type::Bits { .. } | Type::Enum { .. } | Type::Bool | Type::Array { .. } => value,
+                Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
+                    return Err(BuilderError::InvalidOperation(format!(
+                        "cannot lower block result with unresolved dimensions in '{}'",
+                        block.result
+                    )));
+                }
             };
             state.builder.output_port(&port.name, field)?;
         }

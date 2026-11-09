@@ -136,6 +136,9 @@ fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String> {
         Type::Named(_) | Type::Applied { .. } => {
             Err(format!("cannot render fuzz input of named type {ty}"))
         }
+        Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
+            Err(format!("fuzz input has unresolved dimensions: {ty}"))
+        }
     }
 }
 
@@ -212,7 +215,11 @@ fn dslx_structural_type(ty: &Type) -> Option<String> {
         // Module constants generated here have structural types. Nominal
         // declarations are compared against DSLX struct metadata in
         // module_graph.
-        Type::Named(_) | Type::Enum { .. } | Type::Applied { .. } => return None,
+        Type::Named(_)
+        | Type::Enum { .. }
+        | Type::Applied { .. }
+        | Type::ParametricBits { .. }
+        | Type::ParametricArray { .. } => return None,
     })
 }
 

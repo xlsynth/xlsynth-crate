@@ -317,6 +317,85 @@ pub block circuit(clk, x: u8) -> (u16, u16) {
 }
 
 #[test]
+fn imported_value_parametrics_resolve_in_their_lexical_modules() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "math.bx",
+        r#"
+const STEP = u32:2;
+const N = u32:7;
+pub fn own<N: u32 = {N}>() -> u32 { N }
+pub fn widen<N: u32, W: u32 = {N + STEP}>(x: uN[N]) -> uN[W] {
+    (x as uN[W]) + (STEP as uN[W])
+}
+pub fn narrow<N: u32>(x: uN[N]) -> u5 {
+    let N = u32:3;
+    widen<N>(x as uN[N])
+}
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "mid.bx",
+        r#"
+use math::widen;
+const STEP = u32:4;
+pub fn apply(x: u8) -> u12 { widen<8, {8 + STEP}>(x) }
+"#,
+    )?;
+    let source = r#"
+use math;
+use mid::apply;
+const STEP = u32:6;
+#[allow(combinational_block)]
+pub block circuit(clk, x: u8) -> (u10, u12, u14, u5) {
+    (math::widen(x), apply(x), math::widen<8, {8 + STEP}>(x), math::narrow(x))
+}
+"#;
+    let options = search_paths(&[dir.path()]);
+    assert_eq!(
+        run(compile_design(source, &options)?, 19)?,
+        IrValue::parse_typed("(bits[10]:21, bits[12]:21, bits[14]:21, bits[5]:5)")?
+    );
+    let defaulted = "use math; const N = u32:9; fn f() -> u32 { math::own() }";
+    assert!(check_source_with_options(defaulted, &options).is_err());
+    check_source_with_options(&defaulted.replace("own()", "own<4>()"), &options)?;
+    Ok(())
+}
+
+#[test]
+fn imported_templates_keep_callback_and_value_actuals_in_their_respective_scopes()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "library.bx",
+        r#"
+pub fn apply<N: u32, F: fn(uN[N]) -> uN[N]>(x: uN[N]) -> uN[N] { F(x) }
+pub fn inc(x: u8) -> u8 { x + u8:1 }
+pub const W = u32:8;
+"#,
+    )?;
+    let source = r#"
+use library::apply;
+#[allow(combinational_block)]
+pub block circuit(clk, x: u8) -> u8 { apply<8, inc>(x) }
+use library::inc;
+use library::W;
+"#;
+    let options = search_paths(&[dir.path()]);
+    assert_eq!(
+        run(compile_design(source, &options)?, 19)?,
+        IrValue::make_ubits(8, 20)?
+    );
+    let later_value = source.replace("apply<8,", "apply<W,");
+    let error = check_source_with_options(&later_value, &options).unwrap_err();
+    assert!(error.contains("declared later"), "{error}");
+    Ok(())
+}
+
+#[test]
 fn bx_libraries_keep_their_extern_link_symbols() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     write_module(
