@@ -841,6 +841,13 @@ jobs:
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
 
+      - name: Enable Rust build cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-rust
+          key: ${{ env.OS_KEY }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Report disk usage before cargo build (rocky8)
         run: |
           python3 scripts/report_disk_usage.py \
