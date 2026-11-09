@@ -28,9 +28,8 @@ pub fn compile_bx(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<CompiledBx> {
-    let module = xlsynth_bx::parse_module(source).map_err(anyhow::Error::msg)?;
     let checked =
-        xlsynth_bx::check_module_with_options(&module, options).map_err(anyhow::Error::msg)?;
+        xlsynth_bx::check_source_with_options(source, options).map_err(anyhow::Error::msg)?;
     let package = xlsynth_bx::lower_module(&checked, package, reset).map_err(anyhow::Error::msg)?;
     Ok(CompiledBx { checked, package })
 }
@@ -169,15 +168,15 @@ fn bx_type(
         Type::Bits { signed: true, .. } => {
             bail!("signed BX type {ty} is unsupported by readable Lean")
         }
+        Type::Enum { .. } => bail!("BX numeric enum {ty} is unsupported by readable Lean"),
+        Type::Applied { .. } => bail!("BX type application {ty} is unsupported by readable Lean"),
         Type::Tuple(items) => SourceType::Tuple {
             members: items
                 .iter()
                 .map(|t| bx_type(t, module, declarations))
                 .collect::<Result<_>>()?,
         },
-        Type::Enum { .. }
-        | Type::Applied { .. }
-        | Type::ParametricBits { .. }
+        Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. } => bail!("BX type {ty} is unsupported by readable Lean"),

@@ -17,7 +17,7 @@ fn compile(source: &str) -> CompiledBx {
 
 #[test]
 fn checked_bx_and_saved_ir_emit_identical_raw_equations() {
-    let compiled = compile("block counter(clk, rst) -> u8 { reg n: u8 = 1; n := n + u8:1; n }");
+    let compiled = compile("block counter(clk) -> u8 { reg n: u8 = 1; n := n + u8:1; n }");
     let bundle = compiled.emit_readable(None).unwrap();
     let saved = Parser::new(&compiled.package().to_string())
         .parse_and_validate_package()
