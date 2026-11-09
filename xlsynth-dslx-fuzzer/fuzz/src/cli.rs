@@ -419,7 +419,7 @@ fn rejection(tool: &str, output: &Output, modules: &[SourceModule]) -> CheckFail
 
 /// Writes a sample into its own import directory and captures the standalone
 /// DUT's verdict.
-fn run_converter(
+pub(super) fn run_converter(
     modules: &[SourceModule],
     converter: &Path,
     stdlib: &Path,

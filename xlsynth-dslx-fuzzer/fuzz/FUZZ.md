@@ -152,31 +152,37 @@ Standalone generic workers collect in-process C++ coverage after a successful
 CLI conversion, including on a disproof or a public signature mismatch.
 The primary CLI finding takes precedence over a secondary feedback error.
 
-
 ## Native BX function conversion
 
 The `fuzz_bx_converter_contracts` target accepts the same audit-v7 byte format
 as the focused DSLX worker. It runs the BX frontend on single-module source,
 lowers accepted functions with the BX Rust compiler, checks the signature of
 `main`, and compares its IR with the generator's independent IR for all inputs
-using Bitwuzla. Warnings collected by the checker allow comparison of otherwise
-valid programs. Imports, externs, and contracts requiring event or acceptance
-oracles are outside the scope of this target. Clocked block behavior requires
-a state-transition oracle.
+using Bitwuzla. On a discrepancy it compiles the original source with the
+standalone DSLX converter and checks the two functions' public signatures,
+return values and assertion behavior over all inputs. Imports, externs, and
+contracts requiring event or acceptance oracles are outside the scope of this
+target. Clocked block behavior requires a state-transition oracle.
 
 Replay a saved audit-v7 unit from the repository root.
 
 ```sh
+export DSLX_FUZZ_CONVERTER=/path/to/ir_converter_main
+export DSLX_STDLIB_PATH=/path/to/matching/xls/dslx/stdlib
 cargo fuzz run --fuzz-dir xlsynth-dslx-fuzzer/fuzz --features with-bitwuzla-system \
   --sanitizer none fuzz_bx_converter_contracts /path/to/audit-v7-unit -- -runs=1
 ```
 
 Set `DSLX_PROOF_RESULTS` to a ledger file and `DSLX_FINDINGS_DIR` to a
 findings directory for a continuous campaign. The BX ledger records `P` for a
-proof, `D` for a counterexample, `I` for a solver limit, and `X` for
-unsuccessful lowering or invalid emitted IR after BX accepts the source.
-`R` means BX rejected the source during parsing or typechecking. `S` means
-the contract or its dependencies are outside this target's scope. A `D`
-identifies a disagreement with the independent reference. For inference cases
-where BX specifies different rules for a binding, check the BX contract before
-attributing a compiler defect.
+proof against the independent reference. `A` means BX disagreed with that
+reference but proved equivalent to DSLX. These inputs are counted without
+saving a finding or stopping the fuzzer. `D` records a value or assertion
+counterexample between BX and DSLX after BX failed the reference check. The
+diagnostic includes both comparisons, which can have different witnesses.
+`X` records a BX lowering, emitted IR or signature failure confirmed by
+comparison with DSLX. `I` means a solver limit or unusable DSLX output left
+the comparison unresolved. Set `DSLX_INCONCLUSIVE_DIR` to retain these
+inputs for replay. `R` means BX rejected the source during parsing or
+typechecking. `S` means the contract or its dependencies are outside this
+target's scope.

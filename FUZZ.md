@@ -374,9 +374,10 @@ the target.
 Replays audit-v7 bytes as self-contained combinational BX functions. For
 accepted source, the target lowers the BX function, checks its exact public
 signature, and proves the value and assertion behavior against the generator's
-independent IR with Bitwuzla. The independent reference can expose wrong
-values shared by the BX and DSLX implementations. The campaign counts frontend
-rejections and out-of-scope cases separately. [Target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md)
+independent IR with Bitwuzla. On a discrepancy it compiles the same source
+with the configured DSLX converter and compares the two emitted functions
+over all inputs. The campaign counts equivalent BX and DSLX behavior
+separately and retains differences for triage. [Target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md)
 
 ### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_dslx_converter_contracts.rs
 

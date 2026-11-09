@@ -117,12 +117,13 @@ impl Campaign {
         self.record_mark(mark);
     }
 
-    /// Count unproved BX inputs separately. A DSLX audit program can be
-    /// outside the BX language or require an oracle other than a value proof.
+    /// Keep BX-specific findings separate from shared DSLX behavior and from
+    /// programs that never reached a proof.
     pub fn record_bx(&self, data: &[u8], family: &str, result: Result<BxOutcome, CheckFailure>) {
         match result {
             Ok(BxOutcome::OutsideScope) => self.record_mark(b'S'),
             Ok(BxOutcome::FrontendRejected(_)) => self.record_mark(b'R'),
+            Ok(BxOutcome::SharedWithDslx) => self.record_mark(b'A'),
             Ok(BxOutcome::Checked(verdict)) => self.record(data, Some(family), Ok(verdict)),
             Err(failure) => self.record(data, Some(family), Err(failure)),
         }
@@ -144,21 +145,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bx_skips_and_frontend_rejections_never_increment_proofs() -> std::io::Result<()> {
+    fn bx_counts_shared_behavior_separately_from_proofs_and_findings() -> std::io::Result<()> {
         let ledger = tempfile::NamedTempFile::new()?;
+        let findings = tempfile::tempdir()?;
         let campaign = Campaign {
             proof_results: Some(Mutex::new(ledger.reopen()?)),
             inconclusive_dir: None,
-            findings_dir: None,
+            findings_dir: Some(findings.path().to_owned()),
         };
         for outcome in [
             BxOutcome::OutsideScope,
             BxOutcome::FrontendRejected("unsupported".into()),
+            BxOutcome::SharedWithDslx,
             BxOutcome::Checked(EquivResult::Proved),
         ] {
             campaign.record_bx(&[], "test", Ok(outcome));
         }
-        assert_eq!(std::fs::read(ledger.path())?, b"SRP");
+        assert_eq!(std::fs::read(ledger.path())?, b"SRAP");
+        assert_eq!(std::fs::read_dir(findings.path())?.count(), 0);
         Ok(())
     }
 }
