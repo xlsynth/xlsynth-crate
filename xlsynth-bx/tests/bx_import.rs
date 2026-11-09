@@ -497,6 +497,46 @@ block circuit(clk, x: u8) -> (u8, u8) { (lib::original(x), lib::overridden()) }
 }
 
 #[test]
+fn named_maps_in_library_blocks_resolve_later_callback_imports() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "math.bx",
+        "pub fn bump(x: u8) -> u8 { x + u8:1 }",
+    )?;
+    write_module(
+        dir.path(),
+        "stage.bx",
+        r#"
+#[allow(combinational_block)]
+pub block apply(clk, x: u8) -> u8 {
+    let ys = map({ [x] }, math::bump);
+    let zs = map((u8:2..u8:4), math::bump);
+    ys[u32:0] + zs[u32:0]
+}
+use math;
+"#,
+    )?;
+    let source = r#"
+use stage;
+fn map(x: u8, y: u8) -> u8 { x ^ y }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 { let y = stage::apply(x); y }
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 10)?, IrValue::make_ubits(8, 14)?);
+
+    let root_block = r#"
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 { map([x], bump)[u32:0] }
+use math::bump;
+"#;
+    let package = compile_design(root_block, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 10)?, IrValue::make_ubits(8, 11)?);
+    Ok(())
+}
+
+#[test]
 fn signatures_bind_each_parameter_before_qualifying_its_type() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     for module in ["helper", "clk", "rst"] {

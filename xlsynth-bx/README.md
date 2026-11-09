@@ -104,7 +104,7 @@ BX emits XLS IR for runtime array operations. For an out-of-range index, IR read
 
 ### Compile-time function parameters
 
-Declare callable parameters between angle brackets in the order callers will supply them. Give each callback its argument and result types. As with a local function declaration, omitting the result annotation means `()`. Inside the function body, use the parameter as the callee of a direct call.
+Declare callable parameters between angle brackets in the order callers will supply them. Give each callback its argument and result types. As with a local function declaration, omitting the result annotation means `()`. Inside the function body, invoke the parameter directly or pass a unary parameter as the callback in `map(xs, F)`.
 
 ```text
 fn fold4<F: fn(u16, u16) -> u16>(xs: u16[4], seed: u16) -> u16 {
@@ -124,7 +124,14 @@ BX checks the body against its declared signatures, then generates one function 
 
 ### Map expressions
 
-Use `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The input supplies the parameter type, and the lambda's result supplies the output element type. The output has the same length as the input.
+Use `map(array, function_name)` or `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The callback takes one element, and its return type supplies the output element type. The output has the same length as the input.
+
+```text
+fn widen(x: u8) -> u16 { x as u16 }
+fn widen_all(xs: u8[4]) -> u16[4] { map(xs, widen) }
+```
+
+A named callback can be a visible concrete BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX uses the input element type to infer imported DSLX function specializations. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
 
 ```text
 #[allow(combinational_block)]
@@ -147,7 +154,8 @@ capturing callback that returns a tuple or array literal, as in
 
 Write `|x: u8| -> u16 { ... }` to give explicit types. Give input literals their intended width before mapping. For example, `[1, 3]` supplies two-bit elements, so `map([1, 3], |x| x + 1)` yields `[2, 0]`. For eight-bit arithmetic, write `map([u8:1, u8:3], |x| x + 1)`. A result annotation is useful for a body that returns an unsized literal, as in `|_| -> u16 { 0 }`. A constant integer range is also a valid input, for example `map(u8:0..=u8:3, |x| x * x)`.
 
-BX emits an XLS IR `map` when the callback needs no enclosing wires. For a
+BX emits an XLS IR `map` when the callback needs no enclosing wires. A named
+callback maps directly to its linked function. For a
 capturing callback, BX evaluates the first element directly and lowers the
 remaining elements to a `counted_for` with the captures as invariant
 arguments. Structural unrolling and generic block specialization
@@ -462,7 +470,7 @@ block pipeline(clk, rst, packet: (bool, u8)) -> (bool, u32) {
 
 With public DSLX helpers `widen(u8) -> u16` and `square(u16) -> u32`, the first stage produces `(bool, u16)`. That pair supplies both the valid bit and the payload of the second stage. BX emits a direct call to each selected helper. Calls with identical concrete types and callback identities share a block definition. Each call still creates its own hardware instance.
 
-The same syntax accepts local BX functions and signature-checked externs. For example, `extern fn widen(x: u8) -> u16 = "wide_ir";` lets a caller write `advance<widen>(packet)` when lowering into a package containing `wide_ir`. Callable parameters are usable only as direct callees in the block body.
+The same syntax accepts local BX functions and signature-checked externs. For example, `extern fn widen(x: u8) -> u16 = "wide_ir";` lets a caller write `advance<widen>(packet)` when lowering into a package containing `wide_ir`. A block body can invoke a callable parameter directly or use it as a `map` callback.
 
 ### Replicating child blocks
 

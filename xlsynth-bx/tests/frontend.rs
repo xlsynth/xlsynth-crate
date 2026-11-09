@@ -18,6 +18,8 @@ mod local_functions;
 mod map_lambda;
 #[path = "frontend/module_constants.rs"]
 mod module_constants;
+#[path = "frontend/named_map.rs"]
+mod named_map;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
 #[path = "frontend/unroll_for.rs"]

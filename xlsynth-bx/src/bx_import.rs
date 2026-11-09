@@ -119,6 +119,17 @@ impl Names {
 
     /// Resolve one free reference before it can see another file's bindings.
     fn resolve(&self, name: &str, at: Option<usize>) -> Result<String, String> {
+        self.resolve_with_root_fallback(name, at, name)
+    }
+
+    /// Preserve the caller's interpretation of a name with no visible root
+    /// binding.
+    fn resolve_with_root_fallback(
+        &self,
+        name: &str,
+        at: Option<usize>,
+        fallback: &str,
+    ) -> Result<String, String> {
         if name.contains('$') {
             return Err(format!("invalid source reference '{name}'"));
         }
@@ -168,7 +179,7 @@ impl Names {
                 _ => Err(format!("unknown name '{name}' in BX module '{subject}'")),
             };
         }
-        Ok(name.to_owned())
+        Ok(fallback.to_owned())
     }
 }
 

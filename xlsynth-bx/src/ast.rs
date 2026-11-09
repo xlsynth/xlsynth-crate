@@ -299,6 +299,13 @@ pub enum Expr {
         args: Vec<Expr>,
     },
     Map(Box<MapExpr>),
+    /// A named callback over a range. Array operands use ordinary call syntax
+    /// until checking resolves the callee and callback in their lexical scope.
+    NamedMap {
+        target: String,
+        iterable: Box<ForIterable>,
+        callback: String,
+    },
     Unary {
         op: UnaryOp,
         value: Box<Expr>,

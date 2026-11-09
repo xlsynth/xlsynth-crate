@@ -245,6 +245,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                     pending.push(SourceNode::Iterable(&map.iterable));
                     pending.push(SourceNode::Expression(&map.body));
                 }
+                Expr::NamedMap { iterable, .. } => pending.push(SourceNode::Iterable(iterable)),
                 Expr::Scope { bindings, result } => {
                     for binding in bindings {
                         binding.pattern.visit_names(&mut |name| {

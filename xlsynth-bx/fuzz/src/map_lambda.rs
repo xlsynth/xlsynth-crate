@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compare anonymous `map` calls and their lexical captures with pinned DSLX.
+//! Compare named and anonymous `map` callbacks with pinned DSLX.
 
 use crate::eval::expr_eval::{bx_source, dslx_source};
-use crate::function_oracle::{DslxExecution, FunctionProgram, compare_program};
+use crate::function_oracle::{DslxExecution, FunctionProgram, compare_bx_program, compare_program};
 use crate::input_seed;
+use std::fs;
+use tempfile::tempdir;
 use xlsynth::dslx::{ImportData, MatchableModuleMember, parse_and_typecheck};
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{check_module, parse_module};
@@ -12,7 +14,10 @@ use xlsynth_bx::{check_module, parse_module};
 /// Vary array and result shapes, lexical captures, nested maps and helpers.
 pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
     let mut bytes = data.iter().copied().chain(std::iter::repeat(0));
-    let shape = bytes.next().unwrap() % 7;
+    let shape = bytes.next().unwrap() % 9;
+    if shape >= 7 {
+        return check_named_map(data, shape == 8);
+    }
     if shape == 6 {
         return check_counted_captures(data);
     }
@@ -164,12 +169,154 @@ pub fn check_map_lambda(data: &[u8]) -> Result<(), String> {
     )
 }
 
+/// Compare a named call and its forwarding lambda against the same DSLX map.
+fn check_named_map(data: &[u8], imported: bool) -> Result<(), String> {
+    let mut bytes = data.iter().copied().skip(1).chain(std::iter::repeat(0));
+    let flags = bytes.next().unwrap();
+    let shape = flags & 3;
+    let input_width = usize::from(bytes.next().unwrap() % 128) + 1;
+    let output_width = usize::from(bytes.next().unwrap() % 128) + 1;
+    let length = usize::from(bytes.next().unwrap() % 4) + 1;
+    let output_shape = bytes.next().unwrap() % 3;
+    let mutation = bytes.next().unwrap() % 16;
+    let valid = mutation < 12;
+    let input_sign = if flags & 4 == 0 { 'u' } else { 's' };
+    let output_sign = if flags & 8 == 0 { 'u' } else { 's' };
+    // Both endpoints of a signed or unsigned range must fit the element type.
+    let input_width = if shape == 3 {
+        input_width.max(4)
+    } else {
+        input_width
+    };
+    let input_bits = format!("{input_sign}N[{input_width}]");
+    let output_bits = format!("{output_sign}N[{output_width}]");
+    let element_type = |bits: &str| match shape {
+        1 => format!("({bits}, bool)"),
+        2 => format!("{bits}[2]"),
+        _ => bits.to_owned(),
+    };
+    let element = element_type(&input_bits);
+    let (out, value) = match output_shape {
+        0 => (output_bits.clone(), "v ^ (v >> u8:1)"),
+        1 => (format!("({output_bits}, bool)"), "(v, v == 0)"),
+        _ => (format!("{output_bits}[2]"), "[v, !v]"),
+    };
+    let selected = match shape {
+        1 => "if item.1 { item.0 } else { !item.0 }",
+        2 => "item[u32:1] - item[u32:0]",
+        _ => "item",
+    };
+    let (parametrics, helper_element) = if mutation == 13 {
+        (
+            "",
+            element_type(&format!("{input_sign}N[{}]", input_width + 1)),
+        )
+    } else if imported {
+        ("<N: u32>", element_type(&format!("{input_sign}N[N]")))
+    } else {
+        ("", element.clone())
+    };
+    let extra = if mutation == 12 { ", other: u32" } else { "" };
+    let helper = format!(
+        "fn transform{parametrics}(item: {helper_element}{extra}) -> {out} {{ let v = ({selected}) as {output_bits}; {value} }}"
+    );
+    let mut bx_functions = helper.clone();
+    let mut native_functions = helper.clone();
+    let mut bx_target = "transform";
+    let mut native_target = "transform";
+    let directory = if imported {
+        let directory = tempdir().map_err(|e| e.to_string())?;
+        fs::write(directory.path().join("ops.x"), format!("pub {helper}"))
+            .map_err(|e| e.to_string())?;
+        native_functions = "import ops;".into();
+        native_target = "ops::transform";
+        if flags & 16 == 0 || mutation == 14 {
+            bx_functions = "use ops::transform;".into();
+        } else {
+            bx_functions = "use ops;".into();
+            bx_target = "ops::transform";
+        }
+        Some(directory)
+    } else {
+        None
+    };
+
+    let argument = if mutation == 15 {
+        "u8:0".to_string()
+    } else if shape == 3 {
+        let start: i32 = if input_sign == 's' { -2 } else { 1 };
+        let inclusive = flags & 32 != 0;
+        let end = start + length as i32 - i32::from(inclusive);
+        let op = if inclusive { "..=" } else { ".." };
+        format!("({input_bits}:{start}{op}{input_bits}:{end})")
+    } else {
+        "xs".into()
+    };
+    let shadow = if mutation == 14 {
+        // The local value hides a callable of the same name.
+        native_target = "transform";
+        "let transform = xs;"
+    } else {
+        ""
+    };
+    let params = format!("xs: {element}[{length}]");
+    let array = format!("{out}[{length}]");
+    let result = if valid {
+        format!("({array}, {array})")
+    } else {
+        array
+    };
+    let native_map = format!("map({argument}, {native_target})");
+    let native_body = if valid {
+        format!("let expected = {native_map}; (expected, expected)")
+    } else {
+        format!("{shadow} {native_map}")
+    };
+    let body = if valid {
+        let maps = |target| {
+            format!("(map({argument}, {target}), map({argument}, |x| -> {out} {{ {target}(x) }}))")
+        };
+        if flags & 64 != 0 {
+            bx_functions.push_str(&format!(
+                "\nfn apply<F: fn({element}) -> {out}>({params}) -> {result} {{ {} }}",
+                maps("F")
+            ));
+            format!("apply<{bx_target}>(xs)")
+        } else {
+            maps(bx_target)
+        }
+    } else {
+        // Check the named form alone so an invalid forwarding lambda cannot
+        // mask an incorrectly accepted named callback.
+        format!("{shadow} map({argument}, {bx_target})")
+    };
+    let bx = format!("{bx_functions}\n{}", bx_source(&params, &result, &body));
+    compare_bx_program(
+        &bx,
+        FunctionProgram {
+            functions: native_functions,
+            params,
+            result,
+            body: native_body,
+            valid: Some(valid),
+            dslx_ir: true,
+            dynamic_index: None,
+        },
+        input_seed(data),
+        DslxExecution::ConcreteConstants,
+        Vec::new(),
+        &directory.iter().map(|d| d.path()).collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("{error}\nCallback:\n{helper}"))
+}
+
 /// Literal operands determine their width before the lambda is called. The
 /// pinned DSLX typechecker accepts a wider annotation but passes narrow values.
 fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
     let mut bytes = data.iter().copied().skip(1).chain(std::iter::repeat(0));
     let flags = bytes.next().unwrap();
     let mode = flags % 3;
+    let named = flags & 8 != 0;
     let width = 2 + usize::from(bytes.next().unwrap() % 7);
     let high = 1usize << (width - 1);
     let operand = if range {
@@ -190,7 +337,7 @@ fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
     } else {
         format!(": uN[{annotated}]")
     };
-    if mode != 2 && flags & 4 != 0 {
+    if !named && mode != 2 && flags & 4 != 0 {
         let ty = format!("uN[{width}]");
         let bias = usize::from(bytes.next().unwrap()) % (1 << width);
         let functions = format!(
@@ -213,13 +360,24 @@ fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
         );
     }
     let calculation = if mode == 2 { "x" } else { "x + 1" };
-    let body = format!("map({operand}, |x{annotation}| {calculation})");
+    let (functions, body) = if named {
+        let ty = format!("uN[{annotated}]");
+        (
+            format!("fn transform(x: {ty}) -> {ty} {{ {calculation} }}"),
+            format!("map({operand}, transform)"),
+        )
+    } else {
+        (
+            String::new(),
+            format!("map({operand}, |x{annotation}| {calculation})"),
+        )
+    };
     if mode != 2 {
-        return compare_literal_program(data, "", result, body, true);
+        return compare_literal_program(data, functions, "", result, body, true);
     }
-    let bx = bx_source("", &result, &body);
+    let bx = format!("{functions}\n{}", bx_source("", &result, &body));
     let reference = format!(
-        "{}\nconst OBSERVED = sample();",
+        "{functions}\n{}\nconst OBSERVED = sample();",
         dslx_source("", &result, &body)
     );
     let inferred = Type::Bits {
@@ -230,12 +388,12 @@ fn check_inferred_literal_map(data: &[u8], range: bool) -> Result<(), String> {
         signed: false,
         width: annotated,
     };
-    check_narrow_native_result(
-        &bx,
-        &reference,
-        &format!("map lambda parameter expects {parameter}, got {inferred}"),
-        width,
-    )
+    let diagnostic = if named {
+        format!("callback 'transform' has parameter types ({parameter}), expected ({inferred})")
+    } else {
+        format!("map lambda parameter expects {parameter}, got {inferred}")
+    };
+    check_narrow_native_result(&bx, &reference, &diagnostic, width)
 }
 
 /// Compare captures of the counted index, changing carry and loop-local lets.
@@ -277,7 +435,7 @@ fn check_counted_captures(data: &[u8]) -> Result<(), String> {
         "for (i, acc) in {range} {{ let local = {local}; map(acc, |x| -> {ty} {{ {callback} }}) }}(xs)"
     );
     if mode < 2 {
-        return compare_literal_program(data, &params, result, body, true);
+        return compare_literal_program(data, String::new(), &params, result, body, true);
     }
     // Pinned DSLX accepts the wider callback result but its bytecode returns
     // the capture's materialized width. Converting this counted carry can
@@ -317,7 +475,14 @@ fn check_constant_result(data: &[u8]) -> Result<(), String> {
     let body = format!("map(xs, {callback})");
     let params = "xs: u8[2]";
     if annotated || declared <= width {
-        return compare_literal_program(data, params, result, body, declared >= width);
+        return compare_literal_program(
+            data,
+            String::new(),
+            params,
+            result,
+            body,
+            declared >= width,
+        );
     }
     let bx = bx_source(params, &result, &body);
     let reference = format!(
@@ -344,6 +509,7 @@ fn check_constant_result(data: &[u8]) -> Result<(), String> {
 /// frontends.
 fn compare_literal_program(
     data: &[u8],
+    functions: String,
     params: &str,
     result: String,
     body: String,
@@ -351,7 +517,7 @@ fn compare_literal_program(
 ) -> Result<(), String> {
     compare_program(
         FunctionProgram {
-            functions: String::new(),
+            functions,
             params: params.into(),
             result,
             body,
@@ -415,6 +581,23 @@ mod tests {
     use super::check_map_lambda;
 
     #[test]
+    fn compare_generated_named_maps() -> Result<(), String> {
+        for family in [7, 8] {
+            for shape in 0..4 {
+                for result in 0..3 {
+                    for flags in [0, 20, 72, 124] {
+                        check_map_lambda(&[family, flags | shape, 67, 12, 3, result, 0])?;
+                    }
+                }
+                for mutation in 12..16 {
+                    check_map_lambda(&[family, 4 | shape, 11, 89, 2, 1, mutation])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn compare_generated_map_lambdas() -> Result<(), String> {
         for shape in 0..3 {
             for result in 0..3 {
@@ -441,7 +624,7 @@ mod tests {
             }
         }
         for shape in 3..5 {
-            for mode in [0, 1, 2, 4, 6] {
+            for mode in [0, 1, 2, 4, 6, 8, 9, 10] {
                 for width in [0, 3, 6] {
                     check_map_lambda(&[shape, mode, width, 31, 19, 55])?;
                 }

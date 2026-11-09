@@ -356,7 +356,7 @@ pub(crate) fn parse_with_templates(
 /// Collect use leaves before parsing expressions that depend on import kinds.
 pub(crate) fn module_uses(source: &str) -> Result<Vec<UsePath>, String> {
     let mut paths = Vec::new();
-    Parser::new(source, false)?.visit_uses(|path, _| paths.push(path))?;
+    Parser::new(source, false)?.scan_module_bindings(|path, _| paths.push(path))?;
     Ok(paths)
 }
 
@@ -384,6 +384,8 @@ struct Parser<'s> {
     /// Pure operands such as counted-loop iterables and map inputs permit
     /// lexical value scopes while keeping the enclosing identifier dialect.
     expression_grammar: ExpressionGrammar,
+    /// Tracks module and lexical bindings that hide the builtin map in a block.
+    block_map_shadowed: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
     /// Local callback-template declarations disambiguate angle brackets from
@@ -543,6 +545,7 @@ impl<'s> Parser<'s> {
             dslx_type_display,
             value_context: ValueContext::Block,
             expression_grammar: ExpressionGrammar::Block,
+            block_map_shadowed: false,
             block_type_params: BTreeSet::new(),
             callback_templates,
             hidden_templates: Vec::new(),
@@ -621,19 +624,23 @@ impl<'s> Parser<'s> {
         self.value_context != ValueContext::Block
     }
 
-    /// Restore only the template names shadowed in this lexical scope.
+    /// Restore callable names used to disambiguate syntax when leaving this
+    /// scope.
     fn with_name_scope<T>(
         &mut self,
         parse: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let first = self.hidden_templates.len();
+        let map_shadowed = self.block_map_shadowed;
         let result = parse(self);
+        self.block_map_shadowed = map_shadowed;
         self.callback_templates
             .extend(self.hidden_templates.drain(first..));
         result
     }
 
-    fn hide_template(&mut self, name: &str) {
+    fn shadow_callable(&mut self, name: &str) {
+        self.block_map_shadowed |= name == "map";
         if let Some(entry) = self.callback_templates.remove_entry(name) {
             self.hidden_templates.push(entry);
         }
@@ -643,7 +650,7 @@ impl<'s> Parser<'s> {
     /// name.
     fn hide_pattern_name(&mut self, name: &str) {
         if name != "_" {
-            self.hide_template(name);
+            self.shadow_callable(name);
         }
     }
 
@@ -669,9 +676,11 @@ impl<'s> Parser<'s> {
         }
     }
 
-    /// Walk only top-level use declarations, sharing use-tree parsing and
-    /// duplicate binding checks with the complete module parse.
-    fn visit_uses(&mut self, mut visit: impl FnMut(UsePath, usize)) -> Result<(), String> {
+    /// Find top-level imports and bare callable declarations that shadow map.
+    fn scan_module_bindings(
+        &mut self,
+        mut visit: impl FnMut(UsePath, usize),
+    ) -> Result<(), String> {
         let mut depth = 0usize;
         let mut bindings = BTreeSet::new();
         let mut paths = Vec::new();
@@ -681,6 +690,13 @@ impl<'s> Parser<'s> {
             match token.text {
                 "{" => depth += 1,
                 "}" => depth = depth.saturating_sub(1),
+                "fn" | "block" | "struct"
+                    if depth == 0
+                        && self.peek(0) == "map"
+                        && matches!(self.peek(1), "(" | "<" | "{") =>
+                {
+                    self.block_map_shadowed = true;
+                }
                 "use"
                     if depth == 0
                         && (self.pos == 1
@@ -689,6 +705,7 @@ impl<'s> Parser<'s> {
                     self.use_tree(&mut paths, Some(&mut bindings))?;
                     self.expect(";")?;
                     for path in paths.drain(..) {
+                        self.block_map_shadowed |= path.binding() == Some("map");
                         visit(path, token.start);
                     }
                 }
@@ -705,9 +722,13 @@ impl<'s> Parser<'s> {
         &mut self,
         templates: Option<&BTreeSet<String>>,
     ) -> Result<Module, String> {
-        if self.tokens.iter().any(|token| token.text == "<") {
+        if self
+            .tokens
+            .iter()
+            .any(|token| matches!(token.text, "<" | "map"))
+        {
             let mut imports = BTreeMap::new();
-            self.visit_uses(|mut path, start| {
+            self.scan_module_bindings(|mut path, start| {
                 let name = path.components.pop().expect("parsed use leaf");
                 let binding = TemplateBinding {
                     direct: templates
@@ -1001,10 +1022,10 @@ impl<'s> Parser<'s> {
         };
         self.expect("{")?;
         for formal in &callback_params {
-            self.hide_template(&formal.name);
+            self.shadow_callable(&formal.name);
         }
         for param in &params {
-            self.hide_template(&param.name);
+            self.shadow_callable(&param.name);
         }
         let body = self.value_scope()?.value;
         Ok(Function {
@@ -1191,17 +1212,17 @@ impl<'s> Parser<'s> {
         let signature = self.block_signature(name)?;
         self.expect("{")?;
         for name in &params.type_params {
-            self.hide_template(name);
+            self.shadow_callable(name);
         }
         for formal in &params.callback_params {
-            self.hide_template(&formal.name);
+            self.shadow_callable(&formal.name);
         }
-        self.hide_template(&signature.clock);
+        self.shadow_callable(&signature.clock);
         if let Some(reset) = &signature.reset {
-            self.hide_template(reset);
+            self.shadow_callable(reset);
         }
         for port in &signature.params {
-            self.hide_template(&port.name);
+            self.shadow_callable(&port.name);
         }
         let body = self.body()?;
         self.block_type_params.clear();
@@ -1429,7 +1450,7 @@ impl<'s> Parser<'s> {
                 } else {
                     None
                 };
-                self.hide_template(&param.name);
+                self.shadow_callable(&param.name);
                 statements.push(Stmt::Reg {
                     name: param.name,
                     ty: param.ty,
@@ -1441,7 +1462,7 @@ impl<'s> Parser<'s> {
                 self.pos += 1;
                 let name = self.ident()?;
                 self.expect(":")?;
-                self.hide_template(&name);
+                self.shadow_callable(&name);
                 statements.push(Stmt::Inst {
                     name,
                     block: if self.peek(1) == "::" {
@@ -1564,7 +1585,7 @@ impl<'s> Parser<'s> {
         self.expect("=")?;
         let value = self.expr()?;
         for name in names {
-            self.hide_template(&name);
+            self.shadow_callable(&name);
         }
         Ok((
             LetBinding {
@@ -1855,7 +1876,7 @@ impl<'s> Parser<'s> {
         self.expect("{")?;
         let body = self.with_name_scope(|p| {
             for name in names {
-                p.hide_template(&name);
+                p.shadow_callable(&name);
             }
             p.value_scope()
         })?;
@@ -2258,8 +2279,11 @@ impl<'s> Parser<'s> {
             });
         }
         if self.eat("(") {
-            if name == "map" && self.has_lambda_argument() {
-                return self.map_call();
+            if name == "map" && self.peek(0) != ")" {
+                let lambda = self.has_lambda_argument();
+                if lambda || self.dslx_value_grammar() || !self.block_map_shadowed {
+                    return self.map_call(name, lambda);
+                }
             }
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
@@ -2411,12 +2435,39 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// An inline lambda is available only as the second argument of `map`.
-    /// Calls with ordinary arguments retain their usual name resolution.
-    fn map_call(&mut self) -> Result<ParsedExpr, String> {
+    /// Accept a range in the first operand and an inline lambda in the second.
+    /// Calls with ordinary arguments retain their usual grammar and resolution.
+    fn map_call(&mut self, target: String, lambda: bool) -> Result<ParsedExpr, String> {
         let iterable = self.with_value_grammar(|p| p.for_iterable(Braces::Struct))?;
+        if !lambda && let ParsedIterable::Array(first) = iterable {
+            let mut args = vec![first];
+            if !self.eat(")") {
+                self.expect(",")?;
+                args.extend(self.list(")", Self::expr)?);
+            }
+            return self.aggregate(args, |args| Expr::Call { name: target, args });
+        }
         self.expect(",")?;
-        let mapped = if self.value_context == ValueContext::Block {
+        let mapped = if !lambda {
+            let offset = self.tokens[self.pos].start;
+            let callback = self.expr()?;
+            let Expr::Name(callback) = callback.value else {
+                return Err(diagnostic(
+                    self.source,
+                    offset,
+                    "expected a named map function",
+                ));
+            };
+            let (iterable, height) = iterable.into_ast();
+            self.compose(
+                height,
+                Expr::NamedMap {
+                    target,
+                    iterable: Box::new(iterable),
+                    callback,
+                },
+            )?
+        } else if self.value_context == ValueContext::Block {
             self.block_map_lambda(iterable)?
         } else {
             self.map_lambda(iterable)?
@@ -4150,6 +4201,93 @@ block wrapper(clk, x: u8, y: u8) -> u8 { map(x, (x | y)) }
         };
         assert_eq!(name, "map");
         assert!(matches!(&args[..], [Expr::Name(_), Expr::Binary { .. }]));
+        Ok(())
+    }
+
+    #[test]
+    fn shadowed_map_calls_keep_ordinary_block_operand_grammar() -> Result<(), String> {
+        for operand in [
+            "unroll_for! (i, a) in u8:0..u8:1 { let v = a + i; v }(x) + u8:1",
+            "{ let y = x; { y } }",
+            "if true { if true { () }; x } else { x }",
+            "map([x], |v| (if true { () }, v).1)[u32:0]",
+        ] {
+            let source = format!(
+                "block m(clk, x: u8) -> u8 {{ map({operand}, x) }}\n\
+                 block n(clk, x: u8) -> u8 {{ other({operand}, x) }}\n\
+                 fn map(a: u8, b: u8) -> u8 {{ a + b }}"
+            );
+            let module = parse_module(&source)?;
+            let (Expr::Call { args: map, .. }, Expr::Call { args: other, .. }) =
+                (&module.blocks[0].output, &module.blocks[1].output)
+            else {
+                panic!("expected ordinary calls with {operand}")
+            };
+            assert_eq!(map, other, "{operand}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn block_map_grammar_follows_imports_externs_and_callback_formals() -> Result<(), String> {
+        for (formals, declaration) in [
+            ("", "use ops::{other, map};"),
+            ("", "extern fn map(a:u8, b:u8) -> u8;"),
+            ("", "block map(clk, a:u8, b:u8) -> u8 { a }"),
+            ("<map: fn(u8, u8) -> u8>", ""),
+        ] {
+            let source = format!(
+                "block apply{formals}(clk, x:u8) -> u8 {{ map({{ u8:0 }}, x) }}\n{declaration}"
+            );
+            assert!(parse_module(&source).is_err(), "{source}");
+            parse_module(&source.replace("{ u8:0 }", "u8:0"))?;
+        }
+        parse_module(
+            "extern fn map::step(x:u8) -> u8; block apply(clk,x:u8) -> u8[1] { map({[x]}, map::step) }",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn named_maps_preserve_call_syntax_for_arrays_and_grouped_ranges() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn by_range() -> u8[3] { map(((u8:1..=u8:3)), (helpers::twice),) }
+fn by_array(xs: u8[3]) -> u8[3] { map(map(xs, twice), helpers::twice) }
+"#,
+        )?;
+        let Expr::NamedMap {
+            target,
+            iterable,
+            callback,
+        } = &module.functions[0].body
+        else {
+            panic!("expected a map over a range")
+        };
+        assert_eq!(target, "map");
+        assert_eq!(callback, "helpers::twice");
+        assert!(matches!(
+            iterable.as_ref(),
+            ForIterable::Range {
+                inclusive: true,
+                ..
+            }
+        ));
+        let Expr::Call { name, args } = &module.functions[1].body else {
+            panic!("expected an ordinary call")
+        };
+        assert_eq!(name, "map");
+        assert!(
+            matches!(&args[..], [Expr::Call { name, args }, Expr::Name(callback)]
+            if name == "map" && callback == "helpers::twice"
+            && matches!(&args[..], [Expr::Name(xs), Expr::Name(f)] if xs == "xs" && f == "twice"))
+        );
+        for value in ["other(u8:0..u8:3, f)", "u8:0..u8:3", "map(u8:0..u8:3, f())"] {
+            assert!(
+                parse_module(&format!("fn g() -> u8[3] {{ {value} }}")).is_err(),
+                "{value}"
+            );
+        }
         Ok(())
     }
 

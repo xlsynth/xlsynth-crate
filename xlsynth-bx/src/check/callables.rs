@@ -21,6 +21,12 @@ pub(super) enum CallbackSource<'m> {
     Imported { module: String, member: String },
 }
 
+/// A map may directly invoke a formal in the current specialization.
+pub(super) enum MapCallee<'m> {
+    Formal(usize),
+    Declaration(CallbackSource<'m>),
+}
+
 /// One formal has a fixed resolved signature for the lifetime of the module.
 /// Its validated actual can be reused at any site resolving the same source.
 #[derive(Eq, Hash, PartialEq)]
@@ -102,7 +108,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Some(&self.decls.templates[spec.block.name.as_str()].callback_indices)
     }
 
-    /// A callback name is available only as the callee of a direct call.
+    /// Look up a callable parameter for a direct call or a named map.
     pub(super) fn callback_index(&self, name: &str) -> Option<usize> {
         self.callback_indices()?.get(name).copied()
     }
@@ -178,7 +184,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// compare its return type, while block templates use it for inference.
     fn callback_result(
         &mut self,
-        name: &str,
         params: &[Type],
         source: &CallbackSource<'m>,
         block_input_nodes: Option<usize>,
@@ -205,7 +210,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         .collect::<Vec<_>>()
                         .join(", ");
                     return Err(format!(
-                        "callback '{name}' has parameter types ({actual}), expected ({expected})"
+                        "callback '{callee}' has parameter types ({actual}), expected ({expected})"
                     ));
                 }
                 let target = if f.local {
@@ -266,8 +271,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.replaying_body() {
             self.charge_expansion("callback bindings", formal.binding_work)?;
         }
-        let (target, result) =
-            self.callback_result(actual, &formal.signature.params, &key.source, None)?;
+        let (target, result) = self.callback_result(&formal.signature.params, &key.source, None)?;
         if !compatible(&result, &formal.signature.result) {
             return Err(format!(
                 "callback '{actual}' returns {result}, expected {}",
@@ -320,7 +324,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 self.charge_expansion("callback lookup", nodes)?;
                 bound
             }
-            None => self.validate_block_callback(actual, formal, bindings, key)?,
+            None => self.validate_block_callback(formal, bindings, key)?,
         };
         bindings.merge_callback_results(&bound.result_bindings, |nodes| {
             self.charge_expansion("callback result matching", nodes)
@@ -332,7 +336,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// its return pattern. Neither depends on other port or callback bindings.
     fn validate_block_callback(
         &mut self,
-        actual: &str,
         formal: &BlockCallbackFormal,
         bindings: &Bindings,
         key: BlockCallbackBinding<'m>,
@@ -355,7 +358,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             params.push(ty);
         }
         let (target, result) =
-            self.callback_result(actual, &params, &key.binding.source, Some(input_nodes))?;
+            self.callback_result(&params, &key.binding.source, Some(input_nodes))?;
         let registry = self
             .specializations
             .as_mut()
@@ -423,10 +426,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok((interface.result.clone(), K::Call { name: symbol, args }))
     }
 
-    /// Typecheck against the declared signature in both the abstract body
-    /// and its concrete instances. Abstract call nodes are never lowered.
-    pub(super) fn call_formal(&mut self, index: usize, args: &[Expr]) -> Result<(Type, K), String> {
-        let (formal, target) = if let Some(template) = self.source_template {
+    fn bound_formal(&self, index: usize) -> (&'a CallbackParam, Option<CallbackTarget<'m>>) {
+        if let Some(template) = self.source_template {
             (
                 &template.callback_params[index].signature,
                 self.function_spec.map(|spec| spec.targets[index]),
@@ -434,7 +435,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             let bound = &self.specialization.expect("bound block callback").callbacks[index];
             (&bound.signature, Some(bound.target))
-        };
+        }
+    }
+
+    /// Typecheck against the declared signature in both the abstract body
+    /// and its concrete instances. Abstract call nodes are never lowered.
+    pub(super) fn call_formal(&mut self, index: usize, args: &[Expr]) -> Result<(Type, K), String> {
+        let (formal, target) = self.bound_formal(index);
         let dslx_arguments =
             self.kind == BodyKind::Function || !matches!(target, Some(CallbackTarget::Extern(_)));
         let args = self.call_arguments(
@@ -443,7 +450,87 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             formal.params.iter().map(|ty| (None, ty)),
             dslx_arguments,
         )?;
-        let call = match target {
+        let call = self.callback_call(target, &formal.name, args);
+        Ok((formal.result.clone(), call))
+    }
+
+    /// Resolve names even when an enclosing loop has no iterations.
+    pub(super) fn map_callee(
+        &self,
+        name: &str,
+        is_local: impl Fn(&str) -> bool,
+    ) -> Result<MapCallee<'m>, String> {
+        if let Some(index) = self.callback_index(name)
+            && !is_local(name)
+        {
+            return Ok(MapCallee::Formal(index));
+        }
+        // An extern declaration binds its full qualified name. A value
+        // sharing its qualifier can still shadow an imported module.
+        if let Some(callee) = self.qualified_extern(name) {
+            return self
+                .callback_source(callee, |_| false)
+                .map(MapCallee::Declaration);
+        }
+        self.callback_source(name, is_local)
+            .map(MapCallee::Declaration)
+    }
+
+    /// Recover a qualified extern's declaration name if scope preparation
+    /// substituted an alias for an unrelated value sharing its qualifier.
+    pub(super) fn qualified_extern(&self, name: &str) -> Option<&'m str> {
+        let (head, member) = name.split_once("::")?;
+        let source = super::scope::source_binding_name(head, &self.scope_alias_names);
+        let qualified = if source == head {
+            Cow::Borrowed(name)
+        } else {
+            Cow::Owned(format!("{source}::{member}"))
+        };
+        let (&callee, f) = self.decls.functions.get_key_value(qualified.as_ref())?;
+        (!f.local).then_some(callee)
+    }
+
+    /// Apply a unary callback to an already materialized array element.
+    pub(super) fn map_element_call(
+        &mut self,
+        name: &str,
+        element: TypedExpr,
+    ) -> Result<TypedExpr, String> {
+        let (target, ty) = match self.map_callee(name, |head| self.names.contains(head))? {
+            MapCallee::Formal(index) => {
+                let (formal, target) = self.bound_formal(index);
+                let [input] = formal.params.as_slice() else {
+                    return Err(format!(
+                        "map callback '{name}' requires exactly one parameter"
+                    ));
+                };
+                if !compatible(input, &element.ty) {
+                    return Err(format!(
+                        "map callback '{name}' expects {input}, got {}",
+                        element.ty
+                    ));
+                }
+                (target, formal.result.clone())
+            }
+            MapCallee::Declaration(source) => {
+                let (target, ty) =
+                    self.callback_result(std::slice::from_ref(&element.ty), &source, None)?;
+                (Some(target), ty.into_owned())
+            }
+        };
+        Ok(TypedExpr {
+            ty,
+            kind: self.callback_call(target, name, vec![element]),
+        })
+    }
+
+    fn callback_call(
+        &mut self,
+        target: Option<CallbackTarget<'m>>,
+        name: &str,
+        args: Vec<TypedExpr>,
+    ) -> K {
+        match target {
             Some(CallbackTarget::Local(name)) => {
                 if self.source_kind == BodyKind::Function {
                     self.local_callees.insert(name.to_owned());
@@ -459,11 +546,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
             Some(CallbackTarget::Imported(id)) => K::ImportedCall { id, args },
             None => K::Call {
-                name: formal.name.clone(),
+                name: name.to_owned(),
                 args,
             },
-        };
-        Ok((formal.result.clone(), call))
+        }
     }
 
     /// Apply the same data argument width and arity rules to a direct call,

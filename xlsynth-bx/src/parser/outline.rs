@@ -156,6 +156,7 @@ fn parse_outline_with_functions<'s>(
         block_type_params: BTreeSet::new(),
         callback_templates: Default::default(),
         hidden_templates: Vec::new(),
+        block_map_shadowed: false,
     };
     let mut module = DslxOutline::default();
     let mut uses = Vec::new();

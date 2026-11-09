@@ -707,6 +707,15 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             Type::Bits { .. } | Type::Bool => { /* Primitive types have no references. */ }
         }
     }
+    fn capture_iterable(iterable: &mut ForIterable, aliases: &mut BTreeMap<String, String>) {
+        match iterable {
+            ForIterable::Range { start, limit, .. } => {
+                capture_names(start, aliases);
+                capture_names(limit, aliases);
+            }
+            ForIterable::Array(array) => capture_names(array, aliases),
+        }
+    }
     fn capture_binding(
         binding: &mut LetBinding,
         aliases: &mut BTreeMap<String, String>,
@@ -846,13 +855,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 rename_type(element, aliases);
                 rename_type(carry, aliases);
             }
-            match &mut fold.iterable {
-                ForIterable::Range { start, limit, .. } => {
-                    capture_names(start, aliases);
-                    capture_names(limit, aliases);
-                }
-                ForIterable::Array(expr) => capture_names(expr, aliases),
-            }
+            capture_iterable(&mut fold.iterable, aliases);
             capture_names(&mut fold.seed, aliases);
             let mut hidden = Vec::new();
             for pattern in [&fold.element, &fold.accumulator] {
@@ -863,13 +866,7 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::Map(map) => {
             rename(&mut map.target, aliases);
-            match &mut map.iterable {
-                ForIterable::Range { start, limit, .. } => {
-                    capture_names(start, aliases);
-                    capture_names(limit, aliases);
-                }
-                ForIterable::Array(array) => capture_names(array, aliases),
-            }
+            capture_iterable(&mut map.iterable, aliases);
             if let Some(ty) = &mut map.parameter_type {
                 rename_type(ty, aliases);
             }
@@ -879,6 +876,15 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             }
             capture_names(&mut map.body, aliases);
             aliases.extend(hidden);
+        }
+        Expr::NamedMap {
+            target,
+            iterable,
+            callback,
+        } => {
+            rename(target, aliases);
+            capture_iterable(iterable, aliases);
+            rename(callback, aliases);
         }
     }
 }
