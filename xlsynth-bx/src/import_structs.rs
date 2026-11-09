@@ -50,13 +50,36 @@ struct AggregateProjection {
     suffix: String,
 }
 
+/// The names used by the frozen native DSLX import graph. Clones share its
+/// source snapshot, including the filename mappings for generated functions.
+#[derive(Clone)]
+pub struct ImportNames(Rc<NativeSourceFiles>);
+
+impl ImportNames {
+    /// Original dotted source subject of a module in the checked graph.
+    pub fn source_module_name<'a>(&'a self, native: &'a str) -> &'a str {
+        self.0.original_subject(native).unwrap_or(native)
+    }
+
+    /// The IR spelling before BX allocates symbols in the destination package.
+    pub fn restore_ir_name(&self, native: &str) -> String {
+        self.0.restore_ir_names(native)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CapturedSources {
+    pub(crate) types: WrittenTypes,
+    pub(crate) names: Option<ImportNames>,
+}
+
 pub(crate) type WrittenTypes = BTreeMap<String, Rc<crate::LinkedStruct>>;
 
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
     graph: Rc<OutlineGraph>,
-    files: Option<NativeSourceFiles>,
+    files: Option<Rc<NativeSourceFiles>>,
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
@@ -106,9 +129,9 @@ impl ImportedStructs {
     ) -> Result<(Self, Option<ImportData>), String> {
         let graph = loader.finish(uses)?;
         let files = (!uses.is_empty())
-            .then(|| graph.native_source_files())
+            .then(|| graph.native_source_files().map(Rc::new))
             .transpose()?;
-        let mut data = files.as_ref().map(NativeSourceFiles::import_data);
+        let mut data = files.as_deref().map(NativeSourceFiles::import_data);
         let registry = Self::for_snapshot(Rc::new(graph), files);
         if let Some(data) = data.as_mut() {
             for (index, path) in uses.iter().enumerate() {
@@ -134,7 +157,7 @@ impl ImportedStructs {
 
     /// Pair the frozen declaration graph with the native handles of one
     /// snapshot.
-    fn for_snapshot(graph: Rc<OutlineGraph>, files: Option<NativeSourceFiles>) -> Self {
+    fn for_snapshot(graph: Rc<OutlineGraph>, files: Option<Rc<NativeSourceFiles>>) -> Self {
         Self {
             graph,
             files,
@@ -547,6 +570,13 @@ impl ImportedStructs {
         ))
     }
 
+    pub(crate) fn take_sources(&mut self) -> CapturedSources {
+        CapturedSources {
+            types: self.written_types.take().unwrap_or_default(),
+            names: self.files.clone().map(ImportNames),
+        }
+    }
+
     /// Capture the written annotation before BX erases transparent aliases.
     /// The witness shares the same frozen files and native import context.
     pub(crate) fn record_written_type(
@@ -578,7 +608,16 @@ impl ImportedStructs {
         self.written_types
             .as_mut()
             .expect("capture enabled")
-            .insert(key, Rc::new(crate::LinkedStruct { module, annotation }));
+            .insert(
+                key,
+                Rc::new(crate::LinkedStruct {
+                    module,
+                    annotation,
+                    module_names: ImportNames(
+                        self.files.as_ref().expect("DSLX source snapshot").clone(),
+                    ),
+                }),
+            );
         Ok(())
     }
 
