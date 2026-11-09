@@ -5,10 +5,11 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, builtin_contracts, enum_width_contracts,
-    inferred_flow_contracts, literal_order_contracts, mixed_literal_contracts,
-    nested_scope_contracts, nominal_contracts, observable_value_contracts, observer_contracts,
-    pattern_acceptance, scope_contracts, tuple_literal_contracts, unrolled_loop_contracts,
+    SourceModule, aggregate_method_contracts, builtin_contracts, dead_branch_contracts,
+    enum_width_contracts, inferred_flow_contracts, literal_order_contracts,
+    map_parametric_contracts, mixed_literal_contracts, nested_scope_contracts, nominal_contracts,
+    observable_value_contracts, observer_contracts, pattern_acceptance, scope_contracts,
+    tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -156,6 +157,19 @@ pub fn generate_v7(data: &[u8]) -> Result<AuditCase, String> {
     Ok(AuditCase::Semantic(case))
 }
 
+/// Exercises map specializations, same-width scalar casts and value-parametric
+/// conditionals. Prefix an audit-v7 input with zero to preserve it.
+pub fn generate_v8(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    let case = match selector % 8 {
+        5 => map_parametric_contracts::generate(options)?,
+        6 => zero_width_cast_contracts::generate(options),
+        7 => dead_branch_contracts::generate(options),
+        _ => return generate_v7(options),
+    };
+    Ok(AuditCase::Semantic(case))
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -203,7 +217,25 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditCase, generate, generate_v2, generate_v6, generate_v7};
+    use super::{AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8};
+
+    #[test]
+    fn zero_prefix_preserves_v7_semantic_contracts() -> Result<(), String> {
+        for selector in [5, 6, 7] {
+            let bytes = [selector, 1, 2, 2, 5];
+            let prefixed = [&[0][..], &bytes].concat();
+            let (AuditCase::Semantic(old), AuditCase::Semantic(new)) =
+                (generate_v7(&bytes)?, generate_v8(&prefixed)?)
+            else {
+                return Err("expected an embedded v7 semantic contract".into());
+            };
+            assert_eq!(old.family, new.family);
+            assert_eq!(old.modules, new.modules);
+            assert_eq!(old.expected_ir, new.expected_ir);
+            assert_eq!(old.max_and_nodes, new.max_and_nodes);
+        }
+        Ok(())
+    }
 
     #[test]
     fn zero_prefix_preserves_mixed_literal_source_and_both_runtime_oracles() -> Result<(), String> {

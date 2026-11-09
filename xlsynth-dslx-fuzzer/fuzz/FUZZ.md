@@ -138,6 +138,27 @@ Use a separate audit-v7 corpus. Prefix an audit-v6 input with one zero byte to
 preserve its source and oracle. Replay archived audit-v6 inputs directly with
 their original grammar setting.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v8` to exercise three additional
+families using ordinary free functions.
+
+- Specialize a function passed to `map` with inline arithmetic, a let-bound
+  expression, or its literal result. The reference adds the folded parameter
+  to each array element independently.
+- Cast between signed and unsigned scalar types of equal width, directly and
+  through a value-parametric helper. Every cast must preserve the input bits,
+  including at width zero where there is no sign bit to extend.
+- Specialize a free function on a constexpr `if` with a runtime argument in
+  the inactive arm. Compare inline addition, a bare conditional and a
+  let-bound conditional against the live arm's value plus the addend. Vary
+  branch polarity and include controls with two constant arms.
+
+The one-byte inputs `05`, `06`, and `07` (hex) replay the baseline inline
+`map` expression, signed zero-width cast, and wrapped constexpr `if`.
+The converter runs in a child process, so a signal or nonzero exit can be
+retained with its source while the campaign continues. Successful conversions
+are checked against the same independent oracles. Prefix an audit-v7 unit
+with one zero byte to preserve its source and oracle in an audit-v8 corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
@@ -154,8 +175,9 @@ The primary CLI finding takes precedence over a secondary feedback error.
 
 ## Native BX function conversion
 
-The `fuzz_bx_converter_contracts` target accepts the same audit-v7 byte format
-as the focused DSLX worker. It runs the BX frontend on single-module source,
+The `fuzz_bx_converter_contracts` target defaults to audit-v7. Set
+`DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v8` to replay the focused DSLX worker's v8
+units. It runs the BX frontend on single-module source,
 lowers accepted functions with the BX Rust compiler, checks the signature of
 `main`, and compares its IR with the generator's independent IR for all inputs
 using Bitwuzla. On a discrepancy it compiles the original source with the
