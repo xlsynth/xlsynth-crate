@@ -117,6 +117,99 @@ block circuit(clk, x: u8) -> u8 { let y = stages::identity(x); y }
 }
 
 #[test]
+fn bx2ir_reports_each_combinational_block_once_across_source_files() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let library = "pub block invert(clk, x: u8) -> u8 { !x }";
+    let source = r#"use ops;
+block passthrough(clk, x: u8) -> u8 { x }
+pub block circuit(clk, x: u8) -> u8 {
+    let first = ops::invert(x);
+    let second = ops::invert(first);
+    second
+}
+"#;
+    fs::write(root.join("ops.bx"), library)?;
+    fs::write(root.join("circuit.bx"), source)?;
+    let demoted = driver(root, &["bx2ir", "circuit.bx", "--warnings-as-errors=false"])?;
+    let warnings = String::from_utf8(demoted.stderr)?;
+    assert!(demoted.status.success(), "{warnings}");
+    compare_golden_text(&warnings, "tests/bx2ir_combinational_warnings.golden.txt");
+
+    let strict = driver(root, &["bx2ir", "circuit.bx"])?;
+    assert_eq!(strict.status.code(), Some(1));
+    assert!(strict.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(strict.stderr)?,
+        format!("{warnings}xlsynth-driver: bx2ir: BX warnings treated as errors\n")
+    );
+
+    fs::write(
+        root.join("ops.bx"),
+        format!("#[allow(combinational_block)]\n{library}"),
+    )?;
+    fs::write(
+        root.join("circuit.bx"),
+        source.replace(
+            "block passthrough",
+            "#[allow(combinational_block)]\nblock passthrough",
+        ),
+    )?;
+    let suppressed = driver(root, &["bx2ir", "circuit.bx", "--warnings-as-errors"])?;
+    assert!(
+        suppressed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&suppressed.stderr)
+    );
+    assert!(suppressed.stderr.is_empty());
+    assert_eq!(suppressed.stdout, demoted.stdout);
+    Ok(())
+}
+
+#[test]
+fn bx2gv_applies_the_bx_warning_policy_before_writing_the_netlist() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::write(root.join("cells.lib"), MAPPING_CELLS)?;
+    stdout(root, &["lib2proto", "cells.lib", "--output=cells.proto"])?;
+    fs::write(
+        root.join("design.bx"),
+        r#"
+block invert(clk, d: bool) -> bool { !d }
+pub block capture(clk, d: bool) -> bool {
+    reg q: bool;
+    let inv = invert(d);
+    q := inv;
+    q
+}
+"#,
+    )?;
+    let mut args = vec![
+        "bx2gv",
+        "design.bx",
+        "--liberty-proto=cells.proto",
+        "-o",
+        "mapped.pb",
+    ];
+    let strict = driver(root, &args)?;
+    assert_eq!(strict.status.code(), Some(1));
+    assert!(strict.stdout.is_empty());
+    assert!(!root.join("mapped.pb").try_exists()?);
+    args.push("--warnings-as-errors=false");
+    let demoted = driver(root, &args)?;
+    let warnings = String::from_utf8(demoted.stderr)?;
+    assert!(demoted.status.success(), "{warnings}");
+    assert_eq!(
+        String::from_utf8(strict.stderr)?,
+        format!("{warnings}xlsynth-driver: bx2gv: BX warnings treated as errors\n")
+    );
+    assert!(demoted.stdout.is_empty());
+    let netlist = pb::Netlist::decode(fs::read(root.join("mapped.pb"))?.as_slice())?;
+    assert_eq!(netlist.modules.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn transitive_runtime_width_assertions_point_at_the_multiplier() -> Result<()> {
     let directory = multiplier_design(
         r#"    assert!(N >= u32:2, "min_width");
@@ -496,7 +589,9 @@ fn inferred_dslx_struct_can_share_its_name_with_functions_and_constants() -> Res
     )?;
     fs::write(
         root.join("design.bx"),
-        "use decoy; use factory; block b(clk, x: u8) -> u8 { factory::make(x).0.z }",
+        r#"use decoy; use factory;
+#[allow(combinational_block)]
+block b(clk, x: u8) -> u8 { factory::make(x).0.z }"#,
     )?;
     // The generated type probe for decoy::Leaf fails. The subsequent probe
     // for wire::Leaf must still see an intact DSLX inference graph.
@@ -528,6 +623,7 @@ dslx_path = ["configured"]
     fs::write(
         root.join("math_pipe.bx"),
         r#"use custom_math;
+#[allow(combinational_block)]
 block math_pipe(clk, x: u8) -> u8 { custom_math::twice(x) }"#,
     )?;
 
@@ -559,6 +655,7 @@ fn extern_function_links_into_the_dslx_package() -> Result<()> {
     fs::write(
         root.join("doubler.bx"),
         r#"extern fn arithmetic::twice(x: u8) -> u8;
+#[allow(combinational_block)]
 block doubler(clk, x: u8) -> u8 { arithmetic::twice(x) }"#,
     )?;
     let actual = stdout(root, &["bx2ir", "doubler.bx", "--link-ir=arithmetic.ir"])?;
@@ -589,7 +686,8 @@ fn top_override_and_reset_flags_apply_to_a_standalone_module() -> Result<()> {
     let root = directory.path();
     fs::write(
         root.join("blocks.bx"),
-        r#"pub block passthrough(clk, x: u8) -> u8 { x }
+        r#"#[allow(combinational_block)]
+pub block passthrough(clk, x: u8) -> u8 { x }
 block delay(clk, rst, x: u8) -> u8 {
     reg q: u8 = 0;
     q := x;

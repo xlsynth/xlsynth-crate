@@ -24,7 +24,7 @@ pub fn bx_source(params: &str, result: &str, body: &str) -> String {
     } else {
         format!("clk, {params}")
     };
-    format!("block sample({ports}) -> {result} {{\n{body}\n}}")
+    format!("#[allow(combinational_block)]\nblock sample({ports}) -> {result} {{\n{body}\n}}")
 }
 
 /// Wrap the shared body in a DSLX function with the same value signature.

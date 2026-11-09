@@ -23,6 +23,7 @@ use crate::infer_literal::{
     minimum_type, projected_type_compatible, unify_inferred_members,
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
+use crate::warnings::WarningCollector;
 mod callables;
 mod counted_for;
 mod function_specializations;
@@ -1387,23 +1388,24 @@ pub(crate) fn check_sources(
     // the instances actually elaborated, including children declared later.
     let mut specializations = BlockSpecializations::new(names);
     let mut checked = Vec::new();
+    let mut warning_collector = WarningCollector::default();
     for block in module
         .blocks
         .iter()
         .filter(|b| b.type_params.is_empty() && b.callback_params.is_empty())
     {
-        checked.push(
-            BodyChecker::check_block(
-                &declarations,
-                block,
-                &mut resolver,
-                &mut structs,
-                &mut specializations,
-                None,
-                &mut function_registry,
-            )
-            .map_err(|e| format!("block '{}': {e}", block.name))?,
-        );
+        let body = BodyChecker::check_block(
+            &declarations,
+            block,
+            &mut resolver,
+            &mut structs,
+            &mut specializations,
+            None,
+            &mut function_registry,
+        )
+        .map_err(|e| format!("block '{}': {e}", block.name))?;
+        warning_collector.record_block(&block.name, body.requires_hardware);
+        checked.push(body.block);
     }
     let mut specialized_blocks = BTreeSet::new();
     while let Some(spec) = specializations.pending.pop_front() {
@@ -1417,8 +1419,9 @@ pub(crate) fn check_sources(
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
+        warning_collector.record_block(&spec.block.name, block.requires_hardware);
         specialized_blocks.insert(spec.name.clone());
-        checked.push(block);
+        checked.push(block.block);
     }
     let functions =
         function_registry.finish(function_bodies, &declarations, &mut resolver, &mut structs)?;
@@ -1441,7 +1444,9 @@ pub(crate) fn check_sources(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
+    let warnings = warning_collector.finish(module, linked, |name| declarations.is_block(name));
     let mut checked = CheckedModule {
+        warnings,
         structs: structs.definitions,
         constants: module
             .constants
@@ -1487,12 +1492,20 @@ struct MapScope {
     outer_iterations: usize,
 }
 
+/// The checked body and whether its source needs hardware, including child
+/// references resolved inside structural iterations that were skipped.
+struct BlockBody {
+    block: CheckedBlock,
+    requires_hardware: bool,
+}
+
 /// Lexical values, loop elaboration, and any hardware declared in one body.
 struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
     structs: &'a mut StructTable,
     resolver: &'a mut ImportResolver,
     kind: BodyKind,
+    uses_child: Cell<bool>,
     /// The source body owns the expansion budget even while checking a lambda
     /// with function-local rules.
     source_kind: BodyKind,
@@ -1689,6 +1702,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             structs,
             resolver,
             kind,
+            uses_child: Cell::new(false),
             source_kind: kind,
             specializations: None,
             specialization: None,
@@ -1785,7 +1799,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         specializations: &'a mut BlockSpecializations<'m>,
         specialization: Option<&'a BlockSpecialization<'m>>,
         function_registry: &'a mut FunctionSpecializations<'m>,
-    ) -> Result<CheckedBlock, String> {
+    ) -> Result<BlockBody, String> {
         let interface = match specialization {
             Some(spec) => &spec.interface,
             None => &decls.blocks[block.name.as_str()],
@@ -1881,7 +1895,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let output = c
             .scoped_result(&block.output, Some(&interface.result), true)
             .map_err(|e| format!("result: {e}"))?;
-        Ok(CheckedBlock {
+        let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
+        let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             public: specialization.is_none() && block.public,
             clock: block.clock.clone(),
@@ -1890,6 +1905,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             result: interface.result.clone(),
             statements: c.statements,
             output,
+        };
+        Ok(BlockBody {
+            block,
+            requires_hardware,
         })
     }
 
@@ -1941,6 +1960,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.replaying_body() || has_callbacks {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
+        self.uses_child.set(true);
         Ok(())
     }
 
@@ -4316,6 +4336,7 @@ block wrap(clk, x: u8) -> u8 {
     #[test]
     fn aggregate_equality_accepts_matching_arrays_and_tuples_in_block_ir() {
         let source = r#"
+#[allow(combinational_block)]
 block same(clk, a: (s8, u8[3]), b: (s8, u8[3])) -> bool { a == b }
 "#;
         compile(

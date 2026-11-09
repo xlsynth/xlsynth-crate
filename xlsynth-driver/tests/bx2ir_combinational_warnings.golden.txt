@@ -1,0 +1,2 @@
+ops.bx:1:11: warning[combinational_block]: block 'ops::invert' has no registers or child instances. Consider defining it as a function.
+circuit.bx:2:7: warning[combinational_block]: block 'passthrough' has no registers or child instances. Consider defining it as a function.

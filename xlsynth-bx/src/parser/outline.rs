@@ -146,6 +146,7 @@ fn parse_outline_with_functions<'s>(
 ) -> Result<DslxOutline, String> {
     let mut parser = Parser {
         source,
+        dialect: Dialect::Dslx,
         tokens: lex(source, Dialect::Dslx, None)?,
         pos: 0,
         depth: 0,

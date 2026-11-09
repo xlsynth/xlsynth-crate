@@ -469,6 +469,11 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
   directory containing the BX input is also searched after these directories.
 - `--dslx-stdlib-path <DIR>` overrides the toolchain's DSLX standard library
   directory. The default uses the configured directory or the bundled library.
+- `--warnings-as-errors[=true|false]` defaults to `true`. Warnings from the
+  input file or its BX imports stop compilation. Use
+  `--warnings-as-errors=false` to print the warnings to stderr and continue.
+  An intentional combinational block can opt out of its warning with
+  `#[allow(combinational_block)]` immediately before the declaration.
 - `--reset-active-low[=true|false]` selects active-low reset for the block
   hierarchy. Defaults to `false` (active-high). The bare flag enables it.
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
@@ -501,8 +506,8 @@ xlsynth-driver bx2gv mul_inc.bx --liberty-proto cells.proto --netlist-format=pb 
 ```
 
 - `--top`, `--link-ir`, `--dslx-path`, `--dslx-stdlib-path`,
-  `--reset-active-low`, and `--reset-asynchronous` use the same inputs and
-  defaults as [`bx2ir`](#bx2ir-bx-to-block-ir).
+  `--warnings-as-errors`, `--reset-active-low`, and `--reset-asynchronous`
+  use the same inputs and defaults as [`bx2ir`](#bx2ir-bx-to-block-ir).
 - `--liberty-proto <PATH>` supplies the required normalized library.
   `--mapper <native|abc>` defaults to `native` with the proto alone.
   Supplying raw `--liberty <PATH>` files selects ABC for combinational mapping.

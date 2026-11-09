@@ -5,8 +5,8 @@ use std::{error::Error, fs, io, path::Path};
 use tempfile::tempdir;
 use xlsynth_bx::ast::{Expr, Stmt};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module_with_options, compile_with_options, empty_package,
-    lower_module, parse_module,
+    ImportOptions, ResetBehavior, check_module_with_options, check_source_with_options,
+    compile_with_options, empty_package, lower_module, parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
@@ -60,6 +60,7 @@ pub const BIAS = u8:4;
 pub struct Sample { value: u8 }
 fn bump(x: u8) -> u8 { let (BIAS, extra) = (x, BIAS); BIAS + extra }
 pub fn pack(x: u8) -> Sample { Sample { value: bump(x) } }
+#[allow(combinational_block)]
 pub block stage(clk, x: u8) -> u8 { pack(x).value }
 "#,
     )?;
@@ -122,6 +123,7 @@ pub fn apply(x: u8) -> u8 { helper(base(x)) }"#,
 use left;
 use right;
 fn helper(x: u8) -> u8 { !x }
+#[allow(combinational_block)]
 block circuit(clk, x: u8) -> (u8, u8, u8) {
     (left::apply(x), right::apply(x), helper(x))
 }
@@ -372,7 +374,7 @@ pub fn adjust(xs: u8[1]) -> u8[1] {
 fn a_member_use_ignores_an_unrelated_bx_file_named_after_the_member() -> Result<(), Box<dyn Error>>
 {
     let root = tempdir()?;
-    let caller = "use arithmetic::bump; block circuit(clk, x: u8) -> u8 { bump(x) }";
+    let caller = "use arithmetic::bump; #[allow(combinational_block)] block circuit(clk, x: u8) -> u8 { bump(x) }";
     write_module(root.path(), "bump.bx", caller)?;
     let options = search_paths(&[root.path()]);
     for ext in ["bx", "x"] {
@@ -394,7 +396,7 @@ fn search_order_prefers_full_module_paths_and_existing_dslx_modules() -> Result<
 {
     let first = tempdir()?;
     let second = tempdir()?;
-    let source = "use device::probe; block circuit(clk, x: u8) -> u8 { probe::tag(x) }";
+    let source = "use device::probe; #[allow(combinational_block)] block circuit(clk, x: u8) -> u8 { probe::tag(x) }";
     for (dir, offset) in [(first.path(), 1), (second.path(), 7)] {
         write_module(
             dir,
@@ -441,6 +443,7 @@ pub fn read(x: Tag) -> u8 { x.value + u8:1 }
     let source = r#"
 use a::b;
 use a_b;
+#[allow(combinational_block)]
 block circuit(clk, x: u8) -> (u8, u8) {
     (b::read(b::make(x)), a_b::read(a_b::make(x)))
 }
@@ -482,6 +485,7 @@ use lib;
 fn map() -> u8 { u8:7 }
 fn update() -> u8 { u8:8 }
 fn zero!() -> u8 { u8:9 }
+#[allow(combinational_block)]
 block circuit(clk, x: u8) -> (u8, u8) { (lib::original(x), lib::overridden()) }
 "#;
     let package = compile_design(source, &search_paths(&[dir.path()]))?;
@@ -571,6 +575,7 @@ fn qualified_extern_calls_and_underscore_hardware_ports_keep_their_source_bindin
         r#"
 extern fn chip::invert(x: u8) -> u8;
 fn invert(chip: u8) -> u8 { chip::invert(chip) }
+#[allow(combinational_block)]
 pub block drive(clk, _: u8) -> u8 { invert(_) }
 "#,
     )?;
@@ -607,6 +612,7 @@ fn calls_on_local_values_are_checked_when_a_loop_iteration_elaborates() -> Resul
     let dir = tempdir()?;
     let options = search_paths(&[dir.path()]);
     let library = r#"
+#[allow(combinational_block)]
 pub block stage(clk, x: u8) -> u8 {
     unroll_for! (i, a) in u8:0..u8:0 { let y = x(a); y }(x)
 }
@@ -615,6 +621,7 @@ pub block stage(clk, x: u8) -> u8 {
     // be in scope, and an elaborated call cannot instantiate the root block.
     let root = r#"
 use device;
+#[allow(combinational_block)]
 block x(clk, data: u8) -> u8 { !data }
 pub block circuit(clk, data: u8) -> u8 { let y = device::stage(data); y }
 "#;
@@ -685,12 +692,70 @@ pub block stage(clk, x: u8) -> u8 {
 }
 
 #[test]
+fn rebinding_a_block_formal_keeps_module_callees_hidden() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    for (formal, ty, call, type_formal) in [
+        ("child: fn(u8) -> u8", "u8", "stage<id>(x)", false),
+        ("child", "child", "stage(x)", true),
+    ] {
+        let caller = format!(
+            "fn id(x: u8) -> u8 {{ x }} block circuit(clk, x: u8) -> u8 {{ let y = {call}; y }}"
+        );
+        for (body, context, callback_error) in [
+            (
+                "let y = child(x); y",
+                "let 'y': ",
+                "'child' names a local value here",
+            ),
+            (
+                "child::op(x)",
+                "result: ",
+                "callable parameter 'child' may only be used as a callee",
+            ),
+            (
+                "inst i: child; i.x := x; i.out",
+                "",
+                "callable parameter 'child' requires a direct call",
+            ),
+        ] {
+            let declarations = format!(
+                r#"
+extern fn child::op(x: u8) -> u8;
+block child(clk, x: u8) -> u8 {{ reg q: u8; q := x; q }}
+pub block stage<{formal}>(clk, x: {ty}) -> {ty} {{ let child = x; {body} }}
+"#
+            );
+            write_module(dir.path(), "device.bx", &declarations)?;
+            let reason = if type_formal {
+                "'child' names a type parameter here"
+            } else {
+                callback_error
+            };
+            for (source, name) in [
+                (declarations.as_str(), "stage"),
+                ("use device::stage;", "device::stage"),
+            ] {
+                let error = check_source_with_options(&format!("{source}\n{caller}"), &options)
+                    .unwrap_err();
+                assert_eq!(
+                    error,
+                    format!("block '{name}' ({name}__0): {context}{reason}")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn a_scoped_callee_keeps_its_binding_when_prepared_for_a_loop() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(dir.path(), "unused.bx", "")?;
     let options = search_paths(&[dir.path()]);
     let source = r#"
 fn ident(x: u8) -> u8 { x }
+#[allow(combinational_block)]
 block circuit(clk, x: u8) -> u8 {
     ident({ let w = x; unroll_for! (i, a) in u8:0..u8:0 { let y = w(a); y }(x) })
 }

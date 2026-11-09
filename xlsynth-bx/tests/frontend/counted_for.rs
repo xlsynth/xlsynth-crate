@@ -20,6 +20,7 @@ use xlsynth_pir::libxls_bridge::value_to_libxls;
 #[test]
 fn specialized_fold_captures_a_child_output() -> Result<(), Box<dyn Error>> {
     let source = r#"
+#[allow(combinational_block)]
 block offset(clk, bias: u8) -> u8 { bias }
 block accumulate<T>(clk, data: T[2], bias: u8) -> T {
     inst adjust: offset;
@@ -478,7 +479,8 @@ fn nested_counted_bodies_compile_on_a_small_stack() -> Result<(), String> {
     for _ in 0..48 {
         body = format!("for (_, a) in u8:0..u8:1 {{ {body} }}(x)");
     }
-    let runtime = format!("block folded(clk, x: u8) -> u8 {{ {body} }}");
+    let runtime =
+        format!("#[allow(combinational_block)] block folded(clk, x: u8) -> u8 {{ {body} }}");
     let reset = format!(
         "block folded(clk, rst, x: u8) -> u8 {{ reg q: u8 = {}; q := x; q }}",
         body.replace('x', "u8:7"),
@@ -518,6 +520,7 @@ fn counted_loop_scoped_iterable_and_seed_use_enclosing_values() -> Result<(), Bo
 #[test]
 fn lexical_lets_in_iterables_and_seeds_hide_instances_and_externs() -> Result<(), String> {
     let source = r#"
+#[allow(combinational_block)]
 block child(clk, z: u8) -> u8 { z }
 pub block wrapper(clk, x: u8) -> u8 {
     inst pair: child;

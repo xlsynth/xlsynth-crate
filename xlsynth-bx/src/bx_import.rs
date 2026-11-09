@@ -19,7 +19,7 @@ use crate::parser;
 use lookup::{BxUse, UseLookup};
 
 pub(crate) use lookup::validate_use_path;
-pub(crate) use names::{local_callee_name, mark_local_callee};
+pub(crate) use names::{UnlinkedBlockScope, local_callee_name, mark_local_callee};
 
 /// The source module and spelling of a hygienically qualified BX name.
 pub(crate) fn library_item(name: &str) -> Option<(&str, &str)> {
@@ -178,6 +178,8 @@ impl Names {
 pub(crate) struct LinkedSources {
     pub module: Module,
     pub dslx_bindings: Vec<String>,
+    /// Filenames behind the logical module names used in checked diagnostics.
+    pub module_paths: BTreeMap<String, PathBuf>,
     /// Direct BX member imports that shadow the zero intrinsic at a
     /// declaration.
     pub zero_uses: BTreeMap<String, String>,
@@ -395,6 +397,9 @@ impl<'a> Graph<'a> {
             })
             .collect();
         self.append(&module, &names)?;
+        self.linked
+            .module_paths
+            .insert(source.target.subject.clone(), source.target.path.clone());
         Ok(Library {
             subject: source.target.subject.clone(),
             exports,

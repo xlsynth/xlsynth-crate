@@ -10,12 +10,14 @@ use xlsynth_pir::{
 use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::dslx_import::{ImportedCall, ResolvedImports};
+use crate::warnings::BxWarning;
 use TypedExprKind as K;
 
 /// A module with concrete signatures, single drivers, and an acyclic instance
 /// hierarchy.
 #[derive(Clone, Debug)]
 pub struct CheckedModule {
+    pub(crate) warnings: Vec<BxWarning>,
     pub(crate) structs: Vec<StructDef>,
     pub(crate) constants: Vec<CheckedConstant>,
     pub(crate) externs: Vec<ExternFn>,
@@ -44,6 +46,12 @@ impl CheckedModule {
             take_qualified_names(self.externs.iter_mut().map(|f| &mut f.name));
         self.library_extern_blocks =
             take_qualified_names(self.extern_blocks.iter_mut().map(|b| &mut b.name));
+    }
+
+    /// Warnings from the root and its BX libraries in dependency and source
+    /// order.
+    pub fn warnings(&self) -> &[BxWarning] {
+        &self.warnings
     }
 
     pub fn structs(&self) -> &[StructDef] {

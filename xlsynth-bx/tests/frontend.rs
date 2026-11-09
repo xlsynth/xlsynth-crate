@@ -203,7 +203,7 @@ block capture(clk, rst, x: Payload) -> (u4, Payload) {
 
 #[test]
 fn reading_rst_means_asserted_even_when_the_physical_reset_is_active_low() {
-    let source = "block reset_probe(clk, rst) -> bool { rst }";
+    let source = "#[allow(combinational_block)] block reset_probe(clk, rst) -> bool { rst }";
     for active_low in [false, true] {
         let policy = ResetBehavior {
             active_low,
@@ -297,6 +297,7 @@ extern fn arithmetic::transform(x: u8) -> u8;
 extern fn logic::transform(x: u8) -> u8;
 extern fn transform(x: u8) -> u8;
 extern fn raw_alias(x: u8) -> u8 = "__bundle__transform";
+#[allow(combinational_block)]
 block calls(clk, x: u8) -> (u8, u8, u8, u8) {
     (arithmetic::transform(x), logic::transform(x), transform(x), raw_alias(x))
 }"#;
@@ -319,6 +320,7 @@ block calls(clk, x: u8) -> (u8, u8, u8, u8) {
 fn a_qualified_extern_can_override_its_mangled_symbol() {
     let source = r#"
 extern fn arithmetic::transform(x: u8) -> u8 = "__logic__transform";
+#[allow(combinational_block)]
 block call(clk, x: u8) -> u8 { arithmetic::transform(x) }"#;
     let linked = Parser::new(LINKED_MODULES)
         .parse_and_validate_package()
@@ -343,7 +345,10 @@ block call(clk, x: u8) -> u8 { absent::transform(x) }"#;
     let linked = Parser::new(LINKED_MODULES)
         .parse_and_validate_package()
         .unwrap();
-    assert!(compile(source, linked, ResetBehavior::default()).is_err());
+    assert_eq!(
+        compile(source, linked, ResetBehavior::default()).unwrap_err(),
+        "extern fn 'absent::transform': no linked IR function for '__absent__transform'"
+    );
 }
 
 #[test]

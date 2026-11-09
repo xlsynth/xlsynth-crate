@@ -84,21 +84,60 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
             body: scope.expr(&def.body)?,
         });
     }
-    let hardware_callees = module
+    let hardware_callees = hardware_callees(module);
+    for def in &module.blocks {
+        out.blocks
+            .push(qualify_block(def, names, &hardware_callees)?);
+    }
+    Ok(out)
+}
+
+fn hardware_callees(module: &Module) -> BTreeSet<&str> {
+    module
         .externs
         .iter()
         .map(|d| d.name.as_str())
         .chain(module.blocks.iter().map(|d| d.name.as_str()))
         .chain(module.extern_blocks.iter().map(|d| d.name.as_str()))
-        .collect();
-    for def in &module.blocks {
-        // Blocks can call blocks and functions declared later. A constant
-        // read by a block must already have been introduced.
-        let mut scope = Scope::new(names, None, position(&def.name));
-        scope.hardware_callees = Some(&hardware_callees);
-        out.blocks.push(scope.block(def)?);
+        .collect()
+}
+
+/// Blocks can call blocks and functions declared later. A constant read by a
+/// block must already have been introduced.
+fn qualify_block(
+    block: &Block,
+    names: &Names,
+    hardware_callees: &BTreeSet<&str>,
+) -> Result<Block, String> {
+    let mut scope = Scope::new(names, None, names.positions.get(&block.name).copied());
+    scope.hardware_callees = Some(hardware_callees);
+    scope.block(block)
+}
+
+/// Resolve local callees in an unlinked, uninstantiated block template whose
+/// possible child names overlap data binders.
+pub(crate) struct UnlinkedBlockScope<'m> {
+    names: Names,
+    hardware_callees: BTreeSet<&'m str>,
+}
+
+impl<'m> UnlinkedBlockScope<'m> {
+    pub(crate) fn new(module: &'m Module) -> Result<Self, String> {
+        let uses = module
+            .uses
+            .iter()
+            .filter_map(|u| u.binding())
+            .map(|name| (name.to_owned(), super::Binding::Dslx(name.to_owned())))
+            .collect();
+        Ok(Self {
+            names: Names::new(module, None, uses)?,
+            hardware_callees: hardware_callees(module),
+        })
     }
-    Ok(out)
+
+    pub(crate) fn qualify(&self, block: &Block) -> Result<Block, String> {
+        qualify_block(block, &self.names, &self.hardware_callees)
+    }
 }
 
 /// BX data wires can share a spelling with an extern or a structural child
@@ -125,6 +164,9 @@ struct Scope<'a> {
     at: Option<usize>,
     value_at: Option<usize>,
     locals: BTreeMap<String, Local>,
+    /// A declaration's type and callable formals keep module callees hidden
+    /// even when a nearer data binding shadows the formal itself.
+    formals: BTreeSet<String>,
     introduced: Vec<(String, Option<Local>)>,
     hardware_callees: Option<&'a BTreeSet<&'a str>>,
     expression_depth: usize,
@@ -138,6 +180,7 @@ impl<'a> Scope<'a> {
             at,
             value_at,
             locals: BTreeMap::new(),
+            formals: BTreeSet::new(),
             hardware_callees: None,
             introduced: Vec::new(),
             expression_depth: 0,
@@ -146,6 +189,9 @@ impl<'a> Scope<'a> {
     }
 
     fn bind_as(&mut self, name: &str, binding: Local) {
+        if binding == Local::Formal {
+            self.formals.insert(name.to_owned());
+        }
         if (name != "_" || binding == Local::Hardware) && self.locals.get(name) != Some(&binding) {
             let previous = self.locals.insert(name.to_owned(), binding);
             self.introduced.push((name.to_owned(), previous));
@@ -195,6 +241,15 @@ impl<'a> Scope<'a> {
     /// Preserve BX's structural call namespace for a data wire that has the
     /// same spelling as an extern function or a locally declared child block.
     fn callee(&self, name: &str, site: CallSite) -> Result<String, String> {
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if self.formals.contains(head)
+            && self.locals.get(head) != Some(&Local::Formal)
+            && self.names.definitions.contains(name)
+        {
+            // Keep the source spelling so the checker sees both the formal
+            // and the nearer value when checking a skipped or executed call.
+            return Ok(name.to_owned());
+        }
         // A qualified extern is declared under its full name. An ordinary
         // value called `chip` does not hide the extern `chip::step`.
         if let Some((head, _)) = name.split_once("::")
@@ -334,6 +389,8 @@ impl<'a> Scope<'a> {
             .collect::<Result<_, _>>()?;
         Ok(Block {
             name: self.names.declared(&def.name),
+            name_position: def.name_position,
+            allowed_warnings: def.allowed_warnings.clone(),
             public: def.public,
             type_params: def.type_params.clone(),
             callback_params,

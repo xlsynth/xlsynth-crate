@@ -455,16 +455,20 @@ impl<'a> LexicalScope<'a> {
         }
     }
 
-    /// Look up a binding in this scope and its enclosing scopes.
-    fn contains(&self, name: &str) -> bool {
+    /// Find the lexical scope that introduced a visible name.
+    fn lookup(&self, name: &str) -> Option<&Self> {
         let mut scope = Some(self);
         while let Some(current) = scope {
             if current.values.contains(name) {
-                return true;
+                return Some(current);
             }
             scope = current.parent;
         }
-        false
+        None
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
     }
 }
 
@@ -695,16 +699,27 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Tuple(items) | Expr::Array(items) | Expr::Call { args: items, .. } => {
                 if let Expr::Call { name, .. } = expr {
-                    if !locals.contains(name)
-                        && self.callback_index(name).is_none()
-                        && self.decls.is_block(name)
-                    {
-                        if self.kind == BodyKind::Function || locals.in_lambda {
-                            return Err(format!("pure function cannot call block '{name}'"));
+                    let local = locals.lookup(name);
+                    if self.callback_index(name).is_none() && self.decls.is_block(name) {
+                        if local.is_none() {
+                            if self.kind == BodyKind::Function || locals.in_lambda {
+                                return Err(format!("pure function cannot call block '{name}'"));
+                            }
+                            self.check_block_callback_list(name, 0, false)?;
+                            self.uses_child.set(true);
+                        } else if self.kind != BodyKind::Function
+                            && !locals.in_lambda
+                            && local.is_some_and(|scope| scope.parent.is_none())
+                            && !self.function_values.contains_key(name)
+                            && !self.loop_values.contains_key(name)
+                        {
+                            // A hardware port or wire can share the structural
+                            // child's name. A nearer lexical or iteration
+                            // binder shadows it.
+                            self.uses_child.set(true);
                         }
-                        self.check_block_callback_list(name, 0, false)?;
                     }
-                    if self.callback_index(name).is_none() || locals.contains(name) {
+                    if self.callback_index(name).is_none() || local.is_some() {
                         self.check_value_name(name, locals)?;
                     }
                 }
@@ -722,6 +737,7 @@ impl BodyChecker<'_, '_> {
                     .set(locals.visited.get().saturating_add(callbacks.len()));
                 if self.decls.is_block(name) && self.callback_index(name).is_none() {
                     self.check_block_callback_list(name, callbacks.len(), locals.contains(name))?;
+                    self.uses_child.set(true);
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
