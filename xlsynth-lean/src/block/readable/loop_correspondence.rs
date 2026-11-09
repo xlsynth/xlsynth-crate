@@ -164,7 +164,7 @@ private theorem countedFor_succ {w : Nat} {α : Type} (n stride : Nat) (f : BitV
         ];
         let mut codecs = Vec::new();
         for decl in self.declarations {
-            let name = identifier(decl.name())?;
+            let name = type_identifier(decl.name())?;
             let codec = format!("XlsCodec.{name}");
             rules.extend(codec_round_trip_rules(&name));
             rules.extend(

@@ -25,7 +25,7 @@ pub(crate) use lookup::validate_use_path;
 pub(crate) use names::{UnlinkedBlockScope, local_callee_name, mark_local_callee};
 
 /// The source module and spelling of a hygienically qualified BX name.
-pub(crate) fn library_item(name: &str) -> Option<(&str, &str)> {
+pub fn library_item(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix("$bx$")?.split_once('$')
 }
 

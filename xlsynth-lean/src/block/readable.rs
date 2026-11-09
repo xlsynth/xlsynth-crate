@@ -13,7 +13,7 @@
 //! this check; agreement between them does not establish agreement with XLS
 //! execution.
 
-use std::{collections::BTreeSet, fmt::Write};
+use std::{borrow::Cow, collections::BTreeSet, fmt::Write};
 
 mod enum_dispatch;
 mod loop_correspondence;
@@ -57,6 +57,19 @@ struct Presentation<'a> {
     annotation_contexts: Vec<Vec<SourceType>>,
     names: Vec<String>,
     register_fields: Vec<String>,
+}
+
+/// Keep the linker's identity for nominal type comparisons and recover the
+/// public BX spelling only when printing Lean.
+fn type_name(key: &str) -> Cow<'_, str> {
+    match xlsynth_bx::library_item(key) {
+        Some((module, item)) => format!("{}::{item}", module.replace('.', "::")).into(),
+        None => key.into(),
+    }
+}
+
+fn type_identifier(key: &str) -> Result<String> {
+    identifier(&type_name(key))
 }
 
 /// Emit five dependent modules after the raw emitter checks supported
@@ -478,7 +491,9 @@ impl<'a> Presentation<'a> {
             )),
             SourceType::Enum { name }
             | SourceType::Struct { name }
-            | SourceType::Alias { name } => Ok(format!("_root_.XlsSource.{}", identifier(name)?)),
+            | SourceType::Alias { name } => {
+                Ok(format!("_root_.XlsSource.{}", type_identifier(name)?))
+            }
         }
     }
 
@@ -526,7 +541,7 @@ impl<'a> Presentation<'a> {
                 | SourceType::Alias { name },
             ) => Ok(format!(
                 "(XlsCodec.{}.{operation} ({value}))",
-                identifier(name)?
+                type_identifier(name)?
             )),
         }
     }
@@ -594,8 +609,13 @@ impl<'a> Presentation<'a> {
         let mut out = String::from("import Std\n\nnamespace XlsSource\n\n");
         // Source members and generated codecs have disjoint namespaces. A
         // source field named `encode` must remain an ordinary record field.
+        let mut public_names = BTreeSet::new();
         for declaration in self.declarations {
-            let name = identifier(declaration.name())?;
+            let name = type_identifier(declaration.name())?;
+            ensure!(
+                public_names.insert(name.clone()),
+                "distinct source declarations share the Lean type name {name}"
+            );
             match declaration {
                 TypeDecl::Enum { name: original, .. } => {
                     writeln!(out, "inductive {name} where")?;
@@ -637,7 +657,7 @@ impl<'a> Presentation<'a> {
         );
         out.push_str(BOOL_REPRESENTATION);
         for declaration in self.declarations {
-            let name = identifier(declaration.name())?;
+            let name = type_identifier(declaration.name())?;
             let nominal = self.named_type(declaration.name())?;
             let source_type = self.source_type(&nominal)?;
             let physical = source_shape(&nominal, self.declarations)?;
@@ -1488,7 +1508,7 @@ end XlsReadable
             "XlsCodec.decodeBool".to_owned(),
         ]);
         for declaration in self.declarations {
-            let name = identifier(declaration.name())?;
+            let name = type_identifier(declaration.name())?;
             functions.extend(declaration_functions(declaration, &name)?);
         }
         for graph in self.proof_graphs() {
@@ -1566,9 +1586,9 @@ end XlsReadable
                 writeln!(
                     out,
                     "private theorem {} {} :\n    XlsCodec.{}.encode ⟨{}⟩ =\n      {} := by\n  rfl\n",
-                    identifier(&format!("encode_{name}_mk"))?,
+                    identifier(&format!("encode_{}_mk", type_name(name)))?,
                     binders.join(" "),
-                    identifier(name)?,
+                    type_identifier(name)?,
                     values.join(", "),
                     tuple_value(encoded.into_iter())
                 )?;
@@ -1618,15 +1638,15 @@ end XlsReadable
             rules.extend(PROJECTION_ITE_RULES.map(str::to_owned));
             rules.extend(VECTOR_MAP_RULES.map(str::to_owned));
             for declaration in self.declarations.iter().rev() {
-                let name = identifier(declaration.name())?;
+                let name = type_identifier(declaration.name())?;
                 // Keep codec heads until roundtrips cancel.
                 rules.extend(codec_round_trip_rules(&name));
                 if let TypeDecl::Struct { name, .. } = declaration {
-                    rules.push(identifier(&format!("encode_{name}_mk"))?);
+                    rules.push(identifier(&format!("encode_{}_mk", type_name(name)))?);
                     // A BX record and a DSLX parameter may share only their
                     // physical layout. Expose fields of the decoded argument
                     // while its nested codec round-trip rules are still active.
-                    rules.push(format!("XlsCodec.{}.decode", identifier(name)?));
+                    rules.push(format!("XlsCodec.{}.decode", type_identifier(name)?));
                 }
             }
             rules.extend(BOOL_ROUND_TRIP_RULES.map(str::to_owned));

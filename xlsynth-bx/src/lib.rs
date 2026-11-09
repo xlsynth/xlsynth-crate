@@ -20,6 +20,7 @@ mod test_runner;
 mod typed;
 mod warnings;
 
+pub use bx_import::library_item;
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
 pub use import_structs::ImportNames;
@@ -155,7 +156,8 @@ pub struct LinkedStruct {
 /// The checked source and its linked hardware, with the import graphs that
 /// produced its callable IR functions.
 pub struct CompiledModule {
-    /// Written annotations retain transparent aliases erased by BX checking.
+    /// Written annotations before type checking erases transparent aliases.
+    /// BX library declarations and references use the linker's qualified names.
     pub source: ast::Module,
     pub checked: CheckedModule,
     pub package: Package,
@@ -174,6 +176,10 @@ pub fn compile_with_source(
     let mut modules = Vec::new();
     let mut sources = import_structs::CapturedSources::default();
     let (source, libraries) = bx_import::read(source, options)?;
+    let linked_source = libraries
+        .libraries
+        .as_ref()
+        .map(|linked| linked.module.clone());
     let checked = check::check_sources_with_tests(
         &source,
         libraries,
@@ -201,7 +207,7 @@ pub fn compile_with_source(
         });
     })?;
     Ok(CompiledModule {
-        source,
+        source: linked_source.unwrap_or(source),
         checked,
         package,
         imports,
