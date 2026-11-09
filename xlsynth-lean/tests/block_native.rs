@@ -62,6 +62,56 @@ example (p : «ops::Packet») : Helpers.«ops::pick» p = p.inner.value := rfl
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn imported_parametric_structs_preserve_bx_interface_types() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(
+        dir.path().join("ops.x"),
+        "pub struct Packet<N: u32> { zebra: uN[N], apple: uN[N] }",
+    )?;
+    let compiled = compile_bx(
+        r#"
+use ops;
+struct Envelope { narrow: ops::Packet<4> }
+block direct(clk, p: ops::Packet<8>) -> ops::Packet<8> { p }
+block pair(clk, p: ops::Packet<8>, src: Envelope) -> (ops::Packet<8>, ops::Packet<4>) {
+    reg stored: ops::Packet<8>;
+    stored := p;
+    (stored, src.narrow)
+}
+"#,
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?;
+    for (block, proof) in [
+        (
+            "direct",
+            "example (q : State) (x : Input) : observe q x = (x.p.zebra, x.p.apple) := rfl",
+        ),
+        (
+            "pair",
+            r#"
+example (q : State) (x : Input) : (step q x).stored = x.p := rfl
+example (q : State) (x : Input) : («ops::Packet<8>» × «ops::Packet<4>») := observe q x
+example (q : State) (x : Input) : observe q x = (q.stored, x.src.narrow) := rfl
+"#,
+        ),
+    ] {
+        let mut bundle = compiled.emit_readable(Some(block))?;
+        bundle.files.push((
+            "Check.lean".into(),
+            format!("import ReadableCorrespondence\nopen XlsReadable XlsSource\n{proof}\n"),
+        ));
+        check_bundle(bundle, block);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_struct_alias_survives_bx_register_and_nested_ports() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(
