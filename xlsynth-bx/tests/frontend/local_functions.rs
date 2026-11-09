@@ -177,7 +177,9 @@ fn comparisons_infer_destructured_members_across_calls_and_branches() -> Result<
             format!("({other}) == (match flag {{ true => a, _ => a }})"),
         ] {
             let body = format!("let (a,) = ({stored},); {comparison}");
-            let bx = format!("{helpers} block sample(clk, flag:bool, x:u8)->bool {{ {body} }}");
+            let bx = format!(
+                "{helpers} #[allow(combinational_block)] block sample(clk, flag:bool, x:u8)->bool {{ {body} }}"
+            );
             let dslx = format!("{helpers} fn sample(flag:bool, x:u8)->bool {{ {body} }}");
             dslx::parse_and_typecheck(&dslx, "compare.x", "compare", &mut ImportData::default())?;
             let reference = format!("fn sample(flag:bool, x:u8)->bool {{ {result} }}");
@@ -195,7 +197,7 @@ fn comparisons_infer_destructured_members_across_calls_and_branches() -> Result<
         }
     }
     let source = format!(
-        "{helpers} block sample(clk, flag:bool, x:u8)->bool {{ let (a,) = ((1, flag),); a == (wide(x), identity(flag)) }}"
+        "{helpers} #[allow(combinational_block)] block sample(clk, flag:bool, x:u8)->bool {{ let (a,) = ((1, flag),); a == (wide(x), identity(flag)) }}"
     );
     let package = compile(&source, empty_package("anchors"), ResetBehavior::default())?;
     let nodes = &package.get_block("sample").unwrap().nodes;
@@ -817,7 +819,9 @@ fn offset!(x': u8) -> u8 {
 }
 fn block(x: u8) -> u8 { offset!(x) }
 "#;
-    let bx = format!("{helpers}\nblock sample(clk, x: u8) -> u8 {{ block(x) }}");
+    let bx = format!(
+        "{helpers}\n#[allow(combinational_block)]\nblock sample(clk, x: u8) -> u8 {{ block(x) }}"
+    );
     let package = compile(&bx, empty_package("identifiers"), ResetBehavior::default())?;
     let block = package.get_top_block().ok_or("missing sample block")?;
     let function = combinational_block_to_fn(block)?;
@@ -849,7 +853,9 @@ fn before() -> u8 { zero!<u8>() }
 fn zero!() -> u8 { u8:7 }
 fn after() -> (u8, u8) { (before(), zero!<u8>()) }
 "#;
-    let bx = format!("{helpers}\nblock sample(clk) -> (u8, u8) {{ after() }}");
+    let bx = format!(
+        "{helpers}\n#[allow(combinational_block)]\nblock sample(clk) -> (u8, u8) {{ after() }}"
+    );
     let package = compile(&bx, empty_package("design"), ResetBehavior::default())?;
     let top = package.get_top_block().ok_or("missing sample block")?;
     let actual = eval_fn_in_package_value(&package, &combinational_block_to_fn(top)?, &[]);

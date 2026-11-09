@@ -47,6 +47,14 @@ fn invoke_signature(package: &Package, index: usize) -> Result<InvokeSignature, 
 /// dependencies.
 pub fn lower_module(
     module: &CheckedModule,
+    package: Package,
+    reset: ResetBehavior,
+) -> Result<Package, String> {
+    lower_checked_module(module, package, reset).map_err(crate::bx_import::diagnostic)
+}
+
+fn lower_checked_module(
+    module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
 ) -> Result<Package, String> {

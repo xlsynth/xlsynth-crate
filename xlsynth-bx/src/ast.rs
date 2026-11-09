@@ -2,7 +2,9 @@
 
 //! Source-level representation of a BX module, before name and type checking.
 
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
+
+use crate::BxWarningKind;
 
 // Generate both directions of the spelling map from the same operator list.
 macro_rules! operator_enum {
@@ -420,11 +422,22 @@ pub enum Stmt {
     },
 }
 
+/// A one-based source line and character column within a BX file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourcePosition {
+    pub line: usize,
+    pub column: usize,
+}
+
 /// A block definition, including its implicit timing domain and output
 /// expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Block {
     pub name: String,
+    /// Location of the declared name, when parsed from a source file.
+    pub name_position: Option<SourcePosition>,
+    /// Warning kinds suppressed for this definition by `#[allow(...)]`.
+    pub allowed_warnings: BTreeSet<BxWarningKind>,
     pub public: bool,
     /// Type parameter names in declaration order.
     pub type_params: Vec<String>,

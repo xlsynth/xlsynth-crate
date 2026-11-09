@@ -326,6 +326,7 @@ struct S5 { a: S4, b: S4 }
         let source = |iterations| {
             format!(
                 r#"{declarations}
+#[allow(combinational_block)]
 block sample(clk, xs: {element}[1], guards: bool[2]) -> u1[1] {{
     unroll_for! (i, acc) in u32:0..u32:{iterations} {{
         if guards[i] {{ map(xs, |_| {callback}) }} else {{ acc }}
@@ -478,6 +479,7 @@ fn captured_maps_can_change_the_element_layout() -> Result<(), Box<dyn Error>> {
 fn captured_maps_with_empty_array_result_fields_survive_optimization() -> Result<(), Box<dyn Error>>
 {
     let source = r#"
+#[allow(combinational_block)]
 pub block sample(clk, xs: u8[3], empty: u8[0]) -> (u8, u8[0])[3] {
     map(xs, |x| -> (u8, u8[0]) { (x, empty) })
 }
@@ -491,6 +493,7 @@ pub block sample(clk, xs: u8[3], empty: u8[0]) -> (u8, u8[0])[3] {
 #[test]
 fn map_reads_register_and_child_output_at_the_current_cycle() -> xlsynth_vastly::Result<()> {
     let source = r#"
+#[allow(combinational_block)]
 block child(clk, d: u8) -> u8 { d + u8:1 }
 pub block sample(clk, rst, en: bool, d: u8) -> (u8, u8) {
     reg q: u8 = u8:0;

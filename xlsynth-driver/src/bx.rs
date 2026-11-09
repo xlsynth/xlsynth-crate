@@ -5,14 +5,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command, value_parser};
-use xlsynth_bx::{ImportOptions, ResetBehavior, compile_with_options, empty_package};
+use xlsynth_bx::{
+    ImportOptions, ResetBehavior, check_source_with_options, empty_package, lower_module,
+};
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
 
-use crate::common::write_stdout;
+use crate::common::{DEFAULT_WARNINGS_AS_ERRORS, write_stdout};
 use crate::toolchain_config::{ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path};
 use crate::{g8r2gv, ir2gates};
 
@@ -44,6 +46,15 @@ fn add_bx_args(command: Command) -> Command {
                 .visible_alias("dslx_path")
                 .value_name("DIRS")
                 .help("Semicolon-separated BX and DSLX import directories (overrides the toolchain path)"),
+        )
+        .arg(
+            Arg::new("warnings-as-errors")
+                .long("warnings-as-errors")
+                .help("Treat BX source warnings as errors (default true)")
+                .num_args(0..=1)
+                .require_equals(true)
+                .default_missing_value("true")
+                .value_parser(value_parser!(bool)),
         )
         .arg(
             Arg::new("dslx_stdlib_path")
@@ -154,12 +165,24 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
         active_low: matches.get_flag("reset-active-low"),
         asynchronous: matches.get_flag("reset-asynchronous"),
     };
-    let mut package = compile_with_options(&source, package, reset, &imports)
+    let checked = check_source_with_options(&source, &imports)
+        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
+    let mut package = lower_module(&checked, package, reset)
         .map_err(|error| anyhow!("{}: {error}", path.display()))?;
     select_top(
         &mut package,
         matches.get_one::<String>("top").map(String::as_str),
     )?;
+    for warning in checked.warnings() {
+        eprintln!("{}", warning.display_with_root(path));
+    }
+    let warnings_as_errors = matches
+        .get_one::<bool>("warnings-as-errors")
+        .copied()
+        .unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
+    if warnings_as_errors && !checked.warnings().is_empty() {
+        bail!("BX warnings treated as errors");
+    }
     Ok(package)
 }
 

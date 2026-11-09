@@ -234,6 +234,7 @@ pub block parent(clk, element_1_0: u8) -> u8 {
         skipped
     }(element_0_0)
 }
+#[allow(combinational_block)]
 block echo(clk, x: u8) -> u8 { x }
 "#;
     let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
@@ -303,6 +304,7 @@ pub block parent(clk, x:u8) -> u8 {
     let bx_inst_0 = split(result);
     bx_inst_0.0
 }
+#[allow(combinational_block)]
 block split(clk, x:u8) -> (u8, u8) { (x, x + u8:1) }
 "#;
     let package = compile(source, empty_package("design"), ResetBehavior::default())?;
@@ -330,9 +332,12 @@ pub block parent(clk, x: u8) -> Bundle {
     let outputs = bundle(array[1], pair.1);
     Bundle { data: outputs.data, flags: outputs.flags }
 }
+#[allow(combinational_block)]
 block split(clk, x: u8) -> (u8, bool) { (x, x == u8:0) }
+#[allow(combinational_block)]
 block samples(clk, x: u8) -> u8[2] { [x, x + u8:1] }
 block sink(clk, x: u8) -> () { reg saved: u8; saved := x; () }
+#[allow(combinational_block)]
 block bundle(clk, x: u8, flag: bool) -> Bundle { Bundle { data: x, flags: (flag, !flag) } }
 "#;
     let pkg = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();

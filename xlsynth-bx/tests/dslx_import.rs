@@ -102,6 +102,7 @@ use a::b;
 use a_b;
 use acm_random::rng_deterministic_seed;
 extern fn score(x: u8) -> u8;
+#[allow(combinational_block)]
 block results(clk, x: u8) -> (u8, u8, u8, u32) {
     (b::score(x), a_b::score(x), score(x), rng_deterministic_seed())
 }
@@ -141,7 +142,7 @@ pub fn checked_score(x: u8) -> u8 { if x == u8:0 { fail!("zero", x) } else { sco
         dslx_stdlib_path: None,
         additional_search_paths: vec![root.path()],
     };
-    let source = "use fabric::stage; block b(clk, x: u8) -> u8 { stage::score(x) }";
+    let source = "use fabric::stage; #[allow(combinational_block)] block b(clk, x: u8) -> u8 { stage::score(x) }";
     let checked = check_module_with_options(&parse_module(source)?, &options)?;
     let effectful = "use fabric::stage; block b(clk, x: u8) -> u8 { stage::checked_score(x) }";
     let error = compile_with_options(
@@ -212,7 +213,7 @@ pub fn tag(x: u8) -> u8 {
         dslx_stdlib_path: None,
         additional_search_paths: vec![root.path()],
     };
-    let bx = "use wire; block run(clk, x: u8) -> u8 { wire::tag(x) }";
+    let bx = "use wire; #[allow(combinational_block)] block run(clk, x: u8) -> u8 { wire::tag(x) }";
     let package = compile_with_options(
         bx,
         empty_package("design"),
@@ -271,7 +272,7 @@ fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(
         "wire_x.x",
         "import wire; pub fn score(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
     )?;
-    let bx = "use wire_x; block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
+    let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
     let options = ImportOptions {
         additional_search_paths: vec![&modules],
         ..Default::default()
@@ -331,7 +332,7 @@ pub fn read(_value: SDomain, x: u8) -> u8 { x + u8:5 }"#,
         additional_search_paths: vec![root.path()],
     };
     let package = compile_with_options(
-        "use wire; block run(clk, x: u8) -> u8 { wire::read(wire::make(), x) }",
+        "use wire; #[allow(combinational_block)] block run(clk, x: u8) -> u8 { wire::read(wire::make(), x) }",
         empty_package("design"),
         ResetBehavior::default(),
         &options,
@@ -354,6 +355,7 @@ fn stdlib_override_supplies_the_body_and_its_portable_source_path() -> Result<()
     };
     let source = r#"
 use acm_random;
+#[allow(combinational_block)]
 block seed(clk, x: u8) -> u32 { acm_random::rng_deterministic_seed() + (x as u32) }
 "#;
     let package = compile_with_options(

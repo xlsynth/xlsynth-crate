@@ -23,7 +23,9 @@ fn classify(x: sN[96]) -> (u8, u16) {
     result
 }"#;
     let body = "match key(x) { sN[96]:-3 | sN[96]:3 => (u8:4, u16:5), _ => classify(x) }";
-    let bx = format!("{helpers}\nblock sample(clk, x: sN[96]) -> (u8, u16) {{ {body} }}");
+    let bx = format!(
+        "{helpers}\n#[allow(combinational_block)]\nblock sample(clk, x: sN[96]) -> (u8, u16) {{ {body} }}"
+    );
     let reference = format!("{helpers}\nfn sample(x: sN[96]) -> (u8, u16) {{ {body} }}");
     let evaluator = ExpressionEvaluator::compile_block(
         &bx,

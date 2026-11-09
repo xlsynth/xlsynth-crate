@@ -9,10 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::{IrBits, IrValue};
 
+use crate::BxWarningKind;
 use crate::ast::{
     BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, Expr, ExternBlock, ExternFn,
     ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm, MatchPattern, Module, Param,
-    Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    SourcePosition, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -26,10 +27,20 @@ pub(crate) struct Token<'s> {
     character: Option<u8>,
 }
 
+const SOURCE_START: SourcePosition = SourcePosition { line: 1, column: 1 };
+
+/// Advance a diagnostic position across UTF-8 source text.
+fn advance_position(start: SourcePosition, text: &str) -> SourcePosition {
+    let line = start.line + text.bytes().filter(|&b| b == b'\n').count();
+    let column = match text.rsplit_once('\n') {
+        Some((_, suffix)) => 1 + suffix.chars().count(),
+        None => start.column + text.chars().count(),
+    };
+    SourcePosition { line, column }
+}
+
 fn diagnostic(source: &str, offset: usize, message: &str) -> String {
-    let prefix = &source[..offset];
-    let line = 1 + prefix.bytes().filter(|&b| b == b'\n').count();
-    let column = 1 + prefix.rsplit('\n').next().unwrap_or("").chars().count();
+    let SourcePosition { line, column } = advance_position(SOURCE_START, &source[..offset]);
     format!("{line}:{column}: {message}")
 }
 
@@ -237,7 +248,7 @@ fn lex(
                 return Err(diagnostic(source, start, "unterminated symbol string"));
             }
             i += 1;
-        } else if dialect == Dialect::Dslx && (b == b'#' || rest.starts_with(">>")) {
+        } else if dialect == Dialect::Dslx && rest.starts_with(">>") {
             // Separate closing angles in nested parametric type arguments.
             // Expressions in an outline retain their source spelling.
             i += 1;
@@ -252,7 +263,7 @@ fn lex(
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
         {
             i += 2;
-        } else if b"(){}[]:,.=;!&|^+-*/%<>".contains(&b) {
+        } else if b"#(){}[]:,.=;!&|^+-*/%<>".contains(&b) {
             i += 1;
         } else {
             return Err(diagnostic(source, start, "unexpected character"));
@@ -288,8 +299,8 @@ fn lex(
     Ok(tokens)
 }
 
-/// The DSLX outline scanner additionally recognizes attributes, backtick
-/// strings, and standalone apostrophes.
+/// The DSLX outline scanner additionally recognizes backtick strings and
+/// standalone apostrophes.
 #[derive(Clone, Copy, PartialEq)]
 enum Dialect {
     Bx,
@@ -364,6 +375,7 @@ pub(crate) fn parse_value_type(source: &str) -> Result<Type, String> {
 /// Cursor over the token stream, whose final element always represents EOF.
 struct Parser<'s> {
     source: &'s str,
+    dialect: Dialect,
     tokens: Vec<Token<'s>>,
     pos: usize,
     depth: usize,
@@ -524,6 +536,7 @@ impl<'s> Parser<'s> {
         }
         Ok(Self {
             source,
+            dialect: Dialect::Bx,
             tokens,
             pos: 0,
             depth: 0,
@@ -573,6 +586,17 @@ impl<'s> Parser<'s> {
 
     fn error(&self, message: &str) -> String {
         let token = self.tokens[self.pos];
+        if self.dialect == Dialect::Bx
+            && token.text == "#"
+            && self.peek(1) == "["
+            && self.peek(2) == "allow"
+        {
+            return diagnostic(
+                self.source,
+                token.start,
+                "place a BX warning attribute before the block definition, including its optional 'pub'",
+            );
+        }
         let found = if token.text.is_empty() {
             "end of input"
         } else {
@@ -708,12 +732,23 @@ impl<'s> Parser<'s> {
     fn module(&mut self) -> Result<Module, String> {
         let mut module = Module::default();
         let mut use_bindings = BTreeSet::new();
+        // Advance from the previous name so recording positions is linear
+        // across all declarations, including multiple blocks on one line.
+        let mut position = SOURCE_START;
+        let mut offset = 0;
         while !self.peek(0).is_empty() {
+            let allowed_warnings = self.block_warning_attributes()?;
             let public = self.eat("pub");
             if self.eat("block") {
-                let block = self.with_name_scope(|p| p.block(public))?;
+                let name_offset = self.tokens[self.pos].start;
+                position = advance_position(position, &self.source[offset..name_offset]);
+                offset = name_offset;
+                let block =
+                    self.with_name_scope(|p| p.block(public, position, allowed_warnings))?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
+            } else if !allowed_warnings.is_empty() {
+                return Err(self.error("expected a block definition after #[allow(...)]"));
             } else if self.eat("fn") {
                 self.value_context = ValueContext::DslxItem;
                 let function = self.with_name_scope(|p| p.function(public))?;
@@ -772,6 +807,33 @@ impl<'s> Parser<'s> {
             }
         }
         Ok(module)
+    }
+
+    /// Read per-block warning suppressions before an optional visibility
+    /// modifier.
+    fn block_warning_attributes(&mut self) -> Result<BTreeSet<BxWarningKind>, String> {
+        let mut allowed = BTreeSet::new();
+        while self.eat("#") {
+            self.expect("[")?;
+            self.expect("allow")?;
+            self.expect("(")?;
+            if self.peek(0) == ")" {
+                return Err(self.error("expected a BX warning name in #[allow(...)]"));
+            }
+            loop {
+                let name = self.peek(0);
+                let warning = BxWarningKind::from_name(name)
+                    .ok_or_else(|| self.error("unknown BX warning in #[allow(...)]"))?;
+                self.pos += 1;
+                allowed.insert(warning);
+                if !self.eat(",") || self.peek(0) == ")" {
+                    break;
+                }
+            }
+            self.expect(")")?;
+            self.expect("]")?;
+        }
+        Ok(allowed)
     }
 
     /// Flatten one DSLX use tree in source order. BX additionally bounds the
@@ -1118,7 +1180,12 @@ impl<'s> Parser<'s> {
         Ok(params)
     }
 
-    fn block(&mut self, public: bool) -> Result<Block, String> {
+    fn block(
+        &mut self,
+        public: bool,
+        name_position: SourcePosition,
+        allowed_warnings: BTreeSet<BxWarningKind>,
+    ) -> Result<Block, String> {
         let name = self.ident()?;
         let params = self.block_parametrics()?;
         let signature = self.block_signature(name)?;
@@ -1143,6 +1210,8 @@ impl<'s> Parser<'s> {
             .ok_or_else(|| self.error("block requires an output expression"))?;
         Ok(Block {
             name: signature.name,
+            name_position: Some(name_position),
+            allowed_warnings,
             public,
             type_params: params.type_params,
             callback_params: params.callback_params,
@@ -2778,6 +2847,79 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_warning_attributes_and_name_positions_are_per_declaration() -> Result<(), String> {
+        let source = "/* µ */ block first(clk) -> u8 { u8:1 }\n\
+                      #[allow(combinational_block)]\n  pub block second(clk) -> u8 { u8:2 } block third(clk) -> u8 { u8:3 }";
+        let module = parse_module(source)?;
+        let [first, second, third] = module.blocks.as_slice() else {
+            panic!("expected three blocks");
+        };
+        assert_eq!(
+            first.name_position,
+            Some(SourcePosition {
+                line: 1,
+                column: 15
+            })
+        );
+        assert_eq!(
+            second.name_position,
+            Some(SourcePosition {
+                line: 3,
+                column: 13
+            })
+        );
+        assert_eq!(
+            third.name_position,
+            Some(SourcePosition {
+                line: 3,
+                column: 46
+            })
+        );
+        assert!(first.allowed_warnings.is_empty());
+        assert!(second.public);
+        assert_eq!(
+            second.allowed_warnings,
+            BTreeSet::from([BxWarningKind::CombinationalBlock])
+        );
+        assert!(third.allowed_warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn warning_attributes_reject_unknown_names_and_misplaced_allowances() {
+        for (source, diagnostic) in [
+            (
+                "#[allow(typo)] block b(clk) -> u8 { u8:0 }",
+                "unknown BX warning in #[allow(...)], found 'typo'",
+            ),
+            (
+                "#[allow()] block b(clk) -> u8 { u8:0 }",
+                "expected a BX warning name",
+            ),
+            (
+                "#[allow(combinational_block)] pub fn f() -> u8 { u8:0 }",
+                "expected a block definition after #[allow(...)]",
+            ),
+            (
+                "pub #[allow(combinational_block)] block b(clk) -> u8 { u8:0 }",
+                "place a BX warning attribute before the block definition",
+            ),
+            (
+                "block b(clk) -> u8 { #[allow(combinational_block)] u8:0 }",
+                "place a BX warning attribute before the block definition",
+            ),
+        ] {
+            let error = parse_module(source).unwrap_err();
+            assert!(error.contains(diagnostic), "{error}");
+        }
+        let dslx = "pub #[allow(combinational_block)] fn f() {}";
+        assert_eq!(
+            crate::parse_dslx_outline(dslx).unwrap_err(),
+            "1:5: expected a DSLX module declaration, found '#'"
+        );
+    }
 
     #[test]
     fn module_constants_retain_types_visibility_names_and_declaration_order() -> Result<(), String>

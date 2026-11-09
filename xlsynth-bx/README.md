@@ -113,7 +113,7 @@ fn fold4<F: fn(u16, u16) -> u16>(xs: u16[4], seed: u16) -> u16 {
 
 fn add16(a: u16, b: u16) -> u16 { a + b }
 
-block sum(clk, xs: u16[4]) -> u16 {
+fn sum(xs: u16[4]) -> u16 {
     fold4<add16>(xs, u16:0)
 }
 ```
@@ -127,6 +127,7 @@ BX checks the body against its declared signatures, then generates one function 
 Use `map(array, |element| expression)` in a function or block to transform each element of a nonempty array in order. The input supplies the parameter type, and the lambda's result supplies the output element type. The output has the same length as the input.
 
 ```text
+#[allow(combinational_block)]
 block offsets(clk, base: u32) -> u32[4] {
     map(u32:0..u32:4, |i| base + i)
 }
@@ -170,6 +171,7 @@ fn sum_words(words: u16[4], bias: u32) -> u32 {
     }(bias)
 }
 
+#[allow(combinational_block)]
 block checksum(clk, words: u16[4], bias: u32) -> u32 {
     sum_words(words, bias)
 }
@@ -219,6 +221,31 @@ Declare and call a prelinked DSLX function by its module-qualified name, such as
 For an unqualified declaration such as `extern fn transform(x: u8) -> u16;`, call `transform(x)`. The linker tries the plain IR name first and then the DSLX symbol for the package's own module. To bind a specialization or choose a local alias, supply the exact IR symbol, as in `extern fn widen(x: u8) -> u16 = "__math__transform";`.
 
 The linker checks argument order, widths, aggregate shapes, and result type before emitting `invoke`. Signedness and struct names are BX-level distinctions. Their IR representations are bits and tuples respectively. The linked function and its callees must have pure IR bodies.
+
+### BX warnings
+
+`compile`, `compile_with_options`, `bx2ir`, and `bx2gv` treat BX warnings as
+errors by default. The `combinational_block` warning points to a block that
+only computes a value. Prefer a `fn` for this kind of helper. A block with a
+register or a child instance already serves a hardware role. A helper that
+only reads its implicit reset can take the normalized reset as an explicit
+`bool` function argument. Type-generic blocks can express signatures
+unavailable on BX functions.
+
+For an intentional combinational RTL interface, allow the warning on that
+declaration. Other declarations in the same file or an imported BX library
+still receive their own diagnostics.
+
+```text
+#[allow(combinational_block)]
+pub block increment_port(clk, x: u8) -> u8 { x + u8:1 }
+```
+
+To inspect all warnings and still emit output, pass `--warnings-as-errors=false`
+to either driver command. Rust callers can use `check_source_with_options`
+and inspect `CheckedModule::warnings()` before calling `lower_module`. Each
+warning identifies its source declaration and location. Repeated calls,
+specializations, and imports of the same declaration share one diagnostic.
 
 ### Using BX libraries
 
@@ -312,7 +339,7 @@ BX can name public, non-parametric DSLX structs in ports, registers, and express
 ```text
 use packet::Header;
 
-block tag_header(clk, h: Header) -> Header {
+fn tag_header(h: Header) -> Header {
     Header { tag: h.tag + u8:1, valid: h.valid }
 }
 ```
@@ -328,7 +355,7 @@ all parameters in a spelling such as `Packet<>` when each has a default.
 ```text
 use apfloat;
 
-block add_half(clk, a: apfloat::APFloat<5, 10>, b: apfloat::APFloat<5, 10>)
+fn add_half(a: apfloat::APFloat<5, 10>, b: apfloat::APFloat<5, 10>)
     -> apfloat::APFloat<5, 10> {
     apfloat::add(a, b)
 }

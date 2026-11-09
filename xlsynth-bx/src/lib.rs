@@ -14,6 +14,7 @@ mod layout;
 pub mod lower;
 pub mod parser;
 mod typed;
+mod warnings;
 
 pub use check::{CheckedModule, check_module, check_module_with_options};
 pub use dslx_import::ImportedCall;
@@ -22,6 +23,7 @@ pub use parser::outline::{
     DslxOutline, OutlineDecl, OutlineKind, OutlineShape, OutlineType, parse_dslx_outline,
 };
 pub use parser::parse_module;
+pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;
 
 use std::path::Path;
@@ -37,7 +39,7 @@ pub struct ImportOptions<'a> {
 }
 
 /// Parses and checks BX source, then links its functions and blocks into the
-/// supplied IR package.
+/// supplied IR package. Warnings are treated as errors.
 pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<Package, String> {
     compile_with_options(source, package, reset, &ImportOptions::default())
 }
@@ -51,17 +53,40 @@ pub fn parse_module_with_options(
     bx_import::parse_source(source, options)
 }
 
-/// Compiles BX source with the specified BX and DSLX module search paths.
+/// Check BX source and its imports in one snapshot. The returned module
+/// carries warnings alongside its checked declarations.
+pub fn check_source_with_options(
+    source: &str,
+    options: &ImportOptions<'_>,
+) -> Result<CheckedModule, String> {
+    let (module, libraries) = bx_import::read(source, options)?;
+    check::check_sources(&module, libraries.as_ref(), options).map_err(bx_import::diagnostic)
+}
+
+/// Compile BX source with the specified module search paths and treat
+/// warnings as errors. Use [`check_source_with_options`] and [`lower_module`]
+/// to inspect warnings and choose whether to continue.
 pub fn compile_with_options(
     source: &str,
     package: Package,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<Package, String> {
-    let (module, libraries) = bx_import::read(source, options)?;
-    let checked = check::check_sources(&module, libraries.as_ref(), options)
-        .map_err(bx_import::diagnostic)?;
-    lower_module(&checked, package, reset).map_err(bx_import::diagnostic)
+    let checked = check_source_with_options(source, options)?;
+    // Keep link errors actionable even when the source also has warnings.
+    let package = lower_module(&checked, package, reset)?;
+    if !checked.warnings().is_empty() {
+        let diagnostics = checked
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "{}\nBX warnings treated as errors",
+            diagnostics.join("\n")
+        ));
+    }
+    Ok(package)
 }
 
 /// Creates a destination for BX modules whose externs require no linked IR.

@@ -70,6 +70,7 @@ extern fn flip(x: u8) -> u8 = "invert";
 
 fn __math__offset(x: u8) -> u8 { x + u8:9 }
 fn collect(x: u8) -> (u8, u8, u8) { (__math__offset(x), math::transform(x), flip(x)) }
+#[allow(combinational_block)]
 block results(clk, x: u8) -> (u8, u8, u8) { collect(x) }
 "#;
     let package = compile_with_options(source, linked, ResetBehavior::default(), &options)?;
@@ -116,6 +117,7 @@ fn stage__bx_2() -> bits[8] { ret literal.1: bits[8] = literal(value=42, id=1) }
     let source = r#"
 fn stage(next: u8, next__bx_1: u8) -> u8 { next - next__bx_1 }
 fn stage__bx_1(x: u8) -> u8 { x + u8:7 }
+#[allow(combinational_block)]
 block results(clk, x: u8) -> u8 { stage(stage__bx_1(x), x) }
 "#;
     let package = compile(source, linked, ResetBehavior::default())?;
@@ -139,13 +141,16 @@ fn block_typed_zero_preserves_the_intrinsic_with_a_same_named_import() -> Result
         ..ImportOptions::default()
     };
     for (source, expected) in [
-        ("use wire::zero!; block probe(clk) -> u8 { zero!<u8>() }", 0),
         (
-            "block probe(clk) -> u8 { zero!<u8>() } fn zero!() -> u8 { u8:7 }",
+            "use wire::zero!; #[allow(combinational_block)] block probe(clk) -> u8 { zero!<u8>() }",
+            0,
+        ),
+        (
+            "#[allow(combinational_block)] block probe(clk) -> u8 { zero!<u8>() } fn zero!() -> u8 { u8:7 }",
             7,
         ),
         (
-            "block probe(clk) -> u8 { zero!() } fn zero!() -> u8 { u8:7 }",
+            "#[allow(combinational_block)] block probe(clk) -> u8 { zero!() } fn zero!() -> u8 { u8:7 }",
             7,
         ),
     ] {

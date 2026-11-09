@@ -283,7 +283,7 @@ pub fn direct(x: Two) -> (u8, u8, u8) {
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let source = "use wire; block b(clk, x: wire::Two) -> (u8, u8, u8) { wire::direct(x) }";
+        let source = "use wire; #[allow(combinational_block)] block b(clk, x: wire::Two) -> (u8, u8, u8) { wire::direct(x) }";
         let linked = compile_with_options(
             source,
             empty_package("sample"),
@@ -391,7 +391,7 @@ pub fn nested<N: u32>(s: outer::Outer<N>, y: left::Item, z: right::Item) -> (u8,
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let source = "use outer; use left; use right; block b(clk, x: outer::Two, y: left::Item, z: right::Item) -> (u8, u8) { outer::direct(x, y, z) }";
+        let source = "use outer; use left; use right; #[allow(combinational_block)] block b(clk, x: outer::Two, y: left::Item, z: right::Item) -> (u8, u8) { outer::direct(x, y, z) }";
         let error = check_module_with_options(&parse_module(source)?, &options)
             .err()
             .ok_or("expected unsupported map dispatch")?;
@@ -477,7 +477,7 @@ pub fn scalar_and_array(x: wire::Item, y: u8[2][2]) -> u8 {
             additional_search_paths: vec![dir.path()],
             ..Default::default()
         };
-        let source = "use wire; use arrays; block b(clk, x: wire::Item, y: u8[2][2]) -> u8 { arrays::scalar_and_array(x, y) }";
+        let source = "use wire; use arrays; #[allow(combinational_block)] block b(clk, x: wire::Item, y: u8[2][2]) -> u8 { arrays::scalar_and_array(x, y) }";
         let linked = compile_with_options(
             source,
             empty_package("sample"),

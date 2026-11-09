@@ -250,6 +250,7 @@ block capture<A, B>(clk, rst, x: (A, B[2])) -> (A, B) {
 fn unused_generic_blocks_do_not_create_ir_or_compete_for_top() -> Result<(), String> {
     let source = r#"
 pub block unused<T>(clk, x: T) -> T { x }
+#[allow(combinational_block)]
 block wrapper(clk, x: u8) -> u8 { x }
 "#;
     let package = compile(source, empty_package("design"), ResetBehavior::default())?;
@@ -289,7 +290,7 @@ block wrapper(clk, x: u8) -> u8 { let child = echo(x); child }
     let standalone = compile(source, empty_package("design"), ResetBehavior::default())?;
     let child_name = &standalone.get_top_block().unwrap().instantiations[0].block;
     let linked = compile(
-        &format!("block {child_name}(clk) -> bool {{ false }}"),
+        &format!("#[allow(combinational_block)] block {child_name}(clk) -> bool {{ false }}"),
         empty_package("design"),
         ResetBehavior::default(),
     )?;
