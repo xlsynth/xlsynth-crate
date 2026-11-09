@@ -90,27 +90,33 @@ impl SourceModule {
 }
 
 /// Native logical and physical filenames can differ for Bazel runfiles.
-struct SourcePath {
+pub(crate) struct SourcePath {
     logical: PathBuf,
-    physical: PathBuf,
+    pub(crate) physical: PathBuf,
 }
 
-/// XLS also checks a depot-root-stripped suffix. For a single component
-/// that suffix is ".x".
-fn module_suffixes(subject: &str) -> (PathBuf, PathBuf) {
-    let tail = subject.split_once('.').map_or("", |(_, tail)| tail);
-    (
-        PathBuf::from(format!("{}.x", subject.replace('.', "/"))),
-        PathBuf::from(format!("{}.x", tail.replace('.', "/"))),
-    )
+/// BX module paths are root-relative. Native DSLX additionally tries the
+/// suffix with its depot root removed, including ".x" for a single component.
+fn module_suffixes(subject: &str, extension: &str) -> (PathBuf, Option<PathBuf>) {
+    let full = PathBuf::from(format!("{}.{extension}", subject.replace('.', "/")));
+    let stripped = (extension == "x").then(|| {
+        let tail = subject.split_once('.').map_or("", |(_, tail)| tail);
+        PathBuf::from(format!("{}.x", tail.replace('.', "/")))
+    });
+    (full, stripped)
+}
+
+/// Search roots and lazily discovered Bazel runfiles for module imports.
+pub(crate) struct ModuleSearch<'a> {
+    stdlib: &'a Path,
+    roots: &'a [&'a Path],
+    runfiles: OnceCell<XlsRunfiles>,
 }
 
 /// File lookup decisions, including missing full-module use leaves, for one
 /// check.
 struct SourceLocator<'a> {
-    stdlib: &'a Path,
-    roots: &'a [&'a Path],
-    runfiles: OnceCell<XlsRunfiles>,
+    search: ModuleSearch<'a>,
     locations: BTreeMap<String, Option<SourcePath>>,
     member_use_names: BTreeSet<String>,
 }
@@ -139,33 +145,45 @@ fn implicit_source(
     None
 }
 
+impl<'a> ModuleSearch<'a> {
+    pub(crate) fn new(stdlib: &'a Path, roots: &'a [&'a Path]) -> Self {
+        Self {
+            stdlib,
+            roots,
+            runfiles: OnceCell::new(),
+        }
+    }
+
+    /// Look up a dotted module subject using the native DSLX search order.
+    pub(crate) fn file(&self, subject: &str, extension: &str) -> Option<SourcePath> {
+        let (full, stripped) = if extension == "x" && STDLIB_MODULES.contains(&subject) {
+            (self.stdlib.join(format!("{subject}.x")), None)
+        } else {
+            module_suffixes(subject, extension)
+        };
+        if let Some(path) = implicit_source(&full, stripped.as_deref(), &self.runfiles) {
+            return Some(path);
+        }
+        for root in self.roots {
+            for suffix in std::iter::once(&full).chain(stripped.as_ref()) {
+                let physical = root.join(suffix);
+                if physical.exists() {
+                    return Some(SourcePath {
+                        logical: physical.clone(),
+                        physical,
+                    });
+                }
+            }
+        }
+        None
+    }
+}
+
 impl SourceLocator<'_> {
     fn lookup(&mut self, subject: &str) -> Option<&SourcePath> {
         self.locations
             .entry(subject.to_owned())
-            .or_insert_with(|| {
-                let (full, stripped) = if STDLIB_MODULES.contains(&subject) {
-                    (self.stdlib.join(format!("{subject}.x")), None)
-                } else {
-                    let (full, stripped) = module_suffixes(subject);
-                    (full, Some(stripped))
-                };
-                if let Some(path) = implicit_source(&full, stripped.as_deref(), &self.runfiles) {
-                    return Some(path);
-                }
-                for root in self.roots {
-                    for suffix in std::iter::once(&full).chain(stripped.as_ref()) {
-                        let physical = root.join(suffix);
-                        if physical.exists() {
-                            return Some(SourcePath {
-                                logical: physical.clone(),
-                                physical,
-                            });
-                        }
-                    }
-                }
-                None
-            })
+            .or_insert_with(|| self.search.file(subject, "x"))
             .as_ref()
     }
 
@@ -209,9 +227,7 @@ impl OutlineGraph {
         search_paths: &[&Path],
     ) -> Result<Self, String> {
         let mut locator = SourceLocator {
-            stdlib,
-            roots: search_paths,
-            runfiles: OnceCell::new(),
+            search: ModuleSearch::new(stdlib, search_paths),
             locations: BTreeMap::new(),
             member_use_names: BTreeSet::new(),
         };

@@ -191,7 +191,7 @@ xlsynth-driver block2sv checksum.unrolled.ir > checksum.sv
 
 ## Compile and link
 
-Use `parse_module` and `check_module` to inspect BX. The checker resolves DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
+Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
 
 ```rust
 use xlsynth_bx::{compile, ResetBehavior};
@@ -219,6 +219,47 @@ Declare and call a prelinked DSLX function by its module-qualified name, such as
 For an unqualified declaration such as `extern fn transform(x: u8) -> u16;`, call `transform(x)`. The linker tries the plain IR name first and then the DSLX symbol for the package's own module. To bind a specialization or choose a local alias, supply the exact IR symbol, as in `extern fn widen(x: u8) -> u16 = "__math__transform";`.
 
 The linker checks argument order, widths, aggregate shapes, and result type before emitting `invoke`. Signedness and struct names are BX-level distinctions. Their IR representations are bits and tuples respectively. The linked function and its callees must have pure IR bodies.
+
+### Using BX libraries
+
+Place reusable declarations in a `.bx` file and mark the library interface with
+`pub`. This `stages.bx` library defines a register for any payload type.
+
+```text
+pub block pipe_reg<T>(clk, rst, valid: bool, data: T) -> (bool, T) {
+    reg valid_q: bool = false;
+    reg data_q: T;
+    valid_q := valid;
+    if valid { data_q := data; }
+    (valid_q, data_q)
+}
+```
+
+A sibling file can import the module and call its block. The call inherits
+the caller's clock and reset, and BX infers `T` from `data`.
+
+```text
+use stages;
+
+pub block delay(clk, rst, valid: bool, data: u16) -> (bool, u16) {
+    let delayed = stages::pipe_reg(valid, data);
+    delayed
+}
+```
+
+`use stages::pipe_reg;` binds the block directly. Module, member, and grouped
+imports work for public blocks, functions, structs, and constants. Library
+declarations can use private helpers and import other BX or DSLX modules.
+Transitive imports stay in the file that declares them. The root file's blocks
+determine the implicit top. BX links library blocks, functions, and externs reached
+from the root declarations.
+
+Module paths start at a search root. For example, `use ip::stages;` looks for
+`ip/stages.x` or `ip/stages.bx` and binds `stages`. An existing DSLX module
+takes precedence over a BX file with the same logical path. The driver also
+searches the input file's directory. Use `--dslx-path` to add a library
+directory. Library API callers supply directories in
+`ImportOptions::additional_search_paths`.
 
 ### Using DSLX modules and members
 

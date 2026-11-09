@@ -43,7 +43,7 @@ fn add_bx_args(command: Command) -> Command {
                 .long("dslx-path")
                 .visible_alias("dslx_path")
                 .value_name("DIRS")
-                .help("Semicolon-separated DSLX import directories (overrides the toolchain path)"),
+                .help("Semicolon-separated BX and DSLX import directories (overrides the toolchain path)"),
         )
         .arg(
             Arg::new("dslx_stdlib_path")
@@ -139,7 +139,12 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
             .unwrap_or("design");
         empty_package(name)
     };
-    let paths = get_dslx_search_paths(matches, config);
+    let mut paths = get_dslx_search_paths(matches, config);
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        && !paths.iter().any(|p| p == parent)
+    {
+        paths.push(parent.to_path_buf());
+    }
     let stdlib = get_dslx_stdlib_path(matches, config);
     let imports = ImportOptions {
         dslx_stdlib_path: stdlib.as_deref().map(Path::new),

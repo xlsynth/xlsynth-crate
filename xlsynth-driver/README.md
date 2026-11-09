@@ -435,8 +435,8 @@ xlsynth-driver gv2block \
 ### `bx2ir`: BX to Block IR
 
 Compiles a `.bx` file to an XLS block IR package on stdout. A BX pipeline
-declares the registers between stages and can call local BX functions or
-imported DSLX functions for the combinational work. This `mul_inc.bx` captures
+declares the registers between stages and can use blocks and functions from BX
+libraries or call imported DSLX functions for the combinational work. This `mul_inc.bx` captures
 a product on one clock edge and the incremented product on the next.
 
 ```text
@@ -462,11 +462,11 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--link-ir <PACKAGE>` supplies an existing XLS IR package for `extern fn`
   and `extern block` declarations. By default, compilation starts with an
   empty package named after the BX file stem, or `design` if the stem cannot
-  serve as an IR package name. BX `use` declarations resolve DSLX source on
-  the module search path.
-- `--dslx-path 'dir1;dir2'` sets the DSLX module search directories in order,
-  overriding the directories from the toolchain configuration. To import
-  a module next to the BX source, include its directory in the search path.
+  serve as an IR package name. BX `use` declarations resolve `.bx` and `.x`
+  modules on the search path.
+- `--dslx-path 'dir1;dir2'` sets the BX and DSLX module search directories in
+  order, overriding the directories from the toolchain configuration. The
+  directory containing the BX input is also searched after these directories.
 - `--dslx-stdlib-path <DIR>` overrides the toolchain's DSLX standard library
   directory. The default uses the configured directory or the bundled library.
 - `--reset-active-low[=true|false]` selects active-low reset for the block

@@ -462,6 +462,7 @@ fn literal_copy_work(value: &IrValue) -> usize {
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
+    zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
     constants: BTreeMap<&'a str, CheckedConstant>,
     functions: BTreeMap<&'a str, FunctionInterface>,
@@ -471,6 +472,15 @@ struct Declarations<'a> {
 }
 
 impl Declarations<'_> {
+    /// Resolve the spelling shared by a source module's zero intrinsic and
+    /// functions.
+    fn zero_binding(&self, owner: &str) -> String {
+        self.zero_uses
+            .and_then(|uses| uses.get(owner))
+            .cloned()
+            .unwrap_or_else(|| crate::bx_import::zero_binding(owner))
+    }
+
     fn is_block(&self, name: &str) -> bool {
         self.blocks.contains_key(name) || self.templates.contains_key(name)
     }
@@ -1159,9 +1169,21 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
+    let linked = crate::bx_import::link(module, options)?;
+    check_sources(module, linked.as_ref(), options).map_err(crate::bx_import::diagnostic)
+}
+
+/// Check the root and all loaded libraries against one DSLX source snapshot.
+pub(crate) fn check_sources(
+    root: &Module,
+    linked: Option<&crate::bx_import::LinkedSources>,
+    options: &ImportOptions<'_>,
+) -> Result<CheckedModule, String> {
+    let module = linked.map_or(root, |l| &l.module);
     let mut names = BTreeSet::new();
-    for path in &module.uses {
-        let name = path.binding().ok_or("empty DSLX use path")?;
+    for (i, path) in module.uses.iter().enumerate() {
+        let leaf = path.binding().ok_or("empty DSLX use path")?;
+        let name = linked.map_or(leaf, |l| l.dslx_bindings[i].as_str());
         if !names.insert(name.to_owned()) {
             return Err(format!("duplicate use binding '{name}'"));
         }
@@ -1177,16 +1199,23 @@ pub fn check_module_with_options(
         }
     }
     for constant in &module.constants {
-        let name = constant.name.as_str();
+        let source_name = constant.name.as_str();
+        let name = linked
+            .and_then(|_| crate::bx_import::library_item(source_name))
+            .map_or(source_name, |(_, n)| n);
         if !(crate::parser::is_use_identifier(name) || name == "self") {
             return Err(format!("invalid module constant name '{name}'"));
         }
         if dslx_builtin_binding(name) {
             return Err(format!("constant '{name}' shadows a builtin"));
         }
-        declare(&mut names, name)?;
+        declare(&mut names, source_name)?;
     }
-    let mut resolver = ImportResolver::new(&module.uses, options)?;
+    let mut resolver = if let Some(libraries) = linked {
+        ImportResolver::with_bindings(&module.uses, options, Some(&libraries.dslx_bindings))?
+    } else {
+        ImportResolver::new(&module.uses, options)?
+    };
     let mut structs = StructTable::default();
     for def in &module.structs {
         declare(&mut names, &def.name)?;
@@ -1221,6 +1250,7 @@ pub fn check_module_with_options(
     }
 
     let mut declarations = Declarations {
+        zero_uses: linked.map(|l| &l.zero_uses),
         positions: module
             .declaration_order
             .iter()
@@ -1411,7 +1441,7 @@ pub fn check_module_with_options(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
-    Ok(CheckedModule {
+    let mut checked = CheckedModule {
         structs: structs.definitions,
         constants: module
             .constants
@@ -1424,13 +1454,23 @@ pub fn check_module_with_options(
             })
             .collect(),
         externs,
+        library_extern_functions: BTreeMap::new(),
         functions,
         specialized_functions: function_registry.generated_names(),
         extern_blocks,
-        imports: resolver.finish()?,
+        library_extern_blocks: BTreeMap::new(),
+        imports: Default::default(),
         blocks,
         specialized_blocks,
-    })
+    };
+    checked.imports = if linked.is_some() {
+        let calls = checked.retain_library_dependencies();
+        checked.restore_extern_names();
+        resolver.finish_with_calls(Some(&calls))?
+    } else {
+        resolver.finish()?
+    };
+    Ok(checked)
 }
 
 /// Controls which declarations and bindings are available in a BX body.
@@ -1468,6 +1508,8 @@ struct BodyChecker<'a, 'm> {
     /// ports.
     checking_callback_inputs: bool,
     function_position: Option<usize>,
+    /// The zero intrinsic can be shadowed in the body's own source module.
+    zero_binding: String,
     /// Blocks allow forward hardware references, but introduce constants in
     /// source order.
     block_position: Option<usize>,
@@ -1656,6 +1698,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             dslx_value_context: false,
             checking_callback_inputs: false,
             function_position: None,
+            zero_binding: "zero!".into(),
             block_position: None,
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
@@ -1689,6 +1732,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Check ordered let bindings and a return expression in a pure scope.
     fn check_function(&mut self, function: &Function) -> Result<CheckedFunction, String> {
+        self.zero_binding = self.decls.zero_binding(&function.name);
         self.function_position = self.decls.positions.get(function.name.as_str()).copied();
         let interface = &self.decls.functions[function.name.as_str()];
         self.source_template = (!interface.callback_params.is_empty()).then_some(interface);
@@ -1778,6 +1822,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 has_reset: block.reset.is_some(),
             },
         );
+        c.zero_binding = decls.zero_binding(&block.name);
         c.outputs = outputs;
         c.block_position = decls.positions.get(block.name.as_str()).copied();
         c.specializations = Some(specializations);
@@ -2439,7 +2484,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn zero_value(&mut self, ty: &Type) -> Result<(Type, K), String> {
         let ty = self.source_type(ty)?;
         if self.zero_calls_function()? {
-            self.function_call("zero!", &[])
+            self.function_call(&self.zero_binding.clone(), &[])
         } else {
             let layout = crate::layout::Layouts::new(&self.structs.definitions)
                 .lower(&ty)
@@ -3330,13 +3375,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
-            BodyKind::Function => Ok(self.decls.visible("zero!", self.function_position)
-                && (self.decls.functions.contains_key("zero!")
-                    || self.resolver.lookup("zero!")?.is_some())),
+            BodyKind::Function => Ok(self
+                .decls
+                .visible(&self.zero_binding, self.function_position)
+                && (self
+                    .decls
+                    .functions
+                    .contains_key(self.zero_binding.as_str())
+                    || self.resolver.lookup(&self.zero_binding)?.is_some())),
             // Only a local function can override zero! in a BX block.
-            BodyKind::Block { .. } => {
-                Ok(self.decls.functions.get("zero!").is_some_and(|f| f.local))
-            }
+            BodyKind::Block { .. } => Ok(self
+                .decls
+                .functions
+                .get(self.zero_binding.as_str())
+                .is_some_and(|f| f.local)),
         }
     }
 
@@ -3431,11 +3483,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve a local or extern signature or infer an imported DSLX
     /// specialization.
     fn function_call(&mut self, name: &str, args: &[Expr]) -> Result<(Type, K), String> {
-        if self.loop_values.contains_key(name) {
-            return Err(format!("'{name}' names a loop-local value"));
+        let local = crate::bx_import::local_callee_name(name);
+        let binding = local.unwrap_or(name);
+        let source_name = scope::source_binding_name(binding, &self.scope_alias_names);
+        if self.loop_values.contains_key(binding) {
+            return Err(format!("'{source_name}' names a loop-local value"));
         }
-        if self.function_values.contains_key(name) {
-            return Err(format!("'{name}' names a local value here"));
+        if local.is_some() || self.function_values.contains_key(name) {
+            return Err(format!("'{source_name}' names a local value here"));
         }
         if let Some(index) = self.callback_index(name) {
             if self.names.contains(name) {
@@ -3476,7 +3531,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if visible && self.decls.is_block(name) {
             return Err(self.block_in_value_error(name));
         }
-        if name == "update" && (!visible || !self.decls.functions.contains_key(name)) {
+        if name == crate::bx_import::BUILTIN_UPDATE
+            || name == "update" && (!visible || !self.decls.functions.contains_key(name))
+        {
             if self.names.contains(name) {
                 return Err(format!("'{name}' names a local value here"));
             }

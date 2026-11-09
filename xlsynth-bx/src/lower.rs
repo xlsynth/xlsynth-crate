@@ -18,6 +18,7 @@ use xlsynth_pir::{
 };
 
 use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
+use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern, TypedExpr,
     TypedExprKind, TypedMatchArm, output_ports,
@@ -148,10 +149,9 @@ pub fn lower_module(
             .append_block(builder)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
     }
-    let mut concrete = module
-        .blocks
-        .iter()
-        .filter(|block| !module.specialized_blocks.contains(&block.name));
+    let mut concrete = module.blocks.iter().filter(|block| {
+        library_item(&block.name).is_none() && !module.specialized_blocks.contains(&block.name)
+    });
     if let Some(first) = concrete.next() {
         package.top = None;
         let top = if concrete.clone().next().is_none() {
@@ -168,36 +168,48 @@ pub fn lower_module(
     Ok(package)
 }
 
-/// IR symbols for generated block definitions whose preferred name is already
-/// occupied in the linked package. Parent instances use the same mapping.
-#[derive(Default)]
+/// IR symbols for library blocks, their prelinked externs, and generated
+/// specializations. Parent instances use the same mapping as definitions.
 struct BlockSymbols {
     renamed: BTreeMap<String, String>,
 }
 
 impl BlockSymbols {
     fn new(module: &CheckedModule, package: &Package, function_symbols: &[String]) -> Self {
-        if module.specialized_blocks.is_empty() {
-            return Self::default();
+        let mut renamed: BTreeMap<_, _> = module
+            .library_extern_blocks
+            .iter()
+            .map(|(&index, key)| (key.clone(), module.extern_blocks[index].name.clone()))
+            .collect();
+        if module.specialized_blocks.is_empty()
+            && module
+                .blocks
+                .iter()
+                .all(|b| library_item(&b.name).is_none())
+        {
+            return Self { renamed };
         }
         let linked: BTreeSet<_> = package
             .members
             .iter()
             .map(|member| member.graph().name.as_str())
+            .chain(function_symbols.iter().map(String::as_str))
             .collect();
         let mut occupied = linked
             .iter()
             .copied()
             .chain(module.blocks.iter().map(|block| block.name.as_str()))
-            .chain(function_symbols.iter().map(String::as_str))
             .map(str::to_owned)
             .collect();
-        let renamed = module
-            .specialized_blocks
-            .iter()
-            .filter(|name| linked.contains(name.as_str()))
-            .map(|name| (name.clone(), fresh_ir_name(name, &mut occupied)))
-            .collect();
+        for block in &module.blocks {
+            let name = &block.name;
+            if library_item(name).is_some()
+                || (module.specialized_blocks.contains(name)
+                    && (!is_valid_identifier(name) || linked.contains(name.as_str())))
+            {
+                renamed.insert(name.clone(), fresh_ir_name(name, &mut occupied));
+            }
+        }
         Self { renamed }
     }
 
@@ -206,8 +218,13 @@ impl BlockSymbols {
     }
 }
 
-/// Reserve a numbered suffix for a generated package symbol.
-fn fresh_ir_name(stem: &str, occupied: &mut BTreeSet<String>) -> String {
+/// Turn a checked name into a legal IR symbol and disambiguate collisions.
+fn fresh_ir_name(name: &str, occupied: &mut BTreeSet<String>) -> String {
+    let stem = name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+    // Library identities and their specializations already contain a namespace.
+    if name.contains('$') && occupied.insert(stem.clone()) {
+        return stem;
+    }
     let mut suffix = 1;
     loop {
         let candidate = format!("{stem}__bx_{suffix}");
@@ -242,8 +259,7 @@ fn local_ir_names<'a>(
             if is_valid_identifier(name) && !conflicts.contains(name) {
                 return name.to_owned();
             }
-            let stem = name.replace(['\'', '!'], "_");
-            fresh_ir_name(&stem, &mut occupied)
+            fresh_ir_name(name, &mut occupied)
         })
         .collect()
 }
@@ -257,7 +273,7 @@ fn check_extern_blocks(
     reset_behavior: ResetBehavior,
 ) -> Result<(), String> {
     for declaration in &module.extern_blocks {
-        let name = &declaration.name;
+        let name = declaration.name.as_str();
         let block = package
             .get_block(name)
             .ok_or_else(|| format!("extern block '{name}': no linked IR block of that name"))?;
@@ -360,7 +376,7 @@ fn link_externs(
         })
         .collect();
     let mut bindings = BTreeMap::new();
-    for declaration in &module.externs {
+    for (i, declaration) in module.externs.iter().enumerate() {
         let name = declaration.name.as_str();
         let symbol = match (&declaration.symbol, name.split_once("::")) {
             (Some(symbol), _) => symbol.clone(),
@@ -385,7 +401,11 @@ fn link_externs(
             function,
             layouts,
         )?;
-        bindings.insert(declaration.name.clone(), index);
+        let key = module
+            .library_extern_functions
+            .get(&i)
+            .unwrap_or(&declaration.name);
+        bindings.insert(key.clone(), index);
     }
     // Both select arms can run. Check reachable bodies for effects, including
     // dead nodes and calls through maps or loops.

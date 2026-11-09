@@ -17,6 +17,7 @@ use crate::check::MAX_ELABORATION_DEPTH;
 use crate::dslx_import::TypeWitness;
 use crate::parser::parse_value_type;
 pub(crate) use effect_source::{EffectFunctionSource, EffectSources, is_token_builtin};
+pub(crate) use outline_graph::ModuleSearch;
 use outline_graph::{DeclId, NativeSourceFiles, OutlineGraph, ResolvedShape};
 
 /// The Rust declaration and BX layout associated with a checked native type.

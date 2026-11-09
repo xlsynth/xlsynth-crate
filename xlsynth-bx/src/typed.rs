@@ -8,6 +8,7 @@ use xlsynth_pir::{
 };
 
 use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
+use crate::bx_import::library_item;
 use crate::dslx_import::{ImportedCall, ResolvedImports};
 use TypedExprKind as K;
 
@@ -18,11 +19,17 @@ pub struct CheckedModule {
     pub(crate) structs: Vec<StructDef>,
     pub(crate) constants: Vec<CheckedConstant>,
     pub(crate) externs: Vec<ExternFn>,
+    /// Qualified call targets of imported extern functions, by declaration
+    /// index.
+    pub(crate) library_extern_functions: BTreeMap<usize, String>,
     pub(crate) functions: Vec<CheckedFunction>,
     /// Generated function definitions that can be renamed when linked into
     /// an existing package.
     pub(crate) specialized_functions: BTreeSet<String>,
     pub(crate) extern_blocks: Vec<ExternBlock>,
+    /// Qualified instance targets of imported extern blocks, by declaration
+    /// index.
+    pub(crate) library_extern_blocks: BTreeMap<usize, String>,
     pub(crate) imports: ResolvedImports,
     pub(crate) blocks: Vec<CheckedBlock>,
     /// Generated block definitions referenced by inferred call sites.
@@ -30,17 +37,30 @@ pub struct CheckedModule {
 }
 
 impl CheckedModule {
+    /// Restore source spellings after filtering unreachable externs. Calls and
+    /// instances keep their qualified keys to distinguish library declarations.
+    pub(crate) fn restore_extern_names(&mut self) {
+        self.library_extern_functions =
+            take_qualified_names(self.externs.iter_mut().map(|f| &mut f.name));
+        self.library_extern_blocks =
+            take_qualified_names(self.extern_blocks.iter_mut().map(|b| &mut b.name));
+    }
+
     pub fn structs(&self) -> &[StructDef] {
         &self.structs
     }
-    /// Module constants in source order, with their compile-time values.
+    /// BX constants and their compile-time values, in dependency and source
+    /// order across modules.
     pub fn constants(&self) -> &[CheckedConstant] {
         &self.constants
     }
+    /// Extern function declarations with their original names and optional link
+    /// symbols.
     pub fn externs(&self) -> &[ExternFn] {
         &self.externs
     }
-    /// Local functions in dependency order, with callees preceding callers.
+    /// BX functions from the source and its libraries in dependency order,
+    /// with callees preceding callers.
     pub fn functions(&self) -> &[CheckedFunction] {
         &self.functions
     }
@@ -53,11 +73,25 @@ impl CheckedModule {
     pub fn imported_calls(&self) -> &[ImportedCall] {
         &self.imports.calls
     }
-    /// Blocks in dependency order, with child definitions preceding their
-    /// parents.
+    /// BX blocks from the source and its libraries in dependency order, with
+    /// child definitions preceding their parents.
     pub fn blocks(&self) -> &[CheckedBlock] {
         &self.blocks
     }
+}
+
+/// Keep the checked key for each library declaration and expose its source
+/// name.
+fn take_qualified_names<'a>(
+    names: impl Iterator<Item = &'a mut String>,
+) -> BTreeMap<usize, String> {
+    names
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let source = library_item(name)?.1.to_owned();
+            Some((i, std::mem::replace(name, source)))
+        })
+        .collect()
 }
 
 /// A typed module constant, evaluated before checking its consumers.

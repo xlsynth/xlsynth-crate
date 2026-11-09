@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod ast;
+mod bx_import;
 pub mod check;
 mod dslx_import;
 mod effect_diagnostic;
@@ -26,12 +27,12 @@ pub use xlsynth_pir::ir_builder::ResetBehavior;
 use std::path::Path;
 use xlsynth_pir::ir::{FileTable, Package};
 
-/// Paths used by DSLX to resolve BX module imports and their dependencies.
+/// Search paths for BX and DSLX imports and their dependencies.
 #[derive(Clone, Debug, Default)]
 pub struct ImportOptions<'a> {
     /// The bundled DSLX standard library is used by default.
     pub dslx_stdlib_path: Option<&'a Path>,
-    /// Additional DSLX search directories, in lookup order.
+    /// Additional module search directories, in lookup order.
     pub additional_search_paths: Vec<&'a Path>,
 }
 
@@ -41,16 +42,26 @@ pub fn compile(source: &str, package: Package, reset: ResetBehavior) -> Result<P
     compile_with_options(source, package, reset, &ImportOptions::default())
 }
 
-/// Compiles BX source with the specified DSLX module search paths.
+/// Parse a BX source file with its imported template signatures available to
+/// distinguish multi-callback calls from comma-separated comparisons.
+pub fn parse_module_with_options(
+    source: &str,
+    options: &ImportOptions<'_>,
+) -> Result<ast::Module, String> {
+    bx_import::parse_source(source, options)
+}
+
+/// Compiles BX source with the specified BX and DSLX module search paths.
 pub fn compile_with_options(
     source: &str,
     package: Package,
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
 ) -> Result<Package, String> {
-    let module = parse_module(source)?;
-    let checked = check_module_with_options(&module, options)?;
-    lower_module(&checked, package, reset)
+    let (module, libraries) = bx_import::read(source, options)?;
+    let checked = check::check_sources(&module, libraries.as_ref(), options)
+        .map_err(bx_import::diagnostic)?;
+    lower_module(&checked, package, reset).map_err(bx_import::diagnostic)
 }
 
 /// Creates a destination for BX modules whose externs require no linked IR.

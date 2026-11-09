@@ -14,6 +14,7 @@ impl<'a> BodyChecker<'a, '_> {
         decl: &ConstDef,
         functions: &'a dyn Fn(&str) -> Option<&'a CheckedFunction>,
     ) -> Result<CheckedConstant, String> {
+        self.zero_binding = self.decls.zero_binding(&decl.name);
         self.function_position = self.decls.positions.get(decl.name.as_str()).copied();
         self.constant_functions = Some(ConstantFunctions::new(functions));
         let annotation = decl
