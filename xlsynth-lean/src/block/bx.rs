@@ -156,14 +156,21 @@ impl CompiledBx {
                 Ok(())
             })?;
         }
-        // BX structs have unqualified source keys. DSLX declarations keep the
-        // owning module in theirs. Diagnose overlaps before rendering either.
-        let bx_names: BTreeSet<_> = declarations
+        // Root and library BX keys are distinct from qualified DSLX keys,
+        // but both languages can declare the same name in the same Lean
+        // namespace.
+        let mut bx_names = BTreeSet::from([(self.module_name.as_str(), graph.name.as_str())]);
+        for (owner, local) in declarations
             .iter()
             .map(TypeDecl::name)
             .filter(|name| !name.contains("::"))
-            .chain(std::iter::once(graph.name.as_str()))
-            .collect();
+            .map(|name| xlsynth_bx::library_item(name).unwrap_or((&self.module_name, name)))
+        {
+            ensure!(
+                bx_names.insert((owner, local)),
+                "duplicate BX source declaration '{owner}::{local}' in the root and an imported library"
+            );
+        }
         for (owner, local) in declarations
             .iter()
             .map(TypeDecl::name)
@@ -177,7 +184,7 @@ impl CompiledBx {
             )
         {
             ensure!(
-                self.module_name != owner || !bx_names.contains(local),
+                !bx_names.contains(&(owner, local)),
                 "duplicate source declaration '{owner}::{local}' in BX '{owner}.bx' and DSLX '{owner}.x'; rename one declaration"
             );
         }

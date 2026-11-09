@@ -346,6 +346,72 @@ example (q : XlsReadable.State) (x : XlsReadable.Input) :
 }
 
 #[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_library_record_keeps_its_declaring_module() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("lib.bx"), "pub struct Packet { value: u8 }")?;
+    let mut bundle = compile_bx(
+        "design",
+        "use lib; struct Packet { count: u8 }
+         block demo(clk, p: lib::Packet, q: Packet) -> u8 { p.value + q.count }",
+        xlsynth_bx::empty_package("pkg"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+    )?
+    .emit_readable(None)?;
+    bundle.files.push((
+        "LibraryRecord.lean".into(),
+        "import ReadableCorrespondence
+example (x : XlsReadable.Input) : XLS.lib.Packet := x.p
+example (x : XlsReadable.Input) : XLS.design.Packet := x.q
+#guard XlsReadable.observe {} {p := {value := 5}, q := {count := 7}} == 12
+"
+        .into(),
+    ));
+    check_bundle(bundle, "BX library and root records with the same name");
+    Ok(())
+}
+
+#[test]
+fn bx_library_record_conflicts_with_a_dslx_declaration_of_the_same_name() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    fs::write(dir.path().join("lib.bx"), "pub struct Packet { value: u8 }")?;
+    let options = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let emit = |function| {
+        let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+        let dslx = xlsynth::dslx::parse_and_typecheck(
+            &format!("pub fn {function}(x: u8) -> u8 {{ x }}"),
+            "lib.x",
+            "lib",
+            &mut imports,
+        )?;
+        xlsynth_lean::block::compile_bx_with_dslx(
+            "design",
+            &format!(
+                "use lib::Packet; extern fn lib::{function}(x: u8) -> u8;
+                 block demo(clk, p: Packet) -> u8 {{ lib::{function}(p.value) }}"
+            ),
+            dslx,
+            Default::default(),
+            &options,
+        )?
+        .emit_readable(None)
+    };
+    emit("read")?;
+    assert_eq!(
+        emit("Packet").err().unwrap().to_string(),
+        "duplicate source declaration 'lib::Packet' in BX 'lib.bx' and DSLX 'lib.x'; rename one declaration"
+    );
+    Ok(())
+}
+
+#[test]
 fn module_owner_can_be_shared_by_disjoint_bx_and_dslx_declarations() -> Result<()> {
     let dir = tempfile::tempdir()?;
     fs::write(

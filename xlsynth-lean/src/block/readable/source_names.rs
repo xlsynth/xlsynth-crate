@@ -9,7 +9,9 @@ use super::{SourceType, identifier, lean, product_type};
 use crate::block::source_types::{StatefulInterface, StructField, TypeDecl};
 
 pub(super) fn declaring_name<'a>(bx_namespace: &'a str, name: &'a str) -> (&'a str, &'a str) {
-    name.split_once("::").unwrap_or((bx_namespace, name))
+    xlsynth_bx::library_item(name)
+        .or_else(|| name.split_once("::"))
+        .unwrap_or((bx_namespace, name))
 }
 
 /// A type owns the namespace for its projections, constructors and other Lean

@@ -51,24 +51,41 @@ fn readable_interface_uses_linked_bx_library_structs() {
         "struct Word { value: u8 } pub struct Packet { payload: Word }",
     )
     .unwrap();
-    let compiled = compile_bx(
-        "design",
-        "use lib; struct Packet { tag: bool }
+    let emit = |module_name| {
+        compile_bx(
+            module_name,
+            "use lib; struct Packet { tag: bool }
          block demo(clk, p: lib::Packet, q: Packet) -> lib::Packet { p }",
-        xlsynth_bx::empty_package("example"),
-        Default::default(),
-        &xlsynth_bx::ImportOptions {
-            additional_search_paths: vec![library.path()],
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let bundle = compiled.emit_readable(Some("demo")).unwrap();
+            xlsynth_bx::empty_package("example"),
+            Default::default(),
+            &xlsynth_bx::ImportOptions {
+                additional_search_paths: vec![library.path()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .emit_readable(Some("demo"))
+    };
+    let bundle = emit("design").unwrap();
     let types = &bundle.files[1].1;
-    assert!(types.contains("structure «lib::Packet»"), "{types}");
-    assert!(types.contains("structure «Packet»"), "{types}");
-    assert!(types.contains("«value» : _root_.BitVec 8"), "{types}");
+    assert!(
+        types.contains("-- Source struct lib::Packet { payload }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct design::Packet { tag }"),
+        "{types}"
+    );
+    assert!(
+        types.contains("-- Source struct lib::Word { value }"),
+        "{types}"
+    );
+    assert!(!types.contains("$bx$"), "{types}");
     assert!(types.contains("«payload» :"), "{types}");
+    assert_eq!(
+        emit("lib").err().unwrap().to_string(),
+        "duplicate BX source declaration 'lib::Packet' in the root and an imported library"
+    );
 }
 
 #[test]
