@@ -369,6 +369,15 @@ tuple grammar; older released converters contain a sibling-rest crash.
 See the [crate guide](xlsynth-dslx-fuzzer/README.md) for running and reproducing
 the target.
 
+### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_bx_converter_contracts.rs
+
+Replays audit-v7 bytes as self-contained combinational BX functions. For
+accepted source, the target lowers the BX function, checks its exact public
+signature, and proves the value and assertion behavior against the generator's
+independent IR with Bitwuzla. The independent reference can expose wrong
+values shared by the BX and DSLX implementations. The campaign counts frontend
+rejections and out-of-scope cases separately. [Target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md)
+
 ### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_dslx_converter_contracts.rs
 
 Varies DSLX source names, expressions and types to exercise specific converter

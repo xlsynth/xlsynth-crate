@@ -2,7 +2,7 @@
 
 //! Records standalone campaign outcomes and their replay inputs.
 
-use crate::CheckFailure;
+use crate::{CheckFailure, bx::BxOutcome};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
@@ -114,6 +114,21 @@ impl Campaign {
             }
             _ => unreachable!("check_prepared reports prover errors and mismatches as failures"),
         };
+        self.record_mark(mark);
+    }
+
+    /// Count unproved BX inputs separately. A DSLX audit program can be
+    /// outside the BX language or require an oracle other than a value proof.
+    pub fn record_bx(&self, data: &[u8], family: &str, result: Result<BxOutcome, CheckFailure>) {
+        match result {
+            Ok(BxOutcome::OutsideScope) => self.record_mark(b'S'),
+            Ok(BxOutcome::FrontendRejected(_)) => self.record_mark(b'R'),
+            Ok(BxOutcome::Checked(verdict)) => self.record(data, Some(family), Ok(verdict)),
+            Err(failure) => self.record(data, Some(family), Err(failure)),
+        }
+    }
+
+    fn record_mark(&self, mark: u8) {
         if let Some(results) = &self.proof_results {
             results
                 .lock()
@@ -121,5 +136,29 @@ impl Campaign {
                 .write_all(&[mark])
                 .expect("write proof outcome");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bx_skips_and_frontend_rejections_never_increment_proofs() -> std::io::Result<()> {
+        let ledger = tempfile::NamedTempFile::new()?;
+        let campaign = Campaign {
+            proof_results: Some(Mutex::new(ledger.reopen()?)),
+            inconclusive_dir: None,
+            findings_dir: None,
+        };
+        for outcome in [
+            BxOutcome::OutsideScope,
+            BxOutcome::FrontendRejected("unsupported".into()),
+            BxOutcome::Checked(EquivResult::Proved),
+        ] {
+            campaign.record_bx(&[], "test", Ok(outcome));
+        }
+        assert_eq!(std::fs::read(ledger.path())?, b"SRP");
+        Ok(())
     }
 }

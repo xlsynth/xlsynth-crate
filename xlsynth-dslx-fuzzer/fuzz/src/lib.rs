@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod bx;
 pub mod campaign;
 pub mod cli;
 pub mod native;
@@ -35,7 +36,7 @@ fn prove_with_assertions(
     let converted = converted_fn.get_type();
     if expected != converted {
         return Err(CheckFailure::InvalidOutput(format!(
-            "Converted top signature differs from the DSLX reference: expected {expected:?}, got {converted:?}\n{sample:#?}"
+            "Converted top signature differs from the generated reference: expected {expected:?}, got {converted:?}\n{sample:#?}"
         )));
     }
     let prover = prover_for_choice_with_limits(

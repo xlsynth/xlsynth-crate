@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-dslx-fuzzer"
-version = "0.79.0"
+version = "0.81.0"
 edition = "2024"
 publish = false
 license = "Apache-2.0"
@@ -10,8 +10,8 @@ description = "Compositional DSLX semantics samples with independently construct
 workspace = true
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.79.0" }
-xlsynth-pir = { path = "../xlsynth-pir", version = "0.79.0" }
+xlsynth = { path = "../xlsynth", version = "0.81.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.81.0" }
 tempfile = "3.20"
 
 [dev-dependencies]
