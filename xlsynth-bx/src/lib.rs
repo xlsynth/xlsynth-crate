@@ -166,7 +166,8 @@ pub struct CompiledModule {
     pub checked: CheckedModule,
     pub package: Package,
     pub imports: Vec<LinkedImport>,
-    /// Original module subjects in the frozen DSLX import graph, including unused imports.
+    /// Original module subjects in the frozen DSLX import graph, including
+    /// unused imports.
     pub imported_modules: BTreeSet<String>,
     /// Indexed by the spelling used in BX, including unqualified use bindings.
     pub imported_structs: BTreeMap<String, Rc<LinkedStruct>>,
