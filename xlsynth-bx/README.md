@@ -646,11 +646,19 @@ block add_held(clk, en: bool @0, x: u8 @0, r: u8 @1) -> u8 @1 {
 The checker follows the output back to its inputs. A `let` adds zero stages,
 combinational operands must align, and a register adds one stage. Each write
 guard must align with the data at the write edge, including enclosing guards
-in nested `if` statements. Literals can be used at any stage. In the example,
-`q` and `r` are both at stage 1. When `en` is low, `q` holds its previous
-value and the sum still responds to `r`. A stage annotation checks alignment
-in the datapath. The block's enable and valid signals determine which
-transactions actually advance.
+in nested `if` statements. In the example, `q` and `r` are both at stage 1.
+When `en` is low, `q` holds its previous value and the sum still responds to
+`r`. A stage annotation checks alignment in the datapath. The block's enable
+and valid signals determine which transactions actually advance.
+
+The checker follows names, unary and binary operators, casts, `if`
+expressions, and struct and tuple construction and field reads. A scalar
+literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
+`A` can also be used at any stage because BX evaluates the constant before
+checking timing. Returning `[u8:7]` directly leaves an array expression whose
+stage BX cannot infer yet. Array indexing has the same limitation. For
+`x: u8[2]`, returning `x[u1:0]` gives `cannot infer output cycle for this
+expression` even though the index is constant.
 
 A uniform result such as `-> Ports @1` checks every output port at stage 1.
 For different stages, use `-> Ports @(live: 0, saved: 1)` and list every
