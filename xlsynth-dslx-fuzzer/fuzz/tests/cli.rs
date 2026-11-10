@@ -376,6 +376,65 @@ IR"#,
 }
 
 #[test]
+fn optimized_contract_retains_optimizer_failures_and_proves_its_output()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let optimizer = converter.with_file_name("opt_main");
+    write_tool(
+        &converter,
+        r#"cat <<'IR'
+package sample
+top fn __sample__main() -> bits[1] {
+  a: bits[8][0] = array(id=1)
+  ret result: bits[1] = eq(a, a, id=2)
+}
+IR"#,
+    )?;
+    let require_input = r#"set -eu
+test "$1" = --top=__sample__main
+grep -Fq 'bits[8][0] = array(' "$2""#;
+    let run = || {
+        check_audit(
+            audit_contracts::generate_v11(&[6])?,
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        )
+    };
+    write_tool(
+        &optimizer,
+        &format!(
+            "{require_input}\necho 'Empty array Values are not supported.' >&2\nkill -ABRT $$"
+        ),
+    )?;
+    let verdict = run();
+    assert!(
+        matches!(verdict, Err(CheckFailure::ConverterRejected(ref message))
+            if message.starts_with("opt_main failed")
+                && message.contains("Empty array Values are not supported.")
+                && message.contains("bits[8][0] = array(")),
+        "{verdict:?}"
+    );
+    for value in [0, 1] {
+        write_tool(
+            &optimizer,
+            &format!(
+                "{require_input}\ncat <<'IR'\npackage sample\ntop fn __sample__main() -> bits[1] {{\n  ret result: bits[1] = literal(value={value}, id=1)\n}}\nIR"
+            ),
+        )?;
+        let verdict = run();
+        assert!(
+            matches!(
+                (value, &verdict),
+                (0, Err(CheckFailure::Disproved(_))) | (1, Ok(EquivResult::Proved))
+            ),
+            "{verdict:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn signed_bound_call_reports_a_bytecode_disagreement_when_the_ir_is_correct()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

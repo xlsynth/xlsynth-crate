@@ -73,8 +73,24 @@ pub fn check_audit(
     converter: &Path,
     stdlib: &Path,
 ) -> Result<EquivResult, CheckFailure> {
+    check_audit_with_optimizer(
+        case,
+        converter,
+        &converter.with_file_name("opt_main"),
+        stdlib,
+    )
+}
+
+/// Checks a focused audit case with an explicitly selected optimizer.
+pub fn check_audit_with_optimizer(
+    case: AuditCase,
+    converter: &Path,
+    optimizer: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
     match case {
         AuditCase::Semantic(case) => check_contract(case, converter, stdlib),
+        AuditCase::Optimized(case) => check_optimized_contract(case, converter, optimizer, stdlib),
         AuditCase::Traces { case, expected } => check_semantic_contract(
             case,
             converter,
@@ -153,6 +169,59 @@ pub fn check_audit(
             shadows_dimension,
         } => check_typechecked_contract(case, &[], shadows_dimension, converter, stdlib),
     }
+}
+
+/// Runs native optimization in a child so an optimizer failure can be
+/// retained with the source and unoptimized IR.
+fn check_optimized_contract(
+    case: ContractCase,
+    converter: &Path,
+    optimizer: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let directory = directory.path();
+    let prepared = convert_modules(
+        case.modules,
+        case.expected_ir,
+        converter,
+        stdlib,
+        directory,
+        None,
+        true,
+    )?;
+    let input = directory.join("unoptimized.ir");
+    std::fs::write(&input, &prepared.converted_ir).map_err(|error| error.to_string())?;
+    let output = Command::new(optimizer)
+        .arg(format!("--top={}", prepared.converted_top))
+        .arg(&input)
+        .output()
+        .map_err(|error| {
+            CheckFailure::Checker(format!(
+                "could not execute {}: {error}",
+                optimizer.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(CheckFailure::ConverterRejected(format!(
+            "opt_main failed ({}): {}\n{prepared:#?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let optimized_ir = String::from_utf8(output.stdout).map_err(|error| {
+        CheckFailure::InvalidOutput(format!(
+            "opt_main output is not UTF-8: {error}\n{prepared:#?}"
+        ))
+    })?;
+    let optimized = PreparedSample {
+        converted_ir: optimized_ir,
+        ..prepared
+    };
+    parse_contract_ir(&optimized, "opt_main")?;
+    let outcome = classify_with_assertions(&optimized, AssertionSemantics::Same)?;
+    native_feedback(&optimized, stdlib, directory, None)?;
+    Ok(outcome)
 }
 
 /// Recognizes a normal DSLX type error with a source diagnostic. Signals,
@@ -262,7 +331,7 @@ fn check_typechecked_contract(
         None,
         true,
     )?;
-    parse_contract_ir(&prepared)?;
+    parse_contract_ir(&prepared, "converter")?;
     let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same)?;
     // Prefer the standalone IR finding, then the first bytecode discrepancy.
     runtime?;
@@ -339,11 +408,14 @@ fn run_typechecker(
     )
 }
 
-/// Validates the standalone converter's output before the equivalence proof.
-fn parse_contract_ir(prepared: &PreparedSample) -> Result<xlsynth::IrPackage, CheckFailure> {
+/// Validates the standalone tool's output before the equivalence proof.
+fn parse_contract_ir(
+    prepared: &PreparedSample,
+    tool: &str,
+) -> Result<xlsynth::IrPackage, CheckFailure> {
     xlsynth::IrPackage::parse_ir(&prepared.converted_ir, None).map_err(|error| {
         CheckFailure::InvalidOutput(format!(
-            "C++ IR parser rejected converter output: {error}\n{prepared:#?}"
+            "C++ IR parser rejected {tool} output: {error}\n{prepared:#?}"
         ))
     })
 }
@@ -372,7 +444,7 @@ fn check_semantic_contract(
         None,
         true,
     )?;
-    let package = parse_contract_ir(&prepared)?;
+    let package = parse_contract_ir(&prepared, "converter")?;
     let verdict = classify_with_assertions(&prepared, AssertionSemantics::Same);
     let feedback = native_feedback(&prepared, stdlib, directory.path(), None);
     let outcome = verdict?;

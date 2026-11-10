@@ -5,13 +5,13 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, bound_parametric_contracts, builtin_contracts,
-    dead_branch_contracts, enum_width_contracts, inferred_flow_contracts,
+    SourceModule, aggregate_method_contracts, array_cast_contracts, bound_parametric_contracts,
+    builtin_contracts, dead_branch_contracts, enum_width_contracts, inferred_flow_contracts,
     lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
     mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
     observer_contracts, pattern_acceptance, scope_contracts, self_dimension_contracts,
-    signed_call_contracts, tuple_literal_contracts, unrolled_loop_contracts,
-    zero_width_cast_contracts,
+    signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
+    unrolled_loop_contracts, zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -19,6 +19,9 @@ use crate::{
 #[derive(Debug)]
 pub enum AuditCase {
     Semantic(ContractCase),
+    /// Conversion followed by standalone optimization must preserve the
+    /// declared interface and semantics.
+    Optimized(ContractCase),
     /// Count trace events on the emitted main function at Boolean input true.
     Traces {
         case: ContractCase,
@@ -70,9 +73,10 @@ impl AuditCase {
     /// Stable identifier used to retain replay bytes per property.
     pub fn family(&self) -> &'static str {
         match self {
-            Self::Semantic(case) | Self::Traces { case, .. } | Self::TraceMessages { case, .. } => {
-                case.family
-            }
+            Self::Semantic(case)
+            | Self::Optimized(case)
+            | Self::Traces { case, .. }
+            | Self::TraceMessages { case, .. } => case.family,
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
             Self::TupleLiteral { case, .. }
@@ -211,6 +215,23 @@ pub fn generate_v10(data: &[u8]) -> Result<AuditCase, String> {
     }
 }
 
+/// Exercises constexpr array packing, empty array folding, and identity
+/// array casts. A zero prefix preserves the audit-v10 input format.
+pub fn generate_v11(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 8 {
+        4 => Ok(AuditCase::Semantic(signed_array_cast_contracts::widen(
+            options,
+        ))),
+        5 => Ok(AuditCase::Semantic(signed_array_cast_contracts::pack(
+            options,
+        ))),
+        6 => Ok(AuditCase::Optimized(array_cast_contracts::empty(options))),
+        7 => Ok(AuditCase::Semantic(array_cast_contracts::identity(options))),
+        _ => generate_v10(options),
+    }
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -260,10 +281,11 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 mod tests {
     use super::{
         AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8, generate_v9,
+        generate_v10, generate_v11,
     };
 
     #[test]
-    fn zero_prefix_preserves_v7_and_v8_semantic_contracts() -> Result<(), String> {
+    fn zero_prefix_preserves_semantic_contracts() -> Result<(), String> {
         for selector in [5, 6, 7] {
             let bytes = [selector, 1, 2, 2, 5];
             let prefixed = [&[0][..], &bytes].concat();
@@ -280,6 +302,13 @@ mod tests {
                 assert_eq!(old.max_and_nodes, new.max_and_nodes);
             }
         }
+        let (AuditCase::Semantic(old), AuditCase::Semantic(new)) =
+            (generate_v10(&[7, 1])?, generate_v11(&[0, 7, 1])?)
+        else {
+            return Err("expected an embedded audit-v10 semantic contract".into());
+        };
+        assert_eq!(old.modules, new.modules);
+        assert_eq!(old.expected_ir, new.expected_ir);
         Ok(())
     }
 

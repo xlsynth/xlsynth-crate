@@ -34,9 +34,10 @@ pub fn check_audit(
         | AuditCase::BoundCall { case, .. }
         | AuditCase::DimensionScope { case, .. }
         | AuditCase::MixedLiteral { case, .. } => case,
-        // Event, negative constexpr, and acceptance-only contracts require
-        // observations beyond comparing the value of an emitted function.
-        AuditCase::Traces { .. }
+        // Optimizer, event, negative constexpr, and acceptance-only contracts
+        // require observations beyond comparing the value of an emitted function.
+        AuditCase::Optimized(_)
+        | AuditCase::Traces { .. }
         | AuditCase::TraceMessages { .. }
         | AuditCase::ConstexprFailure { .. }
         | AuditCase::PatternAcceptance { .. } => return Ok(BxOutcome::OutsideScope),

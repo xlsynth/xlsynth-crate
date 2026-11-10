@@ -198,6 +198,27 @@ module constants in type dimensions.
 Prefix an audit-v9 input with one zero byte to preserve it in an audit-v10
 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v11` for array cast contracts. The
+one-byte inputs below are in hex.
+
+- `04` packs unsigned elements into a signed word and widens it in a module
+  constant. The baseline must produce `s16:-125` (`0xff83`).
+- `05` packs signed elements in a module constant. Concatenating their bit
+  patterns independently gives `u8:0x83` in the baseline. Both packing cases
+  vary element widths, array length and bit patterns. Append `01` for a
+  runtime control or `02` for an unsigned constexpr control.
+- `06` casts zero bits into an empty array and keeps the array live through
+  equality. The DSLX target runs `opt_main` in a child process and proves the
+  optimized output against the expected scalar Boolean. The optimizer
+  defaults to the `opt_main` alongside the converter. Set
+  `DSLX_FUZZ_OPTIMIZER` to use a matching binary in another directory.
+  `06 01` uses a nonempty array as a control.
+- `07` casts a runtime `u8[2]` value to its own type. The emitted interface
+  and every element must be preserved. `07 01` returns the array directly.
+
+Prefix an audit-v10 input with one zero byte to preserve it in an audit-v11
+corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
@@ -215,15 +236,16 @@ The primary CLI finding takes precedence over a secondary feedback error.
 ## Native BX function conversion
 
 The `fuzz_bx_converter_contracts` target defaults to audit-v7. Set
-`DSLX_FUZZ_CONTRACT_GRAMMAR` to `audit-v8`, `audit-v9` or `audit-v10` to replay the
-corresponding focused worker's units. It runs the BX frontend on single-module source,
+`DSLX_FUZZ_CONTRACT_GRAMMAR` to `audit-v8`, `audit-v9`, `audit-v10` or
+`audit-v11` to replay the corresponding focused worker's units. It runs the BX
+frontend on single-module source,
 lowers accepted functions with the BX Rust compiler, checks the signature of
 `main`, and compares its IR with the generator's independent IR for all inputs
 using Bitwuzla. On a discrepancy it compiles the original source with the
 standalone DSLX converter and checks the two functions' public signatures,
 return values and assertion behavior over all inputs. Imports, externs, and
-contracts requiring event or acceptance oracles are outside the scope of this
-target. Clocked block behavior requires a state-transition oracle.
+contracts requiring optimizer, event, or acceptance oracles are outside the
+scope of this target. Clocked block behavior requires a state-transition oracle.
 
 Replay a saved audit-v7 unit from the repository root.
 

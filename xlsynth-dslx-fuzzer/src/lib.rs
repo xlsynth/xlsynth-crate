@@ -5,6 +5,7 @@
 pub mod aggregate_flow;
 pub mod aggregate_match;
 mod aggregate_method_contracts;
+mod array_cast_contracts;
 pub mod array_fragment;
 pub mod ast;
 pub mod audit_contracts;
@@ -35,6 +36,7 @@ pub mod range_match;
 mod scope_contracts;
 pub mod select_fold;
 mod self_dimension_contracts;
+mod signed_array_cast_contracts;
 mod signed_call_contracts;
 pub mod sum_pattern;
 mod tuple_literal_contracts;

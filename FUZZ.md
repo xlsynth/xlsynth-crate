@@ -372,7 +372,7 @@ the target.
 ### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_bx_converter_contracts.rs
 
 Replays self-contained combinational BX functions. The default byte format is
-`audit-v7`, with `audit-v8`, `audit-v9` and `audit-v10` available. For
+`audit-v7`, with `audit-v8` through `audit-v11` available. For
 accepted source, the target lowers the BX function, checks its exact public
 signature, and proves the value and assertion behavior against the generator's
 independent IR with Bitwuzla. On a discrepancy it compiles the same source
@@ -419,6 +419,9 @@ The `audit-v10` grammar checks parameter names that shadow constants used
 in their own type dimensions. It also checks full-package IR parsing and
 execution for inferred and explicitly typed map lambdas over
 `xN[SIGNED][WIDTH]` elements.
+The `audit-v11` grammar checks sign extension after constexpr array packing,
+constexpr packing of signed elements, empty arrays during standalone IR
+optimization, and array-to-array identity casts.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

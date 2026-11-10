@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use xlsynth_dslx_fuzzer::audit_contracts::{self, AuditCase};
 use xlsynth_dslx_fuzzer::converter_contracts;
-use xlsynth_dslx_fuzzer_fuzz::{campaign::Campaign, cli::check_audit};
+use xlsynth_dslx_fuzzer_fuzz::{campaign::Campaign, cli::check_audit_with_optimizer};
 
 /// Production converter, import path, and campaign outputs shared by mutations.
 struct Config {
     converter: PathBuf,
+    optimizer: PathBuf,
     stdlib: PathBuf,
     campaign: Campaign,
     generate: fn(&[u8]) -> Result<AuditCase, String>,
@@ -22,6 +23,9 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 fuzz_target!(init: {
     let converter = std::env::var_os("DSLX_FUZZ_CONVERTER").expect("set DSLX_FUZZ_CONVERTER");
     let converter = std::fs::canonicalize(converter).expect("invalid DSLX_FUZZ_CONVERTER");
+    let optimizer = std::env::var_os("DSLX_FUZZ_OPTIMIZER")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| converter.with_file_name("opt_main"));
     let stdlib = std::env::var_os("DSLX_STDLIB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| xlsynth::default_dslx_stdlib_path().to_owned());
@@ -38,14 +42,15 @@ fuzz_target!(init: {
         Some(name) if name == "audit-v8" => audit_contracts::generate_v8,
         Some(name) if name == "audit-v9" => audit_contracts::generate_v9,
         Some(name) if name == "audit-v10" => audit_contracts::generate_v10,
+        Some(name) if name == "audit-v11" => audit_contracts::generate_v11,
         Some(name) => panic!("unknown DSLX_FUZZ_CONTRACT_GRAMMAR {name:?}"),
     };
-    let config = Config { converter, stdlib, campaign: Campaign::from_env(true), generate };
+    let config = Config { converter, optimizer, stdlib, campaign: Campaign::from_env(true), generate };
     assert!(CONFIG.set(config).is_ok(), "fuzzer initialized twice");
 }, |data: &[u8]| {
     let config = CONFIG.get().expect("fuzzer not initialized");
     let case = (config.generate)(data).expect("generating converter contract");
     let family = case.family();
-    let result = check_audit(case, &config.converter, &config.stdlib);
+    let result = check_audit_with_optimizer(case, &config.converter, &config.optimizer, &config.stdlib);
     config.campaign.record(data, Some(family), result);
 });

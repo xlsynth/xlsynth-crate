@@ -7,6 +7,7 @@ mod builtin_map;
 mod effects;
 
 use crate::SourceModule;
+pub(crate) use acceptance::{ArrayIdentityForm, array_identity};
 
 /// Generated DSLX modules, their independent top function and any IR size
 /// limit.
@@ -39,7 +40,7 @@ pub fn generate(data: &[u8]) -> Result<ContractCase, String> {
         0 => builtin_map::generate(options),
         1 => acceptance::one_hot(options),
         2 => acceptance::payload_pattern(options),
-        3 => acceptance::array_cast(options),
+        3 => Ok(acceptance::array_cast(options)),
         4 => effects::enum_cast(options),
         5 => effects::guard_growth(options),
         6 => Ok(pack_elements(options)),

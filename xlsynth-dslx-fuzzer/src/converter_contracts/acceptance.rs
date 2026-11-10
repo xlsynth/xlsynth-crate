@@ -106,10 +106,22 @@ pub fn main({declarations}) -> bool {{
     Ok(ContractCase::single("payload_pattern", text, expected_ir))
 }
 
-/// Compares an array identity cast (including a type alias) with the input.
-/// A direct return and an explicit reconstruction provide working controls.
-pub(super) fn array_cast(data: &[u8]) -> Result<ContractCase, String> {
-    let mode = data.first().copied().unwrap_or_default() % 4;
+/// Equivalent spellings of a runtime array identity.
+pub(crate) enum ArrayIdentityForm {
+    Uncast,
+    DirectCast,
+    AliasCast,
+    Rebuild,
+}
+
+/// Preserves the original array-identity byte mapping for focused replays.
+pub(super) fn array_cast(data: &[u8]) -> ContractCase {
+    let form = match data.first().copied().unwrap_or_default() % 4 {
+        0 => ArrayIdentityForm::Uncast,
+        1 => ArrayIdentityForm::DirectCast,
+        2 => ArrayIdentityForm::AliasCast,
+        _ => ArrayIdentityForm::Rebuild,
+    };
     let width = usize::from(data.get(1).copied().unwrap_or_default() % 16) + 1;
     let length = usize::from(data.get(2).copied().unwrap_or_default() % 4) + 2;
     let sign = if data.get(3).copied().unwrap_or_default() & 1 == 0 {
@@ -117,12 +129,27 @@ pub(super) fn array_cast(data: &[u8]) -> Result<ContractCase, String> {
     } else {
         's'
     };
-    let ty = format!("{sign}{width}[{length}]");
-    let (declaration, expression) = match mode {
-        0 => (String::new(), "x".into()),
-        1 => (String::new(), format!("x as {ty}")),
-        2 => (format!("type A = {ty};\n"), "x as A".into()),
-        _ => {
+    array_identity("array_cast", form, width, length, sign)
+}
+
+/// Checks that a runtime array retains its full shape and contents.
+pub(crate) fn array_identity(
+    family: &'static str,
+    form: ArrayIdentityForm,
+    width: usize,
+    length: usize,
+    sign: char,
+) -> ContractCase {
+    let ty = if width <= 64 {
+        format!("{sign}{width}[{length}]")
+    } else {
+        format!("{sign}N[{width}][{length}]")
+    };
+    let (declaration, expression) = match form {
+        ArrayIdentityForm::Uncast => (String::new(), "x".into()),
+        ArrayIdentityForm::DirectCast => (String::new(), format!("x as {ty}")),
+        ArrayIdentityForm::AliasCast => (format!("type A = {ty};\n"), "x as A".into()),
+        ArrayIdentityForm::Rebuild => {
             let elements = (0..length)
                 .map(|index| format!("x[u32:{index}]"))
                 .collect::<Vec<_>>()
@@ -135,7 +162,7 @@ pub(super) fn array_cast(data: &[u8]) -> Result<ContractCase, String> {
     let expected_ir = format!(
         "package expected\n\ntop fn main(x: {ir_ty} id=1) -> {ir_ty} {{\n  ret x: {ir_ty} = param(name=x, id=1)\n}}\n"
     );
-    Ok(ContractCase::single("array_cast", text, expected_ir))
+    ContractCase::single(family, text, expected_ir)
 }
 
 #[cfg(test)]
