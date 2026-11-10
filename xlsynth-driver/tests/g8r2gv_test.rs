@@ -116,15 +116,17 @@ fn mapper_specific_options_reject_explicit_mismatches_before_reading_design() ->
             "--area-recovery requires --mapper native",
         ),
     ] {
-        let r = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
-            .args(["g8r2gv", "unused.g8r", "--liberty-proto", "unused.proto"])
-            .args(flags)
-            .output()?;
-        assert!(!r.status.success());
-        assert_eq!(
-            String::from_utf8(r.stderr)?,
-            format!("xlsynth-driver: g8r2gv: {expected}\n")
-        );
+        for (command, input) in [("g8r2gv", "unused.g8r"), ("bx2gv", "unused.bx")] {
+            let r = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+                .args([command, input, "--liberty-proto", "unused.proto"])
+                .args(&flags)
+                .output()?;
+            assert!(!r.status.success());
+            assert_eq!(
+                String::from_utf8(r.stderr)?,
+                format!("xlsynth-driver: {command}: {expected}\n")
+            );
+        }
     }
     Ok(())
 }

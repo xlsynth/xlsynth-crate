@@ -511,8 +511,8 @@ xlsynth-driver bx2gv mul_inc.bx --liberty-proto cells.proto --netlist-format=pb 
   `--warnings-as-errors`, `--reset-active-low`, and `--reset-asynchronous`
   use the same inputs and defaults as [`bx2ir`](#bx2ir-bx-to-block-ir).
 - `--liberty-proto <PATH>` supplies the required normalized library.
-  `--mapper <native|abc>` defaults to `native` with the proto alone.
-  Supplying raw `--liberty <PATH>` files selects ABC for combinational mapping.
+  `--mapper <native|abc>` defaults to `native`. To use ABC, specify
+  `--mapper=abc` and supply the matching raw `--liberty <PATH>` files.
 - `-o, --output <PATH>` writes the mapped netlist to a file. The default is
   gate-level Verilog on stdout. `.pb` and `.proto` filenames select
   protobuf, and `--netlist-format <gv|pb>` overrides the filename.
