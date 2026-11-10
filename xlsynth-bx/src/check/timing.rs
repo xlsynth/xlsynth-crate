@@ -308,11 +308,17 @@ impl<'a> Checker<'a> {
         mut fields: Vec<usize>,
     ) {
         let operand = |value| Step::Expr(value, scope, vec![]);
+        let mut read = |name: &'s str, fields| match self.binding(scope, name) {
+            Some(binding) => walk.pending.push(Step::Read(name, binding, fields)),
+            None => walk.values.push(Cycle::Unknown),
+        };
         match &expr.kind {
-            K::Name(name) => match self.binding(scope, name) {
-                Some(binding) => walk.pending.push(Step::Read(name, binding, fields)),
-                None => walk.values.push(Cycle::Unknown),
-            },
+            K::Name(name) => read(name, fields),
+            K::BindingTupleIndex { name, index } => {
+                // `let (head, _) = pair;` reads the same field as `pair.0`.
+                fields.push(*index);
+                read(name, fields);
+            }
             K::Literal(_) => walk.values.push(Cycle::Independent),
             K::Unary { value, .. } | K::Cast { value } => {
                 walk.pending.push(Step::Expr(value, scope, fields));
