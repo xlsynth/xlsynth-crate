@@ -34,7 +34,13 @@ struct StructBinding {
     public_name: Option<String>,
     /// Ordered value bindings distinguish instances even when all fields
     /// coincide.
-    layouts: BTreeMap<Vec<u32>, usize>,
+    layouts: BTreeMap<Rc<[u32]>, usize>,
+}
+
+/// The template and concrete bindings of a reflected DSLX layout.
+struct ImportedStructInstance {
+    template: DeclId,
+    values: Rc<[u32]>,
 }
 
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
@@ -46,6 +52,7 @@ pub(crate) struct ImportedStructs {
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
     named_layouts: BTreeMap<String, usize>,
+    parametric_instances: BTreeMap<usize, ImportedStructInstance>,
     /// Reflected layouts that contain a concrete parametric struct, including
     /// through fields of another struct.
     instance_layouts: BTreeSet<usize>,
@@ -113,6 +120,7 @@ impl ImportedStructs {
             declarations: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
             named_layouts: BTreeMap::new(),
+            parametric_instances: BTreeMap::new(),
             instance_layouts: BTreeSet::new(),
             exports_bound: false,
             #[cfg(test)]
@@ -367,9 +375,11 @@ impl ImportedStructs {
             }
             Type::Tuple(members) => members.iter().any(|m| self.contains_parametric_instance(m)),
             Type::Applied { .. } => true,
-            Type::Bits { .. } | Type::ParametricBits { .. } | Type::Bool | Type::Enum { .. } => {
-                false
-            }
+            Type::Bits { .. }
+            | Type::ParametricBits { .. }
+            | Type::ParametricStruct { .. }
+            | Type::Bool
+            | Type::Enum { .. } => false,
         }
     }
 
@@ -456,6 +466,19 @@ impl ImportedStructs {
         let spelling = instance_spelling(member, args);
         self.resolve_spelling(subject, member, &spelling, data)
             .map_err(|e| format!("{subject}::{spelling}: {}", self.remap_diagnostic(e)))
+    }
+
+    /// Get the captured bindings when a layout belongs to the named template.
+    pub(crate) fn struct_parametric_values(
+        &self,
+        canonical: &str,
+        subject: &str,
+        member: &str,
+    ) -> Option<&[u32]> {
+        let index = self.named_layouts.get(canonical)?;
+        let instance = self.parametric_instances.get(index)?;
+        (instance.template.subject == subject && instance.template.name == member)
+            .then_some(instance.values.as_ref())
     }
 
     /// Reflect a named struct or a concrete application. The base declaration
@@ -637,10 +660,10 @@ impl ImportedStructs {
             (None, Vec::new())
         };
         let binding = &self.bindings[&def];
-        if let Some(&index) = binding.layouts.get(&actuals) {
+        if let Some(&index) = binding.layouts.get(actuals.as_slice()) {
             return Ok(self.definitions[index].name.clone());
         }
-        let path = if let Some(id) = template {
+        let path = if let Some(id) = &template {
             Some(format!(
                 "{}::{}",
                 id.subject,
@@ -696,6 +719,16 @@ impl ImportedStructs {
         let index = self.definitions.len();
         let public = path.is_some();
         let name = path.unwrap_or_else(|| format!("0bx_private_{index}::{identifier}"));
+        let actuals: Rc<[u32]> = actuals.into();
+        if let Some(template) = template {
+            self.parametric_instances.insert(
+                index,
+                ImportedStructInstance {
+                    template,
+                    values: Rc::clone(&actuals),
+                },
+            );
+        }
         self.bindings
             .get_mut(&def)
             .expect("registered native declaration")
@@ -712,6 +745,7 @@ impl ImportedStructs {
         self.definitions.push(StructDef {
             name: name.clone(),
             public,
+            value_parametrics: Vec::new(),
             fields,
         });
         Ok(name)

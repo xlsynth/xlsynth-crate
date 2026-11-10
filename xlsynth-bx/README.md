@@ -157,6 +157,39 @@ use its name in the type. A public BX library constant can be qualified, as
 in `u8[packet::LANES]`. Width slices and value-parametric functions also
 accept dimension expressions.
 
+## Native parametric structs
+
+A BX struct can declare `u32` value parametrics that determine field widths,
+array lengths, and nested struct arguments.
+
+```text
+struct Packet<N: u32, M: u32 = {N + u32:1}> {
+    data: uN[N],
+    tags: u8[M],
+}
+
+fn invert<N: u32, M: u32>(packet: Packet<N, M>) -> Packet<N, M> {
+    Packet { data: !packet.data, tags: packet.tags }
+}
+
+fn make(data: u8, tags: u8[9]) -> Packet<8> {
+    Packet { data: data, tags: tags }
+}
+```
+
+Supply an explicit prefix of arguments in a type annotation or constructor.
+Arguments can be literals, names, or braced compile-time expressions. Defaults
+can refer to earlier bindings. A constructor can infer omitted arguments
+from its expected type or from the types of its field values. Every binding
+contributes to the struct's type identity, including bindings that do not
+affect its layout. Declare a template before referring to it in another type.
+Declare the struct `pub` to use it from another BX module.
+
+BX also accepts the turbofish spelling `Packet::<8>` in a type annotation
+or constructor. Calls can use the same syntax, as in `invert::<8, 9>(packet)`.
+Struct arguments that depend on an inferred block type parameter can appear
+in the block body.
+
 ## Defining functions
 
 Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Function signatures can include bits, structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
@@ -518,8 +551,8 @@ BX can read fields through a private struct nested inside a public one. To pass 
 
 BX accepts concrete instances of public DSLX struct templates with `u32` value
 parameters. Write the application directly in a type annotation or struct
-literal. Arguments can be bare integer literals or explicitly typed `u32`
-literals. DSLX supplies defaults for omitted trailing parameters, including
+literal. Arguments accept the same `u32` forms as native struct arguments.
+DSLX supplies defaults for omitted trailing parameters, including
 all parameters in a spelling such as `Packet<>` when each has a default.
 
 ```text

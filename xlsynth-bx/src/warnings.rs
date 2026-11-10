@@ -226,6 +226,9 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                     pending.push(SourceNode::Annotation(element));
                     pending.push(SourceNode::Expression(size));
                 }
+                Type::ParametricStruct { args, .. } => {
+                    pending.extend(args.iter().map(SourceNode::Expression));
+                }
                 Type::Array { element, .. } => pending.push(SourceNode::Annotation(element)),
                 Type::Tuple(fields) => pending.extend(fields.iter().map(SourceNode::Annotation)),
                 _ => { /* Concrete scalar and nominal annotations introduce no expressions. */ }
@@ -324,7 +327,12 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 Expr::Array(items) | Expr::Tuple(items) => {
                     pending.extend(items.iter().map(SourceNode::Expression));
                 }
-                Expr::Struct { fields, .. } | Expr::AppliedStruct { fields, .. } => {
+                Expr::Struct { fields, .. }
+                | Expr::AppliedStruct { fields, .. }
+                | Expr::ParametricStruct { fields, .. } => {
+                    if let Expr::ParametricStruct { args, .. } = expr {
+                        pending.extend(args.iter().map(SourceNode::Expression));
+                    }
                     pending.extend(
                         fields
                             .iter()

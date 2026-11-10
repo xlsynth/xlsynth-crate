@@ -12,7 +12,7 @@ use super::generic_blocks::{Bindings, TypeArgument};
 use super::{
     BodyChecker, BodyKind, CheckedFunction, ConstantBudgets, Declarations, Function,
     FunctionInterface, ImportResolver, MAX_ELABORATION_DEPTH, MAX_SPECIALIZATIONS, MAX_TYPE_SIZE,
-    StructTable, dependency_order, source_type_nodes,
+    StructTable, TypeResolver, dependency_order, source_type_nodes,
 };
 use crate::ast::{ConstDef, EnumDef, ExternFn, Module, Type};
 use crate::typed::BoundParametricValue;
@@ -293,7 +293,7 @@ impl<'m> FunctionSpecializations<'m> {
         module: &'m Module,
         decls: &mut Declarations<'m>,
         resolver: &mut ImportResolver,
-        structs: &mut StructTable,
+        structs: &mut StructTable<'m>,
     ) -> Result<Vec<FunctionBody>, String> {
         enum Definition<'m> {
             Struct(usize),
@@ -342,20 +342,42 @@ impl<'m> FunctionSpecializations<'m> {
             let function = match definition {
                 Definition::Struct(index) => {
                     let def = &module.structs[index];
-                    structs.definitions[index].fields = super::resolve_fields(
+                    if !def.value_parametrics.is_empty() {
+                        let mut checker =
+                            BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                        checker
+                            .check_struct_template_names(def)
+                            .map_err(|e| format!("struct '{}': {e}", def.name))?;
+                        continue;
+                    }
+                    let fields = super::resolve_fields(
                         &def.fields,
                         decls.module_dimensions(&def.name),
-                        resolver,
-                        structs,
+                        &mut TypeResolver {
+                            resolver,
+                            structs,
+                            functions: Some(self),
+                        },
                     )
                     .map_err(|e| format!("struct '{}': {e}", def.name))?;
+                    structs.definitions[index].fields = fields;
                     structs.update_imports(resolver)?;
                     structs.index(index)?;
                     continue;
                 }
                 Definition::Extern(f) => {
                     decls
-                        .add_function(&f.name, &f.params, &f.result, None, resolver, structs)
+                        .add_function(
+                            &f.name,
+                            &f.params,
+                            &f.result,
+                            None,
+                            &mut TypeResolver {
+                                resolver,
+                                structs,
+                                functions: Some(self),
+                            },
+                        )
                         .map_err(|e| format!("extern '{}': {e}", f.name))?;
                     continue;
                 }
@@ -369,7 +391,17 @@ impl<'m> FunctionSpecializations<'m> {
                         }
                     }
                     decls
-                        .add_function(&f.name, &f.params, &f.result, Some(f), resolver, structs)
+                        .add_function(
+                            &f.name,
+                            &f.params,
+                            &f.result,
+                            Some(f),
+                            &mut TypeResolver {
+                                resolver,
+                                structs,
+                                functions: Some(self),
+                            },
+                        )
                         .map_err(|e| format!("fn '{}': {e}", f.name))?;
                     f
                 }

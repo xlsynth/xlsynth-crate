@@ -290,7 +290,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let key = CallbackBinding {
             template,
             formal: index,
-            source: self.callback_source(actual, |head| self.names.contains(head))?,
+            source: self.callback_source(actual, |head| self.has_local_name(head))?,
         };
         if let Some(target) = self
             .function_registry
@@ -328,7 +328,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         formal: &BlockCallbackFormal,
         bindings: &mut Bindings,
     ) -> Result<Rc<BoundCallback<'m>>, String> {
-        let source = self.callback_source(actual, |head| self.names.contains(head))?;
+        let source = self.callback_source(actual, |head| self.has_local_name(head))?;
         self.charge_expansion("callback lookup", 1 + formal.input_type_params.len())?;
         let key = BlockCallbackBinding {
             binding: CallbackBinding {
@@ -432,13 +432,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if !self.decls.function_templates.contains_key(name)
             && self.resolver.lookup(name)?.is_some()
             && let CallbackSource::Imported { module, member } =
-                self.callback_source(name, |head| self.names.contains(head))?
+                self.callback_source(name, |head| self.has_local_name(head))?
         {
             let value = self.explicit_import_call(&module, &member, parametrics, args)?;
             return Ok((value.ty, value.kind));
         }
         let template =
-            self.callable_template(name, self.names.contains(name), parametrics.len())?;
+            self.callable_template(name, self.has_local_name(name), parametrics.len())?;
+        if self.function_registry.is_none() {
+            return Err(format!(
+                "cannot specialize function '{name}' in this type annotation"
+            ));
+        }
         if template.has_inferred_parametrics() {
             return self.value_function_call(template, parametrics, args);
         }
@@ -561,6 +566,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 return Ok(MapCallee::Builtin(builtin));
             }
             let visible_type = (self.structs.indices.contains_key(name)
+                || self.structs.template(name).is_some()
                 || self.structs.enums.contains_key(name))
                 && visible;
             if spelling == name

@@ -490,11 +490,34 @@ impl<'a> LexicalScope<'a> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NominalUse {
     Annotation,
+    StructField,
     Constructor,
     AppliedStruct,
 }
 
 impl BodyChecker<'_, '_> {
+    /// Resolve template names in source order without evaluating any bindings.
+    pub(super) fn check_struct_template_names(&mut self, def: &StructDef) -> Result<(), String> {
+        self.function_position = self.decls.positions.get(def.name.as_str()).copied();
+        self.zero_binding = self.decls.zero_binding(&def.name);
+        self.template_name_depth = Some(Cell::new(0));
+        let visited = Cell::new(0);
+        let mut locals = LexicalScope::root(&self.names, &visited);
+        for binding in &def.value_parametrics {
+            self.check_type_names(&binding.ty, &locals)?;
+            // The binding is visible in its own default before it has a value.
+            locals.bind_pattern_name(&binding.name);
+            self.value_parametric_names.insert(binding.name.clone());
+            if let Some(default) = &binding.default {
+                self.check_expr_names(default, &locals)?;
+            }
+        }
+        for field in &def.fields {
+            self.check_annotation_names(&field.ty, &locals, NominalUse::StructField)?;
+        }
+        Ok(())
+    }
+
     /// Resolve names at a template's declaration while leaving concrete types
     /// and evaluation to the call that supplies its parametric values.
     pub(super) fn check_value_template_names(&mut self, f: &Function) -> Result<(), String> {
@@ -598,7 +621,8 @@ impl BodyChecker<'_, '_> {
             || !(self.decls.declares_function(target)
                 || self.decls.is_block(target)
                 || self.structs.indices.contains_key(target)
-                || self.structs.enums.contains_key(target)
+                || (self.structs.template(target).is_some()
+                    || self.structs.enums.contains_key(target))
                     && self
                         .decls
                         .visible(target, self.function_position.or(self.block_position))
@@ -725,6 +749,11 @@ impl BodyChecker<'_, '_> {
             }
             bindings.reject_value(name)?;
         }
+        if usage == NominalUse::StructField && self.structs.definition(name).is_ok() {
+            // The layout schedule has already checked forward references to
+            // ordinary structs that appear directly in field annotations.
+            return Ok(());
+        }
         self.decls
             .check_type_name_visibility(name, self.function_position)?;
         if let Some((module, member)) =
@@ -739,11 +768,13 @@ impl BodyChecker<'_, '_> {
             } else {
                 self.resolver.check_member_name(&module, &member)
             }
+        } else if self.structs.template(name).is_some() {
+            Ok(())
         } else if usage == NominalUse::AppliedStruct {
-            Err(format!(
-                "'{name}' requires an imported DSLX struct template"
-            ))
-        } else if usage == NominalUse::Annotation && self.structs.local_enum(name).is_some() {
+            Err(format!("'{name}' requires a struct template"))
+        } else if matches!(usage, NominalUse::Annotation | NominalUse::StructField)
+            && self.structs.local_enum(name).is_some()
+        {
             Ok(())
         } else {
             self.structs.definition(name).map(|_| ())
@@ -751,28 +782,44 @@ impl BodyChecker<'_, '_> {
     }
 
     fn check_type_names(&self, ty: &Type, locals: &LexicalScope<'_>) -> Result<(), String> {
-        self.with_template_name_depth(|| self.check_type_names_at_depth(ty, locals))
+        self.check_annotation_names(ty, locals, NominalUse::Annotation)
+    }
+
+    fn check_annotation_names(
+        &self,
+        ty: &Type,
+        locals: &LexicalScope<'_>,
+        usage: NominalUse,
+    ) -> Result<(), String> {
+        self.with_template_name_depth(|| self.check_type_names_at_depth(ty, locals, usage))
     }
 
     fn check_type_names_at_depth(
         &self,
         ty: &Type,
         locals: &LexicalScope<'_>,
+        usage: NominalUse,
     ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match ty {
-            Type::Named(name) => self.check_nominal_name(name, NominalUse::Annotation, locals)?,
+            Type::Named(name) => self.check_nominal_name(name, usage, locals)?,
             Type::Applied { name, .. } => {
                 self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?
             }
-            Type::Tuple(items) => {
-                for item in items {
-                    self.check_type_names(item, locals)?;
+            Type::ParametricStruct { name, args } => {
+                self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?;
+                for arg in args {
+                    self.check_expr_names(arg, locals)?;
                 }
             }
-            Type::Array { element, .. } => self.check_type_names(element, locals)?,
+            Type::Tuple(items) => {
+                for item in items {
+                    self.check_annotation_names(item, locals, usage)?;
+                }
+            }
+            Type::Array { element, .. } => self.check_annotation_names(element, locals, usage)?,
             Type::ParametricArray { element, size } => {
-                self.check_type_names(element, locals)?;
+                self.check_annotation_names(element, locals, usage)?;
                 self.check_expr_names(size, locals)?;
             }
             Type::ParametricBits { signed, width } => {
@@ -974,14 +1021,20 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(arg, locals)?;
                 }
             }
-            Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
+            Expr::Struct { name, fields }
+            | Expr::AppliedStruct { name, fields, .. }
+            | Expr::ParametricStruct { name, fields, .. } => {
                 locals.visited.set(locals.visited.get().saturating_add(1));
-                let usage = if matches!(expr, Expr::AppliedStruct { .. }) {
-                    NominalUse::AppliedStruct
-                } else {
-                    NominalUse::Constructor
+                let usage = match expr {
+                    Expr::Struct { .. } => NominalUse::Constructor,
+                    _ => NominalUse::AppliedStruct,
                 };
                 self.check_nominal_name(name, usage, locals)?;
+                if let Expr::ParametricStruct { args, .. } = expr {
+                    for arg in args {
+                        self.check_expr_names(arg, locals)?;
+                    }
+                }
                 for (_, value) in fields {
                     self.check_expr_names(value, locals)?;
                 }

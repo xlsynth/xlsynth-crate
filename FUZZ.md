@@ -290,6 +290,12 @@ Generates DSLX structs with two value parameters and two specializations that sh
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_parametrics.rs
+
+Generates native BX and DSLX packet templates with signed or unsigned payloads and fixed-size arrays. Cases vary explicit and inferred arguments, derived defaults, nested symbolic applications, and widths inferred from unsized struct fields. Some BX cases use turbofish for the same applications spelled with plain angle brackets in DSLX. Rejected programs exercise incompatible specializations, same-shaped distinct declarations, conflicting field types, and extra arguments. The target compares source acceptance and checks projected data and inferred bindings against both compiled DSLX IR and concrete DSLX calls.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_parametrics --sanitizer none`.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset

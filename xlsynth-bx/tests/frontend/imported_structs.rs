@@ -1283,11 +1283,13 @@ pub fn pair(a: First, b: Second) -> (First[1], Second) { ([a], b) }
 use tags;
 use tags::Tagged;
 use facade::Again;
-block sample(clk, a: Again, b: Tagged<u32:8, 10>) -> (u32, u32, u32) {
+fn local_tag<W: u32, N: u32>(_value: Tagged<W, N>) -> u32 { N }
+fn local_width<W: u32, N: u32>(_value: tags::Tagged<W, N>) -> u32 { W }
+block sample(clk, a: Again, b: Tagged<u32:8, 10>) -> (u32, u32, u32, u32, u32, u32) {
     let p = tags::pair(a, b);
     let first: tags::Tagged<8> = p.0[u32:0];
     let copy = Tagged<8, u32:9> { x: first.x };
-    (tags::tag(first), tags::tag(copy), tags::tag(p.1))
+    (tags::tag(first), tags::tag(copy), tags::tag(p.1), local_tag(a), local_tag(p.1), local_width(copy))
 }"#;
     let checked = check_module_with_options(&parse_module(source)?, &options)?;
     assert_eq!(
@@ -1316,7 +1318,9 @@ block sample(clk, a: Again, b: Tagged<u32:8, 10>) -> (u32, u32, u32) {
     let value = IrValue::parse_typed("(bits[8]:7)")?;
     assert_eq!(
         block.evaluate(&[value.clone(), value])?,
-        IrValue::parse_typed("(bits[32]:9, bits[32]:9, bits[32]:10)")?
+        IrValue::parse_typed(
+            "(bits[32]:9, bits[32]:9, bits[32]:10, bits[32]:9, bits[32]:10, bits[32]:8)"
+        )?
     );
     Ok(())
 }

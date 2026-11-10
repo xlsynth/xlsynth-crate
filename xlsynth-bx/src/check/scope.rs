@@ -702,6 +702,12 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
     fn rename_type(ty: &mut Type, aliases: &mut BTreeMap<String, String>) {
         match ty {
             Type::Named(name) | Type::Applied { name, .. } => rename(name, aliases),
+            Type::ParametricStruct { name, args } => {
+                rename(name, aliases);
+                for arg in args {
+                    capture_names(arg, aliases);
+                }
+            }
             Type::Array { element, .. } => rename_type(element, aliases),
             Type::ParametricArray { element, size } => {
                 rename_type(element, aliases);
@@ -768,6 +774,15 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             rename(name, aliases);
             for (_, value) in fields {
                 capture_names(value, aliases);
+            }
+        }
+        Expr::ParametricStruct { name, args, fields } => {
+            rename(name, aliases);
+            for expr in args
+                .iter_mut()
+                .chain(fields.iter_mut().map(|(_, value)| value))
+            {
+                capture_names(expr, aliases);
             }
         }
         Expr::Call { name, args } => {

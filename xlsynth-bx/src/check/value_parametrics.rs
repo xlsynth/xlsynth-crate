@@ -16,15 +16,16 @@ use super::generic_blocks::{Bindings, callback_argument_name, validate_inference
 use super::generic_inputs::{Input, InputPattern};
 use super::{
     BodyChecker, BodyKind, CallbackFormal, CallbackTarget, Declarations, FunctionInterface, K,
-    MAX_ELABORATION_DEPTH, StructTable, bits, child_type_budget, compatible, declare,
+    MAX_ELABORATION_DEPTH, StructTable, TypeResolver, bits, child_type_budget, compatible, declare,
     literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
     CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, Type,
 };
+use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, ConstantUse, TypedExpr};
 
-fn dimension_type() -> Type {
+pub(super) fn dimension_type() -> Type {
     Type::Bits {
         signed: false,
         width: 32,
@@ -62,7 +63,10 @@ impl<'m> Declarations<'m> {
                 Type::Bits { .. } | Type::Bool | Type::Enum { .. } => {
                     structs.validate_type(&p.ty)?
                 }
-                Type::ParametricBits { .. } | Type::Named(_) | Type::Applied { .. } => {
+                Type::ParametricBits { .. }
+                | Type::Named(_)
+                | Type::Applied { .. }
+                | Type::ParametricStruct { .. } => {
                     // Resolve dependent widths and nominal enum or struct
                     // annotations in the template's declaration scope.
                 }
@@ -91,10 +95,10 @@ impl<'m> Declarations<'m> {
 
 /// Only a bare binding in a dimension provides an inference constraint. A
 /// computed dimension is checked after its operands have concrete values.
-struct InferredBindings<'f> {
+pub(super) struct InferredBindings<'f> {
     formals: &'f [ParametricBinding],
     indices: BTreeMap<&'f str, usize>,
-    values: Vec<Option<BoundParametricValue>>,
+    pub(super) values: Vec<Option<BoundParametricValue>>,
     explicit_count: usize,
     // Gather all witnesses from one data argument before its bindings become
     // context for later arguments. Tuple fields must agree with one another.
@@ -102,7 +106,7 @@ struct InferredBindings<'f> {
 }
 
 impl<'f> InferredBindings<'f> {
-    fn new(formals: &'f [ParametricBinding], explicit_count: usize) -> Self {
+    pub(super) fn new(formals: &'f [ParametricBinding], explicit_count: usize) -> Self {
         Self {
             formals,
             indices: formals
@@ -139,6 +143,9 @@ impl<'f> InferredBindings<'f> {
             }
             Type::Array { element, .. } => self.needs_witness(element),
             Type::Tuple(fields) => fields.iter().any(|f| self.needs_witness(f)),
+            Type::ParametricStruct { args, .. } => {
+                args.iter().any(|arg| self.missing(arg).is_some())
+            }
             _ => false,
         }
     }
@@ -166,7 +173,7 @@ impl<'f> InferredBindings<'f> {
         Ok(())
     }
 
-    fn finish_argument(&mut self) {
+    pub(super) fn finish_argument(&mut self) {
         for (index, value) in std::mem::take(&mut self.witnesses) {
             self.values[index] = Some(value);
         }
@@ -180,7 +187,13 @@ impl<'f> InferredBindings<'f> {
         Ok(())
     }
 
-    fn infer(&mut self, formal: &Type, actual: &Type) -> Result<(), String> {
+    fn infer(
+        &mut self,
+        formal: &Type,
+        actual: &Type,
+        structs: &StructTable,
+        resolver: &ImportResolver,
+    ) -> Result<(), String> {
         match (formal, actual) {
             (Type::ParametricBits { signed, width }, actual) => {
                 if let Some((sign, count)) = bits(actual) {
@@ -196,17 +209,29 @@ impl<'f> InferredBindings<'f> {
                 },
             ) => {
                 self.bind_size(size, *count)?;
-                self.infer(element, actual)?;
+                self.infer(element, actual, structs, resolver)?;
             }
             (
                 Type::Array { element, .. },
                 Type::Array {
                     element: actual, ..
                 },
-            ) => self.infer(element, actual)?,
+            ) => self.infer(element, actual, structs, resolver)?,
             (Type::Tuple(fields), Type::Tuple(actuals)) => {
                 for (field, actual) in fields.iter().zip(actuals) {
-                    self.infer(field, actual)?;
+                    self.infer(field, actual, structs, resolver)?;
+                }
+            }
+            (Type::ParametricStruct { name, args }, Type::Named(canonical)) => {
+                let values = if let Some(instance) = structs.instances.get(canonical) {
+                    (instance.template.name == *name).then_some(instance.values.as_slice())
+                } else {
+                    resolver.struct_parametric_values(name, canonical)?
+                };
+                if let Some(values) = values {
+                    for (arg, &value) in args.iter().zip(values) {
+                        self.bind_dimension(arg, &dimension_type(), IrValue::u32(value))?;
+                    }
                 }
             }
             _ => { /* Concrete constraints are checked against the final signature. */ }
@@ -217,7 +242,7 @@ impl<'f> InferredBindings<'f> {
     /// An array literal provides its length even when its element needs the
     /// formal parameter's width as context. An untyped empty literal needs its
     /// complete array type from context before it can supply a length.
-    fn literal_lengths(&mut self, pattern: &Type, expr: &Expr) -> Result<(), String> {
+    pub(super) fn literal_lengths(&mut self, pattern: &Type, expr: &Expr) -> Result<(), String> {
         match (pattern, expr) {
             (Type::ParametricArray { size, element }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
@@ -358,6 +383,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
         match ty {
+            Type::ParametricStruct { name, args } => {
+                let ty = self.struct_actual_type(name, args)?;
+                self.resolve_dimensions(&ty, remaining)
+            }
             Type::ParametricBits { signed, width } => {
                 let signed = self
                     .parametric_value(signed, &Type::Bool)?
@@ -393,15 +422,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     ty,
                     &|name| {
                         self.names.contains(name)
+                            || self
+                                .enclosing_type_locals
+                                .is_some_and(|contains| contains(name))
                             || callbacks.is_some_and(|indices| indices.contains_key(name))
                     },
                     self.function_type_bindings
                         .as_ref()
                         .or_else(|| self.specialization.map(|s| &s.bindings)),
-                    self.decls
-                        .dimensions_at(self.function_position.or(self.block_position)),
-                    self.resolver,
-                    self.structs,
+                    self.decls.dimensions_at(
+                        self.function_position.or(self.block_position),
+                        &self.zero_binding,
+                    ),
+                    &mut TypeResolver {
+                        resolver: self.resolver,
+                        structs: self.structs,
+                        functions: self.function_registry.as_deref_mut(),
+                    },
                     remaining,
                 )
             }
@@ -476,10 +513,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         f: &'m Function,
         evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
     ) -> Result<T, String> {
-        let registry = self
-            .function_registry
-            .as_deref_mut()
-            .expect("module function registry");
+        let registry = self.function_registry.as_deref_mut().ok_or_else(|| {
+            format!(
+                "cannot specialize function '{}' in this type annotation",
+                f.name
+            )
+        })?;
         registry.enter(&f.name)?;
         let result = stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
             let mut definition =
@@ -678,8 +717,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.dimension_witness(formal, expr, inferred, /* tuple_member= */ false)
     }
 
-    /// An unsized scalar in a tuple has its own width when that field supplies
-    /// evidence. An unsized scalar passed by itself can wait for context.
+    /// An unsized scalar in a tuple or struct supplies its minimum width.
+    /// An unsized scalar passed directly to a function can wait for context.
     fn dimension_witness(
         &mut self,
         formal: &Type,
@@ -697,13 +736,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             return Ok(None);
         };
-        inferred.infer(formal, &value.ty)?;
+        inferred.infer(formal, &value.ty, self.structs, self.resolver)?;
         Ok(Some(value))
     }
 
     /// Tuple fields have independent widths. Checking a field that supplies a
     /// dimension must leave the other fields free to use their inferred types.
-    fn infer_type_input<'e>(
+    pub(super) fn infer_type_input<'e>(
         &mut self,
         formal: &Type,
         expr: &'e Expr,
@@ -758,7 +797,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         self.structs,
                         /* contextual_projection= */ false,
                     )?;
-                    inferred.infer(&param.ty, &value.ty)?;
+                    inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
                     Input::Checked { expr: None, value }
                 }
                 (None, None) => unreachable!("map supplies a typed argument"),
@@ -863,7 +902,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 FunctionParametricRef::Callback(callback) => {
                     let name = callback_argument_name(actual)?;
-                    let source = self.callback_source(name, |head| self.names.contains(head))?;
+                    let source = self.callback_source(name, |head| self.has_local_name(head))?;
                     environment = self
                         .function_registry
                         .as_deref_mut()
@@ -970,6 +1009,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         actuals: &[Expr],
         mut args: Vec<DataArgument<'_>>,
     ) -> Result<(Type, K), String> {
+        if self.function_registry.is_none() {
+            return Err(format!(
+                "cannot specialize function '{}' in this type annotation",
+                f.name
+            ));
+        }
         if args.len() != f.params.len() {
             return Err(format!(
                 "'{}' expects {} arguments, got {}",
@@ -1011,7 +1056,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             if let Some(expr) = arg.source {
                 arg.checked = self.infer_dimension_input(&param.ty, expr, &mut inferred)?;
             } else if let Some(value) = &arg.checked {
-                inferred.infer(&param.ty, &value.ty)?;
+                inferred.infer(&param.ty, &value.ty, self.structs, self.resolver)?;
             }
             inferred.finish_argument();
         }
@@ -1024,7 +1069,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .get(i)
                     .ok_or_else(|| format!("'{}' requires explicit callable arguments", f.name))?;
                 let name = super::generic_blocks::callback_argument_name(actual)?;
-                let source = self.callback_source(name, |head| self.names.contains(head))?;
+                let source = self.callback_source(name, |head| self.has_local_name(head))?;
                 let formal = &interface.callback_params[targets.len()];
                 if self.replaying_body() {
                     self.charge_expansion("callback bindings", formal.binding_work)?;

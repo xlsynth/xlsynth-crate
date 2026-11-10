@@ -421,6 +421,7 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
         | Type::Tuple(_)
         | Type::Named(_)
         | Type::Applied { .. }
+        | Type::ParametricStruct { .. }
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
         | Type::Array { .. } => None,

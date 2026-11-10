@@ -472,7 +472,8 @@ struct Parser<'s> {
     forward_map_import: bool,
     /// Type parameters that can annotate literals in this function or block.
     type_params: BTreeSet<&'s str>,
-    /// Function templates allow full expressions in their type dimensions.
+    /// Function and struct templates allow full expressions in their type
+    /// dimensions.
     dependent_types: bool,
     /// Local template declarations disambiguate angle brackets from
     /// comparisons in a comma-separated expression list. Block callers can
@@ -541,6 +542,20 @@ enum ExpressionGrammar {
 struct ParsedType {
     value: Type,
     depth: usize,
+}
+
+/// Preserve concrete struct applications and track the depth of computed
+/// arguments.
+enum StructArguments {
+    Concrete(Vec<u32>),
+    Computed { args: Vec<Expr>, height: usize },
+}
+
+/// Parsed value arguments and their token spans for struct-literal validation.
+struct ParsedAngleArguments {
+    args: Vec<Expr>,
+    spans: Vec<std::ops::Range<usize>>,
+    height: usize,
 }
 
 /// Contents of braces before determining whether they form a guard or a value.
@@ -726,6 +741,16 @@ impl<'s> Parser<'s> {
         } else {
             false
         }
+    }
+
+    /// Leave the opening angle for the same argument parser as bare `<...>`.
+    fn eat_turbofish(&mut self) -> bool {
+        self.peek(1) == "<" && self.eat("::")
+    }
+
+    /// Whether this opening angle is explicitly prefixed with `::`.
+    fn turbofish_at(&self, angle: usize) -> bool {
+        angle > 0 && self.tokens[angle].text == "<" && self.tokens[angle - 1].text == "::"
     }
 
     fn error(&self, message: &str) -> String {
@@ -938,15 +963,9 @@ impl<'s> Parser<'s> {
                 module.declaration_order.push(constant.name.clone());
                 module.constants.push(constant);
             } else if self.eat("struct") {
-                let name = self.ident()?;
-                module.declaration_order.push(name.clone());
-                self.expect("{")?;
-                let fields = self.list("}", Self::param)?;
-                module.structs.push(StructDef {
-                    name,
-                    public,
-                    fields,
-                });
+                let def = self.with_name_scope(|p| p.struct_def(public))?;
+                module.declaration_order.push(def.name.clone());
+                module.structs.push(def);
             } else if self.eat("enum") {
                 self.value_context = ValueContext::DslxItem;
                 let def = self.with_name_scope(|p| p.enum_def(public))?;
@@ -1088,11 +1107,11 @@ impl<'s> Parser<'s> {
     /// Parse a local name or a member of an imported DSLX module.
     fn name_or_qualified_member(&mut self) -> Result<String, String> {
         let head = self.take_identifier(is_value_identifier)?;
-        if !self.eat("::") {
-            return Ok(head);
+        if self.peek(1) != "<" && self.eat("::") {
+            let member = self.take_identifier(is_dslx_member_name)?;
+            return Ok(format!("{head}::{member}"));
         }
-        let member = self.take_identifier(is_dslx_member_name)?;
-        Ok(format!("{head}::{member}"))
+        Ok(head)
     }
 
     /// An imported enum value can have a module, type, and member component.
@@ -1134,6 +1153,40 @@ impl<'s> Parser<'s> {
         Ok(Param {
             name,
             ty: self.ty()?,
+        })
+    }
+
+    /// Parse an aggregate declaration and any value parametrics in its header.
+    fn struct_def(&mut self, public: bool) -> Result<StructDef, String> {
+        let name = self.ident()?;
+        let value_parametrics = if self.eat("<") {
+            self.dependent_types = true;
+            if self.peek(0) == ">" {
+                return Err(self.error("expected a struct value parameter"));
+            }
+            let mut index = 0;
+            self.with_value_grammar(|p| {
+                p.list(">", |p| {
+                    let binding = p.value_parametric(index)?;
+                    index += 1;
+                    Ok(binding)
+                })
+            })?
+        } else {
+            Vec::new()
+        };
+        self.expect("{")?;
+        let fields = if self.dependent_types {
+            self.with_value_grammar(|p| p.list("}", Self::param))?
+        } else {
+            self.list("}", Self::param)?
+        };
+        self.dependent_types = false;
+        Ok(StructDef {
+            name,
+            public,
+            value_parametrics,
+            fields,
         })
     }
 
@@ -1243,27 +1296,8 @@ impl<'s> Parser<'s> {
                     p.shadow_callable(&param.name);
                     callback_params.push(param);
                 } else {
-                    // DSLX permits `self` as a value parametric even though a
-                    // data parameter named `self` requires an impl method.
-                    let name = p.ident()?;
-                    p.expect(":")?;
-                    p.bind_local_name(&name);
-                    let ty = p.ty()?;
-                    let default = if p.eat("=") {
-                        p.expect("{")?;
-                        let value = p.expr()?.value;
-                        p.expect("}")?;
-                        Some(value)
-                    } else {
-                        None
-                    };
-                    p.shadow_callable(&name);
-                    value_parametrics.push(ParametricBinding {
-                        name,
-                        ty,
-                        default,
-                        index: value_parametrics.len() + callback_params.len(),
-                    });
+                    value_parametrics
+                        .push(p.value_parametric(value_parametrics.len() + callback_params.len())?);
                 }
                 Ok(())
             })?;
@@ -1295,6 +1329,31 @@ impl<'s> Parser<'s> {
             params,
             result,
             body,
+        })
+    }
+
+    /// Parse a value formal and its optional braced default.
+    fn value_parametric(&mut self, index: usize) -> Result<ParametricBinding, String> {
+        // DSLX permits `self` as a value parametric even though a data
+        // parameter named `self` requires an impl method.
+        let name = self.ident()?;
+        self.expect(":")?;
+        self.bind_local_name(&name);
+        let ty = self.ty()?;
+        let default = if self.eat("=") {
+            self.expect("{")?;
+            let value = self.expr()?.value;
+            self.expect("}")?;
+            Some(value)
+        } else {
+            None
+        };
+        self.shadow_callable(&name);
+        Ok(ParametricBinding {
+            name,
+            ty,
+            default,
+            index,
         })
     }
 
@@ -1567,7 +1626,7 @@ impl<'s> Parser<'s> {
         Ok((signed, bit_count))
     }
 
-    /// Nonliteral dimensions name constants. Function templates can also
+    /// Nonliteral dimensions name constants. Templates can also
     /// compute dimensions from their value parametrics.
     fn type_dimension(&mut self) -> Result<ParsedExpr, String> {
         let start = self.tokens[self.pos].start;
@@ -1662,23 +1721,76 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
-    /// Read the concrete u32 arguments of a DSLX struct application.
-    fn struct_arguments(&mut self) -> Result<Vec<u32>, String> {
+    /// Read concrete u32 literals, names, and braced expressions in a struct
+    /// application.
+    fn struct_arguments(&mut self) -> Result<StructArguments, String> {
+        let arguments = self.parsed_angle_arguments()?;
+        self.classify_struct_arguments(arguments)
+    }
+
+    /// Read explicit value arguments before their enclosing syntax is known.
+    fn parsed_angle_arguments(&mut self) -> Result<ParsedAngleArguments, String> {
         self.expect("<")?;
-        self.list(">", |p| {
-            if p.eat("u32") {
-                p.expect(":")?;
+        let mut spans = Vec::new();
+        let mut height = 0;
+        let args = self.list(">", |p| {
+            let start = p.pos;
+            let actual = p.parametric_argument()?;
+            spans.push(start..p.pos);
+            height = height.max(actual.height);
+            Ok(actual.value)
+        })?;
+        Ok(ParsedAngleArguments {
+            args,
+            spans,
+            height,
+        })
+    }
+
+    /// Retain the concrete representation for lists of direct u32 literals.
+    fn classify_struct_arguments(
+        &self,
+        ParsedAngleArguments {
+            args,
+            spans,
+            height,
+        }: ParsedAngleArguments,
+    ) -> Result<StructArguments, String> {
+        let mut concrete = Vec::new();
+        for (arg, span) in args.iter().zip(spans) {
+            let start = self.tokens[span.start];
+            if start.text == "{" {
+                continue;
             }
-            let value = normalized_integer(p.peek(0))
+            if let Expr::Name(name) = arg {
+                validate_dslx_value_path(name)
+                    .map_err(|e| diagnostic(self.source, start.start, &e))?;
+                continue;
+            }
+            let spelling = match &self.tokens[span] {
+                [number] => Some(number.text),
+                [ty, colon, number] if ty.text == "u32" && colon.text == ":" => Some(number.text),
+                _ => None,
+            };
+            let value = spelling
+                .and_then(normalized_integer)
                 .and_then(|text| {
                     let (digits, radix) = radix_digits(&text);
                     u32::from_str_radix(digits, radix).ok()
                 })
                 .ok_or_else(|| {
-                    p.error("expected a concrete nonnegative struct argument that fits u32")
+                    diagnostic(
+                        self.source,
+                        start.start,
+                        "expected a concrete nonnegative struct argument that fits u32",
+                    )
                 })?;
-            p.pos += 1;
-            Ok(value)
+            concrete.push(value);
+        }
+        Ok(if concrete.len() == args.len() {
+            StructArguments::Concrete(concrete)
+        } else {
+            StructArguments::Computed { args, height }
         })
     }
 
@@ -1751,10 +1863,21 @@ impl<'s> Parser<'s> {
             // in a tuple of comparisons such as (x as T < 1, 2 > (y)).
             let after_as = self.pos > 0 && self.tokens[self.pos - 1].text == "as";
             let name = self.name_or_qualified_member()?;
-            if self.peek(0) == "<" && (!after_as || self.struct_arguments_end(self.pos).is_some()) {
-                Type::Applied {
-                    name,
-                    args: self.struct_arguments()?,
+            if self.eat_turbofish()
+                || (self.peek(0) == "<"
+                    && (!after_as || self.struct_arguments_end(self.pos).is_some()))
+            {
+                match self.struct_arguments()? {
+                    StructArguments::Concrete(args) => Type::Applied { name, args },
+                    StructArguments::Computed { args, height } => {
+                        if height >= MAX_SYNTAX_DEPTH {
+                            return Err(self.error("type nesting exceeds 64 levels"));
+                        }
+                        return Ok(ParsedType {
+                            value: Type::ParametricStruct { name, args },
+                            depth: height + 1,
+                        });
+                    }
                 }
             } else {
                 Type::Named(name)
@@ -2605,16 +2728,20 @@ impl<'s> Parser<'s> {
             self.pos += 1;
             return self.counted_for();
         }
-        if text == "zero!" && self.peek(1) == "<" && !self.zero_parametric_call() {
-            self.pos += 2;
-            let ty = self.ty()?;
-            self.expect(">")?;
-            self.expect("(")?;
-            self.expect(")")?;
-            return Ok(ParsedExpr::leaf(Expr::Zero(ty)));
-        }
-        if self.peek(1) == "<" && self.type_builtin_at(self.pos) {
-            return self.type_builtin_call();
+        let angle_offset = if self.peek(1) == "::" { 2 } else { 1 };
+        if self.peek(angle_offset) == "<" {
+            let angle = self.pos + angle_offset;
+            if text == "zero!" && !self.zero_parametric_call(angle) {
+                self.pos = angle + 1;
+                let ty = self.ty()?;
+                self.expect(">")?;
+                self.expect("(")?;
+                self.expect(")")?;
+                return Ok(ParsedExpr::leaf(Expr::Zero(ty)));
+            }
+            if self.type_builtin_at(self.pos) {
+                return self.type_builtin_call(angle);
+            }
         }
         if self.eat("true") || self.eat("false") {
             return Ok(ParsedExpr::leaf(Expr::Bool(text == "true")));
@@ -2645,24 +2772,21 @@ impl<'s> Parser<'s> {
             return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }
         let name = self.name_or_qualified_member()?;
-        if self.parametric_arguments_end(self.pos, &["("]).is_some() {
+        let mut explicit = if self.eat_turbofish() {
+            Some(self.parsed_angle_arguments()?)
+        } else {
+            None
+        };
+        if self.peek(0) == "("
+            && let Some(arguments) = explicit.take()
+        {
+            return self.parametric_call(name, arguments.args, arguments.height);
+        }
+        if explicit.is_none() && self.parametric_arguments_end(self.pos, &["("]).is_some() {
             self.expect("<")?;
             let mut height = 0;
             let parametrics = self.parametric_arguments(&mut height)?;
-            self.expect("(")?;
-            let args = self.list(")", |p| {
-                let arg = p.expr()?;
-                height = height.max(arg.height);
-                Ok(arg.value)
-            })?;
-            return self.compose(
-                height,
-                Expr::ParametricCall {
-                    name,
-                    parametrics,
-                    args,
-                },
-            );
+            return self.parametric_call(name, parametrics, height);
         }
         if self.eat("(") {
             if name == "map" && self.peek(0) != ")" {
@@ -2680,7 +2804,12 @@ impl<'s> Parser<'s> {
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
         }
-        let struct_args = if self
+        let struct_args = if let Some(arguments) = explicit {
+            if self.peek(0) != "{" {
+                return Err(self.error("expected '(' or '{' after explicit value arguments"));
+            }
+            Some(self.classify_struct_arguments(arguments)?)
+        } else if self
             .struct_arguments_end(self.pos)
             .is_some_and(|end| self.tokens[end].text == ">" && self.tokens[end + 1].text == "{")
         {
@@ -2690,7 +2819,10 @@ impl<'s> Parser<'s> {
         };
         if self.peek(0) == "{" && self.struct_braces(braces) {
             self.pos += 1;
-            let mut height = 0;
+            let mut height = match &struct_args {
+                Some(StructArguments::Computed { height, .. }) => *height,
+                _ => 0,
+            };
             let fields = self.list("}", |parser| {
                 let field = parser.take_identifier(is_dslx_member_name)?;
                 let value = if parser.eat(":") {
@@ -2702,7 +2834,10 @@ impl<'s> Parser<'s> {
                 Ok((field, value.value))
             })?;
             let value = match struct_args {
-                Some(args) => Expr::AppliedStruct { name, args, fields },
+                Some(StructArguments::Concrete(args)) => Expr::AppliedStruct { name, args, fields },
+                Some(StructArguments::Computed { args, .. }) => {
+                    Expr::ParametricStruct { name, args, fields }
+                }
                 None => Expr::Struct { name, fields },
             };
             return self.compose(height, value);
@@ -2711,6 +2846,29 @@ impl<'s> Parser<'s> {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
         Ok(ParsedExpr::leaf(self.named_value(name)?))
+    }
+
+    /// Parse the runtime arguments of a call with explicit value arguments.
+    fn parametric_call(
+        &mut self,
+        name: String,
+        parametrics: Vec<Expr>,
+        mut height: usize,
+    ) -> Result<ParsedExpr, String> {
+        self.expect("(")?;
+        let args = self.list(")", |p| {
+            let arg = p.expr()?;
+            height = height.max(arg.height);
+            Ok(arg.value)
+        })?;
+        self.compose(
+            height,
+            Expr::ParametricCall {
+                name,
+                parametrics,
+                args,
+            },
+        )
     }
 
     /// A lexical binding or callable template can shadow a typed builtin.
@@ -2736,9 +2894,9 @@ impl<'s> Parser<'s> {
     }
 
     /// Parse the type list and value arguments of a typed builtin.
-    fn type_builtin_call(&mut self) -> Result<ParsedExpr, String> {
+    fn type_builtin_call(&mut self, angle: usize) -> Result<ParsedExpr, String> {
         let name = self.peek(0).to_owned();
-        self.pos += 2;
+        self.pos = angle + 1;
         let mut height = 0;
         let types = self.list(">", |parser| {
             let ty = parser.parsed_ty(true)?;
@@ -2801,6 +2959,14 @@ impl<'s> Parser<'s> {
         if self.tokens[angle].text != "<" || angle == 0 {
             return None;
         }
+        if self.turbofish_at(angle) {
+            let end = self.value_arguments_end(
+                angle, /* allow_comma= */ true, /* allow_combined_close= */ false,
+            )?;
+            return following
+                .contains(&self.tokens[end + 1].text)
+                .then_some(end);
+        }
         // In `pair(x < y, z > (w))` a comma can separate two comparisons.
         // At the start of a standalone expression it can only belong to the
         // parametric list, even if a nearer value shadows the function name.
@@ -2826,16 +2992,27 @@ impl<'s> Parser<'s> {
                     .get(name)
                     .is_some_and(|binding| binding.direct.is_some()),
             };
+        let end = self.value_arguments_end(angle, allow_comma, false)?;
+        following
+            .contains(&self.tokens[end + 1].text)
+            .then_some(end)
+    }
+
+    /// Find the first top-level closing angle without scanning into the
+    /// enclosing expression.
+    fn value_arguments_end(
+        &self,
+        angle: usize,
+        allow_comma: bool,
+        allow_combined_close: bool,
+    ) -> Option<usize> {
         let mut depth = 0usize;
         for index in angle + 1..self.tokens.len() {
             let token = &self.tokens[index];
             match token.text {
                 "" => return None,
-                ">" if depth == 0 => {
-                    return following
-                        .contains(&self.tokens[index + 1].text)
-                        .then_some(index);
-                }
+                ">" if depth == 0 => return Some(index),
+                ">>" | ">=" if depth == 0 && allow_combined_close => return Some(index),
                 "{" if depth != 0 || matches!(self.tokens[index - 1].text, "<" | ",") => depth += 1,
                 "(" if depth != 0 || self.tokens[index - 1].text == ":" => depth += 1,
                 "[" => depth += 1,
@@ -2859,32 +3036,42 @@ impl<'s> Parser<'s> {
         if self.tokens[angle].text != "<" {
             return None;
         }
-        let count = self.tokens[angle + 1..]
-            .iter()
-            .take_while(|token| number_token(token.text) || matches!(token.text, "u32" | ":" | ","))
-            .count();
-        let end = angle + 1 + count;
+        let end = self.value_arguments_end(
+            angle, /* allow_comma= */ true, /* allow_combined_close= */ true,
+        )?;
         let close = self.tokens[end].text;
-        if !matches!(close, ">" | ">>" | ">=") {
-            return None;
-        }
         let next = self.tokens[end + 1].text;
+        let (before_name, bare_name) = match &self.tokens[..angle] {
+            [before @ .., _, separator, _] if separator.text == "::" => (before, None),
+            [before @ .., name] => (before, Some(name.text)),
+            [] => return None,
+        };
         if close == ">" && next == "{" {
-            return Some(end);
+            // Imports have template placeholders even when they could name a
+            // type. A known bare value cannot start a symbolic constructor.
+            let known_value = bare_name.is_some_and(|name| {
+                self.visible_names.contains(name) && !self.callable_templates.contains_key(name)
+            });
+            if !known_value
+                || self.tokens[angle + 1..end].iter().all(|token| {
+                    number_token(token.text) || matches!(token.text, "u32" | ":" | ",")
+                })
+            {
+                return Some(end);
+            }
         }
         // Types directly inside zero! or following 'as' can have commas at
         // expression nesting depth zero. Tuples and arrays delimit their own
         // contents in expression_lookahead.
-        let (before_name, is_type_param) = match &self.tokens[..angle] {
-            [before @ .., _, separator, _] if separator.text == "::" => (before, false),
-            [before @ .., name] => (before, self.type_params.contains(name.text)),
-            [] => return None,
-        };
         match before_name {
-            [.., zero, open] if zero.text == "zero!" && open.text == "<" => Some(end),
+            [.., zero, Token { text: "::", .. }, open] | [.., zero, open]
+                if zero.text == "zero!" && open.text == "<" =>
+            {
+                Some(end)
+            }
             [.., cast]
                 if cast.text == "as"
-                    && !is_type_param
+                    && !bare_name.is_some_and(|name| self.type_params.contains(name))
                     && (matches!(
                         next,
                         "." | "[" | "as" | "," | ")" | "]" | "}" | ";" | "{" | ".." | "..="
@@ -2905,6 +3092,16 @@ impl<'s> Parser<'s> {
             let offset = index - start;
             index = self
                 .type_builtin_arguments_end(index)
+                .or_else(|| {
+                    self.turbofish_at(index)
+                        .then(|| {
+                            self.value_arguments_end(
+                                index, /* allow_comma= */ true,
+                                /* allow_combined_close= */ true,
+                            )
+                        })
+                        .flatten()
+                })
                 .or_else(|| self.parametric_arguments_end(index, &["("]))
                 .or_else(|| self.struct_arguments_end(index))
                 .unwrap_or(index)
@@ -2915,9 +3112,10 @@ impl<'s> Parser<'s> {
 
     /// Skip a typed builtin's annotation list when looking for outer commas.
     fn type_builtin_arguments_end(&self, angle: usize) -> Option<usize> {
+        let name = angle.checked_sub(if self.turbofish_at(angle) { 2 } else { 1 })?;
         if self.tokens[angle].text != "<"
-            || !self.type_builtin_at(angle.checked_sub(1)?)
-            || (angle >= 2 && self.tokens[angle - 2].text == "::")
+            || !self.type_builtin_at(name)
+            || (name > 0 && self.tokens[name - 1].text == "::")
         {
             return None;
         }
@@ -2944,7 +3142,7 @@ impl<'s> Parser<'s> {
     /// Distinguish the typed zero intrinsic from a visible callback template
     /// with the same name. Without import hints, preserve the intrinsic for a
     /// single type argument and no value arguments.
-    fn zero_parametric_call(&self) -> bool {
+    fn zero_parametric_call(&self, angle: usize) -> bool {
         let Some(binding) = self.callable_templates.get("zero!") else {
             return false;
         };
@@ -2957,7 +3155,6 @@ impl<'s> Parser<'s> {
         if binding.members.is_some() {
             return true;
         }
-        let angle = self.pos + 1;
         self.parametric_arguments_end(angle, &["("])
             .is_some_and(|end| {
                 let mut depth = 0usize;
@@ -3110,10 +3307,10 @@ impl<'s> Parser<'s> {
         while self.peek(offset) == "(" {
             offset += 1;
         }
-        if self.peek(offset + 1) == "::" {
+        if self.peek(offset + 1) == "::" && self.peek(offset + 2) != "<" {
             offset += 2;
         }
-        let angle = offset + 1;
+        let angle = offset + if self.peek(offset + 1) == "::" { 2 } else { 1 };
         self.peek(angle) == "<"
             && self
                 .parametric_arguments_end(self.pos + angle, &[",", ")"])
@@ -3132,6 +3329,7 @@ impl<'s> Parser<'s> {
             return Ok(map);
         }
         let callback = self.name_or_qualified_member()?;
+        self.eat_turbofish();
         self.expect("<")?;
         let (iterable, mut height) = iterable.into_ast();
         let parametrics = self.parametric_arguments(&mut height)?;
@@ -4234,16 +4432,66 @@ block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> 
     }
 
     #[test]
+    fn native_struct_parametrics_preserve_defaults_and_dependent_fields() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+pub struct Packet<N: u32, M: u32 = {N + u32:1},> {
+    data: uN[N], nested: Other<M>, array: u8[M + u32:1],
+}
+fn wrap<N: u32>(data: uN[N], nested: Other<{N + u32:1}>) -> Packet<N> {
+    Packet<N, {N + u32:1}> { data, nested, array: zero!<u8[N + u32:2]>() }
+}
+"#,
+        )?;
+        let definition = &module.structs[0];
+        assert!(definition.public);
+        assert!(matches!(&definition.value_parametrics[..], [
+            ParametricBinding { name: n, index: 0, default: None, .. },
+            ParametricBinding { name: m, index: 1, default: Some(Expr::Binary { op: BinaryOp::Add, .. }), .. },
+        ] if n == "N" && m == "M"));
+        assert!(
+            matches!(&definition.fields[0].ty, Type::ParametricBits { width, .. }
+            if width.as_ref() == &Expr::Name("N".into()))
+        );
+        assert_eq!(
+            definition.fields[1].ty,
+            Type::ParametricStruct {
+                name: "Other".into(),
+                args: vec![Expr::Name("M".into())],
+            }
+        );
+        assert!(
+            matches!(&definition.fields[2].ty, Type::ParametricArray { size, .. }
+            if matches!(size.as_ref(), Expr::Binary { op: BinaryOp::Add, .. }))
+        );
+        let wrap = &module.functions[0];
+        assert_eq!(
+            wrap.result,
+            Type::ParametricStruct {
+                name: "Packet".into(),
+                args: vec![Expr::Name("N".into())],
+            }
+        );
+        assert!(
+            matches!(&wrap.body, Expr::ParametricStruct { name, args, fields }
+            if name == "Packet"
+                && matches!(&args[..], [Expr::Name(n), Expr::Binary { op: BinaryOp::Add, .. }] if n == "N")
+                && fields.len() == 3)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn struct_arguments_preserve_expression_operators_and_delimiters() -> Result<(), String> {
         let module = parse_module(
             r#"
 block compare<T>(clk, x: T, y: T) -> (bool, bool) {
-    (x as T < 1, 2 > (y >> u32:1))
+    (x as T < WIDTH, 2 > (y >> u32:1))
 }
 block choose(clk, xs: u8[2]) -> u8[2] {
     let ys = map(Packet<2,3> { xs }.xs, |v| v);
-    let zs = map(zero!<Packet<u32:2,3>>().xs, |v| v);
-    match (u8:1) + Packet<2,3> { tag: u8:0 }.tag { 0 => ys, _ => zs }
+    let zs = map(zero!<Packet<u32:2,{N + u32:1}>>().xs, |v| v);
+    match (u8:1) + Packet<N,M> { tag: u8:0 }.tag { 0 => ys, _ => zs }
 }
 "#,
         )?;
@@ -4324,9 +4572,136 @@ block classify(clk, x:u32, y:u32) -> (bool,bool) {
     }
 
     #[test]
-    fn struct_applications_require_concrete_u32_literals() {
+    fn symbolic_constructor_lookahead_respects_known_values() -> Result<(), String> {
+        for (declarations, head) in [("", "a"), ("const LIMIT = u32:7;", "LIMIT")] {
+            let signature = "fn compare(a: u32, b: u32, c: u32) -> (bool, bool)";
+            let missing_parens =
+                format!("{declarations} {signature} {{ ({head} < b, b > {{ c }}) }}");
+            assert!(parse_module(&missing_parens).is_err(), "{missing_parens}");
+            let valid = format!("{declarations} {signature} {{ ({head} < b, b > ({{ c }})) }}");
+            let module = parse_module(&valid)?;
+            assert!(matches!(&module.functions[0].body, Expr::Tuple(fields)
+                if matches!(&fields[..], [Expr::Binary { op: BinaryOp::Lt, .. }, Expr::Binary { op: BinaryOp::Gt, .. }])));
+        }
+
+        let source = r#"
+use packets;
+use packets::Packet;
+struct Local<W: u32> { data: uN[W] }
+fn make<W: u32>(data: uN[W]) -> (Local<W>, Packet<W>, packets::Packet<W>) {
+    (Local<W> { data }, Packet<W> { data }, packets::Packet<W> { data })
+}
+"#;
+        let module = parse_with_templates(source, &BTreeSet::new())?;
+        assert!(matches!(&module.functions[0].body, Expr::Tuple(fields)
+            if fields.len() == 3 && fields.iter().all(|field| matches!(field, Expr::ParametricStruct { .. }))));
+        Ok(())
+    }
+
+    #[test]
+    fn turbofish_preserves_struct_types_constructors_and_intrinsics() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+use wire;
+struct Packet<N: u32> { data: uN[N] }
+fn wrap<N: u32>(data: uN[N]) -> (Packet::<N>, wire::Packet::<N>) {
+    (Packet::<N> { data }, wire::Packet::<{N + u32:0}> { data })
+}
+fn empty() -> Packet::<> { zero!::<Packet::<>>() }
+fn width() -> u32 { bit_count::<uN[8]>() }
+"#,
+        )?;
+        let wrap = &module.functions[0];
+        assert!(
+            matches!(&wrap.result, Type::Tuple(types) if matches!(&types[..], [
+            Type::ParametricStruct { name: local, .. },
+            Type::ParametricStruct { name: qualified, .. },
+        ] if local == "Packet" && qualified == "wire::Packet"))
+        );
+        assert!(
+            matches!(&wrap.body, Expr::Tuple(fields) if matches!(&fields[..], [
+            Expr::ParametricStruct { name: local, .. },
+            Expr::ParametricStruct { name: qualified, args, .. },
+        ] if local == "Packet" && qualified == "wire::Packet" && matches!(&args[..], [Expr::Binary { op: BinaryOp::Add, .. }])))
+        );
+        assert!(
+            matches!(&module.functions[1].body, Expr::Zero(Type::Applied { name, args })
+            if name == "Packet" && args.is_empty())
+        );
+        assert!(
+            matches!(&module.functions[2].body, Expr::TypeBuiltin { name, .. }
+            if name == "bit_count")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn turbofish_disambiguates_calls_and_named_map_callbacks() -> Result<(), String> {
+        let module = parse_with_templates(
+            r#"
+use wire;
+fn apply(x: u8) -> (u8, u8) { (local::<u8:3, true>(x), wire::apply::<u8:3, true>(x)) }
+block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
+    let ys = map(Packet::<2,3> { xs }.xs, |v| v);
+    (map(ys, local::<u8:3, true>), map(ys, wire::apply::<u8:3, true>))
+}
+"#,
+            &BTreeSet::new(),
+        )?;
+        let Expr::Tuple(calls) = &module.functions[0].body else {
+            panic!("expected two calls");
+        };
+        let Expr::Tuple(maps) = &module.blocks[0].output else {
+            panic!("expected two maps");
+        };
+        for ((call, map), expected) in calls.iter().zip(maps).zip(["local", "wire::apply"]) {
+            assert!(
+                matches!(call, Expr::ParametricCall { name, parametrics, args }
+                if name == expected && parametrics.len() == 2 && args.len() == 1)
+            );
+            assert!(matches!(map, Expr::NamedMap { callback, parametrics, .. }
+                if callback == expected && parametrics.len() == 2));
+        }
+        assert!(matches!(
+            &module.blocks[0].statements[0],
+            Stmt::Let {
+                value: Expr::Map(_),
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn map_lambda_accepts_mixed_angle_spellings_in_zero_type() -> Result<(), String> {
+        for zero in [
+            "zero!<S<2,3>>()",
+            "zero!<S::<2,3>>()",
+            "zero!::<S<2,3>>()",
+            "zero!::<S::<2,3>>()",
+        ] {
+            let source = format!(
+                r#"
+struct S<N: u32, M: u32> {{ data: u8[N], tag: uN[M] }}
+block sample(clk) -> u8[2] {{ map({zero}.data, |x| x) }}
+"#,
+            );
+            let module = parse_module(&source).map_err(|error| format!("{zero}: {error}"))?;
+            let Expr::Map(mapped) = &module.blocks[0].output else {
+                panic!("expected a map lambda for {zero}");
+            };
+            assert!(
+                matches!(&mapped.iterable, ForIterable::Array(Expr::Field { value, name })
+                if name == "data" && matches!(value.as_ref(), Expr::Zero(Type::Applied { name, args })
+                    if name == "S" && args == &[2, 3]))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unbraced_struct_arguments_require_names_or_concrete_u32_literals() {
         for arguments in [
-            "N",
             "u8:2",
             "-1",
             "u32:-1",
@@ -4335,6 +4710,8 @@ block classify(clk, x:u32, y:u32) -> (bool,bool) {
             "0b2",
             "00",
             "1+2",
+            "N+2",
+            "_",
             "u32",
             "2,,3",
         ] {

@@ -25,9 +25,9 @@ impl<'a> Layouts<'a> {
         Ok(match ty {
             Type::Bits { width, .. } | Type::Enum { width, .. } => ir::Type::Bits(*width),
             Type::Bool => ir::Type::Bits(1),
-            Type::Applied { .. } => {
+            Type::Applied { .. } | Type::ParametricStruct { .. } => {
                 return Err(BuilderError::InvalidOperation(format!(
-                    "unresolved DSLX struct type '{ty}'"
+                    "unresolved struct type '{ty}'"
                 )));
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {

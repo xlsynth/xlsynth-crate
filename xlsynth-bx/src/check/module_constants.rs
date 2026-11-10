@@ -7,27 +7,52 @@ use crate::infer_literal::has_implicit_constant_type;
 
 use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
 
-/// Module constants visible where a declaration writes its type annotations.
+/// Module scope visible where a declaration writes its type annotations.
 #[derive(Clone, Copy)]
 pub(super) struct ModuleDimensions<'a, 'm> {
-    decls: &'a Declarations<'m>,
-    position: Option<usize>,
+    pub(super) decls: &'a Declarations<'m>,
+    pub(super) position: Option<usize>,
+    zero_binding: ZeroBinding<'a>,
+}
+
+/// The declaration that owns the lexical `zero!` binding, or a binding
+/// already resolved by the enclosing body checker.
+#[derive(Clone, Copy)]
+enum ZeroBinding<'a> {
+    Owner(&'a str),
+    Resolved(&'a str),
 }
 
 impl<'m> Declarations<'m> {
-    pub(super) fn module_dimensions(&self, owner: &str) -> ModuleDimensions<'_, 'm> {
-        self.dimensions_at(self.positions.get(owner).copied())
+    pub(super) fn module_dimensions<'a>(&'a self, owner: &'a str) -> ModuleDimensions<'a, 'm> {
+        ModuleDimensions {
+            decls: self,
+            position: self.positions.get(owner).copied(),
+            zero_binding: ZeroBinding::Owner(owner),
+        }
     }
 
-    pub(super) fn dimensions_at(&self, position: Option<usize>) -> ModuleDimensions<'_, 'm> {
+    pub(super) fn dimensions_at<'a>(
+        &'a self,
+        position: Option<usize>,
+        zero_binding: &'a str,
+    ) -> ModuleDimensions<'a, 'm> {
         ModuleDimensions {
             decls: self,
             position,
+            zero_binding: ZeroBinding::Resolved(zero_binding),
         }
     }
 }
 
 impl ModuleDimensions<'_, '_> {
+    pub(super) fn zero_binding(&self) -> String {
+        match self.zero_binding {
+            ZeroBinding::Owner(owner) => self.decls.zero_binding(owner),
+            ZeroBinding::Resolved(binding) => binding.to_owned(),
+        }
+    }
+
     /// Resolve the constant in its declaring scope and preserve its source
     /// type.
     fn constant(

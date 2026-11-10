@@ -329,6 +329,20 @@ impl ImportResolver {
         self.structs.definitions()
     }
 
+    /// Read the bindings of a concrete instance through its source use name.
+    pub(crate) fn struct_parametric_values(
+        &self,
+        template: &str,
+        canonical: &str,
+    ) -> Result<Option<&[u32]>, String> {
+        let Some((subject, member)) = self.lookup(template)? else {
+            return Ok(None);
+        };
+        Ok(self
+            .structs
+            .struct_parametric_values(canonical, &subject, &member))
+    }
+
     pub(crate) fn enum_definitions(&self) -> &[CheckedEnum] {
         self.structs.enum_definitions()
     }
@@ -583,8 +597,8 @@ fn normalize_import_type(
                 "unsupported nominal type '{name}' in imported function signature"
             ));
         }
-        Type::Applied { name, .. } => {
-            return Err(format!("unresolved imported struct application '{name}'"));
+        Type::Applied { name, .. } | Type::ParametricStruct { name, .. } => {
+            return Err(format!("unresolved struct application '{name}'"));
         }
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
             return Err(format!(
@@ -648,8 +662,8 @@ impl ProbeImports {
                 Ok(format!("{}[{size}]", self.render_type(element, structs)?))
             }
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
-            Type::Applied { name, .. } => {
-                Err(format!("unresolved imported struct application '{name}'"))
+            Type::Applied { name, .. } | Type::ParametricStruct { name, .. } => {
+                Err(format!("unresolved struct application '{name}'"))
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => Err(format!(
                 "unresolved dimensions in imported function signature '{ty}'"
