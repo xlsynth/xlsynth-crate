@@ -476,6 +476,7 @@ pub(super) fn bits(ty: &Type) -> Option<(bool, usize)> {
         | Type::Named(_)
         | Type::Applied { .. }
         | Type::ParametricStruct { .. }
+        | Type::TypeApplied { .. }
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
         | Type::Array { .. } => None,

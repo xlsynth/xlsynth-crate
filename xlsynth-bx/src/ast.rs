@@ -123,6 +123,11 @@ pub enum Type {
         name: String,
         args: Vec<Expr>,
     },
+    /// A native struct application with type arguments.
+    TypeApplied {
+        name: String,
+        args: Vec<Type>,
+    },
 }
 
 /// A typed name in a parameter list or struct declaration.
@@ -137,9 +142,17 @@ pub struct Param {
 pub struct StructDef {
     pub name: String,
     pub public: bool,
+    /// Type parameters in declaration order.
+    pub type_params: Vec<String>,
     /// Compile-time values in declaration order.
     pub value_parametrics: Vec<ParametricBinding>,
     pub fields: Vec<Param>,
+}
+
+impl StructDef {
+    pub fn is_parametric(&self) -> bool {
+        !self.type_params.is_empty() || !self.value_parametrics.is_empty()
+    }
 }
 
 /// One named value in a numeric enum, before constant evaluation.
@@ -421,6 +434,12 @@ pub enum Expr {
     ParametricStruct {
         name: String,
         args: Vec<Expr>,
+        fields: Vec<(String, Expr)>,
+    },
+    /// A native struct literal with explicit type arguments.
+    TypeAppliedStruct {
+        name: String,
+        args: Vec<Type>,
         fields: Vec<(String, Expr)>,
     },
     Field {

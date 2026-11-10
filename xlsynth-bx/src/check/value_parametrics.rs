@@ -66,7 +66,8 @@ impl<'m> Declarations<'m> {
                 Type::ParametricBits { .. }
                 | Type::Named(_)
                 | Type::Applied { .. }
-                | Type::ParametricStruct { .. } => {
+                | Type::ParametricStruct { .. }
+                | Type::TypeApplied { .. } => {
                     // Resolve dependent widths and nominal enum or struct
                     // annotations in the template's declaration scope.
                 }
@@ -142,7 +143,9 @@ impl<'f> InferredBindings<'f> {
                     || self.needs_witness(element)
             }
             Type::Array { element, .. } => self.needs_witness(element),
-            Type::Tuple(fields) => fields.iter().any(|f| self.needs_witness(f)),
+            Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
+                fields.iter().any(|f| self.needs_witness(f))
+            }
             Type::ParametricStruct { args, .. } => {
                 args.iter().any(|arg| self.missing(arg).is_some())
             }
@@ -231,6 +234,15 @@ impl<'f> InferredBindings<'f> {
                 if let Some(values) = values {
                     for (arg, &value) in args.iter().zip(values) {
                         self.bind_dimension(arg, &dimension_type(), IrValue::u32(value))?;
+                    }
+                }
+            }
+            (Type::TypeApplied { name, args }, Type::Named(canonical)) => {
+                if let Some(instance) = structs.instances.get(canonical)
+                    && instance.template.name == *name
+                {
+                    for (arg, actual) in args.iter().zip(&instance.types) {
+                        self.infer(arg, actual, structs, resolver)?;
                     }
                 }
             }
@@ -383,6 +395,40 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
         };
         match ty {
+            Type::TypeApplied { name, args } => {
+                if self.has_local_name(name)
+                    || self
+                        .callback_indices()
+                        .is_some_and(|indices| indices.contains_key(name))
+                {
+                    return Err(format!("'{name}' names a local value here"));
+                }
+                self.reject_type_parameter_value(name)?;
+                self.decls.check_type_name_visibility(
+                    name,
+                    self.function_position.or(self.block_position),
+                )?;
+                let template = self
+                    .structs
+                    .template(name)
+                    .ok_or_else(|| format!("unknown type-parametric struct '{name}'"))?;
+                super::struct_parametrics::check_type_arity(template, args.len())?;
+                let budget = child_type_budget(remaining)?;
+                let args = args
+                    .iter()
+                    .map(|arg| self.resolve_dimensions(arg, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ty = Type::TypeApplied {
+                    name: name.clone(),
+                    args,
+                };
+                let ty = match self.type_bindings() {
+                    Some(bindings) if bindings.has_unbound_variable(&ty) => return Ok(ty),
+                    Some(bindings) => bindings.concrete_type(&ty)?,
+                    None => ty,
+                };
+                self.materialize_type_applications(ty, remaining)
+            }
             Type::ParametricStruct { name, args } => {
                 let ty = self.struct_actual_type(name, args)?;
                 self.resolve_dimensions(&ty, remaining)
@@ -729,7 +775,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if !inferred.needs_witness(formal) {
             return Ok(None);
         }
-        let value = if tuple_member {
+        let value = if self.contains_type_struct_constructor(expr) {
+            let Some(value) = self.constructor_dimension_witness(expr)? else {
+                return Ok(None);
+            };
+            value
+        } else if tuple_member {
             self.inferred_expr(expr)?
         } else if minimum_type(expr)?.is_none() {
             self.expr(expr, None)?

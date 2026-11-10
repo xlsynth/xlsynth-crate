@@ -88,8 +88,11 @@ impl StructTable<'_> {
                 type_dependencies(
                     &field.ty,
                     |ty, name| {
-                        has_symbolic_application |= matches!(ty, Type::ParametricStruct { .. });
-                        deps.push(name);
+                        has_symbolic_application |=
+                            matches!(ty, Type::ParametricStruct { .. } | Type::TypeApplied { .. });
+                        if !def.type_params.iter().any(|param| param == name) {
+                            deps.push(name);
+                        }
                     },
                     |expr| {
                         if let crate::ast::Expr::Name(name) = expr {
@@ -125,7 +128,7 @@ impl StructTable<'_> {
             for dep in &deps {
                 if local_structs
                     .get(dep)
-                    .is_some_and(|def| !def.value_parametrics.is_empty())
+                    .is_some_and(|def| def.is_parametric())
                     && position(dep) > position(&def.name)
                 {
                     return Err(format!(

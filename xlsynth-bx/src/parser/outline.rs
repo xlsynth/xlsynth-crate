@@ -229,6 +229,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         type_params: BTreeSet::new(),
         dependent_types: false,
         callable_templates: Default::default(),
+        type_structs: Default::default(),
         hidden_templates: Vec::new(),
         visible_names: Default::default(),
         visible_type_names: Default::default(),

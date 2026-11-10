@@ -420,19 +420,22 @@ fn decode_byte_string(text: &str) -> Result<Vec<u8>, &'static str> {
 /// Parse a source module without loading its imports. Imported spellings of
 /// `f<a,b>(x)` are parsed as calls. Use [`crate::parse_module_with_options`] to
 /// distinguish these calls from tuples of comparisons on imported constants,
-/// or an imported `zero!<callback>()` from the intrinsic `zero!<Type>()`.
+/// distinguish an imported `zero!<callback>()` from the intrinsic
+/// `zero!<Type>()`, or parse type arguments to imported BX structs.
 /// Syntax diagnostics carry one-based line and column.
 pub fn parse_module(source: &str) -> Result<Module, String> {
     Parser::new(source, false)?.module_with_imports(None)
 }
 
-/// Parse with the callable templates exported by the module's imports. Their
-/// source spellings distinguish parametric arguments from pairs of comparisons.
-pub(crate) fn parse_with_templates(
+/// Parse with the callable and type templates exported by the module's imports.
+pub(crate) fn parse_with_imports(
     source: &str,
     templates: &BTreeSet<String>,
+    type_structs: &BTreeSet<String>,
 ) -> Result<Module, String> {
-    Parser::new(source, false)?.module_with_imports(Some(templates))
+    let mut parser = Parser::new(source, false)?;
+    parser.type_structs.extend(type_structs.iter().cloned());
+    parser.module_with_imports(Some(templates))
 }
 
 /// Collect use leaves before parsing expressions that depend on import kinds.
@@ -479,6 +482,8 @@ struct Parser<'s> {
     /// comparisons in a comma-separated expression list. Block callers can
     /// use function and block templates declared later in the source.
     callable_templates: BTreeMap<String, TemplateBinding>,
+    /// Local and imported struct templates whose arguments are types.
+    type_structs: BTreeSet<String>,
     /// Entries hidden by currently active data or callable bindings.
     hidden_templates: Vec<(String, TemplateBinding)>,
     /// Names in source scope, including imports. An overwritten literal type
@@ -549,6 +554,7 @@ struct ParsedType {
 enum StructArguments {
     Concrete(Vec<u32>),
     Computed { args: Vec<Expr>, height: usize },
+    Types { args: Vec<Type>, height: usize },
 }
 
 /// Parsed value arguments and their token spans for struct-literal validation.
@@ -680,9 +686,17 @@ impl<'s> Parser<'s> {
         let tokens = lex(source, Dialect::Bx, None)?;
         let mut callable_templates = BTreeMap::new();
         let mut header = None;
-        for ts in tokens.windows(3) {
+        let mut type_structs = BTreeSet::new();
+        for (index, ts) in tokens.windows(3).enumerate() {
             match (ts[0].text, ts[1].text, ts[2].text) {
                 ("fn" | "block", _, "<") => header = Some(ts[1]),
+                ("struct", name, "<")
+                    if tokens.get(index + 3).is_some_and(|t| is_identifier(t.text))
+                        && (tokens.get(index + 4).is_some_and(|t| t.text != ":")
+                            || tokens.get(index + 5).is_some_and(|t| t.text == "type")) =>
+                {
+                    type_structs.insert(name.to_owned());
+                }
                 (":", annotation, _) if annotation != "type" => {
                     // Only value and callable formals take explicit arguments.
                     if let Some(name) = header.take() {
@@ -708,6 +722,7 @@ impl<'s> Parser<'s> {
             type_params: BTreeSet::new(),
             dependent_types: false,
             callable_templates,
+            type_structs,
             hidden_templates: Vec::new(),
             visible_names: HashSet::new(),
             visible_type_names: HashSet::new(),
@@ -1188,25 +1203,46 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse an aggregate declaration and any value parametrics in its header.
+    /// Parse an aggregate declaration and its type or value parametrics.
     fn struct_def(&mut self, public: bool) -> Result<StructDef, String> {
         let name = self.ident()?;
-        let value_parametrics = if self.eat("<") {
+        let mut type_params = Vec::new();
+        let mut value_parametrics = Vec::new();
+        if self.eat("<") {
             self.dependent_types = true;
             if self.peek(0) == ">" {
-                return Err(self.error("expected a struct value parameter"));
+                return Err(self.error("expected a struct parameter"));
             }
-            let mut index = 0;
+            let mut names = BTreeSet::new();
             self.with_value_grammar(|p| {
                 p.list(">", |p| {
-                    let binding = p.value_parametric(index)?;
-                    index += 1;
-                    Ok(binding)
+                    let token = p.tokens[p.pos];
+                    let is_type = p.peek(1) != ":" || p.peek(2) == "type";
+                    if !names.insert(token.text) {
+                        return Err(
+                            p.error(&format!("duplicate struct parameter '{}'", token.text))
+                        );
+                    }
+                    if is_type {
+                        if !value_parametrics.is_empty() {
+                            return Err(p.error("a struct cannot mix type and value parameters"));
+                        }
+                        let name = p.ident()?;
+                        if p.eat(":") {
+                            p.expect("type")?;
+                        }
+                        p.type_params.insert(token.text);
+                        type_params.push(name);
+                    } else {
+                        if !type_params.is_empty() {
+                            return Err(p.error("a struct cannot mix type and value parameters"));
+                        }
+                        value_parametrics.push(p.value_parametric(value_parametrics.len())?);
+                    }
+                    Ok(())
                 })
-            })?
-        } else {
-            Vec::new()
-        };
+            })?;
+        }
         self.expect("{")?;
         let fields = if self.dependent_types {
             self.with_value_grammar(|p| p.list("}", Self::param))?
@@ -1214,9 +1250,11 @@ impl<'s> Parser<'s> {
             self.list("}", Self::param)?
         };
         self.dependent_types = false;
+        self.type_params.clear();
         Ok(StructDef {
             name,
             public,
+            type_params,
             value_parametrics,
             fields,
         })
@@ -1833,9 +1871,21 @@ impl<'s> Parser<'s> {
         Ok(size)
     }
 
-    /// Read concrete u32 literals, names, and braced expressions in a struct
-    /// application.
-    fn struct_arguments(&mut self) -> Result<StructArguments, String> {
+    /// Read struct arguments using the declaration's parameter kind.
+    fn struct_arguments(&mut self, name: &str) -> Result<StructArguments, String> {
+        if self.type_structs.contains(name) {
+            self.expect("<")?;
+            let singleton_tuples = self.dslx_value_grammar();
+            let mut height = 0;
+            let args = self.nested(|p| {
+                p.list(">", |p| {
+                    let arg = p.parsed_ty(singleton_tuples)?;
+                    height = height.max(arg.depth);
+                    Ok(arg.value)
+                })
+            })?;
+            return Ok(StructArguments::Types { args, height });
+        }
         let arguments = self.parsed_angle_arguments()?;
         self.classify_struct_arguments(arguments)
     }
@@ -1979,7 +2029,7 @@ impl<'s> Parser<'s> {
                 || (self.peek(0) == "<"
                     && (!after_as || self.struct_arguments_end(self.pos).is_some()))
             {
-                match self.struct_arguments()? {
+                match self.struct_arguments(&name)? {
                     StructArguments::Concrete(args) => Type::Applied { name, args },
                     StructArguments::Computed { args, height } => {
                         if height >= MAX_SYNTAX_DEPTH {
@@ -1987,6 +2037,15 @@ impl<'s> Parser<'s> {
                         }
                         return Ok(ParsedType {
                             value: Type::ParametricStruct { name, args },
+                            depth: height + 1,
+                        });
+                    }
+                    StructArguments::Types { args, height } => {
+                        if height >= MAX_SYNTAX_DEPTH {
+                            return Err(self.error("type nesting exceeds 64 levels"));
+                        }
+                        return Ok(ParsedType {
+                            value: Type::TypeApplied { name, args },
                             depth: height + 1,
                         });
                     }
@@ -2917,23 +2976,26 @@ impl<'s> Parser<'s> {
             return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }
         let name = self.name_or_qualified_member()?;
-        let mut explicit = if self.eat_turbofish() {
-            Some(self.parsed_angle_arguments()?)
-        } else {
-            None
-        };
+        let turbofish = self.eat_turbofish();
+        let type_struct = self.type_structs.contains(&name);
+        let typed_struct_args = (turbofish && type_struct)
+            .then(|| self.struct_arguments(&name))
+            .transpose()?;
+        let mut explicit = (turbofish && !type_struct)
+            .then(|| self.parsed_angle_arguments())
+            .transpose()?;
         if self.peek(0) == "("
             && let Some(arguments) = explicit.take()
         {
             return self.parametric_call(name, arguments.args, arguments.height);
         }
-        if explicit.is_none() && self.parametric_arguments_end(self.pos, &["("]).is_some() {
+        if !turbofish && self.parametric_arguments_end(self.pos, &["("]).is_some() {
             self.expect("<")?;
             let mut height = 0;
             let parametrics = self.parametric_arguments(&mut height)?;
             return self.parametric_call(name, parametrics, height);
         }
-        if self.eat("(") {
+        if typed_struct_args.is_none() && self.eat("(") {
             if name == "map" && self.peek(0) != ")" {
                 let lambda = self.has_lambda_argument();
                 if lambda || self.dslx_value_grammar() {
@@ -2949,23 +3011,31 @@ impl<'s> Parser<'s> {
             let args = self.list(")", Self::expr)?;
             return self.aggregate(args, |args| Expr::Call { name, args });
         }
-        let struct_args = if let Some(arguments) = explicit {
+        let struct_args = if typed_struct_args.is_some() {
+            if self.peek(0) != "{" {
+                return Err(self.error("expected '{' after struct type arguments"));
+            }
+            typed_struct_args
+        } else if let Some(arguments) = explicit {
             if self.peek(0) != "{" {
                 return Err(self.error("expected '(' or '{' after explicit value arguments"));
             }
             Some(self.classify_struct_arguments(arguments)?)
-        } else if self
-            .struct_arguments_end(self.pos)
-            .is_some_and(|end| self.tokens[end].text == ">" && self.tokens[end + 1].text == "{")
-        {
-            Some(self.struct_arguments()?)
+        } else if self.struct_arguments_end(self.pos).is_some_and(|end| {
+            (self.tokens[end].text == ">" || type_struct && self.tokens[end].text == ">>")
+                && self.tokens[end + 1].text == "{"
+        }) {
+            Some(self.struct_arguments(&name)?)
         } else {
             None
         };
         if self.peek(0) == "{" && self.struct_braces(braces) {
             self.pos += 1;
             let mut height = match &struct_args {
-                Some(StructArguments::Computed { height, .. }) => *height,
+                Some(
+                    StructArguments::Computed { height, .. }
+                    | StructArguments::Types { height, .. },
+                ) => *height,
                 _ => 0,
             };
             let fields = self.list("}", |parser| {
@@ -2982,6 +3052,9 @@ impl<'s> Parser<'s> {
                 Some(StructArguments::Concrete(args)) => Expr::AppliedStruct { name, args, fields },
                 Some(StructArguments::Computed { args, .. }) => {
                     Expr::ParametricStruct { name, args, fields }
+                }
+                Some(StructArguments::Types { args, .. }) => {
+                    Expr::TypeAppliedStruct { name, args, fields }
                 }
                 None => Expr::Struct { name, fields },
             };
@@ -3181,9 +3254,14 @@ impl<'s> Parser<'s> {
         if self.tokens[angle].text != "<" {
             return None;
         }
-        let end = self.value_arguments_end(
-            angle, /* allow_comma= */ true, /* allow_combined_close= */ true,
-        )?;
+        let type_struct = self.type_struct_before(angle);
+        let end = if type_struct {
+            self.type_arguments_end(angle)?
+        } else {
+            self.value_arguments_end(
+                angle, /* allow_comma= */ true, /* allow_combined_close= */ true,
+            )?
+        };
         let close = self.tokens[end].text;
         let next = self.tokens[end + 1].text;
         let (before_name, bare_name) = match &self.tokens[..angle] {
@@ -3191,7 +3269,7 @@ impl<'s> Parser<'s> {
             [before @ .., name] => (before, Some(name.text)),
             [] => return None,
         };
-        if close == ">" && next == "{" {
+        if (close == ">" || type_struct && close == ">>") && next == "{" {
             // Imports have template placeholders even when they could name a
             // type. A known bare value cannot start a symbolic constructor.
             let known_value = bare_name.is_some_and(|name| {
@@ -3228,6 +3306,24 @@ impl<'s> Parser<'s> {
         }
     }
 
+    /// Whether this angle follows a known type-parametric struct name.
+    fn type_struct_before(&self, angle: usize) -> bool {
+        let end = angle - usize::from(self.turbofish_at(angle));
+        let visible_type = |name: &str| {
+            !self.visible_names.contains(name) || self.callable_templates.contains_key(name)
+        };
+        match &self.tokens[..end] {
+            [.., head, separator, member] if separator.text == "::" => {
+                visible_type(head.text)
+                    && self
+                        .type_structs
+                        .contains(&format!("{}::{}", head.text, member.text))
+            }
+            [.., name] => visible_type(name.text) && self.type_structs.contains(name.text),
+            [] => false,
+        }
+    }
+
     /// Skip callback and struct argument lists while looking for expression
     /// delimiters. Offsets still refer to the enclosing token stream.
     fn expression_lookahead(&self, start: usize) -> impl Iterator<Item = (usize, &Token<'s>)> {
@@ -3240,10 +3336,14 @@ impl<'s> Parser<'s> {
                 .or_else(|| {
                     self.turbofish_at(index)
                         .then(|| {
-                            self.value_arguments_end(
-                                index, /* allow_comma= */ true,
-                                /* allow_combined_close= */ true,
-                            )
+                            if self.type_struct_before(index) {
+                                self.type_arguments_end(index)
+                            } else {
+                                self.value_arguments_end(
+                                    index, /* allow_comma= */ true,
+                                    /* allow_combined_close= */ true,
+                                )
+                            }
                         })
                         .flatten()
                 })
@@ -3264,17 +3364,23 @@ impl<'s> Parser<'s> {
         {
             return None;
         }
+        let end = self.type_arguments_end(angle)?;
+        (self.tokens[end + 1].text == "(").then_some(end)
+    }
+
+    /// Find the closing angle of a type argument list, including nested types.
+    fn type_arguments_end(&self, angle: usize) -> Option<usize> {
         let mut angles = 1usize;
         let mut groups = 0usize;
-        for index in angle + 1..self.tokens.len() {
-            match self.tokens[index].text {
+        for (index, token) in self.tokens.iter().enumerate().skip(angle + 1) {
+            match token.text {
                 "(" | "[" | "{" => groups += 1,
                 ")" | "]" | "}" => groups = groups.checked_sub(1)?,
                 "<" if groups == 0 => angles += 1,
                 close @ (">" | ">>") if groups == 0 => {
                     angles = angles.checked_sub(if close == ">>" { 2 } else { 1 })?;
                     if angles == 0 {
-                        return (self.tokens[index + 1].text == "(").then_some(index);
+                        return Some(index);
                     }
                 }
                 "" | ";" if groups == 0 => break,
@@ -4747,7 +4853,7 @@ fn make<W: u32>(data: uN[W]) -> (Local<W>, Packet<W>, packets::Packet<W>) {
     (Local<W> { data }, Packet<W> { data }, packets::Packet<W> { data })
 }
 "#;
-        let module = parse_with_templates(source, &BTreeSet::new())?;
+        let module = parse_with_imports(source, &BTreeSet::new(), &BTreeSet::new())?;
         assert!(matches!(&module.functions[0].body, Expr::Tuple(fields)
             if fields.len() == 3 && fields.iter().all(|field| matches!(field, Expr::ParametricStruct { .. }))));
         Ok(())
@@ -4791,8 +4897,126 @@ fn width() -> u32 { bit_count::<uN[8]>() }
     }
 
     #[test]
+    fn struct_type_arguments_parse_nested_applications_and_constructors() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct FlowOut<T: type> { pop_valid: bool, pop_data: T }
+struct Pair<A, B> { first: A, second: B }
+fn compare(x: u8) -> bool {
+    FlowOut<Pair<u8, u8>> { pop_valid: true, pop_data: Pair { first: x, second: x } }.pop_data.first < x
+}
+block stage<T>(clk, x: T) -> (FlowOut<Pair<T[2], (bool, u8)>>, Pair::<T, u8>) {
+    (FlowOut<Pair<T[2], (bool, u8)>> { pop_valid: true, pop_data: x },
+     Pair::<T, u8> { first: x, second: u8:0 })
+}
+"#,
+        )?;
+        assert_eq!(module.structs[0].type_params, ["T"]);
+        assert_eq!(module.structs[1].type_params, ["A", "B"]);
+        assert!(matches!(
+            &module.functions[0].body,
+            Expr::Binary {
+                op: BinaryOp::Lt,
+                ..
+            }
+        ));
+        let expected = [
+            Type::TypeApplied {
+                name: "FlowOut".into(),
+                args: vec![Type::TypeApplied {
+                    name: "Pair".into(),
+                    args: vec![
+                        Type::Array {
+                            element: Box::new(Type::Named("T".into())),
+                            size: 2,
+                        },
+                        Type::Tuple(vec![
+                            Type::Bool,
+                            Type::Bits {
+                                signed: false,
+                                width: 8,
+                            },
+                        ]),
+                    ],
+                }],
+            },
+            Type::TypeApplied {
+                name: "Pair".into(),
+                args: vec![
+                    Type::Named("T".into()),
+                    Type::Bits {
+                        signed: false,
+                        width: 8,
+                    },
+                ],
+            },
+        ];
+        let block = &module.blocks[0];
+        assert_eq!(block.result, Type::Tuple(expected.to_vec()));
+        let Expr::Tuple(values) = &block.output else {
+            panic!("expected a pair of constructors");
+        };
+        for (value, expected) in values.iter().zip(expected) {
+            assert!(matches!((value, expected), (
+                Expr::TypeAppliedStruct { name, args, .. },
+                Type::TypeApplied { name: expected_name, args: expected_args }
+            ) if name == &expected_name && args == &expected_args));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn struct_type_lookahead_respects_local_value_shadowing() -> Result<(), String> {
+        let mut parser = Parser::new("struct Wrap<T> { payload: T } Wrap < x", false)?;
+        let angle = parser
+            .tokens
+            .iter()
+            .rposition(|token| token.text == "<")
+            .unwrap();
+        assert!(parser.type_struct_before(angle));
+        parser.shadow_callable("Wrap");
+        assert!(!parser.type_struct_before(angle));
+        Ok(())
+    }
+
+    #[test]
+    fn imported_struct_type_parameters_are_disambiguated() -> Result<(), String> {
+        let module = parse_with_imports(
+            r#"
+use library;
+use library::FlowOut;
+fn wrap<T>(x: T) -> (FlowOut<T>, library::FlowOut<(T, u8)>) {
+    (FlowOut<T> { pop_data: x }, library::FlowOut::<(T, u8)> { pop_data: (x, u8:0) })
+}
+"#,
+            &BTreeSet::new(),
+            &BTreeSet::from(["FlowOut".into(), "library::FlowOut".into()]),
+        )?;
+        let function = &module.functions[0];
+        assert!(matches!(&function.result, Type::Tuple(types)
+            if matches!(&types[..], [Type::TypeApplied { name: local, .. }, Type::TypeApplied { name: qualified, .. }]
+                if local == "FlowOut" && qualified == "library::FlowOut")));
+        assert!(matches!(&function.body, Expr::Tuple(values)
+            if matches!(&values[..], [Expr::TypeAppliedStruct { name: local, .. }, Expr::TypeAppliedStruct { name: qualified, .. }]
+                if local == "FlowOut" && qualified == "library::FlowOut")));
+        Ok(())
+    }
+
+    #[test]
+    fn structs_reject_mixed_type_and_value_parametrics() {
+        for params in ["T, N: u32", "N: u32, T: type"] {
+            let source = format!("struct Mixed<{params}> {{ field: T }}");
+            let error = parse_module(&source).unwrap_err();
+            assert!(
+                error.contains("cannot mix type and value parameters"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
     fn turbofish_disambiguates_calls_and_named_map_callbacks() -> Result<(), String> {
-        let module = parse_with_templates(
+        let module = parse_with_imports(
             r#"
 use wire;
 fn apply(x: u8) -> (u8, u8) { (local::<u8:3, true>(x), wire::apply::<u8:3, true>(x)) }
@@ -4801,6 +5025,7 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
     (map(ys, local::<u8:3, true>), map(ys, wire::apply::<u8:3, true>))
 }
 "#,
+            &BTreeSet::new(),
             &BTreeSet::new(),
         )?;
         let Expr::Tuple(calls) = &module.functions[0].body else {
@@ -4976,7 +5201,7 @@ fn compare_member(a:u8, b:u8, x:u8) -> (bool,bool) { (K < a, b > (x)) }
 fn shadow(apply:u8, a:u8, b:u8, x:u8) -> (bool,bool) { (apply < a, b > (x)) }
 "#;
         let templates = BTreeSet::from(["lib::compose".to_string(), "apply".to_string()]);
-        let module = parse_with_templates(source, &templates)?;
+        let module = parse_with_imports(source, &templates, &BTreeSet::new())?;
         assert_eq!(module_uses(source)?, module.uses);
         let Expr::ParametricCall { name, args, .. } = &module.functions[0].body else {
             panic!("expected qualified template call");
@@ -5027,7 +5252,7 @@ fn apply(x: u8) -> u8 { zero!<left>(x) }
         ));
         let ambiguous = "use wire::zero!; fn f() -> u8 { zero!<Tag>() }";
         let templates = BTreeSet::from(["zero!".to_string()]);
-        let hinted = parse_with_templates(ambiguous, &templates)?;
+        let hinted = parse_with_imports(ambiguous, &templates, &BTreeSet::new())?;
         assert!(matches!(
             &hinted.functions[0].body,
             Expr::ParametricCall { parametrics, .. } if parametrics == &names(["Tag"])

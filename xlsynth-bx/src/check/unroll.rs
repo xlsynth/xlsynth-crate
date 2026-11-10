@@ -496,6 +496,9 @@ impl BodyChecker<'_, '_> {
     pub(super) fn check_struct_template_names(&mut self, def: &StructDef) -> Result<(), String> {
         self.function_position = self.decls.positions.get(def.name.as_str()).copied();
         self.zero_binding = self.decls.zero_binding(&def.name);
+        if !def.type_params.is_empty() {
+            self.function_type_bindings = Some(super::Bindings::new(&def.type_params));
+        }
         self.template_name_depth = Some(Cell::new(0));
         let visited = Cell::new(0);
         let mut locals = LexicalScope::root(&self.names, &visited);
@@ -808,6 +811,12 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(arg, locals)?;
                 }
             }
+            Type::TypeApplied { name, args } => {
+                self.check_nominal_name(name, NominalUse::AppliedStruct, locals)?;
+                for arg in args {
+                    self.check_annotation_names(arg, locals, usage)?;
+                }
+            }
             Type::Tuple(items) => {
                 for item in items {
                     self.check_annotation_names(item, locals, usage)?;
@@ -1028,7 +1037,8 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Struct { name, fields }
             | Expr::AppliedStruct { name, fields, .. }
-            | Expr::ParametricStruct { name, fields, .. } => {
+            | Expr::ParametricStruct { name, fields, .. }
+            | Expr::TypeAppliedStruct { name, fields, .. } => {
                 locals.visited.set(locals.visited.get().saturating_add(1));
                 let usage = match expr {
                     Expr::Struct { .. } => NominalUse::Constructor,
@@ -1038,6 +1048,11 @@ impl BodyChecker<'_, '_> {
                 if let Expr::ParametricStruct { args, .. } = expr {
                     for arg in args {
                         self.check_expr_names(arg, locals)?;
+                    }
+                }
+                if let Expr::TypeAppliedStruct { args, .. } = expr {
+                    for arg in args {
+                        self.check_type_names(arg, locals)?;
                     }
                 }
                 for (_, value) in fields {

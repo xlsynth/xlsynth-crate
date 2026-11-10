@@ -37,6 +37,9 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     for def in &module.structs {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, at);
+        for name in &def.type_params {
+            scope.bind_as(name, Local::Formal);
+        }
         let value_parametrics = def
             .value_parametrics
             .iter()
@@ -47,6 +50,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         out.structs.push(StructDef {
             name: names.declared(&def.name),
             public: def.public,
+            type_params: def.type_params.clone(),
             value_parametrics,
             fields: scope.fields(&def.fields)?,
         });
@@ -396,6 +400,13 @@ impl<'a> Scope<'a> {
                     .map(|arg| self.type_expression(arg, depth))
                     .collect::<Result<_, _>>()?,
             },
+            Type::TypeApplied { name, args } => Type::TypeApplied {
+                name: self.reference(name, self.at)?,
+                args: args
+                    .iter()
+                    .map(|arg| self.type_at_depth(arg, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            },
             Type::Tuple(fields) => Type::Tuple(
                 fields
                     .iter()
@@ -724,7 +735,8 @@ impl<'a> Scope<'a> {
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
             Expr::Struct { name, fields }
             | Expr::AppliedStruct { name, fields, .. }
-            | Expr::ParametricStruct { name, fields, .. } => {
+            | Expr::ParametricStruct { name, fields, .. }
+            | Expr::TypeAppliedStruct { name, fields, .. } => {
                 let name = self.reference(name, self.at)?;
                 let fields = fields
                     .iter()
@@ -739,6 +751,14 @@ impl<'a> Scope<'a> {
                     Expr::ParametricStruct { args, .. } => Expr::ParametricStruct {
                         name,
                         args: self.expressions(args)?,
+                        fields,
+                    },
+                    Expr::TypeAppliedStruct { args, .. } => Expr::TypeAppliedStruct {
+                        name,
+                        args: args
+                            .iter()
+                            .map(|ty| self.ty(ty))
+                            .collect::<Result<_, _>>()?,
                         fields,
                     },
                     _ => Expr::Struct { name, fields },

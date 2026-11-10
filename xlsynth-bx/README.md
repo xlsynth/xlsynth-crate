@@ -208,6 +208,40 @@ or constructor. Calls can use the same syntax, as in `invert::<8, 9>(packet)`.
 Struct arguments that depend on an inferred block type parameter can appear
 in the block body.
 
+### Type parameters on structs
+
+Declare a type parameter with `<T>` or `<T: type>`. A type application such as
+`FlowOut<Packet>` supplies a type for each parameter. Type parameters and value
+parametrics belong to separate struct declarations.
+
+```text
+struct FlowOut<T> { pop_valid: bool, pop_data: T }
+struct Packet { tag: u8, words: u32[2] }
+
+block flow_result<T>(clk, rst, valid: bool, data: T) -> FlowOut<T> {
+    reg valid_q: bool = false;
+    reg data_q: T = zero!<T>();
+    valid_q := valid;
+    if valid { data_q := data; }
+    FlowOut { pop_valid: valid_q, pop_data: data_q }
+}
+
+pub block packet_stage(clk, rst, valid: bool, packet: Packet) -> FlowOut<Packet> {
+    let stage = flow_result(valid, packet);
+    stage
+}
+```
+
+The call binds `T` to `Packet`. The result type supplies the type argument for
+the `FlowOut` literal. A literal can also supply it explicitly, as in
+`FlowOut::<T> { pop_valid: valid_q, pop_data: data_q }`. With no concrete
+expected type, a constructor can infer its arguments from typed fields. Give
+a numeric literal a type annotation when it supplies a type argument.
+
+Each specialization exposes `pop_valid` and `pop_data` as named output ports.
+Here `pop_data` is one port of type `Packet`. A caller can read its fields with
+expressions such as `stage.pop_data.tag`.
+
 ## Defining functions
 
 Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Function signatures can include bits, structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.

@@ -10,6 +10,7 @@ use crate::infer_literal::has_concrete_element_type;
 use crate::typed::{TypedExpr, TypedExprKind as K};
 
 use super::generic_blocks::Bindings;
+use super::struct_parametrics::StructWitness;
 use super::{
     BlockTemplate, BodyChecker, BoundCallback, BranchSelector, MAX_ELABORATION_DEPTH,
     MAX_TYPE_SIZE, MatchSelector, has_aggregate_literal,
@@ -233,8 +234,8 @@ impl<'m> BodyChecker<'_, 'm> {
             .into_iter()
             .zip(formals)
             .map(|(input, p)| {
-                let ty = bindings
-                    .concrete_type(&p.ty)
+                let ty = self
+                    .bound_block_type(&p.ty, &bindings)
                     .map_err(|e| input_error(p, e))?;
                 self.finish_input(input, &ty).map_err(|e| input_error(p, e))
             })
@@ -262,7 +263,7 @@ impl<'m> BodyChecker<'_, 'm> {
         for (name, constructors) in groups {
             let exprs: Vec<_> = constructors.iter().map(|(expr, _)| *expr).collect();
             if let Some(checked) = self
-                .infer_constructors(&exprs)
+                .infer_constructors(&exprs, /* infer_literal_widths= */ false)
                 .map_err(|e| format!("type parameter '{name}', call to {callee}: {e}"))?
             {
                 bindings.match_input(&Type::Named(name.into()), &checked[0].ty, self.structs)?;
@@ -277,9 +278,40 @@ impl<'m> BodyChecker<'_, 'm> {
         Ok(())
     }
 
-    /// Unify corresponding fields and array elements against concrete
-    /// siblings. A group consisting entirely of unsized leaves stays unbound.
-    fn infer_constructors(&mut self, items: &[&Expr]) -> Result<Option<Vec<TypedExpr>>, String> {
+    /// Obtain a dimension witness from the whole constructor type when its
+    /// fields can determine that type without the callee's context.
+    pub(super) fn constructor_dimension_witness(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<Option<TypedExpr>, String> {
+        self.infer_constructors(&[expr], /* infer_literal_widths= */ true)
+            .map(|values| values.and_then(|mut values| values.pop()))
+    }
+
+    /// Unify corresponding fields against concrete siblings. A type
+    /// parameter needs a typed witness. A dimension can use minimum widths.
+    fn infer_constructors(
+        &mut self,
+        items: &[&Expr],
+        infer_literal_widths: bool,
+    ) -> Result<Option<Vec<TypedExpr>>, String> {
+        if items.iter().any(|expr| matches!(expr, Expr::Scope { .. })) {
+            return self.with_scoped_results(items, |checker, prepared| {
+                checker.infer_constructors(prepared, infer_literal_widths)
+            });
+        }
+        if items
+            .iter()
+            .any(|expr| matches!(expr, Expr::If { .. } | Expr::Match { .. }))
+            && items
+                .iter()
+                .any(|expr| self.contains_type_struct_constructor(expr))
+        {
+            let (selectors, branches) = self.result_branches(items)?;
+            return Ok(self
+                .infer_constructors(&branches, infer_literal_widths)?
+                .map(|values| Self::rebuild_branch_results(selectors, values)));
+        }
         if let Some(Expr::Tuple(first)) = items.first()
             && let Some(tuples) = items
                 .iter()
@@ -293,7 +325,7 @@ impl<'m> BodyChecker<'_, 'm> {
             let mut size = 1usize;
             for index in 0..first.len() {
                 let fields: Vec<_> = tuples.iter().map(|tuple| &tuple[index]).collect();
-                let Some(checked) = self.infer_constructors(&fields)? else {
+                let Some(checked) = self.infer_constructors(&fields, infer_literal_widths)? else {
                     return Ok(None);
                 };
                 // Reject an over-budget tuple as it grows, before copying the
@@ -331,7 +363,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 .collect::<Option<Vec<_>>>()
         {
             let elements: Vec<_> = arrays.into_iter().flatten().collect();
-            let Some(checked) = self.infer_constructors(&elements)? else {
+            let Some(checked) = self.infer_constructors(&elements, infer_literal_widths)? else {
                 return Ok(None);
             };
             let ty = Type::Array {
@@ -349,11 +381,22 @@ impl<'m> BodyChecker<'_, 'm> {
                 .collect::<Result<_, _>>()?;
             return Ok(Some(arrays));
         }
+        let mut deferred = false;
         for (index, item) in items.iter().enumerate() {
             if has_concrete_element_type(item, self.common_widths())? {
-                let anchor = self.expr(item, None)?;
+                let anchor = match self.type_struct_witness(item)? {
+                    StructWitness::Other => self.expr(item, None)?,
+                    StructWitness::Deferred => {
+                        deferred = true;
+                        continue;
+                    }
+                    StructWitness::Checked(value) => value,
+                };
                 return self.check_siblings(items, index, anchor).map(Some);
             }
+        }
+        if infer_literal_widths && !deferred && !items.is_empty() {
+            return self.unify_values(items).map(Some);
         }
         Ok(None)
     }
@@ -375,8 +418,9 @@ impl<'m> BodyChecker<'_, 'm> {
         let branches = matches!(arg, Expr::If { .. } | Expr::Match { .. });
         let partial_constructor = branches
             && !matches!(pattern, InputPattern::Function(Some(_)))
-            && has_aggregate_literal(arg)
-            && !has_concrete_element_type(arg, self.common_widths())?;
+            && (self.contains_type_struct_constructor(arg)
+                || (has_aggregate_literal(arg)
+                    && !has_concrete_element_type(arg, self.common_widths())?));
         if branches
             && !partial_constructor
             && matches!(pattern, InputPattern::Function(None))
@@ -487,21 +531,39 @@ impl<'m> BodyChecker<'_, 'm> {
             {
                 return Ok(Input::Contextual(arg));
             }
+            (Type::TypeApplied { .. }, _) if !bindings.has_unbound_variable(formal) => {
+                return Ok(Input::Contextual(arg));
+            }
             _ => {
+                if matches!(arg, Expr::Tuple(_) | Expr::Array(_))
+                    && !matches!(pattern, InputPattern::Function(Some(_)))
+                    && self.contains_type_struct_constructor(arg)
+                {
+                    // A whole-aggregate type variable may receive its type
+                    // from another argument or from the constructor group.
+                    return Ok(Input::Contextual(arg));
+                }
                 if !has_concrete_element_type(arg, self.common_widths())? {
                     return Ok(Input::Contextual(arg));
                 }
-                let value = match pattern {
-                    InputPattern::Block => {
-                        let value = self.expr(arg, None)?;
-                        bindings.match_input(formal, &value.ty, self.structs)?;
-                        value
+                let checked = match &mut pattern {
+                    InputPattern::Block => None,
+                    InputPattern::Function(value) => value.take(),
+                };
+                let value = if let Some(checked) = checked {
+                    checked
+                } else {
+                    match self.type_struct_witness(arg)? {
+                        StructWitness::Other => self.expr(arg, None)?,
+                        StructWitness::Deferred => return Ok(Input::Contextual(arg)),
+                        StructWitness::Checked(value) => value,
                     }
-                    InputPattern::Function(checked) => {
-                        let value = match checked {
-                            Some(value) => value,
-                            None => self.expr(arg, None)?,
-                        };
+                };
+                match pattern {
+                    InputPattern::Block => {
+                        bindings.match_input(formal, &value.ty, self.structs)?;
+                    }
+                    InputPattern::Function(_) => {
                         let contextual_projection =
                             matches!(arg, Expr::Name(_) | Expr::Field { .. } | Expr::Index { .. })
                                 && self.contains_inferred_aggregate(arg);
@@ -511,9 +573,8 @@ impl<'m> BodyChecker<'_, 'm> {
                             self.structs,
                             contextual_projection,
                         )?;
-                        value
                     }
-                };
+                }
                 return Ok(Input::Checked {
                     expr: Some(arg),
                     value,

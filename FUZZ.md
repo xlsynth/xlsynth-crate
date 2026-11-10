@@ -328,6 +328,12 @@ Generates native BX and DSLX packet templates with signed or unsigned payloads a
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_type_parameters.rs
+
+Compares type-parametric BX block results with concrete DSLX struct definitions and pure functions. A generic BX block returns a named record with an inferred bits, tuple, array, or nominal payload type. Calls reuse and vary payload types, and constructors use implicit context or explicit type arguments. The target checks that a result from a distinct specialization is rejected when assigned to the wrong nominal type. On accepted programs it compares the named field values from flattened BX Block IR with compiled and constexpr DSLX results.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_type_parameters --sanitizer none`.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset

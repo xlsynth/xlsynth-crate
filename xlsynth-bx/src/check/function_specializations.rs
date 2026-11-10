@@ -342,7 +342,7 @@ impl<'m> FunctionSpecializations<'m> {
             let function = match definition {
                 Definition::Struct(index) => {
                     let def = &module.structs[index];
-                    if !def.value_parametrics.is_empty() {
+                    if def.is_parametric() {
                         let mut checker =
                             BodyChecker::new(decls, resolver, structs, BodyKind::Function);
                         checker

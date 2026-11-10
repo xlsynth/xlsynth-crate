@@ -108,6 +108,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_struct_type_parameters"
+path = "fuzz_targets/fuzz_bx_dslx_struct_type_parameters.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_module_graph"
 path = "fuzz_targets/fuzz_bx_dslx_module_graph.rs"
 test = false

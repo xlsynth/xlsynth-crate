@@ -375,18 +375,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let key_nodes = key.inputs.iter().fold(1usize, |total, input| {
             total.saturating_add(input.source_nodes)
         });
-        let registry = self
-            .specializations
+        self.specializations
             .as_mut()
-            .expect("block specialization registry");
-        registry.charge_callback_storage(key_nodes)?;
+            .expect("block specialization registry")
+            .charge_callback_storage(key_nodes)?;
         let mut params = Vec::with_capacity(formal.signature.params.len());
         let mut input_nodes = 0usize;
         for param in &formal.signature.params {
-            let ty = bindings.concrete_type(param)?;
+            let ty = self.bound_block_type(param, bindings)?;
             let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
             input_nodes = input_nodes.saturating_add(shape.ir_nodes);
-            registry.charge_callback_storage(source_type_nodes(&ty))?;
+            self.specializations
+                .as_mut()
+                .expect("block specialization registry")
+                .charge_callback_storage(source_type_nodes(&ty))?;
             params.push(ty);
         }
         let (target, result) =

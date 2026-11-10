@@ -597,7 +597,9 @@ fn normalize_import_type(
                 "unsupported nominal type '{name}' in imported function signature"
             ));
         }
-        Type::Applied { name, .. } | Type::ParametricStruct { name, .. } => {
+        Type::Applied { name, .. }
+        | Type::ParametricStruct { name, .. }
+        | Type::TypeApplied { name, .. } => {
             return Err(format!("unresolved struct application '{name}'"));
         }
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
@@ -662,7 +664,9 @@ impl ProbeImports {
                 Ok(format!("{}[{size}]", self.render_type(element, structs)?))
             }
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
-            Type::Applied { name, .. } | Type::ParametricStruct { name, .. } => {
+            Type::Applied { name, .. }
+            | Type::ParametricStruct { name, .. }
+            | Type::TypeApplied { name, .. } => {
                 Err(format!("unresolved struct application '{name}'"))
             }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => Err(format!(
