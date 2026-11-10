@@ -132,6 +132,15 @@ pub fn check_audit(
             converter,
             stdlib,
         ),
+        AuditCase::BoundCall {
+            case,
+            runtime_module,
+        } => match runtime_module {
+            Some(module) => {
+                check_literal_bindings(case, &[("Original", &module)], converter, stdlib)
+            }
+            None => check_literal_bindings(case, &[], converter, stdlib),
+        },
     }
 }
 
@@ -259,6 +268,7 @@ fn check_literal_runtime(
         &[
             "--evaluator=dslx-interpreter",
             "--compare=none",
+            "--lower_to_ir=false",
             "--test_filter=literal_runtime",
         ],
         None,

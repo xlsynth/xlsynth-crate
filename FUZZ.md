@@ -371,7 +371,7 @@ the target.
 
 ### xlsynth-dslx-fuzzer/fuzz/fuzz_targets/fuzz_bx_converter_contracts.rs
 
-Replays audit-v7 bytes by default, or audit-v8 bytes when selected, as
+Replays audit-v7 bytes by default, or audit-v8 or audit-v9 bytes when selected, as
 self-contained combinational BX functions. For
 accepted source, the target lowers the BX function, checks its exact public
 signature, and proves the value and assertion behavior against the generator's
@@ -411,6 +411,10 @@ The `audit-v8` grammar exercises expression-specialized functions passed to
 arguments with a runtime name in an inactive constexpr branch. It retains
 native compiler failures and proves successful conversions against independent
 IR for every input.
+The `audit-v9` grammar checks let-bound literals used as data or value
+arguments to specialized functions. It compares the exact emitted width and
+value against independent IR. For signed widening it also executes the
+original call in DSLX bytecode, which can disagree even when the IR is correct.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

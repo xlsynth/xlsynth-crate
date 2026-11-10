@@ -129,7 +129,7 @@ fn tuple_literal_checks_the_uncasted_cli_and_separate_bytecode_source()
 test ! -e types.pb
 grep -Fxq 'pub fn main(x: u8) -> u8 { let (a, _) = (1, x); a as u8 }' sample.x
 grep -Fxq 'fn literal_runtime() {' sample.x
-for flag in --evaluator=dslx-interpreter --compare=none --test_filter=literal_runtime; do
+for flag in --evaluator=dslx-interpreter --compare=none --lower_to_ir=false --test_filter=literal_runtime; do
   printf '%s\n' "$@" | grep -Fxq -- "$flag"
 done
 echo ran >> "$(dirname "$0")/runtime-runs"
@@ -299,6 +299,47 @@ esac"#,
         assert!(matches, "{outcome}: {result:?}");
         assert_eq!(std::fs::read_to_string(tools.join("runs"))?, "raw\ncast\n");
     }
+    Ok(())
+}
+
+#[test]
+fn signed_bound_call_reports_a_bytecode_disagreement_when_the_ir_is_correct()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    write_tool(
+        &converter.with_file_name("typecheck_main"),
+        "touch types.pb",
+    )?;
+    write_tool(
+        &converter,
+        r#"set -eu
+test -f types.pb
+cat <<'IR'
+package sample
+top fn __sample__main() -> bits[32] {
+  ret x: bits[32] = literal(value=0xfffffff5, id=1)
+}
+IR"#,
+    )?;
+    write_tool(
+        &converter.with_file_name("dslx_interpreter_main"),
+        r#"set -eu
+grep -Fq 'let x = 0x15; widen<5>(x)' sample.x
+echo '[ RUN UNITTEST  ] literal_runtime' >&2
+echo '~~~^ FailureError: 21 vs 4294967285' >&2
+exit 1"#,
+    )?;
+    let outcome = check_audit(
+        audit_contracts::generate_v9(&[7])?,
+        &converter,
+        xlsynth::default_dslx_stdlib_path(),
+    );
+    assert!(
+        matches!(outcome, Err(CheckFailure::Disproved(ref message))
+        if message.starts_with("Original DSLX runtime comparison failed")),
+        "{outcome:?}"
+    );
     Ok(())
 }
 

@@ -159,6 +159,25 @@ retained with its source while the campaign continues. Successful conversions
 are checked against the same independent oracles. Prefix an audit-v7 unit
 with one zero byte to preserve its source and oracle in an audit-v8 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v9` to exercise the widths and
+signedness of let-bound integer literals at calls. Each case runs the standalone
+typechecker on its original source before conversion.
+
+- `05` (hex) passes `let x = 3` to `identity<8>(x)`. The argument and result
+  of the instantiated identity function must both be eight bits wide.
+- `06` passes `let n = 4` as the value parameter of a function that returns its
+  `u32` parameter. The emitted public return type must be `bits[32]`, even
+  though three bits suffice to hold the value four.
+- `07` passes `let x = 0x15` to a helper specialized with an `s5` parameter
+  and a `u32` result. The expected value is `0xfffffff5`. The checker proves
+  the emitted IR and executes the original call in a separate DSLX bytecode
+  test. `07 04` exercises the same conversion with a concrete `s5` parameter.
+
+Mutations vary widths, literal values and spellings, and how the operand gets
+its type. Inline literals and explicitly typed bindings provide passing
+controls. Prefix an audit-v8 unit with one zero byte to preserve its source
+and oracle in an audit-v9 corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
@@ -176,8 +195,8 @@ The primary CLI finding takes precedence over a secondary feedback error.
 ## Native BX function conversion
 
 The `fuzz_bx_converter_contracts` target defaults to audit-v7. Set
-`DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v8` to replay the focused DSLX worker's v8
-units. It runs the BX frontend on single-module source,
+`DSLX_FUZZ_CONTRACT_GRAMMAR` to `audit-v8` or `audit-v9` to replay the
+corresponding focused worker's units. It runs the BX frontend on single-module source,
 lowers accepted functions with the BX Rust compiler, checks the signature of
 `main`, and compares its IR with the generator's independent IR for all inputs
 using Bitwuzla. On a discrepancy it compiles the original source with the

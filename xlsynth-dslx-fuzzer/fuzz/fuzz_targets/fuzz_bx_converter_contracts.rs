@@ -29,6 +29,7 @@ fuzz_target!(init: {
         None => audit_contracts::generate_v7,
         Some(name) if name == "audit-v7" => audit_contracts::generate_v7,
         Some(name) if name == "audit-v8" => audit_contracts::generate_v8,
+        Some(name) if name == "audit-v9" => audit_contracts::generate_v9,
         Some(name) => panic!("unknown BX contract grammar {name:?}"),
     };
     let config = Config { converter, stdlib, campaign: Campaign::from_env(true), generate };

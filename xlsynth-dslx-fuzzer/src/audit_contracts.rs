@@ -5,11 +5,12 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, builtin_contracts, dead_branch_contracts,
-    enum_width_contracts, inferred_flow_contracts, literal_order_contracts,
+    SourceModule, aggregate_method_contracts, bound_parametric_contracts, builtin_contracts,
+    dead_branch_contracts, enum_width_contracts, inferred_flow_contracts, literal_order_contracts,
     map_parametric_contracts, mixed_literal_contracts, nested_scope_contracts, nominal_contracts,
     observable_value_contracts, observer_contracts, pattern_acceptance, scope_contracts,
-    tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
+    signed_call_contracts, tuple_literal_contracts, unrolled_loop_contracts,
+    zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -49,6 +50,12 @@ pub enum AuditCase {
         raw_runtime_module: SourceModule,
         runtime_module: SourceModule,
     },
+    /// Typecheck an integer literal used in a call, prove the emitted IR, and
+    /// optionally evaluate the original binding with a DSLX bytecode test.
+    BoundCall {
+        case: ContractCase,
+        runtime_module: Option<SourceModule>,
+    },
 }
 
 impl AuditCase {
@@ -60,7 +67,9 @@ impl AuditCase {
             }
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
-            Self::TupleLiteral { case, .. } | Self::MixedLiteral { case, .. } => case.family,
+            Self::TupleLiteral { case, .. }
+            | Self::MixedLiteral { case, .. }
+            | Self::BoundCall { case, .. } => case.family,
         }
     }
 }
@@ -170,6 +179,18 @@ pub fn generate_v8(data: &[u8]) -> Result<AuditCase, String> {
     Ok(AuditCase::Semantic(case))
 }
 
+/// Decodes calls using let-bound integer literals. Prefix an audit-v8 unit
+/// with zero to retain its source and oracle.
+pub fn generate_v9(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 8 {
+        5 => Ok(bound_parametric_contracts::data_argument(options)),
+        6 => Ok(bound_parametric_contracts::value_argument(options)),
+        7 => Ok(signed_call_contracts::generate(options)),
+        _ => generate_v8(options),
+    }
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -217,22 +238,27 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 
 #[cfg(test)]
 mod tests {
-    use super::{AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8};
+    use super::{
+        AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8, generate_v9,
+    };
 
     #[test]
-    fn zero_prefix_preserves_v7_semantic_contracts() -> Result<(), String> {
+    fn zero_prefix_preserves_v7_and_v8_semantic_contracts() -> Result<(), String> {
         for selector in [5, 6, 7] {
             let bytes = [selector, 1, 2, 2, 5];
             let prefixed = [&[0][..], &bytes].concat();
-            let (AuditCase::Semantic(old), AuditCase::Semantic(new)) =
-                (generate_v7(&bytes)?, generate_v8(&prefixed)?)
-            else {
-                return Err("expected an embedded v7 semantic contract".into());
-            };
-            assert_eq!(old.family, new.family);
-            assert_eq!(old.modules, new.modules);
-            assert_eq!(old.expected_ir, new.expected_ir);
-            assert_eq!(old.max_and_nodes, new.max_and_nodes);
+            for (old, new) in [
+                (generate_v7(&bytes)?, generate_v8(&prefixed)?),
+                (generate_v8(&bytes)?, generate_v9(&prefixed)?),
+            ] {
+                let (AuditCase::Semantic(old), AuditCase::Semantic(new)) = (old, new) else {
+                    return Err("expected an embedded semantic contract".into());
+                };
+                assert_eq!(old.family, new.family);
+                assert_eq!(old.modules, new.modules);
+                assert_eq!(old.expected_ir, new.expected_ir);
+                assert_eq!(old.max_and_nodes, new.max_and_nodes);
+            }
         }
         Ok(())
     }
