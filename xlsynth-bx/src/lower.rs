@@ -1424,10 +1424,14 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 }
             }
             TypedExprKind::Binary { op, left, right } => {
-                let signed = matches!(left.ty, Type::Bits { signed: true, .. });
                 let lhs = self.expr(left)?;
                 let rhs = self.expr(right)?;
-                self.binary(*op, signed, lhs, rhs)
+                if *op == BinaryOp::Concat && matches!(expr.ty, Type::Array { .. }) {
+                    self.builder.array_concat(&[lhs, rhs])
+                } else {
+                    let signed = matches!(left.ty, Type::Bits { signed: true, .. });
+                    self.binary(*op, signed, lhs, rhs)
+                }
             }
             TypedExprKind::Cast { value } => self.cast(value, &expr.ty),
             TypedExprKind::If {

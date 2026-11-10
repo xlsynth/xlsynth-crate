@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod array_concat;
 mod bits_array_casts;
 mod block_callbacks;
 mod block_let_patterns;
@@ -22,6 +23,7 @@ mod scalar_match;
 mod struct_parametrics;
 mod unroll_types;
 
+pub use array_concat::check_array_concat;
 pub use bits_array_casts::check_bits_array_casts;
 pub use block_callbacks::check_block_callbacks;
 pub use block_let_patterns::check_block_let_patterns;
