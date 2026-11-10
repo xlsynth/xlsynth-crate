@@ -159,14 +159,19 @@ pub(super) fn source_gate_behavior(
     if tables.next().is_some() || table.members.len() != 1 {
         return None;
     }
-    let [inputs, state] = table.qualifiers.as_slice() else {
+    let [inputs, states] = table.qualifiers.as_slice() else {
         return None;
     };
     let inputs = text(inputs).ok()?;
-    let state = text(state).ok()?;
+    // The qualifier lists state names. Keep its source spelling for the
+    // unsupported-semantics location, and use its single name for pin lookup.
+    let states = text(states).ok()?;
+    let mut state_names = states.split_ascii_whitespace();
+    let state = state_names.next()?;
     let columns: Vec<_> = inputs.split_ascii_whitespace().collect();
     // Pin-role validation has already established that the names are distinct.
-    if columns.len() != input_pins(gate).count()
+    if state_names.next().is_some()
+        || columns.len() != input_pins(gate).count()
         || !input_pins(gate).all(|pin| columns.contains(&pin))
         || !verifies_latch_table(unique_attr(table, "table")?, &columns, &gate.clock_pin)
     {
@@ -227,7 +232,7 @@ pub(super) fn source_gate_behavior(
     let covered = unsupported.len() == 3
         && recorded(
             UnsupportedFeature::StateTable,
-            format!("statetable({inputs},{state})"),
+            format!("statetable({inputs},{states})"),
         )
         && recorded(
             UnsupportedFeature::InternalState,

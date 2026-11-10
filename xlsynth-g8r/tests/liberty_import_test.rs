@@ -174,6 +174,25 @@ fn clock_gate_certifies_low_latch_table_and_survives_proto_roundtrip() {
 }
 
 #[test]
+fn clock_gate_certifies_padded_statetable_state_name() {
+    for qualifier in ["IQ ", " \tIQ\t "] {
+        let source = CLOCK_GATE_LIB.replace(
+            r#"statetable ("CLK ENA SE", "IQ")"#,
+            &format!(r#"statetable ("CLK ENA SE", "{qualifier}")"#),
+        );
+        assert_ne!(source, CLOCK_GATE_LIB);
+        let library = parse(&source, LibertyPayloadOptions::all()).unwrap();
+        let cell = clock_gate_cell(&library).unwrap();
+        let gate = cell.positive_edge_clock_gate(&library).unwrap().unwrap();
+        assert_eq!(
+            gate.behavior,
+            ClockGateBehavior::LowLatchEnableOrTest as i32
+        );
+        assert!(cell.unsupported_semantics.is_empty());
+    }
+}
+
+#[test]
 fn clock_gate_certifies_a_complete_two_input_table_without_test_control() {
     let source = CLOCK_GATE_LIB
         .replace(r#""CLK ENA SE""#, r#""ENA CLK""#)
@@ -210,6 +229,8 @@ fn clock_gate_rejects_incomplete_and_conflicting_source_behavior() {
             "clock_gate_enable_pin: true; clock_gate_clock_pin: true;",
         ),
         ("internal_node: \"IQ\";", "internal_node: \"OTHER\";"),
+        (r#""CLK ENA SE", "IQ""#, r#""CLK ENA SE", " ""#),
+        (r#""CLK ENA SE", "IQ""#, r#""CLK ENA SE", "IQ OTHER""#),
         (
             "state_function: \"CLK & IQ\";",
             "state_function: \"CLK & !IQ\";",
