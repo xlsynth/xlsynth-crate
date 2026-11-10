@@ -24,7 +24,7 @@ pub(super) fn check_outputs(
     block: &CheckedBlock,
     ports: &[Param],
     port_names: &BTreeSet<String>,
-    structs: &StructTable,
+    structs: &StructTable<'_>,
 ) -> Result<(), String> {
     let Some(expected) = &block.output_cycles else {
         return Ok(());
@@ -119,11 +119,11 @@ struct Scope<'a> {
 /// outputs.
 struct Checker<'a> {
     scopes: Vec<Scope<'a>>,
-    structs: &'a StructTable,
+    structs: &'a StructTable<'a>,
 }
 
 impl<'a> Checker<'a> {
-    fn new(block: &'a CheckedBlock, structs: &'a StructTable) -> Self {
+    fn new(block: &'a CheckedBlock, structs: &'a StructTable<'a>) -> Self {
         let mut root = Scope::default();
         for param in &block.params {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
