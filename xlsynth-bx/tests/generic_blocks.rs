@@ -281,6 +281,73 @@ fn unused_generic_signatures_validate_nominal_types_and_fixed_dimensions() {
 }
 
 #[test]
+fn block_dimensions_use_constants_from_the_definition_scope() -> Result<(), String> {
+    let source = r#"
+const LANES = u32:2;
+const WIDTH = u32:7;
+fn last(xs: u8[2]) -> u7 { xs[u32:1] as u7 }
+block select<T, F: fn(T[LANES]) -> uN[WIDTH]>(clk, xs: T[LANES]) -> uN[WIDTH] {
+    let saved: T[LANES] = xs;
+    F(saved)
+}
+extern block device(clk, xs: u8[LANES]) -> uN[WIDTH];
+block wrapper(clk, LANES: u32, WIDTH: u32, xs: u8[2]) -> u7 {
+    let selected = select<last>(xs);
+    selected
+}
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    let [selected, wrapper] = checked.blocks() else {
+        panic!("expected the select specialization and its caller");
+    };
+    assert_eq!(selected.params[0].ty, wrapper.params[2].ty);
+    assert_eq!(selected.result, wrapper.result);
+    let [device] = checked.extern_blocks() else {
+        panic!("expected the device declaration");
+    };
+    assert_eq!(device.params, selected.params);
+    assert_eq!(device.result, selected.result);
+    Ok(())
+}
+
+#[test]
+fn unused_block_signatures_reject_unavailable_dimension_names() -> Result<(), String> {
+    for source in [
+        "block b<T>(clk, xs: T[N]) -> T { xs[0] } const N = u32:2;",
+        "const N = u32:2; block b<N>(clk, xs: N[N]) -> N { xs[0] }",
+        "const N = u32:2; block b<T, N: fn(T[N]) -> T>(clk, x: T) -> T { x }",
+        "const N = u32:2; extern block device(clk, N: u32, xs: u8[N]) -> u8;",
+    ] {
+        let error = check_module(&parse_module(source)?).unwrap_err();
+        assert!(error.contains("'N'"), "{source}\n{error}");
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_block_loops_resolve_dimension_names_under_loop_binders() -> Result<(), String> {
+    let source = r#"
+const N = u32:8;
+block fold(clk, x: u8) -> u8 {
+    unroll_for! (i, acc) in u32:0..u32:0 {
+        let y: uN[N] = acc;
+        y
+    }(x)
+}
+"#;
+    check_module(&parse_module(source)?)?;
+    let shadowed = source.replace("(i, acc)", "(N, acc)");
+    check_module(&parse_module(&shadowed)?)?;
+    let unknown = source.replace("uN[N]", "uN[missing]");
+    assert!(
+        check_module(&parse_module(&unknown)?)
+            .unwrap_err()
+            .contains("'missing'")
+    );
+    Ok(())
+}
+
+#[test]
 fn linking_preserves_a_block_with_the_generated_specialization_name() -> Result<(), Box<dyn Error>>
 {
     let source = r#"

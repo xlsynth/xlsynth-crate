@@ -1,9 +1,112 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ast::ConstDef;
+use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
+
+use crate::ast::{ConstDef, Expr, Type};
 use crate::infer_literal::has_implicit_constant_type;
 
-use super::{BodyChecker, CheckedConstant};
+use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
+
+/// Module constants visible where a declaration writes its type annotations.
+#[derive(Clone, Copy)]
+pub(super) struct ModuleDimensions<'a, 'm> {
+    decls: &'a Declarations<'m>,
+    position: Option<usize>,
+}
+
+impl<'m> Declarations<'m> {
+    pub(super) fn module_dimensions(&self, owner: &str) -> ModuleDimensions<'_, 'm> {
+        self.dimensions_at(self.positions.get(owner).copied())
+    }
+
+    pub(super) fn dimensions_at(&self, position: Option<usize>) -> ModuleDimensions<'_, 'm> {
+        ModuleDimensions {
+            decls: self,
+            position,
+        }
+    }
+}
+
+impl ModuleDimensions<'_, '_> {
+    /// Resolve the constant in its declaring scope and preserve its source
+    /// type.
+    fn constant(
+        &self,
+        expr: &Expr,
+        expected: &Type,
+        is_local: &dyn Fn(&str) -> bool,
+        bindings: Option<&Bindings>,
+    ) -> Result<&IrValue, String> {
+        let Expr::Name(name) = expr else {
+            return Err("a concrete type dimension requires a literal or a module constant".into());
+        };
+        let head = name
+            .split_once("::")
+            .map_or(name.as_str(), |(head, _)| head);
+        if is_local(head) {
+            return Err(format!(
+                "'{head}' names a local value in this type dimension"
+            ));
+        }
+        if let Some(bindings) = bindings {
+            bindings.reject_value(name)?;
+        }
+        if !self.decls.visible(name, self.position) {
+            return Err(format!(
+                "module constant '{name}' is declared after this type dimension"
+            ));
+        }
+        let constant = self
+            .decls
+            .constants
+            .get(name.as_str())
+            .ok_or_else(|| format!("unknown module constant '{name}' in type dimension"))?;
+        if !compatible(&constant.ty, expected) {
+            return Err(format!(
+                "type dimension '{name}' expects {expected}, got {}",
+                constant.ty
+            ));
+        }
+        Ok(&constant.value)
+    }
+
+    pub(super) fn size(
+        &self,
+        expr: &Expr,
+        is_local: &dyn Fn(&str) -> bool,
+        bindings: Option<&Bindings>,
+    ) -> Result<usize, String> {
+        let expected = Type::Bits {
+            signed: false,
+            width: 32,
+        };
+        if let Expr::Literal { ty, text } = expr
+            && ty.as_ref().is_none_or(|ty| compatible(ty, &expected))
+        {
+            let (digits, radix) = crate::parser::radix_digits(text);
+            return u32::from_str_radix(digits, radix)
+                .map(|width| width as usize)
+                .map_err(|_| format!("invalid u32 type dimension '{text}'"));
+        }
+        let value = self.constant(expr, &expected, is_local, bindings)?;
+        ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
+            .ok_or_else(|| "type dimension does not fit usize".into())
+    }
+
+    pub(super) fn signed(
+        &self,
+        expr: &Expr,
+        is_local: &dyn Fn(&str) -> bool,
+        bindings: Option<&Bindings>,
+    ) -> Result<bool, String> {
+        if let Expr::Bool(value) = expr {
+            return Ok(*value);
+        }
+        self.constant(expr, &Type::Bool, is_local, bindings)?
+            .to_bool()
+            .map_err(|e| e.to_string())
+    }
+}
 
 impl<'a> BodyChecker<'a, '_> {
     /// Resolve a pure initializer in declaration order and retain its concrete

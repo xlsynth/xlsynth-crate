@@ -670,7 +670,53 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read};
-    use crate::ast::{BinaryOp, Expr};
+    use crate::ast::{BinaryOp, Expr, Type};
+
+    #[test]
+    fn linked_type_dimensions_follow_their_declaring_modules() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(dir.path().join("sizes.bx"), "pub const N = u32:3;")?;
+        fs::write(
+            dir.path().join("lib.bx"),
+            r#"
+use sizes::N;
+const W = u32:8;
+pub struct Bus { lanes: uN[W][N] }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let (_, imports) = read(
+            "use lib; use sizes; block b(clk, x: lib::Bus) -> u8[sizes::N] { x.lanes }",
+            &options,
+        )?;
+        let linked = imports.libraries.expect("two BX library imports").module;
+        let Type::ParametricArray { element, size } = &linked.structs[0].fields[0].ty else {
+            panic!("expected the library array dimension");
+        };
+        let Type::ParametricBits { width, .. } = &**element else {
+            panic!("expected the library element width");
+        };
+        assert_eq!(width.as_ref(), &Expr::Name("$bx$lib$W".into()));
+        assert_eq!(size.as_ref(), &Expr::Name("$bx$sizes$N".into()));
+        let Type::ParametricArray {
+            size: root_size, ..
+        } = &linked.blocks[0].result
+        else {
+            panic!("expected the root result dimension");
+        };
+        assert_eq!(root_size, size);
+        let error = read("struct Bus { lanes: u8[sizes::N] } use sizes;", &options)
+            .err()
+            .expect("the later import is out of scope");
+        assert!(
+            error.contains("use binding 'sizes' is declared later"),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_function_hints_distinguish_calls_and_comparisons() -> Result<(), Box<dyn Error>> {

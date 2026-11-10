@@ -49,6 +49,63 @@ fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
 }
 
 #[test]
+fn overwritten_literal_dimensions_resolve_in_library_source_order() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(dir.path(), "sizes.bx", "pub const W = u8:3;")?;
+    let options = search_paths(&[dir.path()]);
+    let root = "use lib; const ROOT_ONLY = u32:2; fn sample()->u8 { lib::pick() }";
+    let pick = "pub fn pick()->u8 { u8:(uN[sizes::W]:129) }";
+    write_module(dir.path(), "lib.bx", &format!("use sizes; {pick}"))?;
+    check_source_with_options(root, &options)?;
+    for library in [
+        format!("{pick} use sizes;"),
+        "pub fn pick()->u8 { u8:(uN[ROOT_ONLY]:129) }".to_owned(),
+    ] {
+        write_module(dir.path(), "lib.bx", &library)?;
+        assert!(
+            check_source_with_options(root, &options).is_err(),
+            "{library}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn library_dimensions_keep_their_defining_scope() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "shape.bx",
+        r#"
+const WIDTH = u32:7;
+pub const LANES = u32:2;
+pub struct Packet { row: uN[WIDTH][LANES] }
+pub fn sum(p: Packet) -> uN[WIDTH] {
+    for (i, acc) in u32:0..LANES { acc + p.row[i] }(uN[WIDTH]:0)
+}
+"#,
+    )?;
+    let source = r#"
+use shape;
+const WIDTH = u32:5;
+const LANES = u32:3;
+#[allow(combinational_block)]
+pub block circuit(clk, x:u8)->u8 {
+    let row: u7[shape::LANES] = [x as u7, (x as uN[WIDTH]) as u7];
+    shape::sum(shape::Packet { row: row }) as u8
+}
+"#;
+    let options = search_paths(&[dir.path()]);
+    assert_eq!(
+        run(compile_design(source, &options)?, 228)?,
+        IrValue::make_ubits(8, 104)?
+    );
+    let private = "use shape; fn bad(x:uN[shape::WIDTH])->u7 { x }";
+    assert!(check_source_with_options(private, &options).is_err());
+    Ok(())
+}
+
+#[test]
 fn imported_bx_enum_members_resolve_through_module_and_member_uses() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(

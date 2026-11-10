@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth_pir::IrBits;
 
-use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_deps};
+use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_dependencies};
 use crate::ast::{EnumDef, Module, Type};
 
 impl StructTable {
@@ -50,8 +50,8 @@ impl StructTable {
         Ok(())
     }
 
-    /// Order structs by their local struct dependencies and the last enum
-    /// declaration needed to lay out their fields.
+    /// Schedule layouts after their nested structs, enum representations,
+    /// and any module constants used as dimensions.
     pub(super) fn struct_schedule(
         module: &Module,
         position: impl Fn(&str) -> usize,
@@ -61,16 +61,37 @@ impl StructTable {
             .iter()
             .map(|def| (def.name.as_str(), position(&def.name)))
             .collect();
+        let constant_positions: BTreeMap<_, _> = module
+            .constants
+            .iter()
+            .map(|c| (c.name.as_str(), position(&c.name)))
+            .collect();
         let mut graph = Vec::new();
         let mut ready = Vec::new();
         let local_structs: BTreeSet<_> =
             module.structs.iter().map(|def| def.name.as_str()).collect();
         for def in &module.structs {
             let mut deps = Vec::new();
+            let mut dimensions = Vec::new();
             for field in &def.fields {
-                type_deps(&field.ty, &mut deps);
+                type_dependencies(&field.ty, &mut deps, |expr| {
+                    if let crate::ast::Expr::Name(name) = expr {
+                        dimensions.push(name.as_str());
+                    }
+                });
             }
             let mut at = 0;
+            for dimension in dimensions {
+                if let Some(&constant_at) = constant_positions.get(dimension) {
+                    if constant_at > position(&def.name) {
+                        return Err(format!(
+                            "module constant '{dimension}' is declared after struct '{}'",
+                            def.name
+                        ));
+                    }
+                    at = at.max(constant_at);
+                }
+            }
             for dep in &deps {
                 if let Some(&enum_at) = enum_positions.get(dep) {
                     if enum_at > position(&def.name) {
@@ -173,7 +194,7 @@ impl<'a> BodyChecker<'a, '_> {
             return Ok(false);
         };
         if let Some(def) = self.structs.local_enum(prefix) {
-            crate::parser::validate_enum_member_path(name)?;
+            crate::parser::validate_dslx_value_path(name)?;
             self.decls.check_type_name_visibility(
                 prefix,
                 self.function_position.or(self.block_position),
@@ -184,7 +205,7 @@ impl<'a> BodyChecker<'a, '_> {
             return Err(format!("enum '{prefix}' has no member '{member}'"));
         }
         if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
-            crate::parser::validate_enum_member_path(name)?;
+            crate::parser::validate_dslx_value_path(name)?;
             self.decls.check_type_name_visibility(
                 prefix,
                 self.function_position.or(self.block_position),
@@ -225,7 +246,7 @@ impl<'a> BodyChecker<'a, '_> {
         } else {
             return Ok(None);
         };
-        crate::parser::validate_enum_member_path(name)?;
+        crate::parser::validate_dslx_value_path(name)?;
         let value = def
             .members
             .get(member)

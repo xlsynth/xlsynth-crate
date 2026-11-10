@@ -37,7 +37,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         out.structs.push(StructDef {
             name: names.declared(&def.name),
             public: def.public,
-            fields: Scope::new(names, None, None).fields(&def.fields)?,
+            fields: Scope::new(names, None, position(&def.name)).fields(&def.fields)?,
         });
     }
     for def in &module.enums {
@@ -70,7 +70,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         });
     }
     for def in &module.externs {
-        let mut scope = Scope::new(names, None, None);
+        let mut scope = Scope::new(names, None, position(&def.name));
         out.externs.push(ExternFn {
             name: names.declared(&def.name),
             params: scope.params(&def.params, Local::Lexical)?,
@@ -79,7 +79,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         });
     }
     for def in &module.extern_blocks {
-        let mut scope = Scope::new(names, None, None);
+        let mut scope = Scope::new(names, None, position(&def.name));
         scope.timing_ports(&def.clock, def.reset.as_deref());
         out.extern_blocks.push(ExternBlock {
             name: names.declared(&def.name),
@@ -625,7 +625,7 @@ impl<'a> Scope<'a> {
                 if reference.contains("::") {
                     // Qualification can remove the distinction between `_::A`
                     // and `module::_::A`. Check the original value path first.
-                    crate::parser::validate_enum_member_path(name)?;
+                    crate::parser::validate_dslx_value_path(name)?;
                 }
                 Expr::Name(reference)
             }

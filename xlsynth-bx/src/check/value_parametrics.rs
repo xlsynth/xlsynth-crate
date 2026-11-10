@@ -329,6 +329,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             || callbacks.is_some_and(|indices| indices.contains_key(name))
                     },
                     self.specialization.map(|s| &s.bindings),
+                    self.decls
+                        .dimensions_at(self.function_position.or(self.block_position)),
                     self.resolver,
                     self.structs,
                     remaining,

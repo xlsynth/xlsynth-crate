@@ -51,6 +51,7 @@ use callables::{BlockCallbackBinding, BlockCallbackFormal, BoundCallback};
 use counted_for::CarryContext;
 use function_specializations::{CallbackTarget, FunctionSpecialization, FunctionSpecializations};
 use generic_blocks::{Bindings, TypeArgument};
+use module_constants::ModuleDimensions;
 
 /// Render the common DSLX expressions used in a symbolic type annotation.
 struct Dimension<'e>(&'e Expr);
@@ -637,6 +638,7 @@ fn resolve_type(
     ty: &Type,
     is_local: &dyn Fn(&str) -> bool,
     bindings: Option<&Bindings>,
+    dimensions: ModuleDimensions<'_, '_>,
     resolver: &mut ImportResolver,
     structs: &StructTable,
     remaining: usize,
@@ -648,9 +650,10 @@ fn resolve_type(
             }
             if let Some(bindings) = bindings {
                 if matches!(ty, Type::Named(_)) && bindings.declares(name) {
-                    // An actual type is already resolved in the caller's scope.
-                    // During template declaration the name is still symbolic.
-                    return Ok(bindings.get(name).unwrap_or(ty).clone());
+                    // Keep type parameters symbolic until the dimensions have
+                    // been resolved and the substituted layout has been
+                    // bounded.
+                    return Ok(ty.clone());
                 }
                 bindings.reject_value(name)?;
             }
@@ -678,6 +681,7 @@ fn resolve_type(
                 element,
                 is_local,
                 bindings,
+                dimensions,
                 resolver,
                 structs,
                 child_type_budget(remaining)?,
@@ -688,7 +692,17 @@ fn resolve_type(
             let child_budget = child_type_budget(remaining)?;
             items
                 .iter()
-                .map(|item| resolve_type(item, is_local, bindings, resolver, structs, child_budget))
+                .map(|item| {
+                    resolve_type(
+                        item,
+                        is_local,
+                        bindings,
+                        dimensions,
+                        resolver,
+                        structs,
+                        child_budget,
+                    )
+                })
                 .collect::<Result<_, _>>()
                 .map(Type::Tuple)
         }
@@ -711,9 +725,22 @@ fn resolve_type(
                 ))
             }
         }
-        Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
-            Err("unresolved value-parametric dimension".into())
-        }
+        Type::ParametricBits { signed, width } => Ok(Type::Bits {
+            signed: dimensions.signed(signed, is_local, bindings)?,
+            width: dimensions.size(width, is_local, bindings)?,
+        }),
+        Type::ParametricArray { element, size } => Ok(Type::Array {
+            element: Box::new(resolve_type(
+                element,
+                is_local,
+                bindings,
+                dimensions,
+                resolver,
+                structs,
+                child_type_budget(remaining)?,
+            )?),
+            size: dimensions.size(size, is_local, bindings)?,
+        }),
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
@@ -721,6 +748,7 @@ fn resolve_type(
 /// Resolve struct fields in the enclosing module scope.
 fn resolve_fields(
     params: &[Param],
+    dimensions: ModuleDimensions<'_, '_>,
     resolver: &mut ImportResolver,
     structs: &StructTable,
 ) -> Result<Vec<Param>, String> {
@@ -733,6 +761,7 @@ fn resolve_fields(
                     &p.ty,
                     &|_| false,
                     None,
+                    dimensions,
                     resolver,
                     structs,
                     MAX_ELABORATION_DEPTH,
@@ -749,6 +778,7 @@ fn resolve_signature<'a>(
     result: &Type,
     timing_ports: impl IntoIterator<Item = &'a String>,
     bindings: Option<&Bindings>,
+    dimensions: ModuleDimensions<'_, '_>,
     resolver: &mut ImportResolver,
     structs: &StructTable,
 ) -> Result<(Vec<Param>, Type), String> {
@@ -762,6 +792,7 @@ fn resolve_signature<'a>(
                 &p.ty,
                 &|name| scope.contains(name),
                 bindings,
+                dimensions,
                 resolver,
                 structs,
                 MAX_ELABORATION_DEPTH,
@@ -772,6 +803,7 @@ fn resolve_signature<'a>(
         result,
         &|name| scope.contains(name),
         bindings,
+        dimensions,
         resolver,
         structs,
         MAX_ELABORATION_DEPTH,
@@ -797,7 +829,7 @@ fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
 /// Keep the spellings in sync with GetParametricBuiltins and
 /// GetIoObjectBuiltins in the pinned frontend. Sized type keywords are already
 /// excluded by the lexer.
-fn dslx_builtin_binding(name: &str) -> bool {
+pub(crate) fn is_dslx_builtin_value(name: &str) -> bool {
     crate::import_structs::is_token_builtin(name)
         || matches!(
             name,
@@ -839,34 +871,53 @@ fn dslx_builtin_binding(name: &str) -> bool {
                 | "recv_non_blocking"
                 | "recv_if_non_blocking"
                 | "join"
-                | "token"
                 | "read"
                 | "write"
-                | "Source"
-                | "Sink"
-                | "IOResult"
-                | "ChannelConfig"
         )
+}
+
+/// DSLX builtin types can qualify a member in an overwritten annotation.
+pub(crate) fn is_dslx_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "token" | "Source" | "Sink" | "IOResult" | "ChannelConfig"
+    )
 }
 
 /// Collect BX dependencies. Imported layouts are registered before local
 /// structs.
 fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
+    type_dependencies(ty, result, |_| {});
+}
+
+/// Walk nominal dependencies and the expressions supplying dimensions without
+/// recursively copying potentially nested source types.
+fn type_dependencies<'a>(
+    ty: &'a Type,
+    names: &mut Vec<&'a str>,
+    mut dimension: impl FnMut(&'a Expr),
+) {
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
         match ty {
             Type::Named(name) | Type::Enum { name, .. } => {
                 if !name.contains("::") {
-                    result.push(name);
+                    names.push(name);
                 }
             }
-            Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
-                pending.push(element)
+            Type::Array { element, .. } => pending.push(element),
+            Type::ParametricArray { element, size } => {
+                dimension(size);
+                pending.push(element);
+            }
+            Type::ParametricBits { signed, width } => {
+                dimension(signed);
+                dimension(width);
             }
             Type::Tuple(fields) => pending.extend(fields.iter().rev()),
-            Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. } | Type::Applied { .. } => {
+            Type::Bool | Type::Bits { .. } | Type::Applied { .. } => {
                 // Primitives and concrete imported applications have no local
-                // type dependencies.
+                // dependencies.
             }
         }
     }
@@ -923,6 +974,7 @@ impl<'a> Declarations<'a> {
                         ty,
                         &|name| names.contains(name),
                         None,
+                        self.dimensions_at(at),
                         resolver,
                         structs,
                         MAX_ELABORATION_DEPTH,
@@ -942,7 +994,15 @@ impl<'a> Declarations<'a> {
                 self.function_templates.insert(name, function);
             }
         }
-        let (params, result) = resolve_signature(params, result, &names, None, resolver, structs)?;
+        let (params, result) = resolve_signature(
+            params,
+            result,
+            &names,
+            None,
+            self.module_dimensions(name),
+            resolver,
+            structs,
+        )?;
         structs.update_imports(resolver)?;
         let callback_params = callback_params
             .into_iter()
@@ -1351,7 +1411,7 @@ pub(crate) fn check_sources(
         if !(crate::parser::is_use_identifier(name) || name == "self") {
             return Err(format!("invalid module constant name '{name}'"));
         }
-        if dslx_builtin_binding(name) {
+        if is_dslx_builtin_value(name) || is_dslx_builtin_type(name) {
             return Err(format!("constant '{name}' shadows a builtin"));
         }
         declare(&mut names, source_name)?;
@@ -1467,20 +1527,28 @@ pub(crate) fn check_sources(
                 .map_err(|e| format!("block '{}': {e}", b.name))?;
             Some(Bindings::new(&b.type_params))
         };
+        let dimensions = declarations.module_dimensions(&b.name);
         let (params, result) = resolve_signature(
             &b.params,
             &b.result,
             reserved_ports,
             symbolic.as_ref(),
+            dimensions,
             &mut resolver,
             &structs,
         )?;
         if let Some(bindings) = &symbolic {
-            declarations.templates.insert(
-                &b.name,
-                BlockTemplate::new(b, params, result, bindings, &mut resolver, &mut structs)
-                    .map_err(|e| format!("block '{}': {e}", b.name))?,
-            );
+            let template = BlockTemplate::new(
+                b,
+                params,
+                result,
+                bindings,
+                dimensions,
+                &mut resolver,
+                &mut structs,
+            )
+            .map_err(|e| format!("block '{}': {e}", b.name))?;
+            declarations.templates.insert(&b.name, template);
             continue;
         }
         structs.update_imports(&resolver)?;
@@ -1503,6 +1571,7 @@ pub(crate) fn check_sources(
             &b.result,
             timing_ports,
             None,
+            declarations.module_dimensions(&b.name),
             &mut resolver,
             &structs,
         )?;
@@ -2136,10 +2205,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
         self.decls
             .check_type_visibility(source, self.function_position)?;
-        if let Some(spec) = self.specialization {
-            spec.bindings.validate_substitution(source)?;
-        }
         let ty = self.resolve_dimensions(source, MAX_ELABORATION_DEPTH)?;
+        let ty = match self.specialization {
+            Some(spec) => spec.bindings.concrete_type(&ty)?,
+            None => ty,
+        };
         self.structs.update_imports(self.resolver)?;
         self.structs.validate_type(&ty)?;
         Ok(ty)

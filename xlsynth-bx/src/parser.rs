@@ -5,7 +5,7 @@
 pub mod outline;
 pub(crate) mod source_bytes;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use xlsynth_pir::{IrBits, IrValue};
 
@@ -111,9 +111,9 @@ fn is_function_identifier(text: &str) -> bool {
     is_use_identifier(text) || text == "self"
 }
 
-/// DSLX permits `self` only at the head of an enum path and `_` only after
+/// DSLX permits `self` only at the head of a value path and `_` only after
 /// a qualifier. Both spellings are valid in declarations.
-pub(crate) fn validate_enum_member_path(name: &str) -> Result<(), String> {
+pub(crate) fn validate_dslx_value_path(name: &str) -> Result<(), String> {
     let mut components = name.split("::");
     if components.next() == Some("_") {
         return Err("wildcard pattern '_' cannot be used as a reference".into());
@@ -426,8 +426,7 @@ struct Parser<'s> {
     forward_map_import: bool,
     /// Type parameters that can annotate integer literals in this block.
     block_type_params: BTreeSet<&'s str>,
-    /// Function value parametrics permit expressions in bit and array
-    /// dimensions.
+    /// Function templates allow full expressions in their type dimensions.
     dependent_types: bool,
     /// Local template declarations disambiguate angle brackets from
     /// comparisons in a comma-separated expression list. Block callers can
@@ -435,6 +434,26 @@ struct Parser<'s> {
     callable_templates: BTreeMap<String, TemplateBinding>,
     /// Entries hidden by currently active data or callable bindings.
     hidden_templates: Vec<(String, TemplateBinding)>,
+    /// Names in source scope, including imports. An overwritten literal type
+    /// needs lexical resolution while its syntax is still available.
+    visible_names: HashSet<String>,
+    /// Struct and enum names can qualify a member, but cannot be bare values.
+    visible_type_names: HashSet<String>,
+    /// Names newly introduced in an active lexical scope.
+    local_names: Vec<String>,
+    literal_type_context: LiteralTypeContext,
+}
+
+/// Which parts of a nested literal annotation still require name resolution.
+#[derive(Clone, Copy, PartialEq)]
+enum LiteralTypeContext {
+    /// The checker receives this type and its dimension expressions.
+    Live,
+    /// The literal's outer annotation supersedes this type.
+    Overwritten,
+    /// A computed dimension of an overwritten template type is discarded
+    /// together with all of its subexpressions and lexical scopes.
+    DiscardedExpression,
 }
 
 /// A binding can be a callable template itself, or a module exporting
@@ -593,6 +612,10 @@ impl<'s> Parser<'s> {
             dependent_types: false,
             callable_templates,
             hidden_templates: Vec::new(),
+            visible_names: HashSet::new(),
+            visible_type_names: HashSet::new(),
+            local_names: Vec::new(),
+            literal_type_context: LiteralTypeContext::Live,
         })
     }
 
@@ -675,15 +698,27 @@ impl<'s> Parser<'s> {
         parse: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let first = self.hidden_templates.len();
+        let first_name = self.local_names.len();
         let map_shadowed = self.block_map_shadowed;
         let result = parse(self);
         self.block_map_shadowed = map_shadowed;
         self.callable_templates
             .extend(self.hidden_templates.drain(first..));
+        for name in self.local_names.drain(first_name..) {
+            self.visible_names.remove(&name);
+        }
         result
     }
 
+    fn bind_local_name(&mut self, name: &str) {
+        if !self.visible_names.contains(name) {
+            self.visible_names.insert(name.to_owned());
+            self.local_names.push(name.to_owned());
+        }
+    }
+
     fn shadow_callable(&mut self, name: &str) {
+        self.bind_local_name(name);
         self.block_map_shadowed |= name == "map";
         if let Some(entry) = self.callable_templates.remove_entry(name) {
             self.hidden_templates.push(entry);
@@ -802,8 +837,10 @@ impl<'s> Parser<'s> {
         let mut position = SOURCE_START;
         let mut offset = 0;
         while !self.peek(0).is_empty() {
+            let first_declaration = module.declaration_order.len();
             let allowed_warnings = self.block_warning_attributes()?;
             let public = self.eat("pub");
+            let declares_type = matches!(self.peek(0), "enum" | "struct");
             if self.eat("block") {
                 let name_offset = self.tokens[self.pos].start;
                 position = advance_position(position, &self.source[offset..name_offset]);
@@ -880,6 +917,16 @@ impl<'s> Parser<'s> {
                     "expected a block, const, enum, fn, struct, extern, or use declaration",
                 ));
             }
+            let names = if declares_type {
+                &mut self.visible_type_names
+            } else {
+                &mut self.visible_names
+            };
+            names.extend(
+                module.declaration_order[first_declaration..]
+                    .iter()
+                    .cloned(),
+            );
         }
         Ok(module)
     }
@@ -1116,6 +1163,7 @@ impl<'s> Parser<'s> {
                     // data parameter named `self` requires an impl method.
                     let name = p.ident()?;
                     p.expect(":")?;
+                    p.bind_local_name(&name);
                     let ty = p.ty()?;
                     let default = if p.eat("=") {
                         p.expect("{")?;
@@ -1137,13 +1185,17 @@ impl<'s> Parser<'s> {
             })?;
         }
         self.expect("(")?;
-        let params = self.list(")", Self::param)?;
+        let params = self.list(")", |p| {
+            p.bind_local_name(p.peek(0));
+            p.param()
+        })?;
         let result = if self.eat("->") {
             self.ty()?
         } else {
             Type::Tuple(Vec::new())
         };
         self.expect("{")?;
+        self.bind_local_name(&name);
         for param in &params {
             self.shadow_callable(&param.name);
         }
@@ -1164,6 +1216,7 @@ impl<'s> Parser<'s> {
     /// list.
     fn callback_param(&mut self) -> Result<CallbackParam, String> {
         let name = self.take_identifier(is_use_identifier)?;
+        self.bind_local_name(&name);
         self.expect(":")?;
         self.expect("fn")?;
         self.expect("(")?;
@@ -1333,6 +1386,7 @@ impl<'s> Parser<'s> {
         let params = self.block_parametrics()?;
         let signature = self.block_signature(name)?;
         self.expect("{")?;
+        self.bind_local_name(&signature.name);
         for name in &params.type_params {
             self.shadow_callable(name);
         }
@@ -1387,7 +1441,7 @@ impl<'s> Parser<'s> {
             };
             return Ok((WidthSliceType::Concrete(ty), 0));
         }
-        let (signed, bit_count) = self.bit_type_expressions()?;
+        let (signed, bit_count) = self.bit_type_expressions(Self::expr)?;
         Ok((
             WidthSliceType::Bits {
                 signed: Box::new(signed.value),
@@ -1399,29 +1453,88 @@ impl<'s> Parser<'s> {
 
     /// Read the expressions controlling signedness and width in a bits
     /// annotation.
-    fn bit_type_expressions(&mut self) -> Result<(ParsedExpr, ParsedExpr), String> {
+    fn bit_type_expressions(
+        &mut self,
+        nonliteral_dimension: fn(&mut Self) -> Result<ParsedExpr, String>,
+    ) -> Result<(ParsedExpr, ParsedExpr), String> {
         let spelling = self.peek(0);
         self.pos += 1;
         let signed = if spelling == "xN" {
             self.expect("[")?;
-            let expr = self.expr()?;
+            let expr = if matches!(self.peek(0), "true" | "false") && self.peek(1) == "]" {
+                self.expr()?
+            } else {
+                nonliteral_dimension(self)?
+            };
             self.expect("]")?;
             expr
         } else {
             ParsedExpr::leaf(Expr::Bool(spelling == "sN"))
         };
         self.expect("[")?;
-        let bit_count = self.expr()?;
+        let bit_count = if self.plain_dimension(0) {
+            self.expr()?
+        } else {
+            nonliteral_dimension(self)?
+        };
         self.expect("]")?;
         Ok((signed, bit_count))
+    }
+
+    /// Nonliteral dimensions name constants. Function templates can also
+    /// compute dimensions from their value parametrics.
+    fn type_dimension(&mut self) -> Result<ParsedExpr, String> {
+        let start = self.tokens[self.pos].start;
+        let mut dimension = if self.dependent_types {
+            // Template expressions introduce their own scopes. Only a bare
+            // dimension name here needs the lookup for an overwritten type.
+            let previous = self.literal_type_context;
+            if previous == LiteralTypeContext::Overwritten {
+                self.literal_type_context = LiteralTypeContext::DiscardedExpression;
+            }
+            let expr = self.expr();
+            self.literal_type_context = previous;
+            expr?
+        } else {
+            ParsedExpr::leaf(Expr::Name(self.name_or_qualified_member()?))
+        };
+        if let Expr::Name(name) = &mut dimension.value {
+            if self.literal_type_context == LiteralTypeContext::Overwritten {
+                // DSLX resolves only the head of a path in a type that an
+                // outer literal annotation overwrites.
+                while self.eat("::") {
+                    name.push_str("::");
+                    name.push_str(&self.take_identifier(is_function_identifier)?);
+                }
+                let head = name
+                    .split_once("::")
+                    .map_or(name.as_str(), |(head, _)| head);
+                let type_member = head != name.as_str()
+                    && (self.visible_type_names.contains(head)
+                        || crate::check::is_dslx_builtin_type(head));
+                if !type_member
+                    && !self.visible_names.contains(head)
+                    && !self.visible_names.contains(name.as_str())
+                    && !crate::check::is_dslx_builtin_value(head)
+                {
+                    return Err(diagnostic(
+                        self.source,
+                        start,
+                        &format!("unknown name '{head}' in literal annotation"),
+                    ));
+                }
+            }
+            validate_dslx_value_path(name).map_err(|e| self.error(&e))?;
+        }
+        Ok(dimension)
     }
 
     fn parsed_ty(&mut self, singleton_tuples: bool) -> Result<ParsedType, String> {
         let mut ty = self.type_atom(singleton_tuples)?;
         while self.eat("[") {
             let element = Box::new(ty.value);
-            ty.value = if self.dependent_types && !self.plain_dimension(0) {
-                let size = self.expr()?;
+            ty.value = if !self.dslx_type_display && !self.plain_dimension(0) {
+                let size = self.type_dimension()?;
                 ty.depth = ty.depth.max(size.height);
                 Type::ParametricArray {
                     element,
@@ -1506,8 +1619,8 @@ impl<'s> Parser<'s> {
             } else {
                 self.plain_dimension(2)
             };
-            if self.dependent_types && !concrete {
-                let (signed, width) = self.bit_type_expressions()?;
+            if !self.dslx_type_display && !concrete {
+                let (signed, width) = self.bit_type_expressions(Self::type_dimension)?;
                 return Ok(ParsedType {
                     value: Type::ParametricBits {
                         signed: Box::new(signed.value),
@@ -2007,17 +2120,27 @@ impl<'s> Parser<'s> {
     }
 
     /// Both loop spellings allow an optional element and accumulator type pair.
-    fn loop_annotation(&mut self) -> Result<Option<(Type, Type)>, String> {
+    fn loop_annotation<'n>(
+        &mut self,
+        binders: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Option<(Type, Type)>, String> {
         if !self.eat(":") {
             return Ok(None);
         }
-        self.expect("(")?;
-        let element = self.ty()?;
-        self.expect(",")?;
-        let accumulator = self.ty()?;
-        self.eat(",");
-        self.expect(")")?;
-        Ok(Some((element, accumulator)))
+        // The names are in scope while parsing the binder annotation. The
+        // iterable and seed are parsed in the enclosing scope.
+        self.with_name_scope(|p| {
+            for name in binders {
+                p.bind_local_name(name);
+            }
+            p.expect("(")?;
+            let element = p.ty()?;
+            p.expect(",")?;
+            let accumulator = p.ty()?;
+            p.eat(",");
+            p.expect(")")?;
+            Ok(Some((element, accumulator)))
+        })
     }
 
     /// Parse a pure counted fold in either a block or a local function.
@@ -2033,7 +2156,7 @@ impl<'s> Parser<'s> {
         let accumulator = self.binding_pattern(&mut names, self.identifier_predicate())?;
         self.eat(",");
         self.expect(")")?;
-        let annotation = self.loop_annotation()?;
+        let annotation = self.loop_annotation(names.iter().map(String::as_str))?;
         self.expect("in")?;
         let (iterable, height) = self.for_iterable(Braces::Body)?.into_ast();
         self.expect("{")?;
@@ -2158,7 +2281,7 @@ impl<'s> Parser<'s> {
         }
         self.eat(",");
         self.expect(")")?;
-        let annotation = self.loop_annotation()?;
+        let annotation = self.loop_annotation([index.as_str(), accumulator.as_str()])?;
         self.expect("in")?;
         // Range endpoints are operands of '..', even at the start of the
         // iterable.
@@ -2934,27 +3057,21 @@ impl<'s> Parser<'s> {
         }
         self.expect("|")?;
         let parameter = self.take_identifier(is_use_identifier)?;
-        let parameter_type = if self.eat(":") {
-            Some(self.ty()?)
-        } else {
-            None
-        };
-        self.eat(",");
-        self.expect("|")?;
-        let result_type = if self.eat("->") {
-            Some(self.ty()?)
-        } else {
-            None
-        };
-        let body = self.with_name_scope(|p| {
+        let (parameter_type, result_type, body) = self.with_name_scope(|p| {
+            p.bind_local_name(&parameter);
+            let parameter_type = if p.eat(":") { Some(p.ty()?) } else { None };
+            p.eat(",");
+            p.expect("|")?;
+            let result_type = if p.eat("->") { Some(p.ty()?) } else { None };
             p.hide_pattern_name(&parameter);
-            if p.eat("{") {
-                p.value_scope()
+            let body = if p.eat("{") {
+                p.value_scope()?
             } else if result_type.is_some() {
-                Err(p.error("lambda with an explicit result type requires a braced body"))
+                return Err(p.error("lambda with an explicit result type requires a braced body"));
             } else {
-                p.expr()
-            }
+                p.expr()?
+            };
+            Ok((parameter_type, result_type, body))
         })?;
         let (iterable, height) = iterable.into_ast();
         self.compose(
@@ -2997,7 +3114,16 @@ impl<'s> Parser<'s> {
             return Ok(literal);
         }
         if self.starts_bit_literal()? {
-            self.ty()?;
+            // DSLX resolves the head of each name as it parses this type.
+            // The outer annotation subsequently replaces it, so its members,
+            // signedness and widths never undergo type checking.
+            let previous = self.literal_type_context;
+            if previous == LiteralTypeContext::Live {
+                self.literal_type_context = LiteralTypeContext::Overwritten;
+            }
+            let inner = self.ty();
+            self.literal_type_context = previous;
+            inner?;
             self.expect(":")?;
             return self.nested(|parser| parser.annotated_literal(ty));
         }
@@ -3666,8 +3792,69 @@ fn concrete(x:uN[8][4])->sN[8] { x[u32:0] as s8 }
         assert_eq!(self_binding.functions[0].value_parametrics[0].name, "self");
         assert!(parse_module("fn f<N:u32={8}>(x:u8)->u8 { /* still DSLX */ x }").is_err());
         assert!(
-            parse_module("fn f<N:u32>(x:uN[N])->uN[N] {x} block bad(clk,x:uN[N])->u8{x}").is_err()
+            parse_module("fn f<N:u32>(x:uN[N])->uN[N] {x} block bad(clk,x:uN[N + 1])->u8{x}")
+                .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn module_constants_in_block_and_function_dimensions_retain_their_names() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+use sizes;
+const WORDS = u32:2;
+fn pass(xs: (sN[sizes::WIDTH], bool)[WORDS]) -> (sN[sizes::WIDTH], bool)[WORDS] { xs }
+block wires(clk, xs: (sN[sizes::WIDTH], bool)[WORDS]) -> (sN[sizes::WIDTH], bool)[WORDS] { xs }
+"#,
+        )?;
+        let expected = Type::ParametricArray {
+            element: Box::new(Type::Tuple(vec![
+                Type::ParametricBits {
+                    signed: Box::new(Expr::Bool(true)),
+                    width: Box::new(Expr::Name("sizes::WIDTH".into())),
+                },
+                Type::Bool,
+            ])),
+            size: Box::new(Expr::Name("WORDS".into())),
+        };
+        let function = &module.functions[0];
+        let block = &module.blocks[0];
+        for annotation in [
+            &function.params[0].ty,
+            &function.result,
+            &block.params[0].ty,
+            &block.result,
+        ] {
+            assert_eq!(annotation, &expected);
+        }
+        for ty in [
+            "xN[sizes::SIGNED][8]",
+            "xN[true][WORDS]",
+            "uN[self]",
+            "u8[sizes::_]",
+        ] {
+            parse_module(&format!("fn pass(x:{ty})->{ty} {{ x }}"))?;
+        }
+        for (ty, message) in [
+            ("u8[_]", "wildcard pattern"),
+            ("uN[sizes::self]", "expected an identifier after '::'"),
+        ] {
+            for source in [
+                format!("struct Bus {{ words: {ty} }}"),
+                format!("fn f<F: fn({ty}) -> u8>(x: {ty}) -> u8 {{ F(x) }}"),
+            ] {
+                let error = parse_module(&source).unwrap_err();
+                assert!(error.contains(message), "{source}\n{error}");
+            }
+        }
+        for ty in ["u8[WORDS + 1]", "uN[WORDS * 2]", "xN[!SIGNED][WORDS]"] {
+            assert!(
+                parse_module(&format!("fn bad(x:{ty}) {{ }}")).is_err(),
+                "{ty}"
+            );
+        }
         Ok(())
     }
 
@@ -4293,6 +4480,8 @@ block i(clk, x: u8) -> u8 { inst(x) }
             "uN[8] extra",
             "uN[10000000]",
             "uN[8][10000000]",
+            "uN[WIDTH]",
+            "uN[8][WORDS]",
         ] {
             assert!(parse_value_type(invalid).is_err(), "{invalid}");
         }
@@ -5378,7 +5567,7 @@ block wrapper(clk, xs: u8[2]) -> u8 {
             "block b(clk, x: u8, offset: u8) -> u4 { x[offset-1+:u4] }",
             "block b(clk) -> u4 { u8:0xd9[6+:u4] }",
             "block b(clk, x: u8) -> u4 { if true { x } else { x }[0+:u4] }",
-            "block b(clk, x: u8[_8]) -> u8 { x[u1:0] }",
+            "block b(clk, x: u8[8_]) -> u8 { x[u1:0] }",
             "block b(clk) -> u8 { u8:_42 }",
             "block b(clk) -> u8 {",
         ] {

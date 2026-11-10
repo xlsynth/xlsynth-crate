@@ -11,7 +11,8 @@ use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, ImportResolver, MAX_ELABORATION_DEPTH,
-    StructTable, TypeShape, compatible, resolve_type, source_type_nodes, type_deps,
+    ModuleDimensions, StructTable, TypeShape, compatible, resolve_type, source_type_nodes,
+    type_deps,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -107,6 +108,7 @@ impl<'m> BlockTemplate<'m> {
         params: Vec<Param>,
         result: Type,
         bindings: &Bindings,
+        dimensions: ModuleDimensions<'_, '_>,
         resolver: &mut ImportResolver,
         structs: &mut StructTable,
     ) -> Result<Self, String> {
@@ -119,6 +121,7 @@ impl<'m> BlockTemplate<'m> {
                     ty,
                     &|name| callback_indices.contains_key(name),
                     Some(bindings),
+                    dimensions,
                     resolver,
                     structs,
                     MAX_ELABORATION_DEPTH,
