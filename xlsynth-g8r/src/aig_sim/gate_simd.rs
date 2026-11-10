@@ -10,8 +10,8 @@
 //! 256-bit vectors.
 
 use crate::aig::gate::{AigNode, AigRef, GateFn};
-use core::simd::u64x4;
 use std::ops::{BitAnd, BitOr, BitOrAssign, BitXor, Not};
+use wide::u64x4;
 use xlsynth_pir::IrBits;
 
 /// A fixed-width boolean vector with 256 lanes.
@@ -19,23 +19,27 @@ use xlsynth_pir::IrBits;
 /// Internally this is represented as 4 × 64-bit limbs laid out least
 /// significant limb first – lane *i* lives in bit *(i % 64)* of
 /// `words[i / 64]`.
+///
+/// The public tuple field holds a `wide::u64x4`. Callers migrating from
+/// `core::simd::u64x4` can construct this value with [`Self::from_words`]
+/// and read its four words with [`Self::to_array`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Vec256(pub u64x4);
 
 impl Vec256 {
     #[inline]
     pub const fn zero() -> Self {
-        Self(u64x4::from_array([0; 4]))
+        Self::from_words([0; 4])
     }
 
     #[inline]
     pub const fn from_words(words: [u64; 4]) -> Self {
-        Self(u64x4::from_array(words))
+        Self(u64x4::new(words))
     }
 
     #[inline]
     pub const fn splat(bit: bool) -> Self {
-        Self(u64x4::from_array(if bit { [u64::MAX; 4] } else { [0; 4] }))
+        Self::from_words(if bit { [u64::MAX; 4] } else { [0; 4] })
     }
 
     #[inline]
@@ -54,7 +58,7 @@ impl Vec256 {
                 words[lane] |= 1u64 << offset;
             }
         }
-        Self(u64x4::from_array(words))
+        Self::from_words(words)
     }
 
     #[inline]

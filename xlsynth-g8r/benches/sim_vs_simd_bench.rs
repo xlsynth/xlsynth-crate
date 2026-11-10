@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-#![feature(portable_simd)]
 
 //! Benchmarks scalar vs SIMD gate evaluators on the bf16_add circuit.
 
@@ -50,7 +49,7 @@ fn prepare_inputs() -> (Vec<[IrBits; 2]>, Vec<gate_simd::Vec256>) {
     // Convert accumulators into Vec256s.
     let simd_inputs: Vec<gate_simd::Vec256> = bit_accumulators
         .into_iter()
-        .map(|words| gate_simd::Vec256(core::simd::u64x4::from_array(words)))
+        .map(gate_simd::Vec256::from_words)
         .collect();
 
     (scalar_inputs, simd_inputs)

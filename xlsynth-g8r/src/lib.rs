@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(portable_simd)]
-
 pub mod aig;
 pub mod aig_serdes;
 pub mod aig_sim;

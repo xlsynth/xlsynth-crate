@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(map_try_insert)]
-
 //! Functionality that is purely related to the XLS IR, i.e. parsing,
 //! representing, querying/manipulating, etc.
 

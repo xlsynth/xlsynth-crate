@@ -130,6 +130,10 @@ TOML file containing `dso_path` and `dslx_stdlib_path`.
 
 ## Development Notes
 
+The repository selects nightly for development tooling. To build the workspace on
+stable Rust with the pre-fetched XLS artifacts configured above, run
+`cargo +stable build --workspace`.
+
 For a containerized contributor build, see the [container build and test reference](docker/README.md).
 Full validation is the contributor default and runs workspace checks, tests, and
 pre-commit with networking disabled after preparation. The same Dockerfile is

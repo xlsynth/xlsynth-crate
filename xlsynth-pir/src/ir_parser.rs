@@ -2,7 +2,7 @@
 
 //! Parser and emitter for XLS IR functions and blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, hash_map::Entry};
 
 use crate::ffi_proto::parse_foreign_function_data;
 use crate::ir::{
@@ -129,12 +129,15 @@ impl From<ir_verify::VerifyError> for ParseOrValidateError {
 
 impl FileTable {
     fn add(&mut self, id: usize, path: String) -> Result<(), ParseError> {
-        match self.id_to_path.try_insert(id, path) {
-            Err(std::collections::hash_map::OccupiedError { .. }) => Err(ParseError::new(format!(
+        match self.id_to_path.entry(id) {
+            Entry::Occupied(_) => Err(ParseError::new(format!(
                 "file number {} already exists",
                 id
             ))),
-            Ok(_) => Ok(()),
+            Entry::Vacant(entry) => {
+                entry.insert(path);
+                Ok(())
+            }
         }
     }
 }
@@ -4277,6 +4280,19 @@ fn bar(x: bits[8] id=3) -> bits[8] {
             .parse_file_number(&mut FileTable::new(), FilePathSyntax::Pir)
             .unwrap();
         println!("{:?}", file_table);
+    }
+
+    #[test]
+    fn test_parse_duplicate_file_number_preserves_original_path() {
+        let mut table = FileTable::new();
+        Parser::new(r#"file_number 1 "first.x""#)
+            .parse_file_number(&mut table, FilePathSyntax::Pir)
+            .unwrap();
+        let error = Parser::new(r#"file_number 1 "second.x""#)
+            .parse_file_number(&mut table, FilePathSyntax::Pir)
+            .unwrap_err();
+        assert_eq!(error.msg, "file number 1 already exists");
+        assert_eq!(table.id_to_path[&1], "first.x");
     }
 
     #[test]

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![feature(portable_simd)]
 
-use core::simd::u64x4;
 use criterion::{Criterion, criterion_group, criterion_main};
 use rand::prelude::SeedableRng;
 use rand_pcg::Pcg64Mcg;
@@ -74,7 +72,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     }
                     words_per_bit
                         .into_iter()
-                        .map(|w| Vec256(u64x4::from_array(w)))
+                        .map(Vec256::from_words)
                         .collect::<Vec<Vec256>>()
                 };
 

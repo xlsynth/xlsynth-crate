@@ -2,7 +2,7 @@
 
 #![allow(unused)]
 
-use std::collections::{HashMap, hash_map::OccupiedError};
+use std::collections::HashMap;
 
 use crate::{IrFormatPreference, IrValue};
 

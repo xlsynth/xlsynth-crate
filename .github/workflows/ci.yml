@@ -1035,10 +1035,9 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
         with:
-          toolchain: nightly
+          toolchain: stable
           profile: minimal
           override: true
-          components: clippy
 
       - name: Enable sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
@@ -1069,12 +1068,12 @@ jobs:
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p rocky8 -o pre_download -d -v ${TAG}
 
-      - name: Install libc++ from llvm-18
+      - name: Install libc++ and the protobuf compiler
         run: |
           sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
-          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev protobuf-compiler
 
-      - name: Run cargo tests using pre-downloaded artifacts
+      - name: Build the workspace, check all targets, and test xlsynth on stable
         env:
           XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-rocky8.so
           DSLX_STDLIB_PATH: ${{ github.workspace }}/pre_download/xls/dslx/stdlib
@@ -1082,6 +1081,8 @@ jobs:
         run: |
           echo "Using XLS_DSO_PATH=${XLS_DSO_PATH}"
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
+          cargo build --workspace
+          cargo check --workspace --all-targets
           cargo test -p xlsynth --verbose
 
       - name: Run sample usage tests using pre-downloaded artifacts

@@ -37,7 +37,6 @@ use crate::test_utils::{
 use crate::transforms::get_all_transforms;
 use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use clap::ValueEnum;
-use core::simd::u64x4;
 use serde_json;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -1031,10 +1030,7 @@ fn generate_simd_inputs(gate_fn: &GateFn, rng: &mut impl rand::Rng) -> Vec<Vec25
         }
     }
 
-    words_per_bit
-        .into_iter()
-        .map(|w| Vec256(u64x4::from_array(w)))
-        .collect()
+    words_per_bit.into_iter().map(Vec256::from_words).collect()
 }
 
 #[derive(serde::Serialize)]
