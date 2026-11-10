@@ -88,10 +88,10 @@ Use public numeric enums from BX or DSLX libraries with `use protocol;` and `pro
 
 In imported DSLX, cast both operands to the backing type before an ordered comparison, for example `(a as u3) < (b as u3)`. The pinned XLS converter aborts on direct enum ordering. BX checks before conversion and reports an import error if it cannot verify a comparison in a selected function. DSLX can also instantiate a comparison while checking a `#[fuzz_domain]` method, a non-scalar module constant, an enum discriminant, a type width, or a `const_assert!`. Such declarations can trigger the diagnostic even when the selected function never calls the comparison. A scalar module constant computed by direct enum ordering may have no constexpr value in the pinned interpreter. Reading it then produces the native missing-value error.
 
-### Scalar match expressions
+### Match expressions
 
-Use `match` on a boolean, numeric enum, or signed or unsigned bit value in a function or
-block. The first matching arm supplies the result. All arms share a result
+Use `match` on a tuple, boolean, numeric enum, or signed or unsigned bit value
+in a function or block. The first matching arm supplies the result. All arms share a result
 type, which can also be an array, tuple, or struct.
 
 ```text
@@ -110,6 +110,22 @@ module constant, enum member, or function value parametric. Patterns support lit
 alternatives, and `_` for any remaining value. The arms must cover the whole
 subject type. For example, `true` and `false` cover a boolean without a
 wildcard.
+
+Tuple patterns match corresponding fields. Use a scalar pattern or a nested
+tuple pattern for each field. A wildcard field accepts any value in that
+position. Patterns can supply widths to unsized fields in tuple literals and
+conditional branches that return tuple literals. An already inferred value
+used as a subject keeps its field types.
+
+```text
+fn round_to_even(guard: bool, sticky: bool, odd: bool) -> bool {
+    match (guard, sticky) {
+        (true, true) => true,
+        (true, false) => odd,
+        (false, _) => false,
+    }
+}
+```
 
 ## Module constants
 

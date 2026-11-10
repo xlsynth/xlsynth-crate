@@ -259,10 +259,10 @@ pub struct TypedExpr {
     pub kind: TypedExprKind,
 }
 
-/// A checked pattern whose bit values have the subject's width. Range
-/// comparisons use the subject's signedness.
+/// A checked match pattern with scalar comparisons at the leaves of tuple
+/// patterns.
 #[derive(Clone, Debug)]
-pub enum ScalarPattern {
+pub enum TypedMatchPattern {
     Wildcard,
     Literal(IrBits),
     Range {
@@ -270,18 +270,53 @@ pub enum ScalarPattern {
         end: IrBits,
         inclusive: bool,
     },
+    Tuple(Vec<TypedMatchPattern>),
 }
 
-impl ScalarPattern {
-    pub(super) fn matches(&self, value: &IrBits, signed: bool) -> bool {
+impl TypedMatchPattern {
+    /// Whether matching requires only tuple structure and no comparisons.
+    pub fn is_irrefutable(&self) -> bool {
         match self {
             Self::Wildcard => true,
-            Self::Literal(literal) => value == literal,
+            Self::Tuple(members) => members.iter().all(Self::is_irrefutable),
+            Self::Literal(_) | Self::Range { .. } => false,
+        }
+    }
+
+    /// Compare a constant with this pattern using each member type's
+    /// signedness.
+    pub(crate) fn matches_value(&self, value: &IrValue, ty: &Type) -> Result<bool, String> {
+        self.matches_counted(value, ty, &mut |_| Some(()))
+            .ok_or_else(|| "constant match subject does not conform to its checked type".into())
+    }
+
+    /// Visit members until one fails, charging for each comparison before doing
+    /// it.
+    fn matches_counted(
+        &self,
+        value: &IrValue,
+        ty: &Type,
+        charge: &mut impl FnMut(usize) -> Option<()>,
+    ) -> Option<bool> {
+        Some(match self {
+            Self::Wildcard => {
+                charge(1)?;
+                true
+            }
+            Self::Literal(literal) => {
+                let value = value.as_bits().ok()?;
+                charge(value.get_bit_count().div_ceil(64).max(1))?;
+                value == literal
+            }
             Self::Range {
                 start,
                 end,
                 inclusive,
             } => {
+                let value = value.as_bits().ok()?;
+                let words = value.get_bit_count().div_ceil(64).max(1);
+                charge(words * (2 + usize::from(*inclusive)))?;
+                let (signed, _) = repr_bits(ty)?;
                 let at_or_above = if signed {
                     value.sge(start)
                 } else {
@@ -294,15 +329,30 @@ impl ScalarPattern {
                 };
                 at_or_above && (below || *inclusive && value == end)
             }
-        }
+            Self::Tuple(patterns) => {
+                charge(1)?;
+                let (Type::Tuple(types), IrValue::Tuple(values)) = (ty, value) else {
+                    return None;
+                };
+                if patterns.len() != types.len() || patterns.len() != values.len() {
+                    return None;
+                }
+                for ((pattern, ty), value) in patterns.iter().zip(types).zip(values.iter()) {
+                    if !pattern.matches_counted(value, ty, charge)? {
+                        return Some(false);
+                    }
+                }
+                true
+            }
+        })
     }
 }
 
-/// Alternatives sharing one checked result in a source-ordered scalar match.
+/// Alternatives sharing one checked result in a source-ordered match.
 #[derive(Clone, Debug)]
 pub struct TypedMatchArm {
     /// An empty list means every source alternative was an empty range.
-    pub patterns: Vec<ScalarPattern>,
+    pub patterns: Vec<TypedMatchPattern>,
     pub value: TypedExpr,
 }
 
@@ -958,25 +1008,21 @@ pub(crate) fn constant_work(value: &IrValue) -> usize {
 /// for each endpoint and may also compare equality at the inclusive limit.
 fn constant_match_arm<'a>(
     arms: &'a [TypedMatchArm],
-    value: &IrBits,
-    signed: bool,
+    value: &IrValue,
+    ty: &Type,
     work: &mut CountedWork<'_>,
 ) -> Option<&'a TypedExpr> {
-    let words = value.get_bit_count().div_ceil(64).max(1);
-    for arm in arms {
+    let mut charge = |cost| {
         if work.inside_loop {
-            work.charge(1)?;
+            work.charge(cost)
+        } else {
+            Some(())
         }
+    };
+    for arm in arms {
+        charge(1)?;
         for pattern in &arm.patterns {
-            if work.inside_loop {
-                let comparisons = match pattern {
-                    ScalarPattern::Wildcard => 1,
-                    ScalarPattern::Literal(_) => words,
-                    ScalarPattern::Range { inclusive, .. } => words * (2 + usize::from(*inclusive)),
-                };
-                work.charge(comparisons)?;
-            }
-            if pattern.matches(value, signed) {
+            if pattern.matches_counted(value, ty, &mut charge)? {
                 return Some(&arm.value);
             }
         }
@@ -1231,9 +1277,7 @@ impl TypedExpr {
             K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
             K::Match { subject, arms } => {
                 let value = subject.constant_with_budget(names, remaining)?;
-                let bits_value = value.as_bits().ok()?;
-                let signed = repr_bits(&subject.ty)?.0;
-                constant_match_arm(arms, bits_value, signed, remaining)?
+                constant_match_arm(arms, &value, &subject.ty, remaining)?
                     .constant_with_budget(names, remaining)
             }
             K::If {

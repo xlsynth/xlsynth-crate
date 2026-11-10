@@ -20,12 +20,14 @@ use xlsynth_pir::{
 use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
-    CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern, TypedExpr,
-    TypedExprKind, TypedMatchArm, literal_copy_work, output_ports,
+    CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
+    TypedMatchArm, literal_copy_work, output_ports,
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
-use crate::typed::{CheckedBinding, TypedFor, TypedIterable, TypedMap, repr_bits};
+use crate::typed::{
+    CheckedBinding, TypedFor, TypedIterable, TypedMap, TypedMatchPattern, repr_bits,
+};
 
 /// Destination package indices for named BX functions, externs, and inferred
 /// DSLX specializations.
@@ -1085,8 +1087,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         subject: &TypedExpr,
         arms: &[TypedMatchArm],
     ) -> Result<BValue, BuilderError> {
-        let signed = matches!(subject.ty, Type::Bits { signed: true, .. });
-        let subject = self.expr(subject)?;
+        let subject_value = self.expr(subject)?;
         let mut predicates = Vec::new();
         let mut cases = Vec::new();
         for arm in arms {
@@ -1094,7 +1095,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 // Every source alternative in this arm was an empty range.
                 continue;
             }
-            if matches!(arm.patterns.as_slice(), [ScalarPattern::Wildcard]) {
+            if arm.patterns.iter().any(TypedMatchPattern::is_irrefutable) {
                 let default = self.expr(&arm.value)?;
                 if predicates.is_empty() {
                     return Ok(default);
@@ -1109,29 +1110,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             }
             let mut alternatives = Vec::with_capacity(arm.patterns.len());
             for pattern in &arm.patterns {
-                alternatives.push(match pattern {
-                    ScalarPattern::Literal(bits) => {
-                        let literal = self.builder.literal(IrValue::Bits(bits.clone()))?;
-                        self.builder.eq(subject, literal)?
-                    }
-                    ScalarPattern::Range {
-                        start,
-                        end,
-                        inclusive,
-                    } => {
-                        let start = self.builder.literal(IrValue::Bits(start.clone()))?;
-                        let end = self.builder.literal(IrValue::Bits(end.clone()))?;
-                        let ge = self.binary(BinaryOp::Ge, signed, subject, start)?;
-                        let op = if *inclusive {
-                            BinaryOp::Le
-                        } else {
-                            BinaryOp::Lt
-                        };
-                        let upper = self.binary(op, signed, subject, end)?;
-                        self.builder.and(ge, upper)?
-                    }
-                    ScalarPattern::Wildcard => unreachable!("exhaustive arm is normalized"),
-                });
+                alternatives.push(self.lower_match_pattern(pattern, subject_value, &subject.ty)?);
             }
             let predicate = if let [only] = alternatives.as_slice() {
                 *only
@@ -1145,6 +1124,60 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         Err(BuilderError::InvalidOperation(
             "match has no exhaustive arm".into(),
         ))
+    }
+
+    /// Combine the predicates of constrained tuple members and compare scalar
+    /// leaves.
+    fn lower_match_pattern(
+        &mut self,
+        pattern: &TypedMatchPattern,
+        subject: BValue,
+        ty: &Type,
+    ) -> Result<BValue, BuilderError> {
+        match pattern {
+            TypedMatchPattern::Wildcard => {
+                unreachable!("irrefutable pattern requires no predicate")
+            }
+            TypedMatchPattern::Literal(bits) => {
+                let literal = self.builder.literal(IrValue::Bits(bits.clone()))?;
+                self.builder.eq(subject, literal)
+            }
+            TypedMatchPattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let (signed, _) = repr_bits(ty).expect("checked range subject is scalar");
+                let start = self.builder.literal(IrValue::Bits(start.clone()))?;
+                let end = self.builder.literal(IrValue::Bits(end.clone()))?;
+                let ge = self.binary(BinaryOp::Ge, signed, subject, start)?;
+                let op = if *inclusive {
+                    BinaryOp::Le
+                } else {
+                    BinaryOp::Lt
+                };
+                let upper = self.binary(op, signed, subject, end)?;
+                self.builder.and(ge, upper)
+            }
+            TypedMatchPattern::Tuple(patterns) => {
+                let Type::Tuple(types) = ty else {
+                    unreachable!("checked tuple pattern requires a tuple subject");
+                };
+                let mut predicates = Vec::new();
+                for (index, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
+                    if !pattern.is_irrefutable() {
+                        let member = self.builder.tuple_index(subject, index)?;
+                        predicates.push(self.lower_match_pattern(pattern, member, ty)?);
+                    }
+                }
+                if let [only] = predicates.as_slice() {
+                    Ok(*only)
+                } else {
+                    let bits = self.builder.concat(&predicates)?;
+                    self.builder.and_reduce(bits)
+                }
+            }
+        }
     }
 
     /// Invokes a linked function with the lowered BX arguments in source order.

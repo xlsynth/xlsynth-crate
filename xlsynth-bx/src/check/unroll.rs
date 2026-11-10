@@ -1093,9 +1093,10 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(operand, locals)?;
                 }
                 for arm in arms {
+                    let pattern_nodes = arm.patterns.iter().flat_map(MatchPattern::nodes).count();
                     locals
                         .visited
-                        .set(locals.visited.get().saturating_add(arm.patterns.len()));
+                        .set(locals.visited.get().saturating_add(pattern_nodes));
                     self.check_expr_names(&arm.value, locals)?;
                 }
             }

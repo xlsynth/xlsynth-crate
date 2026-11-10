@@ -39,15 +39,18 @@ mod map;
 mod match_patterns;
 mod module_constants;
 mod scope;
+mod source_patterns;
 mod struct_parametrics;
+mod tuple_match;
 mod unroll;
 mod value_parametrics;
 
 pub use crate::builtin::BuiltinOp;
+pub use crate::typed::TypedMatchPattern as ScalarPattern;
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
-    CheckedStmt, ScalarPattern, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap,
-    TypedMatchArm,
+    CheckedStmt, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap, TypedMatchArm,
+    TypedMatchPattern,
 };
 use crate::typed::{
     ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse, TypedExprKind as K, bits,
@@ -199,10 +202,22 @@ fn has_aggregate_literal(expr: &Expr) -> bool {
 /// group. Each pattern group consumes exactly one checked arm value.
 struct MatchSelector {
     subject: TypedExpr,
-    patterns: Vec<Vec<ScalarPattern>>,
+    patterns: Vec<Vec<TypedMatchPattern>>,
 }
 
 impl MatchSelector {
+    /// Select the first matching arm for a compile-time subject.
+    fn selected_arm(&self, value: &IrValue) -> Result<usize, String> {
+        for (index, patterns) in self.patterns.iter().enumerate() {
+            for pattern in patterns {
+                if pattern.matches_value(value, &self.subject.ty)? {
+                    return Ok(index);
+                }
+            }
+        }
+        Err("constant value did not select an arm of an exhaustive match".into())
+    }
+
     fn with_values(self, values: &mut impl Iterator<Item = TypedExpr>) -> TypedExpr {
         let arms: Vec<_> = self
             .patterns
@@ -229,8 +244,7 @@ enum BranchSelector {
     Match(MatchSelector),
 }
 
-/// Collect the subject and literal constraints in source order. AST callers
-/// can construct patterns directly, including inside an empty unrolled loop.
+/// Collect the subject and literal constraints in source order.
 fn match_operands<'e>(
     subject: &'e Expr,
     arms: &'e [MatchArm],
@@ -239,8 +253,16 @@ fn match_operands<'e>(
     if arms.is_empty() || arms.iter().any(|arm| arm.patterns.is_empty()) {
         return Err("match requires at least one arm and a pattern for each arm".into());
     }
+    source_patterns::validate_match_pattern_size(arms)?;
     let mut operands = vec![subject];
-    for pattern in arms.iter().flat_map(|arm| &arm.patterns) {
+    for (_, pattern) in arms
+        .iter()
+        .flat_map(|arm| &arm.patterns)
+        .flat_map(MatchPattern::nodes)
+    {
+        if matches!(pattern, MatchPattern::Tuple(_)) {
+            continue;
+        }
         for literal in pattern.literals() {
             if !matches!(literal, Expr::Bool(_) | Expr::Literal { .. })
                 && !matches!(pattern, MatchPattern::Literal(Expr::Name(name)) if is_named_pattern(name)?)
@@ -1414,6 +1436,7 @@ pub fn check_module_with_options(
     module: &Module,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
+    source_patterns::validate_source_match_patterns(module)?;
     let imports = crate::bx_import::link(module, options)?;
     check_sources(module, imports, options).map_err(crate::bx_import::diagnostic)
 }
@@ -3654,80 +3677,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .iter()
                 .any(|item| matches!(item, Expr::If { .. } | Expr::Match { .. }))
         {
-            // Every conditional branch contributes to the same element type.
-            let mut branches = Vec::new();
-            let mut conditions = Vec::new();
-            for item in items {
-                match item {
-                    Expr::If {
-                        condition,
-                        then_value,
-                        else_value,
-                    } => {
-                        conditions
-                            .push(BranchSelector::If(self.expr(condition, Some(&Type::Bool))?));
-                        branches.extend([then_value.as_ref(), else_value.as_ref()]);
-                    }
-                    Expr::Match { subject, arms } => {
-                        conditions.push(BranchSelector::Match(self.match_selector(subject, arms)?));
-                        branches.extend(arms.iter().map(|arm| &arm.value));
-                    }
-                    _ => {
-                        conditions.push(BranchSelector::Value);
-                        branches.push(*item);
-                    }
-                }
-            }
-            let mut branches = self.unify_values(&branches)?.into_iter();
-            return Ok(conditions
-                .into_iter()
-                .map(|condition| match condition {
-                    BranchSelector::Value => branches.next().expect("one value per item"),
-                    BranchSelector::Match(selector) => selector.with_values(&mut branches),
-                    BranchSelector::If(condition) => {
-                        let value = branches.next().expect("then branch");
-                        TypedExpr {
-                            ty: value.ty.clone(),
-                            kind: K::If {
-                                condition: Box::new(condition),
-                                then_value: Box::new(value),
-                                else_value: Box::new(
-                                    branches.next().expect("two branches per conditional"),
-                                ),
-                            },
-                        }
-                    }
-                })
-                .collect());
+            return self.check_result_branches(items, Self::unify_values);
         }
         if !first_has_type
             && let Expr::Tuple(first) = items[0]
             && let Some(tuples) = items
                 .iter()
                 .map(|item| match item {
-                    Expr::Tuple(fields) if fields.len() == first.len() => Some(fields),
+                    Expr::Tuple(fields) if fields.len() == first.len() => Some(fields.as_slice()),
                     _ => None,
                 })
                 .collect::<Option<Vec<_>>>()
         {
-            let mut values = vec![Vec::with_capacity(first.len()); tuples.len()];
-            let mut types = Vec::with_capacity(first.len());
-            for i in 0..first.len() {
-                let fields: Vec<_> = tuples.iter().map(|tuple| &tuple[i]).collect();
-                let fields = self.unify_values(&fields)?;
-                types.push(fields[0].ty.clone());
-                for (tuple, field) in values.iter_mut().zip(fields) {
-                    tuple.push(field);
-                }
-            }
-            let ty = Type::Tuple(types);
-            return Ok(values
-                .into_iter()
-                .map(|fields| TypedExpr {
-                    ty: ty.clone(),
-                    kind: K::Tuple(fields),
-                })
-                .collect());
+            return self
+                .check_tuple_results(&tuples, |checker, _, fields| checker.unify_values(fields));
         }
         if !first_has_type
             && let Expr::Array(first) = items[0]
@@ -3780,6 +3743,83 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 self.check_siblings(items, i, anchor)
             }
         }
+    }
+
+    /// Check all branch results together, then rebuild their typed selectors.
+    fn check_result_branches(
+        &mut self,
+        items: &[&Expr],
+        check: impl FnOnce(&mut Self, &[&Expr]) -> Result<Vec<TypedExpr>, String>,
+    ) -> Result<Vec<TypedExpr>, String> {
+        let mut branches = Vec::new();
+        let mut selectors = Vec::new();
+        for item in items {
+            match item {
+                Expr::If {
+                    condition,
+                    then_value,
+                    else_value,
+                } => {
+                    selectors.push(BranchSelector::If(self.expr(condition, Some(&Type::Bool))?));
+                    branches.extend([then_value.as_ref(), else_value.as_ref()]);
+                }
+                Expr::Match { subject, arms } => {
+                    selectors.push(BranchSelector::Match(self.match_selector(subject, arms)?));
+                    branches.extend(arms.iter().map(|arm| &arm.value));
+                }
+                _ => {
+                    selectors.push(BranchSelector::Value);
+                    branches.push(*item);
+                }
+            }
+        }
+        let mut branches = check(self, &branches)?.into_iter();
+        Ok(selectors
+            .into_iter()
+            .map(|selector| match selector {
+                BranchSelector::Value => branches.next().expect("one value per item"),
+                BranchSelector::Match(selector) => selector.with_values(&mut branches),
+                BranchSelector::If(condition) => {
+                    let then_value = branches.next().expect("then branch");
+                    let else_value = branches.next().expect("else branch");
+                    TypedExpr {
+                        ty: then_value.ty.clone(),
+                        kind: K::If {
+                            condition: Box::new(condition),
+                            then_value: Box::new(then_value),
+                            else_value: Box::new(else_value),
+                        },
+                    }
+                }
+            })
+            .collect())
+    }
+
+    /// Check each column of same-arity tuple constructors as one type group.
+    fn check_tuple_results(
+        &mut self,
+        tuples: &[&[Expr]],
+        mut check: impl FnMut(&mut Self, usize, &[&Expr]) -> Result<Vec<TypedExpr>, String>,
+    ) -> Result<Vec<TypedExpr>, String> {
+        let arity = tuples[0].len();
+        let mut values: Vec<_> = tuples.iter().map(|_| Vec::with_capacity(arity)).collect();
+        let mut types = Vec::with_capacity(arity);
+        for i in 0..arity {
+            let fields: Vec<_> = tuples.iter().map(|tuple| &tuple[i]).collect();
+            let fields = check(self, i, &fields)?;
+            types.push(fields[0].ty.clone());
+            for (tuple, field) in values.iter_mut().zip(fields) {
+                tuple.push(field);
+            }
+        }
+        let ty = Type::Tuple(types);
+        Ok(values
+            .into_iter()
+            .map(|fields| TypedExpr {
+                ty: ty.clone(),
+                kind: K::Tuple(fields),
+            })
+            .collect())
     }
 
     /// An aggregate carry may obtain different field types from different
@@ -3897,20 +3937,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         && (checker.module_constant(name).is_some()
                             || checker.is_enum_member_name(name)?)))
             })?;
+            if arms
+                .iter()
+                .flat_map(|arm| &arm.patterns)
+                .any(|p| matches!(p, MatchPattern::Tuple(_)))
+            {
+                return checker.tuple_match_selector(subject, arms);
+            }
             let mut values = checker.check_results(&operands, None)?.into_iter();
             let subject = values.next().expect("subject is the first operand");
             check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
                 checker.zero_calls_function()
             })?;
-            let patterns = if let Type::Enum { name, .. } = &subject.ty {
-                let def = checker
-                    .structs
-                    .enums
-                    .get(name)
-                    .ok_or_else(|| format!("unknown enum '{name}'"))?;
-                match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
-            } else {
-                match_patterns::check_patterns(&subject.ty, arms, values)?
+            let patterns = match &subject.ty {
+                Type::Enum { name, .. } => {
+                    let def = checker
+                        .structs
+                        .enums
+                        .get(name)
+                        .ok_or_else(|| format!("unknown enum '{name}'"))?;
+                    match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
+                }
+                Type::Tuple(_) => return checker.finish_tuple_match(subject, arms),
+                _ => match_patterns::check_patterns(&subject.ty, arms, values)?,
             };
             Ok(MatchSelector { subject, patterns })
         })
@@ -4138,13 +4187,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let subject = checker
                     .checked_constant(&selector.subject)?
                     .ok_or("slice type dimension must be a compile-time constant")?;
-                let value = subject.as_bits().map_err(|e| e.to_string())?;
-                let (signed, _) = repr_bits(&selector.subject.ty).expect("checked scalar match");
-                let selected = selector
-                    .patterns
-                    .iter()
-                    .position(|patterns| patterns.iter().any(|p| p.matches(value, signed)))
-                    .expect("exhaustive match");
+                let selected = selector.selected_arm(&subject)?;
                 let values = arms
                     .iter()
                     .map(|arm| checker.dimension_expr(&arm.value, context_width))

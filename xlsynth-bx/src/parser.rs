@@ -580,6 +580,14 @@ struct ParsedExpr {
     spelling: ExprSpelling,
 }
 
+/// Canonical spellings of tuple and range patterns in one match expression.
+#[derive(Default)]
+struct MatchPatternSpellings {
+    current: String,
+    contains_range: bool,
+    seen: BTreeSet<String>,
+}
+
 /// An iterable being parsed, retaining expression heights through parentheses.
 enum ParsedIterable {
     Array(ParsedExpr),
@@ -2157,11 +2165,11 @@ impl<'s> Parser<'s> {
         let subject = self.match_value(Braces::MatchArms)?;
         self.expect("{")?;
         let mut height = subject.height;
-        let mut range_spellings = BTreeSet::new();
+        let mut spellings = MatchPatternSpellings::default();
         let arms = self.list("}", |parser| {
-            let mut patterns = vec![parser.match_pattern(&mut range_spellings)?];
+            let mut patterns = vec![parser.match_arm_pattern(&mut spellings)?];
             while parser.eat("|") {
-                patterns.push(parser.match_pattern(&mut range_spellings)?);
+                patterns.push(parser.match_arm_pattern(&mut spellings)?);
             }
             parser.expect("=>")?;
             let value = parser.match_value(Braces::Struct)?;
@@ -2180,44 +2188,77 @@ impl<'s> Parser<'s> {
         )
     }
 
+    /// Detect repeated spellings even when the pattern has an empty domain.
+    fn match_arm_pattern(
+        &mut self,
+        spellings: &mut MatchPatternSpellings,
+    ) -> Result<MatchPattern, String> {
+        let first = self.pos;
+        spellings.current.clear();
+        spellings.contains_range = false;
+        let pattern = self.match_pattern(spellings)?;
+        let tuple = matches!(pattern, MatchPattern::Tuple(_));
+        if (tuple || spellings.contains_range) && !spellings.seen.insert(spellings.current.clone())
+        {
+            let message = if tuple {
+                "exact-duplicate match pattern"
+            } else {
+                "duplicate range pattern"
+            };
+            return Err(diagnostic(self.source, self.tokens[first].start, message));
+        }
+        Ok(pattern)
+    }
+
+    /// Parse tuple patterns recursively, building a key for the full pattern.
     fn match_pattern(
         &mut self,
-        range_spellings: &mut BTreeSet<String>,
+        spellings: &mut MatchPatternSpellings,
     ) -> Result<MatchPattern, String> {
         if self.eat("_") {
+            spellings.current.push('_');
             return Ok(MatchPattern::Wildcard);
         }
+        if self.eat("(") {
+            spellings.current.push('(');
+            return self.nested(|parser| {
+                let fields = parser.list(")", |parser| {
+                    let field = parser.match_pattern(spellings)?;
+                    spellings.current.push(',');
+                    Ok(field)
+                })?;
+                spellings.current.push(')');
+                Ok(MatchPattern::Tuple(fields))
+            });
+        }
+        let first = self.pos;
         let mut end = 1;
         while end < 5 && self.peek(end) == "::" && is_function_identifier(self.peek(end + 1)) {
             end += 2;
         }
-        if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|") {
+        if is_function_identifier(self.peek(0)) && matches!(self.peek(end), "=>" | "|" | "," | ")")
+        {
             // The checker resolves a scalar constant, value parametric, or enum
             // member. DSLX requires numeric literals on both sides of a range.
             let name = self.name_or_qualified_member()?;
-            return Ok(MatchPattern::Literal(self.named_value(name)?));
+            let value = self.named_value(name)?;
+            spellings
+                .current
+                .extend(self.tokens[first..self.pos].iter().map(|token| token.text));
+            return Ok(MatchPattern::Literal(value));
         }
-        let first = self.pos;
         let start = self.pattern_literal()?;
+        append_literal_pattern_spelling(&mut spellings.current, &self.tokens[first..self.pos]);
         let separator = self.pos;
         let inclusive = self.eat("..=");
         if inclusive || self.eat("..") {
             let end = self.pattern_literal()?;
-            // An empty interval contributes no coverage, but DSLX still
-            // rejects repeated source patterns, including in one alternative.
-            let spelling = format!(
-                "{}{}{}",
-                literal_pattern_spelling(&self.tokens[first..separator]),
-                self.tokens[separator].text,
-                literal_pattern_spelling(&self.tokens[separator + 1..self.pos]),
+            spellings.contains_range = true;
+            spellings.current.push_str(self.tokens[separator].text);
+            append_literal_pattern_spelling(
+                &mut spellings.current,
+                &self.tokens[separator + 1..self.pos],
             );
-            if !range_spellings.insert(spelling) {
-                return Err(diagnostic(
-                    self.source,
-                    self.tokens[first].start,
-                    "duplicate range pattern",
-                ));
-            }
             Ok(MatchPattern::Range {
                 start,
                 end,
@@ -2255,8 +2296,8 @@ impl<'s> Parser<'s> {
         Ok(literal.value)
     }
 
-    /// In a match subject, a named field starts a struct constructor while a
-    /// scalar literal or wildcard starts the pattern list.
+    /// In a match subject, distinguish a struct constructor from the pattern
+    /// list by what follows the opening brace.
     fn struct_braces(&self, braces: Braces) -> bool {
         match braces {
             Braces::Struct => true,
@@ -3553,8 +3594,11 @@ pub(crate) fn character_or_bool_digits(text: &str, ty: &Type) -> Result<String, 
 /// DSLX retains the outer type spelling, the numeric radix and separators,
 /// and whether the literal was parenthesized. Character escapes denote the
 /// same literal as the corresponding byte.
-fn literal_pattern_spelling(tokens: &[Token]) -> String {
-    let mut result = String::new();
+fn append_literal_pattern_spelling(result: &mut String, tokens: &[Token]) {
+    let parenthesized = tokens.iter().any(|t| t.text == "(");
+    if parenthesized {
+        result.push('(');
+    }
     if let Some(colon) = tokens.iter().position(|t| t.text == ":") {
         for token in &tokens[..=colon] {
             result.push_str(token.text);
@@ -3569,10 +3613,8 @@ fn literal_pattern_spelling(tokens: &[Token]) -> String {
     } else {
         result.push_str(value.text);
     }
-    if tokens.iter().any(|t| t.text == "(") {
-        format!("({result})")
-    } else {
-        result
+    if parenthesized {
+        result.push(')');
     }
 }
 
@@ -4990,7 +5032,7 @@ block dispatch(clk, match: u8) -> u8 {
     }
 
     #[test]
-    fn match_patterns_require_scalar_literals_and_punctuated_arms() {
+    fn match_patterns_require_punctuated_arms_and_literal_range_endpoints() {
         for arms in [
             "0 => x 1 => x",
             "0 -> x",
@@ -4999,7 +5041,8 @@ block dispatch(clk, match: u8) -> u8 {
             "0 .. = 1 => x",
             "0 .. x => x",
             "- 1 => x",
-            "(0,) => x",
+            "(0 | 1,) => x",
+            "(_, ..) => x",
             "[0] => x",
             "NAME .. u8:1 => x",
             "u8[1]:0 => x",
@@ -5007,6 +5050,54 @@ block dispatch(clk, match: u8) -> u8 {
             let src = format!("fn f(x:u8) -> u8 {{ match x {{ {arms} }} }}");
             assert!(parse_module(&src).is_err(), "{src}");
         }
+    }
+
+    #[test]
+    fn tuple_match_patterns_preserve_shape_and_leaf_order() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn f(x: ((bool,), (), u8)) -> bool {
+    match x {
+        ((false), (), u8:1..u8:2) | ((true,), (), limits::MAX,) => true,
+        (_, _, _) => false,
+    }
+}
+"#,
+        )?;
+        let Expr::Match { arms, .. } = &module.functions[0].body else {
+            panic!("expected match");
+        };
+        let literal = |text: &str| Expr::Literal {
+            ty: Some(Type::Bits {
+                signed: false,
+                width: 8,
+            }),
+            text: text.into(),
+        };
+        assert_eq!(
+            arms[0].patterns,
+            [
+                MatchPattern::Tuple(vec![
+                    MatchPattern::Tuple(vec![MatchPattern::Literal(Expr::Bool(false))]),
+                    MatchPattern::Tuple(vec![]),
+                    MatchPattern::Range {
+                        start: literal("1"),
+                        end: literal("2"),
+                        inclusive: false,
+                    },
+                ]),
+                MatchPattern::Tuple(vec![
+                    MatchPattern::Tuple(vec![MatchPattern::Literal(Expr::Bool(true))]),
+                    MatchPattern::Tuple(vec![]),
+                    MatchPattern::Literal(Expr::Name("limits::MAX".into())),
+                ]),
+            ]
+        );
+        assert_eq!(
+            arms[0].patterns[0].literals().cloned().collect::<Vec<_>>(),
+            [Expr::Bool(false), literal("1"), literal("2")]
+        );
+        Ok(())
     }
 
     #[test]
@@ -5041,6 +5132,24 @@ block dispatch(clk, match: u8) -> u8 {
                 "fn f(x:u8) -> u8 {{ match x {{ {left}..{left} => x, {right}..{right} => x, _ => x }} }}"
             );
             assert_eq!(parse_module(&src).is_err(), duplicate, "{src}");
+        }
+    }
+
+    #[test]
+    fn range_spelling_is_compared_as_part_of_the_whole_tuple_pattern() {
+        let left = "((u2:1..u2:1, _), false)";
+        for (right, duplicate) in [
+            (left, true),
+            ("((u2:1 .. u2:1, _,), false,)", true),
+            ("((uN[2]:1..uN[2]:1, _), false)", false),
+            ("((u2:1..u2:1, _), true)", false),
+        ] {
+            for between in ["=> true,", "|"] {
+                let src = format!(
+                    "fn f(x: ((u2, bool), bool)) -> bool {{ match x {{ {left} {between} {right} => false, _ => true }} }}"
+                );
+                assert_eq!(parse_module(&src).is_err(), duplicate, "{src}");
+            }
         }
     }
 

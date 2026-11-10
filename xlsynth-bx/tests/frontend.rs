@@ -36,6 +36,8 @@ mod native_structs;
 mod numeric_enums;
 #[path = "frontend/scalar_match.rs"]
 mod scalar_match;
+#[path = "frontend/tuple_match.rs"]
+mod tuple_match;
 #[path = "frontend/unroll_for.rs"]
 mod unroll_for;
 

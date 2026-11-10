@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Block, Expr, ForIterable, Module, SourcePosition, Stmt, Type, WidthSliceType};
+use crate::ast::{Block, Expr, Module, SourceNode, SourcePosition, Stmt};
 use crate::bx_import::{LinkedSources, UnlinkedBlockScope, library_item};
 
 /// A BX warning category, also used in source-level `#[allow(...)]` attributes.
@@ -155,14 +155,6 @@ impl<'m> WarningCollector<'m> {
     }
 }
 
-/// A source node that may contain a structural declaration or child call.
-enum SourceNode<'a> {
-    Statement(&'a Stmt),
-    Expression(&'a Expr),
-    Iterable(&'a ForIterable),
-    Annotation(&'a Type),
-}
-
 /// A child call in an unchecked body can share its spelling with a local
 /// value. Other bodies can be classified directly from their source.
 #[derive(PartialEq)]
@@ -188,200 +180,55 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
     pending.extend(block.statements.iter().map(SourceNode::Statement));
     while let Some(node) = pending.pop() {
         match node {
-            SourceNode::Statement(stmt) => match stmt {
-                Stmt::Reg { .. }
-                | Stmt::Inst { .. }
-                | Stmt::Write { .. }
-                | Stmt::Connect { .. } => {
-                    return TemplateHardware::Known(true);
+            SourceNode::Statement(
+                Stmt::Reg { .. } | Stmt::Inst { .. } | Stmt::Write { .. } | Stmt::Connect { .. },
+            ) => return TemplateHardware::Known(true),
+            SourceNode::Statement(Stmt::Let { name, .. }) => {
+                binders.insert(name.clone());
+            }
+            SourceNode::Statement(Stmt::LetPattern(binding)) => {
+                binding.pattern.visit_names(&mut |name| {
+                    binders.insert(name.to_owned());
+                });
+            }
+            SourceNode::Expression(
+                Expr::Call { name, .. }
+                | Expr::MapBeforeUse { name, .. }
+                | Expr::ParametricCall { name, .. },
+            ) => {
+                if !formals.contains(name.as_str()) && is_block(name) {
+                    callees.insert(name.as_str());
                 }
-                Stmt::Let { name, value, ty } => {
-                    binders.insert(name.clone());
-                    pending.push(SourceNode::Expression(value));
-                    pending.extend(ty.iter().map(SourceNode::Annotation));
+                if let SourceNode::Expression(Expr::MapBeforeUse { args, .. }) = node {
+                    // Only the ordinary arguments can belong to a child call.
+                    pending.extend(args.iter().map(SourceNode::Expression));
+                    continue;
                 }
-                Stmt::LetPattern(binding) => {
+            }
+            SourceNode::Expression(Expr::UnrollFor(fold)) => {
+                binders.insert(fold.index.clone());
+                binders.insert(fold.accumulator.clone());
+            }
+            SourceNode::Expression(Expr::For(fold)) => {
+                for pattern in [&fold.element, &fold.accumulator] {
+                    pattern.visit_names(&mut |name| {
+                        binders.insert(name.to_owned());
+                    });
+                }
+            }
+            SourceNode::Expression(Expr::Map(map)) => {
+                binders.insert(map.parameter.clone());
+            }
+            SourceNode::Expression(Expr::Scope { bindings, .. }) => {
+                for binding in bindings {
                     binding.pattern.visit_names(&mut |name| {
                         binders.insert(name.to_owned());
                     });
-                    pending.push(SourceNode::Expression(&binding.value));
-                    pending.extend(binding.ty.iter().map(SourceNode::Annotation));
                 }
-                Stmt::If { condition, body } => {
-                    pending.push(SourceNode::Expression(condition));
-                    pending.extend(body.iter().map(SourceNode::Statement));
-                }
-            },
-            SourceNode::Iterable(ForIterable::Array(expr)) => {
-                pending.push(SourceNode::Expression(expr))
             }
-            SourceNode::Iterable(ForIterable::Range { start, limit, .. }) => {
-                pending.extend([start, limit].map(SourceNode::Expression));
-            }
-            SourceNode::Annotation(ty) => match ty {
-                Type::ParametricBits { signed, width } => {
-                    pending.extend([signed.as_ref(), width.as_ref()].map(SourceNode::Expression));
-                }
-                Type::ParametricArray { element, size } => {
-                    pending.push(SourceNode::Annotation(element));
-                    pending.push(SourceNode::Expression(size));
-                }
-                Type::ParametricStruct { args, .. } => {
-                    pending.extend(args.iter().map(SourceNode::Expression));
-                }
-                Type::Array { element, .. } => pending.push(SourceNode::Annotation(element)),
-                Type::Tuple(fields) => pending.extend(fields.iter().map(SourceNode::Annotation)),
-                _ => { /* Concrete scalar and nominal annotations introduce no expressions. */ }
-            },
-            SourceNode::Expression(expr) => match expr {
-                Expr::Call { name, args }
-                | Expr::MapBeforeUse { name, args, .. }
-                | Expr::ParametricCall { name, args, .. } => {
-                    if !formals.contains(name.as_str()) && is_block(name) {
-                        callees.insert(name.as_str());
-                    }
-                    pending.extend(args.iter().map(SourceNode::Expression));
-                    if let Expr::ParametricCall { parametrics, .. } = expr {
-                        pending.extend(parametrics.iter().map(SourceNode::Expression));
-                    }
-                }
-                Expr::UnrollFor(fold) => {
-                    binders.insert(fold.index.clone());
-                    binders.insert(fold.accumulator.clone());
-                    pending.extend(fold.body.iter().map(SourceNode::Statement));
-                    if let Some((element, accumulator)) = &fold.annotation {
-                        pending.extend([element, accumulator].map(SourceNode::Annotation));
-                    }
-                    pending.extend(
-                        [&fold.start, &fold.limit, &fold.seed, &fold.result]
-                            .map(SourceNode::Expression),
-                    );
-                }
-                Expr::For(fold) => {
-                    for pattern in [&fold.element, &fold.accumulator] {
-                        pattern.visit_names(&mut |name| {
-                            binders.insert(name.to_owned());
-                        });
-                    }
-                    pending.push(SourceNode::Iterable(&fold.iterable));
-                    if let Some((element, accumulator)) = &fold.annotation {
-                        pending.extend([element, accumulator].map(SourceNode::Annotation));
-                    }
-                    pending.extend([&fold.seed, &fold.body].map(SourceNode::Expression));
-                }
-                Expr::Map(map) => {
-                    binders.insert(map.parameter.clone());
-                    pending.push(SourceNode::Iterable(&map.iterable));
-                    pending.push(SourceNode::Expression(&map.body));
-                    pending.extend(
-                        map.parameter_type
-                            .iter()
-                            .chain(&map.result_type)
-                            .map(SourceNode::Annotation),
-                    );
-                }
-                Expr::NamedMap {
-                    iterable,
-                    parametrics,
-                    ..
-                } => {
-                    pending.push(SourceNode::Iterable(iterable));
-                    pending.extend(parametrics.iter().map(SourceNode::Expression));
-                }
-                Expr::Scope { bindings, result } => {
-                    for binding in bindings {
-                        binding.pattern.visit_names(&mut |name| {
-                            binders.insert(name.to_owned());
-                        });
-                    }
-                    pending.push(SourceNode::Expression(result));
-                    pending.extend(bindings.iter().map(|b| SourceNode::Expression(&b.value)));
-                    pending.extend(
-                        bindings
-                            .iter()
-                            .filter_map(|b| b.ty.as_ref())
-                            .map(SourceNode::Annotation),
-                    );
-                }
-                Expr::If {
-                    condition,
-                    then_value,
-                    else_value,
-                } => {
-                    pending.extend(
-                        [condition.as_ref(), then_value, else_value].map(SourceNode::Expression),
-                    );
-                }
-                Expr::Match { subject, arms } => {
-                    pending.push(SourceNode::Expression(subject));
-                    for arm in arms {
-                        pending.push(SourceNode::Expression(&arm.value));
-                        pending.extend(
-                            arm.patterns
-                                .iter()
-                                .flat_map(|p| p.literals())
-                                .map(SourceNode::Expression),
-                        );
-                    }
-                }
-                Expr::Array(items) | Expr::Tuple(items) => {
-                    pending.extend(items.iter().map(SourceNode::Expression));
-                }
-                Expr::Struct { fields, .. }
-                | Expr::AppliedStruct { fields, .. }
-                | Expr::ParametricStruct { fields, .. } => {
-                    if let Expr::ParametricStruct { args, .. } = expr {
-                        pending.extend(args.iter().map(SourceNode::Expression));
-                    }
-                    pending.extend(
-                        fields
-                            .iter()
-                            .map(|(_, value)| SourceNode::Expression(value)),
-                    );
-                }
-                Expr::Field { value, .. } | Expr::Unary { value, .. } => {
-                    pending.push(SourceNode::Expression(value));
-                }
-                Expr::Cast { value, ty } => {
-                    pending.push(SourceNode::Expression(value));
-                    pending.push(SourceNode::Annotation(ty));
-                }
-                Expr::TypeBuiltin { types, args, .. } => {
-                    pending.extend(types.iter().map(SourceNode::Annotation));
-                    pending.extend(args.iter().map(SourceNode::Expression));
-                }
-                Expr::Index { value, index }
-                | Expr::Binary {
-                    left: value,
-                    right: index,
-                    ..
-                } => {
-                    pending.extend([value.as_ref(), index.as_ref()].map(SourceNode::Expression));
-                }
-                Expr::WidthSlice {
-                    value,
-                    start,
-                    width,
-                } => {
-                    pending.extend([value.as_ref(), start.as_ref()].map(SourceNode::Expression));
-                    match width {
-                        WidthSliceType::Bits { signed, bit_count } => pending.extend(
-                            [signed.as_ref(), bit_count.as_ref()].map(SourceNode::Expression),
-                        ),
-                        WidthSliceType::Concrete(ty) => pending.push(SourceNode::Annotation(ty)),
-                    }
-                }
-                Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
-                    pending.push(SourceNode::Annotation(ty));
-                }
-                Expr::Name(_)
-                | Expr::Bool(_)
-                | Expr::ByteString(_)
-                | Expr::Literal { ty: None, .. } => {
-                    // Leaf values introduce no hardware.
-                }
-            },
+            _ => { /* These nodes do not declare binders or name a potential child. */ }
         }
+        node.push_children(&mut pending);
     }
     if callees.is_empty() {
         TemplateHardware::Known(false)

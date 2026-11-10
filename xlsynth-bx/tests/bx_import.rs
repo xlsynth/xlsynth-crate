@@ -38,6 +38,35 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
     )
 }
 
+#[test]
+fn imported_tuple_match_uses_the_library_constant() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "flags.bx",
+        r#"
+const TARGET = u8:73;
+pub fn decode(x: u8) -> u8 {
+    match (true, (x, ())) {
+        (true, (TARGET, ())) => u8:1,
+        _ => u8:0,
+    }
+}
+"#,
+    )?;
+    let source = r#"
+use flags;
+const TARGET = u8:74;
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 { flags::decode(x) }
+"#;
+    let options = search_paths(&[dir.path()]);
+    let package = compile_design(source, &options)?;
+    assert_eq!(run(package.clone(), 73)?, IrValue::make_ubits(8, 1)?);
+    assert_eq!(run(package, 74)?, IrValue::make_ubits(8, 0)?);
+    Ok(())
+}
+
 /// Evaluate the selected block, including its imported child instances.
 fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
     xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;

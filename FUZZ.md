@@ -217,6 +217,20 @@ From `xlsynth-bx`, run:
 XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_scalar_match --sanitizer none
 ```
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_tuple_match.rs
+
+Compares tuple `match` in BX blocks and local functions with pinned DSLX
+source checking, concrete execution, and compiled IR. The generator varies
+nested tuple shapes, singleton and unit patterns, alternatives, and leaves
+with booleans, wildcards, constants, and signed or unsigned ranges. Generated
+coverage partitions, gaps, and overlaps detect exhaustiveness and first-match
+priority errors. Concrete inputs cross range endpoints with the Boolean
+combinations to exercise overlapping arms and nested field projections.
+Rejected programs exercise redundant patterns and incorrect tuple arity or
+leaf signedness.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_tuple_match`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_unroll_types.rs
 
 Compares the inferred type of an unannotated BX binding to native DSLX
