@@ -633,7 +633,8 @@ fn visit_bit_members(
         Type::Bits { .. } | Type::Bool => visit(path, ty)?,
         Type::ParametricArray { .. }
         | Type::ParametricBits { .. }
-        | Type::ParametricStruct { .. } => {
+        | Type::ParametricStruct { .. }
+        | Type::TypeApplied { .. } => {
             return Err("literal inference requires resolved type dimensions".into());
         }
         Type::Enum { .. } | Type::Named(_) | Type::Applied { .. } => { /* A struct declares concrete types for its fields. */
@@ -683,7 +684,8 @@ pub(crate) fn unify_inferred_members(
             }
             Type::ParametricArray { .. }
             | Type::ParametricBits { .. }
-            | Type::ParametricStruct { .. } => {
+            | Type::ParametricStruct { .. }
+            | Type::TypeApplied { .. } => {
                 return Err("literal inference requires resolved type dimensions".into());
             }
         }

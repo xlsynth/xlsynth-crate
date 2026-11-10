@@ -25,7 +25,7 @@ impl<'a> Layouts<'a> {
         Ok(match ty {
             Type::Bits { width, .. } | Type::Enum { width, .. } => ir::Type::Bits(*width),
             Type::Bool => ir::Type::Bits(1),
-            Type::Applied { .. } | Type::ParametricStruct { .. } => {
+            Type::Applied { .. } | Type::ParametricStruct { .. } | Type::TypeApplied { .. } => {
                 return Err(BuilderError::InvalidOperation(format!(
                     "unresolved struct type '{ty}'"
                 )));

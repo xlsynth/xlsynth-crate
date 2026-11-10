@@ -133,9 +133,10 @@ pub(crate) fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String>
             "(uN[{width}]:{} as {name})",
             value.to_string_fmt_no_prefix(IrFormatPreference::Hex)
         )),
-        Type::Named(_) | Type::Applied { .. } | Type::ParametricStruct { .. } => {
-            Err(format!("cannot render fuzz input of named type {ty}"))
-        }
+        Type::Named(_)
+        | Type::Applied { .. }
+        | Type::ParametricStruct { .. }
+        | Type::TypeApplied { .. } => Err(format!("cannot render fuzz input of named type {ty}")),
         Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
             Err(format!("fuzz input has unresolved dimensions: {ty}"))
         }
@@ -219,6 +220,7 @@ fn dslx_structural_type(ty: &Type) -> Option<String> {
         | Type::Enum { .. }
         | Type::Applied { .. }
         | Type::ParametricStruct { .. }
+        | Type::TypeApplied { .. }
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. } => return None,
     })

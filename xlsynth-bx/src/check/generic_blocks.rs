@@ -11,8 +11,7 @@ use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, MAX_ELABORATION_DEPTH, ModuleDimensions,
-    StructTable, TypeResolver, TypeShape, compatible, resolve_type, source_type_nodes,
-    type_parameter_references,
+    StructTable, TypeResolver, TypeShape, compatible, resolve_type, type_parameter_references,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -302,6 +301,7 @@ impl Bindings {
         match pattern {
             Type::Named(name) => self.types.get(name).is_some_and(Option::is_none),
             Type::Tuple(fields) => fields.iter().any(|field| self.has_unbound_variable(field)),
+            Type::TypeApplied { args, .. } => args.iter().any(|arg| self.has_unbound_variable(arg)),
             Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
                 self.has_unbound_variable(element)
             }
@@ -406,7 +406,7 @@ impl Bindings {
                     *binding = Some(Rc::new(BoundType {
                         ty,
                         shape,
-                        source_nodes: source_type_nodes(actual),
+                        source_nodes: shape.source_nodes,
                         type_hash: hasher.finish(),
                     }));
                 }
@@ -414,6 +414,21 @@ impl Bindings {
             return Ok(());
         }
         match (formal, actual) {
+            (Type::TypeApplied { name, args }, Type::Named(actual)) => {
+                if let Some(instance) = structs.instances.get(actual)
+                    && instance.template.name == *name
+                    && instance.types.len() == args.len()
+                {
+                    for (formal, actual) in args.iter().zip(&instance.types) {
+                        self.match_pattern(formal, actual, structs, pattern)?;
+                    }
+                    Ok(())
+                } else if pattern != TypePattern::Resolved {
+                    Ok(())
+                } else {
+                    Err(format!("expected {formal}, got {actual}"))
+                }
+            }
             (Type::Tuple(formals), Type::Tuple(actuals)) if formals.len() == actuals.len() => {
                 for (formal, actual) in formals.iter().zip(actuals) {
                     self.match_pattern(formal, actual, structs, pattern)?;
@@ -475,6 +490,10 @@ impl Bindings {
             Type::Array { element, size } => Type::Array {
                 element: Box::new(self.substitute(element)),
                 size: *size,
+            },
+            Type::TypeApplied { name, args } => Type::TypeApplied {
+                name: name.clone(),
+                args: args.iter().map(|arg| self.substitute(arg)).collect(),
             },
             Type::Bool
             | Type::Bits { .. }
@@ -540,7 +559,8 @@ fn canonical_argument(ty: &Type) -> Type {
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
         | Type::Applied { .. }
-        | Type::ParametricStruct { .. } => ty.clone(),
+        | Type::ParametricStruct { .. }
+        | Type::TypeApplied { .. } => ty.clone(),
     }
 }
 

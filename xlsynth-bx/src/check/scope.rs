@@ -214,6 +214,7 @@ impl BodyChecker<'_, '_> {
         // Constructors and branches share their members' contexts. A
         // self-determined leaf such as a function call can supply its actual
         // type now and use the same checked value during final elaboration.
+        // A bare type-parametric struct may need a sibling's type first.
         if capture_anchors
             && !matches!(
                 expr,
@@ -226,6 +227,9 @@ impl BodyChecker<'_, '_> {
                     | Expr::Match { .. }
             )
             && !super::has_aggregate_literal(expr)
+            && self
+                .inferred_struct_constructor(expr)
+                .is_none_or(|template| template.type_params.is_empty())
             && self.reference_type(expr).is_none()
             && has_concrete_element_type(expr, self.common_widths())?
         {
@@ -708,6 +712,12 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                     capture_names(arg, aliases);
                 }
             }
+            Type::TypeApplied { name, args } => {
+                rename(name, aliases);
+                for arg in args {
+                    rename_type(arg, aliases);
+                }
+            }
             Type::Array { element, .. } => rename_type(element, aliases),
             Type::ParametricArray { element, size } => {
                 rename_type(element, aliases);
@@ -783,6 +793,15 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                 .chain(fields.iter_mut().map(|(_, value)| value))
             {
                 capture_names(expr, aliases);
+            }
+        }
+        Expr::TypeAppliedStruct { name, args, fields } => {
+            rename(name, aliases);
+            for arg in args {
+                rename_type(arg, aliases);
+            }
+            for (_, value) in fields {
+                capture_names(value, aliases);
             }
         }
         Expr::Call { name, args } => {

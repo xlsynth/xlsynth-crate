@@ -126,6 +126,16 @@ impl fmt::Display for Type {
                 }
                 f.write_str(">")
             }
+            Type::TypeApplied { name, args } => {
+                write!(f, "{name}<")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                f.write_str(">")
+            }
             Type::Array { element, size } => write!(f, "{element}[{size}]"),
             Type::ParametricBits { signed, width } => match &**signed {
                 Expr::Bool(false) => write!(f, "uN[{}]", Dimension(width)),
@@ -409,6 +419,13 @@ struct BlockSpecializations<'m> {
     constant_budgets: ConstantBudgets,
 }
 
+/// Concrete compile-time arguments selected for a block call.
+struct BlockParametricArguments<'m> {
+    bindings: Bindings,
+    values: Vec<BoundParametricValue>,
+    callbacks: Vec<Rc<BoundCallback<'m>>>,
+}
+
 impl<'m> BlockSpecializations<'m> {
     fn new(reserved: BTreeSet<String>) -> Self {
         Self {
@@ -428,11 +445,10 @@ impl<'m> BlockSpecializations<'m> {
     fn intern(
         &mut self,
         template: &BlockTemplate<'m>,
-        bindings: Bindings,
-        parametric_values: Vec<BoundParametricValue>,
-        callbacks: Vec<Rc<BoundCallback<'m>>>,
+        arguments: BlockParametricArguments<'m>,
         path: &[&'m str],
-        structs: &StructTable,
+        dimensions: ModuleDimensions<'_, 'm>,
+        types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Rc<BlockSpecialization<'m>>, String> {
         let block = template.block;
         let name = block.name.as_str();
@@ -444,7 +460,12 @@ impl<'m> BlockSpecializations<'m> {
                 "block dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{name}'"
             ));
         }
-        let parametric_values: Rc<[_]> = parametric_values.into();
+        let BlockParametricArguments {
+            bindings,
+            values,
+            callbacks,
+        } = arguments;
+        let parametric_values: Rc<[_]> = values.into();
         let key = BlockKey {
             name,
             types: bindings.arguments(&block.type_params)?,
@@ -464,7 +485,9 @@ impl<'m> BlockSpecializations<'m> {
         }
         // Distinct explicit bindings can replicate the same wide ports.
         // Charge the fully bound interface before cloning its concrete types.
-        if !callbacks.is_empty() || !parametric_values.is_empty() {
+        let mut formal_nodes = 0;
+        let charge_signature = !callbacks.is_empty() || !parametric_values.is_empty();
+        if charge_signature {
             self.expansion_work = self.expansion_work.saturating_add(parametric_values.len());
             for ty in template
                 .params
@@ -472,7 +495,11 @@ impl<'m> BlockSpecializations<'m> {
                 .map(|p| &p.ty)
                 .chain([&template.result])
             {
-                let shape = structs.formal_shape(ty, MAX_ELABORATION_DEPTH, Some(&bindings))?;
+                let shape =
+                    types
+                        .structs
+                        .formal_shape(ty, MAX_ELABORATION_DEPTH, Some(&bindings))?;
+                formal_nodes += shape.ir_nodes;
                 self.expansion_work = self.expansion_work.saturating_add(shape.ir_nodes);
                 if self.expansion_work > MAX_TYPE_SIZE {
                     return Err(format!(
@@ -487,18 +514,36 @@ impl<'m> BlockSpecializations<'m> {
             .map(|p| {
                 Ok(Param {
                     name: p.name.clone(),
-                    ty: bindings.concrete_type(&p.ty)?,
+                    ty: types.materialize_type_applications(
+                        bindings.concrete_type(&p.ty)?,
+                        dimensions,
+                        MAX_ELABORATION_DEPTH,
+                    )?,
                 })
             })
             .collect::<Result<_, String>>()?;
-        let result = bindings.concrete_type(&template.result)?;
+        let result = types.materialize_type_applications(
+            bindings.concrete_type(&template.result)?,
+            dimensions,
+            MAX_ELABORATION_DEPTH,
+        )?;
         let interface = BlockInterface::new(
             &block.clock,
             block.reset.as_deref(),
             params,
             result,
-            structs,
+            types.structs,
         )?;
+        if charge_signature {
+            self.expansion_work = self
+                .expansion_work
+                .saturating_add(interface.port_type_nodes.saturating_sub(formal_nodes));
+            if self.expansion_work > MAX_TYPE_SIZE {
+                return Err(format!(
+                    "block signature exceeds the generic block specialization expansion limit of {MAX_TYPE_SIZE}"
+                ));
+            }
+        }
         let symbol = loop {
             let candidate = format!("{name}__{}", self.next_id);
             self.next_id += 1;
@@ -552,6 +597,7 @@ pub(crate) fn source_type_nodes(ty: &Type) -> usize {
         Type::ParametricBits { .. } => 1,
         Type::Applied { args, .. } => 1 + args.len(),
         Type::ParametricStruct { args, .. } => 1 + args.len(),
+        Type::TypeApplied { args, .. } => 1 + args.iter().map(source_type_nodes).sum::<usize>(),
         Type::Named(_) | Type::Enum { .. } | Type::Bool | Type::Bits { .. } => 1,
     }
 }
@@ -654,6 +700,10 @@ impl Declarations<'_> {
                 | Type::ParametricStruct { name, .. } => {
                     self.check_type_name_visibility(name, at)?
                 }
+                Type::TypeApplied { name, args } => {
+                    self.check_type_name_visibility(name, at)?;
+                    pending.extend(args.iter().rev());
+                }
                 Type::Tuple(fields) => pending.extend(fields.iter().rev()),
                 Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
                     pending.push(element)
@@ -708,6 +758,40 @@ fn resolve_type<'m>(
     remaining: usize,
 ) -> Result<Type, String> {
     match ty {
+        Type::TypeApplied { name, args } => {
+            if is_local(name) {
+                return Err(format!("'{name}' names a local value here"));
+            }
+            if let Some(bindings) = bindings {
+                bindings.reject_value(name)?;
+            }
+            let template = types
+                .structs
+                .template(name)
+                .ok_or_else(|| format!("unknown type-parametric struct '{name}'"))?;
+            dimensions
+                .decls
+                .check_type_name_visibility(name, dimensions.position)?;
+            struct_parametrics::check_type_arity(template, args.len())?;
+            let budget = child_type_budget(remaining)?;
+            let args = args
+                .iter()
+                .map(|arg| resolve_type(arg, is_local, bindings, dimensions, types, budget))
+                .collect::<Result<Vec<_>, _>>()?;
+            let ty = Type::TypeApplied {
+                name: name.clone(),
+                args,
+            };
+            let ty = if let Some(bindings) = bindings {
+                if bindings.has_unbound_variable(&ty) {
+                    return Ok(ty);
+                }
+                bindings.concrete_type(&ty)?
+            } else {
+                ty
+            };
+            types.materialize_type_applications(ty, dimensions, remaining)
+        }
         Type::ParametricStruct { name, args } => {
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
@@ -745,7 +829,14 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
-                checker.specialize_struct(template, args, None, remaining)
+                checker.specialize_struct(
+                    template,
+                    struct_parametrics::StructArguments::Values {
+                        explicit: args,
+                        inferred: &[],
+                    },
+                    remaining,
+                )
             } else if matches!(ty, Type::Applied { .. }) {
                 Err(format!(
                     "'{name}' requires an imported DSLX struct template"
@@ -824,6 +915,52 @@ struct TypeResolver<'a, 'm> {
 }
 
 impl<'m> TypeResolver<'_, 'm> {
+    /// Resolve struct applications whose arguments have already been resolved
+    /// and substituted. Their fields are evaluated in the declaration scope.
+    fn materialize_type_applications(
+        &mut self,
+        ty: Type,
+        dimensions: ModuleDimensions<'_, 'm>,
+        remaining: usize,
+    ) -> Result<Type, String> {
+        match ty {
+            Type::TypeApplied { name, args } => {
+                let template = self
+                    .structs
+                    .template(&name)
+                    .ok_or_else(|| format!("unknown type-parametric struct '{name}'"))?;
+                let budget = child_type_budget(remaining)?;
+                let args = args
+                    .into_iter()
+                    .map(|arg| self.materialize_type_applications(arg, dimensions, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.structs.update_imports(self.resolver)?;
+                self.struct_scope(dimensions).specialize_struct(
+                    template,
+                    struct_parametrics::StructArguments::Types(&args),
+                    remaining,
+                )
+            }
+            Type::Tuple(fields) => {
+                let budget = child_type_budget(remaining)?;
+                fields
+                    .into_iter()
+                    .map(|field| self.materialize_type_applications(field, dimensions, budget))
+                    .collect::<Result<_, _>>()
+                    .map(Type::Tuple)
+            }
+            Type::Array { element, size } => Ok(Type::Array {
+                element: Box::new(self.materialize_type_applications(
+                    *element,
+                    dimensions,
+                    child_type_budget(remaining)?,
+                )?),
+                size,
+            }),
+            _ => Ok(ty),
+        }
+    }
+
     /// Use the module registry so a type argument can specialize a generic
     /// helper.
     fn struct_scope<'a>(&'a mut self, dimensions: ModuleDimensions<'a, 'm>) -> BodyChecker<'a, 'm> {
@@ -983,6 +1120,10 @@ fn type_dependencies<'a>(
                     }
                 }
             }
+            Type::TypeApplied { name, args } => {
+                nominal(ty, name);
+                pending.extend(args.iter().rev());
+            }
             Type::Array { element, .. } => pending.push(element),
             Type::ParametricArray { element, size } => {
                 dimension(size);
@@ -1019,6 +1160,10 @@ struct TypeShape {
     /// Nodes in the lowered IR type. Arrays store their element type once,
     /// and nominal structs expand to tuples.
     ir_nodes: usize,
+    /// Nodes in the source type copied during substitution.
+    source_nodes: usize,
+    /// Bytes in nominal names retained when this type is copied.
+    name_bytes: usize,
 }
 
 impl<'a> Declarations<'a> {
@@ -1190,7 +1335,15 @@ impl BlockInterface {
                 type_nodes,
             });
         }
-        let outputs = output_ports(result, &structs.definitions)?;
+        let outputs = if let Type::TypeApplied { name, .. } = result {
+            structs
+                .template(name)
+                .ok_or_else(|| unknown_declaration("struct", name))?
+                .fields
+                .clone()
+        } else {
+            output_ports(result, &structs.definitions)?
+        };
         for output in &outputs {
             if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
                 return Err(format!(
@@ -1259,7 +1412,11 @@ impl StructTable<'_> {
     fn named_shape(&self, name: &str) -> Result<TypeShape, String> {
         self.indices
             .get(name)
-            .map(|(_, shape)| *shape)
+            .map(|(_, shape)| TypeShape {
+                source_nodes: 1,
+                name_bytes: name.len(),
+                ..*shape
+            })
             .ok_or_else(|| unknown_declaration("struct", name))
     }
 
@@ -1284,6 +1441,8 @@ impl TypeShape {
         size: 1,
         depth: 0,
         ir_nodes: 1,
+        source_nodes: 1,
+        name_bytes: 0,
     };
 
     /// Compute the expanded layout without allocating its substituted type.
@@ -1295,8 +1454,13 @@ impl TypeShape {
     ) -> Result<Self, String> {
         let shape = match ty {
             Type::Bool => Self::LEAF,
-            Type::Bits { width, .. } | Type::Enum { width, .. } => TypeShape {
+            Type::Bits { width, .. } => TypeShape {
                 size: (*width).max(1),
+                ..Self::LEAF
+            },
+            Type::Enum { name, width, .. } => TypeShape {
+                size: (*width).max(1),
+                name_bytes: name.len(),
                 ..Self::LEAF
             },
             Type::Tuple(items) => Self::aggregate(items, remaining, named_shape)?,
@@ -1306,13 +1470,36 @@ impl TypeShape {
                     size: child.size.saturating_mul((*size).max(1)).saturating_add(1),
                     depth: child.depth + 1,
                     ir_nodes: child.ir_nodes.saturating_add(1),
+                    source_nodes: child.source_nodes.saturating_add(1),
+                    name_bytes: child.name_bytes,
                 }
             }
-            Type::Named(name) => named_shape(name)?,
+            Type::Named(name) => {
+                let mut shape = named_shape(name)?;
+                shape.name_bytes = shape.name_bytes.max(name.len());
+                shape
+            }
             // Substitution checks visit source annotations before import
             // resolution. An application is a single nominal leaf there;
             // the checker validates its full layout after resolution.
             Type::Applied { .. } | Type::ParametricStruct { .. } => Self::LEAF,
+            Type::TypeApplied { name, args } => {
+                // Type arguments can be phantom. Count their syntax for
+                // substitution and validate the physical fields at interning.
+                let budget = child_type_budget(remaining)?;
+                let mut shape = Self {
+                    depth: 1,
+                    name_bytes: name.len(),
+                    ..Self::LEAF
+                };
+                for arg in args {
+                    let arg = Self::for_type(arg, budget, named_shape)?;
+                    shape.depth = shape.depth.max(arg.depth + 1);
+                    shape.source_nodes = shape.source_nodes.saturating_add(arg.source_nodes);
+                    shape.name_bytes = shape.name_bytes.saturating_add(arg.name_bytes);
+                }
+                shape
+            }
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
                 return Err("unresolved value-parametric dimension".into());
             }
@@ -1327,6 +1514,7 @@ impl TypeShape {
                 "type {ty} exceeds maximum concrete type size {MAX_TYPE_SIZE}"
             ));
         }
+        shape.check_source_budget()?;
         Ok(shape)
     }
 
@@ -1344,14 +1532,31 @@ impl TypeShape {
             let child = Self::for_type(field, child_budget, named_shape)?;
             shape.size = shape.size.saturating_add(child.size);
             shape.ir_nodes = shape.ir_nodes.saturating_add(child.ir_nodes);
+            shape.source_nodes = shape.source_nodes.saturating_add(child.source_nodes);
             shape.depth = shape.depth.max(child.depth + 1);
+            shape.name_bytes = shape.name_bytes.saturating_add(child.name_bytes);
             if shape.size > MAX_TYPE_SIZE {
                 return Err(format!(
                     "aggregate exceeds maximum concrete type size {MAX_TYPE_SIZE}"
                 ));
             }
+            shape.check_source_budget()?;
         }
         Ok(shape)
+    }
+
+    fn check_source_budget(&self) -> Result<(), String> {
+        if self.source_nodes > MAX_TYPE_SIZE {
+            return Err(format!(
+                "type syntax exceeds the limit of {MAX_TYPE_SIZE} nodes"
+            ));
+        }
+        if self.name_bytes > MAX_TYPE_SIZE {
+            return Err(format!(
+                "type names exceed the limit of {MAX_TYPE_SIZE} bytes"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1525,6 +1730,7 @@ pub(crate) fn check_sources(
             // Reserve local indices before reflection appends imported layouts.
             fields: Vec::new(),
             value_parametrics: Vec::new(),
+            type_params: Vec::new(),
         });
     }
     let mut declarations = Declarations {
@@ -2340,6 +2546,28 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok(ty)
     }
 
+    /// Instantiate a type from a resolved block signature at a call site.
+    fn bound_block_type(&mut self, ty: &Type, bindings: &Bindings) -> Result<Type, String> {
+        self.materialize_type_applications(bindings.concrete_type(ty)?, MAX_ELABORATION_DEPTH)
+    }
+
+    fn materialize_type_applications(
+        &mut self,
+        ty: Type,
+        remaining: usize,
+    ) -> Result<Type, String> {
+        let dimensions = self.decls.dimensions_at(
+            self.function_position.or(self.block_position),
+            &self.zero_binding,
+        );
+        TypeResolver {
+            resolver: self.resolver,
+            structs: self.structs,
+            functions: self.function_registry.as_deref_mut(),
+        }
+        .materialize_type_applications(ty, dimensions, remaining)
+    }
+
     fn hardware_name(&mut self, name: &str) -> Result<(), String> {
         if self.outputs.contains(name) {
             return Err(format!("name '{name}' collides with an output port"));
@@ -2428,11 +2656,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .expect("block elaboration")
                 .intern(
                     template,
-                    call.bindings,
-                    values,
-                    call.callbacks,
+                    BlockParametricArguments {
+                        bindings: call.bindings,
+                        values,
+                        callbacks: call.callbacks,
+                    },
                     path,
-                    self.structs,
+                    self.decls.module_dimensions(target),
+                    &mut TypeResolver {
+                        resolver: self.resolver,
+                        structs: self.structs,
+                        functions: self.function_registry.as_deref_mut(),
+                    },
                 )
                 .map_err(|e| format!("call to block '{target}': {e}"))?;
             prepared = Some(call.values.into_iter());
@@ -2479,9 +2714,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
         });
         match child.result {
-            Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
-                Err("unresolved block result dimension".into())
-            }
+            Type::ParametricBits { .. }
+            | Type::ParametricArray { .. }
+            | Type::TypeApplied { .. } => Err("unresolved block result dimension".into()),
             Type::Tuple(_)
             | Type::Named(_)
             | Type::Applied { .. }
@@ -2851,6 +3086,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let ty = self.struct_actual_type(name, args)?;
                 self.struct_literal(ty, fields, expected)
             }
+            Expr::TypeAppliedStruct { name, args, fields } => self.struct_literal(
+                Type::TypeApplied {
+                    name: name.clone(),
+                    args: args.clone(),
+                },
+                fields,
+                expected,
+            ),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
             Expr::MapBeforeUse {
@@ -3015,6 +3258,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ty @ (Type::Named(_)
             | Type::Applied { .. }
             | Type::ParametricStruct { .. }
+            | Type::TypeApplied { .. }
             | Type::ParametricBits { .. }),
         ) = annotation
         {
@@ -3207,15 +3451,27 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         fields: &[(String, Expr)],
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
+        self.check_struct_literal(&source, fields, expected)
+            .map_err(struct_parametrics::StructLiteralError::into_message)
+    }
+
+    /// Check a constructor while distinguishing incomplete type inference
+    /// from invalid fields or types.
+    fn check_struct_literal(
+        &mut self,
+        source: &Type,
+        fields: &[(String, Expr)],
+        expected: Option<&Type>,
+    ) -> Result<(Type, K), struct_parametrics::StructLiteralError> {
         let mut supplied = BTreeMap::new();
         for (field, value) in fields {
             if supplied.insert(field.as_str(), value).is_some() {
-                return Err(format!("duplicate field '{source}.{field}'"));
+                return Err(format!("duplicate field '{source}.{field}'").into());
             }
         }
-        let (ty, mut inputs) = self.struct_literal_type(&source, &supplied, expected)?;
+        let (ty, mut inputs) = self.struct_literal_type(source, &supplied, expected)?;
         let Type::Named(canonical) = &ty else {
-            return Err(format!("'{source}' is not a struct"));
+            return Err(format!("'{source}' is not a struct").into());
         };
         let members = self.structs.definition(canonical)?.fields.clone();
         let mut values = Vec::new();
@@ -3231,7 +3487,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             values.push(value.map_err(|e| format!("field '{source}.{}': {e}", p.name))?);
         }
         if let Some(field) = supplied.keys().next() {
-            return Err(format!("unknown field '{source}.{field}'"));
+            return Err(format!("unknown field '{source}.{field}'").into());
         }
         Ok((ty, K::Tuple(values)))
     }
@@ -3563,6 +3819,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
+            Expr::Scope { result, .. } => self.contains_inferred_aggregate(result),
             Expr::If {
                 then_value,
                 else_value,
@@ -3824,6 +4081,17 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         items: &[&Expr],
         check: impl FnOnce(&mut Self, &[&Expr]) -> Result<Vec<TypedExpr>, String>,
     ) -> Result<Vec<TypedExpr>, String> {
+        let (selectors, branches) = self.result_branches(items)?;
+        let values = check(self, &branches)?;
+        Ok(Self::rebuild_branch_results(selectors, values))
+    }
+
+    /// Separate branch selectors from their results so all results can share
+    /// the same type evidence.
+    fn result_branches<'e>(
+        &mut self,
+        items: &[&'e Expr],
+    ) -> Result<(Vec<BranchSelector>, Vec<&'e Expr>), String> {
         let mut branches = Vec::new();
         let mut selectors = Vec::new();
         for item in items {
@@ -3846,8 +4114,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
         }
-        let mut branches = check(self, &branches)?.into_iter();
-        Ok(selectors
+        Ok((selectors, branches))
+    }
+
+    /// Attach checked results to the original branch selectors.
+    fn rebuild_branch_results(
+        selectors: Vec<BranchSelector>,
+        values: Vec<TypedExpr>,
+    ) -> Vec<TypedExpr> {
+        let mut branches = values.into_iter();
+        selectors
             .into_iter()
             .map(|selector| match selector {
                 BranchSelector::Value => branches.next().expect("one value per item"),
@@ -3865,7 +4141,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                 }
             })
-            .collect())
+            .collect()
     }
 
     /// Check each column of same-arity tuple constructors as one type group.
@@ -4589,6 +4865,38 @@ mod tests {
 
     fn check_bx(source: &str) -> Result<CheckedModule, String> {
         check_module(&parse_module(source)?)
+    }
+
+    #[test]
+    fn sibling_struct_constructors_supply_inferred_type_arguments() -> Result<(), String> {
+        check_bx(
+            r#"
+struct Wrap<T> { value: T }
+fn choose(c: bool, x: u8, w: Wrap<u8>) -> (u8, u8, u8, u8, u8, u8, u8, u8) {
+    let inferred = [Wrap { value: 1 }, Wrap { value: x }];
+    let reversed = [Wrap { value: x }, Wrap { value: 2 }];
+    let explicit = [Wrap { value: 3 }, Wrap<u8> { value: x }];
+    let reference = [Wrap { value: 4 }, w];
+    let nested = [[Wrap { value: 5 }], [Wrap { value: x }]];
+    let selected = if c { Wrap { value: 6 } } else { Wrap { value: x } };
+    let scoped = if c { Wrap { value: 7 } } else {
+        if c { let y = x; Wrap { value: y } } else { Wrap { value: 8 } }
+    };
+    let matched = match c { true => Wrap { value: 9 }, false => Wrap<u8> { value: x } };
+    (inferred[u32:0].value, reversed[u32:1].value, explicit[u32:0].value,
+     reference[u32:0].value, nested[u32:0][u32:0].value, selected.value,
+     scoped.value, matched.value)
+}
+
+struct Output { result: u8 }
+fn nested_scopes(c: bool, x: u8) -> Output {
+    Output { result: (if c {
+        if c { let _a = x; Wrap { value: 10 } } else { let _b = x; Wrap { value: 11 } }
+    } else { Wrap { value: x } }).value }
+}
+"#,
+        )?;
+        Ok(())
     }
 
     const TAP_PORTS: &str = "Ports { live: x, saved: q }";

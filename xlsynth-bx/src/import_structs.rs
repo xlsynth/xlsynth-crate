@@ -375,6 +375,7 @@ impl ImportedStructs {
             Type::Bits { .. }
             | Type::ParametricBits { .. }
             | Type::ParametricStruct { .. }
+            | Type::TypeApplied { .. }
             | Type::Bool
             | Type::Enum { .. } => false,
         }
@@ -740,6 +741,7 @@ impl ImportedStructs {
             self.instance_layouts.insert(index);
         }
         self.definitions.push(StructDef {
+            type_params: Vec::new(),
             name: name.clone(),
             public,
             value_parametrics: Vec::new(),

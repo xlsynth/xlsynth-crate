@@ -48,6 +48,7 @@ impl<'a> SourceNode<'a> {
                 Type::ParametricStruct { args, .. } => {
                     pending.extend(args.iter().map(Expression));
                 }
+                Type::TypeApplied { args, .. } => pending.extend(args.iter().map(Annotation)),
                 Type::Array { element, .. } => pending.push(Annotation(element)),
                 Type::Tuple(fields) => pending.extend(fields.iter().map(Annotation)),
                 Type::Bits { .. }
@@ -136,9 +137,16 @@ impl<'a> SourceNode<'a> {
                 }
                 Expr::Struct { fields, .. }
                 | Expr::AppliedStruct { fields, .. }
-                | Expr::ParametricStruct { fields, .. } => {
-                    if let Expr::ParametricStruct { args, .. } = expr {
-                        pending.extend(args.iter().map(Expression));
+                | Expr::ParametricStruct { fields, .. }
+                | Expr::TypeAppliedStruct { fields, .. } => {
+                    match expr {
+                        Expr::ParametricStruct { args, .. } => {
+                            pending.extend(args.iter().map(Expression));
+                        }
+                        Expr::TypeAppliedStruct { args, .. } => {
+                            pending.extend(args.iter().map(Annotation));
+                        }
+                        _ => { /* This constructor has no source arguments to visit. */ }
                     }
                     pending.extend(fields.iter().map(|(_, value)| Expression(value)));
                 }

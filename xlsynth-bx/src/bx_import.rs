@@ -44,6 +44,7 @@ struct Export {
     parametrics: Vec<ParametricKind>,
     is_enum: bool,
     is_struct: bool,
+    has_type_params: bool,
 }
 
 /// Callable arguments have the visibility of calls. Value arguments have
@@ -85,6 +86,7 @@ struct Names {
     definitions: BTreeSet<String>,
     enums: BTreeSet<String>,
     structs: BTreeSet<String>,
+    type_structs: BTreeSet<String>,
     templates: BTreeMap<String, Vec<ParametricKind>>,
     uses: BTreeMap<String, Binding>,
     positions: BTreeMap<String, usize>,
@@ -145,6 +147,12 @@ impl Names {
             definitions,
             enums: module.enums.iter().map(|d| d.name.clone()).collect(),
             structs: module.structs.iter().map(|d| d.name.clone()).collect(),
+            type_structs: module
+                .structs
+                .iter()
+                .filter(|d| !d.type_params.is_empty())
+                .map(|d| d.name.clone())
+                .collect(),
             templates,
             uses,
             positions: module
@@ -477,6 +485,7 @@ impl<'a> Graph<'a> {
                         parametrics: names.parametrics(name).to_vec(),
                         is_enum: names.enums.contains(name),
                         is_struct: names.structs.contains(name),
+                        has_type_params: names.type_structs.contains(name),
                     },
                 )
             })
@@ -560,8 +569,8 @@ impl<'a> Graph<'a> {
         Ok(())
     }
 
-    /// Imported template names disambiguate a comma inside angle brackets
-    /// from a comma separating two comparisons.
+    /// Imported templates distinguish calls from comparisons and struct
+    /// type arguments from value arguments.
     fn parse_with_bindings(
         &mut self,
         source: &str,
@@ -569,27 +578,34 @@ impl<'a> Graph<'a> {
         bindings: &BTreeMap<String, Binding>,
     ) -> Result<Module, String> {
         let mut names = BTreeSet::new();
+        let mut type_structs = BTreeSet::new();
         if source.contains('<') {
             for path in uses {
                 let head = path.binding().expect("validated use");
                 match &bindings[head] {
-                    Binding::Member(e) if !e.parametrics.is_empty() => {
-                        names.insert(head.to_owned());
+                    Binding::Member(e) => {
+                        if !e.parametrics.is_empty() {
+                            names.insert(head.to_owned());
+                        }
+                        if e.has_type_params {
+                            type_structs.insert(head.to_owned());
+                        }
                     }
                     Binding::Module(lib) => {
-                        names.extend(
-                            lib.exports
-                                .iter()
-                                .filter(|(_, e)| !e.parametrics.is_empty())
-                                .map(|(n, _)| format!("{head}::{n}")),
-                        );
+                        for (member, export) in &lib.exports {
+                            if !export.parametrics.is_empty() {
+                                names.insert(format!("{head}::{member}"));
+                            }
+                            if export.has_type_params {
+                                type_structs.insert(format!("{head}::{member}"));
+                            }
+                        }
                     }
                     Binding::Dslx(_) => self.lookup.native.template_names(path, &mut names)?,
-                    Binding::Member(_) => { /* Other members retain expression syntax. */ }
                 }
             }
         }
-        parser::parse_with_templates(source, &names)
+        parser::parse_with_imports(source, &names, &type_structs)
     }
 
     fn finish(self) -> SourceImports<'a> {
