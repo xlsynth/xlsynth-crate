@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use clap::builder::ArgPredicate;
 use clap::{Arg, ArgMatches, Command, value_parser};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_source_with_options, empty_package, lower_module,
@@ -92,10 +93,18 @@ pub fn bx2ir_command() -> Command {
 }
 
 pub fn bx2gv_command() -> Command {
-    g8r2gv::add_mapping_args(add_bx_args(
-        Command::new("bx2gv")
-            .about("Compiles BX source and maps it to a Liberty gate-level netlist"),
-    ))
+    g8r2gv::add_mapping_args(
+        add_bx_args(
+            Command::new("bx2gv")
+                .about("Compiles BX source and maps it to a Liberty gate-level netlist"),
+        ),
+        "area",
+        "false",
+    )
+    .mut_arg("mapper", |arg| {
+        arg.default_value_if("liberty", ArgPredicate::IsPresent, "abc")
+            .help("Combinational mapper: native by default, ABC when raw --liberty is supplied")
+    })
 }
 
 /// Marks the requested block, honoring the frontend's inferred top by default.

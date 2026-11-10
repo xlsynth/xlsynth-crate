@@ -791,7 +791,12 @@ block pipeline(clk, rst, x: u2, en: bool) -> u2 {
     stdout(
         root,
         &[
-            &["g8r2gv", "pipeline.g8r"][..],
+            &[
+                "g8r2gv",
+                "pipeline.g8r",
+                "--strategy=area",
+                "--g8r-resize=false",
+            ][..],
             &map_options,
             &["-o", "staged.pb"],
         ]

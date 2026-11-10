@@ -18,9 +18,10 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use test_case::test_case;
-use xlsynth_g8r::aig::AigBitVector;
 use xlsynth_g8r::aig::gate::GateFn;
+use xlsynth_g8r::aig::{AigBitVector, SequentialGateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
+use xlsynth_g8r::aig_serdes::g8r::encode_g8r_binary;
 use xlsynth_g8r::aig_sim::gate_sim::{Collect, eval};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
@@ -36,6 +37,58 @@ fn make_two_input_and_aig() -> String {
     let y = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
     gb.add_output("y".to_string(), AigBitVector::from_bit(y));
     emit_aiger(&gb.build(), true).expect("emit_aiger should succeed")
+}
+
+#[test]
+fn integrated_native_defaults_match_delay_cover_then_standalone_resize() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut gb = GateBuilder::new("demo".into(), GateBuilderOptions::no_opt());
+    let a = *gb.add_input("a".into(), 1).get_lsb(0);
+    let b = *gb.add_input("b".into(), 1).get_lsb(0);
+    let y = gb.add_and_binary(a, b);
+    gb.add_output("y".into(), y.into());
+    std::fs::write(
+        dir.path().join("in.g8rbin"),
+        encode_g8r_binary(&SequentialGateFn::from_gate_fn(gb.build()))
+            .map_err(anyhow::Error::msg)?,
+    )?;
+    std::fs::write(
+        dir.path().join("cells.textproto"),
+        make_timing_enabled_inv_nand2_liberty_textproto(),
+    )?;
+    let call = |args: &[&str]| -> anyhow::Result<Vec<u8>> {
+        let r = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .current_dir(dir.path())
+            .env("XLSYNTH_ABC_PATH", dir.path().join("absent-abc"))
+            .args(args)
+            .output()?;
+        anyhow::ensure!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        Ok(r.stdout)
+    };
+    let common = ["g8r2gv", "in.g8rbin", "--liberty-proto", "cells.textproto"];
+    let integrated = call(&common)?;
+    let mut args = common.to_vec();
+    args.extend([
+        "--mapper=native",
+        "--strategy=delay",
+        "--fanout-opt=true",
+        "--area-recovery=true",
+        "--g8r-resize=false",
+        "-o",
+        "before.gv",
+    ]);
+    call(&args)?;
+    assert_eq!(
+        integrated,
+        call(&[
+            "gv-resize",
+            "--netlist",
+            "before.gv",
+            "--liberty_proto",
+            "cells.textproto"
+        ])?
+    );
+    Ok(())
 }
 
 /// Provides INV/NAND2 cells with complete scalar timing data and known areas.

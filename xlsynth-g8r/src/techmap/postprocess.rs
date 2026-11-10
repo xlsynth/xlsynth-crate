@@ -3,8 +3,12 @@
 //! Apply configured timing stages to combinational covers and compare their
 //! final results.
 
-use super::area::AreaMappedNetlist;
-use super::delay::DelayMappedCandidates;
+use super::area::{AreaMappedNetlist, AreaMappingLibrary, map_gatefn_to_area_netlist};
+use super::delay::{
+    DelayMappedCandidates, DelayMappingLibrary, DelayMappingOptions,
+    map_gatefn_to_delay_candidates, map_gatefn_to_delay_netlist,
+};
+use crate::aig::gate::GateFn;
 use crate::liberty_model::Library;
 use crate::netlist::fanout_opt::{
     FanoutOptimizationOptions, FanoutOptimizationReport, optimize_fanout,
@@ -18,6 +22,41 @@ use anyhow::{Context, Result};
 pub struct PostMappingOptions {
     pub fanout: Option<FanoutOptimizationOptions>,
     pub recovery: Option<ResizeOptions>,
+}
+
+/// Objective for covering the prepared combinational transition graph.
+#[derive(Clone, Copy, Debug)]
+pub enum CoverStrategy {
+    Area,
+    Delay(DelayMappingOptions),
+}
+
+/// Covers a graph and applies electrical optimization before attaching
+/// sequential cells.
+pub fn map_and_optimize_cover(
+    graph: &GateFn,
+    library: &Library,
+    strategy: CoverStrategy,
+    post: &PostMappingOptions,
+) -> Result<(AreaMappedNetlist, PostMappingReport)> {
+    match strategy {
+        CoverStrategy::Area => {
+            let mut cover = map_gatefn_to_area_netlist(graph, &AreaMappingLibrary::new(library)?)?;
+            let report = post.apply(&mut cover.netlist, library)?;
+            Ok((cover, report))
+        }
+        CoverStrategy::Delay(options) => {
+            let cells = DelayMappingLibrary::new(library, options)?;
+            if post.fanout.is_some() || post.recovery.is_some() {
+                post.select_delay_cover(map_gatefn_to_delay_candidates(graph, &cells)?, library)
+            } else {
+                Ok((
+                    map_gatefn_to_delay_netlist(graph, &cells)?,
+                    PostMappingReport::default(),
+                ))
+            }
+        }
+    }
 }
 
 /// Measurements for the emitted mapping, including the final stage's timing and

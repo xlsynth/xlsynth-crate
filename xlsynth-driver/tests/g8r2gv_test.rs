@@ -54,6 +54,9 @@ fn command(dir: &Path, input: &Path) -> Command {
     command
         .arg("g8r2gv")
         .arg(input)
+        .arg("--mapper=abc")
+        // These structural fixtures intentionally have no timing tables.
+        .arg("--g8r-resize=false")
         .arg("--liberty")
         .arg(dir.join("cells.lib"))
         .arg("--liberty-proto")
@@ -63,6 +66,67 @@ fn command(dir: &Path, input: &Path) -> Command {
         .env("NO_COLOR", "1")
         .env_remove("RUST_LOG");
     command
+}
+
+#[test]
+fn mapper_specific_options_reject_explicit_mismatches_before_reading_design() -> anyhow::Result<()>
+{
+    for (flags, expected) in [
+        (
+            vec!["--liberty", "unused.lib"],
+            "--liberty requires the ABC mapper (--mapper abc with --liberty)",
+        ),
+        (
+            vec!["--abc-path", "unused"],
+            "--abc-path requires the ABC mapper (--mapper abc with --liberty)",
+        ),
+        (
+            vec!["--mapper=native", "--abc-path", "unused"],
+            "--abc-path requires the ABC mapper (--mapper abc with --liberty)",
+        ),
+        (
+            vec!["--mapper=native", "--liberty", "unused.lib"],
+            "--liberty requires the ABC mapper (--mapper abc with --liberty)",
+        ),
+        (
+            vec![
+                "--mapper=abc",
+                "--liberty",
+                "unused.lib",
+                "--strategy=delay",
+            ],
+            "--strategy requires --mapper native",
+        ),
+        (
+            vec![
+                "--mapper=abc",
+                "--liberty",
+                "unused.lib",
+                "--fanout-opt=false",
+            ],
+            "--fanout-opt requires --mapper native",
+        ),
+        (
+            vec![
+                "--mapper=abc",
+                "--liberty",
+                "unused.lib",
+                "--area-recovery=false",
+            ],
+            "--area-recovery requires --mapper native",
+        ),
+    ] {
+        let r = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+            .args(["g8r2gv", "unused.g8r", "--liberty-proto", "unused.proto"])
+            .args(flags)
+            .output()?;
+        assert!(!r.status.success());
+        assert_eq!(
+            String::from_utf8(r.stderr)?,
+            format!("xlsynth-driver: g8r2gv: {expected}\n")
+        );
+    }
+    Ok(())
 }
 
 #[test]

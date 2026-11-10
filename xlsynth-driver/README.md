@@ -487,7 +487,9 @@ the optimized block to sequential g8r. It then uses the same mapper as a
 stitched DSLX pipeline. Linked blocks inherit the BX clock even when their
 clock ports have different names. Register load enables and synchronous
 register resets are supported. Blocks with asynchronous register resets can emit RTL through
-`bx2ir` and `block2sv`.
+`bx2ir` and `block2sv`. The shared mapping flags are documented under
+`g8r2gv`; `bx2gv` retains its native area strategy and disabled final resizing
+by default. Use `--strategy=delay --g8r-resize=true` to opt into both.
 
 To map the two-stage multiplier above using the native mapper, supply a
 normalized Liberty library containing combinational cells and flip-flops.
@@ -1593,11 +1595,16 @@ xlsynth-driver gv-stats --netlist resized.gv \
 ### `g8r2gv`: G8R to mapped gate-level netlist
 
 Maps a `.g8r` or `.g8rbin` design to a flat gate-level netlist. With
-`--liberty-proto` alone, g8r maps the combinational logic using its area
-mapper. Supplying raw `--liberty` files selects standalone ABC for that logic.
+`--liberty-proto` alone, g8r delay-maps the combinational logic natively.
+To use standalone ABC for that logic, specify `--mapper=abc` and supply
+the matching raw `--liberty` files.
 ABC's default speed flow also buffers and resizes combinational cells.
 Both paths use g8r to legalize synchronous reset and enable controls, select
 physical flip-flops and clock gates, and assemble the netlist.
+By default both then resize the assembled logic and compatible flops in memory,
+using the same search as `gv-resize`. A fixed `--register-cell` remains fixed.
+Delay mapping, native cover optimization and final resizing require a timing-enabled
+proto. The timing-free native area flow is `--strategy=area --g8r-resize=false`.
 
 Existing direct input-to-register and register-to-output connections remain
 wires, without added buffers or inverters. FFs are selected per bit by minimum
@@ -1621,8 +1628,19 @@ This requires a Liberty proto with a certified low-transparent ICG. Libraries
 without a usable ICG, including older role-only protos, use feedback muxes.
 Use `--clock-gating=false` to generate an ungated baseline.
 
-- `--mapper <native|abc>` – select the combinational mapper. Defaults to
-  `native` with the Liberty proto alone, or `abc` when `--liberty` is supplied.
+- `--mapper <native|abc>` – select the combinational mapper (default: `native`).
+  Native never invokes ABC. Both `--abc-path` and raw `--liberty` files are
+  rejected unless you explicitly select `--mapper=abc`.
+- `--strategy <delay|area>` – native covering objective (default: delay).
+- `--fanout-opt <BOOL>`, `--area-recovery <BOOL>` – optimize fanout and recover
+  area on the native combinational cover before attaching flops. Each defaults
+  to true for delay and false for area. Explicitly specifying any of these three
+  native-only flags with ABC is an error, even when specifying false.
+- `--g8r-resize <BOOL>` – resize the complete mapped netlist (default: true).
+  Disabling this stage does not disable sizing/buffering inside an ABC script,
+  or the native cover's fanout optimization/area recovery.
+- `--primary-input-transition <SLEW>` – input slew in library time units for
+  native delay mapping and electrical optimization (default: 0.01).
 - `--liberty-proto <PATH>` – required normalized library for cell selection.
   Accepts binary or text proto, optionally gzip-compressed.
 - `--liberty <PATH>` – required raw, uncompressed Liberty file for ABC. Repeat
@@ -1638,7 +1656,7 @@ Use `--clock-gating=false` to generate an ungated baseline.
   Verilog export. The trusted script must preserve the combinational boundary
   and leave a mapped network in ABC's main workspace (`&put` after GIA commands).
 - `--driving-cell <CELL>` – override ABC's input driver, which defaults to the proto's `reference_buffer_cell`.
-- `--output-load-ff <FF>` – override ABC's output load **in femtofarads**. Otherwise
+- `--output-load-ff <FF>` – override the output load for native timing and ABC **in femtofarads**. Otherwise
   use the proto's `default_output_load`, converted from library capacitance units.
   Each override is independent; missing/invalid defaults are errors only when
   needed. The resolved driver/load must be valid. There is no unconstrained mode.
