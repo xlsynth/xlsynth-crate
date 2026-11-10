@@ -663,6 +663,23 @@ Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic. Timing
 through child block outputs and extern interfaces is also a follow-up.
 
+#### Related work
+
+Dahlia and Filament showed how hardware timing constraints can be checked
+at compile time. Dahlia catches resource conflicts such as two parallel
+reads that need the same memory port. Filament describes when a port's value
+is available relative to a component invocation, so it can catch a caller
+that reads a result one cycle too early.
+[Dahlia (PLDI 2020)](https://arxiv.org/abs/2004.04852) ·
+[Filament (PLDI 2023)](https://arxiv.org/abs/2304.10646)
+
+SUS's latency counting is a close precedent for BX's stage labels. SUS
+assigns a latency to each wire and can insert registers to align paths that
+meet at an operator. BX checks the registers the author wrote. In
+`add_held` above, declaring `r` at `@0` puts the two inputs to `q + r` at
+stages 1 and 0, and BX reports the mismatch at the adder.
+[Latency Counting in the SUS Language (LATTE 2024)](https://capra.cs.cornell.edu/latte24/paper/4.pdf)
+
 ### Calling a block
 
 An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
