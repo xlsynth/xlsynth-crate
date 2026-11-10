@@ -49,6 +49,7 @@ case "$lean_source" in
     exit 1
     ;;
 esac
+: > "$4" # Stand in for the compiled module at the path following -o.
 exit 0
 "#,
     )

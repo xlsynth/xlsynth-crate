@@ -166,6 +166,44 @@ fn empty_or_wrong_type_proof_body_is_rejected() {
 }
 
 #[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn rejects_a_helper_that_reinterprets_gate_equivalence() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let dir = tempfile::tempdir().unwrap();
+    let lhs = common::and3();
+    let mut rhs = right_associated_and3();
+    let inverted = rhs.outputs[0].bit_vector.get_lsb(0).negate();
+    rhs.outputs[0].bit_vector = AigBitVector::from_bit(inverted);
+    let target = dir.path().join("target");
+    prepare_equivalence_target(&lhs, &rhs)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+
+    let helper = dir.path().join("Helper.lean");
+    std::fs::write(&helper, include_str!("fixtures/reinterpret_target.lean")).unwrap();
+    let sources = LeanProofSources {
+        root: dir.path().into(),
+        body: dir.path().join("Body.lean"),
+        modules: vec![helper],
+    };
+    std::fs::write(&sources.body, "True.intro").unwrap();
+    let failure =
+        run_equivalence_proof(&lean, &target, &sources, &dir.path().join("work")).unwrap_err();
+    assert!(
+        matches!(
+            failure.error.as_ref(),
+            LeanError::ProcessFailed {
+                operation: "equivalence check",
+                stderr,
+                ..
+            } if stderr.contains("UserProof.equivalent has the wrong type; expected Target.Equivalent")
+        ),
+        "unexpected error: {failure}"
+    );
+}
+
+#[test]
 fn interface_mismatches_return_structured_errors_before_invoking_lean() {
     let lhs = common::and3();
     let check = |rhs: &GateFn| prepare_equivalence_target(&lhs, rhs);

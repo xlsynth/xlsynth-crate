@@ -176,7 +176,8 @@ a generated axiom to the proof.
 
 The prepared directory contains the companion support sources, `Lhs.aag`,
 `Rhs.aag`, `Target.lean`, and `Check.lean`. It can be retained
-as a build artifact or inspected while developing the proof.
+as a build artifact or inspected while developing the proof. `Check.lean`
+shows the expected root declaration for manual use.
 
 The runner requires an empty work directory. It copies the fixed prepared
 artifacts and generates `UserProof.lean` at the work root. Helper modules keep
@@ -184,8 +185,14 @@ their paths relative to `LeanProofSources.root`; every supplied file
 must be under that root. The generated wrapper imports helpers in the supplied
 order, and Lean's `--src-deps` mode determines their compilation order. The
 selected installation must include its Lean sources.
-Generated module roots and colliding paths are rejected. A final generated
-module checks `UserProof.equivalent` at `Target.Equivalent`.
+Generated module roots and colliding paths are rejected. Before processing
+the proof, the driver saves the compiled target and its generated dependencies.
+A separate verifier loads those originals alongside the compiled proof modules,
+replays the proof declarations through Lean's kernel, and looks up
+`UserProof.equivalent` and `Target.Equivalent` by their internal names.
+It checks that the theorem's type is definitionally equal to the generated
+proposition. User syntax can therefore help write a proof without changing the
+verifier's interpretation of the goal.
 
 The runner invokes Lean directly and does not manage Lake projects. Lean's
 default solver lookup finds the bundled CaDiCaL beside the Lean executable.
@@ -332,9 +339,12 @@ equivalence. [Routing proof](tests/fixtures/decomposition/RouteProof.lean)
 The checker inspects the theorem's transitive axiom dependencies. It permits
 Lean's `propext`, `Classical.choice` and `Quot.sound`, and replays closed Boolean
 checks from native tactics with Lean's compiler, including the LRAT checks
-used by `bv_decide`. Unproved assumptions and `sorry` fail the audit. The
-supplied IR, the translator, the Lean sources and the Lean toolchain are part
-of the trust boundary.
+used by `bv_decide`. Unproved assumptions and `sorry` fail the audit. This
+uses the same independent root-type check as the AIG proof runner. Proof
+elaboration and native computation run with the caller's OS permissions.
+Running untrusted code requires a separate sandbox that protects the toolchain
+and the verification process. The supplied IR, translator, and Lean toolchain
+are trusted inputs.
 
 ## Validation
 

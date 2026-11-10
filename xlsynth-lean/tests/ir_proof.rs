@@ -125,6 +125,47 @@ fn checks_nullary_and_inequivalent_functions() {
 
 #[test]
 #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn rejects_a_helper_that_reinterprets_the_generated_goal() {
+    let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
+    let zero = "package p\ntop fn c() -> bits[1] { ret v: bits[1] = literal(value=0, id=1) }";
+    let one = zero.replace("value=0", "value=1");
+    let lhs = Parser::new(zero).parse_and_validate_package().unwrap();
+    let rhs = Parser::new(&one).parse_and_validate_package().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    prepare_ir_function_equivalence_target(&lhs, None, &rhs, None)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+
+    // The helper exports syntax into the wrapper and its importers. The
+    // declaration it produces proves True even though the two functions differ.
+    let helper = dir.path().join("Helper.lean");
+    fs::write(&helper, include_str!("fixtures/reinterpret_target.lean")).unwrap();
+    let sources = LeanProofSources {
+        root: dir.path().into(),
+        body: dir.path().join("Body.lean"),
+        modules: vec![helper.clone()],
+    };
+    fs::write(&sources.body, "True.intro").unwrap();
+    let failure =
+        run_ir_function_equivalence_proof(&lean, &target, &sources, &dir.path().join("work"))
+            .unwrap_err();
+    assert!(
+        matches!(
+            failure.error.as_ref(),
+            LeanError::ProcessFailed {
+                operation: "equivalence check",
+                stderr,
+                ..
+            } if stderr.contains("UserProof.equivalent has the wrong type; expected Target.Equivalent")
+        ),
+        "unexpected error: {failure}"
+    );
+}
+
+#[test]
+#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn proves_distinct_graphs_and_agrees_with_the_executable_export() {
     let lean = PathBuf::from(
         std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable"),

@@ -9,7 +9,7 @@ use xlsynth_g8r::aig::GateFn;
 
 use crate::gate_fn::export_gate_fn_aag;
 use crate::ir_proof::FIXED_IR_PROOF_FILES;
-use crate::process::{resolve_lean_executable, run_lean_process};
+use crate::process::{ProcessOutput, resolve_lean_executable, run_lean_process};
 use crate::support::{AIG_PROOF_SUPPORT, IR_FUNCTION_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
@@ -204,7 +204,7 @@ pub fn run_equivalence_proof(
         work_root,
         &artifacts,
         &modules,
-        &[],
+        ProofKind::Aig,
     )
 }
 
@@ -238,8 +238,14 @@ pub fn run_ir_function_equivalence_proof(
         work_root,
         &artifacts,
         &modules,
-        FIXED_IR_PROOF_FILES,
+        ProofKind::Ir,
     )
+}
+
+/// Selects the target's support files and the verifier's axiom policy.
+enum ProofKind {
+    Aig,
+    Ir,
 }
 
 /// Stages the fixed target before any user modules and checks the generated
@@ -251,13 +257,16 @@ fn run_prepared_proof(
     work_root: &Path,
     artifacts: &[&str],
     modules: &[&str],
-    fixed_files: &[(&str, &[u8])],
+    kind: ProofKind,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
+    let (mode, fixed_files) = match kind {
+        ProofKind::Aig => ("aig", &[][..]),
+        ProofKind::Ir => ("ir", FIXED_IR_PROOF_FILES),
+    };
     copy_prepared_target(target_root, &work_root, artifacts, fixed_files)?;
-    let proof_modules = stage_proof_sources(proof_sources, &work_root, artifacts)?;
     let module_roots = [work_root.as_path()];
     let version_output = run_lean_process(
         &lean_executable,
@@ -283,6 +292,12 @@ fn run_prepared_proof(
         )
         .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     }
+    // Keep the original generated declarations in the driver before Lean reads
+    // any helper, including during dependency discovery.
+    let target_objects = read_compiled_modules(&work_root, &generated_modules)
+        .map_err(|error| LeanProofFailure::with_output(error, &result))?;
+    let proof_modules = stage_proof_sources(proof_sources, &work_root, artifacts)
+        .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     let ordered_proof_modules = order_proof_modules(
         &lean_executable,
         &work_root,
@@ -300,15 +315,100 @@ fn run_prepared_proof(
         )
         .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     }
-    compile_module(
+    let verified = verify_compiled_proof(
         &lean_executable,
         &work_root,
-        Path::new("Check.lean"),
-        "equivalence check",
-        &mut result,
+        target_objects,
+        &proof_modules,
+        mode,
     )
     .map_err(|error| LeanProofFailure::with_output(error, &result))?;
+    result.stdout.push_str(&verified.stdout);
+    result.stderr.push_str(&verified.stderr);
     Ok(result)
+}
+
+/// Reads the public .olean and any split module parts that Lean emitted.
+fn read_compiled_modules(
+    root: &Path,
+    modules: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, Vec<u8>>, LeanError> {
+    let mut files = BTreeMap::new();
+    for module in modules {
+        for extension in ["olean", "olean.server", "olean.private", "ir.sig", "ir"] {
+            let relative = module.with_extension(extension);
+            let path = root.join(&relative);
+            match fs::read(&path) {
+                Ok(bytes) => {
+                    files.insert(relative, bytes);
+                }
+                Err(error)
+                    if extension != "olean" && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    // Legacy Lean modules have no separate module parts.
+                }
+                Err(source) => {
+                    return Err(LeanError::Io {
+                        operation: "reading compiled Lean module",
+                        path,
+                        source,
+                    });
+                }
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Starts the crate-owned checker without user sources or frontend extensions
+/// on its Lean search path. Only declared compiled modules cross this boundary.
+fn verify_compiled_proof(
+    lean: &Path,
+    work_root: &Path,
+    target_objects: BTreeMap<PathBuf, Vec<u8>>,
+    proof_modules: &[PathBuf],
+    mode: &str,
+) -> Result<ProcessOutput, LeanError> {
+    let verification = tempfile::Builder::new()
+        .prefix("xlsynth-lean-verify-")
+        .tempdir()
+        .map_err(LeanError::TemporaryDirectory)?;
+    let root = verification.path();
+    let objects = root.join("modules");
+    let proof_objects = read_compiled_modules(work_root, proof_modules)?;
+    for (path, bytes) in target_objects.into_iter().chain(proof_objects) {
+        if objects.join(&path).exists() {
+            return Err(LeanError::InvalidProofSources(format!(
+                "compiled module path {} collides with another artifact",
+                path.display()
+            )));
+        }
+        write_file(&objects, &path, &bytes)?;
+    }
+    let verifier = Path::new("VerifyEquivalence.lean");
+    write_file(
+        root,
+        verifier,
+        include_bytes!("../lean/VerifyEquivalence.lean"),
+    )?;
+    let mut args = vec![
+        OsString::from("--run"),
+        root.join(verifier).into_os_string(),
+        objects.into_os_string(),
+        OsString::from(mode),
+    ];
+    for module in proof_modules {
+        if module != Path::new("UserProof.lean") {
+            args.push(proof_module_name(module)?.as_str().into());
+        }
+    }
+    let output = run_lean_process(lean, root, &[], "equivalence check", &args)?;
+    if output.stdout.lines().last() != Some("xlsynth: verified UserProof.equivalent") {
+        return Err(LeanError::Protocol(
+            "equivalence verifier exited without confirming the root theorem".into(),
+        ));
+    }
+    Ok(output)
 }
 
 /// Prepares and checks a proof body in a temporary directory.
@@ -685,4 +785,69 @@ fn validate_ports<'lhs, 'rhs>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        LeanError, LeanProofOutput, compile_module, read_compiled_modules, verify_compiled_proof,
+        write_file,
+    };
+
+    #[test]
+    #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
+    fn rejects_a_precompiled_proof_for_a_different_target() {
+        let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut output = LeanProofOutput {
+            lean_version: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let mut compile = |name: &str, source: &str| -> Result<(), LeanError> {
+            let path = Path::new(name);
+            write_file(root, path, source.as_bytes())?;
+            compile_module(&lean, root, path, "compiling test fixture", &mut output)
+        };
+
+        compile(
+            "Target.lean",
+            "abbrev Target.Equivalent : Prop := (0 : Nat) = 1",
+        )
+        .unwrap();
+        let original = read_compiled_modules(root, &["Target.lean".into()]).unwrap();
+        compile(
+            "Target.lean",
+            "abbrev Target.Equivalent : Prop := (0 : Nat) = 0",
+        )
+        .unwrap();
+        compile(
+            "UserProof.lean",
+            "import Target\ntheorem UserProof.equivalent : Target.Equivalent := rfl",
+        )
+        .unwrap();
+
+        // Its declared type has the correct name, but its proof body only
+        // typechecks against the second definition of Target.Equivalent.
+        let Err(failure) =
+            verify_compiled_proof(&lean, root, original, &["UserProof.lean".into()], "ir")
+        else {
+            panic!("accepted a proof compiled against a different target");
+        };
+        assert!(
+            matches!(
+                &failure,
+                LeanError::ProcessFailed {
+                    operation: "equivalence check",
+                    stderr,
+                    ..
+                } if stderr.contains("while replaying declaration 'UserProof.equivalent'")
+                    && stderr.contains("declaration type mismatch")
+            ),
+            "unexpected error: {failure}"
+        );
+    }
 }
