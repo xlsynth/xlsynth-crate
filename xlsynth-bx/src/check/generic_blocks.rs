@@ -10,8 +10,8 @@ use crate::ast::{Block, CallbackParam, Expr, Param, Type};
 use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
-    BlockCallbackFormal, BlockInterface, BlockTemplate, ImportResolver, MAX_ELABORATION_DEPTH,
-    ModuleDimensions, StructTable, TypeShape, compatible, resolve_type, source_type_nodes,
+    BlockCallbackFormal, BlockInterface, BlockTemplate, MAX_ELABORATION_DEPTH, ModuleDimensions,
+    StructTable, TypeResolver, TypeShape, compatible, resolve_type, source_type_nodes,
     type_parameter_references,
 };
 
@@ -118,9 +118,8 @@ impl<'m> BlockTemplate<'m> {
         params: Vec<Param>,
         result: Type,
         bindings: &Bindings,
-        dimensions: ModuleDimensions<'_, '_>,
-        resolver: &mut ImportResolver,
-        structs: &mut StructTable,
+        dimensions: ModuleDimensions<'_, 'm>,
+        types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Self, String> {
         let mut callback_indices = BTreeMap::new();
         let mut callback_params = Vec::with_capacity(block.callback_params.len());
@@ -132,8 +131,7 @@ impl<'m> BlockTemplate<'m> {
                     &|name| callback_indices.contains_key(name),
                     Some(bindings),
                     dimensions,
-                    resolver,
-                    structs,
+                    types,
                     MAX_ELABORATION_DEPTH,
                 )
             };
@@ -148,6 +146,9 @@ impl<'m> BlockTemplate<'m> {
             };
             callback_params.push(BlockCallbackFormal::new(signature, bindings));
         }
+        let TypeResolver {
+            resolver, structs, ..
+        } = types;
         structs.update_imports(resolver)?;
         for formal in &callback_params {
             let signature = &formal.signature;
@@ -441,7 +442,8 @@ impl Bindings {
             | Type::Enum { .. }
             | Type::ParametricBits { .. }
             | Type::ParametricArray { .. }
-            | Type::Applied { .. } => formal.clone(),
+            | Type::Applied { .. }
+            | Type::ParametricStruct { .. } => formal.clone(),
         }
     }
 
@@ -498,7 +500,8 @@ fn canonical_argument(ty: &Type) -> Type {
         | Type::Named(_)
         | Type::ParametricBits { .. }
         | Type::ParametricArray { .. }
-        | Type::Applied { .. } => ty.clone(),
+        | Type::Applied { .. }
+        | Type::ParametricStruct { .. } => ty.clone(),
     }
 }
 

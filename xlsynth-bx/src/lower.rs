@@ -822,13 +822,14 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         let value = self.expr(&block.output)?;
         for (index, port) in ports.iter().enumerate() {
             let field = match block.result {
-                Type::Named(_) | Type::Applied { .. } | Type::Tuple(_) => {
-                    self.project(value, index)?
-                }
+                Type::Named(_) | Type::Tuple(_) => self.project(value, index)?,
                 Type::Bits { .. } | Type::Enum { .. } | Type::Bool | Type::Array { .. } => value,
-                Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
+                Type::ParametricBits { .. }
+                | Type::ParametricArray { .. }
+                | Type::Applied { .. }
+                | Type::ParametricStruct { .. } => {
                     return Err(BuilderError::InvalidOperation(format!(
-                        "cannot lower block result with unresolved dimensions in '{}'",
+                        "cannot lower block result with unresolved type '{}'",
                         block.result
                     )));
                 }

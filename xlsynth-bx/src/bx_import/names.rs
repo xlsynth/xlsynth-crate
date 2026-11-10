@@ -35,10 +35,20 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     let position = |name: &str| names.positions.get(name).copied();
     let mut out = Module::default();
     for def in &module.structs {
+        let at = position(&def.name);
+        let mut scope = Scope::new(names, at, at);
+        let value_parametrics = def
+            .value_parametrics
+            .iter()
+            .map(|value| scope.value_parametric(value))
+            .collect::<Result<_, _>>()?;
+        // Struct field annotations can name a later struct declaration.
+        scope.at = None;
         out.structs.push(StructDef {
             name: names.declared(&def.name),
             public: def.public,
-            fields: Scope::new(names, None, position(&def.name)).fields(&def.fields)?,
+            value_parametrics,
+            fields: scope.fields(&def.fields)?,
         });
     }
     for def in &module.enums {
@@ -101,16 +111,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         for formal in def.parametric_bindings() {
             match formal {
                 FunctionParametricRef::Value(value) => {
-                    let ty = scope.ty(&value.ty)?;
-                    // A binding shadows an outer constant even in its own
-                    // default. Reading that value before it is bound fails.
-                    scope.bind(&value.name);
-                    value_parametrics.push(ParametricBinding {
-                        name: value.name.clone(),
-                        ty,
-                        default: value.default.as_ref().map(|e| scope.expr(e)).transpose()?,
-                        index: value.index,
-                    });
+                    value_parametrics.push(scope.value_parametric(value)?);
                 }
                 FunctionParametricRef::Callback(callback) => {
                     callback_params.push(scope.callback(callback)?);
@@ -388,6 +389,13 @@ impl<'a> Scope<'a> {
                 name: self.reference(name, self.at)?,
                 args: args.clone(),
             },
+            Type::ParametricStruct { name, args } => Type::ParametricStruct {
+                name: self.reference(name, self.at)?,
+                args: args
+                    .iter()
+                    .map(|arg| self.type_expression(arg, depth))
+                    .collect::<Result<_, _>>()?,
+            },
             Type::Tuple(fields) => Type::Tuple(
                 fields
                     .iter()
@@ -400,23 +408,22 @@ impl<'a> Scope<'a> {
             },
             Type::ParametricArray { element, size } => Type::ParametricArray {
                 element: Box::new(self.type_at_depth(element, depth + 1)?),
-                size: self.dimension(size, depth)?,
+                size: Box::new(self.type_expression(size, depth)?),
             },
             Type::ParametricBits { signed, width } => Type::ParametricBits {
-                signed: self.dimension(signed, depth)?,
-                width: self.dimension(width, depth)?,
+                signed: Box::new(self.type_expression(signed, depth)?),
+                width: Box::new(self.type_expression(width, depth)?),
             },
             Type::Bits { .. } | Type::Bool => ty.clone(),
         })
     }
 
-    /// Carry type nesting across a dimension expression that can itself
-    /// contain type annotations.
-    fn dimension(&mut self, expr: &Expr, depth: usize) -> Result<Box<Expr>, String> {
+    /// Carry type nesting across an expression that can contain annotations.
+    fn type_expression(&mut self, expr: &Expr, depth: usize) -> Result<Expr, String> {
         self.expression_depth += depth + 1;
         let result = self.expr(expr);
         self.expression_depth -= depth + 1;
-        result.map(Box::new)
+        result
     }
 
     fn optional_type(&mut self, ty: &Option<Type>) -> Result<Option<Type>, String> {
@@ -426,6 +433,23 @@ impl<'a> Scope<'a> {
     /// Struct field names do not shadow other field types.
     fn fields(&mut self, fields: &[Param]) -> Result<Vec<Param>, String> {
         fields.iter().map(|p| self.param(p)).collect()
+    }
+
+    /// Qualify one value binding and bring it into scope for following formals.
+    fn value_parametric(&mut self, value: &ParametricBinding) -> Result<ParametricBinding, String> {
+        let ty = self.ty(&value.ty)?;
+        // The binding shadows an outer constant in its own default.
+        self.bind(&value.name);
+        Ok(ParametricBinding {
+            name: value.name.clone(),
+            ty,
+            default: value
+                .default
+                .as_ref()
+                .map(|expr| self.expr(expr))
+                .transpose()?,
+            index: value.index,
+        })
     }
 
     fn param(&mut self, p: &Param) -> Result<Param, String> {
@@ -658,20 +682,26 @@ impl<'a> Scope<'a> {
             },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
-            Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
+            Expr::Struct { name, fields }
+            | Expr::AppliedStruct { name, fields, .. }
+            | Expr::ParametricStruct { name, fields, .. } => {
                 let name = self.reference(name, self.at)?;
                 let fields = fields
                     .iter()
                     .map(|(name, value)| Ok((name.clone(), self.expr(value)?)))
                     .collect::<Result<_, String>>()?;
-                if let Expr::AppliedStruct { args, .. } = expr {
-                    Expr::AppliedStruct {
+                match expr {
+                    Expr::AppliedStruct { args, .. } => Expr::AppliedStruct {
                         name,
                         args: args.clone(),
                         fields,
-                    }
-                } else {
-                    Expr::Struct { name, fields }
+                    },
+                    Expr::ParametricStruct { args, .. } => Expr::ParametricStruct {
+                        name,
+                        args: self.expressions(args)?,
+                        fields,
+                    },
+                    _ => Expr::Struct { name, fields },
                 }
             }
             Expr::Field { value, name } => Expr::Field {

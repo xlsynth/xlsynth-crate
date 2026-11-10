@@ -39,6 +39,7 @@ mod map;
 mod match_patterns;
 mod module_constants;
 mod scope;
+mod struct_parametrics;
 mod unroll;
 mod value_parametrics;
 
@@ -109,6 +110,16 @@ impl fmt::Display for Type {
                     write!(f, "{arg}")?;
                 }
                 write!(f, ">")
+            }
+            Type::ParametricStruct { name, args } => {
+                write!(f, "{name}<")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{}", Dimension(arg))?;
+                }
+                f.write_str(">")
             }
             Type::Array { element, size } => write!(f, "{element}[{size}]"),
             Type::ParametricBits { signed, width } => match &**signed {
@@ -507,6 +518,7 @@ pub(crate) fn source_type_nodes(ty: &Type) -> usize {
         }
         Type::ParametricBits { .. } => 1,
         Type::Applied { args, .. } => 1 + args.len(),
+        Type::ParametricStruct { args, .. } => 1 + args.len(),
         Type::Named(_) | Type::Enum { .. } | Type::Bool | Type::Bits { .. } => 1,
     }
 }
@@ -603,7 +615,9 @@ impl Declarations<'_> {
                 Type::Named(name) if bindings.is_some_and(|b| b.declares(name)) => {
                     // The template introduces this name in its own scope.
                 }
-                Type::Named(name) | Type::Applied { name, .. } => {
+                Type::Named(name)
+                | Type::Applied { name, .. }
+                | Type::ParametricStruct { name, .. } => {
                     self.check_type_name_visibility(name, at)?
                 }
                 Type::Tuple(fields) => pending.extend(fields.iter().rev()),
@@ -622,12 +636,16 @@ impl Declarations<'_> {
 
 /// Checked nominal BX and DSLX types, with cached sizes for struct layouts.
 #[derive(Default)]
-struct StructTable {
+struct StructTable<'m> {
     enums: BTreeMap<String, CheckedEnum>,
     imported_enum_count: usize,
     definitions: Vec<StructDef>,
     indices: BTreeMap<String, (usize, TypeShape)>,
     imported_count: usize,
+    templates: BTreeMap<&'m str, &'m StructDef>,
+    instances: BTreeMap<String, struct_parametrics::StructInstance<'m>>,
+    instance_layout_nodes: usize,
+    active_templates: BTreeSet<&'m str>,
 }
 
 /// Look up a DSLX module member in the source scope. Block-local values
@@ -647,16 +665,22 @@ fn lookup_use(
 
 /// Copy a source type into the checked module, resolving qualified names as
 /// we go. Bound the walk before cloning any recursive types from AST callers.
-fn resolve_type(
+fn resolve_type<'m>(
     ty: &Type,
     is_local: &dyn Fn(&str) -> bool,
     bindings: Option<&Bindings>,
-    dimensions: ModuleDimensions<'_, '_>,
-    resolver: &mut ImportResolver,
-    structs: &StructTable,
+    dimensions: ModuleDimensions<'_, 'm>,
+    types: &mut TypeResolver<'_, 'm>,
     remaining: usize,
 ) -> Result<Type, String> {
     match ty {
+        Type::ParametricStruct { name, args } => {
+            let mut checker = types.struct_scope(dimensions);
+            checker.enclosing_type_locals = Some(is_local);
+            checker.function_type_bindings = bindings.cloned();
+            let ty = checker.struct_actual_type(name, args)?;
+            resolve_type(&ty, is_local, bindings, dimensions, types, remaining)
+        }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
                 return Err(format!("'{name}' names a local value here"));
@@ -670,20 +694,31 @@ fn resolve_type(
                 }
                 bindings.reject_value(name)?;
             }
-            if let Some((subject, member)) = lookup_use(name, resolver, is_local)? {
+            if let Some((subject, member)) = lookup_use(name, types.resolver, is_local)? {
                 if let Type::Applied { args, .. } = ty {
-                    resolver.resolve_applied(&subject, &member, args)
+                    types.resolver.resolve_applied(&subject, &member, args)
                 } else {
-                    resolver.resolve_named(&subject, &member)
+                    types.resolver.resolve_named(&subject, &member)
                 }
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
+            } else if let Some(template) = types.structs.template(name) {
+                dimensions
+                    .decls
+                    .check_type_name_visibility(name, dimensions.position)?;
+                let args = match ty {
+                    Type::Applied { args, .. } => args.as_slice(),
+                    _ => &[],
+                };
+                let mut checker = types.struct_scope(dimensions);
+                checker.specialize_struct(template, args, None, remaining)
             } else if matches!(ty, Type::Applied { .. }) {
                 Err(format!(
                     "'{name}' requires an imported DSLX struct template"
                 ))
             } else {
-                Ok(structs
+                Ok(types
+                    .structs
                     .enums
                     .get(name)
                     .map_or_else(|| ty.clone(), CheckedEnum::ty))
@@ -695,8 +730,7 @@ fn resolve_type(
                 is_local,
                 bindings,
                 dimensions,
-                resolver,
-                structs,
+                types,
                 child_type_budget(remaining)?,
             )?),
             size: *size,
@@ -705,17 +739,7 @@ fn resolve_type(
             let child_budget = child_type_budget(remaining)?;
             items
                 .iter()
-                .map(|item| {
-                    resolve_type(
-                        item,
-                        is_local,
-                        bindings,
-                        dimensions,
-                        resolver,
-                        structs,
-                        child_budget,
-                    )
-                })
+                .map(|item| resolve_type(item, is_local, bindings, dimensions, types, child_budget))
                 .collect::<Result<_, _>>()
                 .map(Type::Tuple)
         }
@@ -724,8 +748,9 @@ fn resolve_type(
             signed,
             width,
         } => {
-            let definition = structs.enums.get(name).or_else(|| {
-                resolver
+            let definition = types.structs.enums.get(name).or_else(|| {
+                types
+                    .resolver
                     .enum_definitions()
                     .iter()
                     .find(|def| def.name == *name)
@@ -748,8 +773,7 @@ fn resolve_type(
                 is_local,
                 bindings,
                 dimensions,
-                resolver,
-                structs,
+                types,
                 child_type_budget(remaining)?,
             )?),
             size: dimensions.size(size, is_local, bindings)?,
@@ -758,12 +782,31 @@ fn resolve_type(
     }
 }
 
+/// Shared module state used to resolve types and evaluate struct arguments.
+struct TypeResolver<'a, 'm> {
+    resolver: &'a mut ImportResolver,
+    structs: &'a mut StructTable<'m>,
+    functions: Option<&'a mut FunctionSpecializations<'m>>,
+}
+
+impl<'m> TypeResolver<'_, 'm> {
+    /// Use the module registry so a type argument can specialize a generic
+    /// helper.
+    fn struct_scope<'a>(&'a mut self, dimensions: ModuleDimensions<'a, 'm>) -> BodyChecker<'a, 'm> {
+        BodyChecker::struct_type_scope(
+            dimensions,
+            self.resolver,
+            self.structs,
+            self.functions.as_deref_mut(),
+        )
+    }
+}
+
 /// Resolve struct fields in the enclosing module scope.
-fn resolve_fields(
+fn resolve_fields<'m>(
     params: &[Param],
-    dimensions: ModuleDimensions<'_, '_>,
-    resolver: &mut ImportResolver,
-    structs: &StructTable,
+    dimensions: ModuleDimensions<'_, 'm>,
+    types: &mut TypeResolver<'_, 'm>,
 ) -> Result<Vec<Param>, String> {
     params
         .iter()
@@ -775,8 +818,7 @@ fn resolve_fields(
                     &|_| false,
                     None,
                     dimensions,
-                    resolver,
-                    structs,
+                    types,
                     MAX_ELABORATION_DEPTH,
                 )?,
             })
@@ -786,14 +828,13 @@ fn resolve_fields(
 
 /// A parameter name enters scope before its type annotation and remains
 /// visible in later parameters and the result type.
-fn resolve_signature<'a>(
+fn resolve_signature<'a, 'm>(
     params: &[Param],
     result: &Type,
     timing_ports: impl IntoIterator<Item = &'a String>,
     bindings: Option<&Bindings>,
-    dimensions: ModuleDimensions<'_, '_>,
-    resolver: &mut ImportResolver,
-    structs: &StructTable,
+    dimensions: ModuleDimensions<'_, 'm>,
+    types: &mut TypeResolver<'_, 'm>,
 ) -> Result<(Vec<Param>, Type), String> {
     let mut scope: BTreeSet<_> = timing_ports.into_iter().cloned().collect();
     let mut resolved = Vec::with_capacity(params.len());
@@ -806,8 +847,7 @@ fn resolve_signature<'a>(
                 &|name| scope.contains(name),
                 bindings,
                 dimensions,
-                resolver,
-                structs,
+                types,
                 MAX_ELABORATION_DEPTH,
             )?,
         });
@@ -817,8 +857,7 @@ fn resolve_signature<'a>(
         &|name| scope.contains(name),
         bindings,
         dimensions,
-        resolver,
-        structs,
+        types,
         MAX_ELABORATION_DEPTH,
     )?;
     Ok((resolved, result))
@@ -899,9 +938,15 @@ fn type_dependencies<'a>(
     let mut pending = vec![ty];
     while let Some(ty) = pending.pop() {
         match ty {
-            Type::Named(name) | Type::Enum { name, .. } => {
-                if !name.contains("::") {
-                    nominal(ty, name);
+            Type::Named(name)
+            | Type::Enum { name, .. }
+            | Type::Applied { name, .. }
+            | Type::ParametricStruct { name, .. } => {
+                nominal(ty, name);
+                if let Type::ParametricStruct { args, .. } = ty {
+                    for arg in args {
+                        dimension(arg);
+                    }
                 }
             }
             Type::Array { element, .. } => pending.push(element),
@@ -914,10 +959,7 @@ fn type_dependencies<'a>(
                 dimension(width);
             }
             Type::Tuple(fields) => pending.extend(fields.iter().rev()),
-            Type::Bool | Type::Bits { .. } | Type::Applied { .. } => {
-                // Primitives and concrete imported applications have no local
-                // dependencies.
-            }
+            Type::Bool | Type::Bits { .. } => { /* Primitives have no local dependencies. */ }
         }
     }
 }
@@ -953,29 +995,27 @@ impl<'a> Declarations<'a> {
         params: &[Param],
         result: &Type,
         local: Option<&'a Function>,
-        resolver: &mut ImportResolver,
-        structs: &mut StructTable,
+        types: &mut TypeResolver<'_, 'a>,
     ) -> Result<(), String> {
         if let Some(f) = local
             && f.has_inferred_parametrics()
         {
-            return self.add_value_template(f, structs);
+            return self.add_value_template(f, types.structs);
         }
         let mut names = BTreeSet::new();
         let mut callback_params = Vec::new();
         if let Some(function) = local {
-            let at = self.positions.get(name).copied();
+            let dimensions = self.module_dimensions(name);
             for callback in &function.callback_params {
                 declare(&mut names, &callback.name)?;
                 let mut resolve = |ty: &Type| {
-                    self.check_type_visibility(ty, at, None)?;
+                    self.check_type_visibility(ty, dimensions.position, None)?;
                     resolve_type(
                         ty,
                         &|name| names.contains(name),
                         None,
-                        self.dimensions_at(at),
-                        resolver,
-                        structs,
+                        dimensions,
+                        types,
                         MAX_ELABORATION_DEPTH,
                     )
                 };
@@ -999,9 +1039,11 @@ impl<'a> Declarations<'a> {
             &names,
             None,
             self.module_dimensions(name),
-            resolver,
-            structs,
+            types,
         )?;
+        let TypeResolver {
+            resolver, structs, ..
+        } = types;
         structs.update_imports(resolver)?;
         let callback_params = callback_params
             .into_iter()
@@ -1131,10 +1173,10 @@ impl BlockInterface {
     }
 }
 
-impl StructTable {
+impl StructTable<'_> {
     /// Validate a definition after its dependencies and index it for field
     /// selection.
-    fn index(&mut self, index: usize) -> Result<(), String> {
+    fn index(&mut self, index: usize) -> Result<TypeShape, String> {
         let def = &self.definitions[index];
         let shape = TypeShape::aggregate(
             def.fields.iter().map(|p| &p.ty),
@@ -1143,7 +1185,7 @@ impl StructTable {
         )
         .map_err(|e| format!("struct '{}': {e}", def.name))?;
         self.indices.insert(def.name.clone(), (index, shape));
-        Ok(())
+        Ok(shape)
     }
 
     /// Import newly reflected definitions in dependency order. A call can
@@ -1236,7 +1278,7 @@ impl TypeShape {
             // Substitution checks visit source annotations before import
             // resolution. An application is a single nominal leaf there;
             // the checker validates its full layout after resolution.
-            Type::Applied { .. } => Self::LEAF,
+            Type::Applied { .. } | Type::ParametricStruct { .. } => Self::LEAF,
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
                 return Err("unresolved value-parametric dimension".into());
             }
@@ -1441,11 +1483,13 @@ pub(crate) fn check_sources(
         for field in &def.fields {
             declare(&mut fields, &field.name).map_err(|e| format!("struct '{}': {e}", def.name))?;
         }
+        structs.register_template(def)?;
         structs.definitions.push(StructDef {
             name: def.name.clone(),
             public: def.public,
             // Reserve local indices before reflection appends imported layouts.
             fields: Vec::new(),
+            value_parametrics: Vec::new(),
         });
     }
     let mut declarations = Declarations {
@@ -1474,6 +1518,7 @@ pub(crate) fn check_sources(
                 .map(|e| e.name.as_str())
                 .chain(module.externs.iter().map(|f| f.name.as_str()))
                 .chain(module.constants.iter().map(|c| c.name.as_str()))
+                .chain(module.structs.iter().map(|s| s.name.as_str()))
                 .chain(module.functions.iter().map(|f| f.name.as_str()))
                 .enumerate()
                 .map(|(i, name)| (name, i + 1)),
@@ -1527,26 +1572,22 @@ pub(crate) fn check_sources(
             Some(Bindings::new(&b.type_params))
         };
         let dimensions = declarations.module_dimensions(&b.name);
+        let mut types = TypeResolver {
+            resolver: &mut resolver,
+            structs: &mut structs,
+            functions: Some(&mut function_registry),
+        };
         let (params, result) = resolve_signature(
             &b.params,
             &b.result,
             reserved_ports,
             symbolic.as_ref(),
             dimensions,
-            &mut resolver,
-            &structs,
+            &mut types,
         )?;
         if let Some(bindings) = &symbolic {
-            let template = BlockTemplate::new(
-                b,
-                params,
-                result,
-                bindings,
-                dimensions,
-                &mut resolver,
-                &mut structs,
-            )
-            .map_err(|e| format!("block '{}': {e}", b.name))?;
+            let template = BlockTemplate::new(b, params, result, bindings, dimensions, &mut types)
+                .map_err(|e| format!("block '{}': {e}", b.name))?;
             declarations.templates.insert(&b.name, template);
             continue;
         }
@@ -1571,8 +1612,11 @@ pub(crate) fn check_sources(
             timing_ports,
             None,
             declarations.module_dimensions(&b.name),
-            &mut resolver,
-            &structs,
+            &mut TypeResolver {
+                resolver: &mut resolver,
+                structs: &mut structs,
+                functions: Some(&mut function_registry),
+            },
         )?;
         structs.update_imports(&resolver)?;
         declarations
@@ -1655,7 +1699,11 @@ pub(crate) fn check_sources(
     let warnings = warning_collector.finish(module, linked, |name| declarations.is_block(name));
     let mut checked = CheckedModule {
         warnings,
-        structs: structs.definitions,
+        structs: structs
+            .definitions
+            .into_iter()
+            .filter(|def| !structs.templates.contains_key(def.name.as_str()))
+            .collect(),
         enums: structs.enums,
         constants: module
             .constants
@@ -1711,8 +1759,10 @@ struct BlockBody {
 /// Lexical values, loop elaboration, and any hardware declared in one body.
 struct BodyChecker<'a, 'm> {
     decls: &'a Declarations<'m>,
-    structs: &'a mut StructTable,
+    structs: &'a mut StructTable<'m>,
     resolver: &'a mut ImportResolver,
+    /// Runtime names that shadow module declarations in a type annotation.
+    enclosing_type_locals: Option<&'a dyn Fn(&str) -> bool>,
     kind: BodyKind,
     uses_child: Cell<bool>,
     /// The source body owns the expansion budget even while checking a lambda
@@ -1967,13 +2017,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     fn new(
         decls: &'a Declarations<'m>,
         resolver: &'a mut ImportResolver,
-        structs: &'a mut StructTable,
+        structs: &'a mut StructTable<'m>,
         kind: BodyKind,
     ) -> Self {
         Self {
             decls,
             structs,
             resolver,
+            enclosing_type_locals: None,
             kind,
             uses_child: Cell::new(false),
             source_kind: kind,
@@ -2090,7 +2141,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         decls: &'a Declarations<'m>,
         block: &'m Block,
         resolver: &'a mut ImportResolver,
-        structs: &'a mut StructTable,
+        structs: &'a mut StructTable<'m>,
         specializations: &'a mut BlockSpecializations<'m>,
         specialization: Option<&'a BlockSpecialization<'m>>,
         function_registry: &'a mut FunctionSpecializations<'m>,
@@ -2342,7 +2393,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
                 Err("unresolved block result dimension".into())
             }
-            Type::Tuple(_) | Type::Named(_) | Type::Applied { .. } => Ok(TypedExpr {
+            Type::Tuple(_)
+            | Type::Named(_)
+            | Type::Applied { .. }
+            | Type::ParametricStruct { .. } => Ok(TypedExpr {
                 ty: child.result.clone(),
                 kind: K::Tuple(outputs.collect()),
             }),
@@ -2686,14 +2740,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields } => self.struct_literal(Type::Named(name.clone()), fields),
+            Expr::Struct { name, fields } => {
+                self.struct_literal(Type::Named(name.clone()), fields, expected)
+            }
             Expr::AppliedStruct { name, args, fields } => self.struct_literal(
                 Type::Applied {
                     name: name.clone(),
                     args: args.clone(),
                 },
                 fields,
+                expected,
             ),
+            Expr::ParametricStruct { name, args, fields } => {
+                let ty = self.struct_actual_type(name, args)?;
+                self.struct_literal(ty, fields, expected)
+            }
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
             Expr::MapBeforeUse {
@@ -2701,7 +2762,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args,
                 builtin_args,
             } => {
-                if self.is_builtin_map(name, |target| self.names.contains(target))? {
+                if self.is_builtin_map(name, |target| self.has_local_name(target))? {
                     let args = builtin_args
                         .as_deref()
                         .ok_or("invalid operand syntax for the built-in map")?;
@@ -2719,7 +2780,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     self.check_block_callback_list(
                         name,
                         parametrics.len(),
-                        self.names.contains(name),
+                        self.has_local_name(name),
                     )?;
                     return Err(self.block_in_value_error(name));
                 }
@@ -2745,6 +2806,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Look up a lexical value before consulting the block interface.
+    fn has_local_name(&self, name: &str) -> bool {
+        self.names.contains(name)
+            || self.enclosing_type_locals.is_some_and(|contains| {
+                contains(name.split_once("::").map_or(name, |(head, _)| head))
+            })
+    }
+
     fn named_value(&mut self, name: &str) -> Result<(Type, K), String> {
         if name == "_" && (self.kind == BodyKind::Function || self.in_loop_scope()) {
             return Err("cannot read the wildcard binding '_'".into());
@@ -2769,7 +2837,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         self.reject_type_parameter_value(name)?;
-        if !self.names.contains(name)
+        if !self.has_local_name(name)
             && let Some(value) = self.module_constant(name)
         {
             let work = source_type_nodes(&value.ty) - 1 + literal_copy_work(&value.value);
@@ -2848,7 +2916,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<(Type, K), String> {
         let resolved;
         let annotation = if let Some(
-            ty @ (Type::Named(_) | Type::Applied { .. } | Type::ParametricBits { .. }),
+            ty @ (Type::Named(_)
+            | Type::Applied { .. }
+            | Type::ParametricStruct { .. }
+            | Type::ParametricBits { .. }),
         ) = annotation
         {
             resolved = self.source_type(ty)?;
@@ -3038,27 +3109,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         source: Type,
         fields: &[(String, Expr)],
+        expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
-        let ty = self.source_type(&source)?;
-        let Type::Named(canonical) = &ty else {
-            return Err(format!("'{source}' is not a struct"));
-        };
-        let members = self.structs.definition(canonical)?.fields.clone();
         let mut supplied = BTreeMap::new();
         for (field, value) in fields {
             if supplied.insert(field.as_str(), value).is_some() {
                 return Err(format!("duplicate field '{source}.{field}'"));
             }
         }
+        let (ty, mut inputs) = self.struct_literal_type(&source, &supplied, expected)?;
+        let Type::Named(canonical) = &ty else {
+            return Err(format!("'{source}' is not a struct"));
+        };
+        let members = self.structs.definition(canonical)?.fields.clone();
         let mut values = Vec::new();
         for p in &members {
             let v = supplied
                 .remove(p.name.as_str())
                 .ok_or_else(|| format!("missing field '{source}.{}'", p.name))?;
-            values.push(
+            let value = if let Some(input) = inputs.remove(&p.name) {
+                self.finish_input(input, &p.ty)
+            } else {
                 self.expr(v, Some(&p.ty))
-                    .map_err(|e| format!("field '{source}.{}': {e}", p.name))?,
-            );
+            };
+            values.push(value.map_err(|e| format!("field '{source}.{}': {e}", p.name))?);
         }
         if let Some(field) = supplied.keys().next() {
             return Err(format!("unknown field '{source}.{field}'"));
@@ -3383,10 +3457,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
-    /// An inferred aggregate can receive a leaf's type from another operand,
-    /// including when the binding appears inside a tuple or array constructor.
+    /// An inferred aggregate can receive a leaf's type or missing struct
+    /// arguments from another operand.
     fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
         match expr {
+            Expr::Struct { .. } | Expr::AppliedStruct { .. } | Expr::ParametricStruct { .. } => {
+                self.inferred_struct_constructor(expr).is_some()
+            }
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
@@ -3683,6 +3760,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let hint = if first_has_type {
             CommonTypeHint::FromExpr(0)
         } else {
+            if let Some(values) = self.infer_struct_siblings(items)? {
+                return Ok(values);
+            }
             self.common_hint(items)?
         };
         match hint {
@@ -3768,7 +3848,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve the spelling shared by the zero intrinsic and a function.
     fn zero_calls_function(&self) -> Result<bool, String> {
         match self.kind {
-            _ if self.names.contains("zero!") => Err("'zero!' names a local value here".into()),
+            _ if self.has_local_name("zero!") => Err("'zero!' names a local value here".into()),
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
@@ -3850,8 +3930,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 checker.check_results(items, expected)
             });
         }
-        if expected.is_none() && items.iter().any(|e| has_aggregate_literal(e)) {
+        if expected.is_none()
+            && (items.iter().any(|e| has_aggregate_literal(e))
+                || items
+                    .iter()
+                    .any(|e| matches!(e, Expr::If { .. } | Expr::Match { .. }))
+                    && items.iter().any(|e| self.contains_inferred_aggregate(e)))
+        {
             return self.unify_values(items);
+        }
+        if expected.is_none()
+            && let Some(values) = self.infer_struct_siblings(items)?
+        {
+            return Ok(values);
         }
         let (index, anchor) = self.result_anchor(items, expected)?;
         self.check_siblings(items, index, anchor)
@@ -3915,7 +4006,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err(format!("'{source_name}' names a local value here"));
         }
         if let Some(index) = self.callback_index(name) {
-            if self.names.contains(name) {
+            if self.has_local_name(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
             return self.call_formal(index, args);
@@ -3928,7 +4019,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             ));
         }
         self.reject_type_parameter_value(name)?;
-        if self.is_builtin_map(name, |target| self.names.contains(target))? {
+        if self.is_builtin_map(name, |target| self.has_local_name(target))? {
             return self.with_dslx_value_context(|checker| checker.named_array_map(args));
         }
         if let Some(builtin) = name.strip_prefix(BUILTIN_PREFIX)
@@ -3938,7 +4029,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let visible = self.decls.visible(name, self.function_position);
         if !visible {
-            if is_call_builtin(name) && !self.names.contains(name) {
+            if is_call_builtin(name) && !self.has_local_name(name) {
                 return self.builtin_call(name, args);
             }
             return Err(format!("function '{name}' is declared later in the module"));
@@ -3949,7 +4040,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let spelling = crate::bx_import::library_item(name).map_or(name, |(_, item)| item);
         if visible
             && let Some((subject, function)) =
-                lookup_use(name, self.resolver, |binding| self.names.contains(binding))?
+                lookup_use(name, self.resolver, |binding| self.has_local_name(binding))?
         {
             if is_call_builtin(spelling) && self.resolver.has_public_type(&subject, &function) {
                 if !visible_value {
@@ -3986,13 +4077,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if visible_value && self.structs.enums.contains_key(name) {
             return Err(format!("enum '{name}' cannot be called as a function"));
         }
-        if visible_value && is_call_builtin(spelling) && self.structs.indices.contains_key(name) {
+        if visible_value
+            && is_call_builtin(spelling)
+            && (self.structs.indices.contains_key(name) || self.structs.template(name).is_some())
+        {
             return Err(format!(
                 "struct '{spelling}' cannot be called as a function"
             ));
         }
         if is_call_builtin(name) && !self.decls.declares_function(name) {
-            if self.names.contains(name) {
+            if self.has_local_name(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
             return self.builtin_call(name, args);
@@ -4005,7 +4099,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .functions
             .get_key_value(name)
             .ok_or_else(|| format!("unknown function '{name}'"))?;
-        if self.names.contains(name) && (f.local || self.kind == BodyKind::Function) {
+        if self.has_local_name(name) && (f.local || self.kind == BodyKind::Function) {
             return Err(format!("'{name}' names a local value here"));
         }
         if !f.callback_params.is_empty() {

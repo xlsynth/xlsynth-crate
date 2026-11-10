@@ -505,6 +505,9 @@ impl<'a> Graph<'a> {
                 .map(|d| (&d.name, false))
                 .chain(source.constants.iter().map(|d| (&d.name, false)))
                 .chain(source.enums.iter().map(|d| (&d.name, false)))
+                .chain(source.structs.iter().map(|d| (&d.name, false)))
+                .chain(source.externs.iter().map(|d| (&d.name, false)))
+                .chain(source.extern_blocks.iter().map(|d| (&d.name, false)))
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
             {
                 if block && !export.is_enum

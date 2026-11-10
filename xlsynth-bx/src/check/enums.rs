@@ -10,7 +10,7 @@ use xlsynth_pir::IrBits;
 use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_dependencies};
 use crate::ast::{EnumDef, Module, Type};
 
-impl StructTable {
+impl StructTable<'_> {
     /// Only BX declarations have unqualified keys. Imported enum references
     /// must resolve through the current module's use bindings.
     pub(super) fn local_enum(&self, name: &str) -> Option<&CheckedEnum> {
@@ -75,15 +75,22 @@ impl StructTable {
             .collect();
         let mut graph = Vec::new();
         let mut ready = Vec::new();
-        let local_structs: BTreeSet<_> =
-            module.structs.iter().map(|def| def.name.as_str()).collect();
+        let local_structs: BTreeMap<_, _> = module
+            .structs
+            .iter()
+            .map(|def| (def.name.as_str(), def))
+            .collect();
         for def in &module.structs {
             let mut deps = Vec::new();
             let mut dimensions = Vec::new();
+            let mut has_symbolic_application = false;
             for field in &def.fields {
                 type_dependencies(
                     &field.ty,
-                    |_, name| deps.push(name),
+                    |ty, name| {
+                        has_symbolic_application |= matches!(ty, Type::ParametricStruct { .. });
+                        deps.push(name);
+                    },
                     |expr| {
                         if let crate::ast::Expr::Name(name) = expr {
                             dimensions.push(name.as_str());
@@ -91,8 +98,20 @@ impl StructTable {
                     },
                 );
             }
-            let mut at = 0;
+            let parametric_names: BTreeSet<_> = def
+                .value_parametrics
+                .iter()
+                .map(|binding| binding.name.as_str())
+                .collect();
+            let mut at = if parametric_names.is_empty() && !has_symbolic_application {
+                0
+            } else {
+                position(&def.name)
+            };
             for dimension in dimensions {
+                if parametric_names.contains(dimension) {
+                    continue;
+                }
                 if let Some(&constant_at) = constant_positions.get(dimension) {
                     if constant_at > position(&def.name) {
                         return Err(format!(
@@ -104,6 +123,16 @@ impl StructTable {
                 }
             }
             for dep in &deps {
+                if local_structs
+                    .get(dep)
+                    .is_some_and(|def| !def.value_parametrics.is_empty())
+                    && position(dep) > position(&def.name)
+                {
+                    return Err(format!(
+                        "struct template '{dep}' is declared after struct '{}'",
+                        def.name
+                    ));
+                }
                 if let Some(&enum_at) = enum_positions.get(dep) {
                     if enum_at > position(&def.name) {
                         return Err(format!(
@@ -115,7 +144,7 @@ impl StructTable {
                 }
             }
             ready.push(at);
-            deps.retain(|name| local_structs.contains(name));
+            deps.retain(|name| local_structs.contains_key(name));
             graph.push((def.name.as_str(), deps));
         }
         let mut ranks = BTreeMap::new();

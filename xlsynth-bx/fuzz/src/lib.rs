@@ -19,6 +19,7 @@ mod map_lambda;
 mod module_constants;
 mod module_graph;
 mod scalar_match;
+mod struct_parametrics;
 mod unroll_types;
 
 pub use bits_array_casts::check_bits_array_casts;
@@ -37,6 +38,7 @@ pub use map_lambda::check_map_lambda;
 pub use module_constants::check_module_constants;
 pub use module_graph::check_module_graph;
 pub use scalar_match::check_scalar_match;
+pub use struct_parametrics::check_struct_parametrics;
 pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible

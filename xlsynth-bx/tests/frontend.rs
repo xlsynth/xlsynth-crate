@@ -28,6 +28,8 @@ mod map_lambda;
 mod module_constants;
 #[path = "frontend/named_map.rs"]
 mod named_map;
+#[path = "frontend/native_structs.rs"]
+mod native_structs;
 #[path = "frontend/numeric_enums.rs"]
 mod numeric_enums;
 #[path = "frontend/scalar_match.rs"]

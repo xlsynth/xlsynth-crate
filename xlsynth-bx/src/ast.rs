@@ -107,10 +107,15 @@ pub enum Type {
         signed: bool,
         width: usize,
     },
-    /// An imported struct application, before resolving its nominal type.
+    /// A struct application with concrete arguments, before nominal resolution.
     Applied {
         name: String,
         args: Vec<u32>,
+    },
+    /// A struct application with arguments evaluated at compile time.
+    ParametricStruct {
+        name: String,
+        args: Vec<Expr>,
     },
 }
 
@@ -126,6 +131,8 @@ pub struct Param {
 pub struct StructDef {
     pub name: String,
     pub public: bool,
+    /// Compile-time values in declaration order.
+    pub value_parametrics: Vec<ParametricBinding>,
     pub fields: Vec<Param>,
 }
 
@@ -261,7 +268,7 @@ pub struct Function {
     pub body: Expr,
 }
 
-/// A DSLX value parametric, optionally derived from earlier compile-time
+/// A value parametric, optionally derived from earlier compile-time
 /// bindings.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParametricBinding {
@@ -359,6 +366,12 @@ pub enum Expr {
     AppliedStruct {
         name: String,
         args: Vec<u32>,
+        fields: Vec<(String, Expr)>,
+    },
+    /// A struct literal with arguments evaluated at compile time.
+    ParametricStruct {
+        name: String,
+        args: Vec<Expr>,
         fields: Vec<(String, Expr)>,
     },
     Field {

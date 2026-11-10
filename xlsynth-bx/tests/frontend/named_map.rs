@@ -113,6 +113,41 @@ fn named_map_builtin_yields_to_a_visible_type() {
 }
 
 #[test]
+fn parametric_struct_shadows_map_from_its_declaration() -> Result<(), Box<dyn Error>> {
+    let declaration = "struct map<N: u32> { data: uN[N] }";
+    let callback = "fn flip(x: u8) -> u8 { rev(x) }";
+    let sample = "fn sample(xs: u8[2]) -> u8[2] { map(xs, flip) }";
+    let source = format!("{callback}\n{sample}\n{declaration}");
+    check_module(&parse_module(&source)?)?;
+    compile_dslx_module(&source, &[])?;
+
+    let block = r#"
+block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) { (map(xs, flip), map(xs, |x| x)) }
+"#;
+    let source = format!("{callback}\n{block}\n{declaration}");
+    check_module(&parse_module(&source)?)?;
+
+    let source = format!("{callback}\n{declaration}\n{sample}");
+    assert!(
+        check_module(&parse_module(&source)?).is_err(),
+        "BX accepted {source}"
+    );
+    assert!(
+        compile_dslx_module(&source, &[]).is_err(),
+        "DSLX accepted {source}"
+    );
+
+    let lambda =
+        format!("{declaration}\nblock sample(clk, xs: u8[2]) -> u8[2] {{ map(xs, |x| x) }}");
+    let error = check_module(&parse_module(&lambda)?).unwrap_err();
+    assert!(
+        error.contains("an inline lambda argument requires the built-in map"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
 fn bx_library_keeps_its_named_map_builtin_binding() -> Result<(), Box<dyn Error>> {
     let root = tempdir()?;
     fs::write(

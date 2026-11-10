@@ -106,6 +106,46 @@ pub block circuit(clk, x:u8)->u8 {
 }
 
 #[test]
+fn library_struct_arguments_keep_their_defining_zero_binding() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(dir.path(), "widths.bx", "pub fn zero!() -> u32 { u32:7 }")?;
+    let options = search_paths(&[dir.path()]);
+    let source = r#"
+use wire;
+fn zero!() -> u32 { u32:5 }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 {
+    let packet = wire::Packet { lane: wire::Lane<7> { value: x as u7 } };
+    wire::apply<wire::read>(packet.lane) as u8
+}
+"#;
+    for binding in ["fn zero!() -> u32 { u32:7 }", "use widths::zero!;"] {
+        write_module(
+            dir.path(),
+            "wire.bx",
+            &format!(
+                r#"
+{binding}
+pub struct Lane<N: u32> {{ value: uN[N] }}
+pub struct Packet {{ lane: Lane<{{zero!<u32>()}}> }}
+pub fn read(x: Lane<{{zero!<u32>()}}>) -> u7 {{ x.value }}
+pub fn apply<F: fn(Lane<{{zero!<u32>()}}>) -> u7>(x: Lane<7>) -> u7 {{ F(x) }}
+extern fn external_read(x: Lane<{{zero!<u32>()}}>) -> u7;
+extern block external_stage(clk, x: Lane<{{zero!<u32>()}}>) -> u7;
+fn read_external(x: Lane<7>) -> u7 {{ external_read(x) }}
+block stage_external(clk, x: Lane<7>) -> u7 {{ let y = external_stage(x); y }}
+"#
+            ),
+        )?;
+        assert_eq!(
+            run(compile_design(source, &options)?, 228)?,
+            IrValue::make_ubits(8, 100)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_bx_enum_members_resolve_through_module_and_member_uses() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(
