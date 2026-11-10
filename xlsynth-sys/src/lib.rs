@@ -1042,6 +1042,11 @@ unsafe extern "C" {
         type_annotation: *mut CDslxTypeAnnotation,
     ) -> *mut CDslxType;
 
+    /// Returns the borrowed module resolved for this import, or null if absent.
+    pub fn xls_dslx_type_info_get_imported_module(
+        type_info: *mut CDslxTypeInfo,
+        import: *mut CDslxImport,
+    ) -> *mut CDslxModule;
     pub fn xls_dslx_type_info_get_imported_type_info(
         type_info: *mut CDslxTypeInfo,
         module: *mut CDslxModule,

@@ -10,7 +10,7 @@ use xlsynth::dslx::{Function, FunctionCallGraph, MatchableModuleMember, Module, 
 use super::outline_graph::{OutlineGraph, SourceModule};
 use super::{ImportedStructs, NativeSourceFiles};
 use crate::effect_diagnostic::{EffectLocation, const_assert_replacement};
-use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens, visit_conversion_items};
+use crate::parser::outline::{DslxFunctionTokens, dslx_function_tokens};
 use crate::parser::source_bytes::{decode_dslx_source, native_display_tokens_source};
 use crate::parser::{
     Token, dslx_tokens, is_dslx_member_name, is_use_identifier, nonempty_literal_range,
@@ -221,13 +221,11 @@ impl<'a> EffectSources<'a> {
             if ModuleMember::try_from(function).is_ok() {
                 // A top-level declaration has a unique name. Impl methods can
                 // share names with other impls or with generated lambda calls.
-                visit_conversion_items(&written, |item| {
-                    if item.kind == "fn" && item.name.text == name && !item.associated {
-                        body = Some(item.body.to_vec());
-                    }
-                })?;
+                body = dslx_function_tokens(&written)?
+                    .remove(&name)
+                    .map(|f| f.body);
             }
-            original = body.ok_or_else(|| format!("cannot verify dispatch in DSLX function '{name}': libxls v0.61 returned an incomplete function body without an identifiable source declaration"))?;
+            original = body.ok_or_else(|| format!("cannot verify dispatch in DSLX function '{name}': libxls returned an incomplete function body without an identifiable source declaration"))?;
             original.as_slice()
         };
         let angles = application_angles(body);

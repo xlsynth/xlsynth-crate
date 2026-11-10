@@ -872,7 +872,6 @@ fn compile_batch(
     let source = probe_imports.declarations() + &probes;
     let module = format!("0bx_batch_{index}");
     let checked = structs.check_probe(&source, &module, imports)?;
-    structs.check_enum_order(&source, &module)?;
     let explicit_values = call_ids.iter().any(|&id| !calls[id].parametrics.is_empty());
     if has_instances {
         conversion_guard::check(

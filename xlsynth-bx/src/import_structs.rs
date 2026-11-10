@@ -5,7 +5,6 @@
 mod binding_types;
 mod effect_source;
 mod enum_conversion;
-mod enum_order;
 mod enums;
 mod outline_graph;
 mod runfiles;
@@ -62,7 +61,6 @@ pub(crate) struct ImportedStructs {
     definitions: Vec<StructDef>,
     enums: enums::ImportedEnums,
     enum_conversion_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
-    enum_order_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
     probe_index: usize,
 }
 
@@ -128,7 +126,6 @@ impl ImportedStructs {
             definitions: Vec::new(),
             enums: Default::default(),
             enum_conversion_snapshot: Default::default(),
-            enum_order_snapshot: Default::default(),
             probe_index: 0,
         }
     }

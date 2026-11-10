@@ -338,8 +338,8 @@ fn compare_specializations(
     )
 }
 
-/// Pinned DSLX typechecks enum ordering but its bytecode interpreter rejects
-/// enum operands and its IR converter aborts. BX diagnoses the operation.
+/// Check local and imported enum-ordering diagnostics and evaluate explicit
+/// backing-bit comparisons against native DSLX.
 fn check_ordering(
     domain: &Domain,
     source: &str,
@@ -352,8 +352,17 @@ fn check_ordering(
     let params = "a:Mode,b:Mode";
     let bx = format!("{source}\n{}", bx_source(params, "bool", &body));
     let reference = format!("{source}\n{}", dslx_source(params, "bool", &body));
-    parse_and_typecheck(&reference, "oracle.x", "oracle", &mut ImportData::default())
-        .map_err(|e| format!("DSLX rejected enum ordering: {e}\n{reference}"))?;
+    let native_error =
+        match parse_and_typecheck(&reference, "oracle.x", "oracle", &mut ImportData::default()) {
+            Ok(_) => return Err(format!("DSLX accepted enum ordering\n{reference}")),
+            Err(error) => error.to_string(),
+        };
+    let diagnostic = format!("Operator '{op}' requires bits-typed operands, got Mode.");
+    if !native_error.contains(&diagnostic) {
+        return Err(format!(
+            "unexpected DSLX enum ordering diagnostic: {native_error}\n{reference}"
+        ));
+    }
     let module = parse_module(&bx)?;
     match check_module(&module) {
         Err(e) if e.contains("ordered comparison of enum values") => { /* Expected local diagnostic. */
@@ -395,8 +404,7 @@ fn check_ordering(
         ResetBehavior::default(),
         &options,
     ) {
-        Err(e) if e.contains("ordered comparison") && e.contains("cast enum operands") => { /* Expected import diagnostic. */
-        }
+        Err(e) if e.contains(&diagnostic) => { /* DSLX typechecked the imported module. */ }
         Err(e) => {
             return Err(format!(
                 "unexpected imported enum ordering diagnostic: {e}\n{bad}\n{library}"
@@ -408,8 +416,10 @@ fn check_ordering(
             ));
         }
     }
-    // The independent native IR/bytecode reference contains only the safe
-    // sibling. BX must link the safe function from the full imported module.
+    // A module containing the invalid comparison is rejected on import.
+    // Compile the explicitly cast comparison in a valid module on both sides.
+    let library = format!("{}\n{safe}", source.replace("enum Mode", "pub enum Mode"));
+    fs::write(dir.path().join("device.x"), library).map_err(|e| e.to_string())?;
     compare_bx_program(
         &imported("bit_order"),
         FunctionProgram {

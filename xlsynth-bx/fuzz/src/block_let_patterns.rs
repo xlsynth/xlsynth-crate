@@ -137,10 +137,7 @@ pub fn check_block_let_patterns(data: &[u8]) -> Result<(), String> {
         7 => pattern = format!("({first}, _, last, extra)"),
         8 => pattern = format!("({first}, _, {first})"),
         9 => pattern = format!("({first}, .., .., last)"),
-        // The pinned DSLX typechecker accepts some nested tuple patterns on
-        // scalar members that abort its IR converter. Exercise malformed
-        // outer arities here and recurse into known tuples for inner patterns.
-        10 => pattern = format!("({first}, last)"),
+        10 => pattern = format!("({first}, _, (last,))"),
         11 => annotation = format!(": (s8, {payload}, u8)"),
         _ => { /* Keep the generated valid pattern and annotation. */ }
     }

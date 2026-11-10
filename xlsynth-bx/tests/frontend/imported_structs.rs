@@ -254,7 +254,7 @@ block sample(clk, x: first::Mode) -> (bool, bool) {
 }
 
 #[test]
-fn nul_characters_preserve_reachable_dslx_comparison_checks() -> Result<(), Box<dyn Error>> {
+fn nul_character_literals_preserve_imported_dslx_comparisons() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(
         dir.path().join("ops.x"),
@@ -264,7 +264,6 @@ fn copy<N:u32>(x:uN[N])->uN[N] { x }
 pub fn safe(x:Mode)->bool { let _ = '\x00'; (x as u2) < u2:1 }
 pub fn shift(x:Mode)->u2 { let _ = '\x00'; (x as u2) >> u1:1 }
 pub fn sibling(x:Mode)->bool { copy<u32:2>(x as u2) >= u2:1 }
-pub fn bad(x:Mode)->bool { let _ = '\x00'; x < Mode::B }
 "#,
     )?;
     let options = ImportOptions {
@@ -277,9 +276,6 @@ pub fn bad(x:Mode)->bool { let _ = '\x00'; x < Mode::B }
         BlockEvaluator::lower(&checked, bx)?.evaluate(&[IrValue::make_ubits(2, 3)?])?,
         IrValue::parse_typed("(bits[1]:0,bits[2]:1,bits[1]:1)")?
     );
-    let bad = parse_module("use ops; block sample(clk,x:ops::Mode)->bool { ops::bad(x) }")?;
-    let error = check_module_with_options(&bad, &options).unwrap_err();
-    assert!(error.contains("cast enum operands"), "{error}");
     Ok(())
 }
 
@@ -298,80 +294,52 @@ fn imported_enum_order_diagnostic_uses_the_original_byte_columns() -> Result<(),
         ..Default::default()
     };
     let error = check_module_with_options(&bx, &options).unwrap_err();
-    let start = line.windows(3).position(|w| w == b"x <").unwrap() + 1;
-    let span = format!("{}:2:{start}-2:{}", path.display(), start + 2);
-    assert!(error.contains(&span), "expected {span} in {error}");
+    let column = line.iter().position(|b| *b == b'<').unwrap() + 1;
+    assert_eq!(
+        error,
+        format!(
+            "checking use 'ops': xlsynth error: INVALID_ARGUMENT: TypeInferenceError: {}:2:{column}-2:{} Operator '<' requires bits-typed operands, got Mode.",
+            path.display(),
+            column + 1
+        )
+    );
     Ok(())
 }
 
 #[test]
-fn module_constants_do_not_instantiate_runtime_enum_order_guards() -> Result<(), Box<dyn Error>> {
+fn imported_constants_can_order_enum_backing_values() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(
         dir.path().join("ops.x"),
         r#"
-#![feature(use_syntax)]
-type BxUnavailableConstant0 = u8;
-fn assert!(condition:bool, message:u8[1]) { () }
 pub enum Mode : u2 { A = 0, B = 1 }
-pub fn cmp(a:Mode, b:Mode)->bool { a < b }
-fn seven()->u8 { u8:7 }
-const PRIVATE_VALUE = seven();
-const UNAVAILABLE = cmp(Mode::A, Mode::B);
-const UNUSED_PAIR:(Mode,bool) = (Mode::A, cmp(Mode::A, Mode::B));
-pub fn safe(x:Mode)->bool { x == x }
-pub fn missing(x:Mode)->bool { x == x && UNAVAILABLE }
+pub fn before(a:Mode, b:Mode)->bool { (a as u2) < (b as u2) }
 "#,
     )?;
     fs::write(
         dir.path().join("constants.x"),
         r#"
 import ops;
-fn folded()->sN[96] {
-    if false { ops::cmp(ops::Mode::A, ops::Mode::B) as sN[96] }
-    else { sN[96]:-0x1_0000_0000_0000_0001 }
-}
-const WIDE:sN[96] = folded();
-const_assert!(WIDE == sN[96]:-0x1_0000_0000_0000_0001);
-const FOREIGN = ops::cmp(ops::Mode::A, ops::Mode::B);
-pub fn wide(x:ops::Mode)->sN[96] { if ops::safe(x) { WIDE } else { sN[96]:0 } }
-"#,
-    )?;
-    fs::write(
-        dir.path().join("facade.x"),
-        r#"
-#![feature(use_syntax)]
-use ops::PRIVATE_VALUE;
-pub fn read(x:u8)->u8 { x + PRIVATE_VALUE }
+const ORDERED = ops::before(ops::Mode::A, ops::Mode::B);
+const WIDE = if ORDERED { sN[96]:-0x1_0000_0000_0000_0001 } else { sN[96]:0 };
+const_assert!(ORDERED);
+pub fn wide(x:ops::Mode)->sN[96] { if ops::before(x, ops::Mode::B) { WIDE } else { sN[96]:0 } }
 "#,
     )?;
     let options = ImportOptions {
         additional_search_paths: vec![dir.path()],
         ..Default::default()
     };
-    for (uses, call, result) in [
-        ("use ops;", "ops::safe(x)", "bool"),
-        ("use ops; use facade;", "facade::read(x as u8)", "u8"),
-        ("use ops; use constants;", "constants::wide(x)", "sN[96]"),
-    ] {
-        let bx = format!("{uses} block sample(clk, x:ops::Mode)->{result} {{ {call} }}");
-        let native = format!(
-            "import ops; import constants; import facade; fn sample(x:ops::Mode)->{result} {{ {call} }}"
-        );
-        let eval = ExpressionEvaluator::compile_block(
-            &bx,
-            &options,
-            compile_dslx_module(&native, &[dir.path()]),
-        )?;
-        eval.compare(&[IrValue::make_ubits(2, 1)?])?;
-    }
-    for (call, reason) in [
-        ("ops::missing(x)", "No constexpr value"),
-        ("ops::cmp(x,x)", "cast enum operands"),
-    ] {
-        let bx = format!("use ops; block sample(clk, x:ops::Mode)->bool {{ {call} }}");
-        let err = check_module_with_options(&parse_module(&bx)?, &options).unwrap_err();
-        assert!(err.contains(reason), "{call}: {err}");
+    let bx = "use ops; use constants; block sample(clk,x:ops::Mode)->sN[96] { constants::wide(x) }";
+    let native =
+        "import ops; import constants; fn sample(x:ops::Mode)->sN[96] { constants::wide(x) }";
+    let evaluator = ExpressionEvaluator::compile_block(
+        bx,
+        &options,
+        compile_dslx_module(native, &[dir.path()]),
+    )?;
+    for input in [0, 1] {
+        evaluator.compare(&[IrValue::make_ubits(2, input)?])?;
     }
     Ok(())
 }
@@ -480,7 +448,7 @@ pub fn high_byte<T:type>(x:T)->bool {
         let bx = format!("use ops; block sample(clk,x:ops::Mode)->(bool,bool) {{ {body} }}");
         assert_eq!(
             check_module_with_options(&parse_module(&bx)?, &options).unwrap_err(),
-            "compiling DSLX import 'ops': distinct specializations of DSLX function 'eq' have the same native IR symbol with libxls v0.61"
+            "compiling DSLX import 'ops': distinct specializations of DSLX function 'eq' have the same native IR symbol"
         );
     }
     for function in ["via", "mapped_via"] {
@@ -490,7 +458,7 @@ pub fn high_byte<T:type>(x:T)->bool {
         assert_eq!(
             check_module_with_options(&parse_module(&bx)?, &options).unwrap_err(),
             format!(
-                "compiling DSLX import 'ops': libxls v0.61 does not expose the concrete method dispatch to 'compare' inside DSLX function '{function}'; BX cannot verify its native specialization symbols"
+                "compiling DSLX import 'ops': libxls does not expose the concrete method dispatch to 'compare' inside DSLX function '{function}'; BX cannot verify its native specialization symbols"
             )
         );
     }
@@ -511,100 +479,29 @@ pub fn high_byte<T:type>(x:T)->bool {
 }
 
 #[test]
-fn reachable_native_enum_ordering_is_diagnosed_before_conversion() -> Result<(), Box<dyn Error>> {
+fn invalid_enum_ordering_is_diagnosed_when_the_dslx_module_is_imported()
+-> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    fs::write(
-        dir.path().join("dummy.x"),
-        "pub fn cmp(x:u2)->bool{x==u2:0}",
-    )?;
-    fs::write(
-        dir.path().join("ops.x"),
-        r#"
-import dummy; pub enum Mode : u2 { Idle=0, Busy=1 }
-fn copy<N:u32>(x:uN[N])->uN[N]{x}
-pub struct Pair { a:Mode, b:Mode }
-#[fuzz_domain("SDomain")] pub struct S { bad:u3 }
-impl S { fn get(self)->u3 { self.bad } }
-fn use_domain()->SDomain { SDomain { bad: () } }
-pub fn bad(a:Mode,b:Mode)->bool{a<b}
-impl Pair {
-    fn ordered(self:Self)->bool{self.a < self.b}
-    fn bad(self:Self)->bool{self.a == self.b}
-    fn cmp(x:Pair)->bool{x.a < x.b}
-}
-pub fn overload_ok(v:Mode)->bool{Pair{a:v,b:v}.bad()}
-pub fn alias_bad(v:Mode)->bool{type dummy=Pair; dummy::cmp(Pair{a:v,b:v})}
-pub fn alias_counted(v:Mode)->bool{type dummy=Pair; for (_,acc) in u8:0..u8:1 { dummy::cmp(Pair{a:v,b:v}) }(false)}
-pub fn for_binder_ok(v:Mode)->bool{for (bad,acc) in u2:0..u2:1 { acc || bad < (v as u2) }(false)}
-pub fn lambda_bad(v:Mode)->bool{map([v], |x:Mode|->bool{x < v})[u32:0]}
-pub fn zero_unroll(v:Mode)->bool{unroll_for! (_,acc) in u2:0..u2:0 {acc || v >= Mode::Idle}(true)}
-#[test] fn checks_order(){ let _ = bad(Mode::Idle,Mode::Busy); }
-#[quickcheck] fn property(v:u2)->bool{v < u2:3}
-pub proc Unused { config(){()} init{true} next(acc:bool){bad(Mode::Idle,Mode::Busy)} }
-pub fn lambda_good(v:Mode)->bool{map([v], |x:Mode|->bool{copy<u32:2>(x as u2) >= v as u2})[u32:0]}
-pub fn nested_bad(v:Mode)->bool{map([v], |x:Mode|->bool{map([v], |y:Mode|->bool{x <= y})[u32:0]})[u32:0]}
-pub fn method(p:Pair)->bool{p.ordered()}
-pub fn initializer(a:Mode)->bool{ let bad = bad(a,a); bad }
-pub fn field_ok(s:S)->u3{s.bad}
-pub fn param_ok(bad:u3)->u3{bad}
-pub fn local_ok(x:u3)->u3{ let (bad, _) = (x,x); bad }
-pub fn field(p:Pair)->bool{p.a>=p.b}
-pub fn direct(a:Mode)->bool{a != Mode::Idle}
-pub fn indirect(a:Mode)->bool{bad(a,Mode::Busy)}
-pub fn counted(a:Mode)->bool{for (_,v) in u8:0..u8:1 { bad(a,Mode::Busy) }(false)}
-pub fn unary(a:Mode)->bool{a>Mode::Idle}
-pub fn mapped(a:Mode)->bool{map([a],unary)[u32:0]}
-pub fn numeric(a:Mode)->bool{copy<u32:2>(a as u2) <= u2:2}
-pub fn empty_cmp(a:Mode,x:sN[0])->bool{(x <= x) && numeric(a)}
-"#,
-    )?;
+    let path = dir.path().join("ops.x");
     let options = ImportOptions {
         additional_search_paths: vec![dir.path()],
         ..Default::default()
     };
-    fs::write(
-        dir.path().join("stage.x"),
-        "import ops; pub fn via_map(a:ops::Mode)->bool { map([a], ops::unary)[u32:0] }",
-    )?;
-    let source = |call: &str| {
-        format!("use ops; use stage; block sample(clk, a:ops::Mode)->bool {{ {call} }}")
-    };
-    for call in [
-        "ops::bad(a,a)",
-        "ops::field(ops::Pair { a:a, b:a })",
-        "ops::indirect(a)",
-        "ops::initializer(a)",
-        "ops::alias_bad(a)",
-        "ops::alias_counted(a)",
-        "ops::lambda_bad(a)",
-        "ops::nested_bad(a)",
-        "ops::method(ops::Pair { a:a, b:a })",
-        "ops::counted(a)",
-        "ops::mapped(a)",
-        "stage::via_map(a)",
-    ] {
-        let bx = source(call);
-        let err = check_module_with_options(&parse_module(&bx)?, &options).unwrap_err();
-        assert!(err.contains("cast enum operands"), "{call}: {err}");
-    }
-    for call in [
-        "ops::direct(a)",
-        "ops::numeric(a)",
-        "ops::overload_ok(a)",
-        "ops::for_binder_ok(a)",
-        "ops::lambda_good(a)",
-        "ops::zero_unroll(a)",
-        "ops::empty_cmp(a,zero!<sN[0]>())",
-        "ops::field_ok(ops::S { bad:u3:3 }) == u3:3",
-        "ops::param_ok(u3:3) == u3:3",
-        "ops::local_ok(u3:3) == u3:3",
-    ] {
-        let bx = source(call);
-        let checked = check_module_with_options(&parse_module(&bx)?, &options)?;
-        let evaluator = BlockEvaluator::lower(&checked, &bx)?;
+    // Importing a valid sibling still typechecks the invalid comparison.
+    let bx = parse_module("use ops; block sample(clk,x:ops::Mode)->bool { ops::equal(x,x) }")?;
+    for operator in ["<", "<=", ">", ">="] {
+        let source = format!(
+            "pub enum Mode : u2 {{ Idle=0, Busy=1 }}\npub fn equal(a:Mode,b:Mode)->bool {{ a == b }}\npub fn ordered(a:Mode,b:Mode)->bool {{ a {operator} b }}\n"
+        );
+        fs::write(&path, source)?;
+        let error = check_module_with_options(&bx, &options).unwrap_err();
         assert_eq!(
-            evaluator.evaluate(&[IrValue::make_ubits(2, 1)?])?,
-            IrValue::bool(true)
+            error,
+            format!(
+                "checking use 'ops': xlsynth error: INVALID_ARGUMENT: TypeInferenceError: {}:3:41-3:{} Operator '{operator}' requires bits-typed operands, got Mode.",
+                path.display(),
+                41 + operator.len()
+            )
         );
     }
     Ok(())
