@@ -86,7 +86,7 @@ Enum types retain their declaration identity in ports, registers, arrays, struct
 
 Use public numeric enums from BX or DSLX libraries with `use protocol;` and `protocol::State::Idle`, or `use protocol::State;` and `State::Idle`.
 
-In imported DSLX, cast both operands to the backing type before an ordered comparison, for example `(a as u3) < (b as u3)`. The pinned XLS converter aborts on direct enum ordering. BX checks before conversion and reports an import error if it cannot verify a comparison in a selected function. DSLX can also instantiate a comparison while checking a `#[fuzz_domain]` method, a non-scalar module constant, an enum discriminant, a type width, or a `const_assert!`. Such declarations can trigger the diagnostic even when the selected function never calls the comparison. A scalar module constant computed by direct enum ordering may have no constexpr value in the pinned interpreter. Reading it then produces the native missing-value error.
+In imported DSLX, cast both enum operands to their backing type before an ordered comparison, for example `(a as u3) < (b as u3)`. The DSLX typechecker reports the invalid operator when BX checks the import.
 
 ### Match expressions
 

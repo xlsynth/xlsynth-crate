@@ -94,7 +94,7 @@ fn unsupported_type_binding(site: &Site) -> Option<String> {
             .and_then(|info| info.get_type_for_type_annotation(&annotation?));
         if !ty.is_some_and(scalar_or_array) {
             return Some(format!(
-                "DSLX function '{}' specializes type parameter '{name}' as '{}'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs with libxls v0.61",
+                "DSLX function '{}' specializes type parameter '{name}' as '{}'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs",
                 site.callee.function.get_identifier(),
                 actual.to_text()
             ));
@@ -157,7 +157,7 @@ fn named_sibling(instances: &HashSet<Instance>) -> Result<Option<String>, String
             }
         }
     }
-    Ok(collisions.pop_first().map(|(name, sibling)| format!("DSLX specialization of '{name}' can share a native IR symbol with '{sibling}'; this combination is unsupported with libxls v0.61")))
+    Ok(collisions.pop_first().map(|(name, sibling)| format!("DSLX specialization of '{name}' can share a native IR symbol with '{sibling}'; this combination is unsupported")))
 }
 
 /// Native specialization checks applicable to the current import batch.
@@ -253,12 +253,12 @@ pub(super) fn check(
             Entry::Occupied(entry) => entry.into_mut(),
         };
         if has_concrete_structs && calls.indirect {
-            errors.insert(format!("DSLX function '{}' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs with libxls v0.61", caller.function.get_identifier()));
+            errors.insert(format!("DSLX function '{}' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs", caller.function.get_identifier()));
         }
         if !has_concrete_structs
             && (calls.unknown_indirect || !calls.indirect_names.is_subset(&visible_callees))
         {
-            errors.insert(format!("libxls v0.61 does not expose the indirect dispatch inside specialized DSLX function '{}'; BX cannot verify its native specialization symbols", caller.function.get_identifier()));
+            errors.insert(format!("libxls does not expose the indirect dispatch inside specialized DSLX function '{}'; BX cannot verify its native specialization symbols", caller.function.get_identifier()));
         }
         for (name, count) in &calls.methods {
             if visible_methods.get(name).copied().unwrap_or(0) < *count {
@@ -267,7 +267,7 @@ pub(super) fn check(
                 } else {
                     "BX cannot verify its native specialization symbols"
                 };
-                errors.insert(format!("libxls v0.61 does not expose the concrete method dispatch to '{name}' inside DSLX function '{}'; {detail}", caller.function.get_identifier()));
+                errors.insert(format!("libxls does not expose the concrete method dispatch to '{name}' inside DSLX function '{}'; {detail}", caller.function.get_identifier()));
             }
         }
     }
@@ -318,7 +318,7 @@ fn check_type_symbols(instances: &HashSet<Instance>) -> Result<(), String> {
     }
     if let Some(name) = collisions.first() {
         return Err(format!(
-            "distinct specializations of DSLX function '{name}' have the same native IR symbol with libxls v0.61"
+            "distinct specializations of DSLX function '{name}' have the same native IR symbol"
         ));
     }
     Ok(())
@@ -371,7 +371,7 @@ pub fn via<N:u32>(v:uN[N],x:Mode)->bool {
                 false
             )
             .unwrap_err(),
-            "libxls v0.61 does not expose the indirect dispatch inside specialized DSLX function 'via'; BX cannot verify its native specialization symbols"
+            "libxls does not expose the indirect dispatch inside specialized DSLX function 'via'; BX cannot verify its native specialization symbols"
         );
         Ok(())
     }
@@ -525,7 +525,7 @@ pub fn nested<N: u32>(s: outer::Outer<N>, y: left::Item, z: right::Item) -> (u8,
             .ok_or("expected unsupported map dispatch")?;
         assert_eq!(
             error,
-            "compiling DSLX import 'outer': DSLX function 'direct' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs with libxls v0.61"
+            "compiling DSLX import 'outer': DSLX function 'direct' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs"
         );
         for (module, name, method, caller) in [
             ("outer", "shadow", "through", "shadow"),
@@ -546,7 +546,7 @@ pub fn nested<N: u32>(s: outer::Outer<N>, y: left::Item, z: right::Item) -> (u8,
             assert_eq!(
                 error,
                 format!(
-                    "compiling DSLX import '{module}': libxls v0.61 does not expose the concrete method dispatch to '{method}' inside DSLX function '{caller}'; BX cannot verify this specialization before converting imported parametric structs"
+                    "compiling DSLX import '{module}': libxls does not expose the concrete method dispatch to '{method}' inside DSLX function '{caller}'; BX cannot verify this specialization before converting imported parametric structs"
                 )
             );
         }
@@ -616,31 +616,31 @@ pub fn scalar_and_array(x: wire::Item, y: u8[2][2]) -> u8 {
         for (function, diagnostic) in [
             (
                 "nominal",
-                "DSLX function 'echo' specializes type parameter 'T' as 'Tag<u32:2>'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs with libxls v0.61",
+                "DSLX function 'echo' specializes type parameter 'T' as 'Tag<u32:2>'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs",
             ),
             (
                 "tuple_arg",
-                "DSLX function 'echo' specializes type parameter 'T' as '(u8, u8)'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs with libxls v0.61",
+                "DSLX function 'echo' specializes type parameter 'T' as '(u8, u8)'; BX supports only bits and arrays of bits as type-valued arguments when importing concrete parametric structs",
             ),
             (
                 "opaque",
-                "libxls v0.61 does not expose the concrete method dispatch to 'through' inside DSLX function 'opaque'; BX cannot verify this specialization before converting imported parametric structs",
+                "libxls does not expose the concrete method dispatch to 'through' inside DSLX function 'opaque'; BX cannot verify this specialization before converting imported parametric structs",
             ),
             (
                 "mapped",
-                "DSLX function 'mapped' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs with libxls v0.61",
+                "DSLX function 'mapped' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs",
             ),
             (
                 "grouped",
-                "DSLX function 'grouped' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs with libxls v0.61",
+                "DSLX function 'grouped' uses a map callback or indirect invocation; BX cannot verify its target when converting imported parametric structs",
             ),
             (
                 "collision",
-                "DSLX specialization of 'value' can share a native IR symbol with 'value__2'; this combination is unsupported with libxls v0.61",
+                "DSLX specialization of 'value' can share a native IR symbol with 'value__2'; this combination is unsupported",
             ),
             (
                 "ordinary_collision",
-                "DSLX specialization of 'same' can share a native IR symbol with 'A__same'; this combination is unsupported with libxls v0.61",
+                "DSLX specialization of 'same' can share a native IR symbol with 'A__same'; this combination is unsupported",
             ),
         ] {
             let source =

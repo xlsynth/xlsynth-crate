@@ -188,7 +188,7 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dsl
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_enums.rs
 
-Generates numeric enums and compares BX with pinned DSLX source checking, concrete evaluation and compiled IR. Varying discriminants, backing types, aliases and module boundaries exposes nominal type, extension and exhaustiveness errors. Cast probes compare hardware results on arbitrary bits and separately check whether DSLX can evaluate each cast as a constant. Ordering probes exercise direct calls, map callbacks and counted-loop helpers. BX must diagnose enum ordering and evaluate a sibling that compares backing bits. The native execution oracle contains only that sibling because the pinned IR converter aborts on enum ordering.
+Generates numeric enums and compares BX with pinned DSLX source checking, concrete evaluation and compiled IR. Varying discriminants, backing types, aliases and module boundaries exposes nominal type, extension and exhaustiveness errors. Cast probes compare hardware results on arbitrary bits and separately check whether DSLX can evaluate each cast as a constant. Ordering probes exercise direct calls, map callbacks and counted-loop helpers. BX and DSLX must diagnose ordering of enum operands. The target also compares the hardware results of explicitly ordering their backing bits.
 
 Calls to one generic DSLX helper with same-named enums from two modules check specialization identity across equal and different backing widths. The native reference compares each module's members directly.
 

@@ -480,12 +480,11 @@ pub fn apply(x: u8) -> u8 { if x != u8:0 { multiplier::mul(x) } else { x } }"#,
 
 #[test]
 fn implicit_token_diagnostic_handles_nested_tuple_patterns() -> Result<()> {
-    // The pinned IR converter aborts on this nested singleton pattern.
     let directory = tempfile::tempdir()?;
     fs::write(
         directory.path().join("effects.x"),
-        r#"pub fn inner(x: (u8, u8)) -> u8 {
-    let ((a), b) = x;
+        r#"pub fn inner(x: ((u8,), u8)) -> u8 {
+    let ((a,), b) = x;
     assert!(a == b, "x");
     a + b
 }
@@ -493,7 +492,7 @@ fn implicit_token_diagnostic_handles_nested_tuple_patterns() -> Result<()> {
     )?;
     fs::write(
         directory.path().join("pipeline.bx"),
-        "use effects; pub block pipeline(clk, x: (u8, u8)) -> u8 { effects::inner(x) }",
+        "use effects; pub block pipeline(clk, x: ((u8,), u8)) -> u8 { effects::inner(x) }",
     )?;
     let output = driver(directory.path(), &["bx2ir", "pipeline.bx", "--dslx-path=."])?;
     let error = String::from_utf8(output.stderr)?;
