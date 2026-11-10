@@ -502,6 +502,9 @@ impl BodyChecker<'_, '_> {
         // The signature precedes the binding of the function name.
         self.function_position = position.map(|at| at.saturating_sub(1));
         self.zero_binding = self.decls.zero_binding(&f.name);
+        if !f.type_params.is_empty() {
+            self.function_type_bindings = Some(super::Bindings::new(&f.type_params));
+        }
         self.template_name_depth = Some(Cell::new(0));
         let visited = Cell::new(0);
         let mut locals = LexicalScope::root(&self.names, &visited);
@@ -575,8 +578,8 @@ impl BodyChecker<'_, '_> {
             || is_local(target)
             || self.callback_index(target).is_some()
             || self
-                .specialization
-                .is_some_and(|spec| spec.bindings.declares(target))
+                .type_bindings()
+                .is_some_and(|bindings| bindings.declares(target))
         {
             return Ok(false);
         }
@@ -711,16 +714,16 @@ impl BodyChecker<'_, '_> {
                 "callable parameter '{head}' may only be used as a callee"
             ));
         }
-        if let Some(spec) = self.specialization {
-            if usage != NominalUse::AppliedStruct && spec.bindings.declares(name) {
+        if let Some(bindings) = self.type_bindings() {
+            if usage != NominalUse::AppliedStruct && bindings.declares(name) {
                 if usage == NominalUse::Constructor
-                    && matches!(spec.bindings.get(name), Some(Type::Enum { .. }))
+                    && matches!(bindings.get(name), Some(Type::Enum { .. }))
                 {
                     return Err(format!("cannot construct enum '{name}' as a struct"));
                 }
                 return Ok(());
             }
-            spec.bindings.reject_value(name)?;
+            bindings.reject_value(name)?;
         }
         self.decls
             .check_type_name_visibility(name, self.function_position)?;
@@ -942,7 +945,7 @@ impl BodyChecker<'_, '_> {
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
                     }
-                } else if template.is_some_and(|f| f.value_parametrics.is_empty()) {
+                } else if template.is_some_and(|f| !f.has_inferred_parametrics()) {
                     self.callable_template(name, locals.contains(name), parametrics.len())?;
                 } else {
                     self.check_value_name(name, locals, /* callee= */ true)?;

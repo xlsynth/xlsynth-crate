@@ -719,6 +719,60 @@ pub struct Bus { lanes: uN[W][N] }
     }
 
     #[test]
+    fn library_function_type_formals_shadow_declarations_and_skip_explicit_slots()
+    -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("lib.bx"),
+            r#"
+struct T { field: u8 }
+pub fn apply<F: fn(T) -> T, T: type, N: u32>(xs: T[N]) -> T {
+    let x: T = xs[u32:0];
+    F(x)
+}
+pub fn identity<T>(x: T) -> T { x }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let (_, imports) = read(
+            r#"
+use lib;
+use lib::apply;
+fn id(x:u8)->u8{x}
+fn root(x:u8)->(u8,u8,u8) { (lib::apply<id,1>([x]), apply<id,1>([x]), lib::identity(x)) }
+"#,
+            &options,
+        )?;
+        let linked = imports.libraries.expect("BX library import").module;
+        let apply = &linked.functions[0];
+        let t = Type::Named("T".into());
+        assert_eq!(apply.type_params, ["T"]);
+        assert_eq!(apply.result, t);
+        assert_eq!(
+            apply.callback_params[0].params.as_slice(),
+            std::slice::from_ref(&t)
+        );
+        assert_eq!(apply.callback_params[0].result, t);
+        assert_eq!(apply.value_parametrics[0].index, 1);
+        let Expr::Scope { bindings, .. } = &apply.body else {
+            panic!("expected local let");
+        };
+        assert_eq!(bindings[0].ty.as_ref(), Some(&t));
+        let Expr::Tuple(calls) = &linked.functions[3].body else {
+            panic!("expected root calls");
+        };
+        assert_eq!(calls[0], calls[1]);
+        assert!(
+            matches!(&calls[0], Expr::ParametricCall { name, parametrics, .. } if name == "$bx$lib$apply" && matches!(&parametrics[..], [Expr::Name(callback), Expr::Literal { .. }] if callback == "id"))
+        );
+        assert!(matches!(&calls[2], Expr::Call { name, .. } if name == "$bx$lib$identity"));
+        Ok(())
+    }
+
+    #[test]
     fn native_function_hints_distinguish_calls_and_comparisons() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         fs::write(

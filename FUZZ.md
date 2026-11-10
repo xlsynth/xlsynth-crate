@@ -235,6 +235,12 @@ Compares BX functions specialized on named callbacks with independently generate
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_type_parametrics.rs
+
+Generates calls to a pure BX zip function over arrays with independently chosen element and result types. Inferred lengths, explicit lengths, named generic identity maps, and callbacks returning records, tuples, arrays, or bits exercise type binding and specialization reuse. The target checks acceptance against concrete DSLX signatures and compares BX IR with unrolled DSLX calls in compiled IR and concrete evaluation. It catches misbound nominal types, mismatched lengths, and incorrect callback results or element order.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_function_type_parametrics --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_function_value_parametrics.rs
 
 Generates direct calls and named maps over value-parametric BX functions and imported DSLX functions. It compares acceptance, BX block IR, native DSLX IR, and concrete DSLX evaluation. Calls vary positional prefixes, inferred widths and signedness, dependent defaults, and scalar or nominal values. Inputs include nested aggregates, inline literals, and let-bound values. Repeated calls with equal runtime signatures exercise specialization reuse, including bindings that differ above bit 63. Rejected cases check conflicting or missing dimensions, nonconstant actuals, and nominal values from the wrong declaration.

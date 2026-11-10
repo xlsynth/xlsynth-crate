@@ -424,8 +424,8 @@ struct Parser<'s> {
     block_map_shadowed: bool,
     /// Until its use is reached, an imported map may be a callable or an enum.
     forward_map_import: bool,
-    /// Type parameters that can annotate integer literals in this block.
-    block_type_params: BTreeSet<&'s str>,
+    /// Type parameters that can annotate literals in this function or block.
+    type_params: BTreeSet<&'s str>,
     /// Function templates allow full expressions in their type dimensions.
     dependent_types: bool,
     /// Local template declarations disambiguate angle brackets from
@@ -576,24 +576,52 @@ impl ParsedExpr {
     }
 }
 
+/// Find the type formals following a declaration's opening angle. Annotations
+/// and defaults can use any of them, including one declared later in the list.
+fn declared_type_params<'s>(tokens: &[Token<'s>]) -> Vec<&'s str> {
+    let mut next_formal = true;
+    let mut groups = 0usize;
+    let mut angles = 0usize;
+    let mut names = Vec::new();
+    for ts in tokens.windows(3) {
+        let text = ts[0].text;
+        if next_formal && is_use_identifier(text) && (ts[1].text != ":" || ts[2].text == "type") {
+            names.push(text);
+        }
+        next_formal = false;
+        match text {
+            "(" | "[" | "{" => groups += 1,
+            ")" | "]" | "}" => groups = groups.saturating_sub(1),
+            "<" if groups == 0 => angles += 1,
+            ">" | ">=" | ">>" if groups == 0 => {
+                let Some(remaining) = angles.checked_sub(if text == ">>" { 2 } else { 1 }) else {
+                    break;
+                };
+                angles = remaining;
+            }
+            "," if groups == 0 && angles == 0 => next_formal = true,
+            _ => { /* Other tokens do not delimit formals. */ }
+        }
+    }
+    names
+}
+
 impl<'s> Parser<'s> {
     fn new(source: &'s str, dslx_type_display: bool) -> Result<Self, String> {
         let tokens = lex(source, Dialect::Bx, None)?;
         let mut callable_templates = BTreeMap::new();
-        let mut block_header = None;
+        let mut header = None;
         for ts in tokens.windows(3) {
             match (ts[0].text, ts[1].text, ts[2].text) {
-                ("fn", name, "<") => {
-                    callable_templates.insert(name.to_owned(), TemplateBinding::local(ts[1].start));
-                }
-                ("block", _, "<") => block_header = Some(ts[1]),
-                (":", "fn", "(") => {
-                    if let Some(name) = block_header.take() {
+                ("fn" | "block", _, "<") => header = Some(ts[1]),
+                (":", annotation, _) if annotation != "type" => {
+                    // Only value and callable formals take explicit arguments.
+                    if let Some(name) = header.take() {
                         callable_templates
                             .insert(name.text.to_owned(), TemplateBinding::local(name.start));
                     }
                 }
-                (">", _, _) => block_header = None,
+                (">", _, _) => header = None,
                 _ => { /* Other tokens do not identify a callable template. */ }
             }
         }
@@ -608,7 +636,7 @@ impl<'s> Parser<'s> {
             expression_grammar: ExpressionGrammar::Block,
             block_map_shadowed: false,
             forward_map_import: false,
-            block_type_params: BTreeSet::new(),
+            type_params: BTreeSet::new(),
             dependent_types: false,
             callable_templates,
             hidden_templates: Vec::new(),
@@ -1144,6 +1172,7 @@ impl<'s> Parser<'s> {
     /// semicolon or an empty body returns unit, as in DSLX.
     fn function(&mut self, public: bool) -> Result<Function, String> {
         let name = self.ident()?;
+        let mut type_params = Vec::new();
         let mut value_parametrics = Vec::new();
         let mut callback_params = Vec::new();
         if self.eat("<") {
@@ -1153,8 +1182,17 @@ impl<'s> Parser<'s> {
             if self.peek(0) == ">" {
                 return Err(self.error("expected a function parameter"));
             }
+            for formal in declared_type_params(&self.tokens[self.pos..]) {
+                self.type_params.insert(formal);
+                self.shadow_callable(formal);
+            }
             self.list(">", |p| {
-                if p.peek(1) == ":" && p.peek(2) == "fn" {
+                if p.peek(1) != ":" || p.peek(2) == "type" {
+                    type_params.push(p.take_identifier(is_use_identifier)?);
+                    if p.eat(":") {
+                        p.expect("type")?;
+                    }
+                } else if p.peek(2) == "fn" {
                     let param = p.callback_param()?;
                     p.shadow_callable(&param.name);
                     callback_params.push(param);
@@ -1200,10 +1238,12 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&param.name);
         }
         let body = self.value_scope()?.value;
+        self.type_params.clear();
         self.dependent_types = false;
         Ok(Function {
             name,
             public,
+            type_params,
             callback_params,
             value_parametrics,
             params,
@@ -1368,7 +1408,7 @@ impl<'s> Parser<'s> {
                 if p.eat(":") {
                     p.expect("type")?;
                 }
-                p.block_type_params.insert(token.text);
+                p.type_params.insert(token.text);
                 params.type_params.push(name);
             }
             Ok(())
@@ -1401,7 +1441,7 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         let body = self.body()?;
-        self.block_type_params.clear();
+        self.type_params.clear();
         let output = body
             .output
             .ok_or_else(|| self.error("block requires an output expression"))?;
@@ -1661,7 +1701,7 @@ impl<'s> Parser<'s> {
             return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
         } else {
             // A cast can be followed immediately by a less-than comparison.
-            // Block type parameters can name scalar cast targets, including
+            // Type parameters can name scalar cast targets, including
             // in a tuple of comparisons such as (x as T < 1, 2 > (y)).
             let after_as = self.pos > 0 && self.tokens[self.pos - 1].text == "as";
             let name = self.name_or_qualified_member()?;
@@ -2032,7 +2072,7 @@ impl<'s> Parser<'s> {
             if !matches!(
                 ty,
                 Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. }
-            ) && !matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
+            ) && !matches!(&ty, Type::Named(name) if self.type_params.contains(name.as_str()))
             {
                 return Err(self.error("match patterns require a scalar literal type"));
             }
@@ -2061,7 +2101,7 @@ impl<'s> Parser<'s> {
                 }
                 let field = is_function_identifier(first)
                     || !self.dslx_value_grammar() && is_identifier(first);
-                if next == ":" && self.block_type_params.contains(first) {
+                if next == ":" && self.type_params.contains(first) {
                     // Both a field initializer and an annotated integer pattern
                     // can start with `T:0`. Only the latter continues to an arm
                     // arrow before a comma or brace.
@@ -2741,7 +2781,7 @@ impl<'s> Parser<'s> {
         // contents in expression_lookahead.
         let (before_name, is_type_param) = match &self.tokens[..angle] {
             [before @ .., _, separator, _] if separator.text == "::" => (before, false),
-            [before @ .., name] => (before, self.block_type_params.contains(name.text)),
+            [before @ .., name] => (before, self.type_params.contains(name.text)),
             [] => return None,
         };
         match before_name {
@@ -3093,7 +3133,7 @@ impl<'s> Parser<'s> {
         let name = self.peek(0);
         if matches!(name, "bits" | "uN" | "sN" | "xN" | "bool")
             || fixed_width(name).is_some()
-            || (self.peek(1) == ":" && self.block_type_params.contains(name))
+            || (self.peek(1) == ":" && self.type_params.contains(name))
         {
             return Ok(true);
         }
@@ -3135,32 +3175,31 @@ impl<'s> Parser<'s> {
     fn literal(&mut self, ty: Option<Type>) -> Result<ParsedExpr, String> {
         let annotated = ty.is_some();
         let spelling = self.peek(0);
-        let (ty, text) = if self.tokens[self.pos].character.is_some()
-            || matches!(spelling, "true" | "false")
-        {
-            let ty = ty.unwrap_or(if self.tokens[self.pos].character.is_some() {
-                Type::Bits {
-                    signed: false,
-                    width: 8,
-                }
+        let (ty, text) =
+            if self.tokens[self.pos].character.is_some() || matches!(spelling, "true" | "false") {
+                let ty = ty.unwrap_or(if self.tokens[self.pos].character.is_some() {
+                    Type::Bits {
+                        signed: false,
+                        width: 8,
+                    }
+                } else {
+                    Type::Bool
+                });
+                let text = if matches!(&ty, Type::ParametricBits { .. })
+                    || matches!(&ty, Type::Named(name) if self.type_params.contains(name.as_str()))
+                {
+                    // Preserve the intrinsic width requirement until the call
+                    // binds this type.
+                    spelling.to_owned()
+                } else {
+                    character_or_bool_digits(spelling, &ty).map_err(|e| self.error(e))?
+                };
+                (Some(ty), text)
             } else {
-                Type::Bool
-            });
-            let text = if matches!(&ty, Type::ParametricBits { .. })
-                || matches!(&ty, Type::Named(name) if self.block_type_params.contains(name.as_str()))
-            {
-                // Preserve the intrinsic width requirement until the call binds
-                // this type.
-                spelling.to_owned()
-            } else {
-                character_or_bool_digits(spelling, &ty).map_err(|e| self.error(e))?
+                let text = normalized_integer(self.peek(0))
+                    .ok_or_else(|| self.error("expected an integer literal"))?;
+                (ty, text)
             };
-            (Some(ty), text)
-        } else {
-            let text = normalized_integer(self.peek(0))
-                .ok_or_else(|| self.error("expected an integer literal"))?;
-            (ty, text)
-        };
         self.pos += 1;
         let mut expr = ParsedExpr::leaf(Expr::Literal { ty, text });
         if annotated {
@@ -3724,6 +3763,63 @@ fn cmp_call(x:u8) -> bool { x < zero!<get>() }
         assert!(
             matches!(&module.functions[5].body, Expr::Binary { op: BinaryOp::Lt, right, .. } if matches!(right.as_ref(), Expr::ParametricCall { .. }))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn function_type_parameters_are_visible_in_signatures_defaults_and_bodies() -> Result<(), String>
+    {
+        let module = parse_module(
+            r#"
+fn combine<A, F: fn(A, B) -> R, B: type, N: R = { R:0 }, R>(x: A, y: B) -> R {
+    let result: R = F(x, y);
+    match result { R:0 => zero!<R>(), _ => result }
+}
+fn apply(x:u8,y:u16)->u32 { combine<add, u32:1>(x, y) }
+fn plain<T>(x: T) -> T { x }
+fn compare(x:u8, y:u8)->(bool,bool) { (plain < x, y > (x)) }
+"#,
+        )?;
+        let f = &module.functions[0];
+        let r = Type::Named("R".into());
+        assert_eq!(f.type_params, ["A", "B", "R"]);
+        assert!(f.has_inferred_parametrics());
+        assert_eq!(
+            f.callback_params[0].params,
+            [Type::Named("A".into()), Type::Named("B".into())]
+        );
+        assert_eq!(f.callback_params[0].result, r);
+        assert_eq!(f.value_parametrics[0].index, 1);
+        assert_eq!(
+            f.value_parametrics[0].default,
+            Some(Expr::Literal {
+                ty: Some(r.clone()),
+                text: "0".into()
+            })
+        );
+        let Expr::Scope { bindings, result } = &f.body else {
+            panic!("expected local let");
+        };
+        assert_eq!(bindings[0].ty.as_ref(), Some(&r));
+        let Expr::Match { arms, .. } = result.as_ref() else {
+            panic!("expected match on the result");
+        };
+        assert_eq!(
+            arms[0].patterns,
+            [MatchPattern::Literal(
+                f.value_parametrics[0].default.clone().unwrap()
+            )]
+        );
+        assert_eq!(arms[0].value, Expr::Zero(r));
+        assert!(
+            matches!(&module.functions[1].body, Expr::ParametricCall { parametrics, .. } if parametrics.len() == 2)
+        );
+        assert!(
+            matches!(&module.functions[3].body, Expr::Tuple(pair) if matches!(&pair[..], [
+                Expr::Binary { op: BinaryOp::Lt, .. }, Expr::Binary { op: BinaryOp::Gt, .. }
+            ]))
+        );
+        assert!(parse_module("fn f<T>(x:T)->T{x} fn g()->u8{T:0}").is_err());
         Ok(())
     }
 

@@ -226,7 +226,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         dslx_type_display: false,
         value_context: ValueContext::Block,
         expression_grammar: ExpressionGrammar::Block,
-        block_type_params: BTreeSet::new(),
+        type_params: BTreeSet::new(),
         dependent_types: false,
         callable_templates: Default::default(),
         hidden_templates: Vec::new(),

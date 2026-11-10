@@ -144,11 +144,37 @@ can fail on the mismatched signature.
 
 Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
 
-For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking. A function that takes a type as a parameter can be defined in DSLX and imported with `use`.
+For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking.
 
 BX emits XLS IR for runtime array operations. For an out-of-range index, IR reads the last element of a nonempty array, and `update` returns the original array. The native DSLX interpreter reports an evaluation error for either operation. The differential tests check both outcomes.
 
 ### Compile-time function parameters
+
+#### Type parameters
+
+Pure functions use the same inferred type parameters as blocks. Both `fn id<T>(x: T) -> T { x }` and `fn id<T: type>(x: T) -> T { x }` specialize at `id(x)`. The call's data arguments bind types, including element types inside arrays and fields inside tuples. Repeated occurrences must agree on signedness and nominal record identity. `bool` and `u1` are equivalent. Give an integer a width when it is the only source for its type, as in `id(u8:1)`.
+
+Each type parameter needs an inference source in a data argument or a callback result. BX resolves named callbacks in declaration order, using the input types known at that point. In the example below, `xs` and `ys` determine `A`, `B`, and the common array length `N`. BX checks that `join` accepts those element types and infers `R` from its return type.
+
+```text
+struct Left { x: u8 }
+struct Right { y: u16 }
+struct Joined { x: u8, y: u16 }
+
+fn join(a: Left, b: Right) -> Joined { Joined { x: a.x, y: b.y } }
+
+fn zip_with<A, B, R, F: fn(A, B) -> R, N: u32>(xs: A[N], ys: B[N]) -> R[N] {
+    for (i, out_array) in u32:0..N {
+        update(out_array, i, F(xs[i], ys[i]))
+    }(zero!<R[N]>())
+}
+
+fn join_rows(xs: Left[3], ys: Right[3]) -> Joined[3] {
+    zip_with<join>(xs, ys)
+}
+```
+
+Type parameters take no call-site argument. Explicit value arguments and named callbacks retain their declaration order, so `zip_with<join, 3>(xs, ys)` also supplies the array length. BX emits a concrete IR function for each distinct combination of types, values, and callback identities. For a version of this helper that also accepts empty arrays, use `unroll_for!` in place of `for`. With zero iterations it returns the typed seed.
 
 #### Value parametrics
 
@@ -179,8 +205,7 @@ Defaults use the function's declaration scope and can depend on earlier
 bindings. A binding such as `K: uN[N] = {uN[N]:1}` can use an inferred width
 when evaluating its default. Explicit actuals require a binding type that
 can be resolved before instantiation, including widths from module constants.
-Each distinct set of bound values and callback identities produces one
-concrete IR function with only its data parameters.
+The emitted IR function takes only its data parameters.
 
 Nominal values retain their declared type. For a binding `P: Phase`, pass a
 member such as `Phase::Ready`. For `C: Config`, pass a constant of that
@@ -221,7 +246,7 @@ fn widen(x: u8) -> u16 { x as u16 }
 fn widen_all(xs: u8[4]) -> u16[4] { map(xs, widen) }
 ```
 
-A named callback can be a visible BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX can infer a value-parametric callback's signature from the input element type. Supply explicit values on a BX or DSLX callback, as in `map(xs, resize<8, 16>)` or `map(xs, std::msbs<4>)`. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
+A named callback can be a visible BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX can infer a callback's type and value parameters from the input element type, as in `map(xs, id)` for `fn id<T>(x: T) -> T { x }`. Supply explicit values on a BX or DSLX callback, as in `map(xs, resize<8, 16>)` or `map(xs, std::msbs<4>)`. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
 
 ```text
 #[allow(combinational_block)]
