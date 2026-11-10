@@ -49,6 +49,30 @@ fn run(mut package: Package, x: u8) -> Result<IrValue, Box<dyn Error>> {
 }
 
 #[test]
+fn imported_generic_block_checks_the_stage_of_a_destructured_register() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let caller = "use pipe::saved; block top(clk, x: u8) -> u8 { let q = saved(x); q }";
+    let pipe = r#"
+pub block saved<T>(clk, x: T @2) -> T @3 {
+    reg pair: (T, T);
+    pair := (x, x);
+    let (head, _) = pair;
+    head
+}
+"#;
+    write_module(dir.path(), "pipe.bx", pipe)?;
+    check_source_with_options(caller, &options)?;
+    write_module(dir.path(), "pipe.bx", &pipe.replace("@3", "@4"))?;
+    assert_eq!(
+        check_source_with_options(caller, &options).unwrap_err(),
+        "block 'pipe::saved' (pipe::saved__0): expected cycle 4, got cycle 3"
+    );
+    Ok(())
+}
+
+#[test]
 fn imported_bx_enum_members_resolve_through_module_and_member_uses() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(
