@@ -657,8 +657,7 @@ literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
 `A` can also be used at any stage because BX evaluates the constant before
 checking timing. Returning `[u8:7]` directly leaves an array expression whose
 stage BX cannot infer yet. Array indexing has the same limitation. For
-`x: u8[2]`, returning `x[u1:0]` gives `cannot infer output cycle for this
-expression` even though the index is constant.
+`x: u8[2]`, returning `x[u1:0]` gives `cannot infer output cycle for this expression` even though the index is constant.
 
 A uniform result such as `-> Ports @1` checks every output port at stage 1.
 For different stages, use `-> Ports @(live: 0, saved: 1)` and list every
