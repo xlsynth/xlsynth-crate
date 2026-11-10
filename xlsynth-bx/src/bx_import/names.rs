@@ -506,6 +506,11 @@ impl<'a> Scope<'a> {
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
+        let value_parametrics = def
+            .value_parametrics
+            .iter()
+            .map(|p| self.value_parametric(p))
+            .collect::<Result<_, String>>()?;
         let callback_params = def
             .callback_params
             .iter()
@@ -531,6 +536,7 @@ impl<'a> Scope<'a> {
             public: def.public,
             type_params: def.type_params.clone(),
             callback_params,
+            value_parametrics,
             clock: def.clock.clone(),
             reset: def.reset.clone(),
             params,

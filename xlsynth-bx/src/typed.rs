@@ -170,7 +170,7 @@ impl CheckedEnum {
     }
 }
 
-/// A function value parametric after its source type and constexpr value
+/// A value parametric after its source type and constexpr value
 /// have been resolved in BX or DSLX.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BoundParametricValue {

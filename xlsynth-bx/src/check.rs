@@ -12,8 +12,9 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, LetBinding, MatchArm,
-    MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp, WidthSliceType,
+    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
+    LetBinding, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp,
+    WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -47,14 +48,14 @@ mod value_parametrics;
 
 pub use crate::builtin::BuiltinOp;
 pub use crate::typed::TypedMatchPattern as ScalarPattern;
+use crate::typed::{
+    BoundParametricValue, ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse,
+    TypedExprKind as K, bits, repr_bits,
+};
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
     CheckedStmt, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap, TypedMatchArm,
     TypedMatchPattern,
-};
-use crate::typed::{
-    ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse, TypedExprKind as K, bits,
-    repr_bits,
 };
 use callables::{BlockCallbackBinding, BlockCallbackFormal, BoundCallback};
 use counted_for::CarryContext;
@@ -327,12 +328,14 @@ struct BlockTemplate<'m> {
     callback_indices: BTreeMap<String, usize>,
 }
 
-/// The concrete interface shared by instances with identical type bindings.
+/// The concrete interface shared by instances with identical parametric
+/// bindings.
 struct BlockSpecialization<'m> {
     block: &'m Block,
     name: String,
     interface: BlockInterface,
     bindings: Bindings,
+    parametric_values: Rc<[BoundParametricValue]>,
     callbacks: Vec<Rc<BoundCallback<'m>>>,
     path: Vec<&'m str>,
 }
@@ -382,11 +385,13 @@ impl ConstantContext<'_> {
     }
 }
 
-/// The concrete source types and directly selected functions of a block.
+/// The concrete source types, compile-time values, and selected functions of a
+/// block.
 #[derive(Eq, Hash, PartialEq)]
 struct BlockKey<'m> {
     name: &'m str,
     types: Vec<TypeArgument>,
+    values: Rc<[BoundParametricValue]>,
     callbacks: Vec<CallbackTarget<'m>>,
 }
 
@@ -423,6 +428,7 @@ impl<'m> BlockSpecializations<'m> {
         &mut self,
         template: &BlockTemplate<'m>,
         bindings: Bindings,
+        parametric_values: Vec<BoundParametricValue>,
         callbacks: Vec<Rc<BoundCallback<'m>>>,
         path: &[&'m str],
         structs: &StructTable,
@@ -437,9 +443,11 @@ impl<'m> BlockSpecializations<'m> {
                 "block dependency depth exceeds {MAX_ELABORATION_DEPTH} levels at '{name}'"
             ));
         }
+        let parametric_values: Rc<[_]> = parametric_values.into();
         let key = BlockKey {
             name,
             types: bindings.arguments(&block.type_params)?,
+            values: Rc::clone(&parametric_values),
             callbacks: callbacks.iter().map(|bound| bound.target).collect(),
         };
         if let Some(prior) = self.cache.get(&key) {
@@ -453,9 +461,10 @@ impl<'m> BlockSpecializations<'m> {
                 "generic block specialization limit of {MAX_SPECIALIZATIONS} exceeded"
             ));
         }
-        // Distinct callback identities can replicate the same wide ports.
+        // Distinct explicit bindings can replicate the same wide ports.
         // Charge the fully bound interface before cloning its concrete types.
-        if !callbacks.is_empty() {
+        if !callbacks.is_empty() || !parametric_values.is_empty() {
+            self.expansion_work = self.expansion_work.saturating_add(parametric_values.len());
             for ty in template
                 .params
                 .iter()
@@ -503,6 +512,7 @@ impl<'m> BlockSpecializations<'m> {
             name: symbol,
             interface,
             bindings,
+            parametric_values,
             callbacks,
             path,
         });
@@ -580,6 +590,7 @@ struct Declarations<'a> {
     /// Value-template source types are borrowed from function_templates until
     /// instantiation. Only their callable lookup table is needed beforehand.
     value_template_callbacks: BTreeMap<&'a str, BTreeMap<String, usize>>,
+    has_block_value_parametrics: bool,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
 }
@@ -1586,8 +1597,9 @@ pub(crate) fn check_sources(
     for b in &module.blocks {
         let reserved_ports = std::iter::once(&b.clock)
             .chain(&b.reset)
-            .chain(b.callback_params.iter().map(|p| &p.name));
-        let symbolic = if b.type_params.is_empty() && b.callback_params.is_empty() {
+            .chain(b.callback_params.iter().map(|p| &p.name))
+            .chain(b.value_parametrics.iter().map(|p| &p.name));
+        let symbolic = if !b.is_parametric() {
             None
         } else {
             generic_blocks::validate_declaration(b)
@@ -1611,6 +1623,7 @@ pub(crate) fn check_sources(
         if let Some(bindings) = &symbolic {
             let template = BlockTemplate::new(b, params, result, bindings, dimensions, &mut types)
                 .map_err(|e| format!("block '{}': {e}", b.name))?;
+            declarations.has_block_value_parametrics |= !b.value_parametrics.is_empty();
             declarations.templates.insert(&b.name, template);
             continue;
         }
@@ -1665,11 +1678,7 @@ pub(crate) fn check_sources(
     let mut specializations = BlockSpecializations::new(names);
     let mut checked = Vec::new();
     let mut warning_collector = WarningCollector::default();
-    for block in module
-        .blocks
-        .iter()
-        .filter(|b| b.type_params.is_empty() && b.callback_params.is_empty())
-    {
+    for block in module.blocks.iter().filter(|b| !b.is_parametric()) {
         let body = BodyChecker::check_block(
             &declarations,
             block,
@@ -1896,8 +1905,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             enums: &self.structs.enums,
             names: &mut self.constants,
             constexpr_names: (self.resolver.has_imports()
-                || !self.decls.value_template_callbacks.is_empty())
-            .then_some(&self.constexpr_names),
+                || !self.decls.value_template_callbacks.is_empty()
+                || self.decls.has_block_value_parametrics)
+                .then_some(&self.constexpr_names),
             statements: &self.statements,
             budgets,
             charge_values: self.constant_functions.is_some() || self.function_spec.is_some(),
@@ -2212,6 +2222,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         c.specialization = specialization;
         c.function_registry = Some(function_registry);
         c.reserved_hardware_names = reserved_hardware_names;
+        if let Some(spec) = specialization
+            && !spec.parametric_values.is_empty()
+        {
+            // Structural bounds can call a local pure helper on the bound
+            // values.
+            c.enable_constant_functions();
+            for (formal, value) in block
+                .value_parametrics
+                .iter()
+                .zip(spec.parametric_values.iter())
+            {
+                c.bind_parametric_value(&formal.name, value);
+            }
+        }
         c.hardware_name(&block.clock)?;
         if let Some(rst) = &block.reset {
             c.hardware_name(rst)?;
@@ -2231,6 +2255,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 c.reject_type_parameter_value(child)?;
                 if let Some(template) = decls.templates.get(child.as_str()) {
+                    if !template.block.value_parametrics.is_empty() {
+                        return Err(format!(
+                            "block '{child}' requires a let call with explicit value parametrics"
+                        ));
+                    }
                     if !template.callback_params.is_empty() {
                         return Err(format!(
                             "block '{child}' requires a let call with explicit named callbacks"
@@ -2244,7 +2273,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .blocks
                     .get(child.as_str())
                     .ok_or_else(|| format!("unknown child block '{child}'"))?;
-                c.check_child_instance(name, child, child_block, /* has_callbacks= */ false)?;
+                c.check_child_instance(
+                    name,
+                    child,
+                    child_block,
+                    /* has_explicit_parametrics= */ false,
+                )?;
                 c.instances.insert(name.clone(), child_block);
             }
         }
@@ -2315,7 +2349,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         name: &str,
         target: &str,
         child: &BlockInterface,
-        has_callbacks: bool,
+        has_explicit_parametrics: bool,
     ) -> Result<(), String> {
         if child.requires_reset && !matches!(self.kind, BodyKind::Block { has_reset: true }) {
             return Err(format!(
@@ -2324,7 +2358,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         // Every instance materializes its own ports, even when its definition
         // is shared and its outputs are unused.
-        if self.replaying_body() || has_callbacks {
+        if self.replaying_body() || has_explicit_parametrics {
             self.charge_expansion("child block wiring", child.port_type_nodes)?;
         }
         self.uses_child.set(true);
@@ -2354,27 +2388,55 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         binding: &str,
         target: &str,
-        callbacks: &[String],
+        parametrics: &[Expr],
         args: &[Expr],
         expected: Option<&Type>,
     ) -> Result<TypedExpr, String> {
         let mut prepared = None;
         let spec;
         let (symbol, child) = if let Some(template) = self.decls.templates.get(target) {
-            let call = self.generic_inputs(template, args, callbacks)?;
+            let mut values = Vec::with_capacity(template.block.value_parametrics.len());
+            let mut callbacks = Vec::with_capacity(template.callback_params.len());
+            for (formal, actual) in template.block.parametric_bindings().zip(parametrics) {
+                match formal {
+                    FunctionParametricRef::Value(formal) => {
+                        let value = self.parametric_value(actual, &formal.ty).map_err(|e| {
+                            format!(
+                                "value parametric '{}' of block '{target}': {e}",
+                                formal.name
+                            )
+                        })?;
+                        values.push(BoundParametricValue {
+                            ty: formal.ty.clone(),
+                            value,
+                        });
+                    }
+                    FunctionParametricRef::Callback(_) => {
+                        callbacks.push(generic_blocks::callback_argument_name(actual)?.to_owned());
+                    }
+                }
+            }
+            let call = self.generic_inputs(template, args, &callbacks)?;
             let path = self.specialization.map_or(&[][..], |s| s.path.as_slice());
             spec = self
                 .specializations
                 .as_mut()
                 .expect("block elaboration")
-                .intern(template, call.bindings, call.callbacks, path, self.structs)
+                .intern(
+                    template,
+                    call.bindings,
+                    values,
+                    call.callbacks,
+                    path,
+                    self.structs,
+                )
                 .map_err(|e| format!("call to block '{target}': {e}"))?;
             prepared = Some(call.values.into_iter());
             (spec.name.as_str(), &spec.interface)
         } else {
             (target, &self.decls.blocks[target])
         };
-        self.check_child_instance(binding, target, child, !callbacks.is_empty())?;
+        self.check_child_instance(binding, target, child, !parametrics.is_empty())?;
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -2429,9 +2491,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
     }
 
-    /// Check the explicit callback list even in a skipped structural loop,
+    /// Check the explicit parametric count even in a skipped structural loop,
     /// where no concrete data types or hardware instance are needed.
-    fn check_block_callback_list(
+    fn check_block_parametric_count(
         &self,
         target: &str,
         count: usize,
@@ -2442,14 +2504,21 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return Err(format!("'{name}' names a local value here"));
         }
         self.reject_type_parameter_value(target)?;
-        let expected = self
-            .decls
-            .templates
-            .get(target)
-            .map_or(0, |template| template.callback_params.len());
+        let (values, callbacks) = self.decls.templates.get(target).map_or((0, 0), |template| {
+            (
+                template.block.value_parametrics.len(),
+                template.callback_params.len(),
+            )
+        });
+        let expected = values + callbacks;
         if expected != count {
+            let kind = if values == 0 {
+                "callable"
+            } else {
+                "explicit parametric"
+            };
             return Err(format!(
-                "block '{target}' expects {expected} callable arguments, got {count}"
+                "block '{target}' expects {expected} {kind} arguments, got {count}"
             ));
         }
         Ok(())
@@ -2800,7 +2869,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args,
             } => {
                 if self.decls.is_block(name) && self.callback_index(name).is_none() {
-                    self.check_block_callback_list(
+                    self.check_block_parametric_count(
                         name,
                         parametrics.len(),
                         self.has_local_name(name),
