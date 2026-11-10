@@ -74,8 +74,8 @@ impl BinaryOp {
 }
 
 /// Value types shared by block ports, registers, and function calls.
-/// A named type can refer to a declaration or an enclosing block type
-/// parameter.
+/// A named type can refer to a declaration or an enclosing function or block
+/// type parameter.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Type {
     Bits {
@@ -250,6 +250,8 @@ impl MatchPattern {
 pub struct Function {
     pub name: String,
     pub public: bool,
+    /// Type parameters inferred from data inputs and callback results.
+    pub type_params: Vec<String>,
     /// Named, compile-time function parameters in declaration order.
     pub callback_params: Vec<CallbackParam>,
     /// Compile-time values in declaration order.
@@ -271,7 +273,7 @@ pub struct ParametricBinding {
     pub index: usize,
 }
 
-/// One compile-time formal in the source order of a function's declaration.
+/// A value or callback formal that accepts an explicit call argument.
 #[derive(Clone, Copy, Debug)]
 pub enum FunctionParametricRef<'a> {
     Value(&'a ParametricBinding),
@@ -279,6 +281,12 @@ pub enum FunctionParametricRef<'a> {
 }
 
 impl Function {
+    /// Whether a call must bind type or value parameters to specialize this
+    /// function.
+    pub fn has_inferred_parametrics(&self) -> bool {
+        !self.type_params.is_empty() || !self.value_parametrics.is_empty()
+    }
+
     /// Visit interleaved value and callback formals in call-site argument
     /// order.
     pub fn parametric_bindings(&self) -> impl Iterator<Item = FunctionParametricRef<'_>> {
@@ -296,7 +304,7 @@ impl Function {
 }
 
 /// A callable that a function or block template binds to a named pure
-/// function. In a block its signature can refer to the block's type parameters.
+/// function. Its signature can refer to the template's type parameters.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallbackParam {
     pub name: String,

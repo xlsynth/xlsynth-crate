@@ -54,6 +54,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_function_type_parametrics"
+path = "fuzz_targets/fuzz_bx_dslx_function_type_parametrics.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_function_value_parametrics"
 path = "fuzz_targets/fuzz_bx_dslx_function_value_parametrics.rs"
 test = false

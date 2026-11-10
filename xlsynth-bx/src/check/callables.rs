@@ -10,12 +10,12 @@ use std::rc::Rc;
 use super::generic_blocks::TypeArgument;
 use super::{
     Bindings, BlockSpecializations, BodyChecker, BodyKind, CallbackFormal, CallbackTarget, K,
-    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, TypedExpr, compatible, source_type_nodes, type_deps,
+    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, TypedExpr, compatible, source_type_nodes,
 };
 use crate::ast::{CallbackParam, Expr, Function, Type};
 
 /// A visible declaration before its DSLX specialization (if any) is known.
-#[derive(Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub(super) enum CallbackSource<'m> {
     Named(&'m str),
     Imported { module: String, member: String },
@@ -47,18 +47,8 @@ pub(super) struct BlockCallbackFormal {
 
 impl BlockCallbackFormal {
     pub(super) fn new(signature: CallbackParam, bindings: &Bindings) -> Self {
-        let type_params = |types: &[Type]| {
-            let mut names = Vec::new();
-            for ty in types {
-                type_deps(ty, &mut names);
-            }
-            names.retain(|name| bindings.declares(name));
-            names.sort_unstable();
-            names.dedup();
-            names.into_iter().map(str::to_owned).collect()
-        };
-        let input_type_params = type_params(&signature.params);
-        let result_type_params = type_params(std::slice::from_ref(&signature.result));
+        let input_type_params = bindings.referenced_parameters(&signature.params);
+        let result_type_params = bindings.referenced_parameters([&signature.result]);
         Self {
             signature,
             input_type_params,
@@ -142,7 +132,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .function_templates
             .get(name)
             .ok_or_else(|| format!("'{name}' is not a function with callable parameters"))?;
-        if !template.value_parametrics.is_empty() {
+        if template.has_inferred_parametrics() {
             let count = template.callback_params.len() + template.value_parametrics.len();
             if callback_count > count {
                 return Err(format!(
@@ -201,12 +191,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Resolve the actual from the formal input types. Function templates
-    /// compare its return type, while block templates use it for inference.
+    /// can compare its return type or use it to infer further type bindings.
     pub(super) fn callback_result(
         &mut self,
         params: &[Type],
         source: &CallbackSource<'m>,
-        block_input_nodes: Option<usize>,
+        new_import_input_nodes: Option<usize>,
     ) -> Result<(CallbackTarget<'m>, Cow<'a, Type>), String> {
         match source {
             CallbackSource::Named(callee) => {
@@ -241,25 +231,31 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 Ok((target, Cow::Borrowed(&f.result)))
             }
             CallbackSource::Imported { module, member } => {
-                let registry = self.specializations.as_deref_mut();
-                let mut result_budget = None;
+                let mut charge_probe = |nodes| match self.specializations.as_deref_mut() {
+                    Some(blocks) => blocks.charge_callback_storage(nodes),
+                    None => self
+                        .function_registry
+                        .as_deref_mut()
+                        .expect("module function registry")
+                        .charge_bindings(nodes),
+                };
+                let mut created = false;
                 let (id, result) = self.resolver.resolve_with_new_inputs(
                     module,
                     member,
                     params.to_vec(),
                     || {
-                        if let Some(nodes) = block_input_nodes {
-                            let registry = registry.expect("block specialization registry");
-                            registry.charge_callback_storage(nodes)?;
-                            result_budget = Some(registry);
+                        if let Some(nodes) = new_import_input_nodes {
+                            charge_probe(nodes)?;
+                            created = true;
                         }
                         Ok(())
                     },
                 )?;
                 self.structs.update_imports(self.resolver)?;
                 let shape = self.structs.type_shape(&result, MAX_ELABORATION_DEPTH)?;
-                if let Some(registry) = result_budget {
-                    registry.charge_callback_storage(shape.ir_nodes)?;
+                if created {
+                    charge_probe(shape.ir_nodes)?;
                 }
                 Ok((CallbackTarget::Imported(id), Cow::Owned(result)))
             }
@@ -427,7 +423,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let template =
             self.callable_template(name, self.names.contains(name), parametrics.len())?;
-        if !template.value_parametrics.is_empty() {
+        if template.has_inferred_parametrics() {
             return self.value_function_call(template, parametrics, args);
         }
         let callbacks = parametrics
@@ -513,7 +509,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         let head = name.split_once("::").map_or(name, |(head, _)| head);
         if let Some(&template) = self.decls.function_templates.get(name)
-            && !template.value_parametrics.is_empty()
+            && template.has_inferred_parametrics()
             && template.callback_params.is_empty()
             && !is_local(head)
             && self.callback_index(head).is_none()

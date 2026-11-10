@@ -74,11 +74,15 @@ impl StructTable {
             let mut deps = Vec::new();
             let mut dimensions = Vec::new();
             for field in &def.fields {
-                type_dependencies(&field.ty, &mut deps, |expr| {
-                    if let crate::ast::Expr::Name(name) = expr {
-                        dimensions.push(name.as_str());
-                    }
-                });
+                type_dependencies(
+                    &field.ty,
+                    |_, name| deps.push(name),
+                    |expr| {
+                        if let crate::ast::Expr::Name(name) = expr {
+                            dimensions.push(name.as_str());
+                        }
+                    },
+                );
             }
             let mut at = 0;
             for dimension in dimensions {

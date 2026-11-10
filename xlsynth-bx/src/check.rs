@@ -583,13 +583,21 @@ impl Declarations<'_> {
         }
     }
 
-    fn check_type_visibility(&self, ty: &Type, at: Option<usize>) -> Result<(), String> {
+    fn check_type_visibility(
+        &self,
+        ty: &Type,
+        at: Option<usize>,
+        bindings: Option<&Bindings>,
+    ) -> Result<(), String> {
         if at.is_none() {
             return Ok(());
         }
         let mut pending = vec![ty];
         while let Some(ty) = pending.pop() {
             match ty {
+                Type::Named(name) if bindings.is_some_and(|b| b.declares(name)) => {
+                    // The template introduces this name in its own scope.
+                }
                 Type::Named(name) | Type::Applied { name, .. } => {
                     self.check_type_name_visibility(name, at)?
                 }
@@ -884,17 +892,24 @@ pub(crate) fn is_dslx_builtin_type(name: &str) -> bool {
     )
 }
 
-/// Collect BX dependencies. Imported layouts are registered before local
-/// structs.
-fn type_deps<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
-    type_dependencies(ty, result, |_| {});
+/// Collect unresolved local names that can refer to type parameters.
+fn type_parameter_references<'a>(ty: &'a Type, result: &mut Vec<&'a str>) {
+    type_dependencies(
+        ty,
+        |ty, name| {
+            if matches!(ty, Type::Named(_)) {
+                result.push(name);
+            }
+        },
+        |_| {},
+    );
 }
 
 /// Walk nominal dependencies and the expressions supplying dimensions without
 /// recursively copying potentially nested source types.
 fn type_dependencies<'a>(
     ty: &'a Type,
-    names: &mut Vec<&'a str>,
+    mut nominal: impl FnMut(&'a Type, &'a str),
     mut dimension: impl FnMut(&'a Expr),
 ) {
     let mut pending = vec![ty];
@@ -902,7 +917,7 @@ fn type_dependencies<'a>(
         match ty {
             Type::Named(name) | Type::Enum { name, .. } => {
                 if !name.contains("::") {
-                    names.push(name);
+                    nominal(ty, name);
                 }
             }
             Type::Array { element, .. } => pending.push(element),
@@ -958,7 +973,7 @@ impl<'a> Declarations<'a> {
         structs: &mut StructTable,
     ) -> Result<(), String> {
         if let Some(f) = local
-            && !f.value_parametrics.is_empty()
+            && f.has_inferred_parametrics()
         {
             return self.add_value_template(f, structs);
         }
@@ -969,7 +984,7 @@ impl<'a> Declarations<'a> {
             for callback in &function.callback_params {
                 declare(&mut names, &callback.name)?;
                 let mut resolve = |ty: &Type| {
-                    self.check_type_visibility(ty, at)?;
+                    self.check_type_visibility(ty, at, None)?;
                     resolve_type(
                         ty,
                         &|name| names.contains(name),
@@ -1723,6 +1738,9 @@ struct BodyChecker<'a, 'm> {
     specialization: Option<&'a BlockSpecialization<'m>>,
     function_registry: Option<&'a mut FunctionSpecializations<'m>>,
     function_spec: Option<&'a FunctionSpecialization<'m>>,
+    /// Type arguments in the function's declaration scope, including partial
+    /// bindings while checking a callback signature.
+    function_type_bindings: Option<Bindings>,
     /// The enclosing template's signature for abstract or concrete checking.
     source_template: Option<&'a FunctionInterface>,
     /// Callable names available during lexical checking of a value template.
@@ -1979,6 +1997,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             specialization: None,
             function_registry: None,
             function_spec: None,
+            function_type_bindings: None,
             source_template: None,
             template_callbacks: None,
             template_name_depth: None,
@@ -2031,6 +2050,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             None => &self.decls.functions[function.name.as_str()],
         };
         if let Some(bound) = bound {
+            if !function.type_params.is_empty() {
+                self.function_type_bindings = Some(bound.type_bindings.clone());
+            }
             // Width slices and counted ranges may call earlier pure functions
             // with this specialization's compile-time values.
             self.enable_constant_functions();
@@ -2201,13 +2223,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
-    /// Resolve a type written in a block body and register its concrete fields.
+    /// Inferred type arguments in the current block or pure function.
+    fn type_bindings(&self) -> Option<&Bindings> {
+        self.function_type_bindings
+            .as_ref()
+            .or_else(|| self.specialization.map(|s| &s.bindings))
+    }
+
+    /// Resolve a source annotation and register its concrete fields.
     fn source_type(&mut self, source: &Type) -> Result<Type, String> {
         self.decls
-            .check_type_visibility(source, self.function_position)?;
+            .check_type_visibility(source, self.function_position, self.type_bindings())?;
         let ty = self.resolve_dimensions(source, MAX_ELABORATION_DEPTH)?;
-        let ty = match self.specialization {
-            Some(spec) => spec.bindings.concrete_type(&ty)?,
+        let ty = match self.type_bindings() {
+            Some(bindings) => bindings.concrete_type(&ty)?,
             None => ty,
         };
         self.structs.update_imports(self.resolver)?;
@@ -2367,8 +2396,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// A type binder shadows a module member or import in callee position.
     fn reject_type_parameter_value(&self, name: &str) -> Result<(), String> {
-        self.specialization
-            .map_or(Ok(()), |s| s.bindings.reject_value(name))
+        self.type_bindings()
+            .map_or(Ok(()), |bindings| bindings.reject_value(name))
     }
 
     /// Check statements in lexical order, preserving a single expression per
@@ -3209,7 +3238,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .specialization
             .is_some_and(|spec| !spec.callbacks.is_empty());
         if self.checking_callback_inputs
-            || ((self.source_template.is_some() || callback_block || self.map_scope.is_some())
+            || ((self.source_template.is_some()
+                || self.function_type_bindings.is_some()
+                || callback_block
+                || self.map_scope.is_some())
                 && self.replaying_body())
         {
             // Materialize checked IR types incrementally so neither a copied
@@ -3471,8 +3503,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
                 Expr::Bool(_) => Ok(Some(Type::Bool)),
                 Expr::Literal { ty: Some(ty), .. } => {
-                    let ty = match (ty, checker.specialization) {
-                        (Type::Named(name), Some(spec)) => spec.bindings.get(name),
+                    let ty = match (ty, checker.type_bindings()) {
+                        (Type::Named(name), Some(bindings)) => bindings.get(name),
                         _ => Some(ty),
                     };
                     Ok(ty.filter(|ty| bits(ty).is_some()).cloned())

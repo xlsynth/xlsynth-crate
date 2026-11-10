@@ -4,13 +4,20 @@
 //! types and defaults, then typecheck each concrete function specialization.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
-use super::function_specializations::BoundValueSignature;
+use super::callables::CallbackSource;
+use super::function_specializations::{
+    BoundValueSignature, ExplicitEnvironment, InferredCallback, SuppliedParametrics,
+};
+use super::generic_blocks::{Bindings, callback_argument_name, validate_inference_sources};
+use super::generic_inputs::{Input, InputPattern};
 use super::{
-    BodyChecker, BodyKind, CallbackFormal, Declarations, FunctionInterface, K, StructTable, bits,
-    child_type_budget, compatible, declare, minimum_type, resolve_type, source_type_nodes,
+    BodyChecker, BodyKind, CallbackFormal, CallbackTarget, Declarations, FunctionInterface, K,
+    MAX_ELABORATION_DEPTH, StructTable, bits, child_type_budget, compatible, declare,
+    literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
     CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, Type,
@@ -33,6 +40,15 @@ impl<'m> Declarations<'m> {
         structs: &StructTable,
     ) -> Result<(), String> {
         let mut names = BTreeSet::new();
+        for name in &f.type_params {
+            if !crate::parser::is_use_identifier(name) {
+                return Err(format!("invalid type parameter name '{name}'"));
+            }
+            declare(&mut names, name)?;
+        }
+        if !f.type_params.is_empty() {
+            validate_inference_sources(&f.type_params, &f.params, &f.callback_params)?;
+        }
         let mut last = None;
         for p in &f.value_parametrics {
             if p.index >= f.value_parametrics.len() + f.callback_params.len()
@@ -79,13 +95,14 @@ struct InferredBindings<'f> {
     formals: &'f [ParametricBinding],
     indices: BTreeMap<&'f str, usize>,
     values: Vec<Option<BoundParametricValue>>,
+    explicit_count: usize,
     // Gather all witnesses from one data argument before its bindings become
     // context for later arguments. Tuple fields must agree with one another.
     witnesses: BTreeMap<usize, BoundParametricValue>,
 }
 
 impl<'f> InferredBindings<'f> {
-    fn new(formals: &'f [ParametricBinding]) -> Self {
+    fn new(formals: &'f [ParametricBinding], explicit_count: usize) -> Self {
         Self {
             formals,
             indices: formals
@@ -94,6 +111,7 @@ impl<'f> InferredBindings<'f> {
                 .map(|(i, p)| (p.name.as_str(), i))
                 .collect(),
             values: vec![None; formals.len()],
+            explicit_count,
             witnesses: BTreeMap::new(),
         }
     }
@@ -103,7 +121,10 @@ impl<'f> InferredBindings<'f> {
             return None;
         };
         let i = *self.indices.get(name.as_str())?;
-        (self.values[i].is_none() && self.formals[i].default.is_none()).then_some(i)
+        (self.formals[i].index >= self.explicit_count
+            && self.values[i].is_none()
+            && self.formals[i].default.is_none())
+        .then_some(i)
     }
 
     fn needs_witness(&self, ty: &Type) -> bool {
@@ -226,6 +247,52 @@ struct DataArgument<'e> {
     checked: Option<TypedExpr>,
 }
 
+/// Earlier explicit formals stay in declaration scope while the caller
+/// evaluates each constexpr actual with the type of the next formal.
+#[derive(Default)]
+struct ExplicitScope {
+    types: Option<Bindings>,
+    names: BTreeSet<String>,
+    values: BTreeMap<String, Type>,
+    literals: BTreeMap<String, TypedExpr>,
+    constexpr_names: BTreeSet<String>,
+    value_parametric_names: BTreeSet<String>,
+}
+
+impl ExplicitScope {
+    /// Move the lexical maps between successive checks without copying the
+    /// types or literals of every preceding formal at each step.
+    fn exchange(&mut self, checker: &mut BodyChecker<'_, '_>) {
+        std::mem::swap(&mut self.types, &mut checker.function_type_bindings);
+        std::mem::swap(&mut self.names, &mut checker.names);
+        std::mem::swap(&mut self.values, &mut checker.values);
+        std::mem::swap(&mut self.literals, &mut checker.function_values);
+        std::mem::swap(&mut self.constexpr_names, &mut checker.constexpr_names);
+        std::mem::swap(
+            &mut self.value_parametric_names,
+            &mut checker.value_parametric_names,
+        );
+    }
+
+    fn evaluate<'m, T>(
+        &mut self,
+        caller: &mut BodyChecker<'_, 'm>,
+        f: &'m Function,
+        preceding_value: Option<(&str, &BoundParametricValue)>,
+        evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        caller.with_value_definition(f, |definition| {
+            self.exchange(definition);
+            if let Some((name, value)) = preceding_value {
+                definition.bind_parametric_value(name, value);
+            }
+            let result = evaluate(definition);
+            self.exchange(definition);
+            result
+        })
+    }
+}
+
 impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Apply the selected parametric signature to unsized expressions and
     /// materialized references in the caller's lexical scope.
@@ -328,7 +395,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         self.names.contains(name)
                             || callbacks.is_some_and(|indices| indices.contains_key(name))
                     },
-                    self.specialization.map(|s| &s.bindings),
+                    self.function_type_bindings
+                        .as_ref()
+                        .or_else(|| self.specialization.map(|s| &s.bindings)),
                     self.decls
                         .dimensions_at(self.function_position.or(self.block_position)),
                     self.resolver,
@@ -345,17 +414,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         actuals: &[Expr],
         args: &[Expr],
     ) -> Result<(Type, K), String> {
-        let sources: Vec<_> = args.iter().collect();
+        let instantiate = |checker: &mut Self, args: &[&Expr]| {
+            let args = args
+                .iter()
+                .map(|&expr| DataArgument {
+                    source: Some(expr),
+                    checked: None,
+                })
+                .collect();
+            checker.instantiate_value_function(f, actuals, args)
+        };
         self.with_parametric_context(|checker| {
-            checker.with_scoped_results(&sources, |checker, args| {
-                let args = args
+            if f.type_params.is_empty() {
+                let sources: Vec<_> = args.iter().collect();
+                return checker.with_scoped_results(&sources, instantiate);
+            }
+            checker.with_scope_aliases(|checker| {
+                // Preserve scoped aggregate members and branch results until
+                // both their type evidence and the final context are known.
+                let prepared = args
                     .iter()
-                    .map(|&expr| DataArgument {
-                        source: Some(expr),
-                        checked: None,
-                    })
-                    .collect();
-                checker.instantiate_value_function(f, actuals, args)
+                    .map(|expr| checker.prepare_value(expr))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sources = prepared
+                    .iter()
+                    .map(|expr| expr.as_ref())
+                    .collect::<Vec<_>>();
+                instantiate(checker, &sources)
             })
         })
     }
@@ -421,17 +506,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<BoundValueSignature, String> {
         let mut values = Vec::with_capacity(f.value_parametrics.len());
         let mut callbacks = Vec::with_capacity(f.callback_params.len());
+        // One inferred tuple can expand at every formal. Bound the retained
+        // signature incrementally, before resolving the next annotation.
+        let charge = |checker: &mut Self, work| {
+            checker
+                .function_registry
+                .as_deref_mut()
+                .expect("module function registry")
+                .charge_bindings(work)
+        };
         for formal in f.parametric_bindings() {
             let formal = match formal {
                 FunctionParametricRef::Value(formal) => formal,
                 FunctionParametricRef::Callback(formal) => {
+                    let mut binding_work = 0;
+                    let mut resolve = |source: &Type| -> Result<Type, String> {
+                        let ty = self.source_type(source)?;
+                        let nodes = source_type_nodes(&ty);
+                        charge(self, nodes)?;
+                        binding_work += nodes;
+                        Ok(ty)
+                    };
                     let params = formal
                         .params
                         .iter()
-                        .map(|ty| self.source_type(ty))
+                        .map(&mut resolve)
                         .collect::<Result<Vec<_>, _>>()?;
-                    let result = self.source_type(&formal.result)?;
-                    let binding_work = params.iter().chain([&result]).map(source_type_nodes).sum();
+                    let result = resolve(&formal.result)?;
                     callbacks.push(CallbackFormal {
                         signature: CallbackParam {
                             name: formal.name.clone(),
@@ -448,7 +549,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             };
             let supplied = &provided[values.len()];
-            let ty = self.source_type(&formal.ty)?;
+            let ty = self.value_binding_type(formal)?;
             self.names.insert(formal.name.clone());
             let bound = match (supplied, &formal.default) {
                 (Some(bound), default) => {
@@ -483,12 +584,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     ));
                 }
             };
+            charge(self, 1 + literal_copy_work(&bound.value))?;
             self.bind_parametric_value(&formal.name, &bound);
             values.push(bound);
         }
         let mut params = Vec::new();
         for p in &f.params {
             let ty = self.source_type(&p.ty)?;
+            charge(self, source_type_nodes(&ty))?;
             self.names.insert(p.name.clone());
             params.push(Param {
                 name: p.name.clone(),
@@ -498,6 +601,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let result = self.source_type(&f.result)?;
         Ok(BoundValueSignature {
             values,
+            type_bindings: self
+                .function_type_bindings
+                .take()
+                .unwrap_or_else(|| Bindings::new(&[])),
             interface: FunctionInterface {
                 params,
                 result,
@@ -508,8 +615,355 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         })
     }
 
+    /// An inferred annotation on a constexpr formal must select one of the
+    /// value types accepted for an explicitly annotated binding.
+    fn value_binding_type(&mut self, formal: &ParametricBinding) -> Result<Type, String> {
+        let ty = self.source_type(&formal.ty)?;
+        if let Type::Named(name) = &formal.ty
+            && self
+                .type_bindings()
+                .is_some_and(|bindings| bindings.declares(name))
+            && !matches!(
+                ty,
+                Type::Bits { .. } | Type::Bool | Type::Enum { .. } | Type::Named(_)
+            )
+        {
+            return Err(format!(
+                "value parametric '{}' requires a bits, bool, enum, or struct type, got {ty}",
+                formal.name
+            ));
+        }
+        Ok(ty)
+    }
+
     /// Explicit actuals and input types come from the caller. Defaults and
     /// formal annotations are evaluated in the function's definition scope.
+    fn specialized_signature(
+        &mut self,
+        f: &'m Function,
+        types: Bindings,
+        values: Vec<Option<BoundParametricValue>>,
+    ) -> Result<Rc<BoundValueSignature>, String> {
+        let supplied = SuppliedParametrics {
+            types: types.arguments(&f.type_params)?,
+            values,
+        };
+        let registry = self
+            .function_registry
+            .as_deref_mut()
+            .expect("module function registry");
+        if let Some(bound) = registry.cached_value_signature(f, &supplied)? {
+            return Ok(bound);
+        }
+        let signature = self.with_value_definition(f, |definition| {
+            definition.function_type_bindings = (!f.type_params.is_empty()).then_some(types);
+            definition.bound_value_signature(f, &supplied.values)
+        })?;
+        self.function_registry
+            .as_deref_mut()
+            .expect("module function registry")
+            .cache_value_signature(f, supplied, signature)
+    }
+
+    /// Preserve DSLX's source-order dimension inference. An unsized scalar
+    /// can wait for later evidence. A constructor supplies the type inferred
+    /// for its members when this argument needs to bind a width.
+    fn infer_dimension_input(
+        &mut self,
+        formal: &Type,
+        expr: &Expr,
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<Option<TypedExpr>, String> {
+        inferred.literal_lengths(formal, expr)?;
+        self.dimension_witness(formal, expr, inferred, /* tuple_member= */ false)
+    }
+
+    /// An unsized scalar in a tuple has its own width when that field supplies
+    /// evidence. An unsized scalar passed by itself can wait for context.
+    fn dimension_witness(
+        &mut self,
+        formal: &Type,
+        expr: &Expr,
+        inferred: &mut InferredBindings<'_>,
+        tuple_member: bool,
+    ) -> Result<Option<TypedExpr>, String> {
+        if !inferred.needs_witness(formal) {
+            return Ok(None);
+        }
+        let value = if tuple_member {
+            self.inferred_expr(expr)?
+        } else if minimum_type(expr)?.is_none() {
+            self.expr(expr, None)?
+        } else {
+            return Ok(None);
+        };
+        inferred.infer(formal, &value.ty)?;
+        Ok(Some(value))
+    }
+
+    /// Tuple fields have independent widths. Checking a field that supplies a
+    /// dimension must leave the other fields free to use their inferred types.
+    fn infer_type_input<'e>(
+        &mut self,
+        formal: &Type,
+        expr: &'e Expr,
+        types: &mut Bindings,
+        inferred: &mut InferredBindings<'_>,
+        tuple_member: bool,
+    ) -> Result<Input<'e>, String> {
+        if inferred.needs_witness(formal)
+            && let (Type::Tuple(fields), Expr::Tuple(items)) = (formal, expr)
+            && fields.len() == items.len()
+        {
+            let members = fields
+                .iter()
+                .zip(items)
+                .map(|(ty, item)| {
+                    self.infer_type_input(ty, item, types, inferred, /* tuple_member= */ true)
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Input::Aggregate { expr, members });
+        }
+        let witness = self.dimension_witness(formal, expr, inferred, tuple_member)?;
+        self.infer_input(formal, expr, types, InputPattern::Function(witness))
+    }
+
+    /// Infer type variables from data and callback results before applying
+    /// the resulting signature to contextual literals and the specialized body.
+    fn instantiate_type_function(
+        &mut self,
+        f: &'m Function,
+        actuals: &[Expr],
+        mut args: Vec<DataArgument<'_>>,
+    ) -> Result<(Type, K), String> {
+        let mut types = Bindings::new(&f.type_params);
+        let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
+        let mut inputs = Vec::with_capacity(args.len());
+        for (arg, param) in args.iter_mut().zip(&f.params) {
+            let input = match (arg.source, arg.checked.take()) {
+                (Some(expr), _) => {
+                    inferred.literal_lengths(&param.ty, expr)?;
+                    self.infer_type_input(
+                        &param.ty,
+                        expr,
+                        &mut types,
+                        &mut inferred,
+                        /* tuple_member= */ false,
+                    )?
+                }
+                (None, Some(value)) => {
+                    types.infer_source_type(
+                        &param.ty,
+                        &value.ty,
+                        self.structs,
+                        /* contextual_projection= */ false,
+                    )?;
+                    inferred.infer(&param.ty, &value.ty)?;
+                    Input::Checked { expr: None, value }
+                }
+                (None, None) => unreachable!("map supplies a typed argument"),
+            };
+            inferred.finish_argument();
+            inputs.push(input);
+        }
+        self.infer_input_groups(&mut inputs, &f.params, &mut types, &format!("'{}'", f.name))?;
+        let (types, targets) = self.infer_explicit_formals(f, types, actuals, &mut inferred)?;
+        let bound = self.specialized_signature(f, types, inferred.values)?;
+        let mut checked = Vec::with_capacity(inputs.len());
+        for ((input, arg), param) in inputs.into_iter().zip(args).zip(&bound.interface.params) {
+            if let Some(expr) = arg.source {
+                super::check_argument_widths(
+                    expr,
+                    &param.ty,
+                    Some(&self.inferred_bindings),
+                    Some(&|| self.zero_calls_function()),
+                )?;
+            }
+            checked
+                .push(self.finish_input(input, &param.ty).map_err(|e| {
+                    format!("argument '{}', call to '{}': {e}", param.name, f.name)
+                })?);
+        }
+        let result = bound.interface.result.clone();
+        let name = self.intern_function(f, targets, Some(bound))?;
+        Ok((
+            result,
+            K::Call {
+                name,
+                args: checked,
+            },
+        ))
+    }
+
+    /// Visit explicit formals in order. A callback's return can determine
+    /// later callback inputs, constexpr annotations, and the function result.
+    fn infer_explicit_formals(
+        &mut self,
+        f: &'m Function,
+        types: Bindings,
+        actuals: &[Expr],
+        inferred: &mut InferredBindings<'_>,
+    ) -> Result<(Bindings, Vec<CallbackTarget<'m>>), String> {
+        if actuals.is_empty() {
+            return Ok((types, Vec::new()));
+        }
+        let mut environment = self
+            .function_registry
+            .as_deref_mut()
+            .expect("module function registry")
+            .explicit_environment(ExplicitEnvironment::DataTypes(
+                &f.name,
+                types.partial_arguments(),
+            ))?;
+        let mut scope = ExplicitScope {
+            types: Some(types),
+            ..Default::default()
+        };
+        let mut targets = Vec::with_capacity(f.callback_params.len());
+        let mut preceding_value: Option<(&str, &BoundParametricValue)> = None;
+        let mut explicit_values = inferred.values.iter_mut();
+        for (index, (formal, actual)) in f.parametric_bindings().zip(actuals).enumerate() {
+            let prior = preceding_value.take();
+            match formal {
+                FunctionParametricRef::Value(value) => {
+                    let ty = scope.evaluate(self, f, prior, |d| {
+                        if let Some(ty) = d
+                            .function_registry
+                            .as_deref()
+                            .expect("module function registry")
+                            .explicit_value_type(environment)
+                        {
+                            return Ok(ty);
+                        }
+                        let ty = d.value_binding_type(value)?;
+                        d.function_registry
+                            .as_deref_mut()
+                            .expect("module function registry")
+                            .record_explicit_value_type(environment, &ty);
+                        Ok(ty)
+                    })?;
+                    let actual = self
+                        .parametric_value(actual, &ty)
+                        .map_err(|e| format!("parametric '{}': {e}", value.name))?;
+                    let slot = explicit_values
+                        .next()
+                        .expect("value formal in declaration order");
+                    let bound = slot.insert(BoundParametricValue { ty, value: actual });
+                    if index + 1 < actuals.len() {
+                        environment = self
+                            .function_registry
+                            .as_deref_mut()
+                            .expect("module function registry")
+                            .explicit_environment(ExplicitEnvironment::Value(
+                                environment,
+                                bound.clone(),
+                            ))?;
+                    }
+                    preceding_value = Some((&value.name, bound));
+                }
+                FunctionParametricRef::Callback(callback) => {
+                    let name = callback_argument_name(actual)?;
+                    let source = self.callback_source(name, |head| self.names.contains(head))?;
+                    environment = self
+                        .function_registry
+                        .as_deref_mut()
+                        .expect("module function registry")
+                        .explicit_environment(ExplicitEnvironment::Callback(
+                            environment,
+                            source.clone(),
+                        ))?;
+                    let target = scope
+                        .evaluate(self, f, prior, |d| {
+                            d.infer_callback_result(callback, &source, environment)
+                        })
+                        .map_err(|e| {
+                            format!(
+                                "callable parameter '{}' of '{}': {e}",
+                                callback.name, f.name
+                            )
+                        })?;
+                    targets.push(target);
+                }
+            }
+        }
+        Ok((scope.types.expect("generic function bindings"), targets))
+    }
+
+    /// A callback's concrete result binds variables in its return pattern
+    /// after its input annotations resolve in the template's lexical scope.
+    fn infer_callback_result(
+        &mut self,
+        callback: &CallbackParam,
+        source: &CallbackSource<'m>,
+        environment: usize,
+    ) -> Result<CallbackTarget<'m>, String> {
+        let bound = match self
+            .function_registry
+            .as_deref()
+            .expect("module function registry")
+            .inferred_callback(environment)
+        {
+            Some(bound) => bound,
+            None => {
+                let bound = Rc::new(self.validate_inferred_callback(callback, source)?);
+                self.function_registry
+                    .as_deref_mut()
+                    .expect("module function registry")
+                    .record_inferred_callback(environment, Rc::clone(&bound));
+                bound
+            }
+        };
+        let registry = self
+            .function_registry
+            .as_deref_mut()
+            .expect("module function registry");
+        self.function_type_bindings
+            .as_mut()
+            .expect("generic function bindings")
+            .merge_callback_results(&bound.results, |nodes| registry.charge_bindings(nodes))?;
+        self.names.insert(callback.name.clone());
+        Ok(bound.target)
+    }
+
+    /// Resolve the dependent annotations once and retain only the bindings
+    /// contributed by the callback's result.
+    fn validate_inferred_callback(
+        &mut self,
+        callback: &CallbackParam,
+        source: &CallbackSource<'m>,
+    ) -> Result<InferredCallback<'m>, String> {
+        let mut params = Vec::with_capacity(callback.params.len());
+        for ty in &callback.params {
+            let ty = self.source_type(ty)?;
+            self.charge_expansion("callback bindings", source_type_nodes(&ty))?;
+            params.push(ty);
+        }
+        let pattern = self.resolve_dimensions(&callback.result, MAX_ELABORATION_DEPTH)?;
+        self.structs.update_imports(self.resolver)?;
+        self.structs
+            .formal_shape(&pattern, MAX_ELABORATION_DEPTH, self.type_bindings())?;
+        let input_nodes = if matches!(source, CallbackSource::Imported { .. }) {
+            Some(params.iter().try_fold(0usize, |sum, ty| {
+                self.structs
+                    .type_shape(ty, MAX_ELABORATION_DEPTH)
+                    .map(|shape| sum.saturating_add(shape.ir_nodes))
+            })?)
+        } else {
+            None
+        };
+        let (target, result) = self.callback_result(&params, source, input_nodes)?;
+        self.charge_expansion("callback bindings", source_type_nodes(&result))?;
+        let bindings = self
+            .function_type_bindings
+            .as_ref()
+            .expect("generic function bindings");
+        let mut results = Bindings::new(&bindings.referenced_parameters([&pattern]));
+        results.match_input(&pattern, &result, self.structs)?;
+        Ok(InferredCallback { target, results })
+    }
+
+    /// Bind a local template to its actuals and emit a call to its concrete
+    /// symbol.
     fn instantiate_value_function(
         &mut self,
         f: &'m Function,
@@ -524,7 +978,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 args.len()
             ));
         }
-        let mut inferred = InferredBindings::new(&f.value_parametrics);
+        if !f.type_params.is_empty() {
+            return self.instantiate_type_function(f, actuals, args);
+        }
+        let mut inferred = InferredBindings::new(&f.value_parametrics, actuals.len());
         if !actuals.is_empty() {
             // Check explicit annotations before instantiating the callee.
             // Preceding formals hide module declarations even though none of
@@ -552,39 +1009,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         for (arg, param) in args.iter_mut().zip(&f.params) {
             if let Some(expr) = arg.source {
-                inferred.literal_lengths(&param.ty, expr)?;
-            }
-            if inferred.needs_witness(&param.ty) {
-                if let Some(expr) = arg.source {
-                    if minimum_type(expr)?.is_some() {
-                        continue;
-                    }
-                    arg.checked = Some(self.expr(expr, None)?);
-                }
-                inferred.infer(
-                    &param.ty,
-                    &arg.checked.as_ref().expect("checked argument").ty,
-                )?;
+                arg.checked = self.infer_dimension_input(&param.ty, expr, &mut inferred)?;
+            } else if let Some(value) = &arg.checked {
+                inferred.infer(&param.ty, &value.ty)?;
             }
             inferred.finish_argument();
         }
-        let cached = self
-            .function_registry
-            .as_deref_mut()
-            .expect("module function registry")
-            .cached_value_signature(f, &inferred.values)?;
-        let bound = match cached {
-            Some(bound) => bound,
-            None => {
-                let signature = self.with_value_definition(f, |definition| {
-                    definition.bound_value_signature(f, &inferred.values)
-                })?;
-                self.function_registry
-                    .as_deref_mut()
-                    .expect("module function registry")
-                    .cache_value_signature(f, inferred.values, signature)?
-            }
-        };
+        let bound = self.specialized_signature(f, Bindings::new(&[]), inferred.values)?;
         let interface = &bound.interface;
         let mut targets = Vec::new();
         for (i, formal) in f.parametric_bindings().enumerate() {
@@ -647,7 +1078,126 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{check_module, parse_module};
+    use super::{Bindings, BodyChecker, BodyKind, Declarations, StructTable, Type};
+    use crate::check::{FunctionSpecializations, ImportResolver, MAX_TYPE_SIZE};
+    use crate::{ImportOptions, check_module, parse_module};
+    use xlsynth_pir::IrValue;
+
+    #[test]
+    fn repeated_type_formals_stop_signature_construction_at_the_expansion_limit()
+    -> Result<(), String> {
+        let module = parse_module("fn repeat<T>(a:T,b:T)->T { a }")?;
+        let f = &module.functions[0];
+        let mut structs = StructTable::default();
+        let mut decls = Declarations::default();
+        decls.add_value_template(f, &structs)?;
+        let mut types = Bindings::new(&f.type_params);
+        let tuple = Type::Tuple(vec![Type::Bool, Type::Bool]);
+        types.match_input(&f.params[0].ty, &tuple, &structs)?;
+        let mut resolver = ImportResolver::new(&[], &ImportOptions::default())?;
+        let mut registry = FunctionSpecializations::new(Default::default());
+        // The first tuple fits. Resolving the second must stop construction.
+        registry.expansion_work = MAX_TYPE_SIZE - 3;
+        let mut checker = BodyChecker::new(&decls, &mut resolver, &mut structs, BodyKind::Function);
+        checker.function_registry = Some(&mut registry);
+        checker.function_type_bindings = Some(types);
+        let error = checker.bound_value_signature(f, &[]).err();
+        assert_eq!(
+            error,
+            Some(format!(
+                "parametric bindings exceed the function specialization expansion limit of {MAX_TYPE_SIZE}"
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn callback_results_type_later_explicit_values_and_callbacks() -> Result<(), String> {
+        let source = r#"
+fn widen(x:u8)->u16 { x as u16 }
+fn add(a:u16,b:u16)->u16 { a+b }
+fn apply<T,R,F:fn(T)->R,V:R,G:fn(R,R)->R>(x:T)->R { G(F(x),V) }
+const ANSWER = apply<widen,37,add>(u8:5);
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(16, 42).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn aggregate_arguments_share_complementary_type_witnesses() -> Result<(), String> {
+        let source = r#"
+fn pick<T>(a:T,b:T)->T { a }
+const ANSWER = pick((u4:1,2), (3,u8:4));
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[4]:1,bits[8]:2)").map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generic_functions_preserve_contextual_aggregate_signedness() -> Result<(), String> {
+        let source = r#"
+fn width<T,N:u32>(t:T,x:sN[N][1])->u32 { N }
+fn fixed<T>(t:T,x:(s4,s4))->u32 { u32:4 }
+fn mixed<T,N:u32>(x:(T,sN[N][1]))->u32 { N }
+fn test()->(u32,u32,u32,u32,u32) {
+    let a = [0xf];
+    let t = (0xf,0xf);
+    let m = (u8:0,[0xf]);
+    (width<4>(u8:0,a), fixed(u8:0,t), mixed(m),
+     width(u8:0,if true { a } else { a }),
+     mixed(match false { true => m, _ => m }))
+}
+const ANSWER = test();
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[32]:4,bits[32]:4,bits[32]:4,bits[32]:4,bits[32]:4)")
+                .map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn generic_function_dimensions_use_each_arguments_original_witness() -> Result<(), String> {
+        let source = r#"
+fn leading<T,N:u32>(t:T,x:uN[N],xs:uN[N][1])->u32 { N }
+fn trailing<T,N:u32>(t:T,xs:uN[N][1],x:uN[N])->u32 { N }
+fn nested<T,N:u32>(p:(T,uN[N]),x:uN[N])->u32 { N }
+fn tuple_width<T,N:u32>(p:(T,uN[N]))->u32 { N }
+"#;
+        let accepted =
+            format!("{source} const WIDTH = (leading(u8:0,u8:3,[1]),tuple_width((u8:0,1)));");
+        assert_eq!(
+            check_module(&parse_module(&accepted)?)?.constants()[0].value,
+            IrValue::parse_typed("(bits[32]:8,bits[32]:1)").map_err(|e| e.to_string())?
+        );
+        for call in ["trailing(u8:0,[1],u8:3)", "nested((u8:0,1),u8:3)"] {
+            let rejected = format!("{source} const WIDTH = {call};");
+            let err = check_module(&parse_module(&rejected)?).unwrap_err();
+            assert!(err.contains("expected u1, got u8"), "{call}: {err}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn value_formals_keep_their_supported_types_after_inference() -> Result<(), String> {
+        let source = "fn f<T,V:T>(x:T)->T { V } fn test()->u8[1] { f<{[u8:0]}>([u8:1]) }";
+        let error = check_module(&parse_module(source)?).unwrap_err();
+        assert!(
+            error.contains("requires a bits, bool, enum, or struct type"),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn mixed_formals_resolve_callback_types_in_declaration_order() -> Result<(), String> {

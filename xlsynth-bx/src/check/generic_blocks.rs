@@ -12,7 +12,7 @@ use crate::parser::{is_identifier, is_use_identifier};
 use super::{
     BlockCallbackFormal, BlockInterface, BlockTemplate, ImportResolver, MAX_ELABORATION_DEPTH,
     ModuleDimensions, StructTable, TypeShape, compatible, resolve_type, source_type_nodes,
-    type_deps,
+    type_parameter_references,
 };
 
 /// A callable argument identifies a function in the caller's lexical scope.
@@ -56,17 +56,28 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
             return Err(format!("port '{name}' collides with a callable parameter"));
         }
     }
+    validate_inference_sources(&block.type_params, &block.params, &block.callback_params)
+}
+
+/// Every type formal needs evidence from a data argument or the result of a
+/// callback whose inputs have already been inferred.
+pub(super) fn validate_inference_sources(
+    types: &[String],
+    params: &[Param],
+    callbacks: &[CallbackParam],
+) -> Result<(), String> {
+    let mut type_params: BTreeSet<_> = types.iter().map(String::as_str).collect();
     let mut input_names = Vec::new();
-    for param in &block.params {
-        type_deps(&param.ty, &mut input_names);
+    for param in params {
+        type_parameter_references(&param.ty, &mut input_names);
     }
     for name in input_names {
         type_params.remove(name);
     }
-    for callback in &block.callback_params {
+    for callback in callbacks {
         let mut dependencies = Vec::new();
         for ty in &callback.params {
-            type_deps(ty, &mut dependencies);
+            type_parameter_references(ty, &mut dependencies);
         }
         if let Some(missing) = dependencies
             .iter()
@@ -78,17 +89,16 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
             ));
         }
         dependencies.clear();
-        type_deps(&callback.result, &mut dependencies);
+        type_parameter_references(&callback.result, &mut dependencies);
         for name in dependencies {
             type_params.remove(name);
         }
     }
-    if let Some(missing) = block
-        .type_params
+    if let Some(missing) = types
         .iter()
         .find(|name| type_params.contains(name.as_str()))
     {
-        let source = if block.callback_params.is_empty() {
+        let source = if callbacks.is_empty() {
             "any data input"
         } else {
             "any data input or callback result"
@@ -210,6 +220,14 @@ impl Hash for BoundType {
     }
 }
 
+/// Whether dimensions are resolved and a reference can still use context.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TypePattern {
+    Resolved,
+    Source,
+    SourceProjection,
+}
+
 impl Bindings {
     pub(super) fn new(type_params: &[String]) -> Self {
         Self {
@@ -237,6 +255,18 @@ impl Bindings {
 
     pub(super) fn declares(&self, name: &str) -> bool {
         self.types.contains_key(name)
+    }
+
+    /// Check whether the pattern still needs a type witness.
+    pub(super) fn has_unbound_variable(&self, pattern: &Type) -> bool {
+        match pattern {
+            Type::Named(name) => self.types.get(name).is_some_and(Option::is_none),
+            Type::Tuple(fields) => fields.iter().any(|field| self.has_unbound_variable(field)),
+            Type::Array { element, .. } | Type::ParametricArray { element, .. } => {
+                self.has_unbound_variable(element)
+            }
+            _ => false,
+        }
     }
 
     /// A type parameter cannot resolve to a callee or an import qualifier.
@@ -286,17 +316,48 @@ impl Bindings {
         actual: &Type,
         structs: &StructTable,
     ) -> Result<(), String> {
+        self.match_pattern(formal, actual, structs, TypePattern::Resolved)
+    }
+
+    /// Infer type variables while dimensions and nominal imports in a source
+    /// annotation still await resolution in the function's declaration scope.
+    /// An inferred projection still needs to be checked with its bound type.
+    pub(super) fn infer_source_type(
+        &mut self,
+        formal: &Type,
+        actual: &Type,
+        structs: &StructTable,
+        contextual_projection: bool,
+    ) -> Result<(), String> {
+        let pattern = if contextual_projection {
+            TypePattern::SourceProjection
+        } else {
+            TypePattern::Source
+        };
+        self.match_pattern(formal, actual, structs, pattern)
+    }
+
+    fn match_pattern(
+        &mut self,
+        formal: &Type,
+        actual: &Type,
+        structs: &StructTable,
+        pattern: TypePattern,
+    ) -> Result<(), String> {
         if let Type::Named(name) = formal
             && let Some(binding) = self.types.get_mut(name)
         {
             match binding {
-                Some(prior) if !compatible(&prior.ty, actual) => {
+                Some(prior)
+                    if pattern != TypePattern::SourceProjection
+                        && !compatible(&prior.ty, actual) =>
+                {
                     return Err(format!(
                         "conflicting types for type parameter '{name}': inferred {} and {actual}",
                         prior.ty
                     ));
                 }
-                Some(_) => { /* A repeated occurrence agrees with the first binding. */ }
+                Some(_) => { /* Keep the first binding as context for checking the argument. */ }
                 None => {
                     let shape = structs.type_shape(actual, MAX_ELABORATION_DEPTH)?;
                     let ty = canonical_argument(actual);
@@ -315,7 +376,7 @@ impl Bindings {
         match (formal, actual) {
             (Type::Tuple(formals), Type::Tuple(actuals)) if formals.len() == actuals.len() => {
                 for (formal, actual) in formals.iter().zip(actuals) {
-                    self.match_input(formal, actual, structs)?;
+                    self.match_pattern(formal, actual, structs, pattern)?;
                 }
                 Ok(())
             }
@@ -328,7 +389,16 @@ impl Bindings {
                     element: actual,
                     size: actual_size,
                 },
-            ) if size == actual_size => self.match_input(formal, actual, structs),
+            ) if size == actual_size => self.match_pattern(formal, actual, structs, pattern),
+            (
+                Type::ParametricArray { element, .. },
+                Type::Array {
+                    element: actual, ..
+                },
+            ) if pattern != TypePattern::Resolved => {
+                self.match_pattern(element, actual, structs, pattern)
+            }
+            _ if pattern != TypePattern::Resolved => Ok(()),
             _ if compatible(formal, actual) => Ok(()),
             _ => Err(format!("expected {formal}, got {actual}")),
         }
@@ -373,6 +443,27 @@ impl Bindings {
             | Type::ParametricArray { .. }
             | Type::Applied { .. } => formal.clone(),
         }
+    }
+
+    /// Identify the type parameters referenced by callback annotations.
+    pub(super) fn referenced_parameters<'t>(
+        &self,
+        types: impl IntoIterator<Item = &'t Type>,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        for ty in types {
+            type_parameter_references(ty, &mut names);
+        }
+        names.retain(|name| self.declares(name));
+        names.sort_unstable();
+        names.dedup();
+        names.into_iter().map(str::to_owned).collect()
+    }
+
+    /// Before callbacks are resolved, a template's data arguments can leave
+    /// some types unbound. Name order is stable within that declaration.
+    pub(super) fn partial_arguments(&self) -> Vec<Option<TypeArgument>> {
+        self.types.values().cloned().collect()
     }
 
     /// Build the specialization key in the template's declaration order.

@@ -16,7 +16,7 @@ use xlsynth_pir::ir_parser::Parser;
 
 /// Inspect the concrete call targets without depending on their generated
 /// names.
-fn invoke_targets(evaluator: &BlockEvaluator) -> Vec<&str> {
+pub(super) fn invoke_targets(evaluator: &BlockEvaluator) -> Vec<&str> {
     evaluator
         .function
         .nodes

@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Intern and schedule local functions specialized on named callees and values.
+//! Intern and schedule local functions specialized on types, callees and
+//! values.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
-use super::callables::CallbackBinding;
+use super::callables::{CallbackBinding, CallbackSource};
+use super::generic_blocks::{Bindings, TypeArgument};
 use super::{
     BodyChecker, BodyKind, CheckedFunction, ConstantBudgets, Declarations, Function,
     FunctionInterface, ImportResolver, MAX_ELABORATION_DEPTH, MAX_SPECIALIZATIONS, MAX_TYPE_SIZE,
-    StructTable, dependency_order, literal_copy_work, source_type_nodes,
+    StructTable, dependency_order, source_type_nodes,
 };
-use crate::ast::{ConstDef, EnumDef, ExternFn, Module};
+use crate::ast::{ConstDef, EnumDef, ExternFn, Module, Type};
 use crate::typed::BoundParametricValue;
 use crate::typed::{AvailableFunctions, constant_work};
 
@@ -34,17 +36,43 @@ pub(super) struct FunctionSpecialization<'m> {
     pub(super) value_signature: Option<Rc<BoundValueSignature>>,
 }
 
-/// Values and signature resolved in the template's definition scope. Callers
-/// sharing supplied values also share the evaluation of dependent defaults.
+/// Concrete signature and parametric environment in the template's definition
+/// scope.
 pub(super) struct BoundValueSignature {
+    pub(super) type_bindings: Bindings,
     pub(super) values: Vec<BoundParametricValue>,
     pub(super) interface: FunctionInterface,
 }
 
-/// Nominal callback identities and typed constexpr values in formal order.
+/// Inferred types and supplied values before evaluating dependent defaults.
+#[derive(Eq, Hash, PartialEq)]
+pub(super) struct SuppliedParametrics {
+    pub(super) types: Vec<TypeArgument>,
+    pub(super) values: Vec<Option<BoundParametricValue>>,
+}
+
+/// An explicit formal sees the data-inferred types and the ordered prefix of
+/// earlier callback sources and constexpr values. Intern each prefix once so
+/// successive annotations need not copy or hash all preceding arguments.
+#[derive(Eq, Hash, PartialEq)]
+pub(super) enum ExplicitEnvironment<'m> {
+    DataTypes(&'m str, Vec<Option<TypeArgument>>),
+    Value(usize, BoundParametricValue),
+    Callback(usize, CallbackSource<'m>),
+}
+
+/// The target and type variables determined by a callback in one environment.
+pub(super) struct InferredCallback<'m> {
+    pub(super) target: CallbackTarget<'m>,
+    pub(super) results: Bindings,
+}
+
+/// Nominal types, callback identities and typed constexpr values in formal
+/// order.
 #[derive(Clone, Eq, Hash, PartialEq)]
 struct FunctionKey<'m> {
     template: &'m str,
+    types: Vec<TypeArgument>,
     targets: Vec<CallbackTarget<'m>>,
     values: Vec<BoundParametricValue>,
 }
@@ -60,8 +88,10 @@ pub(super) struct FunctionBody {
 /// call sites in this module.
 pub(super) struct FunctionSpecializations<'m> {
     cache: HashMap<FunctionKey<'m>, String>,
-    value_signatures:
-        HashMap<&'m str, HashMap<Vec<Option<BoundParametricValue>>, Rc<BoundValueSignature>>>,
+    value_signatures: HashMap<&'m str, HashMap<SuppliedParametrics, Rc<BoundValueSignature>>>,
+    explicit_environments: HashMap<ExplicitEnvironment<'m>, usize>,
+    explicit_value_types: HashMap<usize, Type>,
+    inferred_callbacks: HashMap<usize, Rc<InferredCallback<'m>>>,
     validated: HashMap<CallbackBinding<'m>, CallbackTarget<'m>>,
     active: Vec<&'m str>,
     generated: Vec<FunctionBody>,
@@ -79,6 +109,9 @@ impl<'m> FunctionSpecializations<'m> {
         Self {
             cache: HashMap::new(),
             value_signatures: HashMap::new(),
+            explicit_environments: HashMap::new(),
+            explicit_value_types: HashMap::new(),
+            inferred_callbacks: HashMap::new(),
             validated: HashMap::new(),
             active: Vec::new(),
             generated: Vec::new(),
@@ -108,7 +141,7 @@ impl<'m> FunctionSpecializations<'m> {
         Ok(())
     }
 
-    fn charge_bindings(&mut self, count: usize) -> Result<(), String> {
+    pub(super) fn charge_bindings(&mut self, count: usize) -> Result<(), String> {
         self.expansion_work = self.expansion_work.saturating_add(count);
         if self.expansion_work > MAX_TYPE_SIZE {
             return Err(format!(
@@ -118,50 +151,86 @@ impl<'m> FunctionSpecializations<'m> {
         Ok(())
     }
 
+    /// Charge hashing, comparison and retained key storage before looking up
+    /// the next formal's declaration environment.
+    pub(super) fn explicit_environment(
+        &mut self,
+        key: ExplicitEnvironment<'m>,
+    ) -> Result<usize, String> {
+        let work = match &key {
+            ExplicitEnvironment::DataTypes(_, types) => types
+                .iter()
+                .flatten()
+                .fold(types.len(), |sum, ty| sum.saturating_add(ty.source_nodes)),
+            ExplicitEnvironment::Value(_, value) => {
+                source_type_nodes(&value.ty).saturating_add(constant_work(&value.value))
+            }
+            ExplicitEnvironment::Callback(_, _) => 1,
+        };
+        self.charge_bindings(1usize.saturating_add(work))?;
+        let next = self.explicit_environments.len();
+        Ok(*self.explicit_environments.entry(key).or_insert(next))
+    }
+
+    pub(super) fn explicit_value_type(&self, environment: usize) -> Option<Type> {
+        self.explicit_value_types.get(&environment).cloned()
+    }
+
+    pub(super) fn record_explicit_value_type(&mut self, environment: usize, ty: &Type) {
+        // Value annotations are scalar or nominal leaves. The environment
+        // lookup already charged storage for this entry.
+        self.explicit_value_types.insert(environment, ty.clone());
+    }
+
+    pub(super) fn inferred_callback(&self, environment: usize) -> Option<Rc<InferredCallback<'m>>> {
+        self.inferred_callbacks.get(&environment).cloned()
+    }
+
+    pub(super) fn record_inferred_callback(
+        &mut self,
+        environment: usize,
+        bound: Rc<InferredCallback<'m>>,
+    ) {
+        self.inferred_callbacks.insert(environment, bound);
+    }
+
     /// Resolve each partial value environment once. The definition's defaults
     /// and dimensions can themselves instantiate previously declared templates.
     pub(super) fn cached_value_signature(
         &mut self,
         f: &'m Function,
-        provided: &[Option<BoundParametricValue>],
+        supplied: &SuppliedParametrics,
     ) -> Result<Option<Rc<BoundValueSignature>>, String> {
-        let work = provided.iter().flatten().fold(provided.len(), |sum, v| {
-            sum.saturating_add(constant_work(&v.value))
-        });
+        let type_work: usize = supplied.types.iter().map(|t| t.source_nodes).sum();
+        let work = supplied
+            .values
+            .iter()
+            .flatten()
+            .fold(type_work + supplied.values.len(), |sum, v| {
+                sum.saturating_add(constant_work(&v.value))
+            });
         self.charge_bindings(work)?;
         Ok(self
             .value_signatures
             .get(f.name.as_str())
-            .and_then(|signatures| signatures.get(provided))
+            .and_then(|signatures| signatures.get(supplied))
             .cloned())
     }
 
-    /// Retain a resolved signature after its definition and all nested defaults
-    /// have been checked. Charge the types and concrete values held by the
-    /// cache.
+    /// Charge the result and retain the signature. Its parameter types and
+    /// values were charged individually as the definition was resolved.
     pub(super) fn cache_value_signature(
         &mut self,
         f: &'m Function,
-        provided: Vec<Option<BoundParametricValue>>,
+        supplied: SuppliedParametrics,
         bound: BoundValueSignature,
     ) -> Result<Rc<BoundValueSignature>, String> {
-        let interface = &bound.interface;
-        let mut work = source_type_nodes(&interface.result);
-        for param in &interface.params {
-            work = work.saturating_add(source_type_nodes(&param.ty));
-        }
-        for callback in &interface.callback_params {
-            work = work.saturating_add(callback.binding_work);
-        }
-        for value in &bound.values {
-            work = work.saturating_add(1 + literal_copy_work(&value.value));
-        }
-        self.charge_bindings(work)?;
+        self.charge_bindings(source_type_nodes(&bound.interface.result))?;
         let bound = Rc::new(bound);
         self.value_signatures
             .entry(&f.name)
             .or_default()
-            .insert(provided, Rc::clone(&bound));
+            .insert(supplied, Rc::clone(&bound));
         Ok(bound)
     }
 
@@ -292,8 +361,12 @@ impl<'m> FunctionSpecializations<'m> {
                 }
                 Definition::Function(f) => {
                     let at = decls.positions.get(f.name.as_str()).copied();
-                    for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
-                        decls.check_type_visibility(ty, at)?;
+                    // Inferred templates check their symbolic signature and
+                    // body together below, with type formals in scope.
+                    if !f.has_inferred_parametrics() {
+                        for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
+                            decls.check_type_visibility(ty, at, None)?;
+                        }
                     }
                     decls
                         .add_function(&f.name, &f.params, &f.result, Some(f), resolver, structs)
@@ -321,7 +394,7 @@ impl<'m> FunctionSpecializations<'m> {
                     continue;
                 }
             };
-            if !function.value_parametrics.is_empty() {
+            if function.has_inferred_parametrics() {
                 // Dimensions and the function body are checked with the actual
                 // bindings of each instantiation, as in DSLX.
                 let mut checker = BodyChecker::new(decls, resolver, structs, BodyKind::Function);
@@ -428,12 +501,20 @@ impl<'m> BodyChecker<'_, 'm> {
             let values = value_signature
                 .as_ref()
                 .map_or(&[][..], |s| s.values.as_slice());
-            let work = values.iter().fold(targets.len() + values.len(), |sum, v| {
-                sum.saturating_add(constant_work(&v.value))
-            });
+            let types = match &value_signature {
+                Some(bound) => bound.type_bindings.arguments(&template.type_params)?,
+                None => Vec::new(),
+            };
+            let type_work: usize = types.iter().map(|ty| ty.source_nodes).sum();
+            let work = values
+                .iter()
+                .fold(type_work + targets.len() + values.len(), |sum, v| {
+                    sum.saturating_add(constant_work(&v.value))
+                });
             registry.charge_bindings(work)?;
             let key = FunctionKey {
                 template: &template.name,
+                types,
                 targets,
                 values: values.to_vec(),
             };
@@ -534,6 +615,55 @@ block sample(clk, x: u8) -> u8 {{ let result = stage(x); result }}
     }
 
     #[test]
+    fn repeated_dependent_formal_annotations_share_their_inference() -> Result<(), String> {
+        let mut source =
+            String::from("fn id(x:u8)->u8{x} fn f0<T,F:fn(u8)->u8,V:u8>(x:T)->u32{u32:8}\n");
+        for level in 1..20 {
+            let previous = level - 1;
+            // Each annotation asks for the same earlier specialization twice.
+            // Both the callback input and the explicit value are eight bits.
+            let call = format!("f{previous}<id,1>(u1:0)");
+            let width = format!("{call}+{call}-u32:8");
+            writeln!(
+                source,
+                "fn f{level}<T,F:fn(uN[{width}])->u8,V:uN[{width}]>(x:T)->u32{{u32:8}}"
+            )
+            .unwrap();
+        }
+        source.push_str("const ANSWER = f19<id,1>(u1:0);");
+        let checked = check_module(&parse_module(&source)?)?;
+        assert_eq!(checked.functions().len(), 21);
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::make_ubits(32, 8).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dependent_formals_cache_the_preceding_values_and_callback_sources() -> Result<(), String> {
+        let source = r#"
+fn as_byte(x:u8)->u8 { x }
+fn as_word(x:u8)->u16 { x as u16 }
+fn apply<T,R,N:u32,F:fn(uN[N])->R,V:R>(x:T)->R { V }
+const ANSWER = (apply<8,as_byte,7>(u8:1), apply<8,as_word,511>(u8:2), apply<8,as_word,511>(u8:3));
+"#;
+        let checked = check_module(&parse_module(source)?)?;
+        assert_eq!(checked.functions().len(), 4);
+        assert_eq!(
+            checked.constants()[0].value,
+            IrValue::parse_typed("(bits[8]:7,bits[16]:511,bits[16]:511)")
+                .map_err(|e| e.to_string())?
+        );
+        let incompatible = source.replace(
+            "apply<8,as_byte,7>(u8:1)",
+            "apply<8,as_byte,7>(u8:1), apply<16,as_byte,7>(u8:1)",
+        );
+        assert!(check_module(&parse_module(&incompatible)?).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn programmatic_symbolic_signatures_are_bounded_before_copying() -> Result<(), String> {
         let mut module = parse_module("fn probe<N:u32>(x:uN[N])->u32{N}")?;
         let input = &mut module.functions[0].params[0].ty;
@@ -556,6 +686,36 @@ block sample(clk, x: u8) -> u8 {{ let result = stage(x); result }}
         assert_eq!(
             checked.unwrap_err(),
             "fn 'probe': value-parametric template nesting exceeds 64 levels"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn type_specializations_charge_types_materialized_inside_the_body() -> Result<(), String> {
+        let declarations = wide_struct_declarations();
+        let source = format!(
+            r#"
+{declarations}
+fn observe<T>(x: T, r: S15) -> T {{
+    let a = r;
+    let b = r;
+    let c = r;
+    let d = r;
+    x
+}}
+block sample(clk, r: S15) -> u1 {{
+    let a = observe(u8:0, r);
+    let b = observe(u8:1, r);
+    u1:0
+}}
+"#
+        );
+        check_module(&parse_module(&source)?)?;
+        let distinct = source.replace("observe(u8:1", "observe(u16:1");
+        let error = check_module(&parse_module(&distinct)?).unwrap_err();
+        assert!(
+            error.contains("function specialization expansion limit"),
+            "{error}"
         );
         Ok(())
     }

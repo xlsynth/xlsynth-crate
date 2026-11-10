@@ -92,6 +92,9 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     for def in &module.functions {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, at);
+        for name in &def.type_params {
+            scope.bind_as(name, Local::Formal);
+        }
         let mut callback_params = Vec::with_capacity(def.callback_params.len());
         let mut value_parametrics = Vec::with_capacity(def.value_parametrics.len());
         for formal in def.parametric_bindings() {
@@ -118,6 +121,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         out.functions.push(Function {
             name: names.declared(&def.name),
             public: def.public,
+            type_params: def.type_params.clone(),
             callback_params,
             value_parametrics,
             params,
