@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "frontend/array_concat.rs"]
+mod array_concat;
 #[path = "frontend/array_update.rs"]
 mod array_update;
 #[path = "frontend/bits_array_casts.rs"]

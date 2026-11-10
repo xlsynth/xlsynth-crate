@@ -168,6 +168,12 @@ checkout. From `xlsynth-bx`, run:
 XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_function_syntax --sanitizer none
 ```
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_array_concat.rs
+
+Compares array concatenation in BX blocks, local functions, and module constants with pinned DSLX. Generated operands vary outer lengths, signedness, element widths, nested arrays, tuples, structs, enums, and independently inferred literals. The target checks acceptance, result shape, and element order through BX block IR, compiled DSLX IR, and DSLX constant evaluation. Typed empty operands use DSLX constant evaluation because the pinned converter cannot lower an empty array literal in a function. Rejected programs exercise mismatched element types, distinct nominal declarations with the same layout, incorrect result lengths, and mixed array and bit operands.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_concat`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs
 
 The target compares BX bits-to-array and array-to-bits casts with pinned DSLX. It varies signed, unsigned and Boolean types, zero-width and wide elements, empty arrays, and asymmetric bit patterns to expose reversed elements or slices. It checks module constants and runtime values against DSLX IR and also checks unsigned casts against DSLX constexpr evaluation. Signed cases use compiled DSLX because the pinned bytecode interpreter cannot flatten signed elements and assigns unsigned tags to cast results. Unequal packed widths and casts involving nested arrays, tuples, structs or enums must fail typechecking.

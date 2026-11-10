@@ -18,6 +18,12 @@ xlsynth-pir = { path = "../../xlsynth-pir", version = "0.81.0" }
 members = ["."]
 
 [[bin]]
+name = "fuzz_bx_dslx_array_concat"
+path = "fuzz_targets/fuzz_bx_dslx_array_concat.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_bits_array_casts"
 path = "fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs"
 test = false

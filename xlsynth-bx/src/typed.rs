@@ -1265,6 +1265,20 @@ impl TypedExpr {
                     UnaryOp::Neg => Some(IrValue::Bits(v.negate())),
                 }
             }
+            K::Binary {
+                op: BinaryOp::Concat,
+                left,
+                right,
+            } if matches!(self.ty, Type::Array { .. }) => {
+                let lhs = left.constant_with_budget(names, remaining)?;
+                let rhs = right.constant_with_budget(names, remaining)?;
+                let (IrValue::Array(a), IrValue::Array(b)) = (&lhs, &rhs) else {
+                    return None;
+                };
+                remaining.charge(constant_work(&lhs).saturating_add(constant_work(&rhs)))?;
+                let elements = [a.elements(), b.elements()].concat();
+                IrValue::make_array_typed(a.element_type().clone(), &elements).ok()
+            }
             K::Binary { op, left, right } => {
                 let lhs = left.constant_with_budget(names, remaining)?;
                 let rhs = right.constant_with_budget(names, remaining)?;

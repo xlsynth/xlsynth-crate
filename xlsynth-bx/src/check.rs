@@ -4363,22 +4363,52 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 (l.ty.clone(), l, r)
             }
             BinaryOp::Concat => {
+                // DSLX infers each operand independently, including array
+                // literals. The result type does not size their elements.
                 let l = self.inferred_expr(left)?;
                 let r = self.inferred_expr(right)?;
-                let (Some((false, left_width)), Some((false, right_width))) =
-                    (bits(&l.ty), bits(&r.ty))
-                else {
-                    return Err(format!(
-                        "bit concatenation requires unsigned operands, got {} and {}",
-                        l.ty, r.ty
-                    ));
-                };
-                let width = left_width
-                    .checked_add(right_width)
-                    .ok_or_else(|| "concatenation width overflow".to_owned())?;
-                let ty = Type::Bits {
-                    signed: false,
-                    width,
+                let ty = match (&l.ty, &r.ty) {
+                    (
+                        Type::Array { element, size },
+                        Type::Array {
+                            element: other,
+                            size: tail,
+                        },
+                    ) => {
+                        if !compatible(element, other) {
+                            return Err(format!(
+                                "array concatenation requires matching element types, got {element} and {other}"
+                            ));
+                        }
+                        Type::Array {
+                            element: element.clone(),
+                            size: size
+                                .checked_add(*tail)
+                                .ok_or("concatenation length overflow")?,
+                        }
+                    }
+                    (Type::Array { .. }, _) | (_, Type::Array { .. }) => {
+                        return Err(format!(
+                            "array concatenation requires two arrays, got {} and {}",
+                            l.ty, r.ty
+                        ));
+                    }
+                    _ => {
+                        let (Some((false, left_width)), Some((false, right_width))) =
+                            (bits(&l.ty), bits(&r.ty))
+                        else {
+                            return Err(format!(
+                                "bit concatenation requires unsigned operands, got {} and {}",
+                                l.ty, r.ty
+                            ));
+                        };
+                        Type::Bits {
+                            signed: false,
+                            width: left_width
+                                .checked_add(right_width)
+                                .ok_or("concatenation width overflow")?,
+                        }
+                    }
                 };
                 self.structs.validate_type(&ty)?;
                 (ty, l, r)
