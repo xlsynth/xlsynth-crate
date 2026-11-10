@@ -303,6 +303,79 @@ esac"#,
 }
 
 #[test]
+fn self_dimension_can_be_diagnosed_or_checked_at_the_declared_width()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let typechecker = converter.with_file_name("typecheck_main");
+    let run = |bytes: &[u8]| {
+        check_audit(
+            audit_contracts::generate_v10(bytes)?,
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        )
+    };
+    write_tool(
+        &typechecker,
+        r#"echo '~~~^ TypeInferenceError: self-referential dimension N' >&2
+echo 'Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking.' >&2
+exit 1"#,
+    )?;
+    assert!(matches!(run(&[6]), Ok(EquivResult::Proved)));
+    assert!(matches!(
+        run(&[6, 1]),
+        Err(CheckFailure::ConverterRejected(_))
+    ));
+    for script in ["kill -SEGV $$", "echo 'Error: INTERNAL: cycle' >&2; exit 1"] {
+        write_tool(&typechecker, script)?;
+        assert!(matches!(run(&[6]), Err(CheckFailure::ConverterRejected(_))));
+    }
+    write_tool(&typechecker, "touch types.pb")?;
+    write_tool(
+        &converter,
+        r#"set -eu
+test -f types.pb
+cat <<'IR'
+package sample
+top fn __sample__main(x: bits[7] id=1) -> bits[7] {
+  ret same: bits[7] = identity(x, id=2)
+}
+IR"#,
+    )?;
+    assert!(matches!(run(&[6]), Err(CheckFailure::InvalidOutput(_))));
+    Ok(())
+}
+
+#[test]
+fn folded_lambda_still_requires_a_parseable_helper() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    write_tool(
+        &converter,
+        r#"cat <<'IR'
+package sample
+top fn __sample__main() -> bits[8] {
+  ret result: bits[8] = literal(value=2, id=1)
+}
+fn __call__xN__dim_bool:0__dim_8(x: bits[8] id=2) -> bits[8] {
+  ret same: bits[8] = identity(x, id=3)
+}
+IR"#,
+    )?;
+    let verdict = check_audit(
+        audit_contracts::generate_v10(&[7])?,
+        &converter,
+        xlsynth::default_dslx_stdlib_path(),
+    );
+    assert!(
+        matches!(verdict, Err(CheckFailure::InvalidOutput(ref message))
+        if message.contains("C++ IR parser rejected converter output")),
+        "{verdict:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn signed_bound_call_reports_a_bytecode_disagreement_when_the_ir_is_correct()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

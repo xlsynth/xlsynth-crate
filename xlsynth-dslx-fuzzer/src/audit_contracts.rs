@@ -6,9 +6,10 @@
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, bound_parametric_contracts, builtin_contracts,
-    dead_branch_contracts, enum_width_contracts, inferred_flow_contracts, literal_order_contracts,
-    map_parametric_contracts, mixed_literal_contracts, nested_scope_contracts, nominal_contracts,
-    observable_value_contracts, observer_contracts, pattern_acceptance, scope_contracts,
+    dead_branch_contracts, enum_width_contracts, inferred_flow_contracts,
+    lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
+    mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
+    observer_contracts, pattern_acceptance, scope_contracts, self_dimension_contracts,
     signed_call_contracts, tuple_literal_contracts, unrolled_loop_contracts,
     zero_width_cast_contracts,
 };
@@ -56,6 +57,13 @@ pub enum AuditCase {
         case: ContractCase,
         runtime_module: Option<SourceModule>,
     },
+    /// A parameter may shadow a module constant used in its own dimension.
+    /// A clean type error is permitted for that spelling. Accepted programs
+    /// must convert to the declared interface and preserve their input bits.
+    DimensionScope {
+        case: ContractCase,
+        shadows_dimension: bool,
+    },
 }
 
 impl AuditCase {
@@ -69,7 +77,8 @@ impl AuditCase {
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
             Self::TupleLiteral { case, .. }
             | Self::MixedLiteral { case, .. }
-            | Self::BoundCall { case, .. } => case.family,
+            | Self::BoundCall { case, .. }
+            | Self::DimensionScope { case, .. } => case.family,
         }
     }
 }
@@ -188,6 +197,17 @@ pub fn generate_v9(data: &[u8]) -> Result<AuditCase, String> {
         6 => Ok(bound_parametric_contracts::value_argument(options)),
         7 => Ok(signed_call_contracts::generate(options)),
         _ => generate_v8(options),
+    }
+}
+
+/// Exercises name lookup in a parameter dimension and lambda specialization
+/// over computed signedness and width. A zero prefix preserves audit-v9.
+pub fn generate_v10(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 8 {
+        6 => Ok(self_dimension_contracts::generate(options)),
+        7 => Ok(lambda_dimension_contracts::generate(options)),
+        _ => generate_v9(options),
     }
 }
 

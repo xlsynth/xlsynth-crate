@@ -178,6 +178,26 @@ its type. Inline literals and explicitly typed bindings provide passing
 controls. Prefix an audit-v8 unit with one zero byte to preserve its source
 and oracle in an audit-v9 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v10` for two properties involving
+module constants in type dimensions.
+
+- `06` (hex) generates `const N = u32:8` and a function with the parameter
+  `N: uN[N]`. The standalone typechecker runs in a child process. A normal
+  source type error is allowed for the self-shadowing form. If it typechecks,
+  the emitted function must preserve the input at the module constant's width.
+  Renaming the parameter, using a literal width and using a module alias each
+  provide an unambiguous control that must typecheck and prove equivalent.
+- `07` maps `|x| x + X` over `[X]`, where `X` has type `xN[SIGNED][WIDTH]`.
+  The C++ IR parser must accept every emitted function name, including a lambda
+  whose result has already been folded. A parser rejection is retained as
+  invalid output (`X`). `07 01` generates the separate explicitly typed
+  `|x: xN[SIGNED][WIDTH]|` control. Both forms use the same independent
+  element-wise reference. Variants exercise signed and unsigned elements,
+  runtime arrays, arithmetic and shifts.
+
+Prefix an audit-v9 input with one zero byte to preserve it in an audit-v10
+corpus.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
@@ -195,7 +215,7 @@ The primary CLI finding takes precedence over a secondary feedback error.
 ## Native BX function conversion
 
 The `fuzz_bx_converter_contracts` target defaults to audit-v7. Set
-`DSLX_FUZZ_CONTRACT_GRAMMAR` to `audit-v8` or `audit-v9` to replay the
+`DSLX_FUZZ_CONTRACT_GRAMMAR` to `audit-v8`, `audit-v9` or `audit-v10` to replay the
 corresponding focused worker's units. It runs the BX frontend on single-module source,
 lowers accepted functions with the BX Rust compiler, checks the signature of
 `main`, and compares its IR with the generator's independent IR for all inputs

@@ -121,14 +121,21 @@ pub fn check_audit(
         AuditCase::TupleLiteral {
             case,
             runtime_module,
-        } => check_literal_bindings(case, &[("Casted", &runtime_module)], converter, stdlib),
+        } => check_typechecked_contract(
+            case,
+            &[("Casted", &runtime_module)],
+            false,
+            converter,
+            stdlib,
+        ),
         AuditCase::MixedLiteral {
             case,
             raw_runtime_module,
             runtime_module,
-        } => check_literal_bindings(
+        } => check_typechecked_contract(
             case,
             &[("Uncast", &raw_runtime_module), ("Casted", &runtime_module)],
+            false,
             converter,
             stdlib,
         ),
@@ -137,11 +144,28 @@ pub fn check_audit(
             runtime_module,
         } => match runtime_module {
             Some(module) => {
-                check_literal_bindings(case, &[("Original", &module)], converter, stdlib)
+                check_typechecked_contract(case, &[("Original", &module)], false, converter, stdlib)
             }
-            None => check_literal_bindings(case, &[], converter, stdlib),
+            None => check_typechecked_contract(case, &[], false, converter, stdlib),
         },
+        AuditCase::DimensionScope {
+            case,
+            shadows_dimension,
+        } => check_typechecked_contract(case, &[], shadows_dimension, converter, stdlib),
     }
+}
+
+/// Recognizes a normal DSLX type error with a source diagnostic. Signals,
+/// parse errors and internal failures remain distinguishable findings.
+fn is_source_type_error(output: &Output) -> bool {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    output.status.code() == Some(1)
+        && stderr
+            .lines()
+            .any(|line| line.contains("^ TypeInferenceError:"))
+        && stderr.lines().any(|line| {
+            line == "Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking."
+        })
 }
 
 /// A pattern may be ill-typed. Once typecheck_main accepts it, the standalone
@@ -156,18 +180,10 @@ fn check_pattern_acceptance(
     write_modules(modules, directory)?;
     let typecheck = run_typechecker(converter, stdlib, directory)?;
     if !typecheck.status.success() {
-        let stderr = String::from_utf8_lossy(&typecheck.stderr);
         // Independent pattern and value shapes intentionally include type
         // errors. Require the typechecker's source diagnostic and normal exit
         // so a syntax error, internal error, or crash remains a finding.
-        if typecheck.status.code() == Some(1)
-            && stderr
-                .lines()
-                .any(|line| line.contains("^ TypeInferenceError:"))
-            && stderr.lines().any(|line| {
-                line == "Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking."
-            })
-        {
+        if is_source_type_error(&typecheck) {
             return Ok(EquivResult::Proved);
         }
         return Err(rejection("typecheck_main", &typecheck, modules));
@@ -205,11 +221,12 @@ fn check_pattern_acceptance(
     Ok(EquivResult::Proved)
 }
 
-/// Proves the original literal bindings and runs their independent bytecode
-/// comparisons, preserving an IR finding when both evaluators fail.
-fn check_literal_bindings(
+/// Checks source acceptance, then proves the original module and runs any
+/// independent bytecode comparisons, preserving the primary IR finding.
+fn check_typechecked_contract(
     case: ContractCase,
     runtime_modules: &[(&str, &SourceModule)],
+    allow_type_error: bool,
     converter: &Path,
     stdlib: &Path,
 ) -> Result<EquivResult, CheckFailure> {
@@ -218,6 +235,11 @@ fn check_literal_bindings(
     write_modules(&case.modules, directory)?;
     let typecheck = run_typechecker(converter, stdlib, directory)?;
     if !typecheck.status.success() {
+        // A self-shadowing parameter dimension may be rejected by the
+        // type system. Its unambiguous controls must still typecheck.
+        if allow_type_error && is_source_type_error(&typecheck) {
+            return Ok(EquivResult::Proved);
+        }
         return Err(rejection("typecheck_main", &typecheck, &case.modules));
     }
 

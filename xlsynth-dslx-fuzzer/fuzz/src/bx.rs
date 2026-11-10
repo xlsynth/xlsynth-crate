@@ -32,6 +32,7 @@ pub fn check_audit(
         AuditCase::Semantic(case)
         | AuditCase::TupleLiteral { case, .. }
         | AuditCase::BoundCall { case, .. }
+        | AuditCase::DimensionScope { case, .. }
         | AuditCase::MixedLiteral { case, .. } => case,
         // Event, negative constexpr, and acceptance-only contracts require
         // observations beyond comparing the value of an emitted function.
