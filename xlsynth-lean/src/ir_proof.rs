@@ -8,9 +8,8 @@ use crate::ir_fn::{Bindings, export_with_bindings};
 use crate::support::write_file;
 use crate::{LeanError, LeanFunction, LeanModuleName};
 
-/// The checker supplies the audit implementation and root command itself.
+/// Trusted word-level proof libraries supplied by the checker.
 pub(crate) const FIXED_IR_PROOF_FILES: &[(&str, &[u8])] = &[
-    ("Check.lean", include_bytes!("../lean/IRCheck.lean")),
     (
         "XlsynthLean/IRProof.lean",
         include_bytes!("../lean/XlsynthLean/IRProof.lean"),

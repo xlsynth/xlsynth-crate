@@ -58,10 +58,12 @@ private def auditIr (checked : Environment) (name : Name) : MetaM Nat := do
   return verified
 
 def main (args : List String) : IO Unit := do
-  let root :: mode :: helpers := args
-    | throw <| IO.userError "expected a compiled module directory, ir or aig, and optional helper module names"
-  unless mode == "ir" || mode == "aig" do
-    throw <| IO.userError s!"invalid equivalence mode: {mode}"
+  let root :: args := args | throw <| IO.userError "expected a compiled module directory"
+  let (selected, modules) ← match args with
+    | "ir" :: theoremName :: mainModule :: helpers =>
+      pure (some (theoremName.toName, mainModule.toName), mainModule :: helpers)
+    | "aig" :: helpers => pure (none, helpers)
+    | _ => throw <| IO.userError "expected aig or ir with a theorem and its defining module"
   let builtin ← getBuiltinSearchPath (← getBuildDir)
   searchPathRef.set (builtin ++ [System.FilePath.mk root])
   let env ← importModules #[{ module := `Target }, { module := `UserProof }] {} (loadExts := false)
@@ -69,13 +71,21 @@ def main (args : List String) : IO Unit := do
   let targetName := `Target.Equivalent
   requireOrigin env targetName `Target
   requireOrigin env theoremName `UserProof
-  let checked ← replayProof env (`UserProof :: helpers.map String.toName)
+  let imported := (modules.map String.toName).filter fun name => (env.getModuleIdx? name).isSome
+  let checked ← replayProof env (`UserProof :: imported)
   let some (.thmInfo thm) := checked.toKernelEnv.find? theoremName
     | throw <| IO.userError s!"expected a theorem named {theoremName}"
   unless Kernel.isDefEqGuarded checked {} thm.type (mkConst targetName) do
     throw <| IO.userError s!"{theoremName} has the wrong type; expected {targetName}"
-  if mode == "ir" then
-    let verified ← (auditIr checked theoremName).run' |>.toIO'
+  if let some (entry, moduleName) := selected then
+    requireOrigin env entry moduleName
+    let some (.thmInfo decl) := checked.toKernelEnv.find? entry
+      | throw <| IO.userError s!"expected a theorem named {entry}"
+    unless Kernel.isDefEqGuarded checked {} decl.type (mkConst targetName) do
+      throw <| IO.userError s!"{entry} has the wrong type; expected {targetName}"
+    unless thm.value.consumeMData.isConstOf entry do
+      throw <| IO.userError s!"{theoremName} must reference the selected theorem {entry}"
+    let verified ← (auditIr checked entry).run' |>.toIO'
       { fileName := "<proof audit>", fileMap := default } { env }
-    IO.println s!"{theoremName}: checked axiom dependencies and replayed {verified} native Boolean checks"
+    IO.println s!"{entry}: checked axiom dependencies and replayed {verified} native Boolean checks"
   IO.println "xlsynth: verified UserProof.equivalent"

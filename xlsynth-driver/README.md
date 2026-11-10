@@ -3485,21 +3485,26 @@ xlsynth-driver ir-fn-lean-prepare --lhs lhs.ir --rhs rhs.ir --output-dir target-
 
 - `--lhs <IR>`, `--rhs <IR>` select the package files.
 - `--lhs-top <FUNCTION>`, `--rhs-top <FUNCTION>` override each side's default entrypoint.
-- `--output-dir <DIR>` receives both generated modules, the target, checker and Lean support.
+- `--output-dir <DIR>` receives both generated modules, `Target.lean`, the Lean support files, and the toolchain pin.
 
 ### `ir-fn-lean-check`
 
-Checks a proof body of `Target.Equivalent` against a bundle from `ir-fn-lean-prepare`.
-The checker rejects unproved assumptions and replays native Boolean checks used by tactics.
+Checks a named theorem in a Lean module against a bundle from `ir-fn-lean-prepare`.
+The driver generates a wrapper that imports the proof module and assigns the
+selected theorem to `UserProof.equivalent : Target.Equivalent`. The independent
+verifier checks the compiled proof against the original target, rejects unproved
+assumptions, and replays native Boolean checks used by tactics.
 
 ```bash
 xlsynth-driver ir-fn-lean-check --target-dir target-lean --lean /path/to/lean \
-  --proof proofs/Body.lean --proof-source proofs/Lemmas.lean
+  --proof proofs/AdderProof.lean --proof-theorem AdderProof.equivalent
 ```
 
-- `--target-dir <DIR>`, `--lean <PATH>` and `--proof <PATH>` are required.
-- `--proof-root <DIR>` resolves helper module names. It defaults to the proof body's directory.
-- Repeat `--proof-source <PATH>` for additional Lean modules.
+- `--target-dir <DIR>` and `--lean <PATH>` select the prepared target and Lean executable. Both are required.
+- `--proof <PATH>` is the required Lean module defining the theorem.
+- `--proof-theorem <NAME>` is the required Lean declaration name, including its namespace, such as `AdderProof.equivalent`.
+- `--proof-root <DIR>` resolves Lean module paths and defaults to the directory containing `--proof`.
+- `--proof-source <PATH>` supplies an additional module imported by the proof or its dependencies. Repeat for each additional module.
 - `--work-dir <DIR>` keeps the staged proof and compiled modules in an empty directory. The default is temporary.
 - `--output-json <PATH>` records the result, diagnostics and audit status.
 

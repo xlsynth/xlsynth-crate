@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use xlsynth_lean::{
-    LeanError, LeanModuleName, LeanProofSources, export_ir_function,
+    LeanError, LeanIrProofSources, LeanModuleName, LeanTheoremName, export_ir_function,
     prepare_ir_function_equivalence_target, run_ir_function_equivalence_proof,
 };
 use xlsynth_pir::ir_parser::Parser;
@@ -26,6 +26,7 @@ fn pointwise_target_preserves_argument_and_result_shapes() {
         fs::read_to_string(dir.path().join("Target.lean")).unwrap(),
         include_str!("goldens/ir_target.lean")
     );
+    assert!(!dir.path().join("Check.lean").exists());
 
     // The argument has the same packed width, but different XLS structure.
     let text = IDENTITY.replace("(bits[1], bits[7])", "bits[8]");
@@ -46,32 +47,34 @@ fn checks_ir_proofs_and_rejects_unproved_assumptions() {
         .unwrap()
         .write_to(&target)
         .unwrap();
-    let sources = LeanProofSources {
+    let sources = LeanIrProofSources {
         root: dir.path().into(),
-        body: dir.path().join("Body.lean"),
-        modules: vec![dir.path().join("Helper.lean")],
+        module: dir.path().join("Identity.lean"),
+        theorem: LeanTheoremName::new("identity_proof").unwrap(),
+        modules: vec![],
     };
     fs::write(
-        &sources.modules[0],
+        &sources.module,
         "import Target\ntheorem identity_proof : Target.Equivalent := by intro first second; rfl\n",
     )
     .unwrap();
-    fs::write(&sources.body, "identity_proof").unwrap();
     run_ir_function_equivalence_proof(&lean, &target, &sources, &dir.path().join("good")).unwrap();
+    assert!(!dir.path().join("good/Check.lean").exists());
 
     fs::write(
-        &sources.modules[0],
-        "import Target\naxiom identity_proof : Target.Equivalent\n",
+        &sources.module,
+        r#"import Target
+axiom assumed : Target.Equivalent
+theorem identity_proof : Target.Equivalent := assumed
+"#,
     )
     .unwrap();
-    // A modified file in a prepared bundle cannot turn off the built-in audit.
-    fs::write(target.join("Check.lean"), "import UserProof\n").unwrap();
     let failure =
         run_ir_function_equivalence_proof(&lean, &target, &sources, &dir.path().join("bad"))
             .unwrap_err();
     assert!(failure.to_string().contains("unverified axiom"));
     fs::write(
-        &sources.modules[0],
+        &sources.module,
         r#"import Target
 axiom falseCheck : false = true
 theorem identity_proof : Target.Equivalent := by cases falseCheck
@@ -104,12 +107,17 @@ fn checks_nullary_and_inequivalent_functions() {
     let other = text.replace("value=0", "value=1");
     let rhs = Parser::new(&other).parse_and_validate_package().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let sources = LeanProofSources {
+    let sources = LeanIrProofSources {
         root: dir.path().into(),
-        body: dir.path().join("Body.lean"),
+        module: dir.path().join("Constant.lean"),
+        theorem: LeanTheoremName::new("Constant.equivalent").unwrap(),
         modules: vec![],
     };
-    fs::write(&sources.body, "by rfl").unwrap();
+    fs::write(
+        &sources.module,
+        "import Target\ntheorem Constant.equivalent : Target.Equivalent := by rfl\n",
+    )
+    .unwrap();
     for (name, right, valid) in [("same", &lhs, true), ("different", &rhs, false)] {
         let root = dir.path().join(name);
         let target = root.join("target");
@@ -142,12 +150,17 @@ fn rejects_a_helper_that_reinterprets_the_generated_goal() {
     // declaration it produces proves True even though the two functions differ.
     let helper = dir.path().join("Helper.lean");
     fs::write(&helper, include_str!("fixtures/reinterpret_target.lean")).unwrap();
-    let sources = LeanProofSources {
+    let sources = LeanIrProofSources {
         root: dir.path().into(),
-        body: dir.path().join("Body.lean"),
-        modules: vec![helper.clone()],
+        module: dir.path().join("Proof.lean"),
+        theorem: LeanTheoremName::new("Proof.equivalent").unwrap(),
+        modules: vec![helper],
     };
-    fs::write(&sources.body, "True.intro").unwrap();
+    fs::write(
+        &sources.module,
+        "import Helper\ntheorem Proof.equivalent : Target.Equivalent := True.intro\n",
+    )
+    .unwrap();
     let failure =
         run_ir_function_equivalence_proof(&lean, &target, &sources, &dir.path().join("work"))
             .unwrap_err();
@@ -158,7 +171,7 @@ fn rejects_a_helper_that_reinterprets_the_generated_goal() {
                 operation: "equivalence check",
                 stderr,
                 ..
-            } if stderr.contains("UserProof.equivalent has the wrong type; expected Target.Equivalent")
+            } if stderr.contains("wrong type") && stderr.contains("Target.Equivalent")
         ),
         "unexpected error: {failure}"
     );
@@ -201,9 +214,9 @@ top fn rhs(first: bits[4] id=1, second: bits[4] id=2) -> bits[4] {
     let executable =
         export_ir_function(&lhs, None, &LeanModuleName::new("Plain").unwrap()).unwrap();
     let plain = executable.write_to(root).unwrap();
-    let helper = root.join("Helper.lean");
+    let proof = root.join("Adder.lean");
     fs::write(
-        &helper,
+        &proof,
         r#"import Target
 import Plain
 import XlsynthLean.IRProof
@@ -217,13 +230,28 @@ theorem add_commutes : Target.Equivalent := by
 "#,
     )
     .unwrap();
-    let sources = LeanProofSources {
+    let mut sources = LeanIrProofSources {
         root: root.into(),
-        body: root.join("Body.lean"),
-        modules: vec![plain, helper],
+        module: proof,
+        theorem: LeanTheoremName::new("add_commutes").unwrap(),
+        modules: vec![plain],
     };
-    fs::write(&sources.body, "add_commutes").unwrap();
     run_ir_function_equivalence_proof(&lean, &target, &sources, &root.join("work")).unwrap();
+
+    // Importing a theorem does not make it a declaration of the selected
+    // module.
+    sources.modules.push(sources.module);
+    sources.module = root.join("OnlyImports.lean");
+    fs::write(&sources.module, "import Adder\n").unwrap();
+    let failure =
+        run_ir_function_equivalence_proof(&lean, &target, &sources, &root.join("wrong-origin"))
+            .unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .contains("add_commutes must be declared by module OnlyImports"),
+        "unexpected error: {failure}",
+    );
 }
 
 /// The cut generalizes both tuple results and preserves the condition on each
@@ -235,18 +263,17 @@ fn factors_repeated_helper_calls_with_pointwise_contracts() {
     let ir = include_str!("fixtures/decomposition/route.ir");
     let reference = Parser::new(ir).parse_and_validate_package().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let body = dir.path().join("Body.lean");
-    fs::write(&body, "RouteProof.equivalent").unwrap();
-    let helper = dir.path().join("RouteProof.lean");
+    let module = dir.path().join("RouteProof.lean");
     fs::write(
-        &helper,
+        &module,
         include_str!("fixtures/decomposition/RouteProof.lean"),
     )
     .unwrap();
-    let sources = LeanProofSources {
+    let sources = LeanIrProofSources {
         root: dir.path().into(),
-        body,
-        modules: vec![helper],
+        module,
+        theorem: LeanTheoremName::new("RouteProof.equivalent").unwrap(),
+        modules: vec![],
     };
     let check = |case: &str, text: &str| {
         let package = Parser::new(text).parse_and_validate_package().unwrap();

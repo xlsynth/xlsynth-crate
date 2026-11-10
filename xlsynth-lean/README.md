@@ -288,17 +288,26 @@ callee's previously proved contract. The ordinary executable exporter uses
 local lets to share intermediates during evaluation. Both layouts use the same
 operation translations.
 
-Supply a Lean term and any helper modules using `LeanProofSources`, then call
-`run_ir_function_equivalence_proof`. Helpers can import `Target` to reason about either
-export. For example, when the left graph computes a four-bit sum through a
-callee and the right graph adds its operands in reverse order, the proof body can use commutativity directly.
+Supply a Lean module and its theorem name using `LeanIrProofSources`, then call
+`run_ir_function_equivalence_proof`. For example, when the left graph computes
+a four-bit sum through a callee and the right graph adds its operands in reverse
+order, `Adder.lean` can prove the target directly:
 
 ```lean
-by
+import Target
+
+theorem Adder.equivalent : Target.Equivalent := by
   intro a b
   change a + b = b + a
   exact BitVec.add_comm a b
 ```
+
+Select `Adder.equivalent` with `--proof-theorem` in the driver or `proof_theorem`
+in the Bazel rule. Supply any modules imported by `Adder.lean` as additional
+sources. The driver generates a wrapper that imports `Adder` and references the
+selected theorem by its qualified name. The final verifier uses the original
+compiled target to check the theorem, its defining module, and the wrapper's
+reference to it.
 
 Import `XlsynthLean.IRProof` for selector and shift lemmas and the
 `ir_bv_normalize` tactic. For bit-vector obligations,

@@ -98,6 +98,40 @@ pub struct LeanProofSources {
     pub modules: Vec<PathBuf>,
 }
 
+/// Fully qualified Lean declaration name selected by an IR equivalence target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeanTheoremName(String);
+
+impl LeanTheoremName {
+    /// Accept dotted identifiers (including names declared at the root).
+    pub fn new(name: &str) -> Result<Self, LeanError> {
+        let valid = name.split('.').all(|part| {
+            let mut chars = part.chars();
+            chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+        });
+        if !valid || name.split('.').next() == Some("_root_") {
+            return Err(LeanError::InvalidProofSources(format!(
+                "invalid Lean proof theorem name {name:?}"
+            )));
+        }
+        Ok(Self(name.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A user module defining the selected IR theorem, and its available imports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeanIrProofSources {
+    pub root: PathBuf,
+    pub module: PathBuf,
+    pub theorem: LeanTheoremName,
+    pub modules: Vec<PathBuf>,
+}
+
 /// Captured diagnostics from a successful equivalence proof check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeanProofOutput {
@@ -200,19 +234,19 @@ pub fn run_equivalence_proof(
     run_prepared_proof(
         lean_executable,
         target_root,
-        proof_sources,
+        ProofInputs::Aig(proof_sources),
         work_root,
         &artifacts,
         &modules,
-        ProofKind::Aig,
     )
 }
 
-/// Checks a proof of the pointwise equality emitted by a word-level IR target.
+/// Checks the named theorem from the proof module against the generated IR
+/// equality.
 pub fn run_ir_function_equivalence_proof(
     lean_executable: &Path,
     target_root: &Path,
-    proof_sources: &LeanProofSources,
+    proof_sources: &LeanIrProofSources,
     work_root: &Path,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
     let proof_modules = [
@@ -229,23 +263,22 @@ pub fn run_ir_function_equivalence_proof(
     let artifacts = IR_FUNCTION_SUPPORT
         .paths()
         .chain(proof_modules)
-        .chain(["Check.lean"])
         .collect::<Vec<_>>();
     run_prepared_proof(
         lean_executable,
         target_root,
-        proof_sources,
+        ProofInputs::Ir(proof_sources),
         work_root,
         &artifacts,
         &modules,
-        ProofKind::Ir,
     )
 }
 
 /// Selects the target's support files and the verifier's axiom policy.
-enum ProofKind {
-    Aig,
-    Ir,
+#[derive(Clone, Copy)]
+enum ProofInputs<'a> {
+    Aig(&'a LeanProofSources),
+    Ir(&'a LeanIrProofSources),
 }
 
 /// Stages the fixed target before any user modules and checks the generated
@@ -253,18 +286,17 @@ enum ProofKind {
 fn run_prepared_proof(
     lean_executable: &Path,
     target_root: &Path,
-    proof_sources: &LeanProofSources,
+    proof_sources: ProofInputs<'_>,
     work_root: &Path,
     artifacts: &[&str],
     modules: &[&str],
-    kind: ProofKind,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
-    let (mode, fixed_files) = match kind {
-        ProofKind::Aig => ("aig", &[][..]),
-        ProofKind::Ir => ("ir", FIXED_IR_PROOF_FILES),
+    let (theorem, fixed_files) = match proof_sources {
+        ProofInputs::Aig(_) => (None, &[][..]),
+        ProofInputs::Ir(ir) => (Some(&ir.theorem), FIXED_IR_PROOF_FILES),
     };
     copy_prepared_target(target_root, &work_root, artifacts, fixed_files)?;
     let module_roots = [work_root.as_path()];
@@ -320,7 +352,7 @@ fn run_prepared_proof(
         &work_root,
         target_objects,
         &proof_modules,
-        mode,
+        theorem,
     )
     .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     result.stdout.push_str(&verified.stdout);
@@ -367,7 +399,7 @@ fn verify_compiled_proof(
     work_root: &Path,
     target_objects: BTreeMap<PathBuf, Vec<u8>>,
     proof_modules: &[PathBuf],
-    mode: &str,
+    theorem: Option<&LeanTheoremName>,
 ) -> Result<ProcessOutput, LeanError> {
     let verification = tempfile::Builder::new()
         .prefix("xlsynth-lean-verify-")
@@ -395,8 +427,13 @@ fn verify_compiled_proof(
         OsString::from("--run"),
         root.join(verifier).into_os_string(),
         objects.into_os_string(),
-        OsString::from(mode),
     ];
+    if let Some(theorem) = theorem {
+        args.push("ir".into());
+        args.push(theorem.as_str().into());
+    } else {
+        args.push("aig".into());
+    }
     for module in proof_modules {
         if module != Path::new("UserProof.lean") {
             args.push(proof_module_name(module)?.as_str().into());
@@ -496,35 +533,43 @@ fn copy_prepared_target(
     Ok(())
 }
 
-/// Stages helpers and generates the proof module around the body.
+/// Stages the declared modules and generates the fixed root theorem.
 fn stage_proof_sources(
-    sources: &LeanProofSources,
+    sources: ProofInputs<'_>,
     work_root: &Path,
     artifacts: &[&str],
 ) -> Result<Vec<PathBuf>, LeanError> {
-    let root = absolute_path(&sources.root)?;
-    let body = absolute_path(&sources.body)?;
-    if body.extension().and_then(|value| value.to_str()) != Some("lean")
-        || body.strip_prefix(&root).is_err()
-    {
+    let (root, entry, helpers, theorem) = match sources {
+        ProofInputs::Aig(s) => (&s.root, &s.body, &s.modules, None),
+        ProofInputs::Ir(s) => (&s.root, &s.module, &s.modules, Some(&s.theorem)),
+    };
+    let root = absolute_path(root)?;
+    let entry = absolute_path(entry)?;
+    if entry.extension().and_then(|v| v.to_str()) != Some("lean") || !entry.starts_with(&root) {
         return Err(LeanError::InvalidProofSources(format!(
-            "proof body {} must be a .lean file under proof root {}",
-            body.display(),
+            "proof file {} must be a .lean file under proof root {}",
+            entry.display(),
             root.display()
         )));
     }
     let mut staged = BTreeMap::<PathBuf, PathBuf>::new();
     let mut modules = vec![PathBuf::from("UserProof.lean")];
-    let mut imports = Vec::with_capacity(sources.modules.len());
+    let mut imports = Vec::new();
     let reserved = artifacts
         .iter()
         .copied()
         .chain(["UserProof.lean"])
         .map(PathBuf::from)
         .collect::<BTreeSet<_>>();
-    for source_path in &sources.modules {
-        let source_path = absolute_path(source_path)?;
-        if source_path == body {
+    // The named entry module comes first so the verifier can check the
+    // selected declaration's module of origin independently of user syntax.
+    let entry_module = theorem.map(|_| entry.as_path());
+    for path in entry_module
+        .into_iter()
+        .chain(helpers.iter().map(PathBuf::as_path))
+    {
+        let source_path = absolute_path(path)?;
+        if theorem.is_none() && source_path == entry {
             return Err(LeanError::InvalidProofSources(
                 "the proof body must not also appear in modules".to_string(),
             ));
@@ -549,7 +594,10 @@ fn stage_proof_sources(
                 relative.display()
             )));
         }
-        imports.push(proof_module_name(&relative)?);
+        let module_name = proof_module_name(&relative)?;
+        if theorem.is_none() || source_path == entry {
+            imports.push(module_name);
+        }
         modules.push(relative.clone());
         if reserved.contains(&relative) || staged.insert(relative.clone(), source_path).is_some() {
             return Err(LeanError::InvalidProofSources(format!(
@@ -566,11 +614,14 @@ fn stage_proof_sources(
         })?;
         write_file(work_root, &relative, &contents)?;
     }
-    let body_source = fs::read_to_string(&body).map_err(|source| LeanError::Io {
-        operation: "reading Lean proof body",
-        path: body,
-        source,
-    })?;
+    let body_source = match theorem {
+        Some(name) => format!("_root_.{}", crate::gate_fn::quoted_lean_name(name.as_str())),
+        None => fs::read_to_string(&entry).map_err(|source| LeanError::Io {
+            operation: "reading Lean proof body",
+            path: entry,
+            source,
+        })?,
+    };
     let source = user_proof_source(&body_source, &imports);
     write_file(work_root, Path::new("UserProof.lean"), source.as_bytes())?;
     Ok(modules)
@@ -627,7 +678,14 @@ fn proof_module_name(path: &Path) -> Result<LeanModuleName, LeanError> {
             path.display()
         )));
     }
-    LeanModuleName::new(parts.join("."))
+    let name = LeanModuleName::new(parts.join("."))?;
+    if name.source_path() != path {
+        return Err(LeanError::InvalidProofSources(format!(
+            "proof module path {} must use a directory per module component",
+            path.display()
+        )));
+    }
+    Ok(name)
 }
 
 /// Uses Lean's source dependency listing to topologically order proof modules.
@@ -792,9 +850,27 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        LeanError, LeanProofOutput, compile_module, read_compiled_modules, verify_compiled_proof,
-        write_file,
+        LeanError, LeanProofOutput, LeanTheoremName, compile_module, read_compiled_modules,
+        verify_compiled_proof, write_file,
     };
+
+    #[test]
+    fn theorem_selector_accepts_names_and_rejects_lean_expressions() {
+        for name in ["equivalent", "Adder.Proofs.eq'", "Adder.eq₁"] {
+            assert_eq!(LeanTheoremName::new(name).unwrap().as_str(), name);
+        }
+        for name in [
+            "",
+            "Adder..eq",
+            "proof.",
+            "_root_.foo",
+            "by rfl",
+            "Foo.(eq)",
+            "a\nb",
+        ] {
+            assert!(LeanTheoremName::new(name).is_err(), "{name:?}");
+        }
+    }
 
     #[test]
     #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
@@ -833,7 +909,7 @@ mod tests {
         // Its declared type has the correct name, but its proof body only
         // typechecks against the second definition of Target.Equivalent.
         let Err(failure) =
-            verify_compiled_proof(&lean, root, original, &["UserProof.lean".into()], "ir")
+            verify_compiled_proof(&lean, root, original, &["UserProof.lean".into()], None)
         else {
             panic!("accepted a proof compiled against a different target");
         };
