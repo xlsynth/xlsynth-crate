@@ -564,12 +564,12 @@ struct Body {
     output: Option<ParsedExpr>,
 }
 
-/// The inferred types and explicitly supplied callbacks of a block, each in
-/// its own declaration order.
+/// A block's inferred types and explicit value and callable formals.
 #[derive(Default)]
 struct BlockParametrics {
     type_params: Vec<String>,
     callback_params: Vec<CallbackParam>,
+    value_parametrics: Vec<ParametricBinding>,
 }
 
 /// Retains the built tree's height until its parent is constructed. Syntactic
@@ -1493,7 +1493,7 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Read block type parameters and callable signatures in one namespace.
+    /// Read block type, value, and callable formals in one namespace.
     fn block_parametrics(&mut self) -> Result<BlockParametrics, String> {
         let mut params = BlockParametrics::default();
         if !self.eat("<") {
@@ -1505,24 +1505,48 @@ impl<'s> Parser<'s> {
         let mut names = BTreeSet::new();
         self.list(">", |p| {
             let token = p.tokens[p.pos];
-            let callable = p.peek(1) == ":" && p.peek(2) == "fn";
+            let annotation = (p.peek(1) == ":").then(|| p.peek(2));
             if !names.insert(token.text) {
-                let kind = if callable { "callable" } else { "type" };
+                let kind = match annotation {
+                    None | Some("type") => "type",
+                    Some("fn") => "callable",
+                    Some(_) => "value",
+                };
                 return Err(diagnostic(
                     p.source,
                     token.start,
                     &format!("duplicate block {kind} parameter '{}'", token.text),
                 ));
             }
-            if callable {
-                params.callback_params.push(p.callback_param()?);
-            } else {
-                let name = p.ident()?;
-                if p.eat(":") {
-                    p.expect("type")?;
+            match annotation {
+                Some("fn") => params.callback_params.push(p.callback_param()?),
+                None | Some("type") => {
+                    let name = p.ident()?;
+                    if p.eat(":") {
+                        p.expect("type")?;
+                    }
+                    p.type_params.insert(token.text);
+                    params.type_params.push(name);
                 }
-                p.type_params.insert(token.text);
-                params.type_params.push(name);
+                Some(_) => {
+                    let name = p.ident()?;
+                    p.expect(":")?;
+                    if !p.eat("u32") {
+                        return Err(p.error("block value parameters require type 'u32'"));
+                    }
+                    if p.peek(0) == "=" {
+                        return Err(p.error("block value parameters require explicit arguments"));
+                    }
+                    params.value_parametrics.push(ParametricBinding {
+                        name,
+                        ty: Type::Bits {
+                            signed: false,
+                            width: 32,
+                        },
+                        default: None,
+                        index: params.value_parametrics.len() + params.callback_params.len(),
+                    });
+                }
             }
             Ok(())
         })?;
@@ -1546,6 +1570,9 @@ impl<'s> Parser<'s> {
         for formal in &params.callback_params {
             self.shadow_callable(&formal.name);
         }
+        for formal in &params.value_parametrics {
+            self.shadow_callable(&formal.name);
+        }
         self.shadow_callable(&signature.clock);
         if let Some(reset) = &signature.reset {
             self.shadow_callable(reset);
@@ -1553,7 +1580,9 @@ impl<'s> Parser<'s> {
         for port in &signature.params {
             self.shadow_callable(&port.name);
         }
+        self.dependent_types = !params.value_parametrics.is_empty();
         let body = self.body()?;
+        self.dependent_types = false;
         self.type_params.clear();
         let output = body
             .output
@@ -1565,6 +1594,7 @@ impl<'s> Parser<'s> {
             public,
             type_params: params.type_params,
             callback_params: params.callback_params,
+            value_parametrics: params.value_parametrics,
             clock: signature.clock,
             reset: signature.reset,
             params: signature.params,
@@ -3810,6 +3840,7 @@ pub(crate) fn explicit_width_hint(spelling: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::FunctionParametricRef;
 
     fn names<const N: usize>(names: [&str; N]) -> [Expr; N] {
         names.map(|name| Expr::Name(name.to_owned()))
@@ -5410,7 +5441,55 @@ block compare(clk, advance: u8, x: u8, y: u8, z: u8) -> (bool, bool) {
     }
 
     #[test]
-    fn block_type_parameter_lists_require_distinct_type_binders() {
+    fn block_value_and_callback_parameters_share_explicit_argument_order() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+const BASE = u32:3;
+fn identity(x: u8) -> u8 { x }
+block caller(clk, x: u8) -> (u8, u8) {
+    let a = stage<2, identity, {BASE + u32:1}>(x);
+    let b = stage::<BASE, identity, u32:6>(x);
+    (a, b)
+}
+block stage<T, N: u32, F: fn(T) -> T, M: u32>(clk, x: T) -> T {
+    unroll_for! (_, acc) in N..M { F(acc) }(x)
+}
+"#,
+        )?;
+        let stage = &module.blocks[1];
+        assert!(stage.is_parametric());
+        assert_eq!(stage.type_params, ["T"]);
+        assert_eq!(stage.value_parametrics[0].index, 0);
+        assert_eq!(stage.value_parametrics[1].index, 2);
+        assert_eq!(
+            stage
+                .parametric_bindings()
+                .map(|formal| match formal {
+                    FunctionParametricRef::Value(value) => value.name.as_str(),
+                    FunctionParametricRef::Callback(callback) => callback.name.as_str(),
+                })
+                .collect::<Vec<_>>(),
+            ["N", "F", "M"]
+        );
+        let [Stmt::Let { value: a, .. }, Stmt::Let { value: b, .. }] =
+            module.blocks[0].statements.as_slice()
+        else {
+            panic!("expected two call bindings");
+        };
+        assert!(matches!(a, Expr::ParametricCall { name, parametrics, .. }
+            if name == "stage"
+                && matches!(parametrics.as_slice(),
+                    [Expr::Literal { ty: None, .. }, Expr::Name(f), Expr::Binary { .. }] if f == "identity")));
+        assert!(matches!(b, Expr::ParametricCall { name, parametrics, .. }
+            if name == "stage"
+                && matches!(parametrics.as_slice(),
+                    [Expr::Name(base), Expr::Name(f), Expr::Literal { ty: Some(_), .. }]
+                        if base == "BASE" && f == "identity")));
+        Ok(())
+    }
+
+    #[test]
+    fn block_parameter_lists_require_distinct_binders() {
         for (params, error) in [
             ("<>", "expected a block type parameter"),
             ("<T, T: type>", "duplicate block type parameter 'T'"),
@@ -5423,7 +5502,12 @@ block compare(clk, advance: u8, x: u8, y: u8, z: u8) -> (bool, bool) {
                 "<F: fn(u8), F: fn()>",
                 "duplicate block callable parameter 'F'",
             ),
-            ("<N: u32>", "expected 'type'"),
+            ("<T, T: u32>", "duplicate block value parameter 'T'"),
+            ("<N: u8>", "block value parameters require type 'u32'"),
+            (
+                "<N: u32 = {u32:1}>",
+                "block value parameters require explicit arguments",
+            ),
             ("<T = u32>", "expected ','"),
             ("<T,,U>", "expected identifier"),
             ("<bool>", "expected identifier"),

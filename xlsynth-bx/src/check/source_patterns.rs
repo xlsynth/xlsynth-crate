@@ -36,6 +36,7 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
     for b in &module.blocks {
         pending.extend(signature(&b.params, &b.result));
         pending.extend(callbacks(&b.callback_params));
+        pending.extend(parametrics(&b.value_parametrics));
         pending.extend(b.statements.iter().map(Statement));
         pending.push(Expression(&b.output));
     }

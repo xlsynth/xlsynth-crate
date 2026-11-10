@@ -126,25 +126,18 @@ impl Names {
             }
         }
         let mut templates = BTreeMap::new();
+        let kind = |formal| match formal {
+            FunctionParametricRef::Value(_) => ParametricKind::Value,
+            FunctionParametricRef::Callback(_) => ParametricKind::Callback,
+        };
         for f in &module.functions {
             if !f.value_parametrics.is_empty() || !f.callback_params.is_empty() {
-                templates.insert(
-                    f.name.clone(),
-                    f.parametric_bindings()
-                        .map(|p| match p {
-                            FunctionParametricRef::Value(_) => ParametricKind::Value,
-                            FunctionParametricRef::Callback(_) => ParametricKind::Callback,
-                        })
-                        .collect(),
-                );
+                templates.insert(f.name.clone(), f.parametric_bindings().map(kind).collect());
             }
         }
         for b in &module.blocks {
-            if !b.callback_params.is_empty() {
-                templates.insert(
-                    b.name.clone(),
-                    vec![ParametricKind::Callback; b.callback_params.len()],
-                );
+            if !b.value_parametrics.is_empty() || !b.callback_params.is_empty() {
+                templates.insert(b.name.clone(), b.parametric_bindings().map(kind).collect());
             }
         }
         Ok(Self {

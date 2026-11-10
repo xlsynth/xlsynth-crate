@@ -335,17 +335,25 @@ impl Function {
     /// Visit interleaved value and callback formals in call-site argument
     /// order.
     pub fn parametric_bindings(&self) -> impl Iterator<Item = FunctionParametricRef<'_>> {
-        let mut values = self.value_parametrics.iter().peekable();
-        let mut callbacks = self.callback_params.iter();
-        let count = self.value_parametrics.len() + self.callback_params.len();
-        (0..count).filter_map(move |index| {
-            if let Some(value) = values.next_if(|p| p.index == index) {
-                Some(FunctionParametricRef::Value(value))
-            } else {
-                callbacks.next().map(FunctionParametricRef::Callback)
-            }
-        })
+        explicit_parametric_bindings(&self.value_parametrics, &self.callback_params)
     }
+}
+
+/// Merge the value and callback formals in explicit call argument order.
+fn explicit_parametric_bindings<'a>(
+    values: &'a [ParametricBinding],
+    callbacks: &'a [CallbackParam],
+) -> impl Iterator<Item = FunctionParametricRef<'a>> {
+    let count = values.len() + callbacks.len();
+    let mut values = values.iter().peekable();
+    let mut callbacks = callbacks.iter();
+    (0..count).filter_map(move |index| {
+        if let Some(value) = values.next_if(|p| p.index == index) {
+            Some(FunctionParametricRef::Value(value))
+        } else {
+            callbacks.next().map(FunctionParametricRef::Callback)
+        }
+    })
 }
 
 /// A callable that a function or block template binds to a named pure
@@ -602,12 +610,28 @@ pub struct Block {
     pub type_params: Vec<String>,
     /// Named callable parameters, in the order supplied at a block call site.
     pub callback_params: Vec<CallbackParam>,
+    /// Explicit compile-time values in declaration order.
+    pub value_parametrics: Vec<ParametricBinding>,
     pub clock: String,
     pub reset: Option<String>,
     pub params: Vec<Param>,
     pub result: Type,
     pub statements: Vec<Stmt>,
     pub output: Expr,
+}
+
+impl Block {
+    /// Whether this declaration needs a call to produce a concrete block.
+    pub fn is_parametric(&self) -> bool {
+        !self.type_params.is_empty()
+            || !self.callback_params.is_empty()
+            || !self.value_parametrics.is_empty()
+    }
+
+    /// Visit explicitly supplied formals in call-site argument order.
+    pub fn parametric_bindings(&self) -> impl Iterator<Item = FunctionParametricRef<'_>> {
+        explicit_parametric_bindings(&self.value_parametrics, &self.callback_params)
+    }
 }
 
 /// One leaf of a BX or DSLX module import. Its final component is bound in BX.

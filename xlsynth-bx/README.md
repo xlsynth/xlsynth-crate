@@ -671,6 +671,37 @@ Use `<T, U>` to declare multiple type parameters. You can also spell a type para
 
 Use a call binding to supply the arguments for inference. When a payload literal is the only source for its type, give it a width, as in `let stage = pipe_reg(valid, u32:0);`. A concrete wrapper such as `packet_stage` supplies a top for compilation. BX validates each generic signature at declaration time, then checks the body at the concrete types of each instantiated specialization.
 
+### Value parametrics on blocks
+
+A block can take required `u32` value parametrics for compile-time expressions
+in its body. Supply each value explicitly in angle brackets at the call site.
+BX infers type parameters from the data inputs.
+
+```text
+block stage<T>(clk, rst, data: T) -> T {
+    reg q: T = zero!<T>();
+    q := data;
+    q
+}
+
+block delay<T, N: u32>(clk, rst, data: T) -> T {
+    unroll_for! (_, prev): (u32, T) in u32:0..N {
+        let next = stage(prev);
+        next
+    }(data)
+}
+
+pub block pipeline(clk, rst, data: u8) -> u8 {
+    let delayed = delay<3>(data);
+    delayed
+}
+```
+
+Value arguments can be literals, constant names, or braced expressions such as
+`delay<{u32:1 + u32:2}>(data)`. If a block declares both value and callable
+parameters, supply their arguments in declaration order. Calls share a block
+definition when the concrete types, values, and callback identities all agree.
+
 ### Named callbacks on blocks
 
 A block can declare type and callable parameters together. Supply the callback names in angle brackets at the call site. BX first infers types from data inputs, then resolves callbacks in declaration order. Each callback's input types must already be known. Its return type can supply a new type parameter or must agree with one already bound.

@@ -97,7 +97,7 @@ impl<'m> WarningCollector<'m> {
         *self.hardware.entry(name).or_default() |= requires_hardware;
     }
 
-    /// Include warnings from unused imports and uninstantiated callable
+    /// Include warnings from unused imports and uninstantiated block
     /// templates, which have a declaration but no checked body.
     pub(crate) fn finish(
         self,
@@ -165,12 +165,14 @@ enum TemplateHardware {
 
 /// Inspect the source rather than just emitted instances. A child in a
 /// zero-trip unroll, even within an otherwise pure expression, prevents
-/// writing the same body as a function. A callable formal names a function.
+/// writing the same body as a function. A callable or value formal shadows
+/// any block with the same name.
 fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> TemplateHardware {
     let formals: BTreeSet<_> = block
         .callback_params
         .iter()
         .map(|p| p.name.as_str())
+        .chain(block.value_parametrics.iter().map(|p| p.name.as_str()))
         .collect();
     let mut binders: BTreeSet<_> = block.params.iter().map(|p| p.name.clone()).collect();
     binders.insert(block.clock.clone());

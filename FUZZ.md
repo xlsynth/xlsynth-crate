@@ -279,6 +279,18 @@ Generates type-generic BX blocks with named callbacks, flattens their combinatio
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_callbacks --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_value_parametrics.rs
+
+Compares explicit `u32` value parametrics on BX blocks with DSLX functions.
+Calls vary literal, named and braced constant arguments, inferred payload
+types, and forwarding through a second template. A structural unroll uses
+the value as its bound. Repeated calls at equal and distinct bounds exercise
+specialization reuse with unchanged port types. Invalid samples cover missing,
+extra, mistyped, and runtime arguments. The target checks source acceptance
+and compares flattened BX Block IR with both compiled and constexpr DSLX.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_value_parametrics --sanitizer none`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_let_patterns.rs
 
 Compares destructuring lets in BX blocks with the same patterns in DSLX functions. Generated programs vary nested tuple shapes, wildcards, rest spans, type annotations, inferred integer fields, lexical shadowing, and direct or child-block initializers. Invalid patterns exercise duplicate binders, extra rest markers, and shape or type mismatches. Accepted programs return selected fields or compare inferred operands, including decimal and radix-prefixed values of different widths and signs inside structural unrolls. The target compares BX block IR with compiled DSLX IR and native DSLX evaluation on shared inputs. For implicit conversions that can abort the pinned converter, it first checks the original source with both frontends, then uses explicit casts or native array-element unification to give the DSLX execution probe the common operand type.

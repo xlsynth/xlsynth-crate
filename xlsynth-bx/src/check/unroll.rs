@@ -127,7 +127,7 @@ impl BodyChecker<'_, '_> {
             } => Some((name, parametrics.as_slice(), args)),
             _ => None,
         };
-        if let Some((target, callbacks, args)) = call
+        if let Some((target, parametrics, args)) = call
             && self.decls.is_block(target)
             && self.callback_index(target).is_none()
         {
@@ -142,11 +142,11 @@ impl BodyChecker<'_, '_> {
             if self.loop_values.contains_key(target) {
                 return Err(format!("'{target}' names a loop-local value"));
             }
-            self.check_block_callback_list(
+            self.check_block_parametric_count(
                 target,
-                callbacks.len(),
+                parametrics.len(),
                 self.function_values.contains_key(target)
-                    || (!callbacks.is_empty() && self.names.contains(target)),
+                    || (!parametrics.is_empty() && self.names.contains(target)),
             )?;
             let binding = if let Some(name) = name
                 && self.iteration_path.is_empty()
@@ -174,11 +174,7 @@ impl BodyChecker<'_, '_> {
                 }
                 binding
             };
-            let callbacks = callbacks
-                .iter()
-                .map(|expr| callback_argument_name(expr).map(str::to_owned))
-                .collect::<Result<Vec<_>, _>>()?;
-            return self.block_call(&binding, target, &callbacks, args, expected);
+            return self.block_call(&binding, target, parametrics, args, expected);
         }
         self.scoped_result(expr, expected, structural)
     }
@@ -969,7 +965,7 @@ impl BodyChecker<'_, '_> {
                             if self.kind == BodyKind::Function || locals.in_lambda {
                                 return Err(format!("pure function cannot call block '{name}'"));
                             }
-                            self.check_block_callback_list(name, 0, false)?;
+                            self.check_block_parametric_count(name, 0, false)?;
                             self.uses_child.set(true);
                         } else if self.kind != BodyKind::Function
                             && !locals.in_lambda
@@ -980,6 +976,7 @@ impl BodyChecker<'_, '_> {
                             // A hardware port or wire can share the structural
                             // child's name. A nearer lexical or iteration
                             // binder shadows it.
+                            self.check_block_parametric_count(name, 0, false)?;
                             self.uses_child.set(true);
                         }
                     }
@@ -999,7 +996,11 @@ impl BodyChecker<'_, '_> {
                 let block = self.decls.is_block(name) && self.callback_index(name).is_none();
                 let template = self.decls.function_templates.get(name.as_str());
                 if block {
-                    self.check_block_callback_list(name, parametrics.len(), locals.contains(name))?;
+                    self.check_block_parametric_count(
+                        name,
+                        parametrics.len(),
+                        locals.contains(name),
+                    )?;
                     self.uses_child.set(true);
                     if self.kind == BodyKind::Function || locals.in_lambda {
                         return Err(format!("pure function cannot call block '{name}'"));
@@ -1009,9 +1010,13 @@ impl BodyChecker<'_, '_> {
                 } else {
                     self.check_value_name(name, locals, /* callee= */ true)?;
                 }
-                let mut formals = template.into_iter().flat_map(|f| f.parametric_bindings());
+                let block_formals = self.decls.templates.get(name.as_str()).filter(|_| block);
+                let mut formals = block_formals
+                    .into_iter()
+                    .flat_map(|t| t.block.parametric_bindings())
+                    .chain(template.into_iter().flat_map(|f| f.parametric_bindings()));
                 for actual in parametrics {
-                    if block || matches!(formals.next(), Some(FunctionParametricRef::Callback(_))) {
+                    if matches!(formals.next(), Some(FunctionParametricRef::Callback(_))) {
                         self.check_callback_argument_names(actual, locals)?;
                     } else {
                         self.check_expr_names(actual, locals)?;

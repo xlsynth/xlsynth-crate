@@ -45,6 +45,37 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
             return Err(format!("duplicate block parameter '{name}'"));
         }
     }
+    let mut value_names = BTreeSet::new();
+    let explicit_count = block.value_parametrics.len() + block.callback_params.len();
+    let mut previous_index = None;
+    for parametric in &block.value_parametrics {
+        let name = parametric.name.as_str();
+        if !is_identifier(name) {
+            return Err(format!("invalid value parametric name '{name}'"));
+        }
+        if type_params.contains(name) || callback_names.contains(name) || !value_names.insert(name)
+        {
+            return Err(format!("duplicate block parameter '{name}'"));
+        }
+        if parametric.ty != super::value_parametrics::dimension_type() {
+            return Err(format!(
+                "block value parametric '{name}' must have type u32"
+            ));
+        }
+        if parametric.default.is_some() {
+            return Err(format!(
+                "block value parametric '{name}' requires an explicit argument"
+            ));
+        }
+        if parametric.index >= explicit_count
+            || previous_index.is_some_and(|i| i >= parametric.index)
+        {
+            return Err(format!(
+                "invalid argument position for block value parametric '{name}'"
+            ));
+        }
+        previous_index = Some(parametric.index);
+    }
     for name in std::iter::once(&block.clock)
         .chain(&block.reset)
         .chain(block.params.iter().map(|param| &param.name))
@@ -54,6 +85,9 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
         }
         if callback_names.contains(name.as_str()) {
             return Err(format!("port '{name}' collides with a callable parameter"));
+        }
+        if value_names.contains(name.as_str()) {
+            return Err(format!("port '{name}' collides with a value parametric"));
         }
     }
     validate_inference_sources(&block.type_params, &block.params, &block.callback_params)
@@ -121,6 +155,11 @@ impl<'m> BlockTemplate<'m> {
         dimensions: ModuleDimensions<'_, 'm>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Self, String> {
+        let value_names: BTreeSet<_> = block
+            .value_parametrics
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
         let mut callback_indices = BTreeMap::new();
         let mut callback_params = Vec::with_capacity(block.callback_params.len());
         for (index, callback) in block.callback_params.iter().enumerate() {
@@ -128,7 +167,7 @@ impl<'m> BlockTemplate<'m> {
             let mut resolve = |ty: &Type| {
                 resolve_type(
                     ty,
-                    &|name| callback_indices.contains_key(name),
+                    &|name| callback_indices.contains_key(name) || value_names.contains(name),
                     Some(bindings),
                     dimensions,
                     types,
