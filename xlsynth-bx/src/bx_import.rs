@@ -250,14 +250,20 @@ impl Names {
     }
 }
 
+/// Source location and warning policy of one BX library in the linked graph.
+pub(crate) struct LibraryModuleInfo {
+    pub path: PathBuf,
+    pub require_block_timing: bool,
+}
+
 /// The checked frontend consumes a single declaration graph. Each DSLX use
 /// retains its original path as well as its binding in that graph.
 #[derive(Default)]
 pub(crate) struct LinkedSources {
     pub module: Module,
     pub dslx_bindings: Vec<String>,
-    /// Filenames behind the logical module names used in checked diagnostics.
-    pub module_paths: BTreeMap<String, PathBuf>,
+    /// Source information for diagnostics, keyed by the logical module name.
+    pub library_modules: BTreeMap<String, LibraryModuleInfo>,
     /// Direct BX member imports that shadow the zero intrinsic at a
     /// declaration.
     pub zero_uses: BTreeMap<String, String>,
@@ -476,9 +482,13 @@ impl<'a> Graph<'a> {
             })
             .collect();
         self.append(&module, &names)?;
-        self.linked
-            .module_paths
-            .insert(source.target.subject.clone(), source.target.path.clone());
+        self.linked.library_modules.insert(
+            source.target.subject.clone(),
+            LibraryModuleInfo {
+                path: source.target.path.clone(),
+                require_block_timing: module.require_block_timing,
+            },
+        );
         Ok(Library {
             subject: source.target.subject.clone(),
             exports,

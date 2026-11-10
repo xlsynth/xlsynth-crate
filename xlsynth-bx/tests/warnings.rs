@@ -10,23 +10,61 @@ use xlsynth_bx::{
 };
 
 #[test]
-fn required_block_timing_warns_only_when_the_output_annotation_is_missing()
--> Result<(), Box<dyn Error>> {
+fn required_block_timing_applies_to_every_block_defined_in_the_module() -> Result<(), String> {
     let source = r#"
-#[require_block_timing]
-block missing(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+block before(clk, x: u8) -> u8 { reg q: u8; q := x; q }
 
-#[require_block_timing]
+#![require_block_timing]
+pub block after(clk, x: u8) -> u8 { reg q: u8; q := x; q }
 block timed(clk, x: u8) -> u8 @1 { reg q: u8; q := x; q }
 
-block ordinary(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+#[allow(missing_block_timing)]
+block exempt(clk, x: u8) -> u8 { reg q: u8; q := x; q }
 "#;
     let checked = check_module(&parse_module(source)?)?;
-    let [warning] = checked.warnings() else {
-        panic!("expected one warning, got {:?}", checked.warnings());
+    let warnings: Vec<_> = checked
+        .warnings()
+        .iter()
+        .map(|warning| (warning.declaration.as_str(), warning.kind))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            ("before", BxWarningKind::MissingBlockTiming),
+            ("after", BxWarningKind::MissingBlockTiming),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn required_block_timing_stays_in_its_source_file() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let lib = dir.path().join("device.bx");
+    let options = ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
     };
-    assert_eq!(warning.kind, BxWarningKind::MissingBlockTiming);
-    assert_eq!(warning.declaration, "missing");
+    let required = "#![require_block_timing]";
+    let library = "pub block stage(clk, x: u8) -> u8 { reg q: u8; q := x; q }";
+    let caller = r#"use device::stage;
+pub block top(clk, x: u8) -> u8 { let y = stage(x); y }"#;
+    for (caller_attr, lib_attr, name, file) in [
+        (required, "", "top", None),
+        ("", required, "device::stage", Some(lib.as_path())),
+    ] {
+        fs::write(&lib, format!("{lib_attr}\n{library}"))?;
+        let checked = check_source_with_options(&format!("{caller_attr}\n{caller}"), &options)?;
+        let [warning] = checked.warnings() else {
+            panic!(
+                "expected one warning for {name}, got {:?}",
+                checked.warnings()
+            );
+        };
+        assert_eq!(warning.kind, BxWarningKind::MissingBlockTiming);
+        assert_eq!(warning.declaration, name);
+        assert_eq!(warning.file.as_deref(), file);
+    }
     Ok(())
 }
 

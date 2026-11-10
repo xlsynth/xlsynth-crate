@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Block, Expr, Module, SourceNode, SourcePosition, Stmt};
-use crate::bx_import::{LinkedSources, UnlinkedBlockScope, library_item};
+use crate::bx_import::{LibraryModuleInfo, LinkedSources, UnlinkedBlockScope, library_item};
 
 /// A BX warning category, also used in source-level `#[allow(...)]` attributes.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -15,7 +15,8 @@ use crate::bx_import::{LinkedSources, UnlinkedBlockScope, library_item};
 pub enum BxWarningKind {
     /// A concrete block contains only computations that belong in a function.
     CombinationalBlock,
-    /// A block marked `#[require_block_timing]` has no output annotation.
+    /// A block in a module marked `#![require_block_timing]` has no output
+    /// annotation.
     MissingBlockTiming,
 }
 
@@ -51,18 +52,15 @@ pub struct BxWarning {
 
 impl BxWarning {
     /// Locate the block declaration in its root or imported source file.
-    fn for_block(kind: BxWarningKind, block: &Block, linked: Option<&LinkedSources>) -> Self {
-        let (declaration, file) = match library_item(&block.name) {
-            Some((module, name)) => (
-                format!("{}::{name}", module.replace('.', "::")),
-                linked.and_then(|l| l.module_paths.get(module)).cloned(),
-            ),
-            None => (block.name.clone(), None),
+    fn for_block(kind: BxWarningKind, block: &Block, library: Option<&LibraryModuleInfo>) -> Self {
+        let declaration = match library_item(&block.name) {
+            Some((module, name)) => format!("{}::{name}", module.replace('.', "::")),
+            None => block.name.clone(),
         };
         Self {
             kind,
             declaration,
-            file,
+            file: library.map(|source| source.path.clone()),
             position: block.name_position,
         }
     }
@@ -127,19 +125,24 @@ impl<'m> WarningCollector<'m> {
     /// templates, which have a declaration but no checked body.
     pub(crate) fn finish(
         self,
-        module: &Module,
+        root: &Module,
         linked: Option<&LinkedSources>,
         is_block: impl Fn(&str) -> bool,
     ) -> Vec<BxWarning> {
         let mut warnings = Vec::new();
         let mut local_scope = None;
+        let module = linked.map_or(root, |sources| &sources.module);
         for block in &module.blocks {
+            let library =
+                library_item(&block.name).and_then(|(name, _)| linked?.library_modules.get(name));
+            let require_timing =
+                library.map_or(root.require_block_timing, |m| m.require_block_timing);
             let kind = BxWarningKind::MissingBlockTiming;
-            if block.require_block_timing
+            if require_timing
                 && block.output_cycles.is_none()
                 && !block.allowed_warnings.contains(&kind)
             {
-                warnings.push(BxWarning::for_block(kind, block, linked));
+                warnings.push(BxWarning::for_block(kind, block, library));
             }
 
             let kind = BxWarningKind::CombinationalBlock;
@@ -171,7 +174,7 @@ impl<'m> WarningCollector<'m> {
             {
                 continue;
             }
-            warnings.push(BxWarning::for_block(kind, block, linked));
+            warnings.push(BxWarning::for_block(kind, block, library));
         }
         warnings
     }

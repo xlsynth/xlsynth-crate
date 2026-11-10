@@ -1729,7 +1729,7 @@ pub(crate) fn check_sources(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
-    let warnings = warning_collector.finish(module, linked, |name| declarations.is_block(name));
+    let warnings = warning_collector.finish(root, linked, |name| declarations.is_block(name));
     let mut checked = CheckedModule {
         warnings,
         structs: structs

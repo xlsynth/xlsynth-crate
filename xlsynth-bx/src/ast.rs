@@ -615,8 +615,6 @@ pub struct Block {
     pub name_position: Option<SourcePosition>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,
-    /// Warn if this block has no output timing annotation.
-    pub require_block_timing: bool,
     pub public: bool,
     /// Type parameter names in declaration order.
     pub type_params: Vec<String>,
@@ -667,6 +665,9 @@ impl UsePath {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// `#![require_block_timing]` requires output timing on this file's block
+    /// definitions.
+    pub require_block_timing: bool,
     /// Bound names in declaration order, including each leaf of a use tree.
     pub declaration_order: Vec<String>,
     pub uses: Vec<UsePath>,
