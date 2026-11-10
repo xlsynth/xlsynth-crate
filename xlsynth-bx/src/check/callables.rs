@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 use super::generic_blocks::TypeArgument;
 use super::{
-    Bindings, BlockSpecializations, BodyChecker, BodyKind, CallbackFormal, CallbackTarget, K,
-    MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, TypedExpr, compatible, source_type_nodes,
+    BUILTIN_PREFIX, Bindings, BlockSpecializations, BodyChecker, BodyKind, CallbackFormal,
+    CallbackTarget, K, MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE, Param, TypedExpr, compatible,
+    source_type_nodes,
 };
 use crate::ast::{CallbackParam, Expr, Function, Type};
 
@@ -21,12 +22,27 @@ pub(super) enum CallbackSource<'m> {
     Imported { module: String, member: String },
 }
 
-/// A map may directly invoke a formal in the current specialization.
+/// A named map callback resolved in the caller's scope.
 pub(super) enum MapCallee<'m> {
     Formal(usize),
     ValueTemplate(&'m Function),
     Declaration(CallbackSource<'m>),
+    Builtin(&'static str),
 }
+
+/// Unary DSLX builtins available as named map callbacks.
+const MAP_BUILTINS: [&str; 10] = [
+    "and_reduce",
+    "array_rev",
+    "array_size",
+    "ceillog2",
+    "clz",
+    "ctz",
+    "encode",
+    "or_reduce",
+    "rev",
+    "xor_reduce",
+];
 
 /// One formal has a fixed resolved signature for the lifetime of the module.
 /// Its validated actual can be reused at any site resolving the same source.
@@ -495,6 +511,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         name: &str,
         is_local: impl Fn(&str) -> bool,
     ) -> Result<MapCallee<'m>, String> {
+        let qualified_builtin = name.strip_prefix(BUILTIN_PREFIX);
+        let spelling = crate::bx_import::library_item(name).map_or(name, |(_, item)| item);
+        let builtin = MAP_BUILTINS
+            .into_iter()
+            .find(|&builtin| builtin == qualified_builtin.unwrap_or(spelling));
+        if qualified_builtin.is_some()
+            && let Some(builtin) = builtin
+        {
+            return Ok(MapCallee::Builtin(builtin));
+        }
         if let Some(index) = self.callback_index(name)
             && !is_local(name)
         {
@@ -518,6 +544,35 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.reject_type_parameter_value(head)?;
             return Ok(MapCallee::ValueTemplate(template));
         }
+        if let Some(builtin) = builtin
+            && !is_local(head)
+            && self.callback_index(head).is_none()
+        {
+            self.reject_type_parameter_value(head)?;
+            let visible = self
+                .decls
+                .visible(name, self.function_position.or(self.block_position));
+            // Blocks can call forward imports of functions. An imported type
+            // shadows the builtin only after its use is visible.
+            if !visible
+                && let Some((module, member)) = self.resolver.lookup_enum_prefix(name)?
+                && self.resolver.has_public_type(&module, &member)
+            {
+                return Ok(MapCallee::Builtin(builtin));
+            }
+            let visible_type = (self.structs.indices.contains_key(name)
+                || self.structs.enums.contains_key(name))
+                && visible;
+            if spelling == name
+                && (!self.decls.visible(name, self.function_position)
+                    || (!self.decls.declares_function(name)
+                        && !self.decls.is_block(name)
+                        && !visible_type
+                        && self.resolver.lookup(name)?.is_none()))
+            {
+                return Ok(MapCallee::Builtin(builtin));
+            }
+        }
         self.callback_source(name, is_local)
             .map(MapCallee::Declaration)
     }
@@ -539,11 +594,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Apply a unary callback to an already materialized array element.
     pub(super) fn map_element_call(
         &mut self,
+        callee: MapCallee<'m>,
         name: &str,
         parametrics: &[Expr],
-        element: TypedExpr,
+        parameter: &Param,
     ) -> Result<TypedExpr, String> {
-        let (target, ty) = match self.map_callee(name, |head| self.names.contains(head))? {
+        let element = TypedExpr {
+            ty: parameter.ty.clone(),
+            kind: K::Name(parameter.name.clone()),
+        };
+        let (target, ty) = match callee {
             MapCallee::ValueTemplate(template) => {
                 return self.value_map_call_with_actuals(template, parametrics, element);
             }
@@ -577,6 +637,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let (target, ty) =
                     self.callback_result(std::slice::from_ref(&element.ty), &source, None)?;
                 (Some(target), ty.into_owned())
+            }
+            MapCallee::Builtin(builtin) => {
+                let mut saved = Vec::new();
+                self.bind_scoped_value(&parameter.name, element, None, &mut saved);
+                let result = self.builtin_call(builtin, &[Expr::Name(parameter.name.clone())]);
+                self.leave_scope(saved);
+                return result.map(|(ty, kind)| TypedExpr { ty, kind });
             }
         };
         Ok(TypedExpr {

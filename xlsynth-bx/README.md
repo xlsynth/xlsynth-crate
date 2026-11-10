@@ -34,6 +34,33 @@ Use `as` to unpack a bit value into a one-dimensional array of bits or to pack t
 
 BX uses the declared signedness in both hardware and constant expressions. For example, `([u4:8, u4:3] as s8) as s16` sign-extends to `-125`. Compiled DSLX hardware agrees. The pinned DSLX bytecode evaluator can lose the signed tag on an array cast and evaluate the same constant as `131`. BX preserves empty-array types in its IR. The pinned XLS IR interpreter and constant-folding pass can fail when they need to materialize an empty array value.
 
+### Pure DSLX builtins
+
+Functions and blocks can call these builtins directly.
+
+| Operations | Builtins |
+| --- | --- |
+| Bits | `and_reduce`, `or_reduce`, `xor_reduce`, `rev`, `clz`, `ctz`, `bit_slice_update` |
+| Encoding and selection | `encode`, `decode<T>`, `one_hot`, `one_hot_sel`, `priority_sel`, `gate!` |
+| Extension and multiplication | `signex`, `widening_cast<T>`, `checked_cast<T>`, `smulp`, `umulp` |
+| Arrays | `array_rev`, `array_size`, `array_slice`, `zip`, `update`, `map` |
+| Typed values and shape queries | `zero!<T>()`, `all_ones!<T>()`, `bit_count<T>()`, `element_count<T>()` |
+| Compile-time values | `ceillog2`, `configured_value_or` |
+
+```text
+const WORD_WIDTH = bit_count<u8>();
+fn parity_of_reversed(x: uN[WORD_WIDTH]) -> bool { xor_reduce(rev(x)) }
+fn set_cell(grid: u8[2][3], row: u32, col: u32, value: u8) -> u8[2][3] {
+    update(grid, (row, col), value)
+}
+```
+
+Use a module constant to put a shape query in a concrete signature dimension, as in `const WIDTH = bit_count<u8>();`.
+
+The `one_hot` priority flag and `ceillog2` operand are compile-time values. When `ceillog2` is a `map` callback, the input array must be known at compile time. `configured_value_or(label, default)` takes a byte-array label and returns its compile-time default in BX. `array_slice(xs, start, witness)` takes the result length from the witness array type and repeats the last source element past the end.
+
+`checked_cast<T>` enforces representability when evaluated as a constant and lowers to the ordinary bits cast in hardware. The two outputs of `umulp` and `smulp` are partial products whose sum is the product truncated to the operand width. Channel and token operations belong to DSLX procs.
+
 ### Numeric enums
 
 Declare each member's encoding and refer to it by name in functions and blocks.
@@ -247,6 +274,8 @@ fn widen_all(xs: u8[4]) -> u16[4] { map(xs, widen) }
 ```
 
 A named callback can be a visible BX function, a public pure DSLX function imported with `use`, a signature-checked `extern fn`, or an enclosing compile-time function parameter such as `F`. Module-qualified names work directly, as in `map(xs, math::widen)`. BX can infer a callback's type and value parameters from the input element type, as in `map(xs, id)` for `fn id<T>(x: T) -> T { x }`. Supply explicit values on a BX or DSLX callback, as in `map(xs, resize<8, 16>)` or `map(xs, std::msbs<4>)`. Give literals their intended width when calling a concrete function, for example `map([u8:1, u8:3], widen)`.
+
+The named builtin callbacks are `clz`, `ctz`, `and_reduce`, `or_reduce`, `xor_reduce`, `rev`, and `encode`. For example, `map(xs, xor_reduce)` computes the parity of each element.
 
 ```text
 #[allow(combinational_block)]

@@ -20,9 +20,14 @@ impl StructTable {
         self.enums.get(name)
     }
 
-    /// A zero-initialized enum, including one nested in an aggregate, needs
-    /// a declared zero member. Visit each nominal struct at most once.
+    /// Check that zero initialization yields a declared value for each enum.
     pub(super) fn check_zero_members(&self, ty: &Type) -> Result<(), String> {
+        self.check_fill_members(ty, /* ones= */ false)
+    }
+
+    /// Check that a bit-filled enum is declared, including inside aggregates.
+    /// Visit each nominal struct at most once.
+    pub(super) fn check_fill_members(&self, ty: &Type, ones: bool) -> Result<(), String> {
         if self.enums.is_empty() {
             return Ok(());
         }
@@ -31,12 +36,14 @@ impl StructTable {
         while let Some(ty) = pending.pop() {
             match ty {
                 Type::Enum { name, width, .. } => {
-                    if !self
-                        .enums
-                        .get(name)
-                        .is_some_and(|e| e.contains(&IrBits::zero(*width)))
-                    {
-                        return Err(format!("enum '{name}' has no zero member"));
+                    let fill = if ones {
+                        IrBits::all_ones(*width)
+                    } else {
+                        IrBits::zero(*width)
+                    };
+                    if !self.enums.get(name).is_some_and(|e| e.contains(&fill)) {
+                        let member = if ones { "all-ones" } else { "zero" };
+                        return Err(format!("enum '{name}' has no {member} member"));
                     }
                 }
                 Type::Tuple(fields) => pending.extend(fields),

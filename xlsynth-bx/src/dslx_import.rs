@@ -237,6 +237,14 @@ impl ImportResolver {
         self.structs.is_enum_type(subject, member)
     }
 
+    pub(crate) fn has_public_type(&self, subject: &str, member: &str) -> bool {
+        self.structs.has_public_type(subject, member)
+    }
+
+    pub(crate) fn is_struct_type(&self, subject: &str, member: &str) -> bool {
+        self.structs.is_struct_type(subject, member)
+    }
+
     /// Check a static callback's declaration even when an empty structural
     /// loop skips invocation and signature resolution.
     pub(crate) fn check_function_name(&self, subject: &str, member: &str) -> Result<(), String> {

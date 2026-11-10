@@ -1,18 +1,216 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::directed_expr_eval::compile_dslx_module;
+use super::directed_expr_eval::{
+    assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx_module,
+};
 use super::expr_eval::BlockEvaluator;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, compile, compile_with_options, empty_package,
-    parse_module,
+    ImportOptions, ResetBehavior, check_module, check_source_with_options, compile,
+    compile_with_options, empty_package, parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::NodePayload;
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 use xlsynth_pir::ir_parser::Parser;
+
+#[test]
+fn named_map_specializes_unary_dslx_builtins() -> Result<(), Box<dyn Error>> {
+    assert_expr_matches_dslx(
+        "xs: u8[3]",
+        "(u8[3], u8[3], u8[3], bool[3], bool[3], bool[3], u3[3])",
+        "(map(xs, rev), map(xs, clz), map(xs, ctz), map(xs, and_reduce), map(xs, or_reduce), map(xs, xor_reduce), map(xs, encode))",
+        [(
+            vec![IrValue::parse_typed(
+                "[bits[8]:1, bits[8]:128, bits[8]:255]",
+            )?],
+            IrValue::parse_typed(
+                "([bits[8]:128, bits[8]:1, bits[8]:255], [bits[8]:7, bits[8]:0, bits[8]:0], [bits[8]:0, bits[8]:7, bits[8]:0], [bits[1]:0, bits[1]:0, bits[1]:1], [bits[1]:1, bits[1]:1, bits[1]:1], [bits[1]:1, bits[1]:1, bits[1]:0], [bits[3]:0, bits[3]:7, bits[3]:7])",
+            )?,
+        )],
+    );
+    Ok(())
+}
+
+#[test]
+fn named_map_evaluates_ceil_log2_and_array_builtins_in_constants() -> Result<(), Box<dyn Error>> {
+    let constants = r#"
+const VALUES = [u32:0, u32:1, u32:8, u32:9];
+const LOGS = map(VALUES, ceillog2);
+const ROWS = [[u8:1, u8:2], [u8:3, u8:4]];
+const REVERSED = map(ROWS, array_rev);
+const SIZES = map(ROWS, array_size);
+"#;
+    let body = "-> (u32[4], u8[2][2], u32[2]) { (LOGS, REVERSED, SIZES) }";
+    let bx = format!("{constants} block sample(clk) {body}");
+    let native = format!("{constants} fn sample() {body}");
+    let evaluator = BlockEvaluator::lower(&check_module(&parse_module(&bx)?)?, &bx)?;
+    let reference = compile_dslx_module(&native, &[])?;
+    assert_eq!(
+        evaluator.compare_ir(&reference, &[])?,
+        IrValue::parse_typed(
+            "([bits[32]:0,bits[32]:0,bits[32]:3,bits[32]:4], [[bits[8]:2,bits[8]:1],[bits[8]:4,bits[8]:3]], [bits[32]:2,bits[32]:2])"
+        )?,
+    );
+    Ok(())
+}
+
+#[test]
+fn named_map_ceil_log2_preserves_wide_element_type() -> Result<(), Box<dyn Error>> {
+    // The bundled interpreter evaluates the mapped values as u32. The
+    // builtin's declared result type has the same width as its input.
+    let bx = r#"
+block sample(clk) -> uN[96][2] {
+    let values = [uN[96]:0x1_0000_0000_0000_0000, uN[96]:0x1_0000_0000_0000_0001];
+    map(values, ceillog2)
+}"#;
+    let evaluator = BlockEvaluator::lower(&check_module(&parse_module(bx)?)?, bx)?;
+    assert_eq!(
+        evaluator.evaluate(&[])?,
+        IrValue::parse_typed("[bits[96]:64, bits[96]:65]")?,
+    );
+    Ok(())
+}
+
+#[test]
+fn named_map_ceil_log2_requires_compile_time_unsigned_inputs() {
+    assert_expr_rejected_by_both("xs: u32[2]", "u32[2]", "map(xs, ceillog2)");
+    assert_expr_rejected_by_both("", "s32[2]", "map([s32:1, s32:8], ceillog2)");
+}
+
+#[test]
+fn named_map_builtin_yields_to_a_visible_binding() -> Result<(), Box<dyn Error>> {
+    let helpers = r#"
+fn before(xs: u8[2]) -> u8[2] { map(xs, rev) }
+fn rev(x: u8) -> u8 { x + u8:1 }
+"#;
+    let body = "-> (u8[2], u8[2]) { (before(xs), map(xs, rev)) }";
+    let bx = format!("{helpers} block sample(clk, xs: u8[2]) {body}");
+    let native = format!("{helpers} fn sample(xs: u8[2]) {body}");
+    let evaluator = BlockEvaluator::lower(&check_module(&parse_module(&bx)?)?, &bx)?;
+    let reference = compile_dslx_module(&native, &[])?;
+    assert_eq!(
+        evaluator.compare_ir(
+            &reference,
+            &[IrValue::parse_typed("[bits[8]:1, bits[8]:128]")?],
+        )?,
+        IrValue::parse_typed("([bits[8]:128, bits[8]:1], [bits[8]:2, bits[8]:129])")?
+    );
+    assert_expr_rejected_by_both("xs: u8[2]", "u8[2]", "let rev = u8:0; map(xs, rev)");
+    Ok(())
+}
+
+#[test]
+fn named_map_builtin_yields_to_a_visible_type() {
+    for declaration in ["struct rev { field: u8 }", "enum rev : u1 { A = 0 }"] {
+        let bx = format!("{declaration}\nblock sample(clk, xs: u8[2]) -> u8[2] {{ map(xs, rev) }}");
+        let native = format!("{declaration}\nfn sample(xs: u8[2]) -> u8[2] {{ map(xs, rev) }}");
+        assert!(parse_module(&bx).and_then(|m| check_module(&m)).is_err());
+        assert!(compile_dslx_module(&native, &[]).is_err());
+    }
+}
+
+#[test]
+fn bx_library_keeps_its_named_map_builtin_binding() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    fs::write(
+        root.path().join("lanes.bx"),
+        "pub fn flip(xs: u8[2]) -> u8[2] { map(xs, rev) }",
+    )?;
+    let bx = r#"
+use lanes;
+fn rev(x: u8) -> u8 { x + u8:1 }
+#[allow(combinational_block)]
+block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
+    (lanes::flip(xs), map(xs, rev))
+}
+"#;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let package = compile_with_options(
+        bx,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    let sample = combinational_block_to_fn(package.get_block("sample").ok_or("missing sample")?)?;
+    assert_eq!(
+        eval_fn_in_package_value(
+            &package,
+            &sample,
+            &[IrValue::parse_typed("[bits[8]:1, bits[8]:128]")?],
+        ),
+        IrValue::parse_typed("([bits[8]:128, bits[8]:1], [bits[8]:2, bits[8]:129])")?
+    );
+    Ok(())
+}
+
+#[test]
+fn direct_and_named_map_builtins_precede_a_later_imported_type() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let declaration = "pub enum rev : u1 { ZERO = 0 }";
+    fs::write(root.path().join("types.bx"), declaration)?;
+    fs::write(root.path().join("enums.x"), declaration)?;
+    fs::write(
+        root.path().join("structs.x"),
+        "pub struct rev { value: u8 }",
+    )?;
+    fs::write(root.path().join("aliases.x"), "pub type rev = u8;")?;
+    fs::write(
+        root.path().join("functions.x"),
+        "pub fn rev(x: u8) -> u8 { x + u8:1 }",
+    )?;
+    let block = r#"
+#[allow(combinational_block)]
+block sample(clk, xs: u8[2]) -> (u8, u8[2]) { (rev(xs[u32:0]), map(xs, rev)) }
+"#;
+    let options = ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    for (module, expected) in [
+        ("types", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
+        ("enums", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
+        ("structs", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
+        ("aliases", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
+        ("functions", "(bits[8]:2, [bits[8]:2, bits[8]:129])"),
+    ] {
+        let bx = format!("{block}\nuse {module}::{{rev}};");
+        let package = compile_with_options(
+            &bx,
+            empty_package("test"),
+            ResetBehavior::default(),
+            &options,
+        )?;
+        let sample =
+            combinational_block_to_fn(package.get_block("sample").ok_or("missing sample")?)?;
+        let args = [IrValue::parse_typed("[bits[8]:1, bits[8]:128]")?];
+        assert_eq!(
+            eval_fn_in_package_value(&package, &sample, &args),
+            IrValue::parse_typed(expected)?
+        );
+    }
+    for module in ["enums", "structs", "aliases"] {
+        for body in ["rev(xs[u32:0])", "map(xs, rev)[u32:0]"] {
+            let bx =
+                format!("use {module}::{{rev}};\nblock sample(clk, xs: u8[2]) -> u8 {{ {body} }}");
+            assert!(check_source_with_options(&bx, &options).is_err());
+            let native = format!(
+                "#![feature(use_syntax)]\nuse {module}::{{rev}};\nfn sample(xs: u8[2]) -> u8 {{ {body} }}"
+            );
+            assert!(compile_dslx_module(&native, &[root.path()]).is_err());
+        }
+        let native = format!(
+            "#![feature(use_syntax)]\nfn sample(xs: u8[2]) -> (u8, u8[2]) {{ (rev(xs[u32:0]), map(xs, rev)) }}\nuse {module}::{{rev}};"
+        );
+        compile_dslx_module(&native, &[root.path()])?;
+    }
+    Ok(())
+}
 
 #[test]
 fn named_map_uses_its_callee_for_runtime_and_constant_values() -> Result<(), Box<dyn Error>> {

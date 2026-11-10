@@ -174,6 +174,12 @@ The target compares BX bits-to-array and array-to-bits casts with pinned DSLX. I
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_bits_array_casts`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_builtins.rs
+
+Generates calls to pure DSLX builtins in BX module constants, local functions, and combinational blocks. It compares source acceptance, constant values, and runtime results against pinned DSLX. The target varies signedness, zero-width and wide operands, aggregate shapes, selector masks, and indices near clipping boundaries. It also generates calls with extra arguments and incompatible operand types, and uses unary builtins as named `map` callbacks. It compares the sum of multiply partial products because the interpreters may split the product differently. It checks `ceillog2` in constants and uses DSLX constexpr execution for decode widths the pinned IR converter cannot lower.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_builtins`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_enums.rs
 
 Generates numeric enums and compares BX with pinned DSLX source checking, concrete evaluation and compiled IR. Varying discriminants, backing types, aliases and module boundaries exposes nominal type, extension and exhaustiveness errors. Cast probes compare hardware results on arbitrary bits and separately check whether DSLX can evaluate each cast as a constant. Ordering probes exercise direct calls, map callbacks and counted-loop helpers. BX must diagnose enum ordering and evaluate a sibling that compares backing bits. The native execution oracle contains only that sibling because the pinned IR converter aborts on enum ordering.

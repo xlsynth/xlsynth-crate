@@ -809,7 +809,9 @@ impl BodyChecker<'_, '_> {
             ));
         }
         self.reject_type_parameter_value(name)?;
-        if matches!(name, "update" | crate::bx_import::BUILTIN_UPDATE) {
+        if callee
+            && super::is_call_builtin(name.strip_prefix(super::BUILTIN_PREFIX).unwrap_or(name))
+        {
             return Ok(());
         }
         if !self.decls.visible(name, self.function_position) {
@@ -867,7 +869,9 @@ impl BodyChecker<'_, '_> {
                 self.check_expr_names(result, &names)?;
             }
             Expr::Name(name) => self.check_value_name(name, locals, /* callee= */ false)?,
-            Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to resolve. */ }
+            Expr::Bool(_) | Expr::ByteString(_) | Expr::Literal { ty: None, .. } => {
+                /* No names to resolve. */
+            }
             Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
                 if matches!(expr, Expr::Zero(_))
                     && !locals.contains("zero!")
@@ -876,6 +880,14 @@ impl BodyChecker<'_, '_> {
                     return Err("callable parameter 'zero!' requires a direct call".into());
                 }
                 self.check_type_names(ty, locals)?
+            }
+            Expr::TypeBuiltin { types, args, .. } => {
+                for ty in types {
+                    self.check_type_names(ty, locals)?;
+                }
+                for arg in args {
+                    self.check_expr_names(arg, locals)?;
+                }
             }
             Expr::Call { name, args }
             | Expr::MapBeforeUse {

@@ -465,6 +465,14 @@ impl OutlineGraph {
             .is_some_and(|module| module.outline.public_functions.contains(name))
     }
 
+    /// Check a type's exported spelling without resolving the declaration.
+    pub(super) fn has_public_type(&self, subject: &str, name: &str) -> bool {
+        self.modules
+            .get(subject)
+            .and_then(|module| module.outline.declarations.get(name))
+            .is_some_and(|decl| decl.has_public_spelling(name))
+    }
+
     /// Resolve a type name in the module that wrote it. Native typechecking
     /// enforces access rules at each source reference (including v1 use
     /// syntax).
@@ -604,13 +612,7 @@ impl OutlineGraph {
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {
-        let module = self.modules.get(subject)?;
-        if !module
-            .outline
-            .declarations
-            .get(name)?
-            .has_public_spelling(name)
-        {
+        if !self.has_public_type(subject, name) {
             return None;
         }
         let id = DeclId {
