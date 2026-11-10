@@ -436,7 +436,11 @@ fn verify_compiled_proof(
     }
     for module in proof_modules {
         if module != Path::new("UserProof.lean") {
-            args.push(proof_module_name(module)?.as_str().into());
+            args.push(
+                proof_module_name(module, theorem.is_none())?
+                    .as_str()
+                    .into(),
+            );
         }
     }
     let output = run_lean_process(lean, root, &[], "equivalence check", &args)?;
@@ -594,7 +598,7 @@ fn stage_proof_sources(
                 relative.display()
             )));
         }
-        let module_name = proof_module_name(&relative)?;
+        let module_name = proof_module_name(&relative, theorem.is_none())?;
         if theorem.is_none() || source_path == entry {
             imports.push(module_name);
         }
@@ -645,7 +649,7 @@ fn user_proof_source(body: &str, imports: &[LeanModuleName]) -> String {
 }
 
 /// Returns the validated module name implied by a helper's relative path.
-fn proof_module_name(path: &Path) -> Result<LeanModuleName, LeanError> {
+fn proof_module_name(path: &Path, reserve_gate_checker: bool) -> Result<LeanModuleName, LeanError> {
     if path.extension().and_then(|value| value.to_str()) != Some("lean") {
         return Err(LeanError::InvalidProofSources(format!(
             "proof module {} must have a .lean extension",
@@ -669,9 +673,10 @@ fn proof_module_name(path: &Path) -> Result<LeanModuleName, LeanError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     if parts.first().is_some_and(|part| {
-        ["Generated", "Target", "Check", "UserProof"]
-            .iter()
-            .any(|reserved| part.eq_ignore_ascii_case(reserved))
+        (reserve_gate_checker && part.eq_ignore_ascii_case("Check"))
+            || ["Generated", "Target", "UserProof"]
+                .iter()
+                .any(|reserved| part.eq_ignore_ascii_case(reserved))
     }) {
         return Err(LeanError::InvalidProofSources(format!(
             "proof module path {} uses a generated module root",

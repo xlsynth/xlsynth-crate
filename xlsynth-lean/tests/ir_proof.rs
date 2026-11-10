@@ -109,7 +109,8 @@ fn checks_nullary_and_inequivalent_functions() {
     let dir = tempfile::tempdir().unwrap();
     let sources = LeanIrProofSources {
         root: dir.path().into(),
-        module: dir.path().join("Constant.lean"),
+        // The IR runner no longer owns Check.lean, so a user module may use it.
+        module: dir.path().join("Check.lean"),
         theorem: LeanTheoremName::new("Constant.equivalent").unwrap(),
         modules: vec![],
     };
