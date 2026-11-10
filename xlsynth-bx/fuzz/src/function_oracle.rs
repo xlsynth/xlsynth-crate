@@ -101,7 +101,7 @@ struct ConcreteCall {
 
 /// Format the concrete value at its source type, retaining aggregate shape
 /// and signed or zero-width bit patterns.
-fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String> {
+pub(crate) fn dslx_literal(ty: &Type, value: &IrValue) -> Result<String, String> {
     match ty {
         Type::Bits { .. } | Type::Bool => Ok(format!(
             "{ty}:{}",

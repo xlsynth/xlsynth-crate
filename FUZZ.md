@@ -168,6 +168,12 @@ checkout. From `xlsynth-bx`, run:
 XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run fuzz_bx_dslx_function_syntax --sanitizer none
 ```
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs
+
+The target compares BX bits-to-array and array-to-bits casts with pinned DSLX. It varies signed, unsigned and Boolean types, zero-width and wide elements, empty arrays, and asymmetric bit patterns to expose reversed elements or slices. It checks module constants and runtime values against DSLX IR and also checks unsigned casts against DSLX constexpr evaluation. Signed cases use compiled DSLX because the pinned bytecode interpreter cannot flatten signed elements and assigns unsigned tags to cast results. Unequal packed widths and casts involving nested arrays, tuples, structs or enums must fail typechecking.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_bits_array_casts`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_enums.rs
 
 Generates numeric enums and compares BX with pinned DSLX source checking, concrete evaluation and compiled IR. Varying discriminants, backing types, aliases and module boundaries exposes nominal type, extension and exhaustiveness errors. Cast probes compare hardware results on arbitrary bits and separately check whether DSLX can evaluate each cast as a constant. Ordering probes exercise direct calls, map callbacks and counted-loop helpers. BX must diagnose enum ordering and evaluate a sibling that compares backing bits. The native execution oracle contains only that sibling because the pinned IR converter aborts on enum ordering.

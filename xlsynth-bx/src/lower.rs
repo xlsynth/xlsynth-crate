@@ -21,11 +21,11 @@ use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, ScalarPattern, TypedExpr,
-    TypedExprKind, TypedMatchArm, output_ports,
+    TypedExprKind, TypedMatchArm, literal_copy_work, output_ports,
 };
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
-use crate::typed::{CheckedBinding, TypedFor, TypedIterable, TypedMap};
+use crate::typed::{CheckedBinding, TypedFor, TypedIterable, TypedMap, repr_bits};
 
 /// Destination package indices for named BX functions, externs, and inferred
 /// DSLX specializations.
@@ -71,13 +71,15 @@ pub fn lower_module(
     package: Package,
     reset: ResetBehavior,
 ) -> Result<Package, String> {
-    lower_checked_module(module, package, reset).map_err(crate::bx_import::diagnostic)
+    lower_checked_module(module, package, reset, crate::check::MAX_TYPE_SIZE)
+        .map_err(crate::bx_import::diagnostic)
 }
 
 fn lower_checked_module(
     module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
+    empty_array_limit: usize,
 ) -> Result<Package, String> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
@@ -148,13 +150,21 @@ fn lower_checked_module(
         occupied,
         next_body: 0,
     };
+    let mut function_specializations =
+        EmptyArrayBudget::new("function specialization", empty_array_limit);
     for (function, symbol) in module.functions.iter().zip(function_symbols) {
+        let budget = if module.specialized_functions.contains(&function.name) {
+            &mut function_specializations
+        } else {
+            &mut EmptyArrayBudget::new("body", empty_array_limit)
+        };
         let index = lower_function(
             function,
             &symbol,
             &mut destination,
             &functions,
             &mut layouts,
+            budget,
         )
         .map_err(|error| format!("fn '{}': {error}", function.name))?;
         functions
@@ -162,17 +172,24 @@ fn lower_checked_module(
             .insert(index, invoke_signature(destination.batch.package(), index)?);
         functions.named.insert(function.name.clone(), index);
     }
+    let mut block_specializations =
+        EmptyArrayBudget::new("generic block specialization", empty_array_limit);
     for block in &module.blocks {
-        let builder = LowerBody::build_block(
-            block,
-            &block_symbols,
+        let budget = if module.specialized_blocks.contains(&block.name) {
+            &mut block_specializations
+        } else {
+            &mut EmptyArrayBudget::new("body", empty_array_limit)
+        };
+        let body = LowerBody::new(
+            BlockBuilder::new(block_symbols.get(&block.name)),
             &mut destination,
             &functions,
             &mut layouts,
-            &module.structs,
-            reset,
-        )
-        .map_err(|error| format!("block '{}': {error}", block.name))?;
+            budget,
+        );
+        let builder = body
+            .build_block(block, &block_symbols, &module.structs, reset)
+            .map_err(|error| format!("block '{}': {error}", block.name))?;
         destination
             .batch
             .append_block(builder)
@@ -519,11 +536,12 @@ pub(crate) fn check_function_purity(function: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
-/// A BX register and the physical reset signal it uses, if any.
-#[derive(Clone, Copy)]
+/// A BX register, its physical reset signal, and any storage type needed to
+/// encode empty-array leaves of its reset value.
 struct Register {
     handle: BRegister,
     reset: Option<BValue>,
+    storage_type: Option<ir::Type>,
 }
 
 /// Hardware resources used to wire register and instance inputs in one block.
@@ -564,6 +582,158 @@ struct LowerBody<'a, 'defs, 'p, S: BuilderState> {
     layouts: &'a mut Layouts<'defs>,
     values: BTreeMap<String, BValue>,
     tuple_elements: HashMap<BValue, Vec<BValue>>,
+    empty_array_budget: &'a mut EmptyArrayBudget,
+}
+
+/// Bounds empty-array lowering for a source body and its generated helpers.
+/// Concrete specializations share one budget per kind across the module.
+struct EmptyArrayBudget {
+    scope: &'static str,
+    limit: usize,
+    used: usize,
+}
+
+impl EmptyArrayBudget {
+    fn new(scope: &'static str, limit: usize) -> Self {
+        Self {
+            scope,
+            limit,
+            used: 0,
+        }
+    }
+
+    /// Charge constructors and wire conversions before allocating their nodes.
+    fn charge(&mut self, work: usize) -> Result<(), BuilderError> {
+        self.used = self.used.saturating_add(work);
+        if self.used > self.limit {
+            return Err(BuilderError::InvalidOperation(format!(
+                "empty array lowering exceeds the {} expansion limit of {}",
+                self.scope, self.limit,
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// XLS requires a typed array constructor for an empty array. In a
+/// homogeneous array the first element determines whether its type contains
+/// one.
+fn contains_empty_array(value: &IrValue) -> bool {
+    match value {
+        IrValue::Array(array) => array.elements().first().is_none_or(contains_empty_array),
+        IrValue::Tuple(fields) => fields.iter().any(contains_empty_array),
+        IrValue::Bits(_) | IrValue::Token => false,
+    }
+}
+
+/// Owned IR type nodes and lowering work for an empty-array constant and one
+/// register wire of its shape. A matching wire subtree needs no adaptation.
+struct EmptyArrayExpansion {
+    type_nodes: usize,
+    literal_work: usize,
+    wire_work: usize,
+}
+
+impl EmptyArrayExpansion {
+    /// Count each tuple field and one representative of each homogeneous
+    /// array. Include type trees that PIR constructs or copies alongside the
+    /// emitted nodes, even for a field forwarded as a single literal or wire.
+    fn for_value(value: &IrValue) -> Self {
+        match value {
+            IrValue::Array(array) => {
+                let Some(first) = array.elements().first() else {
+                    // The array owns its element type even when it is empty.
+                    let type_nodes = 2 + literal_copy_work(value);
+                    return Self {
+                        type_nodes,
+                        literal_work: type_nodes,
+                        wire_work: type_nodes,
+                    };
+                };
+                let child = Self::for_value(first);
+                let type_nodes = 1 + child.type_nodes;
+                if child.wire_work == 0 {
+                    return Self {
+                        type_nodes,
+                        // Cloning the array and constructing its literal type
+                        // each copy its owned element layout.
+                        literal_work: 2 * type_nodes,
+                        wire_work: 0,
+                    };
+                }
+                let count = array.elements().len();
+                // An array constructor gathers the element types and builds
+                // the result type. Each array_index copies the array type
+                // during operand gathering and result deduction.
+                let constructor = count * child.type_nodes + 2 * type_nodes;
+                let projection = 2 + 2 * type_nodes + child.type_nodes;
+                Self {
+                    type_nodes,
+                    literal_work: count * child.literal_work + constructor,
+                    wire_work: count * (child.wire_work + projection) + constructor,
+                }
+            }
+            IrValue::Tuple(fields) => {
+                let mut type_nodes = 1;
+                let mut literal_work = 0;
+                let mut wire_work = 0;
+                for field in fields.iter() {
+                    let child = Self::for_value(field);
+                    type_nodes += child.type_nodes;
+                    literal_work += child.literal_work;
+                    wire_work += child.wire_work;
+                }
+                if wire_work == 0 {
+                    // Tuple values share their storage, but builder.literal
+                    // still materializes their full result type.
+                    return Self {
+                        type_nodes,
+                        literal_work: type_nodes,
+                        wire_work: 0,
+                    };
+                }
+                // The tuple constructor gathers the field types and copies
+                // them into its result. A wire also projects each field.
+                Self {
+                    type_nodes,
+                    literal_work: literal_work + 2 * type_nodes,
+                    wire_work: wire_work + 3 * type_nodes,
+                }
+            }
+            IrValue::Bits(_) | IrValue::Token => Self {
+                type_nodes: 1,
+                literal_work: 1 + literal_copy_work(value),
+                wire_work: 0,
+            },
+        }
+    }
+}
+
+/// Replace each empty array in a reset literal with its zero-bit storage
+/// placeholder, preserving the other fields and array elements.
+fn encode_register_reset(value: &IrValue) -> Result<IrValue, BuilderError> {
+    if !contains_empty_array(value) {
+        return Ok(value.clone());
+    }
+    match value {
+        IrValue::Array(array) if array.elements().is_empty() => Ok(IrValue::Bits(IrBits::zero(0))),
+        IrValue::Array(array) => {
+            let elements = array
+                .elements()
+                .iter()
+                .map(encode_register_reset)
+                .collect::<Result<Vec<_>, _>>()?;
+            IrValue::make_array(&elements)
+                .map_err(|e| BuilderError::InvalidOperation(e.to_string()))
+        }
+        IrValue::Tuple(fields) => Ok(IrValue::Tuple(
+            fields
+                .iter()
+                .map(encode_register_reset)
+                .collect::<Result<_, _>>()?,
+        )),
+        _ => unreachable!("only aggregates can contain an empty array"),
+    }
 }
 
 /// Builds a local function in the destination package's callee and node-ID
@@ -574,8 +744,15 @@ fn lower_function(
     destination: &mut Destination,
     functions: &LinkedFunctions,
     layouts: &mut Layouts,
+    budget: &mut EmptyArrayBudget,
 ) -> Result<usize, BuilderError> {
-    let mut body = LowerBody::new(FnBuilder::new(symbol), destination, functions, layouts);
+    let mut body = LowerBody::new(
+        FnBuilder::new(symbol),
+        destination,
+        functions,
+        layouts,
+        budget,
+    );
     let param_symbols = local_ir_names(
         function.params.iter().map(|param| param.name.as_str()),
         std::iter::empty(),
@@ -595,40 +772,32 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
     /// Allocates the interface and instances before connecting their input
     /// drivers.
     fn build_block(
+        mut self,
         block: &CheckedBlock,
         symbols: &BlockSymbols,
-        destination: &'a mut Destination<'p>,
-        functions: &'a LinkedFunctions,
-        layouts: &'a mut Layouts<'defs>,
         structs: &[StructDef],
         reset_behavior: ResetBehavior,
     ) -> Result<BlockBuilder, BuilderError> {
-        let mut state = Self::new(
-            BlockBuilder::new(symbols.get(&block.name)),
-            destination,
-            functions,
-            layouts,
-        );
         let mut resources = BlockResources::default();
-        state.builder.clock_port(&block.clock)?;
+        self.builder.clock_port(&block.clock)?;
         let reset = if let Some(name) = &block.reset {
-            let physical = state.builder.input_port(name, ir::Type::Bits(1))?;
-            state.builder.set_reset(physical, reset_behavior)?;
+            let physical = self.builder.input_port(name, ir::Type::Bits(1))?;
+            self.builder.set_reset(physical, reset_behavior)?;
             let asserted = if reset_behavior.active_low {
-                state.builder.not(physical)?
+                self.builder.not(physical)?
             } else {
                 physical
             };
-            state.values.insert(name.clone(), asserted);
+            self.values.insert(name.clone(), asserted);
             Some(physical)
         } else {
             None
         };
         for param in &block.params {
-            let value = state
+            let value = self
                 .builder
-                .input_port(&param.name, state.layouts.lower(&param.ty)?)?;
-            state.values.insert(param.name.clone(), value);
+                .input_port(&param.name, self.layouts.lower(&param.ty)?)?;
+            self.values.insert(param.name.clone(), value);
         }
         for statement in &block.statements {
             if let CheckedStmt::Inst {
@@ -636,25 +805,25 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 block: target,
             } = statement
             {
-                let instance = state.add_instance(name, symbols.get(target), reset)?;
+                let instance = self.add_instance(name, symbols.get(target), reset)?;
                 resources.instances.insert(name.clone(), instance);
             }
         }
-        state.wire_statements(&block.statements, &mut resources, reset, None)?;
+        self.wire_statements(&block.statements, &mut resources, reset, None)?;
         let ports = output_ports(&block.result, structs).map_err(BuilderError::InvalidOperation)?;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
             for (port, field) in ports.iter().zip(fields) {
-                let value = state.expr(field)?;
-                state.builder.output_port(&port.name, value)?;
+                let value = self.expr(field)?;
+                self.builder.output_port(&port.name, value)?;
             }
-            return Ok(state.builder);
+            return Ok(self.builder);
         }
-        let value = state.expr(&block.output)?;
+        let value = self.expr(&block.output)?;
         for (index, port) in ports.iter().enumerate() {
             let field = match block.result {
                 Type::Named(_) | Type::Applied { .. } | Type::Tuple(_) => {
-                    state.project(value, index)?
+                    self.project(value, index)?
                 }
                 Type::Bits { .. } | Type::Enum { .. } | Type::Bool | Type::Array { .. } => value,
                 Type::ParametricBits { .. } | Type::ParametricArray { .. } => {
@@ -664,9 +833,9 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     )));
                 }
             };
-            state.builder.output_port(&port.name, field)?;
+            self.builder.output_port(&port.name, field)?;
         }
-        Ok(state.builder)
+        Ok(self.builder)
     }
 
     /// Wires register updates using one shared load-enable node for each
@@ -685,16 +854,46 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     ty,
                     reset: value,
                 } => {
-                    let handle =
-                        self.builder
-                            .register(name, self.layouts.lower(ty)?, value.clone())?;
+                    let ty = self.layouts.lower(ty)?;
+                    let mut storage_type = None;
+                    let value = match value {
+                        Some(value) if contains_empty_array(value) => {
+                            if ty.bit_count() == 0 {
+                                // A zero-bit register has only one possible
+                                // value.
+                                None
+                            } else {
+                                // Each checked register has one read and one
+                                // write.
+                                let expansion = EmptyArrayExpansion::for_value(value);
+                                self.empty_array_budget
+                                    .charge(2 * expansion.wire_work + expansion.literal_work)?;
+                                let encoded = encode_register_reset(value)?;
+                                storage_type = Some(encoded.type_());
+                                Some(encoded)
+                            }
+                        }
+                        _ => value.clone(),
+                    };
+                    let register_reset = value.as_ref().and(reset);
+                    let handle = self.builder.register(
+                        name,
+                        storage_type.as_ref().unwrap_or(&ty).clone(),
+                        value,
+                    )?;
                     let current = self.builder.register_read(handle)?;
+                    let current = if storage_type.is_some() {
+                        self.adapt_register_wire(current, &ty)?
+                    } else {
+                        current
+                    };
                     self.values.insert(name.clone(), current);
                     resources.registers.insert(
                         name.clone(),
                         Register {
                             handle,
-                            reset: value.as_ref().and(reset),
+                            reset: register_reset,
+                            storage_type,
                         },
                     );
                 }
@@ -703,8 +902,13 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     self.values.insert(name.clone(), value);
                 }
                 CheckedStmt::Write { name, value } => {
-                    let reg = resources.registers[name];
+                    let reg = &resources.registers[name];
                     let data = self.expr(value)?;
+                    let data = if let Some(ty) = &reg.storage_type {
+                        self.adapt_register_wire(data, ty)?
+                    } else {
+                        data
+                    };
                     self.builder.register_write(
                         reg.handle,
                         data,
@@ -780,6 +984,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         destination: &'a mut Destination<'p>,
         functions: &'a LinkedFunctions,
         layouts: &'a mut Layouts<'defs>,
+        empty_array_budget: &'a mut EmptyArrayBudget,
     ) -> Self {
         Self {
             builder,
@@ -788,6 +993,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             layouts,
             values: BTreeMap::new(),
             tuple_elements: HashMap::new(),
+            empty_array_budget,
         }
     }
 
@@ -798,6 +1004,44 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             Ok(elements[index])
         } else {
             self.builder.tuple_index(tuple, index)
+        }
+    }
+
+    /// Adapt a wire between a declared register layout and its reset storage
+    /// layout, forwarding each subtree whose type already matches.
+    fn adapt_register_wire(
+        &mut self,
+        value: BValue,
+        target: &ir::Type,
+    ) -> Result<BValue, BuilderError> {
+        if self.builder.get_type(value)? == target {
+            return Ok(value);
+        }
+        match target {
+            ir::Type::Bits(0) => self.builder.literal(IrValue::Bits(IrBits::zero(0))),
+            ir::Type::Array(array) if array.element_count == 0 => {
+                self.builder.array((*array.element_type).clone(), &[])
+            }
+            ir::Type::Tuple(types) => {
+                let mut fields = Vec::with_capacity(types.len());
+                for (index, ty) in types.iter().enumerate() {
+                    let field = self.project(value, index)?;
+                    fields.push(self.adapt_register_wire(field, ty)?);
+                }
+                let tuple = self.builder.tuple(&fields)?;
+                self.tuple_elements.insert(tuple, fields);
+                Ok(tuple)
+            }
+            ir::Type::Array(array) => {
+                let mut elements = Vec::with_capacity(array.element_count);
+                for i in 0..array.element_count {
+                    let index = self.builder.literal(IrValue::u32(i as u32))?;
+                    let element = self.builder.array_index(value, index)?;
+                    elements.push(self.adapt_register_wire(element, &array.element_type)?);
+                }
+                self.builder.array((*array.element_type).clone(), &elements)
+            }
+            _ => unreachable!("register layouts only differ at empty-array leaves"),
         }
     }
 
@@ -937,7 +1181,13 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         let element = builder.param("element", self.layouts.lower(&map.element.ty)?)?;
         let mut capture_wires = Vec::new();
         let captures = self.capture_params(&mut builder, &map.captures, &mut capture_wires)?;
-        let mut body = LowerBody::new(builder, self.destination, self.functions, self.layouts);
+        let mut body = LowerBody::new(
+            builder,
+            self.destination,
+            self.functions,
+            self.layouts,
+            self.empty_array_budget,
+        );
         body.values = captures;
         body.values.insert(map.element.name.clone(), element);
         let result = body.bound_expr(&map.bindings, &map.output)?;
@@ -1060,7 +1310,13 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             TypedIterable::Range { .. } => None,
         };
         let captures = self.capture_params(&mut builder, &fold.captures, &mut invariants)?;
-        let mut body = LowerBody::new(builder, self.destination, self.functions, self.layouts);
+        let mut body = LowerBody::new(
+            builder,
+            self.destination,
+            self.functions,
+            self.layouts,
+            self.empty_array_budget,
+        );
         body.values = captures;
         body.values
             .insert(fold.accumulator.name.clone(), accumulator);
@@ -1093,7 +1349,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     fn expr(&mut self, expr: &TypedExpr) -> Result<BValue, BuilderError> {
         match &expr.kind {
             TypedExprKind::Name(name) => Ok(self.values[name]),
-            TypedExprKind::Literal(value) => self.builder.literal(value.clone()),
+            TypedExprKind::Literal(value) => self.literal(value),
             TypedExprKind::For(fold) => self.counted_for(fold),
             TypedExprKind::Map(map) => self.map(map),
             TypedExprKind::Array(items) => {
@@ -1165,33 +1421,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 let rhs = self.expr(right)?;
                 self.binary(*op, signed, lhs, rhs)
             }
-            TypedExprKind::Cast { value } => {
-                let src = self.expr(value)?;
-                let src_width = self.builder.get_type(src)?.bit_count();
-                let dst_width = match expr.ty {
-                    Type::Bits { width, .. } | Type::Enum { width, .. } => width,
-                    Type::Bool => 1,
-                    _ => {
-                        return Err(BuilderError::InvalidOperation(
-                            "cast target must be bits".into(),
-                        ));
-                    }
-                };
-                if src_width == dst_width {
-                    Ok(src)
-                } else if dst_width < src_width {
-                    self.builder.bit_slice(src, 0, dst_width)
-                } else if src_width > 0
-                    && matches!(
-                        value.ty,
-                        Type::Bits { signed: true, .. } | Type::Enum { signed: true, .. }
-                    )
-                {
-                    self.builder.sign_extend(src, dst_width)
-                } else {
-                    self.builder.zero_extend(src, dst_width)
-                }
-            }
+            TypedExprKind::Cast { value } => self.cast(value, &expr.ty),
             TypedExprKind::If {
                 condition,
                 then_value,
@@ -1203,6 +1433,84 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 self.select_value(condition, &[yes], no)
             }
             TypedExprKind::Match { subject, arms } => self.lower_match(subject, arms),
+        }
+    }
+
+    fn literal(&mut self, value: &IrValue) -> Result<BValue, BuilderError> {
+        if !contains_empty_array(value) {
+            return self.builder.literal(value.clone());
+        }
+        self.empty_array_budget
+            .charge(EmptyArrayExpansion::for_value(value).literal_work)?;
+        self.literal_with_constructors(value)
+    }
+
+    /// Use typed IR constructors for constant aggregates containing empty
+    /// arrays so the emitted package can be parsed by XLS.
+    fn literal_with_constructors(&mut self, value: &IrValue) -> Result<BValue, BuilderError> {
+        if !contains_empty_array(value) {
+            return self.builder.literal(value.clone());
+        }
+        match value {
+            IrValue::Array(array) => {
+                let elements = array
+                    .elements()
+                    .iter()
+                    .map(|e| self.literal_with_constructors(e))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.builder.array(array.element_type().clone(), &elements)
+            }
+            IrValue::Tuple(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|field| self.literal_with_constructors(field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.builder.tuple(&fields)
+            }
+            _ => unreachable!("only aggregates can contain an empty array"),
+        }
+    }
+
+    /// Resize a scalar or convert an equal-width array with element zero at
+    /// the most significant end of the packed bits.
+    fn cast(&mut self, value: &TypedExpr, target: &Type) -> Result<BValue, BuilderError> {
+        let src = self.expr(value)?;
+        if let Type::Array { element, size } = target {
+            let element_type = self.layouts.lower(element)?;
+            let width = element_type.bit_count();
+            let slices = if width == 0 {
+                // Each element is the same zero-bit input wire.
+                vec![src; *size]
+            } else {
+                (0..*size)
+                    .rev()
+                    .map(|i| self.builder.bit_slice(src, i * width, width))
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            return self.builder.array(element_type, &slices);
+        }
+        let (_, dst_width) = repr_bits(target).expect("checked scalar cast target");
+        if let Type::Array { size, .. } = &value.ty {
+            if dst_width == 0 {
+                return self.builder.literal(IrValue::Bits(IrBits::zero(0)));
+            }
+            let mut pieces = Vec::with_capacity(*size);
+            for i in 0..*size {
+                // Concrete BX arrays fit within the DSLX u32 index type.
+                let index = self.builder.literal(IrValue::u32(i as u32))?;
+                pieces.push(self.builder.array_index(src, index)?);
+            }
+            return self.builder.concat(&pieces);
+        }
+        let (signed, src_width) = repr_bits(&value.ty).expect("checked scalar cast source");
+        if src_width == dst_width {
+            Ok(src)
+        } else if dst_width < src_width {
+            self.builder.bit_slice(src, 0, dst_width)
+        } else if signed && src_width > 0 {
+            self.builder.sign_extend(src, dst_width)
+        } else {
+            self.builder.zero_extend(src, dst_width)
         }
     }
 
@@ -1243,5 +1551,122 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             BinaryOp::Ge if signed => b.sge(lhs, rhs),
             BinaryOp::Ge => b.uge(lhs, rhs),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write;
+
+    use super::{EmptyArrayExpansion, lower_checked_module};
+    use crate::{ResetBehavior, check_module, empty_package, lower_module, parse_module};
+
+    #[test]
+    fn empty_array_expansion_follows_source_and_specialization_scopes() -> Result<(), String> {
+        let constants = r#"
+const E = bits[0]:0 as u1[0];
+const A = [(E, u1:0), (E, u1:1)];
+"#;
+        for (bodies, exhausted_scope) in [
+            (
+                r#"
+fn f<N: u32>(x: u1) -> u1 { A[x].1 }
+fn both(x: u1) -> u1 { f<1>(x) ^ f<2>(x) }
+"#,
+                Some("function specialization"),
+            ),
+            (
+                r#"
+#[allow(combinational_block)]
+block stage<T>(clk, x: T) -> u1 { A[x as u1].1 }
+block both(clk, x: u1, y: u2) -> u1 {
+    let a = stage(x);
+    let b = stage(y);
+    a ^ b
+}
+"#,
+                Some("generic block specialization"),
+            ),
+            (
+                r#"
+fn both(xs: u1[2]) -> (u1[2], u1) {
+    let m = map(xs, |i| A[i].1);
+    let f = for (i, acc) in xs { acc ^ A[i].1 }(u1:0);
+    (m, f)
+}
+"#,
+                Some("body"),
+            ),
+            (
+                r#"
+fn f<N: u32>(x: u1) -> u1 { A[x].1 }
+fn a(x: u1) -> u1 { f<1>(x) ^ A[x].1 }
+fn b(x: u1) -> u1 { A[x].1 }
+#[allow(combinational_block)]
+block stage<T>(clk, x: T) -> u1 { A[x as u1].1 }
+#[allow(combinational_block)]
+block ordinary(clk, x: u1) -> u1 { A[x].1 }
+block both(clk, x: u1) -> u1 {
+    let a = stage(x);
+    a ^ A[x].1
+}
+"#,
+                None,
+            ),
+        ] {
+            let checked = check_module(&parse_module(&format!("{constants}{bodies}"))?)?;
+            // One materialization fits exactly in each independent scope.
+            let limit = EmptyArrayExpansion::for_value(&checked.constants()[1].value).literal_work;
+            let result = lower_checked_module(
+                &checked,
+                empty_package("design"),
+                ResetBehavior::default(),
+                limit,
+            );
+            if let Some(scope) = exhausted_scope {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains(&format!(
+                        "empty array lowering exceeds the {scope} expansion limit of {limit}"
+                    )),
+                    "{error}"
+                );
+            } else {
+                result?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn empty_array_expansion_charges_nested_plain_tuple_layouts() -> Result<(), String> {
+        // Sharing keeps the checked constant small. Each emitted literal or
+        // projection still needs its own copy of the 767-node tuple type.
+        let mut source = String::from("struct S0 { a: u1 }\n");
+        for i in 1..=8 {
+            let child = i - 1;
+            writeln!(source, "struct S{i} {{ a: S{child}, b: S{child} }}").unwrap();
+        }
+        source.push_str("const A0 = (bits[0]:0 as u1[0], zero!<S8>());\n");
+        for i in 1..=8 {
+            let child = i - 1;
+            writeln!(source, "const A{i} = [A{child}, A{child}];").unwrap();
+        }
+        // At seven array dimensions the literal fits, while adapting the
+        // register read and write takes the combined cost over the limit.
+        let ty = format!("(u1[0], S8){}", "[2]".repeat(7));
+        for body in [
+            "#[allow(combinational_block)] block b(clk) -> u1 { let _v = A8; u1:0 }".into(),
+            format!("block b(clk, rst) -> u1 {{ reg q: {ty} = A7; q := q; u1:0 }}"),
+        ] {
+            let checked = check_module(&parse_module(&format!("{source}{body}"))?)?;
+            let error = lower_module(&checked, empty_package("design"), ResetBehavior::default())
+                .unwrap_err();
+            assert!(
+                error.contains("empty array lowering exceeds the body expansion limit"),
+                "{error}"
+            );
+        }
+        Ok(())
     }
 }
