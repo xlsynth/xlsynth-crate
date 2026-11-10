@@ -6,10 +6,11 @@
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
     SourceModule, aggregate_method_contracts, array_cast_contracts, bound_parametric_contracts,
-    builtin_contracts, dead_branch_contracts, enum_width_contracts, inferred_flow_contracts,
-    lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
-    mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
-    observer_contracts, pattern_acceptance, scope_contracts, self_dimension_contracts,
+    builtin_contracts, dead_branch_contracts, empty_builtin_contracts, enum_width_contracts,
+    inferred_flow_contracts, lambda_dimension_contracts, literal_order_contracts,
+    map_parametric_contracts, mixed_literal_contracts, nested_scope_contracts, nominal_contracts,
+    observable_value_contracts, observer_contracts, pattern_acceptance,
+    scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
     signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
     unrolled_loop_contracts, zero_width_cast_contracts,
 };
@@ -232,6 +233,20 @@ pub fn generate_v11(data: &[u8]) -> Result<AuditCase, String> {
     }
 }
 
+/// Exercises constexpr builtin widths, tuple update formals and zero-length
+/// select and slice arrays. A zero prefix preserves audit-v11 inputs.
+pub fn generate_v12(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    let case = match selector % 8 {
+        4 => scalar_update_builtin_contracts::ceillog2(options),
+        5 => scalar_update_builtin_contracts::tuple_update(options),
+        6 => empty_builtin_contracts::one_hot_select(options)?,
+        7 => empty_builtin_contracts::array_slice(options)?,
+        _ => return generate_v11(options),
+    };
+    Ok(AuditCase::Semantic(case))
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -281,7 +296,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 mod tests {
     use super::{
         AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8, generate_v9,
-        generate_v10, generate_v11,
+        generate_v10, generate_v11, generate_v12,
     };
 
     #[test]
@@ -334,6 +349,30 @@ mod tests {
             unpack(generate_v6(&bytes)?)?,
             unpack(generate_v7(&prefixed)?)?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_v12_preserves_wide_decode_and_empty_array_optimization() -> Result<(), String> {
+        let decode = [1, 0, 0, 3, 0, 7];
+        let mut prefixed = vec![0; 11];
+        prefixed.extend(decode);
+        let (AuditCase::Semantic(old), AuditCase::Semantic(new)) =
+            (generate(&decode)?, generate_v12(&prefixed)?)
+        else {
+            return Err("expected a semantic decode contract".into());
+        };
+        assert_eq!(new.family, "decode_output_beyond_domain");
+        assert_eq!(old.modules, new.modules);
+        assert_eq!(old.expected_ir, new.expected_ir);
+
+        let (AuditCase::Optimized(old), AuditCase::Optimized(new)) =
+            (generate_v11(&[6])?, generate_v12(&[0, 6])?)
+        else {
+            return Err("expected an optimized array cast contract".into());
+        };
+        assert_eq!(old.modules, new.modules);
+        assert_eq!(old.expected_ir, new.expected_ir);
         Ok(())
     }
 

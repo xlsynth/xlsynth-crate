@@ -219,6 +219,27 @@ one-byte inputs below are in hex.
 Prefix an audit-v10 input with one zero byte to preserve it in an audit-v11
 corpus.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v12` for builtin boundaries.
+The one-byte inputs below are in hex.
+
+- `04` returns the module constant `ceillog2(u8:3)` from a function
+  declared to return `u8`. The reference returns the eight-bit value 2.
+  `04 01` observes the constant's width through concatenation, and
+  `04 02` explicitly casts it to the expected width first.
+- `05` passes a tuple-valued formal parameter directly to `update` on a
+  two-dimensional array. The reference updates the selected element.
+  `05 01` spells the same index as `(i.0, i.1)`.
+- `06` calls `one_hot_sel` with a zero-bit selector and an empty case
+  array. The reference ORs the selected elements, giving zero for no cases.
+  `06 01` checks a one-element control.
+- `07` calls `array_slice` with a zero-length witness. The emitted
+  result must have the witness's empty array type. `07 01` checks a
+  one-element result against an independent indexed read.
+
+Prefix any audit-v11 input with one zero byte to preserve it in audit-v12.
+For example, eleven zero bytes followed by `01 00 00 03 00 07` replay the
+existing one-bit-input, eight-bit-output decode contract.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format

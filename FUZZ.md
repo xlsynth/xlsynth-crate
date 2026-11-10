@@ -422,6 +422,10 @@ execution for inferred and explicitly typed map lambdas over
 The `audit-v11` grammar checks sign extension after constexpr array packing,
 constexpr packing of signed elements, empty arrays during standalone IR
 optimization, and array-to-array identity casts.
+The `audit-v12` grammar checks the width and value of constexpr `ceillog2`,
+tuple-parameter array updates, `one_hot_sel` with zero cases, and
+`array_slice` with a zero-length result witness. It also replays the earlier
+wide-decode contract.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 
