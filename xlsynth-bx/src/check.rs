@@ -24,6 +24,10 @@ use crate::infer_literal::{
 };
 use crate::parser::{character_or_bool_digits, explicit_width_hint};
 use crate::warnings::WarningCollector;
+mod builtin_arrays;
+mod builtin_calls;
+mod builtin_types;
+pub(crate) use builtin_calls::{BUILTIN_PREFIX, is_call_builtin};
 mod callables;
 mod counted_for;
 mod enums;
@@ -38,6 +42,7 @@ mod scope;
 mod unroll;
 mod value_parametrics;
 
+pub use crate::builtin::BuiltinOp;
 pub use crate::typed::{
     CheckedBinding, CheckedBlock, CheckedConstant, CheckedEnum, CheckedFunction, CheckedModule,
     CheckedStmt, ScalarPattern, TypedExpr, TypedExprKind, TypedFor, TypedIterable, TypedMap,
@@ -838,40 +843,19 @@ fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
 /// GetIoObjectBuiltins in the pinned frontend. Sized type keywords are already
 /// excluded by the lexer.
 pub(crate) fn is_dslx_builtin_value(name: &str) -> bool {
-    crate::import_structs::is_token_builtin(name)
+    is_call_builtin(name)
+        || crate::import_structs::is_token_builtin(name)
         || matches!(
             name,
             "all_ones!"
                 | "zero!"
-                | "bit_slice_update"
-                | "ceillog2"
-                | "clz"
-                | "configured_value_or"
-                | "ctz"
-                | "gate!"
                 | "map"
                 | "decode"
-                | "encode"
-                | "one_hot"
-                | "one_hot_sel"
-                | "priority_sel"
-                | "rev"
-                | "umulp"
-                | "smulp"
-                | "array_rev"
-                | "array_size"
                 | "bit_count"
                 | "element_count"
-                | "and_reduce"
-                | "or_reduce"
-                | "xor_reduce"
-                | "signex"
-                | "array_slice"
-                | "update"
                 | "widening_cast"
                 | "checked_cast"
                 | "range"
-                | "zip"
                 | "send"
                 | "send_if"
                 | "recv"
@@ -2690,6 +2674,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }),
             Expr::Name(name) => self.named_value(name),
             Expr::Bool(value) => Ok((Type::Bool, K::Literal(IrValue::bool(*value)))),
+            Expr::ByteString(bytes) => builtin_types::byte_string(bytes),
+            Expr::TypeBuiltin { name, types, args } => self.type_builtin(name, types, args),
             Expr::Zero(ty) => self.zero_value(ty),
             Expr::Literal { ty, text } => self.bit_literal(ty.as_ref(), text, expected),
             Expr::Tuple(items) => self.tuple_literal(items, expected),
@@ -3339,7 +3325,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if !self.iteration_path.is_empty()
             && matches!(
                 value.kind,
-                K::ArrayUpdate { .. } | K::Array(_) | K::Tuple(_) | K::Literal(_)
+                K::ArrayUpdate { .. }
+                    | K::Builtin { .. }
+                    | K::Array(_)
+                    | K::Tuple(_)
+                    | K::Literal(_)
             )
             && value.has_constant_inputs(&self.constexpr_names)
         {
@@ -3941,23 +3931,40 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.is_builtin_map(name, |target| self.names.contains(target))? {
             return self.with_dslx_value_context(|checker| checker.named_array_map(args));
         }
+        if let Some(builtin) = name.strip_prefix(BUILTIN_PREFIX)
+            && is_call_builtin(builtin)
+        {
+            return self.builtin_call(builtin, args);
+        }
         let visible = self.decls.visible(name, self.function_position);
-        if !visible && name != "update" {
+        if !visible {
+            if is_call_builtin(name) && !self.names.contains(name) {
+                return self.builtin_call(name, args);
+            }
             return Err(format!("function '{name}' is declared later in the module"));
         }
+        let visible_value = self
+            .decls
+            .visible(name, self.function_position.or(self.block_position));
+        let spelling = crate::bx_import::library_item(name).map_or(name, |(_, item)| item);
         if visible
             && let Some((subject, function)) =
                 lookup_use(name, self.resolver, |binding| self.names.contains(binding))?
         {
-            let spelling = crate::bx_import::library_item(name).map_or(name, |(_, item)| item);
-            if spelling == "update" && self.resolver.is_enum_type(&subject, &function) {
-                if !self
-                    .decls
-                    .visible(name, self.function_position.or(self.block_position))
-                {
-                    return self.array_update(args);
+            if is_call_builtin(spelling) && self.resolver.has_public_type(&subject, &function) {
+                if !visible_value {
+                    return self.builtin_call(spelling, args);
                 }
-                return Err("enum 'update' cannot be called as a function".into());
+                let kind = if self.resolver.is_enum_type(&subject, &function) {
+                    "enum"
+                } else if self.resolver.is_struct_type(&subject, &function) {
+                    "struct"
+                } else {
+                    "type"
+                };
+                return Err(format!(
+                    "{kind} '{spelling}' cannot be called as a function"
+                ));
             }
             let args = args
                 .iter()
@@ -3976,20 +3983,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if visible && self.decls.is_block(name) {
             return Err(self.block_in_value_error(name));
         }
-        if self.structs.enums.contains_key(name)
-            && self
-                .decls
-                .visible(name, self.function_position.or(self.block_position))
-        {
+        if visible_value && self.structs.enums.contains_key(name) {
             return Err(format!("enum '{name}' cannot be called as a function"));
         }
-        if name == crate::bx_import::BUILTIN_UPDATE
-            || name == "update" && (!visible || !self.decls.declares_function(name))
-        {
+        if visible_value && is_call_builtin(spelling) && self.structs.indices.contains_key(name) {
+            return Err(format!(
+                "struct '{spelling}' cannot be called as a function"
+            ));
+        }
+        if is_call_builtin(name) && !self.decls.declares_function(name) {
             if self.names.contains(name) {
                 return Err(format!("'{name}' names a local value here"));
             }
-            return self.array_update(args);
+            return self.builtin_call(name, args);
         }
         if self.decls.value_template_callbacks.contains_key(name) {
             return self.parametric_call(name, &[], args);
@@ -4025,47 +4031,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             K::Call {
                 name: name.to_owned(),
                 args,
-            },
-        ))
-    }
-
-    /// Check DSLX's single-index array update with independently inferred
-    /// arguments.
-    fn array_update(&mut self, args: &[Expr]) -> Result<(Type, K), String> {
-        let [array, index, replacement] = args else {
-            return Err(format!("'update' expects 3 arguments, got {}", args.len()));
-        };
-        let array = self.expr(array, None)?;
-        let Type::Array { element, .. } = &array.ty else {
-            return Err(format!("'update' requires an array, got {}", array.ty));
-        };
-        // DSLX infers the index and replacement type parameters separately.
-        // An inline unsized scalar cannot supply either type parameter.
-        for (arg, role) in [(index, "index"), (replacement, "replacement")] {
-            if minimum_type(arg)?.is_some() {
-                return Err(format!("cannot infer the type of 'update' {role}"));
-            }
-        }
-        let index = self.expr(index, None)?;
-        if !bits(&index.ty).is_some_and(|(signed, _)| !signed) {
-            return Err(format!(
-                "'update' requires an unsigned index, got {}",
-                index.ty
-            ));
-        }
-        let replacement = self.expr(replacement, None)?;
-        if !compatible(element, &replacement.ty) {
-            return Err(format!(
-                "'update' replacement expects {element}, got {}",
-                replacement.ty
-            ));
-        }
-        Ok((
-            array.ty.clone(),
-            K::ArrayUpdate {
-                array: Box::new(array),
-                index: Box::new(index),
-                replacement: Box::new(replacement),
             },
         ))
     }

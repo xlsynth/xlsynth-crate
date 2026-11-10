@@ -4,13 +4,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BUILTIN_MAP, BUILTIN_UPDATE, Binding, Names, ParametricKind};
+use super::{BUILTIN_MAP, Binding, Names, ParametricKind};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
     MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, Type, UnrollFor,
     WidthSliceType,
 };
+use crate::check::{BUILTIN_PREFIX, is_call_builtin};
 use crate::parser::MAX_SYNTAX_DEPTH;
 
 /// A bound data name in call position. Zero-trip bodies only require it to
@@ -325,22 +326,27 @@ impl<'a> Scope<'a> {
             Some(Local::Lexical | Local::Hardware) => {
                 Err(format!("'{name}' names a local value here"))
             }
-            None if site == CallSite::Direct && name == "map" => self
-                .names
-                .resolve_with_root_fallback(name, self.builtin_at(name), BUILTIN_MAP),
-            None if site == CallSite::Direct && name == "update" => self
-                .names
-                .resolve_with_root_fallback(name, self.builtin_at(name), BUILTIN_UPDATE),
+            None if site == CallSite::Direct && (name == "map" || is_call_builtin(name)) => {
+                self.names.resolve_with_root_fallback(
+                    name,
+                    self.builtin_at(name),
+                    &format!("{BUILTIN_PREFIX}{name}"),
+                )
+            }
             Some(Local::Formal) | None => self.reference(name, self.at),
         }
     }
 
-    /// A block sees callable declarations throughout its module. Enum names
-    /// that shadow the builtin follow the order of value declarations.
+    /// A block sees callable declarations throughout its module. Types that
+    /// shadow a direct builtin call follow the order of value declarations.
     fn builtin_at(&self, name: &str) -> Option<usize> {
-        if self.names.enums.contains(name)
-            || matches!(self.names.uses.get(name), Some(Binding::Member(export)) if export.is_enum)
-        {
+        let member = self.names.uses.get(name);
+        let enum_binding = self.names.enums.contains(name)
+            || matches!(member, Some(Binding::Member(export)) if export.is_enum);
+        let struct_binding = is_call_builtin(name)
+            && (self.names.structs.contains(name)
+                || matches!(member, Some(Binding::Member(export)) if export.is_struct));
+        if enum_binding || struct_binding {
             self.value_at
         } else {
             self.at
@@ -352,6 +358,8 @@ impl<'a> Scope<'a> {
     fn map_callback(&self, name: &str) -> Result<String, String> {
         if name.contains("::") {
             self.callee(name, CallSite::Direct)
+        } else if is_call_builtin(name) {
+            self.reference(name, self.builtin_at(name))
         } else {
             self.reference(name, self.at)
         }
@@ -634,11 +642,20 @@ impl<'a> Scope<'a> {
                 Expr::Name(reference)
             }
             Expr::Bool(value) => Expr::Bool(*value),
+            Expr::ByteString(bytes) => Expr::ByteString(bytes.clone()),
             Expr::Literal { ty, text } => Expr::Literal {
                 ty: self.optional_type(ty)?,
                 text: text.clone(),
             },
             Expr::Zero(ty) => Expr::Zero(self.ty(ty)?),
+            Expr::TypeBuiltin { name, types, args } => Expr::TypeBuiltin {
+                name: name.clone(),
+                types: types
+                    .iter()
+                    .map(|ty| self.ty(ty))
+                    .collect::<Result<_, _>>()?,
+                args: self.expressions(args)?,
+            },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
             Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {

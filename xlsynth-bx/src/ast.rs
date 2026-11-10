@@ -333,6 +333,8 @@ pub enum Expr {
     },
     Name(String),
     Bool(bool),
+    /// A DSLX string literal, with its UTF-8 and escaped bytes decoded.
+    ByteString(Vec<u8>),
     Literal {
         ty: Option<Type>,
         /// Numeric text, or the character or boolean spelling when a generic
@@ -341,6 +343,12 @@ pub enum Expr {
     },
     /// An all-zero value of the specified type, including aggregate types.
     Zero(Type),
+    /// A DSLX builtin invocation with explicit type arguments.
+    TypeBuiltin {
+        name: String,
+        types: Vec<Type>,
+        args: Vec<Expr>,
+    },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
     Struct {

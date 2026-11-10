@@ -2,6 +2,7 @@
 
 //! Typecheck the unary callback of the DSLX map builtin in its lexical scope.
 
+use super::callables::MapCallee;
 use super::{
     BodyChecker, BodyKind, CheckedBinding, K, MAX_ELABORATION_DEPTH, MapScope, Param, Type,
     TypedExpr, TypedMap, compatible,
@@ -102,13 +103,13 @@ impl BodyChecker<'_, '_> {
         let (bindings, output) = match callback {
             MapCallback::Lambda(map) => self.map_lambda_body(map, &parameter, id)?,
             MapCallback::Named(name, parametrics) => {
-                let argument = TypedExpr {
-                    ty: parameter.ty.clone(),
-                    kind: K::Name(parameter.name.clone()),
-                };
+                let callee = self.map_callee(name, |head| self.names.contains(head))?;
+                if matches!(callee, MapCallee::Builtin("ceillog2")) && parametrics.is_empty() {
+                    return self.map_ceillog2(&array, element, *size);
+                }
                 (
                     Vec::new(),
-                    self.map_element_call(name, parametrics, argument)?,
+                    self.map_element_call(callee, name, parametrics, &parameter)?,
                 )
             }
         };

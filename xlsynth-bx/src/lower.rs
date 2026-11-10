@@ -1379,6 +1379,13 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
                 let replacement = self.expr(replacement)?;
                 self.builder.array_update(array, replacement, &[index])
             }
+            TypedExprKind::Builtin { op, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.expr(arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                op.emit(&mut self.builder, &args)
+            }
             TypedExprKind::WidthSlice { value, start } => {
                 let value = self.expr(value)?;
                 let start = self.expr(start)?;

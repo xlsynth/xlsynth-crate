@@ -740,7 +740,9 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
     }
     match expr {
         Expr::Name(name) => rename(name, aliases),
-        Expr::Bool(_) | Expr::Literal { ty: None, .. } => { /* No names to capture. */ }
+        Expr::Bool(_) | Expr::ByteString(_) | Expr::Literal { ty: None, .. } => {
+            /* No names to capture. */
+        }
         Expr::Literal { ty: Some(ty), .. } => rename_type(ty, aliases),
         Expr::Zero(ty) => {
             rename_type(ty, aliases);
@@ -749,6 +751,14 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
                     name: alias.clone(),
                     args: Vec::new(),
                 };
+            }
+        }
+        Expr::TypeBuiltin { types, args, .. } => {
+            for ty in types {
+                rename_type(ty, aliases);
+            }
+            for arg in args {
+                capture_names(arg, aliases);
             }
         }
         Expr::Tuple(fields) | Expr::Array(fields) => {

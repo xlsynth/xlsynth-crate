@@ -3,6 +3,7 @@
 mod bits_array_casts;
 mod block_callbacks;
 mod block_let_patterns;
+mod builtins;
 mod counted_for;
 mod enums;
 mod eval;
@@ -23,6 +24,7 @@ mod unroll_types;
 pub use bits_array_casts::check_bits_array_casts;
 pub use block_callbacks::check_block_callbacks;
 pub use block_let_patterns::check_block_let_patterns;
+pub use builtins::check_builtins;
 pub use counted_for::check_counted_for;
 pub use enums::check_enums;
 pub use function_calls::check_function_calls;

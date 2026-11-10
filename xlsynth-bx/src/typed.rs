@@ -10,6 +10,7 @@ use xlsynth_pir::{
 };
 
 use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
+use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
 use crate::dslx_import::{ImportedCall, ResolvedImports};
 use crate::warnings::BxWarning;
@@ -356,6 +357,10 @@ pub enum TypedExprKind {
         array: Box<TypedExpr>,
         index: Box<TypedExpr>,
         replacement: Box<TypedExpr>,
+    },
+    Builtin {
+        op: BuiltinOp,
+        args: Vec<TypedExpr>,
     },
     WidthSlice {
         value: Box<TypedExpr>,
@@ -1004,6 +1009,7 @@ impl TypedExpr {
             }
             K::Tuple(items)
             | K::Array(items)
+            | K::Builtin { args: items, .. }
             | K::Call { args: items, .. }
             | K::ImportedCall { args: items, .. } => {
                 items.iter().all(|item| item.all_inputs(branches, accept))
@@ -1190,6 +1196,14 @@ impl TypedExpr {
                 let mut elements = array.elements().to_vec();
                 elements[i] = replacement;
                 IrValue::make_array_typed(array.element_type().clone(), &elements).ok()
+            }
+            K::Builtin { op, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| arg.constant_with_budget(names, remaining))
+                    .collect::<Option<Vec<_>>>()?;
+                remaining.charge(op.evaluation_work(&args))?;
+                op.evaluate(&args)
             }
             K::WidthSlice { value, start } => {
                 let value = value.constant_with_budget(names, remaining)?;

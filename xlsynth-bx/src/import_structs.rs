@@ -298,6 +298,10 @@ impl ImportedStructs {
         self.graph.has_public_function(subject, member)
     }
 
+    pub(crate) fn has_public_type(&self, subject: &str, member: &str) -> bool {
+        self.graph.has_public_type(subject, member)
+    }
+
     pub(crate) fn has_public_struct_template(&self, subject: &str, member: &str) -> bool {
         self.graph.public_parametric_struct(subject, member)
     }
@@ -322,6 +326,17 @@ impl ImportedStructs {
             .explicit_types
             .get(&format!("{subject}::{member}"))
             .is_some_and(dslx::Type::is_enum)
+    }
+
+    /// Identify a struct declaration or alias without elaborating a call.
+    pub(crate) fn is_struct_type(&self, subject: &str, member: &str) -> bool {
+        matches!(
+            self.graph.named(subject, member),
+            Some(ResolvedShape::Struct(_))
+        ) || self
+            .explicit_types
+            .get(&format!("{subject}::{member}"))
+            .is_some_and(dslx::Type::is_struct)
     }
 
     #[cfg(test)]

@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod ast;
+mod builtin;
 mod bx_import;
 pub mod check;
 mod dslx_import;

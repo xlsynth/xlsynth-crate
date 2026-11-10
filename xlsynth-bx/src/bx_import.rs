@@ -36,7 +36,6 @@ pub(crate) fn zero_binding(owner: &str) -> String {
 }
 
 pub(crate) const BUILTIN_MAP: &str = "$builtin$map";
-pub(crate) const BUILTIN_UPDATE: &str = "$builtin$update";
 
 /// A public declaration and the information required to parse its call syntax.
 #[derive(Clone)]
@@ -44,6 +43,7 @@ struct Export {
     name: String,
     parametrics: Vec<ParametricKind>,
     is_enum: bool,
+    is_struct: bool,
 }
 
 /// Callable arguments have the visibility of calls. Value arguments have
@@ -84,6 +84,7 @@ struct Names {
     subject: Option<String>,
     definitions: BTreeSet<String>,
     enums: BTreeSet<String>,
+    structs: BTreeSet<String>,
     templates: BTreeMap<String, Vec<ParametricKind>>,
     uses: BTreeMap<String, Binding>,
     positions: BTreeMap<String, usize>,
@@ -150,6 +151,7 @@ impl Names {
             subject: subject.map(str::to_owned),
             definitions,
             enums: module.enums.iter().map(|d| d.name.clone()).collect(),
+            structs: module.structs.iter().map(|d| d.name.clone()).collect(),
             templates,
             uses,
             positions: module
@@ -201,17 +203,16 @@ impl Names {
         let visible = at
             .zip(self.positions.get(head))
             .is_none_or(|(at, &pos)| pos <= at);
+        let builtin = name == "map" || crate::check::is_call_builtin(name);
         if let Some(binding) = self.uses.get(head) {
             if !visible {
-                // These builtins remain visible until the later use introduces
-                // its name.
-                return match name {
-                    "map" => Ok(BUILTIN_MAP.into()),
-                    "update" => Ok(BUILTIN_UPDATE.into()),
-                    _ => Err(format!(
-                        "use binding '{head}' is declared later in the module"
-                    )),
-                };
+                // A later use does not hide an earlier builtin reference.
+                if builtin {
+                    return Ok(format!("{}{name}", crate::check::BUILTIN_PREFIX));
+                }
+                return Err(format!(
+                    "use binding '{head}' is declared later in the module"
+                ));
             }
             return match (binding, member) {
                 (Binding::Module(lib), Some(m)) => {
@@ -235,7 +236,7 @@ impl Names {
                 (Binding::Dslx(alias), None) => Ok(alias.clone()),
             };
         }
-        if self.definitions.contains(name) && (visible || !matches!(name, "map" | "update")) {
+        if self.definitions.contains(name) && (visible || !builtin) {
             return Ok(self.declared(name));
         }
         if let Some(member) = member
@@ -244,12 +245,13 @@ impl Names {
             return Ok(format!("{}::{member}", self.declared(head)));
         }
         if let Some(subject) = &self.subject {
-            return match name {
-                "map" => Ok(BUILTIN_MAP.into()),
-                "update" => Ok(BUILTIN_UPDATE.into()),
-                "zero!" => Ok(self.declared(name)),
-                _ => Err(format!("unknown name '{name}' in BX module '{subject}'")),
-            };
+            if builtin {
+                return Ok(format!("{}{name}", crate::check::BUILTIN_PREFIX));
+            }
+            if name == "zero!" {
+                return Ok(self.declared(name));
+            }
+            return Err(format!("unknown name '{name}' in BX module '{subject}'"));
         }
         Ok(fallback.to_owned())
     }
@@ -475,6 +477,7 @@ impl<'a> Graph<'a> {
                         name: names.declared(name),
                         parametrics: names.parametrics(name).to_vec(),
                         is_enum: names.enums.contains(name),
+                        is_struct: names.structs.contains(name),
                     },
                 )
             })

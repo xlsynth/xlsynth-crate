@@ -338,6 +338,10 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                     pending.push(SourceNode::Expression(value));
                     pending.push(SourceNode::Annotation(ty));
                 }
+                Expr::TypeBuiltin { types, args, .. } => {
+                    pending.extend(types.iter().map(SourceNode::Annotation));
+                    pending.extend(args.iter().map(SourceNode::Expression));
+                }
                 Expr::Index { value, index }
                 | Expr::Binary {
                     left: value,
@@ -362,7 +366,10 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
                 Expr::Zero(ty) | Expr::Literal { ty: Some(ty), .. } => {
                     pending.push(SourceNode::Annotation(ty));
                 }
-                Expr::Name(_) | Expr::Bool(_) | Expr::Literal { ty: None, .. } => {
+                Expr::Name(_)
+                | Expr::Bool(_)
+                | Expr::ByteString(_)
+                | Expr::Literal { ty: None, .. } => {
                     // Leaf values introduce no hardware.
                 }
             },

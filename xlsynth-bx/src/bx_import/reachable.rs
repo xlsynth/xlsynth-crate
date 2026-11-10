@@ -125,6 +125,7 @@ impl Dependencies {
                 } => {
                     pending.extend([array.as_ref(), index.as_ref(), replacement.as_ref()]);
                 }
+                K::Builtin { args, .. } => pending.extend(args),
                 K::If {
                     condition,
                     then_value,

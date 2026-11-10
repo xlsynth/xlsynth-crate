@@ -242,7 +242,9 @@ fn lex(
                 .ok_or_else(|| diagnostic(source, start, "invalid byte character literal"))?;
             character = Some(value);
             i += len;
-        } else if dialect == Dialect::Dslx && matches!(b, b'"' | b'`') {
+        } else if (dialect == Dialect::Dslx && matches!(b, b'"' | b'`'))
+            || (b == b'"' && (brace_depth != 0 || dslx_item.is_some() || callback))
+        {
             // An escaped quote or a delimiter in a string is part of the
             // literal. Preserve the original spelling for the outline.
             let mut escaped = false;
@@ -345,15 +347,23 @@ enum Dialect {
 
 /// Decode one DSLX byte character and return its value and token length.
 fn scan_character(source: &str) -> Option<(u8, usize)> {
-    match source.as_bytes() {
-        [b'\'', b'\\', b'x', _, _, b'\'', ..] => {
-            let digits = source.get(3..5)?;
-            if !digits.bytes().all(|digit| digit.is_ascii_hexdigit()) {
-                return None;
-            }
-            Some((u8::from_str_radix(digits, 16).ok()?, 6))
-        }
-        [b'\'', b'\\', escaped, b'\'', ..] => {
+    let bytes = source.as_bytes();
+    let (value, len) = match bytes.get(1)? {
+        b'\\' => scan_byte_escape(&bytes[2..])?,
+        value if value.is_ascii() && *value != b'\n' => (*value, 0),
+        _ => return None,
+    };
+    (bytes.get(len + 2) == Some(&b'\'')).then_some((value, len + 3))
+}
+
+/// Read a DSLX byte escape after its backslash.
+fn scan_byte_escape(bytes: &[u8]) -> Option<(u8, usize)> {
+    match bytes {
+        [b'x', high, low, ..] => Some((
+            (char::from(*high).to_digit(16)? * 16 + char::from(*low).to_digit(16)?) as u8,
+            3,
+        )),
+        [escaped, ..] => {
             let value = match escaped {
                 b'n' => b'\n',
                 b'r' => b'\r',
@@ -362,13 +372,49 @@ fn scan_character(source: &str) -> Option<(u8, usize)> {
                 b'\\' | b'\'' | b'"' => *escaped,
                 _ => return None,
             };
-            Some((value, 4))
+            Some((value, 1))
         }
-        [b'\'', value, b'\'', ..] if value.is_ascii() && !matches!(value, b'\n' | b'\\') => {
-            Some((*value, 3))
-        }
-        _ => None,
+        [] => None,
     }
+}
+
+/// Decode the UTF-8 bytes and escape sequences inside a DSLX string literal.
+fn decode_byte_string(text: &str) -> Result<Vec<u8>, &'static str> {
+    let mut remaining = &text.as_bytes()[1..text.len() - 1];
+    if remaining.is_empty() {
+        return Err("zero-length DSLX strings are not supported");
+    }
+    let mut value = Vec::new();
+    // The concrete layout charges eight bits per byte plus the array node.
+    let max_bytes = (crate::check::MAX_TYPE_SIZE - 1) / 8;
+    while let [first, tail @ ..] = remaining {
+        remaining = if *first != b'\\' {
+            value.push(*first);
+            tail
+        } else if let Some(unicode) = tail.strip_prefix(b"u{") {
+            let close = unicode
+                .iter()
+                .take(7)
+                .position(|byte| *byte == b'}')
+                .ok_or("expected 1 to 6 hex digits and '}' in Unicode escape")?;
+            let codepoint = std::str::from_utf8(&unicode[..close])
+                .ok()
+                .filter(|digits| digits.bytes().all(|digit| digit.is_ascii_hexdigit()))
+                .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+                .and_then(char::from_u32)
+                .ok_or("invalid Unicode escape in DSLX string")?;
+            value.extend_from_slice(codepoint.encode_utf8(&mut [0; 4]).as_bytes());
+            &unicode[close + 1..]
+        } else {
+            let (byte, len) = scan_byte_escape(tail).ok_or("invalid escape in DSLX string")?;
+            value.push(byte);
+            &tail[len..]
+        };
+        if value.len() > max_bytes {
+            return Err("DSLX string exceeds the maximum concrete type size");
+        }
+    }
+    Ok(value)
 }
 
 /// Parse a source module without loading its imports. Imported spellings of
@@ -2567,6 +2613,9 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             return Ok(ParsedExpr::leaf(Expr::Zero(ty)));
         }
+        if self.peek(1) == "<" && self.type_builtin_at(self.pos) {
+            return self.type_builtin_call();
+        }
         if self.eat("true") || self.eat("false") {
             return Ok(ParsedExpr::leaf(Expr::Bool(text == "true")));
         }
@@ -2588,6 +2637,12 @@ impl<'s> Parser<'s> {
         }
         if number_token(text) || self.tokens[self.pos].character.is_some() {
             return self.literal(None);
+        }
+        if text.starts_with('"') {
+            let bytes = decode_byte_string(text)
+                .map_err(|error| diagnostic(self.source, self.tokens[self.pos].start, error))?;
+            self.pos += 1;
+            return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }
         let name = self.name_or_qualified_member()?;
         if self.parametric_arguments_end(self.pos, &["("]).is_some() {
@@ -2656,6 +2711,47 @@ impl<'s> Parser<'s> {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
         Ok(ParsedExpr::leaf(self.named_value(name)?))
+    }
+
+    /// A lexical binding or callable template can shadow a typed builtin.
+    fn type_builtin_at(&self, name: usize) -> bool {
+        let token = self.tokens[name];
+        matches!(
+            token.text,
+            "all_ones!"
+                | "bit_count"
+                | "element_count"
+                | "decode"
+                | "widening_cast"
+                | "checked_cast"
+        ) && !self.visible_names.contains(token.text)
+            && !self.visible_type_names.contains(token.text)
+            && !self
+                .callable_templates
+                .get(token.text)
+                .and_then(|binding| binding.direct)
+                .is_some_and(|start| {
+                    self.value_context != ValueContext::DslxItem || start <= token.start
+                })
+    }
+
+    /// Parse the type list and value arguments of a typed builtin.
+    fn type_builtin_call(&mut self) -> Result<ParsedExpr, String> {
+        let name = self.peek(0).to_owned();
+        self.pos += 2;
+        let mut height = 0;
+        let types = self.list(">", |parser| {
+            let ty = parser.parsed_ty(true)?;
+            height = height.max(ty.depth);
+            Ok(ty.value)
+        })?;
+        self.expect("(")?;
+        let args = self.list(")", |parser| {
+            let arg = parser.expr()?;
+            height = height.max(arg.height);
+            Ok(arg.value)
+        })?;
+        self.compose(height, Expr::TypeBuiltin { name, types, args })
     }
 
     /// Read actuals after the opening angle and include their heights in the
@@ -2808,12 +2904,41 @@ impl<'s> Parser<'s> {
             let token = self.tokens.get(index)?;
             let offset = index - start;
             index = self
-                .parametric_arguments_end(index, &["("])
+                .type_builtin_arguments_end(index)
+                .or_else(|| self.parametric_arguments_end(index, &["("]))
                 .or_else(|| self.struct_arguments_end(index))
                 .unwrap_or(index)
                 + 1;
             Some((offset, token))
         })
+    }
+
+    /// Skip a typed builtin's annotation list when looking for outer commas.
+    fn type_builtin_arguments_end(&self, angle: usize) -> Option<usize> {
+        if self.tokens[angle].text != "<"
+            || !self.type_builtin_at(angle.checked_sub(1)?)
+            || (angle >= 2 && self.tokens[angle - 2].text == "::")
+        {
+            return None;
+        }
+        let mut angles = 1usize;
+        let mut groups = 0usize;
+        for index in angle + 1..self.tokens.len() {
+            match self.tokens[index].text {
+                "(" | "[" | "{" => groups += 1,
+                ")" | "]" | "}" => groups = groups.checked_sub(1)?,
+                "<" if groups == 0 => angles += 1,
+                close @ (">" | ">>") if groups == 0 => {
+                    angles = angles.checked_sub(if close == ">>" { 2 } else { 1 })?;
+                    if angles == 0 {
+                        return (self.tokens[index + 1].text == "(").then_some(index);
+                    }
+                }
+                "" | ";" if groups == 0 => break,
+                _ => { /* Other tokens do not delimit the type argument list. */ }
+            }
+        }
+        None
     }
 
     /// Distinguish the typed zero intrinsic from a visible callback template
@@ -3448,6 +3573,77 @@ mod tests {
 
     fn names<const N: usize>(names: [&str; N]) -> [Expr; N] {
         names.map(|name| Expr::Name(name.to_owned()))
+    }
+
+    #[test]
+    fn typed_builtins_keep_aggregate_annotations_and_shadowed_comparisons() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn custom<N: u32>(x: u8) -> u8 { x + (N as u8) }
+fn widths(x: u8) -> (u32, s16) {
+    (bit_count<(u8, lib::Packet<2, 3>)>(), widening_cast<s16, u8>(x))
+}
+fn shadow(bit_count: u8, x: u8) -> bool { bit_count < x }
+fn decode<N: u32>(x: u8) -> u8 { custom<N>(x) }
+fn local(x: u8) -> u8 { decode<1>(x) }
+block mapped(clk) -> lib::Packet<2, 3>[2] {
+    map(all_ones!<lib::Packet<2, 3>[2]>(), |x| x)
+}
+"#,
+        )?;
+        let Expr::Tuple(values) = &module.functions[1].body else {
+            panic!("expected a tuple of builtins");
+        };
+        let Expr::TypeBuiltin { name, types, args } = &values[0] else {
+            panic!("expected a typed builtin");
+        };
+        assert_eq!(name, "bit_count");
+        assert!(args.is_empty());
+        let [Type::Tuple(fields)] = types.as_slice() else {
+            panic!("expected a tuple type argument");
+        };
+        assert_eq!(
+            fields[1],
+            Type::Applied {
+                name: "lib::Packet".into(),
+                args: vec![2, 3]
+            }
+        );
+        assert!(matches!(&values[1], Expr::TypeBuiltin { name, types, args }
+            if name == "widening_cast" && types.len() == 2 && args == &names(["x"])));
+        assert!(matches!(
+            module.functions[2].body,
+            Expr::Binary {
+                op: BinaryOp::Lt,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&module.functions[4].body, Expr::ParametricCall { name, .. } if name == "decode")
+        );
+        assert!(matches!(module.blocks[0].output, Expr::Map(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn strings_preserve_escaped_and_utf8_bytes() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+const STRING = "é,\n\x00\"\u{1F410}";
+block top(clk) -> u8 { configured_value_or("a\\b", u8:0) }
+"#,
+        )?;
+        assert_eq!(
+            module.constants[0].value,
+            Expr::ByteString("é,\n\0\"🐐".as_bytes().to_vec())
+        );
+        let Expr::Call { args, .. } = &module.blocks[0].output else {
+            panic!("expected a call");
+        };
+        assert_eq!(args[0], Expr::ByteString(b"a\\b".to_vec()));
+        assert!(parse_module(r#"const BAD = "\x1";"#).is_err());
+        assert!(parse_module(r#"const EMPTY = "";"#).is_err());
+        Ok(())
     }
 
     #[test]
