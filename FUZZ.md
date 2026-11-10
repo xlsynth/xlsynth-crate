@@ -723,6 +723,30 @@ XLSYNTH_LEAN=/path/to/lean cargo fuzz run \
   fuzz_gate_fn_lean_eval -- -timeout=30 -max_len=2048
 ```
 
+### xlsynth-lean/fuzz/fuzz_targets/fuzz_dslx_parametric_calls.rs
+
+Generates nested DSLX calls from `g` through `outer<A, B>` to `inner<Z>` and
+compares the emitted readable Lean caller with native DSLX constant evaluation.
+The focused templates concatenate nibbles or square a parametric value and
+subtract a runtime argument. They vary formal-parameter order, body bindings,
+one to three ordinary arguments, and value parameters. Every result includes
+the inner result, and every program repeats its first call after intervening
+calls. Concat cases exercise all six permutations of three
+sampled nibbles, including collisions. Arithmetic cases cover all 16-bit input
+patterns with unsigned, wrapping arithmetic. This surfaces incorrect forwarding,
+specialization reuse, argument order, and emitted caller wiring.
+
+Set `XLSYNTH_LEAN` to the Lean 4.34.1 executable and use an XLS DSO matching the
+checked-source APIs. Generated programs are valid by construction, so checking,
+emission, elaboration, and result mismatches all fail the sample. Each sample
+elaborates the executable model and checks two runtime input sets. Correspondence
+proofs are exercised separately by the native Lean tests.
+
+```sh
+cd xlsynth-lean/fuzz
+cargo fuzz run --sanitizer none fuzz_dslx_parametric_calls -- -timeout=60 -max_len=11
+```
+
 ### xlsynth-lean/fuzz/fuzz_targets/fuzz_block_lean_eval.rs
 
 Generates a sequential PIR block with synchronous reset and optional load

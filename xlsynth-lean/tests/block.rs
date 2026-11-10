@@ -29,7 +29,7 @@ fn check_block(package: &Package, client: &str) {
     let block = write_to(package, package.get_top_block().unwrap(), &name, root).unwrap();
     let proof = root.join("Client.lean");
     std::fs::write(&proof, format!("import XlsBlock\n{client}")).unwrap();
-    compile_project(root, [block, proof]);
+    compile_project(root, [block, proof]).unwrap();
 }
 
 // Verifies: Each indexed dimension contributes one Lean vector operation.
@@ -385,7 +385,8 @@ example : selected 3 (1, 2, ()) (4, 8, ()) = (5, 10, ()) := by decide
             root.join("Generated/Swap.lean"),
             client,
         ],
-    );
+    )
+    .unwrap();
 }
 
 // Verifies: Named, top, and sole-block selection, including invalid choices.
