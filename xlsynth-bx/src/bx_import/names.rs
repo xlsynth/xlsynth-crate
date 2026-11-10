@@ -629,6 +629,38 @@ impl<'a> Scope<'a> {
         exprs.iter().map(|expr| self.expr(expr)).collect()
     }
 
+    /// Rewrite a match pattern's literals while preserving its tuple shape.
+    fn match_pattern(
+        &mut self,
+        pattern: &MatchPattern,
+        depth: usize,
+    ) -> Result<MatchPattern, String> {
+        if depth > MAX_SYNTAX_DEPTH {
+            return Err(format!(
+                "BX import pattern exceeds {MAX_SYNTAX_DEPTH} levels"
+            ));
+        }
+        Ok(match pattern {
+            MatchPattern::Wildcard => MatchPattern::Wildcard,
+            MatchPattern::Literal(value) => MatchPattern::Literal(self.expr(value)?),
+            MatchPattern::Range {
+                start,
+                end,
+                inclusive,
+            } => MatchPattern::Range {
+                start: self.expr(start)?,
+                end: self.expr(end)?,
+                inclusive: *inclusive,
+            },
+            MatchPattern::Tuple(fields) => MatchPattern::Tuple(
+                fields
+                    .iter()
+                    .map(|field| self.match_pattern(field, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
+    }
+
     /// Rewrite free references without changing the binders or the shape of the
     /// expression.
     fn expr(&mut self, expr: &Expr) -> Result<Expr, String> {
@@ -857,23 +889,7 @@ impl<'a> Scope<'a> {
                         let patterns = arm
                             .patterns
                             .iter()
-                            .map(|p| {
-                                Ok(match p {
-                                    MatchPattern::Wildcard => MatchPattern::Wildcard,
-                                    MatchPattern::Literal(value) => {
-                                        MatchPattern::Literal(self.expr(value)?)
-                                    }
-                                    MatchPattern::Range {
-                                        start,
-                                        end,
-                                        inclusive,
-                                    } => MatchPattern::Range {
-                                        start: self.expr(start)?,
-                                        end: self.expr(end)?,
-                                        inclusive: *inclusive,
-                                    },
-                                })
-                            })
+                            .map(|pattern| self.match_pattern(pattern, 1))
                             .collect::<Result<_, String>>()?;
                         Ok(MatchArm {
                             patterns,

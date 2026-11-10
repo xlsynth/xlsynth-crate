@@ -10,7 +10,7 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{Expr, MatchArm, MatchPattern, Type};
 use crate::infer_literal::check_inferred_signed_width;
-use crate::typed::{CheckedEnum, ScalarPattern, TypedExpr, TypedExprKind, bits};
+use crate::typed::{CheckedEnum, TypedExpr, TypedExprKind, TypedMatchPattern, bits};
 
 /// Disjoint, half-open gaps in the unsigned bit-pattern space, plus the
 /// nonempty source intervals needed to distinguish exact duplicates.
@@ -92,6 +92,11 @@ fn next_literal(
 ) -> Result<IrBits, String> {
     check_inferred_signed_width(&[source], subject_ty, None)?;
     let value = literals.next().ok_or("missing checked pattern literal")?;
+    pattern_bits(value, subject_ty)
+}
+
+/// Extract a checked literal at the type of the value it will match.
+pub(super) fn pattern_bits(value: TypedExpr, subject_ty: &Type) -> Result<IrBits, String> {
     if !super::compatible(&value.ty, subject_ty) {
         return Err(format!(
             "match pattern has type {}, expected {subject_ty}",
@@ -104,6 +109,16 @@ fn next_literal(
     }
 }
 
+/// Empty ranges never select their arm or create a dependency on its result.
+pub(super) fn nonempty_range(start: &IrBits, end: &IrBits, inclusive: bool, signed: bool) -> bool {
+    (inclusive && start == end)
+        || if signed {
+            start.slt(end)
+        } else {
+            start.ult(end)
+        }
+}
+
 /// Check nominal alternatives against the declared encodings. XLS IR uses
 /// the last source arm as its default even if an earlier arm exhausts the
 /// enum; this is observable when hardware supplies an undeclared encoding.
@@ -112,7 +127,7 @@ pub(super) fn check_enum_patterns(
     subject_ty: &Type,
     arms: &[MatchArm],
     mut literals: impl Iterator<Item = TypedExpr>,
-) -> Result<Vec<Vec<ScalarPattern>>, String> {
+) -> Result<Vec<Vec<TypedMatchPattern>>, String> {
     let mut seen = HashSet::new();
     let mut saw_wildcard = false;
     let mut checked = Vec::with_capacity(arms.len());
@@ -138,9 +153,9 @@ pub(super) fn check_enum_patterns(
                     if !seen.insert(value.clone()) {
                         return Err("exact-duplicate match pattern".into());
                     }
-                    patterns.push(ScalarPattern::Literal(value));
+                    patterns.push(TypedMatchPattern::Literal(value));
                 }
-                MatchPattern::Literal(_) | MatchPattern::Range { .. } => {
+                MatchPattern::Literal(_) | MatchPattern::Range { .. } | MatchPattern::Tuple(_) => {
                     return Err(format!(
                         "enum match pattern must name a value of {subject_ty}"
                     ));
@@ -148,7 +163,7 @@ pub(super) fn check_enum_patterns(
             }
         }
         checked.push(if unconditional {
-            vec![ScalarPattern::Wildcard]
+            vec![TypedMatchPattern::Wildcard]
         } else {
             patterns
         });
@@ -166,7 +181,7 @@ pub(super) fn check_patterns(
     subject_ty: &Type,
     arms: &[MatchArm],
     mut literals: impl Iterator<Item = TypedExpr>,
-) -> Result<Vec<Vec<ScalarPattern>>, String> {
+) -> Result<Vec<Vec<TypedMatchPattern>>, String> {
     let (signed, width) = bits(subject_ty)
         .ok_or_else(|| format!("scalar match requires a bits or bool subject, got {subject_ty}"))?;
     let mut coverage = Coverage::new(width);
@@ -182,12 +197,12 @@ pub(super) fn check_patterns(
                     }
                     coverage.saw_wildcard = true;
                     coverage.remaining.clear();
-                    ScalarPattern::Wildcard
+                    TypedMatchPattern::Wildcard
                 }
                 MatchPattern::Literal(source) => {
                     let value = next_literal(source, &mut literals, subject_ty)?;
                     coverage.add_interval(&value, &value)?;
-                    ScalarPattern::Literal(value)
+                    TypedMatchPattern::Literal(value)
                 }
                 MatchPattern::Range {
                     start,
@@ -196,14 +211,7 @@ pub(super) fn check_patterns(
                 } => {
                     let start = next_literal(start, &mut literals, subject_ty)?;
                     let end = next_literal(end, &mut literals, subject_ty)?;
-                    let ascending = if signed {
-                        start.slt(&end)
-                    } else {
-                        start.ult(&end)
-                    };
-                    if !ascending && !(*inclusive && start == end) {
-                        // Empty ranges never select their arm or create a
-                        // hardware dependency on its result.
+                    if !nonempty_range(&start, &end, *inclusive, signed) {
                         continue;
                     }
                     if *inclusive {
@@ -212,16 +220,19 @@ pub(super) fn check_patterns(
                         let one = IrBits::make_ubits(width, 1).map_err(|e| e.to_string())?;
                         coverage.add_interval(&start, &end.sub(&one))?;
                     }
-                    ScalarPattern::Range {
+                    TypedMatchPattern::Range {
                         start,
                         end,
                         inclusive: *inclusive,
                     }
                 }
+                MatchPattern::Tuple(_) => {
+                    return Err("tuple pattern requires a tuple subject".into());
+                }
             });
         }
         if !was_exhaustive && coverage.remaining.is_empty() {
-            patterns = vec![ScalarPattern::Wildcard];
+            patterns = vec![TypedMatchPattern::Wildcard];
         }
         checked.push(patterns);
     }

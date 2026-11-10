@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use super::library_item;
 use crate::typed::{
-    CheckedBlock, CheckedModule, CheckedStmt, ScalarPattern, TypedExpr, TypedExprKind as K,
-    TypedIterable,
+    CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind as K, TypedIterable,
+    TypedMatchPattern,
 };
 
 impl CheckedModule {
@@ -140,7 +140,7 @@ impl Dependencies {
                             pending.push(&arm.value);
                         }
                         // The first exhaustive arm becomes the lowered default.
-                        if matches!(arm.patterns.as_slice(), [ScalarPattern::Wildcard]) {
+                        if arm.patterns.iter().any(TypedMatchPattern::is_irrefutable) {
                             break;
                         }
                     }

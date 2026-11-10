@@ -21,6 +21,7 @@ mod module_constants;
 mod module_graph;
 mod scalar_match;
 mod struct_parametrics;
+mod tuple_match;
 mod unroll_types;
 
 pub use array_concat::check_array_concat;
@@ -41,6 +42,7 @@ pub use module_constants::check_module_constants;
 pub use module_graph::check_module_graph;
 pub use scalar_match::check_scalar_match;
 pub use struct_parametrics::check_struct_parametrics;
+pub use tuple_match::check_tuple_match;
 pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible

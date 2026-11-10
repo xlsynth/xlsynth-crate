@@ -6,6 +6,9 @@ use std::{collections::BTreeSet, fmt};
 
 use crate::BxWarningKind;
 
+mod source_nodes;
+pub(crate) use source_nodes::SourceNode;
+
 // Generate both directions of the spelling map from the same operator list.
 macro_rules! operator_enum {
     ($(#[$attribute:meta])* $name:ident { $($variant:ident => $spelling:literal),+ $(,)? }) => {
@@ -215,8 +218,8 @@ pub struct MatchArm {
     pub value: Expr,
 }
 
-/// A wildcard, scalar literal, value parametric, module constant, enum member,
-/// or literal range.
+/// A tuple of patterns or a leaf matching a wildcard, literal, value
+/// parametric, module constant, enum member, or literal range.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum MatchPattern {
     Wildcard,
@@ -226,28 +229,63 @@ pub enum MatchPattern {
         end: Expr,
         inclusive: bool,
     },
+    Tuple(Vec<MatchPattern>),
 }
 
 impl MatchPattern {
+    /// Visit each pattern node in source order, starting at depth one.
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = (usize, &Self)> {
+        let mut pending: Vec<std::slice::Iter<'_, Self>> = Vec::new();
+        let mut next = Some(self);
+        std::iter::from_fn(move || {
+            loop {
+                if let Some(pattern) = next.take() {
+                    let depth = pending.len() + 1;
+                    if let Self::Tuple(fields) = pattern {
+                        pending.push(fields.iter());
+                    }
+                    return Some((depth, pattern));
+                }
+                next = pending.last_mut()?.next();
+                if next.is_none() {
+                    pending.pop();
+                }
+            }
+        })
+    }
+
     /// Visit literal expressions in the order they occur in the pattern.
     pub(crate) fn literals(&self) -> impl Iterator<Item = &Expr> {
-        match self {
-            Self::Wildcard => [None, None],
-            Self::Literal(value) => [Some(value), None],
-            Self::Range { start, end, .. } => [Some(start), Some(end)],
-        }
-        .into_iter()
-        .flatten()
+        self.nodes()
+            .flat_map(|(_, pattern)| match pattern {
+                Self::Wildcard | Self::Tuple(_) => [None, None],
+                Self::Literal(value) => [Some(value), None],
+                Self::Range { start, end, .. } => [Some(start), Some(end)],
+            })
+            .flatten()
     }
 
     /// Visit the same expressions when capturing their type annotations.
     pub(crate) fn literals_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
-        match self {
-            Self::Wildcard => [None, None],
-            Self::Literal(value) => [Some(value), None],
-            Self::Range { start, end, .. } => [Some(start), Some(end)],
-        }
-        .into_iter()
+        let mut pending: Vec<std::slice::IterMut<'_, Self>> = Vec::new();
+        let mut next = Some(self);
+        std::iter::from_fn(move || {
+            loop {
+                if let Some(pattern) = next.take() {
+                    match pattern {
+                        Self::Wildcard => { /* No literal expressions to visit. */ }
+                        Self::Literal(value) => return Some([Some(value), None]),
+                        Self::Range { start, end, .. } => return Some([Some(start), Some(end)]),
+                        Self::Tuple(fields) => pending.push(fields.iter_mut()),
+                    }
+                }
+                next = pending.last_mut()?.next();
+                if next.is_none() {
+                    pending.pop();
+                }
+            }
+        })
+        .flatten()
         .flatten()
     }
 }
