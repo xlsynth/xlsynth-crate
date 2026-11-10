@@ -42,6 +42,7 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
+mod timing;
 mod tuple_match;
 mod unroll;
 mod value_parametrics;
@@ -1728,7 +1729,7 @@ pub(crate) fn check_sources(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
-    let warnings = warning_collector.finish(module, linked, |name| declarations.is_block(name));
+    let warnings = warning_collector.finish(root, linked, |name| declarations.is_block(name));
     let mut checked = CheckedModule {
         warnings,
         structs: structs
@@ -2305,10 +2306,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             clock: block.clock.clone(),
             reset: block.reset.clone(),
             params: interface.params.clone(),
+            input_cycles: block.input_cycles.clone(),
             result: interface.result.clone(),
+            output_cycles: block.output_cycles.clone(),
             statements: c.statements,
             output,
         };
+        timing::check_outputs(&block, &interface.outputs, &c.outputs, c.structs)?;
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -4575,13 +4579,33 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BodyChecker, BodyKind, CheckedStmt, ConstantBinding, Declarations, ImportOptions,
-        ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
+        BodyChecker, BodyKind, CheckedModule, CheckedStmt, ConstantBinding, Declarations,
+        ImportOptions, ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
     };
     use crate::ast::{BindingPattern, Expr, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    fn check_bx(source: &str) -> Result<CheckedModule, String> {
+        check_module(&parse_module(source)?)
+    }
+
+    const TAP_PORTS: &str = "Ports { live: x, saved: q }";
+
+    /// Common two-port pipeline used to check result annotations.
+    fn check_tap(annotation: &str, result: &str) -> Result<CheckedModule, String> {
+        check_bx(&format!(
+            r#"
+struct Ports {{ saved: u8, live: u8 }}
+block tap(clk, x: u8) -> Ports {annotation} {{
+    reg q: u8;
+    q := x;
+    {result}
+}}
+"#
+        ))
+    }
 
     #[test]
     fn array_casts_share_the_function_expansion_budget() -> Result<(), String> {
@@ -4663,6 +4687,389 @@ fn fold(seed: (u8, u8)) -> (u8, u8) {
             error.contains("iteration 0") && error.contains("function expansion limit"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn declared_output_cycle_must_match_the_inferred_cycle() {
+        let check_delay = |cycle| {
+            let source = format!("block b(clk, x: u8) -> u8 @{cycle} {{ reg q: u8; q := x; q }}");
+            check_bx(&source)
+        };
+        check_delay(1).unwrap();
+        assert_eq!(
+            check_delay(0).unwrap_err(),
+            "block 'b': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn uniform_output_cycle_applies_to_each_field() {
+        check_tap("@1", "Ports { saved: q, live: q }").unwrap();
+        assert_eq!(
+            check_tap("@1", TAP_PORTS).unwrap_err(),
+            "block 'tap': output 'live': expected cycle 1, got cycle 0"
+        );
+    }
+
+    #[test]
+    fn uniform_output_cycle_can_check_an_aggregate_input_as_a_whole() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block pass(clk, p: Ports @1) -> Ports @1 { p }
+"#;
+        check_bx(source).unwrap();
+    }
+
+    #[test]
+    fn field_projection_inherits_the_aggregate_cycle() {
+        let check_pick = |cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block pick(clk, p: Ports @1) -> u8 @{cycle} {{ p.saved }}
+"#
+            );
+            check_bx(&source)
+        };
+        check_pick(1).unwrap();
+        assert_eq!(
+            check_pick(0).unwrap_err(),
+            "block 'pick': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn field_projection_follows_the_selected_initializer() {
+        let check_pick = |field, cycle| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+struct Envelope {{ tag: u8, ports: Ports }}
+block pick(clk, x: u8) -> u8 @{cycle} {{
+    reg q: u8;
+    q := x;
+    let fields = Ports {{ saved: q, live: x }};
+    let envelope = Envelope {{ tag: x, ports: fields }};
+    let p = envelope;
+    p.ports.{field}
+}}
+"#
+            );
+            check_bx(&source)
+        };
+        check_pick("saved", 1).unwrap();
+        check_pick("live", 0).unwrap();
+        assert_eq!(
+            check_pick("live", 1).unwrap_err(),
+            "block 'pick': expected cycle 1, got cycle 0"
+        );
+    }
+
+    #[test]
+    fn field_projection_adds_the_register_cycle() {
+        let check_pick = |saved| {
+            let source = format!(
+                r#"
+struct Ports {{ saved: u8, live: u8 }}
+block pick(clk, x: u8) -> Ports @(saved: 2, live: 1) {{
+    reg q: u8;
+    reg p: Ports;
+    q := x;
+    p := Ports {{ saved: {saved}, live: x }};
+    Ports {{ saved: p.saved, live: p.live }}
+}}
+"#
+            );
+            check_bx(&source)
+        };
+        check_pick("q").unwrap();
+        check_pick("p.live").unwrap(); // x -> p.live @1 -> p.saved @2
+        assert_eq!(
+            check_pick("p.saved").unwrap_err(),
+            "block 'pick': output 'saved': timing feedback through 'p' is unsupported"
+        );
+    }
+
+    #[test]
+    fn declared_output_cycles_match_fields_by_port_name() {
+        check_tap("@(live: 0, saved: 1)", TAP_PORTS).unwrap();
+        assert_eq!(
+            check_tap("@(live: 0, saved: 0)", TAP_PORTS).unwrap_err(),
+            "block 'tap': output 'saved': expected cycle 0, got cycle 1"
+        );
+    }
+
+    #[test]
+    fn forwarding_a_registered_struct_checks_the_same_fields_as_rebuilding_it() {
+        for result in ["q", "Payload { data: q.data, tag: q.tag }"] {
+            let source = format!(
+                r#"
+struct Payload {{ data: u8, tag: u8 }}
+struct Bus {{ payload: Payload }}
+block b(clk, x: u8) -> Bus @1 {{
+    reg q: Payload;
+    q := Payload {{ data: x, tag: u8:7 }};
+    Bus {{ payload: {result} }}
+}}
+"#
+            );
+            assert_eq!(
+                check_bx(&source).unwrap_err(),
+                "block 'b': output 'payload': cannot infer output cycle for this expression"
+            );
+            check_bx(&source.replace("tag: u8:7", "tag: x")).unwrap();
+        }
+    }
+
+    #[test]
+    fn forwarding_a_registered_tuple_field_uses_its_write_enable() {
+        let source = r#"
+struct Bus { payload: (u8, u8) }
+block b(clk, en: bool @2, x: u8 @2) -> Bus @3 {
+    reg q: (u8, (u8, u8));
+    if en { q := (x, (x, u8:7)); }
+    Bus { payload: q.1 }
+}
+"#;
+        check_bx(source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("if en", "if true")).unwrap_err(),
+            "block 'b': output 'payload': cannot infer output cycle for this expression"
+        );
+    }
+
+    #[test]
+    fn long_timing_dependencies_are_independent_of_operand_order() {
+        let mut aliases = String::from("let v0 = x;");
+        let mut pipeline = String::from("reg q0: u8; q0 := x;");
+        for i in 1..256 {
+            let prev = i - 1;
+            aliases.push_str(&format!("let v{i} = v{prev};"));
+            pipeline.push_str(&format!("reg q{i}: u8; q{i} := q{prev} + u8:1;"));
+        }
+        for sum in ["v1 + v255", "v255 + v1"] {
+            check_bx(&format!(
+                "block b(clk, x: u8) -> u8 @0 {{ {aliases} {sum} }}"
+            ))
+            .unwrap();
+        }
+        let source = format!("block b(clk, x: u8) -> u8 @256 {{ {pipeline} q255 }}");
+        check_bx(&source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("@256", "@255")).unwrap_err(),
+            "block 'b': expected cycle 255, got cycle 256"
+        );
+    }
+
+    #[test]
+    fn per_port_timing_follows_aggregate_let_bindings() {
+        let result = "let ports = Ports { saved: q, live: x }; let result = ports; result";
+        check_tap("@(saved: 1, live: 0)", result).unwrap();
+    }
+
+    #[test]
+    fn per_port_timing_projects_a_returned_register() {
+        let result = r#"
+    reg p: Ports;
+    p := Ports { saved: q, live: x };
+    p
+"#;
+        check_tap("@(live: 1, saved: 2)", result).unwrap();
+        assert_eq!(
+            check_tap("@(live: 1, saved: 1)", result).unwrap_err(),
+            "block 'tap': output 'saved': expected cycle 1, got cycle 2"
+        );
+    }
+
+    #[test]
+    fn output_cycle_annotations_reject_unknown_ports() {
+        assert_eq!(
+            check_tap("@(svaed: 1)", TAP_PORTS).unwrap_err(),
+            "block 'tap': unknown output port 'svaed' in cycle annotation"
+        );
+    }
+
+    #[test]
+    fn output_cycle_annotations_require_every_port() {
+        assert_eq!(
+            check_tap("@(saved: 1)", TAP_PORTS).unwrap_err(),
+            "block 'tap': missing cycle annotation for output port 'live'"
+        );
+    }
+
+    #[test]
+    fn declared_input_cycles_seed_timing_inference() {
+        let source = r#"
+block b(clk, x: u8, y: u8 @1) -> u8 @1 {
+    reg q: u8;
+    q := x;
+    q + y
+}
+"#;
+        check_bx(source).unwrap();
+    }
+
+    #[test]
+    fn let_binding_inherits_the_cycle_of_its_initializer() {
+        let source = "block b(clk, x: u8) -> u8 @1 { reg q: u8; let saved = q; q := x; saved }";
+        check_bx(source).unwrap();
+    }
+
+    #[test]
+    fn binary_operands_must_agree_on_cycle() {
+        let check_sum = |sum| {
+            let source = format!("block b(clk, x: u8) -> u8 @1 {{ reg q: u8; q := x; {sum} }}");
+            check_bx(&source)
+        };
+        check_sum("q + q").unwrap();
+        check_sum("q + u8:1").unwrap();
+        check_sum("u8:1 + q").unwrap();
+        assert_eq!(
+            check_sum("q + x").unwrap_err(),
+            "block 'b': operator '+' combines cycle 1 with cycle 0"
+        );
+    }
+
+    #[test]
+    fn guarded_write_checks_enable_against_data_at_the_write_edge() {
+        let check_capture = |enable_cycle| {
+            let source = format!(
+                r#"
+block capture(clk, en: bool @{enable_cycle}, x: u8 @2, y: u8 @2) -> u8 @3 {{
+    reg q: u8;
+    if en {{ q := x + y; }}
+    q
+}}
+"#
+            );
+            check_bx(&source)
+        };
+        assert_eq!(
+            check_capture(1).unwrap_err(),
+            "block 'capture': write to 'q' has guard at cycle 1 and data at cycle 2"
+        );
+        check_capture(2).unwrap();
+    }
+
+    #[test]
+    fn held_register_keeps_its_stage_at_later_reads() {
+        let source = r#"
+block add_held(clk, en: bool, x: u8, r: u8 @1) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q + r
+}
+"#;
+        check_bx(source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("r: u8 @1", "r: u8 @0")).unwrap_err(),
+            "block 'add_held': operator '+' combines cycle 1 with cycle 0"
+        );
+        let registered = source
+            .replace("-> u8 @1", "-> u8 @2")
+            .replace("    q + r", "    reg m: u8;\n    m := q + r;\n    m");
+        check_bx(&registered).unwrap();
+    }
+
+    #[test]
+    fn nested_guards_and_multiple_writes_resolve_local_bindings_in_scope() {
+        let source = r#"
+block b(clk, en: bool, x: u8, late_en: bool @1, y: u8 @1)
+    -> (u8, u8, u8, u8) @(out_0: 1, out_1: 1, out_2: 2, out_3: 1) {
+    reg a: u8;
+    reg b0: u8;
+    reg c: u8;
+    if en {
+        let local = x;
+        let inner = local == u8:1;
+        if inner { a := local; }
+        b0 := local;
+    }
+    if late_en {
+        let local = y;
+        c := local;
+    }
+    let local = y;
+    (a, b0, c, local)
+}
+"#;
+        check_bx(source).unwrap();
+        let bad = source.replace("if inner", "if late_en");
+        assert_eq!(
+            check_bx(&bad).unwrap_err(),
+            "block 'b': output 'out_0': nested write guards combine cycle 0 with cycle 1"
+        );
+    }
+
+    #[test]
+    fn guarded_constant_uses_the_enables_stage_and_checks_offset_overflow() {
+        let source = "block b(clk, en: bool @2) -> u8 @3 { reg q: u8; if en { q := u8:7; } q }";
+        check_bx(source).unwrap();
+        let overflow = source.replace("en: bool @2", &format!("en: bool @{}", u64::MAX));
+        assert_eq!(
+            check_bx(&overflow).unwrap_err(),
+            "block 'b': cycle offset overflow at 'q'"
+        );
+    }
+
+    #[test]
+    fn combinational_if_checks_the_select_and_both_data_inputs() {
+        let source =
+            "block b(clk, en: bool @1, x: u8 @1, y: u8 @1) -> u8 @1 { if en { x } else { y } }";
+        check_bx(source).unwrap();
+        assert_eq!(
+            check_bx(&source.replace("en: bool @1", "en: bool @0")).unwrap_err(),
+            "block 'b': if expression has condition at cycle 0 and data at cycle 1"
+        );
+        assert_eq!(
+            check_bx(&source.replace("y: u8 @1", "y: u8 @0")).unwrap_err(),
+            "block 'b': if branches combine cycle 1 with cycle 0"
+        );
+    }
+
+    #[test]
+    fn field_projection_checks_the_register_write_guard() {
+        let source = r#"
+struct Ports { saved: u8 }
+block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
+    reg q: Ports;
+    if en { q := Ports { saved: x }; }
+    q.saved
+}
+"#;
+        assert_eq!(
+            check_bx(source).unwrap_err(),
+            "block 'capture': write to 'q' has guard at cycle 1 and data at cycle 2"
+        );
+    }
+
+    #[test]
+    fn unary_and_cast_expressions_inherit_the_operand_cycle() {
+        let source = "block b(clk, x: u8) -> u16 @1 { reg q: u8; q := x; (!q) as u16 }";
+        check_bx(source).unwrap();
+    }
+
+    #[test]
+    fn annotated_blocks_require_an_inferred_output_cycle() {
+        check_bx("block b(clk, x: u8[2]) -> u8 { x[u1:0] }").unwrap();
+        let timed = "block b(clk, x: u8[2]) -> u8 @0 { x[u1:0] }";
+        assert_eq!(
+            check_bx(timed).unwrap_err(),
+            "block 'b': cannot infer output cycle for this expression"
+        );
+    }
+
+    #[test]
+    fn output_cycle_inference_rejects_register_feedback() {
+        for rhs in ["q", "q + x"] {
+            let source = format!("block b(clk, x: u8) -> u8 {{ reg q: u8; q := {rhs}; q }}");
+            check_bx(&source).unwrap();
+            let timed = source.replace("-> u8", "-> u8 @1");
+            assert_eq!(
+                check_bx(&timed).unwrap_err(),
+                "block 'b': timing feedback through 'q' is unsupported"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,10 @@
 
 //! Source-level representation of a BX module, before name and type checking.
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use crate::BxWarningKind;
 
@@ -596,6 +599,13 @@ pub struct SourcePosition {
     pub column: usize,
 }
 
+/// Declared cycle offsets for a block's output ports.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutputCycles {
+    Uniform(u64),
+    ByPort(BTreeMap<String, u64>),
+}
+
 /// A block definition, including its implicit timing domain and output
 /// expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -615,7 +625,11 @@ pub struct Block {
     pub clock: String,
     pub reset: Option<String>,
     pub params: Vec<Param>,
+    /// Explicit cycle offsets by data input name.
+    pub input_cycles: BTreeMap<String, u64>,
     pub result: Type,
+    /// Declared output timing, if the block opts into checking it.
+    pub output_cycles: Option<OutputCycles>,
     pub statements: Vec<Stmt>,
     pub output: Expr,
 }
@@ -651,6 +665,9 @@ impl UsePath {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// `#![require_block_timing]` requires output timing on this file's block
+    /// definitions.
+    pub require_block_timing: bool,
     /// Bound names in declaration order, including each leaf of a use tree.
     pub declaration_order: Vec<String>,
     pub uses: Vec<UsePath>,

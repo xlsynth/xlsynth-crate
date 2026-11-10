@@ -13,8 +13,8 @@ use crate::BxWarningKind;
 use crate::ast::{
     BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr,
     ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, SourcePosition, Stmt, StructDef, Type, UnaryOp,
-    UnrollFor, UsePath, WidthSliceType,
+    MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourcePosition, Stmt, StructDef,
+    Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -281,7 +281,7 @@ fn lex(
             || rest.get(..2).and_then(BinaryOp::from_spelling).is_some()
         {
             i += 2;
-        } else if b"#(){}[]:,.=;!&|^+-*/%<>".contains(&b) {
+        } else if b"#(){}[]:,.=;!&|^+-*/%<>".contains(&b) || (dialect == Dialect::Bx && b == b'@') {
             i += 1;
         } else {
             return Err(diagnostic(source, start, "unexpected character"));
@@ -774,6 +774,13 @@ impl<'s> Parser<'s> {
                 "place a BX warning attribute before the block definition, including its optional 'pub'",
             );
         }
+        if self.dialect == Dialect::Bx && token.text == "#" && self.peek(1) == "!" {
+            return diagnostic(
+                self.source,
+                token.start,
+                "write #![...] at the top level of the BX file",
+            );
+        }
         let found = if token.text.is_empty() {
             "end of input"
         } else {
@@ -883,10 +890,12 @@ impl<'s> Parser<'s> {
                 {
                     self.block_map_shadowed = true;
                 }
+                // A use can start the file or follow a declaration or module
+                // attribute.
                 "use"
                     if depth == 0
                         && (self.pos == 1
-                            || matches!(self.tokens[self.pos - 2].text, ";" | "}")) =>
+                            || matches!(self.tokens[self.pos - 2].text, ";" | "}" | "]")) =>
                 {
                     self.use_tree(&mut paths, Some(&mut bindings))?;
                     self.expect(";")?;
@@ -945,7 +954,10 @@ impl<'s> Parser<'s> {
         let mut offset = 0;
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let allowed_warnings = self.block_warning_attributes()?;
+            let allowed_warnings = self.attributes(&mut module)?;
+            if self.peek(0).is_empty() && allowed_warnings.is_empty() {
+                break;
+            }
             let public = self.eat("pub");
             let declares_type = matches!(self.peek(0), "enum" | "struct");
             if self.eat("block") {
@@ -1006,7 +1018,9 @@ impl<'s> Parser<'s> {
                     module.externs.push(function);
                 } else if self.eat("block") {
                     let name = self.ident()?;
-                    let signature = self.block_signature(name)?;
+                    // TODO: 2026-11-06 Parse extern input and output cycles
+                    // for checking timing across block instances.
+                    let signature = self.block_signature(name, Self::param)?;
                     module.declaration_order.push(signature.name.clone());
                     self.expect(";")?;
                     module.extern_blocks.push(signature);
@@ -1032,12 +1046,22 @@ impl<'s> Parser<'s> {
         Ok(module)
     }
 
-    /// Read per-block warning suppressions before an optional visibility
-    /// modifier.
-    fn block_warning_attributes(&mut self) -> Result<BTreeSet<BxWarningKind>, String> {
+    /// Record file-wide attributes and return warning allowances for the next
+    /// block.
+    fn attributes(&mut self, module: &mut Module) -> Result<BTreeSet<BxWarningKind>, String> {
         let mut allowed = BTreeSet::new();
         while self.eat("#") {
+            let module_attribute = self.eat("!");
             self.expect("[")?;
+            if module_attribute {
+                self.expect("require_block_timing")?;
+                self.expect("]")?;
+                module.require_block_timing = true;
+                continue;
+            }
+            if self.peek(0) == "require_block_timing" {
+                return Err(self.error("use #![require_block_timing] at module scope"));
+            }
             self.expect("allow")?;
             self.expect("(")?;
             if self.peek(0) == ")" {
@@ -1461,7 +1485,13 @@ impl<'s> Parser<'s> {
     }
 
     /// Parse the common port list and result of a defined or external block.
-    fn block_signature(&mut self, name: String) -> Result<ExternBlock, String> {
+    /// Externs pass the ordinary typed-port parser. A defined block's
+    /// `data_param` also records an optional stage, as in `r: u8 @1`.
+    fn block_signature(
+        &mut self,
+        name: String,
+        mut data_param: impl FnMut(&mut Self) -> Result<Param, String>,
+    ) -> Result<ExternBlock, String> {
         self.expect("(")?;
         self.expect("clk")?;
         let clock = "clk".to_owned();
@@ -1479,7 +1509,7 @@ impl<'s> Parser<'s> {
                 if matches!(parser.peek(0), "clk" | "rst") {
                     return Err(parser.error("clock and reset roles cannot be data ports"));
                 }
-                parser.param()
+                data_param(parser)
             })?;
         }
         self.expect("->")?;
@@ -1491,6 +1521,40 @@ impl<'s> Parser<'s> {
             params,
             result,
         })
+    }
+
+    /// Parse a decimal cycle number in an input or output annotation.
+    fn cycle_number(&mut self, port_kind: &str) -> Result<u64, String> {
+        let cycle = self.peek(0).parse::<u64>().map_err(|_| {
+            self.error(&format!(
+                "expected an unsigned 64-bit decimal {port_kind} cycle"
+            ))
+        })?;
+        self.pos += 1;
+        Ok(cycle)
+    }
+
+    /// Parse `@N` or `@(port: N, ...)` after the result type.
+    fn output_cycles(&mut self) -> Result<Option<OutputCycles>, String> {
+        if !self.eat("@") {
+            return Ok(None);
+        }
+        if !self.eat("(") {
+            return Ok(Some(OutputCycles::Uniform(self.cycle_number("output")?)));
+        }
+        let entries = self.list(")", |parser| {
+            let name = parser.ident()?;
+            parser.expect(":")?;
+            Ok((name, parser.cycle_number("output")?))
+        })?;
+        let mut cycles = BTreeMap::new();
+        for (name, cycle) in entries {
+            if cycles.contains_key(&name) {
+                return Err(self.error(&format!("duplicate output cycle for '{name}'")));
+            }
+            cycles.insert(name, cycle);
+        }
+        Ok(Some(OutputCycles::ByPort(cycles)))
     }
 
     /// Read block type, value, and callable formals in one namespace.
@@ -1561,7 +1625,15 @@ impl<'s> Parser<'s> {
     ) -> Result<Block, String> {
         let name = self.ident()?;
         let params = self.block_parametrics()?;
-        let signature = self.block_signature(name)?;
+        let mut input_cycles = BTreeMap::new();
+        let signature = self.block_signature(name, |parser| {
+            let param = parser.param()?;
+            if parser.eat("@") {
+                input_cycles.insert(param.name.clone(), parser.cycle_number("input")?);
+            }
+            Ok(param)
+        })?;
+        let output_cycles = self.output_cycles()?;
         self.expect("{")?;
         self.bind_local_name(&signature.name);
         for name in &params.type_params {
@@ -1598,7 +1670,9 @@ impl<'s> Parser<'s> {
             clock: signature.clock,
             reset: signature.reset,
             params: signature.params,
+            input_cycles,
             result: signature.result,
+            output_cycles,
             statements: body.statements,
             output: output.value,
         })
@@ -4015,6 +4089,14 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
     fn warning_attributes_reject_unknown_names_and_misplaced_allowances() {
         for (source, diagnostic) in [
             (
+                "#[require_block_timing] block b(clk) -> u8 { u8:0 }",
+                "use #![require_block_timing] at module scope",
+            ),
+            (
+                "block b(clk) -> u8 { #![require_block_timing] u8:0 }",
+                "write #![...] at the top level of the BX file",
+            ),
+            (
                 "#[allow(typo)] block b(clk) -> u8 { u8:0 }",
                 "unknown BX warning in #[allow(...)], found 'typo'",
             ),
@@ -5303,6 +5385,59 @@ block i(clk, x: u8) -> u8 { inst(x) }
     }
 
     #[test]
+    fn block_output_cycle_distinguishes_absent_from_explicit_zero() {
+        for (suffix, expected) in [
+            ("", None),
+            (" @0", Some(OutputCycles::Uniform(0))),
+            (" @3", Some(OutputCycles::Uniform(3))),
+        ] {
+            let source = format!("block b(clk, x: u8) -> u8{suffix} {{ x }}");
+            let module = parse_module(&source).unwrap();
+            assert_eq!(module.blocks[0].output_cycles, expected);
+        }
+    }
+
+    #[test]
+    fn block_output_cycles_parse_named_ports() {
+        let source = r#"
+struct Ports { saved: u8, live: u8 }
+block tap(clk, x: u8) -> Ports @(saved: 1, live: 0) {
+    reg q: u8;
+    q := x;
+    Ports { saved: q, live: x }
+}
+"#;
+        let module = parse_module(source).unwrap();
+        assert_eq!(
+            module.blocks[0].output_cycles,
+            Some(OutputCycles::ByPort(BTreeMap::from([
+                ("saved".to_owned(), 1),
+                ("live".to_owned(), 0),
+            ])))
+        );
+    }
+
+    #[test]
+    fn block_output_cycles_reject_duplicate_ports() {
+        let source = "block b(clk, x: u8) -> u8 @(saved: 1, saved: 0) { x }";
+        assert_eq!(
+            parse_module(source).unwrap_err(),
+            "1:49: duplicate output cycle for 'saved', found '{'"
+        );
+    }
+
+    #[test]
+    fn block_input_cycles_distinguish_absent_from_explicit_zero() {
+        let source = "block b(clk, x: u8, y: u8 @1, z: u8 @0) -> u8 @2 { x }";
+        let module = parse_module(source).unwrap();
+        let block = &module.blocks[0];
+        assert_eq!(block.input_cycles.get("x"), None);
+        assert_eq!(block.input_cycles.get("y"), Some(&1));
+        assert_eq!(block.input_cycles.get("z"), Some(&0));
+        assert_eq!(block.output_cycles, Some(OutputCycles::Uniform(2)));
+    }
+
+    #[test]
     fn distinguishes_a_guarded_update_from_a_final_if_expression() {
         let module = parse_module(
             r#"
@@ -5621,6 +5756,7 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
             "extern block lane(clk) -> bool { true }",
             "extern block lane(x: u8) -> bool;",
             "extern block lane(clk, rst: bool) -> bool;",
+            "extern block lane(clk, x: u8 @1) -> bool;",
             "extern block lane(clk) -> bool",
         ] {
             assert!(parse_module(bad).is_err(), "{bad}");

@@ -621,6 +621,77 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 - A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
 - A module with one concrete block declaration selects it as top. With multiple concrete declarations, a single concrete `pub block` selects the top. For other configurations, select the desired block on the returned package.
 
+### Pipeline stage annotations
+
+An output annotation such as `-> u8 @1` opts a block into stage checking. Data
+inputs default to `@0`. An input annotation such as `r: u8 @1` says the caller
+already supplies that input at stage 1.
+
+Put `#![require_block_timing]` at the top of a `.bx` file to require an output
+stage on every block defined there. A missing annotation emits
+`missing_block_timing`, which fails compilation by default. Imported files set
+their own policy. To exempt one block, put `#[allow(missing_block_timing)]`
+above its definition.
+
+```text
+#![require_block_timing]
+
+block add_held(clk, en: bool @0, x: u8 @0, r: u8 @1) -> u8 @1 {
+    reg q: u8;
+    if en { q := x; }
+    q + r
+}
+```
+
+The checker follows the output back to its inputs. A `let` adds zero stages,
+combinational operands must align, and a register adds one stage. Each write
+guard must align with the data at the write edge, including enclosing guards
+in nested `if` statements. In the example, `q` and `r` are both at stage 1.
+When `en` is low, `q` holds its previous value and the sum still responds to
+`r`. A stage annotation checks alignment in the datapath. The block's enable
+and valid signals determine which transactions actually advance.
+
+The checker follows names, unary and binary operators, casts, `if`
+expressions, and struct and tuple construction and field reads. A scalar
+literal such as `u8:7` can be used at any stage. With `const A = [u8:7];`,
+`A` can also be used at any stage because BX evaluates the constant before
+checking timing. Returning `[u8:7]` directly leaves an array expression whose
+stage BX cannot infer yet. Array indexing has the same limitation. For
+`x: u8[2]`, returning `x[u1:0]` gives `cannot infer output cycle for this expression` even though the index is constant.
+
+A uniform result such as `-> Ports @1` checks every output port at stage 1.
+For different stages, use `-> Ports @(live: 0, saved: 1)` and list every
+output port. A tuple's port names are `out_0`, `out_1`, and so on. A field
+read such as `p.saved` follows that field's driver. Each aggregate input
+supplies a single stage shared by its fields.
+
+A whole registered struct or tuple is checked field by field. For example,
+with `x: u8 @0` and `q := Payload { data: x, tag: u8:7 };`, `q.data` is
+`@1`. The literal supplies no stage for `q.tag`, so forwarding all of `q`
+cannot establish `@1`. If an `@0` enable guards that write, it supplies the
+stage for capturing the tag and both fields are `@1`.
+
+Register feedback such as `q := q + x;` is legal BX. Following a timed
+output back through that feedback currently produces a diagnostic. Timing
+through child block outputs and extern interfaces is also a follow-up.
+
+#### Related work
+
+Dahlia and Filament showed how hardware timing constraints can be checked
+at compile time. Dahlia catches resource conflicts such as two parallel
+reads that need the same memory port. Filament describes when a port's value
+is available relative to a component invocation, so it can catch a caller
+that reads a result one cycle too early.
+[Dahlia (PLDI 2020)](https://arxiv.org/abs/2004.04852) ·
+[Filament (PLDI 2023)](https://arxiv.org/abs/2304.10646)
+
+SUS's latency counting is a close precedent for BX's stage labels. SUS
+assigns a latency to each wire and can insert registers to align paths that
+meet at an operator. BX checks the registers the author wrote. In
+`add_held` above, declaring `r` at `@0` puts the two inputs to `q + r` at
+stages 1 and 0, and BX reports the mismatch at the adder.
+[Latency Counting in the SUS Language (LATTE 2024)](https://capra.cs.cornell.edu/latte24/paper/4.pdf)
+
 ### Calling a block
 
 An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.

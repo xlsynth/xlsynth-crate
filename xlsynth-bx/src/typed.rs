@@ -9,7 +9,7 @@ use xlsynth_pir::{
     ir_value_utils::{ir_bits_to_usize, ir_bits_to_usize_in_range},
 };
 
-use crate::ast::{BinaryOp, ExternBlock, ExternFn, Param, StructDef, Type, UnaryOp};
+use crate::ast::{BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, StructDef, Type, UnaryOp};
 use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
 use crate::dslx_import::{ImportedCall, ResolvedImports};
@@ -214,7 +214,11 @@ pub struct CheckedBlock {
     pub clock: String,
     pub reset: Option<String>,
     pub params: Vec<Param>,
+    /// Explicit cycle offsets by data input name.
+    pub input_cycles: BTreeMap<String, u64>,
     pub result: Type,
+    /// Declared output timing, if the block opts into checking it.
+    pub output_cycles: Option<OutputCycles>,
     pub statements: Vec<CheckedStmt>,
     pub output: TypedExpr,
 }
