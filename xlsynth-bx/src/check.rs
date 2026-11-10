@@ -508,7 +508,7 @@ pub(crate) fn source_type_nodes(ty: &Type) -> usize {
 
 /// Storage copied when cloning a literal: wide bits own their limbs, and an
 /// array owns its IR element type. Tuple and array element values are shared.
-fn literal_copy_work(value: &IrValue) -> usize {
+pub(crate) fn literal_copy_work(value: &IrValue) -> usize {
     fn descendants(ty: &IrType) -> usize {
         match ty {
             IrType::Tuple(fields) => fields.iter().map(|ty| 1 + descendants(ty)).sum(),
@@ -2717,7 +2717,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 let value = selector.with_values(&mut values.into_iter());
                 Ok((value.ty, value.kind))
             }),
-            Expr::Cast { value, ty } => self.bit_cast(value, ty),
+            Expr::Cast { value, ty } => self.cast(value, ty),
             Expr::If {
                 condition,
                 then_value,
@@ -3108,18 +3108,48 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         )
     }
 
-    /// Check a cast between two bit types.
-    fn bit_cast(&mut self, value: &Expr, ty: &Type) -> Result<(Type, K), String> {
+    /// Check scalar casts and equal-width casts between bits and a flat array.
+    fn cast(&mut self, value: &Expr, ty: &Type) -> Result<(Type, K), String> {
         let ty = self.source_type(ty)?;
         let v = self.inferred_expr(value)?;
-        if matches!((&v.ty, &ty), (Type::Enum { .. }, Type::Enum { .. })) && v.ty != ty {
-            return Err(format!(
-                "cannot cast between distinct enum types {} and {ty}",
-                v.ty
-            ));
-        }
-        if repr_bits(&v.ty).is_none() || repr_bits(&ty).is_none() {
-            return Err(format!("cast from {} to {ty} requires bit types", v.ty));
+        match (&v.ty, &ty) {
+            (Type::Array { element, size }, scalar) | (scalar, Type::Array { element, size }) => {
+                let (Some((_, element_width)), Some((_, scalar_width))) =
+                    (bits(element), bits(scalar))
+                else {
+                    return Err(format!(
+                        "cast from {} to {ty} requires a bit type and a one-dimensional array of bits",
+                        v.ty
+                    ));
+                };
+                // Both layouts have already passed the concrete type size
+                // check.
+                let array_width = element_width * size;
+                if array_width != scalar_width {
+                    return Err(format!(
+                        "cast from {} to {ty} requires equal total widths: array has {array_width} bits, scalar has {scalar_width}",
+                        v.ty
+                    ));
+                }
+                // Unpacking slices each element. Packing indexes each element
+                // with a literal before concatenating the pieces.
+                let element_work = if matches!(v.ty, Type::Array { .. }) {
+                    if scalar_width == 0 { 0 } else { 2 * size }
+                } else {
+                    *size
+                };
+                self.charge_expansion("array cast", element_work + 1)?;
+            }
+            (Type::Enum { .. }, Type::Enum { .. }) if v.ty != ty => {
+                return Err(format!(
+                    "cannot cast between distinct enum types {} and {ty}",
+                    v.ty
+                ));
+            }
+            (from, to) if repr_bits(from).is_none() || repr_bits(to).is_none() => {
+                return Err(format!("cast from {from} to {to} requires bit types"));
+            }
+            _ => { /* Scalar casts can change width and signedness. */ }
         }
         Ok((ty, K::Cast { value: Box::new(v) }))
     }
@@ -4319,6 +4349,19 @@ mod tests {
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
+
+    #[test]
+    fn array_casts_share_the_function_expansion_budget() -> Result<(), String> {
+        let unpack = "fn unpack(x: uN[400000]) -> bool[400000] { x as bool[400000] }";
+        check_module(&parse_module(unpack)?)?;
+        let round_trip = "fn f(x: uN[400000]) -> uN[400000] { (x as bool[400000]) as uN[400000] }";
+        let error = check_module(&parse_module(round_trip)?).unwrap_err();
+        assert!(
+            error.contains("array cast exceeds the function expansion limit"),
+            "{error}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn speculative_fold_preserves_work_when_a_wide_enum_will_not_fit() -> Result<(), String> {

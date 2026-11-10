@@ -30,6 +30,10 @@ BX supports concrete bit types, booleans, numeric enums, tuples, named structs, 
 
 The expression subset includes arithmetic, comparisons, bitwise and logical operations, shifts, concatenation, bit casts, field selection, array indexing, value-producing `if` expressions, and width slices such as `word[offset+:u8]`. See the manual’s [width slice examples](https://google.github.io/xls/dslx_reference/#width-slice).
 
+Use `as` to unpack a bit value into a one-dimensional array of bits or to pack the array back into a bit value. The scalar width must equal the element width times the array length. Element zero holds the most significant bits. For example, `u16:0x12ab as u8[2]` gives `[u8:0x12, u8:0xab]`, and casting that array to `u16` gives `0x12ab`. Signed, unsigned, and `bool` elements preserve their bit patterns. The rule also applies to zero-width values and empty arrays.
+
+BX uses the declared signedness in both hardware and constant expressions. For example, `([u4:8, u4:3] as s8) as s16` sign-extends to `-125`. Compiled DSLX hardware agrees. The pinned DSLX bytecode evaluator can lose the signed tag on an array cast and evaluate the same constant as `131`. BX preserves empty-array types in its IR. The pinned XLS IR interpreter and constant-folding pass can fail when they need to materialize an empty array value.
+
 ### Numeric enums
 
 Declare each member's encoding and refer to it by name in functions and blocks.

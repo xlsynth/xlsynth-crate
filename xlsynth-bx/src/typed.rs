@@ -596,6 +596,51 @@ impl CountedWork<'_> {
         }
     }
 
+    /// Convert a checked constant, charging the array elements before
+    /// allocating or scanning their payload.
+    fn cast(&mut self, value: &IrValue, from: &Type, to: &Type) -> Option<IrValue> {
+        if let Type::Array { element, size } = to {
+            let source = value.as_bits().ok()?;
+            let width = bits(element)?.1;
+            self.charge(size.saturating_mul(width.div_ceil(64).max(1)).max(1))?;
+            let elements = (0..*size)
+                .rev()
+                .map(|i| IrValue::Bits(source.width_slice((i * width) as i64, width as i64)))
+                .collect::<Vec<_>>();
+            return IrValue::make_array_typed(IrType::Bits(width), &elements).ok();
+        }
+        let (_, width) = repr_bits(to)?;
+        if let Type::Array { element, size } = from {
+            if width == 0 {
+                return Some(IrValue::Bits(IrBits::zero(0)));
+            }
+            let element_width = bits(element)?.1;
+            self.charge(constant_work(value))?;
+            let elements = value.as_elements().ok()?;
+            // Visit each output bit once, starting in the last array element.
+            return Some(IrValue::Bits(IrBits::from_lsb_fn(width, |i| {
+                elements[size - 1 - i / element_width]
+                    .as_bits()
+                    .expect("checked cast from a bits array")
+                    .get_bit(i % element_width)
+                    .expect("bit index within element")
+            })));
+        }
+        let source = value.as_bits().ok()?;
+        if let Type::Enum { name, .. } = to {
+            // DSLX bytecode checks the original bits before constructing an
+            // enum. Hardware IR uses the ordinary bit conversion.
+            if matches!(from, Type::Enum { .. }) || !self.enums.get(name)?.contains(source) {
+                self.failure = Some(ConstantFailure::InvalidEnumCast(name.clone()));
+                return None;
+            }
+        }
+        let fill = repr_bits(from)?.0 && source.is_negative();
+        Some(IrValue::Bits(IrBits::from_lsb_fn(width, |i| {
+            source.get_bit(i).unwrap_or(fill)
+        })))
+    }
+
     /// Apply a preceding pure helper to concrete arguments in its own lexical
     /// scope. Charge arguments, definitions and body evaluation to the caller.
     fn call(
@@ -1192,26 +1237,8 @@ impl TypedExpr {
                 }
             }
             K::Cast { value } => {
-                let source = value
-                    .constant_with_budget(names, remaining)?
-                    .to_bits()
-                    .ok()?;
-                if let Type::Enum { name, .. } = &self.ty {
-                    // DSLX bytecode checks the original bits before
-                    // constructing an enum. Hardware IR uses the ordinary bit
-                    // conversion.
-                    if matches!(value.ty, Type::Enum { .. })
-                        || !remaining.enums.get(name)?.contains(&source)
-                    {
-                        remaining.failure = Some(ConstantFailure::InvalidEnumCast(name.clone()));
-                        return None;
-                    }
-                }
-                let fill = repr_bits(&value.ty)?.0 && source.is_negative();
-                let width = repr_bits(&self.ty)?.1;
-                Some(IrValue::Bits(IrBits::from_lsb_fn(width, |i| {
-                    source.get_bit(i).unwrap_or(fill)
-                })))
+                let source = value.constant_with_budget(names, remaining)?;
+                remaining.cast(&source, &value.ty, &self.ty)
             }
             K::Unary { op, value } => {
                 let v = value
@@ -1409,6 +1436,40 @@ block folded(clk) -> u16 {{
                     &BTreeMap::new()
                 ),
                 expected
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn constant_casts_charge_array_work_outside_loops() -> Result<(), String> {
+        let source = r#"
+fn unpack(x: uN[0]) -> uN[0][64] { x as uN[0][64] }
+fn pack(x: uN[256][2]) -> uN[512] { x as uN[512] }
+"#;
+        let module = check_module(&parse_module(source)?)?;
+        for function in module.functions() {
+            let input = match function.name.as_str() {
+                "unpack" => IrValue::Bits(IrBits::zero(0)),
+                "pack" => IrValue::make_array(&[
+                    IrValue::Bits(IrBits::all_ones(256)),
+                    IrValue::Bits(IrBits::zero(256)),
+                ])
+                .map_err(|e| e.to_string())?,
+                _ => unreachable!("only the two cast functions are declared"),
+            };
+            let names = BTreeMap::from([("x".to_owned(), ConstantBinding::Known(input))]);
+            let mut remaining = 4;
+            assert_eq!(
+                function.output.constant(
+                    &names,
+                    &mut remaining,
+                    false,
+                    ConstantUse::Bx,
+                    None,
+                    &BTreeMap::new(),
+                ),
+                Err(ConstantFailure::WorkLimit),
             );
         }
         Ok(())
