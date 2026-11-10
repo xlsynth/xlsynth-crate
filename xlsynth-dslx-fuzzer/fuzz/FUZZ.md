@@ -272,6 +272,24 @@ The inputs below are in hex.
   and `07 09` renames the local.
 
 Prefix any audit-v12 input with one zero byte to preserve it in audit-v13.
+
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v14` to check the width of a bare
+integer field against a typed tuple match pattern. `03` matches `(1, x)`
+against `(u8:1, false)`, and `03 01` explicitly types the scrutinee field as
+`u8`. The independent reference returns `!x`. `03 08` changes the integer
+pattern so the arm cannot match, with `03 09` as the typed control. The
+generator also varies the field position, nesting, literal, and pattern width.
+`03 10` evaluates the match as a module constant with a `false` Boolean
+field, so the integer comparison must select the first arm. `03 11` types
+the integer field explicitly.
+`03 20` and `03 40` produce the subject tuple with an `if` or inner `match`,
+respectively. Their independent runtime reference returns `p ^ x`. Set bit 0
+of the second byte to type the integer fields in both arms. Set bit 7 to
+check the same source in the bytecode interpreter with IR lowering disabled.
+For example, `03 80`, `03 a0`, and `03 c0` check the direct, `if`, and inner
+`match` bytecode results.
+Prefix any audit-v13 input with one zero byte to preserve it in audit-v14.
+
 Replay a retained finding with the same grammar and the retained seed file.
 The target recreates the import tree from the seed, including nested modules.
 

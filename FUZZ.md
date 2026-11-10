@@ -434,6 +434,10 @@ when module paths or function names resemble mangled specializations.
 It also compares the emitted element width of concatenated literal arrays
 against the declared return type and observes element widths through packing
 and signed widening.
+The `audit-v14` grammar checks that the converter compares an unsized integer
+in a tuple match scrutinee at the width supplied by the typed pattern. It
+checks raw bytecode and converted IR independently, with direct, `if`, and
+nested `match` scrutinees evaluated at runtime or in a module constant.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

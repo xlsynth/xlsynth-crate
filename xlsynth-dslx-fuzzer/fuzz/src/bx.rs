@@ -34,12 +34,12 @@ pub fn check_audit(
         | AuditCase::BoundCall { case, .. }
         | AuditCase::DimensionScope { case, .. }
         | AuditCase::MixedLiteral { case, .. } => case,
-        // Optimizer, event, negative constexpr, and acceptance-only contracts
-        // require observations beyond comparing the value of an emitted function.
+        // These contracts observe behavior outside the emitted function's value.
         AuditCase::Optimized(_)
         | AuditCase::Traces { .. }
         | AuditCase::TraceMessages { .. }
         | AuditCase::ConstexprFailure { .. }
+        | AuditCase::LiteralRuntime { .. }
         | AuditCase::PatternAcceptance { .. } => return Ok(BxOutcome::OutsideScope),
     };
     // Restrict this target to a single native BX source. Linking generated

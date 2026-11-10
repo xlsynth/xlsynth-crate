@@ -144,6 +144,10 @@ pub fn check_audit_with_optimizer(
             converter,
             stdlib,
         ),
+        AuditCase::LiteralRuntime { module, .. } => {
+            check_literal_runtime(&module, "Original", converter, stdlib)?;
+            Ok(EquivResult::Proved)
+        }
         AuditCase::MixedLiteral {
             case,
             raw_runtime_module,

@@ -48,6 +48,11 @@ pub enum AuditCase {
         case: ContractCase,
         runtime_module: SourceModule,
     },
+    /// Checks an independent expected value in the DSLX bytecode interpreter.
+    LiteralRuntime {
+        family: &'static str,
+        module: SourceModule,
+    },
     /// Checks inferred operand types against an independent value in IR and
     /// bytecode.
     MixedLiteral {
@@ -80,6 +85,7 @@ impl AuditCase {
             | Self::TraceMessages { case, .. } => case.family,
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
+            Self::LiteralRuntime { family, .. } => family,
             Self::TupleLiteral { case, .. }
             | Self::MixedLiteral { case, .. }
             | Self::BoundCall { case, .. }
@@ -259,6 +265,17 @@ pub fn generate_v13(data: &[u8]) -> Result<AuditCase, String> {
         _ => return generate_v12(options),
     };
     Ok(AuditCase::Semantic(case))
+}
+
+/// Checks literal widths supplied by tuple match patterns. A zero prefix
+/// preserves audit-v13 inputs.
+pub fn generate_v14(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 4 == 3 {
+        Ok(tuple_literal_contracts::match_pattern(options))
+    } else {
+        generate_v13(options)
+    }
 }
 
 /// Varies whether a checked call's result is bound or discarded. The call
