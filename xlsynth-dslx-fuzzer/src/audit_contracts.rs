@@ -5,14 +5,14 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, array_cast_contracts, bound_parametric_contracts,
-    builtin_contracts, dead_branch_contracts, empty_builtin_contracts, enum_width_contracts,
-    inferred_flow_contracts, lambda_dimension_contracts, literal_order_contracts,
-    map_parametric_contracts, mixed_literal_contracts, nested_scope_contracts, nominal_contracts,
-    observable_value_contracts, observer_contracts, pattern_acceptance,
-    scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
-    signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
-    unrolled_loop_contracts, zero_width_cast_contracts,
+    SourceModule, aggregate_method_contracts, array_cast_contracts, array_concat_contracts,
+    bound_parametric_contracts, builtin_contracts, cross_module_parametric_contracts,
+    dead_branch_contracts, empty_builtin_contracts, enum_width_contracts, inferred_flow_contracts,
+    lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
+    mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
+    observer_contracts, pattern_acceptance, scalar_update_builtin_contracts, scope_contracts,
+    self_dimension_contracts, signed_array_cast_contracts, signed_call_contracts,
+    tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -243,6 +243,20 @@ pub fn generate_v12(data: &[u8]) -> Result<AuditCase, String> {
         6 => empty_builtin_contracts::one_hot_select(options)?,
         7 => empty_builtin_contracts::array_slice(options)?,
         _ => return generate_v11(options),
+    };
+    Ok(AuditCase::Semantic(case))
+}
+
+/// Exercises array concatenation widths, specialization names and bindings
+/// across modules. A zero prefix preserves audit-v12 inputs.
+pub fn generate_v13(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    let case = match selector % 8 {
+        4 => array_concat_contracts::generate(options),
+        5 => cross_module_parametric_contracts::specialization_names(options),
+        6 => cross_module_parametric_contracts::struct_specializations(options),
+        7 => cross_module_parametric_contracts::shadowed_expression(options),
+        _ => return generate_v12(options),
     };
     Ok(AuditCase::Semantic(case))
 }

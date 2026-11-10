@@ -426,6 +426,14 @@ The `audit-v12` grammar checks the width and value of constexpr `ceillog2`,
 tuple-parameter array updates, `one_hot_sel` with zero cases, and
 `array_slice` with a zero-length result witness. It also replays the earlier
 wide-decode contract.
+The `audit-v13` grammar checks cross-module value parametrics with reordered
+function binders, same-width struct instances with different signedness, and
+local shadowing in imported function arguments, struct dimensions, and cast
+widths. It checks that distinct DSLX functions get distinct IR symbols even
+when module paths or function names resemble mangled specializations.
+It also compares the emitted element width of concatenated literal arrays
+against the declared return type and observes element widths through packing
+and signed widening.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

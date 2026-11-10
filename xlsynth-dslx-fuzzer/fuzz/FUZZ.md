@@ -240,6 +240,41 @@ Prefix any audit-v11 input with one zero byte to preserve it in audit-v12.
 For example, eleven zero bytes followed by `01 00 00 03 00 07` replay the
 existing one-bit-input, eight-bit-output decode contract.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v13` for cross-module value parametrics
+and array concatenation widths.
+The inputs below are in hex.
+
+- `04` returns `[2] ++ [3]` from a function declared to return `u8[2]`.
+  The reference returns `[2, 3]` with eight bits per element. `04 01` types
+  both literals as `u8`, `04 02` declares the inferred `u2[2]` return type,
+  and `04 04` returns the flat literal `[2, 3]`.
+  `04 08` packs the first and last elements into a fixed-width result. It
+  expects `0x0203`, and `04 09` types both input literals for comparison.
+  `04 10` widens the first element from an annotated signed array, where
+  it must remain positive. `04 11` types both input literals explicitly.
+- `05` calls equally specialized `apply` functions in `lane.ops` and
+  `lane_ops`. They must both convert and keep their distinct results.
+  `05 01` renames the flat module. `05 04` exercises a deeper import path.
+  `05 02` uses a regular function named `apply__8` alongside `apply<N>` at
+  width 8, and `05 03` renames the regular function.
+- `06` forwards `Packet<A, B>` and `Packet<B, A>` through the same call site to
+  a function that declares `B` before `A`. Both instances have the same IR
+  layout, but one field is signed and the other unsigned. The reference
+  widens the fields independently and mixes in distinct derived constants.
+  `06 01` renames the callee binders, `06 02` infers them from the packet, and
+  `06 04` swaps which instance is called first.
+- `07` checks that an expression uses the nearest binding when specializing
+  an imported function. `07 02` uses the expression to instantiate an imported
+  struct and observes the resulting field width. `07 01` and `07 03` rename
+  the local binding for comparison. Setting bit 2 of the second byte puts
+  the expression in a separate `let` before passing it as a parametric.
+  `07 08` observes a runtime word narrowed using the shadowed dimension,
+  and `07 09` renames the local.
+
+Prefix any audit-v12 input with one zero byte to preserve it in audit-v13.
+Replay a retained finding with the same grammar and the retained seed file.
+The target recreates the import tree from the seed, including nested modules.
+
 The target proves values and assertion conditions against independent IR and
 compares the exact top signature. Trace-count cases run the standalone CLI's
 emitted IR through the JIT at Boolean input true. The audit-v2 trace-format
