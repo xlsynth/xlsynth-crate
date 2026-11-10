@@ -615,6 +615,8 @@ pub struct Block {
     pub name_position: Option<SourcePosition>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,
+    /// Warn if this block has no output timing annotation.
+    pub require_block_timing: bool,
     pub public: bool,
     /// Type parameter names in declaration order.
     pub type_params: Vec<String>,

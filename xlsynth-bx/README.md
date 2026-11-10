@@ -627,6 +627,9 @@ An output annotation such as `-> u8 @1` opts a block into stage checking. Data
 inputs default to `@0`. An input annotation such as `r: u8 @1` says the caller
 already supplies that input at stage 1.
 
+Add `#[require_block_timing]` above a block to warn if its output timing
+annotation is missing. BX treats this warning as an error by default.
+
 ```text
 block add_held(clk, en: bool @0, x: u8 @0, r: u8 @1) -> u8 @1 {
     reg q: u8;

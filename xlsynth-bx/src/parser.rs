@@ -572,6 +572,13 @@ struct BlockParametrics {
     value_parametrics: Vec<ParametricBinding>,
 }
 
+/// Attributes written before a BX block declaration.
+#[derive(Default)]
+struct BlockAttributes {
+    allowed_warnings: BTreeSet<BxWarningKind>,
+    require_block_timing: bool,
+}
+
 /// Retains the built tree's height until its parent is constructed. Syntactic
 /// nesting alone cannot bound a left-associative expression tree.
 struct ParsedExpr {
@@ -766,7 +773,7 @@ impl<'s> Parser<'s> {
         if self.dialect == Dialect::Bx
             && token.text == "#"
             && self.peek(1) == "["
-            && self.peek(2) == "allow"
+            && matches!(self.peek(2), "allow" | "require_block_timing")
         {
             return diagnostic(
                 self.source,
@@ -945,18 +952,19 @@ impl<'s> Parser<'s> {
         let mut offset = 0;
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let allowed_warnings = self.block_warning_attributes()?;
+            let attrs = self.block_attributes()?;
             let public = self.eat("pub");
             let declares_type = matches!(self.peek(0), "enum" | "struct");
             if self.eat("block") {
                 let name_offset = self.tokens[self.pos].start;
                 position = advance_position(position, &self.source[offset..name_offset]);
                 offset = name_offset;
-                let block =
-                    self.with_name_scope(|p| p.block(public, position, allowed_warnings))?;
+                let block = self.with_name_scope(|p| p.block(public, position, attrs))?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
-            } else if !allowed_warnings.is_empty() {
+            } else if attrs.require_block_timing {
+                return Err(self.error("expected a block definition after #[require_block_timing]"));
+            } else if !attrs.allowed_warnings.is_empty() {
                 return Err(self.error("expected a block definition after #[allow(...)]"));
             } else if self.eat("fn") {
                 self.value_context = ValueContext::DslxItem;
@@ -1034,12 +1042,16 @@ impl<'s> Parser<'s> {
         Ok(module)
     }
 
-    /// Read per-block warning suppressions before an optional visibility
-    /// modifier.
-    fn block_warning_attributes(&mut self) -> Result<BTreeSet<BxWarningKind>, String> {
-        let mut allowed = BTreeSet::new();
+    /// Read attributes before a block's optional `pub`.
+    fn block_attributes(&mut self) -> Result<BlockAttributes, String> {
+        let mut attrs = BlockAttributes::default();
         while self.eat("#") {
             self.expect("[")?;
+            if self.eat("require_block_timing") {
+                self.expect("]")?;
+                attrs.require_block_timing = true;
+                continue;
+            }
             self.expect("allow")?;
             self.expect("(")?;
             if self.peek(0) == ")" {
@@ -1050,7 +1062,7 @@ impl<'s> Parser<'s> {
                 let warning = BxWarningKind::from_name(name)
                     .ok_or_else(|| self.error("unknown BX warning in #[allow(...)]"))?;
                 self.pos += 1;
-                allowed.insert(warning);
+                attrs.allowed_warnings.insert(warning);
                 if !self.eat(",") || self.peek(0) == ")" {
                     break;
                 }
@@ -1058,7 +1070,7 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             self.expect("]")?;
         }
-        Ok(allowed)
+        Ok(attrs)
     }
 
     /// Flatten one DSLX use tree in source order. BX additionally bounds the
@@ -1599,7 +1611,7 @@ impl<'s> Parser<'s> {
         &mut self,
         public: bool,
         name_position: SourcePosition,
-        allowed_warnings: BTreeSet<BxWarningKind>,
+        attrs: BlockAttributes,
     ) -> Result<Block, String> {
         let name = self.ident()?;
         let params = self.block_parametrics()?;
@@ -1640,7 +1652,8 @@ impl<'s> Parser<'s> {
         Ok(Block {
             name: signature.name,
             name_position: Some(name_position),
-            allowed_warnings,
+            allowed_warnings: attrs.allowed_warnings,
+            require_block_timing: attrs.require_block_timing,
             public,
             type_params: params.type_params,
             callback_params: params.callback_params,

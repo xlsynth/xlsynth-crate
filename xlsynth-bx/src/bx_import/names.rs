@@ -533,6 +533,7 @@ impl<'a> Scope<'a> {
             name: self.names.declared(&def.name),
             name_position: def.name_position,
             allowed_warnings: def.allowed_warnings.clone(),
+            require_block_timing: def.require_block_timing,
             public: def.public,
             type_params: def.type_params.clone(),
             callback_params,

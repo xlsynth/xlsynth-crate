@@ -15,6 +15,8 @@ use crate::bx_import::{LinkedSources, UnlinkedBlockScope, library_item};
 pub enum BxWarningKind {
     /// A concrete block contains only computations that belong in a function.
     CombinationalBlock,
+    /// A block marked `#[require_block_timing]` has no output annotation.
+    MissingBlockTiming,
 }
 
 impl BxWarningKind {
@@ -22,12 +24,14 @@ impl BxWarningKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::CombinationalBlock => "combinational_block",
+            Self::MissingBlockTiming => "missing_block_timing",
         }
     }
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "combinational_block" => Some(Self::CombinationalBlock),
+            "missing_block_timing" => Some(Self::MissingBlockTiming),
             _ => None,
         }
     }
@@ -46,6 +50,23 @@ pub struct BxWarning {
 }
 
 impl BxWarning {
+    /// Locate the block declaration in its root or imported source file.
+    fn for_block(kind: BxWarningKind, block: &Block, linked: Option<&LinkedSources>) -> Self {
+        let (declaration, file) = match library_item(&block.name) {
+            Some((module, name)) => (
+                format!("{}::{name}", module.replace('.', "::")),
+                linked.and_then(|l| l.module_paths.get(module)).cloned(),
+            ),
+            None => (block.name.clone(), None),
+        };
+        Self {
+            kind,
+            declaration,
+            file,
+            position: block.name_position,
+        }
+    }
+
     /// Render a diagnostic using the caller's filename for the root module.
     pub fn display_with_root<'a>(&'a self, root: &'a Path) -> impl fmt::Display + 'a {
         WarningDisplay {
@@ -81,6 +102,11 @@ impl fmt::Display for WarningDisplay<'_> {
                 "block '{}' has no registers or child instances. Consider defining it as a function.",
                 warning.declaration
             ),
+            BxWarningKind::MissingBlockTiming => write!(
+                f,
+                "block '{}' requires an output timing annotation",
+                warning.declaration
+            ),
         }
     }
 }
@@ -108,6 +134,14 @@ impl<'m> WarningCollector<'m> {
         let mut warnings = Vec::new();
         let mut local_scope = None;
         for block in &module.blocks {
+            let kind = BxWarningKind::MissingBlockTiming;
+            if block.require_block_timing
+                && block.output_cycles.is_none()
+                && !block.allowed_warnings.contains(&kind)
+            {
+                warnings.push(BxWarning::for_block(kind, block, linked));
+            }
+
             let kind = BxWarningKind::CombinationalBlock;
             if !block.type_params.is_empty()
                 || block.allowed_warnings.contains(&kind)
@@ -137,19 +171,7 @@ impl<'m> WarningCollector<'m> {
             {
                 continue;
             }
-            let (name, file) = match library_item(&block.name) {
-                Some((module, name)) => (
-                    format!("{}::{name}", module.replace('.', "::")),
-                    linked.and_then(|l| l.module_paths.get(module)).cloned(),
-                ),
-                None => (block.name.clone(), None),
-            };
-            warnings.push(BxWarning {
-                kind,
-                declaration: name,
-                file,
-                position: block.name_position,
-            });
+            warnings.push(BxWarning::for_block(kind, block, linked));
         }
         warnings
     }

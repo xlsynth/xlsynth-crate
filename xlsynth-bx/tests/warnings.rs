@@ -10,6 +10,27 @@ use xlsynth_bx::{
 };
 
 #[test]
+fn required_block_timing_warns_only_when_the_output_annotation_is_missing()
+-> Result<(), Box<dyn Error>> {
+    let source = r#"
+#[require_block_timing]
+block missing(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+
+#[require_block_timing]
+block timed(clk, x: u8) -> u8 @1 { reg q: u8; q := x; q }
+
+block ordinary(clk, x: u8) -> u8 { reg q: u8; q := x; q }
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    let [warning] = checked.warnings() else {
+        panic!("expected one warning, got {:?}", checked.warnings());
+    };
+    assert_eq!(warning.kind, BxWarningKind::MissingBlockTiming);
+    assert_eq!(warning.declaration, "missing");
+    Ok(())
+}
+
+#[test]
 fn rust_compile_helpers_deny_collected_warnings_by_default() -> Result<(), Box<dyn Error>> {
     let source = "block increment(clk, x: u8) -> u8 { x + u8:1 }\n\
                   pub block invert(clk, x: u8) -> u8 { !x }";
