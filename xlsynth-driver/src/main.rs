@@ -2441,7 +2441,7 @@ fn main() {
                 .arg(
                     Arg::new("fanout_opt")
                         .long("fanout-opt")
-                        .help("Optimize fanout before area recovery (default: true for area, false for delay/nand2); --fanout-opt=false disables it. Requires timing-enabled Liberty and output load")
+                        .help("Optimize fanout before area recovery (default: true for area/delay, false for nand2); --fanout-opt=false disables it. Requires timing-enabled Liberty and output load")
                         .num_args(0..=1)
                         .require_equals(true)
                         .default_missing_value("true")
@@ -2471,7 +2471,7 @@ fn main() {
                 .arg(Arg::new("area-recovery").long("area-recovery").num_args(0..=1)
                     .require_equals(true).default_missing_value("true")
                     .value_parser(clap::value_parser!(bool)).action(ArgAction::Set)
-                    .help("Recover cell area without worsening boundary delay after optional fanout repair (default: true for delay, false otherwise); false preserves raw delay mapping"))
+                    .help("Recover cell area without worsening boundary delay after optional fanout repair (default: true for delay, false otherwise); false disables recovery; also set --fanout-opt=false for raw delay mapping"))
                 .arg(Arg::new("area-recovery-rounds").long("area-recovery-rounds")
                     .value_parser(clap::value_parser!(usize)).help("Area-recovery rounds (default: 2); zero disables search"))
                 .arg(Arg::new("area-recovery-evaluation-budget").long("area-recovery-evaluation-budget")

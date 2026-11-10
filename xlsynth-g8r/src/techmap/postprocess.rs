@@ -60,7 +60,7 @@ impl PostMappingOptions {
     ) -> Result<PostMappingReport> {
         let fanout = self.fanout.as_ref().map(|options| {
             optimize_fanout(mapped, library, options.clone()).context(
-                "area fanout optimization failed; provide usable timing data or use --fanout-opt=false for raw mapping",
+                "fanout optimization failed; provide usable timing data or disable fanout optimization with --fanout-opt=false",
             )
         }).transpose()?;
         let recovery = self
