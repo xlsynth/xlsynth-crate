@@ -230,6 +230,10 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         dependent_types: false,
         callable_templates: Default::default(),
         hidden_templates: Vec::new(),
+        visible_names: Default::default(),
+        visible_type_names: Default::default(),
+        local_names: Vec::new(),
+        literal_type_context: super::LiteralTypeContext::Live,
         block_map_shadowed: false,
         forward_map_import: false,
     })

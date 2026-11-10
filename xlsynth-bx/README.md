@@ -106,8 +106,25 @@ Evaluation follows the dependencies of the result. For example, an
 out-of-bounds access in an unused helper binding can
 go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
 DSLX functions and extern functions require runtime evaluation, including when
-reached through a local helper. Constants can supply loop bounds, width-slice
-expressions, and dimensions in value-parametric function signatures.
+reached through a local helper.
+
+Use an earlier `u32` constant as a bit width or array length in a concrete type.
+Here `LANES` also bounds the traversal of the array.
+
+```text
+const WIDTH = u32:12;
+const LANES = u32:4;
+fn sum(xs: uN[WIDTH][LANES]) -> uN[WIDTH] {
+    for (i, acc) in u32:0..LANES { acc + xs[i] }(uN[WIDTH]:0)
+}
+```
+
+Widths can also appear in `bits[WIDTH]`, `sN[WIDTH]`, and
+`xN[SIGNED][WIDTH]`. Use a `bool` or `u1` constant for `SIGNED`. For a
+computed width or length, declare the expression as a module constant, then
+use its name in the type. A public BX library constant can be qualified, as
+in `u8[packet::LANES]`. Width slices and value-parametric functions also
+accept dimension expressions.
 
 ## Defining functions
 

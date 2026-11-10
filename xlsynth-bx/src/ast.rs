@@ -82,8 +82,8 @@ pub enum Type {
         signed: bool,
         width: usize,
     },
-    /// Signedness and width evaluated when a function's value parameters are
-    /// bound.
+    /// Signedness and width evaluated from constants and any bound function
+    /// value parametrics.
     ParametricBits {
         signed: Box<Expr>,
         width: Box<Expr>,
@@ -94,8 +94,8 @@ pub enum Type {
         element: Box<Type>,
         size: usize,
     },
-    /// Array dimension evaluated in a specialized function's parametric
-    /// environment.
+    /// Array dimension evaluated from constants and any bound function value
+    /// parametrics.
     ParametricArray {
         element: Box<Type>,
         size: Box<Expr>,

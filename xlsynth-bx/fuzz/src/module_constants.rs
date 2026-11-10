@@ -14,9 +14,43 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
     let consumer = bytes.next().unwrap();
     let flags = bytes.next().unwrap();
     let width = usize::from(bytes.next().unwrap() % 129) + 1;
-    let mutation = bytes.next().unwrap() % 22;
+    let mutation = bytes.next().unwrap() % 27;
     let count = usize::from(bytes.next().unwrap() % 5) + 1;
-    let ty = format!("{}N[{width}]", if flags & 1 == 0 { 'u' } else { 's' });
+    let named_dimensions = flags & 128 != 0 || mutation >= 22;
+    let signed = flags & 1 != 0;
+    let mut declarations = String::new();
+    let ty = if named_dimensions {
+        let width_type = if mutation == 23 { "u64" } else { "u32" };
+        let count_type = if mutation == 22 { "s32" } else { "u32" };
+        if mutation != 25 {
+            writeln!(declarations, "const WORD_WIDTH = {width_type}:{width};").unwrap();
+        }
+        writeln!(
+            declarations,
+            "const WORD_COUNT = {count_type}:{};",
+            count + 1
+        )
+        .unwrap();
+        if flags & 2 != 0 || mutation == 24 {
+            let sign_value = if mutation == 24 {
+                "u2:1"
+            } else if signed {
+                "true"
+            } else {
+                "false"
+            };
+            writeln!(declarations, "const SIGNED = {sign_value};").unwrap();
+            "xN[SIGNED][WORD_WIDTH]".into()
+        } else if signed {
+            "sN[WORD_WIDTH]".into()
+        } else if flags & 4 != 0 {
+            "bits[WORD_WIDTH]".into()
+        } else {
+            "uN[WORD_WIDTH]".into()
+        }
+    } else {
+        format!("{}N[{width}]", if signed { 's' } else { 'u' })
+    };
     let entropy = data
         .get(5 + count..)
         .filter(|b| !b.is_empty())
@@ -32,11 +66,27 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
     };
     let digits = base.to_string_fmt(radix, false);
     let public = if flags & 8 != 0 { "pub " } else { "" };
-    let mut declarations = if flags & 16 == 0 {
-        format!("{public}const C0: {ty} = {digits};\n")
+    if mutation == 26 || named_dimensions && flags & 16 != 0 {
+        // The outer annotation determines the value. Names in the inner
+        // annotation still have to be in scope.
+        let inner_width = if mutation == 26 {
+            "WORDS"
+        } else {
+            "WORD_COUNT"
+        };
+        writeln!(
+            declarations,
+            "{public}const C0 = {ty}:(uN[{inner_width}]:{digits});"
+        )
+        .unwrap();
+    } else if flags & 16 == 0 {
+        writeln!(declarations, "{public}const C0: {ty} = {digits};").unwrap();
     } else {
-        format!("{public}const C0 = {ty}:{digits};\n")
-    };
+        writeln!(declarations, "{public}const C0 = {ty}:{digits};").unwrap();
+    }
+    if mutation == 25 {
+        writeln!(declarations, "const WORD_WIDTH = u32:{width};").unwrap();
+    }
     writeln!(
         declarations,
         "fn combine(a: {ty}, b: {ty}) -> {ty} {{ (a - b) ^ C0 }}"
@@ -50,6 +100,14 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
         "fn fold(a: {ty}, b: {ty}) -> {ty} {{ for (item, acc) in [a, b] {{ item - acc }}(C0) }}"
     )
     .unwrap();
+    // The pinned converter puts "bool:0" or "bool:1" in the IR helper name
+    // when it infers an xN element from a constant initializer. Spelling the
+    // element type keeps that helper name parseable by XLS.
+    let map_parameter = if ty.starts_with("xN[") {
+        format!("|item: {ty}|")
+    } else {
+        "|item|".to_owned()
+    };
     for i in 1..=count {
         let choice = bytes.next().unwrap();
         let prev = format!("C{}", i - 1);
@@ -61,7 +119,7 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
             3 => format!("{{ let C0 = {prev} - {other}; C0 ^ {other} }}"),
             4 => format!("if {prev} < {other} {{ {prev} }} else {{ {other} }}"),
             5 => format!("({prev}, {other}).1"),
-            6 => format!("map([{prev}, {other}], |item| combine(item, C0))[u32:1]"),
+            6 => format!("map([{prev}, {other}], {map_parameter} combine(item, C0))[u32:1]"),
             _ => format!("fold({prev}, {other})"),
         };
         let annotation = if choice & 8 == 0 {
@@ -72,11 +130,16 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
         writeln!(declarations, "const C{i}{annotation} = {value};").unwrap();
     }
     let last = format!("C{count}");
-    let array = format!("{ty}[2]");
+    let (array, words) = if named_dimensions {
+        let elements = (0..=count).map(|i| format!("C{i}")).collect::<Vec<_>>();
+        (format!("{ty}[WORD_COUNT]"), elements.join(", "))
+    } else {
+        (format!("{ty}[2]"), format!("C0, {last}"))
+    };
     let pair = format!("({ty}, {array})");
     writeln!(
         declarations,
-        "const WORDS: {array} = [C0, {last}];\nconst PAIR = ({last}, WORDS);"
+        "const WORDS: {array} = [{words}];\nconst PAIR = ({last}, WORDS);"
     )
     .unwrap();
     let comparison = if flags & 64 == 0 {
@@ -107,6 +170,10 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
         5 => (
             ty.clone(),
             format!("match x {{ C0 => {last}, _ => !{last} }}"),
+        ),
+        6 if named_dimensions => (
+            ty.clone(),
+            "for (i, acc) in u32:0..WORD_COUNT { acc ^ WORDS[i] }(x)".into(),
         ),
         6 => {
             writeln!(declarations, "const COUNT = u32:{};", flags % 5).unwrap();
@@ -150,7 +217,7 @@ pub fn check_module_constants(data: &[u8]) -> Result<(), String> {
             writeln!(declarations, "const {builtin} = C0;").unwrap();
         }
         21 => declarations.push_str("const BAD = 0 || 1;\n"),
-        _ => { /* Keep the generated declarations well-typed. */ }
+        _ => { /* Valid samples and dimension mutations already have all their declarations. */ }
     }
     let params = format!("x: {ty}, flag: bool");
     let body = if flags & 32 == 0 {
@@ -203,15 +270,23 @@ mod tests {
     #[test]
     fn compare_constant_declarations_and_uses() -> Result<(), String> {
         for consumer in 0..8 {
-            for flags in [0, 3, 10, 21, 35, 60, 64, 111] {
+            for flags in [0, 3, 10, 21, 35, 60, 64, 111, 128, 129, 130, 151, 164] {
                 check_module_constants(&[consumer, flags, 96, 0, 4, 2, 11, 22, 31, 19, 0xf7])?;
             }
         }
-        for mutation in 12..22 {
+        for mutation in 12..27 {
             check_module_constants(&[0, 0, 7, mutation])?;
         }
         for builtin in 1..8 {
             check_module_constants(&[0, builtin, 7, 20])?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn map_over_xn_constants_emits_parseable_dslx_ir_for_both_signs() -> Result<(), String> {
+        for flags in [0xd6, 0xd7] {
+            check_module_constants(&[0x73, flags, 0x73, 0, 0xd6, 0xd6])?;
         }
         Ok(())
     }

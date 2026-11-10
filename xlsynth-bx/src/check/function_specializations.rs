@@ -258,7 +258,8 @@ impl<'m> FunctionSpecializations<'m> {
             )
             .collect::<Vec<_>>();
         // A struct can refer to another local struct declared later. Index it
-        // in dependency order once the representations of its enums are known.
+        // in dependency order once its enum representations and dimensions are
+        // known.
         definitions.extend(
             StructTable::struct_schedule(module, position)?
                 .into_iter()
@@ -271,8 +272,14 @@ impl<'m> FunctionSpecializations<'m> {
         for (_, definition) in definitions {
             let function = match definition {
                 Definition::Struct(index) => {
-                    structs.definitions[index].fields =
-                        super::resolve_fields(&module.structs[index].fields, resolver, structs)?;
+                    let def = &module.structs[index];
+                    structs.definitions[index].fields = super::resolve_fields(
+                        &def.fields,
+                        decls.module_dimensions(&def.name),
+                        resolver,
+                        structs,
+                    )
+                    .map_err(|e| format!("struct '{}': {e}", def.name))?;
                     structs.update_imports(resolver)?;
                     structs.index(index)?;
                     continue;
