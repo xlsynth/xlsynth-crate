@@ -12,38 +12,79 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::StructTable;
-use crate::ast::{BinaryOp, OutputCycles, Param, Type};
+use super::{StructTable, output_ports};
+use crate::ast::{BinaryOp, OutputCycles, Type};
 use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 
 const BLOCK_SCOPE: usize = 0;
 
-/// `ports` lists the block's physical outputs in declaration order.
-/// `port_names` contains those same names for validating a per-port annotation.
-pub(super) fn check_outputs(
-    block: &CheckedBlock,
-    ports: &[Param],
-    port_names: &BTreeSet<String>,
+/// The elaborator orders concrete blocks child-first, including
+/// specializations.
+pub(super) fn check_blocks(
+    blocks: &mut [CheckedBlock],
     structs: &StructTable<'_>,
 ) -> Result<(), String> {
-    let Some(expected) = &block.output_cycles else {
-        return Ok(());
-    };
-    if let OutputCycles::ByPort(expected) = expected {
-        if let Some(port) = expected.keys().find(|port| !port_names.contains(*port)) {
-            return Err(format!("unknown output port '{port}' in cycle annotation"));
+    let mut children: BTreeMap<&str, &CheckedBlock> = BTreeMap::new();
+    for block in blocks {
+        let Some(expected) = &block.output_cycles else {
+            continue;
+        };
+        if let Err(error) = check_outputs(block, expected, structs, &children) {
+            let deferred = block.statements.iter().any(|stmt| match stmt {
+                CheckedStmt::Wire { .. } => true,
+                CheckedStmt::Inst { block, .. } => children
+                    .get(block.as_str())
+                    .is_some_and(|child| child.timing_error.is_some()),
+                _ => false,
+            });
+            if deferred {
+                // Let block IR diagnose feedback in this block or its child
+                // first.
+                block.timing_error = Some(error);
+            } else if block.name != block.source_name {
+                return Err(format!(
+                    "block '{}' ({}): {error}",
+                    block.source_name, block.name
+                ));
+            } else {
+                return Err(format!("block '{}': {error}", block.name));
+            }
         }
-        if let Some(port) = port_names.iter().find(|port| !expected.contains_key(*port)) {
-            return Err(format!("missing cycle annotation for output port '{port}'"));
-        }
+        children.insert(block.name.as_str(), &*block);
     }
+    Ok(())
+}
 
-    let checker = Checker::new(block, structs);
+/// Check a declared stage against each physical output of this block.
+fn check_outputs(
+    block: &CheckedBlock,
+    expected: &OutputCycles,
+    structs: &StructTable<'_>,
+    children: &BTreeMap<&str, &CheckedBlock>,
+) -> Result<(), String> {
+    let checker = Checker::new(block, structs, children);
     let check = |fields: &[usize], expected| checker.infer(&block.output, fields)?.check(expected);
     let aggregate = matches!(block.result, Type::Named(_) | Type::Tuple(_));
     if !aggregate && let OutputCycles::Uniform(cycle) = expected {
         return check(&[], *cycle);
     }
+    let ports = output_ports(&block.result, &structs.definitions)?;
+    if let OutputCycles::ByPort(expected) = expected {
+        let port_names: BTreeSet<_> = ports.iter().map(|p| p.name.as_str()).collect();
+        if let Some(port) = expected
+            .keys()
+            .find(|port| !port_names.contains(port.as_str()))
+        {
+            return Err(format!("unknown output port '{port}' in cycle annotation"));
+        }
+        if let Some(port) = port_names
+            .into_iter()
+            .find(|port| !expected.contains_key(*port))
+        {
+            return Err(format!("missing cycle annotation for output port '{port}'"));
+        }
+    }
+
     for (index, port) in ports.iter().enumerate() {
         // Suppose `saved` is field 0. In `@(live: 0, saved: 1)`, its stage
         // is 1. Use its name for the annotation and its index for the value.
@@ -115,23 +156,125 @@ struct Scope<'a> {
     names: BTreeMap<&'a str, Binding<'a>>,
 }
 
+/// A parent expression connected to a child port with a fixed local stage.
+struct InstanceInput<'a> {
+    port: &'a str,
+    stage: u64,
+    value: &'a TypedExpr,
+}
+
+/// All outputs of one instance share the same translation into parent stages.
+struct Instance<'a> {
+    name: &'a str,
+    inputs: Vec<InstanceInput<'a>>,
+    outputs: &'a OutputCycles,
+    offset: Cell<InstanceOffset>,
+}
+
+/// An offset can be negative when the child numbers its stages from a later
+/// origin.
+#[derive(Clone, Copy)]
+enum InstanceOffset {
+    Unseen,
+    Visiting,
+    Done(Option<i128>),
+}
+
+impl Instance<'_> {
+    /// Each staged input must agree on parent stage minus child stage.
+    fn infer_offset(&self, stages: impl Iterator<Item = Cycle>) -> Result<Option<i128>, String> {
+        let mut offset = None;
+        let mut unknown = false;
+        for (input, actual) in self.inputs.iter().zip(stages) {
+            match actual {
+                Cycle::At(stage) => {
+                    let local = i128::from(input.stage);
+                    if let Some(offset) = offset
+                        && local + offset != i128::from(stage)
+                    {
+                        return Err(format!(
+                            "instance '{}' input '{}': expected parent cycle {}, got {stage}",
+                            self.name,
+                            input.port,
+                            local + offset
+                        ));
+                    }
+                    offset = Some(i128::from(stage) - local);
+                }
+                Cycle::Independent => { /* A constant fits any stage and supplies no offset. */ }
+                Cycle::Unknown => unknown = true,
+            }
+        }
+        Ok(if unknown { None } else { offset })
+    }
+}
+
 /// Build the scopes once, then follow only the drivers reached from the
 /// outputs.
 struct Checker<'a> {
     scopes: Vec<Scope<'a>>,
     structs: &'a StructTable<'a>,
+    instances: BTreeMap<&'a str, Instance<'a>>,
 }
 
 impl<'a> Checker<'a> {
-    fn new(block: &'a CheckedBlock, structs: &'a StructTable<'a>) -> Self {
+    fn new(
+        block: &'a CheckedBlock,
+        structs: &'a StructTable<'a>,
+        children: &BTreeMap<&str, &'a CheckedBlock>,
+    ) -> Self {
         let mut root = Scope::default();
         for param in &block.params {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
             root.names.insert(&param.name, Binding::Input(stage));
         }
+        // An explicit connection may precede its inst declaration. Both it
+        // and a let-call connection have already been checked for a single
+        // driver.
+        let connections: BTreeMap<_, _> = block
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                CheckedStmt::Connect {
+                    instance,
+                    port,
+                    value,
+                    ..
+                } => Some(((instance.as_str(), port.as_str()), value)),
+                _ => None,
+            })
+            .collect();
+        let mut instances = BTreeMap::new();
+        for stmt in &block.statements {
+            if let CheckedStmt::Inst { name, block } = stmt
+                && let Some(child) = children.get(block.as_str())
+                && child.timing_error.is_none()
+                && let Some(outputs) = &child.output_cycles
+            {
+                let inputs = child
+                    .params
+                    .iter()
+                    .map(|p| InstanceInput {
+                        port: &p.name,
+                        stage: child.input_cycles.get(&p.name).copied().unwrap_or(0),
+                        value: connections[&(name.as_str(), p.name.as_str())],
+                    })
+                    .collect();
+                instances.insert(
+                    name.as_str(),
+                    Instance {
+                        name,
+                        inputs,
+                        outputs,
+                        offset: Cell::new(InstanceOffset::Unseen),
+                    },
+                );
+            }
+        }
         let mut checker = Self {
             scopes: vec![root],
             structs,
+            instances,
         };
         checker.collect_drivers(&block.statements, BLOCK_SCOPE);
         checker
@@ -163,8 +306,8 @@ impl<'a> Checker<'a> {
                     self.collect_drivers(body, child);
                     continue;
                 }
-                // Declarations and instance connections supply no inferred
-                // stage.
+                // Instance connections are indexed separately from lexical
+                // names.
                 _ => continue,
             };
             self.scopes[owner].names.insert(name, binding);
@@ -215,6 +358,43 @@ impl<'a> Checker<'a> {
                 Step::Expr(expr, scope, fields) => self.visit_expr(&mut walk, expr, scope, fields),
                 Step::Read(name, binding, fields) => {
                     self.visit_read(&mut walk, name, binding, fields)?
+                }
+                Step::Output(instance, port) => match instance.offset.get() {
+                    InstanceOffset::Unseen => {
+                        instance.offset.set(InstanceOffset::Visiting);
+                        walk.pending.push(Step::Output(instance, port));
+                        walk.pending.push(Step::SaveOffset(instance));
+                        for input in instance.inputs.iter().rev() {
+                            walk.pending
+                                .push(Step::Expr(input.value, BLOCK_SCOPE, vec![]));
+                        }
+                    }
+                    InstanceOffset::Visiting => {
+                        return Err(format!(
+                            "timing feedback through instance '{}' is unsupported",
+                            instance.name
+                        ));
+                    }
+                    InstanceOffset::Done(None) => walk.values.push(Cycle::Unknown),
+                    InstanceOffset::Done(Some(offset)) => {
+                        let local = match instance.outputs {
+                            OutputCycles::Uniform(stage) => *stage,
+                            OutputCycles::ByPort(stages) => stages[port],
+                        };
+                        let translated = i128::from(local) + offset;
+                        let stage = u64::try_from(translated).map_err(|_| {
+                            format!(
+                                "instance '{}.{port}': translated cycle {translated} is out of range",
+                                instance.name
+                            )
+                        })?;
+                        walk.values.push(Cycle::At(stage));
+                    }
+                },
+                Step::SaveOffset(instance) => {
+                    let start = walk.values.len() - instance.inputs.len();
+                    let offset = instance.infer_offset(walk.values.drain(start..))?;
+                    instance.offset.set(InstanceOffset::Done(offset));
                 }
                 Step::Guard(scope) => {
                     let body = &self.scopes[scope];
@@ -316,6 +496,10 @@ impl<'a> Checker<'a> {
         };
         match &expr.kind {
             K::Name(name) => read(name, fields),
+            K::InstanceOutput { instance, port } => match self.instances.get(instance.as_str()) {
+                Some(child) => walk.pending.push(Step::Output(child, port)),
+                None => walk.values.push(Cycle::Unknown),
+            },
             K::BindingTupleIndex { name, index } => {
                 // `let (head, _) = pair;` reads the same field as `pair.0`.
                 fields.push(*index);
@@ -392,6 +576,8 @@ impl<'a> Walk<'a> {
 /// A pending expression, enable, or operation on already evaluated operands.
 enum Step<'a> {
     Expr(&'a TypedExpr, usize, Vec<usize>),
+    Output(&'a Instance<'a>, &'a str),
+    SaveOffset(&'a Instance<'a>),
     Read(&'a str, &'a Binding<'a>, Vec<usize>),
     Guard(usize),
     Join(Join<'a>),

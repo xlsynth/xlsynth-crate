@@ -728,9 +728,17 @@ with `x: u8 @0` and `q := Payload { data: x, tag: u8:7 };`, `q.data` is
 cannot establish `@1`. If an `@0` enable guards that write, it supplies the
 stage for capturing the tag and both fields are `@1`.
 
+Each child instance uses one offset to translate its stages into the parent's
+stages. For a child with `x @0`, `r @1`, and an output at `@1`, connecting
+`x` at parent stage 4 sets the offset to 4. Connecting `r` at stage 5 then
+passes and the output is at stage 5. Connecting `r` at stage 4 fails. A
+second instance of the same child can start at a different stage.
+
+A constant argument fits any stage. At least one argument with a known stage
+must set the offset, and the checker must be able to follow the other
+arguments. An unannotated child or an extern block supplies no output stage.
 Register feedback such as `q := q + x;` is legal BX. Following a timed
-output back through that feedback currently produces a diagnostic. Timing
-through child block outputs and extern interfaces is also a follow-up.
+output back through that feedback currently produces a diagnostic.
 
 #### Related work
 

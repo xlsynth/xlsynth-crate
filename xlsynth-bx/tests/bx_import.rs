@@ -82,7 +82,7 @@ fn imported_generic_block_checks_the_stage_of_a_destructured_register() -> Resul
 {
     let dir = tempdir()?;
     let options = search_paths(&[dir.path()]);
-    let caller = "use pipe::saved; block top(clk, x: u8) -> u8 { let q = saved(x); q }";
+    let caller = "use pipe::saved; block top(clk, x: u8 @4) -> u8 @5 { let q = saved(x); q }";
     let pipe = r#"
 pub block saved<T>(clk, x: T @2) -> T @3 {
     reg pair: (T, T);
