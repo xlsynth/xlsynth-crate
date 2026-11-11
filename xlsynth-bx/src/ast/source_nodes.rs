@@ -64,6 +64,14 @@ impl<'a> SourceNode<'a> {
                 Expr::Array(args) | Expr::Tuple(args) | Expr::Call { args, .. } => {
                     pending.extend(args.iter().map(Expression));
                 }
+                Expr::ArrayLiteral {
+                    annotation,
+                    members,
+                    ..
+                } => {
+                    pending.extend(annotation.iter().map(Annotation));
+                    pending.extend(members.iter().map(Expression));
+                }
                 Expr::MapBeforeUse {
                     args, builtin_args, ..
                 } => {

@@ -159,6 +159,31 @@ pub block circuit(clk, x:u8)->u8 {
 }
 
 #[test]
+fn imported_array_fill_resolves_its_dimension_and_last_value_in_the_library()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "lanes.bx",
+        r#"
+const COUNT = u32:4;
+fn step(x: u8) -> u8 { x + u8:1 }
+pub fn spread(x: u8) -> u8[COUNT] { u8[COUNT]:[0, step(x), ...] }
+"#,
+    )?;
+    let source = r#"
+use lanes;
+const COUNT = u32:2;
+fn step(x: u8) -> u8 { x - u8:1 }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 { lanes::spread(x)[3] }
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 41)?, IrValue::make_ubits(8, 42)?);
+    Ok(())
+}
+
+#[test]
 fn library_struct_arguments_keep_their_defining_zero_binding() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(dir.path(), "widths.bx", "pub fn zero!() -> u32 { u32:7 }")?;

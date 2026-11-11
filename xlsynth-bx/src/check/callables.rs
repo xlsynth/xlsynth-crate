@@ -711,7 +711,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .enumerate()
             .map(|(i, (arg, (label, ty)))| {
                 let value = if dslx {
-                    self.dslx_argument(arg, ty)
+                    crate::infer_literal::check_argument_array_sizes(arg)
+                        .and_then(|()| self.dslx_argument(arg, ty))
                 } else {
                     self.expr(arg, Some(ty))
                 };

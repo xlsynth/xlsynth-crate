@@ -972,8 +972,16 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Tuple(items)
             | Expr::Array(items)
+            | Expr::ArrayLiteral { members: items, .. }
             | Expr::Call { args: items, .. }
             | Expr::MapBeforeUse { args: items, .. } => {
+                if let Expr::ArrayLiteral {
+                    annotation: Some(ty),
+                    ..
+                } = expr
+                {
+                    self.check_type_names(ty, locals)?;
+                }
                 if let Expr::Call { name, .. } | Expr::MapBeforeUse { name, .. } = expr {
                     let local = locals.lookup(name);
                     if self.callback_index(name).is_none() && self.decls.is_block(name) {

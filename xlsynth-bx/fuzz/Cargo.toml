@@ -24,6 +24,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_array_literals"
+path = "fuzz_targets/fuzz_bx_dslx_array_literals.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_bits_array_casts"
 path = "fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs"
 test = false

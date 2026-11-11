@@ -640,6 +640,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         actuals: &[Expr],
         args: &[Expr],
     ) -> Result<(Type, K), String> {
+        for arg in args {
+            crate::infer_literal::check_argument_array_sizes(arg)?;
+        }
         let instantiate = |checker: &mut Self, args: &[&Expr]| {
             let args = args
                 .iter()
@@ -956,7 +959,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     self.infer_type_input(ty, item, types, inferred, /* tuple_member= */ true)
                 })
                 .collect::<Result<_, _>>()?;
-            return Ok(Input::Aggregate { expr, members });
+            return Ok(Input::Aggregate {
+                expr,
+                members,
+                charged_fill: 0,
+            });
         }
         let witness = self.dimension_witness(formal, expr, inferred, tuple_member)?;
         self.infer_input(formal, expr, types, InputPattern::Function(witness))

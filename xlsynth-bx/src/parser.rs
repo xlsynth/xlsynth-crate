@@ -271,7 +271,7 @@ fn lex(
             // Separate closing angles in nested parametric type arguments.
             // Expressions in an outline retain their source spelling.
             i += 1;
-        } else if dialect == Dialect::Bx && rest.starts_with("..=") {
+        } else if dialect == Dialect::Bx && (rest.starts_with("..=") || rest.starts_with("...")) {
             i += 3;
         } else if rest.starts_with(":=")
             || rest.starts_with("+:")
@@ -2538,11 +2538,11 @@ impl<'s> Parser<'s> {
             return Ok(Expr::Bool(false));
         }
         let literal = if self.starts_bit_literal()? {
-            let ty = self.ty()?;
+            let ty = self.parsed_ty(self.dslx_value_grammar())?;
             if !matches!(
-                ty,
+                ty.value,
                 Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. }
-            ) && !matches!(&ty, Type::Named(name) if self.type_params.contains(name.as_str()))
+            ) && !matches!(&ty.value, Type::Named(name) if self.type_params.contains(name.as_str()))
             {
                 return Err(self.error("match patterns require a scalar literal type"));
             }
@@ -2553,6 +2553,9 @@ impl<'s> Parser<'s> {
         } else {
             return Err(self.error("expected a scalar match pattern (literal, range, or _)"));
         };
+        if !matches!(&literal.value, Expr::Literal { .. }) {
+            return Err(self.error("match patterns require a scalar literal"));
+        }
         Ok(literal.value)
     }
 
@@ -2713,7 +2716,7 @@ impl<'s> Parser<'s> {
     /// Parse the range operator below all binary operators. Parentheses can
     /// enclose an entire range, one endpoint, or an array-producing expression.
     fn for_iterable(&mut self, braces: Braces) -> Result<ParsedIterable, String> {
-        let start = if self.eat("(") {
+        let start = if self.peek(0) == "(" && !self.starts_array_literal_type() && self.eat("(") {
             let grouped = self.nested(|p| {
                 p.parenthesized(
                     |p| p.for_iterable(Braces::Struct),
@@ -2904,6 +2907,13 @@ impl<'s> Parser<'s> {
         braces: Braces,
     ) -> Result<ParsedExpr, String> {
         loop {
+            if left.spelling == ExprSpelling::AnnotatedLiteral
+                && matches!(left.value, Expr::ArrayLiteral { .. })
+                && matches!(self.peek(0), "." | "[")
+            {
+                return Err(self
+                    .error("parenthesize a typed array literal before field access or indexing"));
+            }
             if self.dslx_value_grammar()
                 && left.spelling != ExprSpelling::Parenthesized
                 && matches!(left.value, Expr::If { .. })
@@ -3008,8 +3018,10 @@ impl<'s> Parser<'s> {
             return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
         }
         if self.eat("[") {
-            let items = self.list("]", Self::expr)?;
-            return self.aggregate(items, Expr::Array);
+            return self.array_literal(None);
+        }
+        if self.starts_bit_literal()? || self.starts_array_literal_type() {
+            return self.parse_annotated_literal();
         }
         if self.eat("(") {
             let mut expr = self.parenthesized(Self::expr, |parser, fields| {
@@ -3060,11 +3072,6 @@ impl<'s> Parser<'s> {
                     value: Box::new(value.value),
                 },
             );
-        }
-        if self.starts_bit_literal()? {
-            let ty = self.ty()?;
-            self.expect(":")?;
-            return self.annotated_literal(ty);
         }
         if number_token(text) || self.tokens[self.pos].character.is_some() {
             return self.literal(None);
@@ -3296,10 +3303,8 @@ impl<'s> Parser<'s> {
         if number_token(text) {
             return self.literal(None);
         }
-        if self.starts_bit_literal()? {
-            let ty = self.ty()?;
-            self.expect(":")?;
-            return self.annotated_literal(ty);
+        if self.starts_bit_literal()? || self.starts_array_literal_type() {
+            return self.nested(Self::parse_annotated_literal);
         }
         let name = self.name_or_qualified_member()?;
         Ok(ParsedExpr::leaf(self.named_value(name)?))
@@ -3399,6 +3404,11 @@ impl<'s> Parser<'s> {
         };
         let close = self.tokens[end].text;
         let next = self.tokens[end + 1].text;
+        if next == "[" && self.dimensions_before_colon(end + 1) {
+            // An annotated array can start with a struct application whose
+            // arguments have their own commas, e.g. Pair<A, B>[2]:[p, ...].
+            return Some(end);
+        }
         let (before_name, bare_name) = match &self.tokens[..angle] {
             [before @ .., _, separator, _] if separator.text == "::" => (before, None),
             [before @ .., name] => (before, Some(name.text)),
@@ -3858,15 +3868,131 @@ impl<'s> Parser<'s> {
         Ok(false)
     }
 
+    /// Skip a delimited type atom or dimension during literal lookahead.
+    fn after_group(&self, start: usize, open: &str, close: &str) -> Option<usize> {
+        let mut depth = 1;
+        for (index, token) in self.tokens.iter().enumerate().skip(start + 1) {
+            if token.text == open {
+                depth += 1;
+            } else if token.text == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+        }
+        None
+    }
+
+    /// The colon distinguishes an array type's dimensions from indexing.
+    fn dimensions_before_colon(&self, mut index: usize) -> bool {
+        while self.tokens[index].text == "[" {
+            let Some(after) = self.after_group(index, "[", "]") else {
+                return false;
+            };
+            index = after;
+        }
+        self.tokens[index].text == ":"
+    }
+
+    /// A tuple, nominal type or type parameter can start a typed array, but
+    /// the same opening tokens also occur in ordinary values and subscripts.
+    fn starts_array_literal_type(&self) -> bool {
+        let mut index = self.pos;
+        if self.peek(0) == "(" {
+            let Some(after) = self.after_group(index, "(", ")") else {
+                return false;
+            };
+            index = after;
+        } else if is_value_identifier(self.peek(0)) {
+            index += 1;
+            if self.tokens[index].text == "::" && self.tokens[index + 1].text != "<" {
+                index += 2;
+            }
+            if self.tokens.get(index).is_some_and(|t| t.text == "::")
+                && self.tokens[index + 1].text == "<"
+            {
+                index += 1;
+            }
+            if self.tokens.get(index).is_some_and(|t| t.text == "<") {
+                let Some(end) = self.struct_arguments_end(index) else {
+                    return false;
+                };
+                index = end + 1;
+            }
+        } else {
+            return false;
+        }
+        match self.tokens.get(index).map(|t| t.text) {
+            Some("[") => self.dimensions_before_colon(index),
+            // A type parameter can itself denote an array.
+            Some(":") => self.tokens[index + 1..]
+                .iter()
+                .find(|t| t.text != "(")
+                .is_some_and(|t| t.text == "["),
+            _ => false,
+        }
+    }
+
+    fn parse_annotated_literal(&mut self) -> Result<ParsedExpr, String> {
+        let ty = self.parsed_ty(self.dslx_value_grammar())?;
+        self.expect(":")?;
+        self.annotated_literal(ty)
+    }
+
+    /// Parse explicit array members once, retaining an optional trailing fill.
+    fn array_literal(&mut self, annotation: Option<ParsedType>) -> Result<ParsedExpr, String> {
+        let mut height = annotation.as_ref().map_or(0, |ty| ty.depth);
+        let mut members = Vec::new();
+        let mut has_ellipsis = false;
+        while !self.eat("]") {
+            if self.eat("...") {
+                if members.is_empty() {
+                    return Err(self.error("array ellipsis requires a preceding member"));
+                }
+                has_ellipsis = true;
+                self.eat(",");
+                self.expect("]")?;
+                break;
+            }
+            let member = self.expr()?;
+            height = height.max(member.height);
+            members.push(member.value);
+            if self.eat("]") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        let annotated = annotation.is_some();
+        let value = if annotated || has_ellipsis {
+            Expr::ArrayLiteral {
+                annotation: annotation.map(|ty| ty.value),
+                members,
+                has_ellipsis,
+            }
+        } else {
+            Expr::Array(members)
+        };
+        let mut literal = self.compose(height, value)?;
+        if annotated {
+            literal.spelling = ExprSpelling::AnnotatedLiteral;
+        }
+        Ok(literal)
+    }
+
     /// Parse a literal term after a type annotation. Parentheses group the
     /// literal, and the outermost annotation supplies its final type.
-    fn annotated_literal(&mut self, ty: Type) -> Result<ParsedExpr, String> {
-        if self.eat("(") {
+    fn annotated_literal(&mut self, ty: ParsedType) -> Result<ParsedExpr, String> {
+        if self.eat("[") {
+            return self.array_literal(Some(ty));
+        }
+        let compound_type = self.starts_array_literal_type();
+        if !compound_type && self.eat("(") {
             let literal = self.nested(|parser| parser.annotated_literal(ty))?;
             self.expect(")")?;
             return Ok(literal);
         }
-        if self.starts_bit_literal()? {
+        if self.starts_bit_literal()? || compound_type {
             // DSLX resolves the head of each name as it parses this type.
             // The outer annotation subsequently replaces it, so its members,
             // signedness and widths never undergo type checking.
@@ -3880,7 +4006,7 @@ impl<'s> Parser<'s> {
             self.expect(":")?;
             return self.nested(|parser| parser.annotated_literal(ty));
         }
-        self.literal(Some(ty))
+        self.literal(Some(ty.value))
     }
 
     /// Preserve arbitrary-width numbers as text for checking against their
@@ -6404,6 +6530,121 @@ block top(clk, x: u8) -> u8 {
         assert!(
             matches!(&values[..], [Expr::Index { value, .. }] if matches!(value.as_ref(), Expr::Index { .. }))
         );
+    }
+
+    #[test]
+    fn typed_array_literals_retain_the_annotation_and_explicit_members() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            fn grid<T, N: u32>(x: T) -> T[N][2] { T[N][2]:[[x, ...], ...] }
+            fn repeated(x: u8) -> u8[4] { u8[4]:(u8[3]:[1, x, ...,]) }
+            block pair(clk, p: (bool, u8)) -> (bool, u8)[2] {
+                (bool, u8)[2]:[p, p,]
+            }
+            "#,
+        )?;
+        let grid = &module.functions[0];
+        assert_eq!(
+            grid.body,
+            Expr::ArrayLiteral {
+                annotation: Some(grid.result.clone()),
+                members: vec![Expr::ArrayLiteral {
+                    annotation: None,
+                    members: names(["x"]).into(),
+                    has_ellipsis: true,
+                }],
+                has_ellipsis: true,
+            }
+        );
+        let repeated = &module.functions[1];
+        assert_eq!(
+            repeated.body,
+            Expr::ArrayLiteral {
+                annotation: Some(repeated.result.clone()),
+                members: vec![
+                    Expr::Literal {
+                        ty: None,
+                        text: "1".into()
+                    },
+                    Expr::Name("x".into())
+                ],
+                has_ellipsis: true,
+            }
+        );
+        let pair = &module.blocks[0];
+        assert_eq!(
+            pair.output,
+            Expr::ArrayLiteral {
+                annotation: Some(pair.result.clone()),
+                members: names(["p", "p"]).into(),
+                has_ellipsis: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_map_operands_handle_tuple_and_struct_type_delimiters() -> Result<(), String> {
+        for ty in [
+            "(u8, bool)",
+            "Pair<u8, bool>",
+            "Pair::<u8, bool>",
+            "lib::Packet<1,2>",
+        ] {
+            let source = format!(
+                r#"
+                struct Pair<A,B> {{ first: A, second: B }}
+                block b(clk, x: {ty}) -> {ty}[2] {{ map({ty}[2]:[x, ...], |e| e) }}
+            "#
+            );
+            let module = parse_module(&source)?;
+            let block = &module.blocks[0];
+            let Expr::Map(map) = &block.output else {
+                panic!("expected map over {ty}")
+            };
+            assert_eq!(
+                map.iterable,
+                ForIterable::Array(Expr::ArrayLiteral {
+                    annotation: Some(block.result.clone()),
+                    members: names(["x"]).into(),
+                    has_ellipsis: true,
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn array_ellipses_require_a_preceding_member_and_terminate_the_literal() {
+        for expr in [
+            "[...]",
+            "u8[0]:[...,]",
+            "[x ...]",
+            "[x, .. .]",
+            "[x, ..., x]",
+            "[x, ..., ...]",
+            "u8[4]:[x, ...][0]",
+            "library::",
+            "library::Packet::<",
+            "library::Packet<1>[",
+        ] {
+            let source = format!("fn f(x:u8) -> u8 {{ {expr} }}");
+            assert!(parse_module(&source).is_err(), "{expr}");
+        }
+        assert!(parse_module("fn f(x:u8)->u8 { (u8[4]:[x,...])[0] }").is_ok());
+        assert!(parse_module("fn f() -> u8 { library::").is_err());
+    }
+
+    #[test]
+    fn array_annotation_lookahead_keeps_sibling_comparisons_separate() -> Result<(), String> {
+        let comparisons = "x < y,".repeat(4096);
+        let source = format!("fn f(x:u8,y:u8)->() {{ let _ = ({comparisons}); () }}");
+        let module = parse_module(&source)?;
+        let Expr::Scope { bindings, .. } = &module.functions[0].body else {
+            panic!("expected a tuple binding")
+        };
+        assert!(matches!(&bindings[0].value, Expr::Tuple(fields) if fields.len() == 4096));
+        Ok(())
     }
 
     #[test]

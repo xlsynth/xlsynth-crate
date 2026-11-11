@@ -433,7 +433,13 @@ impl<'m> BodyChecker<'_, 'm> {
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
                 self.contains_type_struct_constructor(&fold.seed)
             }
-            Expr::Tuple(items) | Expr::Array(items) => items
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members: items,
+                ..
+            } => items
                 .iter()
                 .any(|item| self.contains_type_struct_constructor(item)),
             Expr::If {
@@ -917,7 +923,7 @@ impl<'m> BodyChecker<'_, 'm> {
             .fields
             .iter()
             .zip(inputs)
-            .filter(|(_, input)| !matches!(input, Input::Contextual(_)))
+            .filter(|(_, input)| !matches!(input, Input::Contextual { .. }))
             .map(|(field, input)| (field.name.clone(), input))
             .collect();
         Ok((ty, inputs))
