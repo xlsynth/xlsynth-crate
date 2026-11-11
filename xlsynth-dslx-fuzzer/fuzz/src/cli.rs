@@ -175,6 +175,30 @@ pub fn check_audit_with_optimizer(
             shadows_dimension,
         } => check_typechecked_contract(case, &[], shadows_dimension, converter, stdlib),
         AuditCase::ParametricSplat(case) => check_parametric_splat(case, converter, stdlib),
+        AuditCase::ExpectedTypeRejection { modules, .. } => {
+            let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+            let output = run_converter(&modules, converter, stdlib, directory.path(), None, true)?;
+            if output.status.success() {
+                return Err(CheckFailure::InvalidOutput(format!(
+                    "Converter accepted a value outside its required type's range\n{modules:#?}\n{}",
+                    String::from_utf8_lossy(&output.stdout)
+                )));
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Only a clean source type error satisfies the range contract.
+            // Crashes, syntax errors and internal errors remain findings.
+            if output.status.code() == Some(1)
+                && stderr
+                    .lines()
+                    .any(|line| line.contains("^ TypeInferenceError:"))
+                && stderr
+                    .lines()
+                    .any(|line| line.starts_with("Error: INVALID_ARGUMENT: TypeInferenceError:"))
+            {
+                return Ok(EquivResult::Proved);
+            }
+            Err(rejection("ir_converter_main", &output, &modules))
+        }
     }
 }
 

@@ -9,9 +9,9 @@ use crate::{
     bound_parametric_contracts, builtin_contracts, cross_module_parametric_contracts,
     dead_branch_contracts, empty_builtin_contracts, enum_width_contracts, inferred_flow_contracts,
     lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
-    mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
-    observer_contracts, parametric_splat_contracts, pattern_acceptance,
-    scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
+    mixed_literal_contracts, nested_scope_contracts, nested_struct_parametric_contracts,
+    nominal_contracts, observable_value_contracts, observer_contracts, parametric_splat_contracts,
+    pattern_acceptance, scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
     signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
     unrolled_loop_contracts, zero_width_cast_contracts,
 };
@@ -76,6 +76,11 @@ pub enum AuditCase {
     },
     /// Checks computed struct splat bases with a bounded standalone converter.
     ParametricSplat(ContractCase),
+    /// The generated source has a value that cannot fit its required type.
+    ExpectedTypeRejection {
+        family: &'static str,
+        modules: Vec<SourceModule>,
+    },
 }
 
 impl AuditCase {
@@ -89,7 +94,9 @@ impl AuditCase {
             | Self::ParametricSplat(case) => case.family,
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
-            Self::LiteralRuntime { family, .. } => family,
+            Self::LiteralRuntime { family, .. } | Self::ExpectedTypeRejection { family, .. } => {
+                family
+            }
             Self::TupleLiteral { case, .. }
             | Self::MixedLiteral { case, .. }
             | Self::BoundCall { case, .. }
@@ -292,6 +299,17 @@ pub fn generate_v15(data: &[u8]) -> Result<AuditCase, String> {
         ))
     } else {
         generate_v14(options)
+    }
+}
+
+/// Checks signed value-parametric range across nested struct types.
+/// A zero prefix preserves audit-v15 inputs.
+pub fn generate_v16(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 16 == 6 {
+        Ok(nested_struct_parametric_contracts::generate(options))
+    } else {
+        generate_v15(options)
     }
 }
 

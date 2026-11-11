@@ -42,6 +42,7 @@ pub fn check_audit(
         | AuditCase::Traces { .. }
         | AuditCase::TraceMessages { .. }
         | AuditCase::ConstexprFailure { .. }
+        | AuditCase::ExpectedTypeRejection { .. }
         | AuditCase::LiteralRuntime { .. }
         | AuditCase::PatternAcceptance { .. } => return Ok(BxOutcome::OutsideScope),
     };

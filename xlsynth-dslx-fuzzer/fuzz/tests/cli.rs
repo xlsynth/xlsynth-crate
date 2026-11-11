@@ -51,6 +51,53 @@ sleep 4"#,
 }
 
 #[test]
+fn nested_struct_parametric_requires_a_clean_range_rejection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let run = |data| -> Result<_, String> {
+        let case = audit_contracts::generate_v16(data)?;
+        Ok(check_audit(
+            case,
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        ))
+    };
+    let diagnostic = r#"echo '~~~^ TypeInferenceError: size mismatch: s4 vs. s3' >&2
+echo 'Error: INVALID_ARGUMENT: TypeInferenceError: size mismatch: s4 vs. s3' >&2"#;
+    write_tool(
+        &converter,
+        &format!(
+            r#"if grep -Fq 'Outer<u64:4>' sample.x; then
+  {diagnostic}
+  exit 1
+fi
+grep -Fq 'Outer<uN[65]:4>' sample.x || exit 2
+echo 'ret K: bits[8] = literal(value=252)'"#
+        ),
+    )?;
+    assert!(matches!(run(&[6, 1])?, Ok(EquivResult::Proved)));
+    let result = run(&[6])?;
+    assert!(
+        matches!(result, Err(CheckFailure::InvalidOutput(ref message))
+            if message.contains("Outer<uN[65]:4>") && message.contains("literal(value=252)")),
+        "{result:?}"
+    );
+    for script in [
+        format!("{diagnostic}\nkill -ABRT $$"),
+        String::from("echo 'Error: INTERNAL: missing parametric binding' >&2; exit 1"),
+        String::from("echo 'Error: INVALID_ARGUMENT: ParseError: missing struct' >&2; exit 1"),
+    ] {
+        write_tool(&converter, &script)?;
+        assert!(matches!(
+            run(&[6])?,
+            Err(CheckFailure::ConverterRejected(_))
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn only_a_clean_pattern_type_error_satisfies_the_frontend_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

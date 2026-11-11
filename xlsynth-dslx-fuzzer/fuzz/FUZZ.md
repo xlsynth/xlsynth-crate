@@ -301,6 +301,16 @@ Rejections, crashes, and deadline misses record `R` with replay bytes, and
 successful conversions proceed to the proof against independent IR.
 Prefix any audit-v14 input with one zero byte to preserve it in audit-v15.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v16` to check values forwarded into a
+nested struct's `s3` parametric. `06` forwards `uN[65]:4` and `06 01` forwards
+`u64:4`. Both values are out of range and require a clean source type error.
+`06 00 01` and `06 01 01` forward the representable value `3` and prove
+that reading and sign-extending the nested parametric returns `3`. The
+generator also varies source width, value, literal radix, and whether the
+nested struct is imported. Unexpected acceptance records `X` and retains the
+source and emitted IR. Crashes and unrelated errors record `R`.
+Prefix any audit-v15 input with one zero byte to preserve it in audit-v16.
+
 Replay a retained finding with the same grammar and the retained seed file.
 The target recreates the import tree from the seed, including nested modules.
 

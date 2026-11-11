@@ -441,6 +441,9 @@ nested `match` scrutinees evaluated at runtime or in a module constant.
 The `audit-v15` grammar checks computed bases of parametric struct splats.
 It compares the inherited field with independent IR and retains converter
 rejections, crashes, and timeouts for inline and let-bound bases.
+The `audit-v16` grammar checks unsigned values forwarded into signed
+parametrics of local or imported nested structs. It requires rejection of
+out-of-range values and proves the widened result for in-range controls.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

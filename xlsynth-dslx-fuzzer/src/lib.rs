@@ -31,6 +31,7 @@ mod map_parametric_contracts;
 pub mod mission_expr;
 mod mixed_literal_contracts;
 mod nested_scope_contracts;
+mod nested_struct_parametric_contracts;
 mod nominal_contracts;
 mod observable_value_contracts;
 mod observer_contracts;
