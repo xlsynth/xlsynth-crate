@@ -567,10 +567,11 @@ struct StructMembers {
     base: Option<Box<StructSplat>>,
 }
 
-/// Parsed value arguments and their token spans for struct-literal validation.
+/// Parsed value arguments and their starting tokens for struct-literal
+/// validation.
 struct ParsedAngleArguments {
     args: Vec<Expr>,
-    spans: Vec<std::ops::Range<usize>>,
+    starts: Vec<usize>,
     height: usize,
 }
 
@@ -1957,34 +1958,34 @@ impl<'s> Parser<'s> {
     /// Read explicit value arguments before their enclosing syntax is known.
     fn parsed_angle_arguments(&mut self) -> Result<ParsedAngleArguments, String> {
         self.expect("<")?;
-        let mut spans = Vec::new();
+        let mut starts = Vec::new();
         let mut height = 0;
         let args = self.list(">", |p| {
-            let start = p.pos;
+            starts.push(p.pos);
             let actual = p.parametric_argument()?;
-            spans.push(start..p.pos);
             height = height.max(actual.height);
             Ok(actual.value)
         })?;
         Ok(ParsedAngleArguments {
             args,
-            spans,
+            starts,
             height,
         })
     }
 
-    /// Retain the concrete representation for lists of direct u32 literals.
+    /// Compact unannotated decimal arguments. Keep the radix of bit-pattern
+    /// literals because a signed formal can accept `0xff` and reject `255`.
     fn classify_struct_arguments(
         &self,
         ParsedAngleArguments {
             args,
-            spans,
+            starts,
             height,
         }: ParsedAngleArguments,
     ) -> Result<StructArguments, String> {
         let mut concrete = Vec::new();
-        for (arg, span) in args.iter().zip(spans) {
-            let start = self.tokens[span.start];
+        for (arg, start) in args.iter().zip(starts) {
+            let start = self.tokens[start];
             if start.text == "{" {
                 continue;
             }
@@ -1993,25 +1994,11 @@ impl<'s> Parser<'s> {
                     .map_err(|e| diagnostic(self.source, start.start, &e))?;
                 continue;
             }
-            let spelling = match &self.tokens[span] {
-                [number] => Some(number.text),
-                [ty, colon, number] if ty.text == "u32" && colon.text == ":" => Some(number.text),
-                _ => None,
-            };
-            let value = spelling
-                .and_then(normalized_integer)
-                .and_then(|text| {
-                    let (digits, radix) = radix_digits(&text);
-                    u32::from_str_radix(digits, radix).ok()
-                })
-                .ok_or_else(|| {
-                    diagnostic(
-                        self.source,
-                        start.start,
-                        "expected a concrete nonnegative struct argument that fits u32",
-                    )
-                })?;
-            concrete.push(value);
+            if let Expr::Literal { ty: None, text } = arg
+                && let Ok(value) = text.parse::<u32>()
+            {
+                concrete.push(value);
+            }
         }
         Ok(if concrete.len() == args.len() {
             StructArguments::Concrete(concrete)
@@ -4866,8 +4853,8 @@ fn g(x:u8)->u8 {
         let module = parse_module(
             r#"
 use packets::Packet;
-fn build(x: u8) -> packets::Packet<u32:0x_f_f, 0b1_0> {
-    packets::Packet<255, u32:2> { x }
+fn build(x: u8) -> packets::Packet<0x_f_f, 0b1_0> {
+    packets::Packet<255, 2> { x }
 }
 block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> {
     let empty:Packet<2>=zero!<Packet<2>>();
@@ -4875,9 +4862,18 @@ block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> 
 }
 "#,
         )?;
-        let qualified = Type::Applied {
+        let qualified = Type::ParametricStruct {
             name: "packets::Packet".into(),
-            args: vec![255, 2],
+            args: vec![
+                Expr::Literal {
+                    ty: None,
+                    text: "0xff".into(),
+                },
+                Expr::Literal {
+                    ty: None,
+                    text: "0b10".into(),
+                },
+            ],
         };
         let packet = Type::Applied {
             name: "Packet".into(),
@@ -5304,21 +5300,68 @@ block sample(clk) -> u8[2] {{ map({zero}.data, |x| x) }}
     }
 
     #[test]
-    fn unbraced_struct_arguments_require_names_or_concrete_u32_literals() {
-        for arguments in [
-            "u8:2",
-            "-1",
-            "u32:-1",
-            "4294967296",
-            "0x1_0000_0000",
-            "0b2",
-            "00",
-            "1+2",
-            "N+2",
-            "_",
-            "u32",
-            "2,,3",
-        ] {
+    fn struct_arguments_preserve_literal_types_and_arbitrary_widths() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+enum Mode: u8 { FIRST = 0, SECOND = 1 }
+struct Tagged<S: bool, W: u8, I: s8, D: u32, X: uN[96], M: Mode> { data: xN[S][W] }
+fn tag(data: s5) -> Tagged<true, u8:5, -1, u32:5, 4294967296, Mode::SECOND> {
+    Tagged<true, u8:5, -1, u32:5, 4294967296, Mode::SECOND> { data }
+}
+struct Aggregates<T: (u8, bool), A: u8[2], R: Tagged<false, 5, 0, 5, 0, Mode::FIRST>> { v: u8 }
+"#,
+        )?;
+        let value_types: Vec<_> = module.structs[0]
+            .value_parametrics
+            .iter()
+            .map(|formal| &formal.ty)
+            .collect();
+        assert!(matches!(&value_types[..], [
+            Type::Bool,
+            Type::Bits { signed: false, width: 8 },
+            Type::Bits { signed: true, width: 8 },
+            Type::Bits { signed: false, width: 32 },
+            Type::Bits { signed: false, width: 96 },
+            Type::Named(name),
+        ] if name == "Mode"));
+        let function = &module.functions[0];
+        let Type::ParametricStruct { args, .. } = &function.result else {
+            panic!("expected value arguments in the result type");
+        };
+        assert!(matches!(&args[..], [
+            Expr::Bool(true),
+            Expr::Literal { ty: Some(Type::Bits { signed: false, width: 8 }), text: width },
+            Expr::Literal { ty: None, text: negative },
+            Expr::Literal { ty: Some(Type::Bits { signed: false, width: 32 }), text: dimension },
+            Expr::Literal { ty: None, text: wide },
+            Expr::Name(member),
+        ] if width == "5" && negative == "-1" && dimension == "5" && wide == "4294967296" && member == "Mode::SECOND"));
+        assert!(
+            matches!(&function.body, Expr::ParametricStruct { args: actual, .. } if actual == args)
+        );
+        assert!(matches!(
+            &module.structs[1].value_parametrics[..],
+            [
+                ParametricBinding {
+                    ty: Type::Tuple(_),
+                    ..
+                },
+                ParametricBinding {
+                    ty: Type::Array { .. },
+                    ..
+                },
+                ParametricBinding {
+                    ty: Type::ParametricStruct { .. },
+                    ..
+                },
+            ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unbraced_struct_arguments_require_names_or_literals() {
+        for arguments in ["0b2", "00", "1+2", "N+2", "_", "u32", "2,,3"] {
             for source in [
                 format!("fn f(x: Packet<{arguments}>) {{ }}"),
                 format!("fn f() {{ Packet<{arguments}> {{ x: u8:0 }} }}"),

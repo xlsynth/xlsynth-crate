@@ -774,6 +774,10 @@ impl BodyChecker<'_, '_> {
             Ok(())
         } else if usage == NominalUse::AppliedStruct {
             Err(format!("'{name}' requires a struct template"))
+        } else if self.structs.declared_records.contains(name) {
+            // Name verification only needs the declaration. A specialization
+            // that uses this layout will resolve its fields during elaboration.
+            Ok(())
         } else if matches!(usage, NominalUse::Annotation | NominalUse::StructField)
             && self.structs.local_enum(name).is_some()
         {

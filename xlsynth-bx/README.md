@@ -177,8 +177,22 @@ accept dimension expressions.
 
 ## Native parametric structs
 
-A BX struct can declare `u32` value parametrics that determine field widths,
-array lengths, and nested struct arguments.
+A BX struct can declare compile-time value parameters of any concrete BX
+value type, including booleans, signed or unsigned integers, enums, tuples,
+arrays, and records. For example, a boolean can select the signedness of a
+field. Constructing `Word` from an `s8` field infers `Word<true>`.
+
+```text
+struct Word<S: bool> { x: xN[S][8] }
+
+fn is_negative(x: s8) -> bool {
+    let word = Word { x };
+    word.x < s8:0
+}
+```
+
+Integer parameters can determine field widths, array lengths, and nested
+struct arguments.
 
 ```text
 struct Packet<N: u32, M: u32 = {N + u32:1}> {
@@ -196,8 +210,9 @@ fn make(data: u8, tags: u8[9]) -> Packet<8> {
 ```
 
 Supply an explicit prefix of arguments in a type annotation or constructor.
-Arguments can be literals, names, or braced compile-time expressions. Defaults
-can refer to earlier bindings. A constructor can infer omitted arguments
+Arguments can be literals, names, or braced compile-time expressions. An
+untyped literal takes the parameter's declared type. Parameter types and
+defaults can refer to earlier bindings. A constructor can infer omitted arguments
 from its expected type or from the types of its field values. Every binding
 contributes to the struct's type identity, including bindings that do not
 affect its layout. Declare a template before referring to it in another type.
@@ -651,7 +666,7 @@ BX can read fields through a private struct nested inside a public one. To pass 
 
 BX accepts concrete instances of public DSLX struct templates with `u32` value
 parameters. Write the application directly in a type annotation or struct
-literal. Arguments accept the same `u32` forms as native struct arguments.
+literal.
 DSLX supplies defaults for omitted trailing parameters, including
 all parameters in a spelling such as `Packet<>` when each has a default.
 
