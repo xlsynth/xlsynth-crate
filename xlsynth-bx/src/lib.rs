@@ -15,6 +15,7 @@ mod infer_literal;
 mod layout;
 pub mod lower;
 pub mod parser;
+mod test_runner;
 mod typed;
 mod warnings;
 
@@ -26,6 +27,7 @@ pub use parser::outline::{
     parse_dslx_outline,
 };
 pub use parser::parse_module;
+pub use test_runner::{BxTestReport, BxTestResult, run_tests};
 pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;

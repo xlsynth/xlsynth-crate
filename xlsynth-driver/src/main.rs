@@ -944,6 +944,7 @@ fn main() {
         )
         .subcommand(bx::bx2ir_command())
         .subcommand(bx::bx2gv_command())
+        .subcommand(bx::bx_test_command())
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx-show")
@@ -4101,6 +4102,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx2gv", subm)) => {
             if let Err(error) = bx::bx2gv(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2gv"), vec![]);
+            }
+        }
+        Some(("bx-test", subm)) => {
+            if let Err(error) = bx::bx_test(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx-test"), vec![]);
             }
         }
         #[cfg(feature = "unstable-dslx-specialize")]

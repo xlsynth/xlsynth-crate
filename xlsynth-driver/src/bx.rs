@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command, value_parser};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_source_file_with_options, empty_package, lower_module,
+    run_tests,
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
@@ -14,24 +15,18 @@ use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
 
-use crate::common::{DEFAULT_WARNINGS_AS_ERRORS, write_stdout};
+use crate::common::{DEFAULT_WARNINGS_AS_ERRORS, write_stdout, write_stdout_line};
 use crate::toolchain_config::{ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path};
 use crate::{g8r2gv, ir2gates};
 
-/// Adds the source, linking, and reset options shared by both BX commands.
-fn add_bx_args(command: Command) -> Command {
-    let mut command = command
+/// Adds the source, linking, and reset options shared by the BX commands.
+fn add_bx_source_args(command: Command) -> Command {
+    command
         .arg(
             Arg::new("input")
                 .value_name("BX_FILE")
                 .required(true)
                 .value_parser(value_parser!(PathBuf)),
-        )
-        .arg(
-            Arg::new("top")
-                .long("top")
-                .value_name("BLOCK")
-                .help("Select the top block (defaults to the sole BX block or unique pub block)"),
         )
         .arg(
             Arg::new("link-ir")
@@ -62,29 +57,38 @@ fn add_bx_args(command: Command) -> Command {
                 .visible_alias("dslx_stdlib_path")
                 .value_name("DIR")
                 .help("Override the DSLX standard library directory"),
-        );
-    for (name, help) in [
-        (
-            "reset-active-low",
-            "Use active-low reset (default active-high)",
-        ),
-        (
+        )
+        .arg(reset_flag("reset-active-low", "Use active-low reset (default active-high)"))
+}
+
+fn reset_flag(name: &'static str, help: &'static str) -> Arg {
+    Arg::new(name)
+        .long(name)
+        .help(help)
+        .num_args(0..=1)
+        .require_equals(true)
+        .default_missing_value("true")
+        .default_value("false")
+        .value_parser(value_parser!(bool))
+}
+
+/// Compilation commands emit a design with one selected top block.
+fn add_bx_args(command: Command) -> Command {
+    add_bx_source_args(command)
+        .arg(reset_flag(
             "reset-asynchronous",
             "Use asynchronous reset (default synchronous)",
-        ),
-    ] {
-        command = command.arg(
-            Arg::new(name)
-                .long(name)
-                .help(help)
-                .num_args(0..=1)
-                .require_equals(true)
-                .default_missing_value("true")
-                .default_value("false")
-                .value_parser(value_parser!(bool)),
-        );
-    }
-    command
+        ))
+        .arg(
+            Arg::new("top")
+                .long("top")
+                .value_name("BLOCK")
+                .help("Select the top block (defaults to the sole BX block or unique pub block)"),
+        )
+}
+
+pub fn bx_test_command() -> Command {
+    add_bx_source_args(Command::new("bx-test").about("Runs unit tests declared in a BX file"))
 }
 
 pub fn bx2ir_command() -> Command {
@@ -129,9 +133,22 @@ fn select_top(package: &mut Package, requested: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Reads the source and optional link package and compiles them with the
-/// selected top.
-fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<Package> {
+/// Input and frontend options resolved for one BX command invocation.
+struct BxInput<'a> {
+    path: &'a Path,
+    source: String,
+    package: Package,
+    imports: ImportOptions<'a>,
+    active_low: bool,
+    warnings_as_errors: bool,
+}
+
+/// Reads the BX source and link package and resolves toolchain search paths.
+fn with_bx_input<T>(
+    matches: &ArgMatches,
+    config: &Option<ToolchainConfig>,
+    run: impl FnOnce(BxInput<'_>) -> Result<T>,
+) -> Result<T> {
     let path = matches
         .get_one::<PathBuf>("input")
         .expect("clap requires BX_FILE");
@@ -165,34 +182,86 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
         dslx_stdlib_path: stdlib.as_deref().map(Path::new),
         additional_search_paths: paths.iter().map(PathBuf::as_path).collect(),
     };
-    let reset = ResetBehavior {
-        active_low: matches.get_flag("reset-active-low"),
-        asynchronous: matches.get_flag("reset-asynchronous"),
-    };
-    let checked = check_source_file_with_options(&source, path, &imports)
-        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
-    let mut package = lower_module(&checked, package, reset)
-        .map_err(|error| anyhow!("{}: {error}", path.display()))?;
-    select_top(
-        &mut package,
-        matches.get_one::<String>("top").map(String::as_str),
-    )?;
-    for warning in checked.warnings() {
-        eprintln!("{}", warning.display_with_root(path));
-    }
     let warnings_as_errors = matches
         .get_one::<bool>("warnings-as-errors")
         .copied()
         .unwrap_or(DEFAULT_WARNINGS_AS_ERRORS);
-    if warnings_as_errors && !checked.warnings().is_empty() {
-        bail!("BX warnings treated as errors");
-    }
-    Ok(package)
+    run(BxInput {
+        path,
+        source,
+        package,
+        imports,
+        active_low: matches.get_flag("reset-active-low"),
+        warnings_as_errors,
+    })
+}
+
+/// Compiles the input and its imports, then selects the requested top block.
+fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<Package> {
+    with_bx_input(matches, config, |input| {
+        let checked = check_source_file_with_options(&input.source, input.path, &input.imports)
+            .map_err(|error| anyhow!("{}: {error}", input.path.display()))?;
+        let reset = ResetBehavior {
+            active_low: input.active_low,
+            asynchronous: matches.get_flag("reset-asynchronous"),
+        };
+        let mut package = lower_module(&checked, input.package, reset)
+            .map_err(|error| anyhow!("{}: {error}", input.path.display()))?;
+        select_top(
+            &mut package,
+            matches.get_one::<String>("top").map(String::as_str),
+        )?;
+        for warning in checked.warnings() {
+            eprintln!("{}", warning.display_with_root(input.path));
+        }
+        if input.warnings_as_errors && !checked.warnings().is_empty() {
+            bail!("BX warnings treated as errors");
+        }
+        Ok(package)
+    })
 }
 
 pub fn bx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     write_stdout(&compile_input(matches, config)?.to_string());
     Ok(())
+}
+
+/// Runs each unit test in the input file and reports all assertion failures.
+pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+    with_bx_input(matches, config, |input| {
+        let reset = ResetBehavior {
+            active_low: input.active_low,
+            asynchronous: false,
+        };
+        let report = run_tests(
+            &input.source,
+            input.path,
+            input.package,
+            reset,
+            &input.imports,
+            input.warnings_as_errors,
+        )
+        .map_err(anyhow::Error::msg)?;
+        for warning in report.warnings {
+            eprintln!("{}", warning.display_with_root(input.path));
+        }
+        let total = report.tests.len();
+        let mut failed = 0;
+        for test in report.tests {
+            if let Some(failure) = test.failure {
+                failed += 1;
+                write_stdout_line(&format!("test {} ... FAILED", test.name));
+                eprintln!("{failure}");
+            } else {
+                write_stdout_line(&format!("test {} ... ok", test.name));
+            }
+        }
+        write_stdout_line(&format!("{} passed; {failed} failed", total - failed));
+        if failed != 0 {
+            bail!("BX tests failed");
+        }
+        Ok(())
+    })
 }
 
 /// Optimizes the selected BX block and maps its sequential design to the

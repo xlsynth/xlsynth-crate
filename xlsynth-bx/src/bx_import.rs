@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::ImportOptions;
-use crate::ast::{FunctionParametricRef, Module, UsePath};
+use crate::ast::{FunctionParametricRef, Module, TestKind, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::import_structs::DslxSourceLoader;
 use crate::parser;
@@ -647,6 +647,13 @@ impl<'a> Graph<'a> {
                 .chain(source.externs.iter().map(|d| (&d.name, false)))
                 .chain(source.extern_blocks.iter().map(|d| (&d.name, false)))
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
+                .chain(
+                    source
+                        .tests
+                        .iter()
+                        .filter(|_| names.subject.is_none())
+                        .map(|t| (&t.name, t.kind == TestKind::Block)),
+                )
             {
                 if block && !export.can_qualify_member
                     || use_pos
@@ -678,7 +685,10 @@ impl<'a> Graph<'a> {
             match names.uses.get(name) {
                 Some(Binding::Dslx(alias)) => linked.declaration_order.push(alias.clone()),
                 Some(_) => { /* BX use visibility was checked in its source module. */ }
-                None => linked.declaration_order.push(names.declared(name)),
+                None if names.subject.is_none() || names.definitions.contains(name) => {
+                    linked.declaration_order.push(names.declared(name));
+                }
+                None => { /* Imported test declarations do not enter the linked module. */ }
             }
         }
         if source.declaration_order.is_empty() {
@@ -751,6 +761,7 @@ impl<'a> Graph<'a> {
         mut self,
         root: &Module,
         bindings: BTreeMap<String, Binding>,
+        include_tests: bool,
     ) -> Result<SourceImports<'a>, String> {
         let linked = !self.loaded.is_empty();
         if linked || root.require_define_before_use {
@@ -763,6 +774,12 @@ impl<'a> Graph<'a> {
                 // does.
                 names.verification_only = true;
                 names::qualify(root, &names)?;
+            }
+            if include_tests {
+                let tests = names::qualify_tests(root, &names)?;
+                if linked {
+                    self.linked.module.tests = tests;
+                }
             }
             self.declaration_orders.extend(names.order);
         }
@@ -782,7 +799,7 @@ pub(crate) fn link<'a>(
 ) -> Result<SourceImports<'a>, String> {
     let mut graph = Graph::new(options);
     let bindings = graph.bindings(module.uses.clone())?;
-    graph.finish(module, bindings)
+    graph.finish(module, bindings, /* include_tests= */ false)
 }
 
 impl Graph<'_> {
@@ -812,9 +829,36 @@ pub(crate) fn read<'a>(
     source: &str,
     options: &'a ImportOptions<'a>,
 ) -> Result<(Module, SourceImports<'a>), String> {
+    read_root(source, options, false)
+}
+
+/// Resolve the root's test bodies in their original import and declaration
+/// scope.
+pub(crate) fn read_for_tests<'a>(
+    source: &str,
+    options: &'a ImportOptions<'a>,
+) -> Result<(Module, SourceImports<'a>), String> {
+    read_root(source, options, true)
+}
+
+/// Parse and link one source snapshot for compilation or test execution.
+fn read_root<'a>(
+    source: &str,
+    options: &'a ImportOptions<'a>,
+    include_tests: bool,
+) -> Result<(Module, SourceImports<'a>), String> {
     let mut graph = Graph::new(options);
-    let (module, bindings) = graph.parse_root(source)?;
-    let imports = graph.finish(&module, bindings)?;
+    let (mut module, bindings) = graph.parse_root(source)?;
+    if include_tests {
+        for test in &module.tests {
+            if !test.overwritten_literal_types.is_empty() {
+                module
+                    .overwritten_literal_types
+                    .insert(test.name.clone(), test.overwritten_literal_types.clone());
+            }
+        }
+    }
+    let imports = graph.finish(&module, bindings, include_tests)?;
     Ok((module, imports))
 }
 
@@ -846,8 +890,77 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read};
-    use crate::ast::{BinaryOp, Expr, Type};
+    use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read, read_for_tests};
+    use crate::ast::{BinaryOp, Expr, TestStmtKind, Type};
+
+    #[test]
+    fn test_runs_check_forward_references_without_compiling_test_bodies() -> Result<(), String> {
+        let source = r#"#![require_define_before_use]
+#[test] block earlier() { assert_eq(later(u8:0), u8:0); }
+fn later(x: u8) -> u8 { x }
+"#;
+        let options = ImportOptions::default();
+        crate::check_source_with_options(source, &options)?;
+        let (module, imports) = read_for_tests(source, &options)?;
+        let error = crate::check::check_sources(&module, imports, &options)
+            .err()
+            .expect("test uses a later declaration");
+        assert_eq!(
+            error,
+            "in 'earlier': 'later' is declared later in the module"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_linking_uses_root_imports_and_preserves_inner_bindings() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("lib.bx"),
+            r#"
+pub type Word = u8;
+pub const VALUE = u8:4;
+pub fn double(x: Word) -> Word { x + x }
+#[test] fn private_test() { assert!(false); }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let source = r#"
+#![require_define_before_use]
+use lib::{Word, VALUE, double};
+#[test] block local_test() {
+    reg drive: Word = VALUE;
+    for VALUE in [VALUE] {
+        drive := double(VALUE);
+        tick!();
+    }
+    assert_eq(drive, VALUE);
+}
+"#;
+        let (_, imports) = read(source, &options)?;
+        assert!(imports.libraries.unwrap().module.tests.is_empty());
+        let (_, imports) = read_for_tests(source, &options)?;
+        let module = imports.libraries.unwrap().module;
+        assert_eq!(module.tests.len(), 1);
+        let statements = &module.tests[0].statements;
+        assert!(
+            matches!(&statements[0].kind, TestStmtKind::Reg { ty: Type::Named(name), init: Some(Expr::Name(value)), .. } if name == "$bx$lib$Word" && value == "$bx$lib$VALUE")
+        );
+        let TestStmtKind::For { body, .. } = &statements[1].kind else {
+            panic!("expected a loop")
+        };
+        assert!(
+            matches!(&body[0].kind, TestStmtKind::Assign { value: Expr::Call { name, args }, .. } if name == "$bx$lib$double" && args == &[Expr::Name("VALUE".into())])
+        );
+        assert!(
+            matches!(&statements[2].kind, TestStmtKind::AssertEq { expected: Expr::Name(name), .. } if name == "$bx$lib$VALUE")
+        );
+        assert!(read_for_tests("use lib::private_test;", &options).is_err());
+        Ok(())
+    }
 
     #[test]
     fn linked_type_dimensions_follow_their_declaring_modules() -> Result<(), Box<dyn Error>> {

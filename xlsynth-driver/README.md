@@ -479,6 +479,37 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
   block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
 
+### `bx-test` runs BX unit tests
+
+Runs the `#[test] fn` and `#[test] block` declarations in the input file.
+Tests execute in declaration order and each test starts with fresh state.
+Imported modules provide functions, blocks, types, and constants. Run
+`bx-test` on a library's own file to execute its tests.
+
+```shell
+xlsynth-driver bx-test counter.bx
+xlsynth-driver bx-test design.bx --dslx-path='lib;models' --link-ir=externs.ir
+```
+
+The command writes each test's result and the pass/fail counts to stdout.
+An assertion failure produces a source diagnostic on stderr. The remaining
+tests still run, and the command exits with a nonzero status if any test fails.
+
+- `--dslx-path 'dir1;dir2'` sets the BX and DSLX import directories, overriding
+  the toolchain search path. The input file's directory is also searched.
+- `--dslx-stdlib-path <DIR>` overrides the configured or bundled DSLX standard
+  library directory.
+- `--link-ir <PACKAGE>` supplies the IR implementations of BX externs. The
+  default is an empty package.
+- `--warnings-as-errors[=true|false]` defaults to `true`. Set it to `false`
+  to print source warnings and run the tests.
+- `--reset-active-low[=true|false]` configures reset polarity for the
+  block hierarchy. The default is active-high. Tests use synchronous reset
+  and `tick!(rst: true)` asserts reset at an edge with either polarity.
+
+See the [BX unit test examples](../xlsynth-bx/README.md#unit-tests) for
+combinational assertions and a clocked test with a table of drive/expect pairs.
+
 ### `bx2gv`: BX to mapped gate-level netlist
 
 Maps a `.bx` design to Liberty cells. The command compiles the selected BX

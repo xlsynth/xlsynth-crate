@@ -6,7 +6,7 @@ use tempfile::tempdir;
 use xlsynth_bx::ast::{Expr, Stmt};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module_with_options, check_source_with_options,
-    compile_with_options, empty_package, lower_module, parse_module,
+    compile_with_options, empty_package, lower_module, parse_module, run_tests,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
@@ -36,6 +36,37 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
         ResetBehavior::default(),
         options,
     )
+}
+
+#[test]
+fn test_register_defaults_are_independent_of_imported_zero_functions() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    write_module(dir.path(), "values.bx", "pub fn zero!() -> u8 { u8:7 }")?;
+    let options = search_paths(&[dir.path()]);
+    let source = r#"
+use values::zero!;
+#[test] block drivers() {
+    reg implicit: u8;
+    reg explicit: u8 = zero!<u8>();
+    assert_eq(implicit, u8:0);
+    assert_eq(explicit, u8:7);
+}
+#[test] fn explicit_call() { assert_eq(zero!<u8>(), u8:7); }
+"#;
+    let report = run_tests(
+        source,
+        Path::new("driver_tests.bx"),
+        empty_package("suite"),
+        ResetBehavior::default(),
+        &options,
+        true,
+    )?;
+    assert_eq!(report.tests.len(), 2);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    Ok(())
 }
 
 #[test]

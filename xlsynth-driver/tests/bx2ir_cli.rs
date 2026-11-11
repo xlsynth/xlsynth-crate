@@ -36,6 +36,152 @@ fn stdout(directory: &Path, arguments: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?)
 }
 
+#[test]
+fn bx_test_runs_root_tests_with_imports_and_linked_functions() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let library = root.join("lib");
+    fs::create_dir(&library)?;
+    fs::write(
+        library.join("math.bx"),
+        r#"pub fn twice(x: u8) -> u8 { x + x }
+#[test]
+fn library_only() { assert!(false); }
+"#,
+    )?;
+    fs::write(
+        root.join("externs.ir"),
+        r#"package arithmetic
+fn triple(x: bits[8]) -> bits[8] {
+    doubled: bits[8] = add(x, x)
+    ret result: bits[8] = add(doubled, x)
+}"#,
+    )?;
+    fs::write(
+        root.join("suite.bx"),
+        r#"use math;
+extern fn triple(x: u8) -> u8;
+
+#[test]
+fn arithmetic() {
+    assert_eq(math::twice(u8:129), u8:2);
+    assert_eq(triple(u8:7), u8:21);
+}
+
+struct Drive { increment: u8, enable: bool }
+struct Expect { total: u8 }
+const CASES: (Drive, Expect)[3] = [
+    (Drive { increment: u8:2, enable: true }, Expect { total: u8:2 }),
+    (Drive { increment: u8:8, enable: false }, Expect { total: u8:2 }),
+    (Drive { increment: u8:3, enable: true }, Expect { total: u8:5 }),
+];
+
+block counter(clk, rst, drive: Drive) -> Expect {
+    reg total_q: u8 = u8:0;
+    if drive.enable {
+        total_q := total_q + drive.increment;
+    }
+    Expect { total: total_q }
+}
+
+#[test]
+block counter_steps() {
+    reg drive: Drive = zero!<Drive>();
+    let output = counter(drive);
+    tick!(rst: true);
+    assert_eq(output, Expect { total: u8:0 });
+    for (to_drive, to_expect) in CASES {
+        drive := to_drive;
+        tick!();
+        assert_eq(output, to_expect);
+    }
+}
+"#,
+    )?;
+    let mut args = vec![
+        "bx-test",
+        "suite.bx",
+        "--dslx-path=lib",
+        "--link-ir=externs.ir",
+    ];
+    let expected = "test arithmetic ... ok\ntest counter_steps ... ok\n2 passed; 0 failed\n";
+    assert_eq!(stdout(root, &args)?, expected);
+    args.push("--reset-active-low");
+    assert_eq!(stdout(root, &args)?, expected);
+    Ok(())
+}
+
+#[test]
+fn bx_test_reports_the_failed_edge_and_continues_with_the_next_test() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("failing.bx"),
+        r#"block capture(clk, rst, d: u8) -> u8 {
+    reg q: u8 = u8:0;
+    q := d;
+    q
+}
+
+#[test]
+block wrong_output() {
+    reg drive: u8 = u8:0;
+    let output = capture(drive);
+    tick!(rst: true);
+    drive := u8:42;
+    tick!();
+    assert_eq(output, u8:41);
+}
+
+#[test]
+fn still_runs() { assert!(true); }
+"#,
+    )?;
+    let output = driver(directory.path(), &["bx-test", "failing.bx"])?;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "test wrong_output ... FAILED\ntest still_runs ... ok\n1 passed; 1 failed\n"
+    );
+    compare_golden_text(
+        &String::from_utf8(output.stderr)?,
+        "tests/bx_test_failed_edge.golden.txt",
+    );
+    Ok(())
+}
+
+#[test]
+fn bx_test_applies_the_bx_warning_policy() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("warning.bx"),
+        r#"block identity(clk, x: u8) -> u8 { x }
+#[test]
+fn sanity() { assert_eq(u8:1, u8:1); }
+"#,
+    )?;
+    let mut args = vec!["bx-test", "warning.bx"];
+    let strict = driver(directory.path(), &args)?;
+    assert_eq!(strict.status.code(), Some(1));
+    assert!(strict.stdout.is_empty());
+
+    args.push("--warnings-as-errors=false");
+    let demoted = driver(directory.path(), &args)?;
+    assert!(
+        demoted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&demoted.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(demoted.stdout)?,
+        "test sanity ... ok\n1 passed; 0 failed\n"
+    );
+    compare_golden_text(
+        &String::from_utf8(demoted.stderr)?,
+        "tests/bx_test_combinational_warning.golden.txt",
+    );
+    Ok(())
+}
+
 const EFFECT_ARGS: &[&str] = &["bx2ir", "pipeline.bx", "--dslx-path=source files"];
 
 /// Build a named BX callback whose transitive DSLX multiplier has the given

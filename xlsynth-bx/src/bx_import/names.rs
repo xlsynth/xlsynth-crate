@@ -8,8 +8,8 @@ use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBind
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, Type, TypeAlias,
-    UnrollFor, WidthSliceType,
+    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, TestDecl,
+    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
 use crate::parser::MAX_SYNTAX_DEPTH;
@@ -177,6 +177,33 @@ fn hardware_callees(module: &Module) -> BTreeSet<&str> {
         .map(|d| d.name.as_str())
         .chain(module.blocks.iter().map(|d| d.name.as_str()))
         .chain(module.extern_blocks.iter().map(|d| d.name.as_str()))
+        .collect()
+}
+
+/// Resolve only the tests requested by the runner, using their own lexical
+/// scopes.
+pub(super) fn qualify_tests(module: &Module, names: &Names) -> Result<Vec<TestDecl>, String> {
+    let hardware = hardware_callees(module);
+    module
+        .tests
+        .iter()
+        .map(|test| {
+            let at = (test.kind == TestKind::Function)
+                .then(|| names.positions.get(&test.name).copied())
+                .flatten();
+            let mut scope = Scope::new(names, at, &test.name);
+            if test.kind == TestKind::Block {
+                scope.region = DeclarationRegion::BlockBody;
+                scope.hardware_callees = Some(&hardware);
+            }
+            Ok(TestDecl {
+                kind: test.kind,
+                name: test.name.clone(),
+                position: test.position,
+                statements: scope.test_body(&test.statements, 0)?,
+                overwritten_literal_types: test.overwritten_literal_types.clone(),
+            })
+        })
         .collect()
 }
 
@@ -596,6 +623,76 @@ impl<'a> Scope<'a> {
         };
         self.bind_pattern(&result.pattern);
         Ok(result)
+    }
+
+    /// Qualify statement operands before bringing their result binders into
+    /// scope.
+    fn test_body(&mut self, body: &[TestStmt], depth: usize) -> Result<Vec<TestStmt>, String> {
+        if depth > MAX_SYNTAX_DEPTH {
+            return Err(format!("BX test exceeds {MAX_SYNTAX_DEPTH} nesting levels"));
+        }
+        body.iter()
+            .map(|stmt| {
+                let kind = match &stmt.kind {
+                    TestStmtKind::Reg { name, ty, init } => {
+                        let ty = self.ty(ty)?;
+                        let init = init.as_ref().map(|e| self.expr(e)).transpose()?;
+                        self.bind(name);
+                        TestStmtKind::Reg {
+                            name: name.clone(),
+                            ty,
+                            init,
+                        }
+                    }
+                    TestStmtKind::Let(binding) => TestStmtKind::Let(self.binding(binding)?),
+                    TestStmtKind::Assign { name, value } => TestStmtKind::Assign {
+                        name: name.clone(),
+                        value: self.expr(value)?,
+                    },
+                    TestStmtKind::Tick { reset } => TestStmtKind::Tick {
+                        reset: reset.as_ref().map(|e| self.expr(e)).transpose()?,
+                    },
+                    TestStmtKind::Assert { predicate, label } => TestStmtKind::Assert {
+                        predicate: self.expr(predicate)?,
+                        label: label.clone(),
+                    },
+                    TestStmtKind::AssertEq { actual, expected } => TestStmtKind::AssertEq {
+                        actual: self.expr(actual)?,
+                        expected: self.expr(expected)?,
+                    },
+                    TestStmtKind::For {
+                        pattern,
+                        iterable,
+                        body,
+                    } => {
+                        let iterable = self.iterable(iterable)?;
+                        let pattern = copy_pattern(pattern, 0)?;
+                        let body = self.nested(|scope| {
+                            scope.bind_pattern(&pattern);
+                            scope.test_body(body, depth + 1)
+                        })?;
+                        TestStmtKind::For {
+                            pattern,
+                            iterable,
+                            body,
+                        }
+                    }
+                    TestStmtKind::If {
+                        condition,
+                        then_body,
+                        else_body,
+                    } => TestStmtKind::If {
+                        condition: self.expr(condition)?,
+                        then_body: self.nested(|scope| scope.test_body(then_body, depth + 1))?,
+                        else_body: self.nested(|scope| scope.test_body(else_body, depth + 1))?,
+                    },
+                };
+                Ok(TestStmt {
+                    position: stmt.position,
+                    kind,
+                })
+            })
+            .collect()
     }
 
     /// Resolve a block body with explicit instances visible before their

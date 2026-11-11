@@ -524,6 +524,80 @@ opt_main --passes=loop_unroll checksum.ir > checksum.unrolled.ir
 xlsynth-driver block2sv checksum.unrolled.ir > checksum.sv
 ```
 
+## Unit tests
+
+Put a `#[test] fn` beside the function it exercises. A test takes no
+arguments. Its body can bind values with `let`, iterate over a table with
+`for`, and check values with `assert_eq(actual, expected)` or
+`assert!(condition)`.
+
+```text
+fn twice(x: u8) -> u8 { x + x }
+
+#[test]
+fn twice_wraps() {
+    assert_eq(twice(u8:129), u8:2);
+    assert!(twice(u8:3) == u8:6);
+}
+```
+
+A `#[test] block` can drive data inputs, advance the clock, and check
+outputs. Declare stimulus registers and wire child blocks with `let` at the
+start of the body. These bindings form the persistent circuit. A `reg` in
+the test holds stimulus. Assign it with `:=` before the edge. A `let` call
+to the block under test creates one instance, so reading its output after
+`tick!()` sees the state captured on that edge. Once the first drive,
+tick, assertion, loop, or conditional executes, each subsequent `let`
+samples its value at that statement. For example, `let before = total;`
+at that point saves the current total for a comparison after another tick.
+`tick!()` advances one edge with reset deasserted. `tick!(rst: true)`
+advances one edge with reset asserted. A stimulus declaration without an
+initializer starts at the typed zero. DUT registers retain their usual
+power-up behavior. Sampling a value that contains unknown bits fails the test.
+
+This counter uses a table of `(Drive, u8)` pairs. The middle row disables
+the update and checks that the counter holds the previous total.
+
+```text
+struct Drive { increment: u8, enable: bool }
+
+block counter(clk, rst, drive: Drive) -> u8 {
+    reg total: u8 = u8:0;
+    if drive.enable { total := total + drive.increment; }
+    total
+}
+
+const CASES: (Drive, u8)[3] = [
+    (Drive { increment: u8:1, enable: true }, u8:1),
+    (Drive { increment: u8:4, enable: false }, u8:1),
+    (Drive { increment: u8:2, enable: true }, u8:3),
+];
+
+#[test]
+block counter_steps() {
+    reg drive: Drive;
+    let total = counter(drive);
+    tick!(rst: true);
+    assert_eq(total, u8:0);
+    for (to_drive, to_expect) in CASES {
+        drive := to_drive;
+        tick!();
+        assert_eq(total, to_expect);
+    }
+}
+```
+
+Run `xlsynth-driver bx-test counter.bx` to execute the tests declared in
+`counter.bx`. Each test runs independently. Changing the expected total in
+the second row to `6` makes `counter_steps` fail at that assertion. The
+diagnostic gives its source location, clock edge, and compared values.
+
+Clocked tests use synchronous reset and the same SystemVerilog lowering as
+`block2sv`. The runner executes procedural `for` statements in a test on
+the host. Value-producing expressions in the DUT or test circuit must lower
+to supported Block IR. Raw `counted_for` and `map` IR nodes require expansion
+before SystemVerilog code generation.
+
 ## Compile and link
 
 Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
@@ -557,7 +631,7 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 
 ### BX warnings
 
-`compile`, `compile_with_options`, `bx2ir`, and `bx2gv` treat BX warnings as
+`compile`, `compile_with_options`, `bx-test`, `bx2ir`, and `bx2gv` treat BX warnings as
 errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
 register or a child instance already serves a hardware role. A helper that
@@ -579,7 +653,7 @@ This applies to blocks, functions, constants, enums, structs, and extern
 signatures, including expressions in parametric defaults and type dimensions.
 
 To inspect all warnings and still emit output, pass `--warnings-as-errors=false`
-to either driver command. Rust callers can use `check_source_with_options`
+to the driver command. Rust callers can use `check_source_with_options`
 and inspect `CheckedModule::warnings()` before calling `lower_module`. Each
 warning identifies its source declaration and location. Repeated calls,
 specializations, and imports share one diagnostic for the same warning site.

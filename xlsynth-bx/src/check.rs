@@ -43,6 +43,7 @@ mod scope;
 mod source_patterns;
 mod struct_parametrics;
 use struct_parametrics::StructApplication;
+mod test_program;
 mod timing;
 mod tuple_match;
 mod unroll;
@@ -1712,6 +1713,17 @@ pub(crate) fn check_sources(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
+    check_sources_with_tests(root, imports, options, None)
+}
+
+/// Elaborate test-only harnesses before draining the shared specialization
+/// queues.
+pub(crate) fn check_sources_with_tests(
+    root: &Module,
+    imports: crate::bx_import::SourceImports<'_>,
+    options: &ImportOptions<'_>,
+    mut tests: Option<&mut crate::test_runner::TestSuite>,
+) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
     let module = linked.map_or(root, |l| &l.module);
     let mut names = BTreeSet::new();
@@ -1847,6 +1859,15 @@ pub(crate) fn check_sources(
         .chain(module.extern_blocks.iter().map(|b| &b.name))
     {
         declare(&mut names, name)?;
+    }
+    let mut harness_names = Vec::new();
+    if let Some(suite) = &mut tests {
+        suite.reserve_names(&names);
+        for test in &module.tests {
+            let harness = suite.harness_name(&test.name);
+            names.insert(harness.clone());
+            harness_names.push(harness);
+        }
     }
     let mut function_registry = FunctionSpecializations::new(names.clone());
     let function_bodies =
@@ -1990,6 +2011,30 @@ pub(crate) fn check_sources(
             .record_block(&block.name, body.requires_hardware);
         checked.push(body.block);
     }
+    let mut test_functions = Vec::new();
+    if let Some(suite) = tests {
+        for (test, harness) in module.tests.iter().zip(harness_names) {
+            let mut checker = BodyChecker::new(
+                &declarations,
+                &mut resolver,
+                &mut structs,
+                match test.kind {
+                    crate::ast::TestKind::Function => BodyKind::Function,
+                    crate::ast::TestKind::Block => BodyKind::Block { has_reset: true },
+                },
+            );
+            checker.specializations = Some(&mut specializations);
+            checker.function_registry = Some(&mut function_registry);
+            checker.warning_owner = Some(&test.name);
+            checker.zero_binding = declarations.zero_binding(&test.name);
+            let position = declarations.positions.get(test.name.as_str()).copied();
+            match test.kind {
+                crate::ast::TestKind::Function => checker.function_position = position,
+                crate::ast::TestKind::Block => checker.block_position = position,
+            }
+            checker.check_test(test, harness, suite, &mut test_functions, &mut checked)?;
+        }
+    }
     let mut specialized_blocks = BTreeSet::new();
     while let Some(spec) = specializations.pending.pop_front() {
         let block = BodyChecker::check_block(
@@ -2009,7 +2054,8 @@ pub(crate) fn check_sources(
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
-    let functions = function_registry.finish(function_bodies)?;
+    let mut functions = function_registry.finish(function_bodies)?;
+    functions.extend(test_functions);
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -3461,12 +3507,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.zero_calls_function()? {
             self.function_call(&self.zero_binding.clone(), &[])
         } else {
-            self.structs.check_zero_members(&ty)?;
-            let layout = crate::layout::Layouts::new(&self.structs.definitions)
-                .lower(&ty)
-                .map_err(|e| e.to_string())?;
-            Ok((ty, K::Literal(zero_ir_value_for_type(&layout))))
+            let zero = self.intrinsic_zero(&ty)?;
+            Ok((ty, zero))
         }
+    }
+
+    /// Construct a zero of a concrete BX type, including enum membership
+    /// checks.
+    fn intrinsic_zero(&self, ty: &Type) -> Result<K, String> {
+        self.structs.check_zero_members(ty)?;
+        let layout = crate::layout::Layouts::new(&self.structs.definitions)
+            .lower(ty)
+            .map_err(|e| e.to_string())?;
+        Ok(K::Literal(zero_ir_value_for_type(&layout)))
     }
 
     /// Check a bit literal at its annotated or inferred width.
