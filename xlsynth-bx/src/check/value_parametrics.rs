@@ -371,12 +371,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         });
         // Scope elaboration may materialize lets while computing an actual
         // or dimension. Their values have been consumed at compile time.
-        for stmt in self.statements.drain(first..) {
-            if let super::CheckedStmt::Let { name, .. } = stmt {
-                self.constants.remove(&name);
-                self.constexpr_names.remove(&name);
-            }
-        }
+        self.discard_temporary_statements(first);
         self.local_callees = callees;
         if !had_functions {
             self.constant_functions = None;
@@ -479,6 +474,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     self.decls.dimensions_at(
                         self.function_position.or(self.block_position),
                         &self.zero_binding,
+                        self.warning_owner,
                     ),
                     &mut TypeResolver {
                         resolver: self.resolver,
@@ -574,6 +570,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .positions
                 .get(f.name.as_str())
                 .map(|at| at.saturating_sub(1));
+            definition.warning_owner = Some(&f.name);
             definition.zero_binding = self.decls.zero_binding(&f.name);
             definition.function_registry = Some(registry);
             evaluate(&mut definition)

@@ -97,23 +97,21 @@ pub enum OutlineShape {
 /// Parse declaration syntax while retaining expressions for DSLX to evaluate.
 /// Function bodies are skipped as balanced tokens in the same source snapshot.
 pub fn parse_dslx_outline(source: &str) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {}, |_, _, _| {})
+    parse_outline_with_functions(source, |_, _, _, _| {}, None, |_, _, _| {})
 }
 
-/// Index semantic sums for resolving checked constructor and pattern paths.
-/// They retain their existing opaque representation in the public outline.
-pub(crate) fn outline_with_sum_names(
+/// Declaration metadata used to resolve imported constructors and patterns.
+#[derive(Default)]
+pub(crate) struct ImportedTypeDeclarations {
+    pub(crate) sums: BTreeSet<String>,
+    pub(crate) struct_arities: BTreeMap<String, usize>,
+}
+
+pub(crate) fn outline_import(
     source: &str,
-    sums: &mut BTreeSet<String>,
+    declarations: &mut ImportedTypeDeclarations,
 ) -> Result<DslxOutline, String> {
-    parse_outline_with_functions(
-        source,
-        |_, _, _, _| {},
-        |name| {
-            sums.insert(name.to_owned());
-        },
-        |_, _, _| {},
-    )
+    parse_outline_with_functions(source, |_, _, _, _| {}, Some(declarations), |_, _, _| {})
 }
 
 /// Visit numeric enum names and the byte after each declaration's closing
@@ -122,7 +120,7 @@ pub(crate) fn visit_numeric_enums(
     source: &str,
     visit: impl FnMut(Token<'_>, usize, bool),
 ) -> Result<(), String> {
-    parse_outline_with_functions(source, |_, _, _, _| {}, |_| {}, visit)?;
+    parse_outline_with_functions(source, |_, _, _, _| {}, None, visit)?;
     Ok(())
 }
 
@@ -151,7 +149,7 @@ pub(crate) fn dslx_function_tokens(
             };
             ambiguous |= functions.insert(name.to_owned(), tokens).is_some();
         },
-        |_| {},
+        None,
         |_, _, _| {},
     )?;
     if ambiguous {
@@ -223,6 +221,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         dialect: Dialect::Dslx,
         tokens: lex(source, Dialect::Dslx, None)?,
         pos: 0,
+        position_cursor: (0, super::SOURCE_START),
         depth: 0,
         dslx_type_display: false,
         value_context: ValueContext::Block,
@@ -244,7 +243,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
 fn parse_outline_with_functions<'s>(
     source: &'s str,
     mut visit: impl FnMut(&str, &[Token<'s>], &[Token<'s>], &[Token<'s>]),
-    mut visit_sum: impl FnMut(&str),
+    mut imported: Option<&mut ImportedTypeDeclarations>,
     mut visit_enum: impl FnMut(Token<'s>, usize, bool),
 ) -> Result<DslxOutline, String> {
     let mut parser = outline_parser(source)?;
@@ -328,7 +327,9 @@ fn parse_outline_with_functions<'s>(
                     "enum" => {
                         let kind = parser.outline_enum(&bindings)?;
                         if matches!(kind, OutlineKind::Opaque) {
-                            visit_sum(&name);
+                            if let Some(imported) = &mut imported {
+                                imported.sums.insert(name.clone());
+                            }
                         } else {
                             let close = parser.tokens[parser.pos - 1];
                             visit_enum(name_token, close.start + close.text.len(), public);
@@ -370,14 +371,17 @@ fn parse_outline_with_functions<'s>(
                     }
                     _ => unreachable!(),
                 };
-                module.declarations.insert(
-                    name,
-                    OutlineDecl {
-                        public,
-                        parametric: !bindings.is_empty(),
-                        kind,
-                    },
-                );
+                let declaration = OutlineDecl {
+                    public,
+                    parametric: !bindings.is_empty(),
+                    kind,
+                };
+                if let Some(imported) = &mut imported
+                    && declaration.is_public_struct_template(&name)
+                {
+                    imported.struct_arities.insert(name.clone(), bindings.len());
+                }
+                module.declarations.insert(name, declaration);
             }
             "impl" | "trait" => parser.skip_outline_item(true)?,
             "const" => {

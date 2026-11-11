@@ -307,8 +307,12 @@ impl ImportedStructs {
         self.graph.has_public_type(subject, member)
     }
 
-    pub(crate) fn has_public_struct_template(&self, subject: &str, member: &str) -> bool {
-        self.graph.public_parametric_struct(subject, member)
+    pub(crate) fn public_struct_template_arity(
+        &self,
+        subject: &str,
+        member: &str,
+    ) -> Option<usize> {
+        self.graph.public_struct_template_arity(subject, member)
     }
 
     pub(crate) fn has_enum_member(&self, subject: &str, member: &str, variant: &str) -> bool {
@@ -644,7 +648,7 @@ impl ImportedStructs {
         self.bindings.entry(def.clone()).or_default();
         let (template, actuals) = if def.is_parametric() {
             let id = written.or(self.bindings[&def].declaration.as_ref())
-                .filter(|id| self.has_public_struct_template(&id.subject, &id.name))
+                .filter(|id| self.public_struct_template_arity(&id.subject, &id.name).is_some())
                 .cloned().ok_or_else(|| format!(
                     "cannot identify a public DSLX struct template for '{identifier}'; name the concrete struct or a public alias in the DSLX type annotation"
                 ))?;

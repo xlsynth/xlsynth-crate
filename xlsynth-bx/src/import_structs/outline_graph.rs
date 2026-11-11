@@ -14,7 +14,7 @@ use super::runfiles::XlsRunfiles;
 use crate::ast::UsePath;
 use crate::check::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
 use crate::parser::dslx_tokens;
-use crate::parser::outline::outline_with_sum_names;
+use crate::parser::outline::{ImportedTypeDeclarations, outline_import};
 use crate::parser::source_bytes::decode_dslx_source;
 use crate::{DslxOutline, OutlineKind, OutlineShape, OutlineType};
 pub(super) use native_files::NativeSourceFiles;
@@ -74,7 +74,7 @@ pub(super) struct SourceModule {
     pub source_path: PathBuf,
     pub source: Vec<u8>,
     pub outline: DslxOutline,
-    sums: BTreeSet<String>,
+    type_declarations: ImportedTypeDeclarations,
     bindings: BTreeMap<String, Binding>,
     features: ImportFeatures,
 }
@@ -363,8 +363,8 @@ impl OutlineGraph {
                     source_path.display()
                 )
             })?;
-            let mut sums = BTreeSet::new();
-            let mut outline = outline_with_sum_names(&decoded, &mut sums).map_err(|e| {
+            let mut type_declarations = ImportedTypeDeclarations::default();
+            let mut outline = outline_import(&decoded, &mut type_declarations).map_err(|e| {
                 format!(
                     "outlining DSLX module '{subject}' at {}: {e}",
                     source_path.display()
@@ -417,7 +417,7 @@ impl OutlineGraph {
                     source_path,
                     source,
                     outline,
-                    sums,
+                    type_declarations,
                     bindings,
                     features: ImportFeatures {
                         type_parameters,
@@ -507,7 +507,12 @@ impl OutlineGraph {
     pub(super) fn is_sum(&self, subject: &str, path: &[String]) -> bool {
         self.reference(subject, path)
             .and_then(|id| self.targets.get(&id))
-            .is_some_and(|id| self.modules[&id.subject].sums.contains(&id.name))
+            .is_some_and(|id| {
+                self.modules[&id.subject]
+                    .type_declarations
+                    .sums
+                    .contains(&id.name)
+            })
     }
 
     /// Collapse name-only alias chains once, without expanding tuple or array
@@ -604,11 +609,13 @@ impl OutlineGraph {
 
     /// A concrete alias can expose an instance of a private struct without
     /// exposing its template. Binding inference needs the template itself.
-    pub(super) fn public_parametric_struct(&self, subject: &str, name: &str) -> bool {
+    pub(super) fn public_struct_template_arity(&self, subject: &str, name: &str) -> Option<usize> {
         self.modules
-            .get(subject)
-            .and_then(|module| module.outline.declarations.get(name))
-            .is_some_and(|decl| decl.is_public_struct_template(name))
+            .get(subject)?
+            .type_declarations
+            .struct_arities
+            .get(name)
+            .copied()
     }
 
     pub(super) fn named(&self, subject: &str, name: &str) -> Option<ResolvedShape> {

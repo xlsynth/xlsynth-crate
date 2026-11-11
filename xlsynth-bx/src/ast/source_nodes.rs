@@ -138,10 +138,10 @@ impl<'a> SourceNode<'a> {
                         );
                     }
                 }
-                Expr::Struct { fields, .. }
-                | Expr::AppliedStruct { fields, .. }
-                | Expr::ParametricStruct { fields, .. }
-                | Expr::TypeAppliedStruct { fields, .. } => {
+                Expr::Struct { fields, base, .. }
+                | Expr::AppliedStruct { fields, base, .. }
+                | Expr::ParametricStruct { fields, base, .. }
+                | Expr::TypeAppliedStruct { fields, base, .. } => {
                     match expr {
                         Expr::ParametricStruct { args, .. } => {
                             pending.extend(args.iter().map(Expression));
@@ -152,6 +152,7 @@ impl<'a> SourceNode<'a> {
                         _ => { /* This constructor has no source arguments to visit. */ }
                     }
                     pending.extend(fields.iter().map(|(_, value)| Expression(value)));
+                    pending.extend(base.as_deref().map(|splat| Expression(&splat.value)));
                 }
                 Expr::Field { value, .. } | Expr::Unary { value, .. } => {
                     pending.push(Expression(value));

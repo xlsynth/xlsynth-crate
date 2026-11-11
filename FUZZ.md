@@ -334,6 +334,12 @@ Compares type-parametric BX block results with concrete DSLX struct definitions 
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_type_parameters --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_updates.rs
+
+Generates struct updates ranging from a base-only copy to replacement of every field. It varies field order, signed and unsigned widths, nested payloads, and inferred, partial, or fully specified value parametrics. Nested struct literals and loop carries exercise width inference from the update constructor, its result type, or a sibling in an array or conditional. For accepted programs it compares the number of `useless_struct_splat` warnings and every field from BX block IR, DSLX IR, and concrete DSLX calls on the same inputs. Rejection cases cover unknown and duplicate fields, incompatible base and field types, and a comma after the final splat. Calls and conditionals that produce a parametric base are bound with a `let` before the update for compatibility with the pinned DSLX typechecker.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_struct_updates -- -max_len=14 -len_control=0` to vary all six program-generation bytes from the start.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_abc_sequential_mapping.rs
 
 Uses the shared resettable block-IR generator, lowers to G8R with explicit reset

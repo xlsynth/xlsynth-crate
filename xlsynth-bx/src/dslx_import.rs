@@ -257,6 +257,15 @@ impl ImportResolver {
         }
     }
 
+    /// Return the declared arity without instantiating an imported template.
+    pub(crate) fn struct_template_arity(&self, subject: &str, member: &str) -> Option<usize> {
+        if self.subjects.contains(subject) {
+            self.structs.public_struct_template_arity(subject, member)
+        } else {
+            None
+        }
+    }
+
     /// Check the base declaration before generating a concrete DSLX type
     /// witness.
     pub(crate) fn check_struct_template_name(
@@ -264,9 +273,7 @@ impl ImportResolver {
         subject: &str,
         member: &str,
     ) -> Result<(), String> {
-        if self.subjects.contains(subject)
-            && self.structs.has_public_struct_template(subject, member)
-        {
+        if self.struct_template_arity(subject, member).is_some() {
             Ok(())
         } else {
             Err(format!(

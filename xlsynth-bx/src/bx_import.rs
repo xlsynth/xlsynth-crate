@@ -539,6 +539,12 @@ impl<'a> Graph<'a> {
             }
         }
         let linked = &mut self.linked.module;
+        linked.declaration_allowances.extend(
+            source
+                .declaration_allowances
+                .iter()
+                .map(|(name, allowances)| (names.declared(name), allowances.clone())),
+        );
         for path in &source.uses {
             if let Some(Binding::Dslx(alias)) =
                 names.uses.get(path.binding().expect("validated use"))

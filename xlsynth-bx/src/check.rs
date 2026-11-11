@@ -2,7 +2,7 @@
 
 //! BX name resolution, value type checking, and structural driver checks.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::rc::Rc;
@@ -13,8 +13,8 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef, Type, UnaryOp,
-    WidthSliceType,
+    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef, StructSplat,
+    Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -628,6 +628,7 @@ fn bits_copy_work(bits: &IrBits) -> usize {
 /// Source declaration indices for lookup during checking.
 #[derive(Default)]
 struct Declarations<'a> {
+    warnings: RefCell<WarningCollector<'a>>,
     block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
@@ -1884,7 +1885,6 @@ pub(crate) fn check_sources(
     // the instances actually elaborated, including children declared later.
     let mut specializations = BlockSpecializations::new(names);
     let mut checked = Vec::new();
-    let mut warning_collector = WarningCollector::default();
     for block in module.blocks.iter().filter(|b| !b.is_parametric()) {
         let body = BodyChecker::check_block(
             &declarations,
@@ -1896,7 +1896,10 @@ pub(crate) fn check_sources(
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}': {e}", block.name))?;
-        warning_collector.record_block(&block.name, body.requires_hardware);
+        declarations
+            .warnings
+            .borrow_mut()
+            .record_block(&block.name, body.requires_hardware);
         checked.push(body.block);
     }
     let mut specialized_blocks = BTreeSet::new();
@@ -1911,7 +1914,10 @@ pub(crate) fn check_sources(
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
-        warning_collector.record_block(&spec.block.name, block.requires_hardware);
+        declarations
+            .warnings
+            .borrow_mut()
+            .record_block(&spec.block.name, block.requires_hardware);
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
@@ -1935,7 +1941,13 @@ pub(crate) fn check_sources(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
-    let warnings = warning_collector.finish(root, linked, |name| declarations.is_block(name));
+    let warnings =
+        declarations
+            .warnings
+            .take()
+            .finish(root, linked, &declarations.positions, |name| {
+                declarations.is_block(name)
+            });
     let mut checked = CheckedModule {
         warnings,
         structs: structs
@@ -2030,6 +2042,9 @@ struct BodyChecker<'a, 'm> {
     /// ports.
     checking_callback_inputs: bool,
     function_position: Option<usize>,
+    /// The source declaration whose expression is being checked, including
+    /// while elaborating its parametric defaults and specializations.
+    warning_owner: Option<&'m str>,
     /// The zero intrinsic can be shadowed in the body's own source module.
     zero_binding: String,
     /// Blocks allow forward hardware references, but introduce constants in
@@ -2284,6 +2299,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             parametric_argument_context: false,
             checking_callback_inputs: false,
             function_position: None,
+            warning_owner: None,
             zero_binding: "zero!".into(),
             block_position: None,
             local_callees: BTreeSet::new(),
@@ -2320,7 +2336,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     }
 
     /// Check ordered let bindings and a return expression in a pure scope.
-    fn check_function(&mut self, function: &Function) -> Result<CheckedFunction, String> {
+    fn check_function(&mut self, function: &'m Function) -> Result<CheckedFunction, String> {
+        self.warning_owner = Some(&function.name);
         self.zero_binding = self.decls.zero_binding(&function.name);
         self.function_position = self.decls.positions.get(function.name.as_str()).copied();
         let bound = self
@@ -2432,6 +2449,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             },
         );
         c.zero_binding = decls.zero_binding(&block.name);
+        c.warning_owner = Some(&block.name);
         c.outputs = outputs;
         c.block_position = decls.positions.get(block.name.as_str()).copied();
         c.specializations = Some(specializations);
@@ -2584,6 +2602,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let dimensions = self.decls.dimensions_at(
             self.function_position.or(self.block_position),
             &self.zero_binding,
+            self.warning_owner,
         );
         TypeResolver {
             resolver: self.resolver,
@@ -3117,7 +3136,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Scope { bindings, result } => {
                 return self.value_scope(bindings, result, expected);
             }
-            Expr::UnrollFor(fold) => return self.unroll(fold, expected, false),
+            Expr::UnrollFor(fold) => {
+                return self.unroll(fold, CarryContext::Expected(expected), false);
+            }
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
                     checker.counted_for(fold, CarryContext::Expected(expected))
@@ -3146,27 +3167,44 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields } => {
-                self.struct_literal(Type::Named(name.clone()), fields, expected)
+            Expr::Struct { name, fields, base } => {
+                self.struct_literal(Type::Named(name.clone()), fields, base.as_deref(), expected)
             }
-            Expr::AppliedStruct { name, args, fields } => self.struct_literal(
+            Expr::AppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => self.struct_literal(
                 Type::Applied {
                     name: name.clone(),
                     args: args.clone(),
                 },
                 fields,
+                base.as_deref(),
                 expected,
             ),
-            Expr::ParametricStruct { name, args, fields } => {
+            Expr::ParametricStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => {
                 let ty = self.struct_actual_type(name, args)?;
-                self.struct_literal(ty, fields, expected)
+                self.struct_literal(ty, fields, base.as_deref(), expected)
             }
-            Expr::TypeAppliedStruct { name, args, fields } => self.struct_literal(
+            Expr::TypeAppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => self.struct_literal(
                 Type::TypeApplied {
                     name: name.clone(),
                     args: args.clone(),
                 },
                 fields,
+                base.as_deref(),
                 expected,
             ),
             Expr::Field { value, name } => self.project_field(value, name),
@@ -3519,14 +3557,31 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ))
     }
 
+    /// Discard lets emitted while checking a compile-time or deferred value.
+    fn discard_temporary_statements(&mut self, first: usize) {
+        for stmt in self.statements.drain(first..) {
+            if let CheckedStmt::Let { name, .. } = stmt {
+                self.constants.remove(&name);
+                self.constexpr_names.remove(&name);
+            }
+        }
+    }
+
     /// Resolve the struct and check its fields in declaration order.
     fn struct_literal(
         &mut self,
         source: Type,
         fields: &[(String, Expr)],
+        base: Option<&StructSplat>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
-        self.check_struct_literal(&source, fields, expected)
+        let base = base
+            .map(|splat| {
+                self.struct_splat_base(&source, &splat.value, expected)
+                    .map(|value| (splat, value))
+            })
+            .transpose()?;
+        self.check_struct_literal(&source, fields, base, expected)
             .map_err(struct_parametrics::StructLiteralError::into_message)
     }
 
@@ -3536,6 +3591,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         &mut self,
         source: &Type,
         fields: &[(String, Expr)],
+        base: Option<(&StructSplat, TypedExpr)>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), struct_parametrics::StructLiteralError> {
         let mut supplied = BTreeMap::new();
@@ -3544,22 +3600,64 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 return Err(format!("duplicate field '{source}.{field}'").into());
             }
         }
-        let (ty, mut inputs) = self.struct_literal_type(source, &supplied, expected)?;
+        let (ty, mut inputs, base) = if let Some((splat, base)) = base {
+            self.check_struct_splat_type(source, &base.ty)?;
+            if let Some(owner) = self.warning_owner
+                && let Type::Named(name) = &base.ty
+                && self.structs.definition(name)?.fields.len() == supplied.len()
+            {
+                self.decls
+                    .warnings
+                    .borrow_mut()
+                    .record_useless_splat(owner, splat.position);
+            }
+            if supplied.is_empty() {
+                return Ok((base.ty, base.kind));
+            }
+            let ty = base.ty.clone();
+            let work = self
+                .structs
+                .type_shape(&ty, MAX_ELABORATION_DEPTH)?
+                .ir_nodes;
+            self.charge_expansion("struct splat", work)?;
+            (ty, BTreeMap::new(), Some(self.share_scoped_value(base)))
+        } else {
+            let (ty, inputs) = self.struct_literal_type(source, &supplied, expected)?;
+            (ty, inputs, None)
+        };
         let Type::Named(canonical) = &ty else {
             return Err(format!("'{source}' is not a struct").into());
         };
         let members = self.structs.definition(canonical)?.fields.clone();
         let mut values = Vec::new();
-        for p in &members {
-            let v = supplied
-                .remove(p.name.as_str())
-                .ok_or_else(|| format!("missing field '{source}.{}'", p.name))?;
-            let value = if let Some(input) = inputs.remove(&p.name) {
-                self.finish_input(input, &p.ty)
+        for (index, p) in members.iter().enumerate() {
+            if let Some(v) = supplied.remove(p.name.as_str()) {
+                let value = if let Some(input) = inputs.remove(&p.name) {
+                    self.finish_input(input, &p.ty)
+                } else {
+                    self.expr(v, Some(&p.ty))
+                };
+                values.push(value.map_err(|e| format!("field '{source}.{}': {e}", p.name))?);
+            } else if let Some(base) = &base {
+                let kind = match &base.kind {
+                    K::Name(name) => K::BindingTupleIndex {
+                        name: name.clone(),
+                        index,
+                    },
+                    K::Literal(value) => {
+                        let member = value.get_element(index).map_err(|e| e.to_string())?;
+                        self.charge_expansion("struct splat", literal_copy_work(&member))?;
+                        K::Literal(member)
+                    }
+                    _ => unreachable!("the splat base is shared by its field projections"),
+                };
+                values.push(TypedExpr {
+                    ty: p.ty.clone(),
+                    kind,
+                });
             } else {
-                self.expr(v, Some(&p.ty))
-            };
-            values.push(value.map_err(|e| format!("field '{source}.{}': {e}", p.name))?);
+                return Err(format!("missing field '{source}.{}'", p.name).into());
+            }
         }
         if let Some(field) = supplied.keys().next() {
             return Err(format!("unknown field '{source}.{field}'").into());
@@ -3888,8 +3986,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// arguments from another operand.
     fn contains_inferred_aggregate(&self, expr: &Expr) -> bool {
         match expr {
+            Expr::For(fold) if fold.annotation.is_none() => {
+                self.contains_inferred_aggregate(&fold.seed)
+            }
+            Expr::UnrollFor(fold) if fold.annotation.is_none() => {
+                self.contains_inferred_aggregate(&fold.seed)
+            }
             Expr::Struct { .. } | Expr::AppliedStruct { .. } | Expr::ParametricStruct { .. } => {
-                self.inferred_struct_constructor(expr).is_some()
+                self.contextual_struct_constructor(expr).is_some()
             }
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
@@ -4128,7 +4232,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let hint = if first_has_type {
             CommonTypeHint::FromExpr(0)
         } else {
-            if let Some(values) = self.infer_struct_siblings(items)? {
+            if let Some(values) = self.infer_struct_siblings(items, None)? {
                 return Ok(values);
             }
             self.common_hint(items)?
@@ -4413,7 +4517,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return self.unify_values(items);
         }
         if expected.is_none()
-            && let Some(values) = self.infer_struct_siblings(items)?
+            && let Some(values) = self.infer_struct_siblings(items, None)?
         {
             return Ok(values);
         }

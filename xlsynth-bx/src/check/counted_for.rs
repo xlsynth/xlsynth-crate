@@ -16,14 +16,43 @@ pub(super) struct Iteration {
     count: usize,
 }
 
-/// The enclosing expression can type the carry or supply a seed elaborated
-/// while unifying sibling expressions.
+/// Carry type evidence from an expected type, a struct update's partial
+/// bindings, or a seed already elaborated while unifying sibling expressions.
 pub(super) enum CarryContext<'a> {
     Expected(Option<&'a Type>),
     Prepared(TypedExpr),
+    StructPrefix { name: &'a str, args: &'a [u32] },
 }
 
 impl BodyChecker<'_, '_> {
+    /// Elaborate the carry once, applying the loop annotation before any
+    /// partial struct bindings supplied by its enclosing update.
+    pub(super) fn loop_seed(
+        &mut self,
+        seed: &Expr,
+        annotation: Option<&Type>,
+        context: CarryContext,
+        check: impl FnOnce(&mut Self, Option<&Type>) -> Result<TypedExpr, String>,
+    ) -> Result<TypedExpr, String> {
+        let expected = match context {
+            CarryContext::Expected(ty) => ty,
+            _ => None,
+        };
+        let seed = match context {
+            CarryContext::Prepared(seed) => seed,
+            CarryContext::StructPrefix { name, args } if annotation.is_none() => {
+                self.splat_base_with_prefix(seed, name, args)?
+            }
+            _ => check(self, annotation.or(expected))?,
+        };
+        if let Some(expected) = expected
+            && !compatible(&seed.ty, expected)
+        {
+            return Err(format!("expected {expected}, got {}", seed.ty));
+        }
+        Ok(seed)
+    }
+
     /// Resolve the iterable and seed outside the binder scope. The body must
     /// produce the carry type even when the loop will execute zero times.
     pub(super) fn counted_for(
@@ -38,16 +67,13 @@ impl BodyChecker<'_, '_> {
             .map(|(e, a)| Ok::<_, String>((self.source_type(e)?, self.source_type(a)?)))
             .transpose()?;
         let element_hint = annotation.as_ref().map(|(e, _)| e);
-        let expected = match context {
-            CarryContext::Expected(ty) => ty,
-            _ => None,
-        };
-        let carry_hint = annotation.as_ref().map(|(_, a)| a).or(expected);
         let iteration = self.counted_iteration(&fold.iterable, element_hint)?;
-        let seed = match context {
-            CarryContext::Prepared(seed) => seed,
-            CarryContext::Expected(_) => {
-                self.with_prepared_value(&fold.seed, |checker, seed| {
+        let seed = self.loop_seed(
+            &fold.seed,
+            annotation.as_ref().map(|(_, a)| a),
+            context,
+            |checker, carry_hint| {
+                checker.with_prepared_value(&fold.seed, |checker, seed| {
                     if carry_hint.is_none() && minimum_type(seed)?.is_some() {
                         return Err(
                             "for needs a typed seed or accumulator for an implicit literal result"
@@ -55,14 +81,9 @@ impl BodyChecker<'_, '_> {
                         );
                     }
                     checker.elaborate_result(seed, carry_hint, false)
-                })?
-            }
-        };
-        if let Some(expected) = expected
-            && !compatible(&seed.ty, expected)
-        {
-            return Err(format!("expected {expected}, got {}", seed.ty));
-        }
+                })
+            },
+        )?;
         let id = self.next_counted_loop;
         self.next_counted_loop += 1;
         let element = Param {

@@ -128,6 +128,181 @@ fn using_an_implicit_reset_as_data_keeps_a_leaf_block_combinational() -> Result<
 }
 
 #[test]
+fn redundant_struct_splats_warn_at_each_splat_and_compile_denies_them() -> Result<(), String> {
+    let source = r#"struct S { a: u8, b: bool }
+fn replace(x: S, a: u8, b: bool) -> S {
+    let copy = S { ..x };
+    let partial = S { a, ..copy };
+    let first = S { a, b, ..partial };
+    S { b, a, ..first }
+}
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    let sites: Vec<_> = checked
+        .warnings()
+        .iter()
+        .map(|w| (w.kind, w.declaration.as_str(), w.position))
+        .collect();
+    assert_eq!(
+        sites,
+        [
+            (
+                BxWarningKind::UselessStructSplat,
+                "replace",
+                Some(SourcePosition {
+                    line: 5,
+                    column: 27
+                })
+            ),
+            (
+                BxWarningKind::UselessStructSplat,
+                "replace",
+                Some(SourcePosition {
+                    line: 6,
+                    column: 15
+                })
+            ),
+        ]
+    );
+    let expected = "<input>:5:27: warning[useless_struct_splat]: all struct fields are supplied explicitly. Remove the trailing struct splat.\n\
+                    <input>:6:15: warning[useless_struct_splat]: all struct fields are supplied explicitly. Remove the trailing struct splat.\n\
+                    BX warnings treated as errors";
+    let reset = ResetBehavior::default();
+    assert_eq!(
+        compile(source, empty_package("test"), reset).unwrap_err(),
+        expected
+    );
+    let package = lower_module(&checked, empty_package("test"), reset)?;
+    assert!(package.get_fn("replace").is_some());
+    Ok(())
+}
+
+#[test]
+fn a_base_only_copy_of_an_empty_struct_has_no_fields_to_carry() -> Result<(), String> {
+    let checked = check_module(&parse_module(
+        "struct Empty {} fn copy(x: Empty) -> Empty { Empty { ..x } }",
+    )?)?;
+    let [warning] = checked.warnings() else {
+        panic!("unexpected warnings: {:?}", checked.warnings());
+    };
+    assert_eq!(warning.kind, BxWarningKind::UselessStructSplat);
+    Ok(())
+}
+
+#[test]
+fn useless_struct_splat_allowances_are_local_to_each_declaration() -> Result<(), String> {
+    let source = r#"struct S { a: u8 }
+const BASE = S { a: u8:0 };
+#[allow(useless_struct_splat)]
+const REPLACED = S { a: u8:1, ..BASE };
+#[allow(useless_struct_splat)]
+fn replace(x: S, a: u8) -> S { S { a, ..x } }
+#[allow(combinational_block, useless_struct_splat)]
+block quiet(clk, x: S, data: u8) -> S { S { a: data, ..x } }
+#[allow(combinational_block)]
+block noisy(clk, x: S, data: u8) -> S { S { a: data, ..x } }
+const NOISY_CONST = S { a: u8:2, ..REPLACED };
+"#;
+    let checked = check_module(&parse_module(source)?)?;
+    let mut warnings: Vec<_> = checked
+        .warnings()
+        .iter()
+        .map(|warning| (warning.declaration.as_str(), warning.kind))
+        .collect();
+    warnings.sort();
+    assert_eq!(
+        warnings,
+        [
+            ("NOISY_CONST", BxWarningKind::UselessStructSplat),
+            ("noisy", BxWarningKind::UselessStructSplat),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn imported_type_declarations_and_extern_signatures_own_their_splat_allowances()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let declarations = r#"struct Size { n: u32 }
+const BASE = Size { n: u32:1 };
+#[allow(useless_struct_splat)]
+enum Code : u32 { Read = Size { n: u32:2, ..BASE }.n }
+#[allow(useless_struct_splat)]
+struct Word<N: u32 = {Size { n: u32:3, ..BASE }.n}> { data: uN[N] }
+fn read(w: Word<>) -> u3 { w.data }
+#[allow(useless_struct_splat)]
+extern fn adjust(x: Word<{Size { n: u32:4, ..BASE }.n}>) -> u4;
+#[allow(useless_struct_splat)]
+extern block stage(clk, x: Word<{Size { n: u32:5, ..BASE }.n}>) -> u5;
+"#;
+    let options = ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let path = dir.path().join("decls.bx");
+    fs::write(
+        &path,
+        declarations.replace("#[allow(useless_struct_splat)]", ""),
+    )?;
+    let checked = check_source_with_options("use decls;", &options)?;
+    let owners: Vec<_> = checked
+        .warnings()
+        .iter()
+        .map(|w| w.declaration.as_str())
+        .collect();
+    assert_eq!(
+        owners,
+        [
+            "decls::Code",
+            "decls::Word",
+            "decls::adjust",
+            "decls::stage"
+        ]
+    );
+    fs::write(&path, declarations)?;
+    let checked = check_source_with_options("use decls;", &options)?;
+    assert!(checked.warnings().is_empty(), "{:?}", checked.warnings());
+    Ok(())
+}
+
+#[test]
+fn imported_struct_splat_warns_once_across_type_specializations() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let library = dir.path().join("records.bx");
+    fs::write(
+        &library,
+        r#"pub struct Record<T> { data: T }
+pub fn replace<T>(x: Record<T>, data: T) -> Record<T> {
+    Record { data, ..x }
+}"#,
+    )?;
+    let source = r#"use records;
+fn byte(x: records::Record<u8>) -> records::Record<u8> { records::replace(x, u8:1) }
+fn word(x: records::Record<u32>) -> records::Record<u32> { records::replace(x, u32:2) }
+"#;
+    let options = ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let checked = check_source_with_options(source, &options)?;
+    let [warning] = checked.warnings() else {
+        panic!("unexpected warnings: {:?}", checked.warnings());
+    };
+    assert_eq!(warning.kind, BxWarningKind::UselessStructSplat);
+    assert_eq!(warning.declaration, "records::replace");
+    assert_eq!(warning.file.as_deref(), Some(library.as_path()));
+    assert_eq!(
+        warning.position,
+        Some(SourcePosition {
+            line: 3,
+            column: 20
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn a_wire_shadowing_a_callback_keeps_its_template_combinational() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let options = ImportOptions {

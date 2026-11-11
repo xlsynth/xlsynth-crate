@@ -8,7 +8,7 @@ use super::{BUILTIN_MAP, Binding, Names, ParametricKind};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, Type, UnrollFor,
+    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, Type, UnrollFor,
     WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -746,25 +746,44 @@ impl<'a> Scope<'a> {
             },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
-            Expr::Struct { name, fields }
-            | Expr::AppliedStruct { name, fields, .. }
-            | Expr::ParametricStruct { name, fields, .. }
-            | Expr::TypeAppliedStruct { name, fields, .. } => {
+            Expr::Struct { name, fields, base }
+            | Expr::AppliedStruct {
+                name, fields, base, ..
+            }
+            | Expr::ParametricStruct {
+                name, fields, base, ..
+            }
+            | Expr::TypeAppliedStruct {
+                name, fields, base, ..
+            } => {
                 let name = self.reference(name, self.at)?;
                 let fields = fields
                     .iter()
                     .map(|(name, value)| Ok((name.clone(), self.expr(value)?)))
                     .collect::<Result<_, String>>()?;
+                let base = base
+                    .as_deref()
+                    .map(|base| {
+                        self.expr(&base.value).map(|value| {
+                            Box::new(StructSplat {
+                                value,
+                                position: base.position,
+                            })
+                        })
+                    })
+                    .transpose()?;
                 match expr {
                     Expr::AppliedStruct { args, .. } => Expr::AppliedStruct {
                         name,
                         args: args.clone(),
                         fields,
+                        base,
                     },
                     Expr::ParametricStruct { args, .. } => Expr::ParametricStruct {
                         name,
                         args: self.expressions(args)?,
                         fields,
+                        base,
                     },
                     Expr::TypeAppliedStruct { args, .. } => Expr::TypeAppliedStruct {
                         name,
@@ -773,8 +792,9 @@ impl<'a> Scope<'a> {
                             .map(|ty| self.ty(ty))
                             .collect::<Result<_, _>>()?,
                         fields,
+                        base,
                     },
-                    _ => Expr::Struct { name, fields },
+                    _ => Expr::Struct { name, fields, base },
                 }
             }
             Expr::Field { value, name } => Expr::Field {

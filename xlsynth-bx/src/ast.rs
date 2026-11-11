@@ -5,6 +5,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    hash::{Hash, Hasher},
     path::PathBuf,
     sync::Arc,
 };
@@ -394,6 +395,27 @@ pub struct ExternBlock {
     pub result: Type,
 }
 
+/// The base expression in a struct update and the source location of its `..`.
+#[derive(Clone, Debug, Eq)]
+pub struct StructSplat {
+    pub value: Expr,
+    pub position: Option<SourcePosition>,
+}
+
+// Source locations are diagnostic metadata. Expressions in type dimensions
+// must compare the same when written in different places.
+impl PartialEq for StructSplat {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl Hash for StructSplat {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.value.hash(state);
+    }
+}
+
 /// A value computed from this cycle's ports and register contents.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Expr {
@@ -425,24 +447,29 @@ pub enum Expr {
     Struct {
         name: String,
         fields: Vec<(String, Expr)>,
+        /// A final `..base` expression supplying omitted fields.
+        base: Option<Box<StructSplat>>,
     },
     /// A struct literal with explicit concrete DSLX value arguments.
     AppliedStruct {
         name: String,
         args: Vec<u32>,
         fields: Vec<(String, Expr)>,
+        base: Option<Box<StructSplat>>,
     },
     /// A struct literal with arguments evaluated at compile time.
     ParametricStruct {
         name: String,
         args: Vec<Expr>,
         fields: Vec<(String, Expr)>,
+        base: Option<Box<StructSplat>>,
     },
     /// A native struct literal with explicit type arguments.
     TypeAppliedStruct {
         name: String,
         args: Vec<Type>,
         fields: Vec<(String, Expr)>,
+        base: Option<Box<StructSplat>>,
     },
     Field {
         value: Box<Expr>,
@@ -624,7 +651,7 @@ pub enum Stmt {
 }
 
 /// A one-based source line and character column within a BX file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourcePosition {
     pub line: usize,
     pub column: usize,
@@ -725,6 +752,9 @@ pub struct Module {
     pub require_block_timing: bool,
     /// Bound names in declaration order, including each leaf of a use tree.
     pub declaration_order: Vec<String>,
+    /// Explicit warning allowances on declarations other than block
+    /// definitions.
+    pub declaration_allowances: BTreeMap<String, BTreeSet<BxWarningKind>>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,

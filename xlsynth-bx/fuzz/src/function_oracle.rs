@@ -3,7 +3,9 @@
 //! Check source acceptance, DSLX bytecode results, and lowered hardware
 //! separately.
 
-use crate::eval::expr_eval::{BlockEvaluator, bx_source, compile_bundled_module, dslx_source};
+use crate::eval::expr_eval::{
+    BlockEvaluator, bx_source, compile_bundled_module_with_warnings, dslx_source,
+};
 use std::fmt::Write;
 use std::{
     env, fs,
@@ -12,7 +14,9 @@ use std::{
 };
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 use xlsynth_bx::ast::Type;
-use xlsynth_bx::{CheckedModule, ImportOptions, check_module_with_options, parse_module};
+use xlsynth_bx::{
+    BxWarningKind, CheckedModule, ImportOptions, check_module_with_options, parse_module,
+};
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize_in_range;
 use xlsynth_pir::libxls_bridge::value_to_libxls;
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
@@ -156,7 +160,7 @@ pub(crate) fn compare_program(
         program.functions,
         bx_source(&program.params, &program.result, &program.body)
     );
-    compare_bx_program(&bx, program, seed, execution, additional_inputs, &[])
+    compare_reference(&bx, program, seed, execution, additional_inputs, &[], true)
 }
 
 /// Compare the original source types independently of lowering. Some native
@@ -287,6 +291,28 @@ pub(crate) fn compare_bx_program(
     additional_inputs: Vec<Vec<IrValue>>,
     search_paths: &[&Path],
 ) -> Result<(), String> {
+    compare_reference(
+        bx,
+        program,
+        seed,
+        execution,
+        additional_inputs,
+        search_paths,
+        false,
+    )
+}
+
+/// Compare lowered functions on shared inputs. Equivalent source bodies can
+/// also compare source-level diagnostics such as redundant struct splats.
+fn compare_reference(
+    bx: &str,
+    program: FunctionProgram,
+    seed: u64,
+    execution: DslxExecution,
+    additional_inputs: Vec<Vec<IrValue>>,
+    search_paths: &[&Path],
+    shared_body: bool,
+) -> Result<(), String> {
     let reference = format!(
         "{}\n{}",
         program.functions,
@@ -298,10 +324,30 @@ pub(crate) fn compare_bx_program(
     };
     let evaluator = BlockEvaluator::lower(&checked, bx)?;
     let native_ir = if program.dslx_ir {
-        Some(
-            compile_bundled_module(&reference, search_paths)
-                .map_err(|e| format!("DSLX IR lowering failed: {e}\n{reference}"))?,
-        )
+        let (function, warnings) =
+            compile_bundled_module_with_warnings(&reference, search_paths)
+                .map_err(|e| format!("DSLX IR lowering failed: {e}\n{reference}"))?;
+        if shared_body {
+            let bx_count = checked
+                .warnings()
+                .iter()
+                .filter(|warning| warning.kind == BxWarningKind::UselessStructSplat)
+                .count();
+            // The pinned C API exposes DSLX warning messages without their
+            // categories or source spans.
+            let dslx_count = warnings
+                .iter()
+                .filter(|w| {
+                    w.starts_with("'Splatted' struct instance has all members of struct defined")
+                })
+                .count();
+            if bx_count != dslx_count {
+                return Err(format!(
+                    "useless_struct_splat warning count differs: BX {bx_count}, DSLX {dslx_count}\nBX:\n{bx}\nDSLX:\n{reference}\nDSLX warnings: {warnings:?}"
+                ));
+            }
+        }
+        Some(function)
     } else {
         None
     };

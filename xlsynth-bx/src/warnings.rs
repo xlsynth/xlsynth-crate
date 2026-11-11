@@ -18,6 +18,8 @@ pub enum BxWarningKind {
     /// A block in a module marked `#![require_block_timing]` has no output
     /// annotation.
     MissingBlockTiming,
+    /// A struct update supplies every member explicitly.
+    UselessStructSplat,
 }
 
 impl BxWarningKind {
@@ -26,6 +28,7 @@ impl BxWarningKind {
         match self {
             Self::CombinationalBlock => "combinational_block",
             Self::MissingBlockTiming => "missing_block_timing",
+            Self::UselessStructSplat => "useless_struct_splat",
         }
     }
 
@@ -33,14 +36,15 @@ impl BxWarningKind {
         match name {
             "combinational_block" => Some(Self::CombinationalBlock),
             "missing_block_timing" => Some(Self::MissingBlockTiming),
+            "useless_struct_splat" => Some(Self::UselessStructSplat),
             _ => None,
         }
     }
 }
 
-/// A warning on a source declaration. Imported block names include their
-/// module path. A root parsed from text has no filename until its caller
-/// supplies one.
+/// A warning at a source declaration or expression. Imported declaration
+/// names include their module path. A root parsed from text has no filename
+/// until its caller supplies one.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BxWarning {
     pub kind: BxWarningKind,
@@ -51,17 +55,22 @@ pub struct BxWarning {
 }
 
 impl BxWarning {
-    /// Locate the block declaration in its root or imported source file.
-    fn for_block(kind: BxWarningKind, block: &Block, library: Option<&LibraryModuleInfo>) -> Self {
-        let declaration = match library_item(&block.name) {
+    /// Locate a warning in its root or imported source file.
+    fn at(
+        kind: BxWarningKind,
+        owner: &str,
+        position: Option<SourcePosition>,
+        library: Option<&LibraryModuleInfo>,
+    ) -> Self {
+        let declaration = match library_item(owner) {
             Some((module, name)) => format!("{}::{name}", module.replace('.', "::")),
-            None => block.name.clone(),
+            None => owner.to_owned(),
         };
         Self {
             kind,
             declaration,
             file: library.map(|source| source.path.clone()),
-            position: block.name_position,
+            position,
         }
     }
 
@@ -105,6 +114,9 @@ impl fmt::Display for WarningDisplay<'_> {
                 "block '{}' requires an output timing annotation",
                 warning.declaration
             ),
+            BxWarningKind::UselessStructSplat => f.write_str(
+                "all struct fields are supplied explicitly. Remove the trailing struct splat.",
+            ),
         }
     }
 }
@@ -114,9 +126,20 @@ impl fmt::Display for WarningDisplay<'_> {
 #[derive(Default)]
 pub(crate) struct WarningCollector<'m> {
     hardware: BTreeMap<&'m str, bool>,
+    /// A source occurrence can be checked by multiple specializations or
+    /// iterations.
+    splats: BTreeMap<&'m str, BTreeSet<Option<SourcePosition>>>,
 }
 
 impl<'m> WarningCollector<'m> {
+    pub(crate) fn record_useless_splat(
+        &mut self,
+        owner: &'m str,
+        position: Option<SourcePosition>,
+    ) {
+        self.splats.entry(owner).or_default().insert(position);
+    }
+
     pub(crate) fn record_block(&mut self, name: &'m str, requires_hardware: bool) {
         *self.hardware.entry(name).or_default() |= requires_hardware;
     }
@@ -127,14 +150,18 @@ impl<'m> WarningCollector<'m> {
         self,
         root: &Module,
         linked: Option<&LinkedSources>,
+        positions: &BTreeMap<&str, usize>,
         is_block: impl Fn(&str) -> bool,
     ) -> Vec<BxWarning> {
         let mut warnings = Vec::new();
         let mut local_scope = None;
         let module = linked.map_or(root, |sources| &sources.module);
+        let library_for = |owner: &str| {
+            library_item(owner).and_then(|(name, _)| linked?.library_modules.get(name))
+        };
         for block in &module.blocks {
-            let library =
-                library_item(&block.name).and_then(|(name, _)| linked?.library_modules.get(name));
+            let owner = block.name.as_str();
+            let library = library_for(owner);
             let require_timing =
                 library.map_or(root.require_block_timing, |m| m.require_block_timing);
             let kind = BxWarningKind::MissingBlockTiming;
@@ -142,7 +169,10 @@ impl<'m> WarningCollector<'m> {
                 && block.output_cycles.is_none()
                 && !block.allowed_warnings.contains(&kind)
             {
-                warnings.push(BxWarning::for_block(kind, block, library));
+                warnings.push((
+                    owner,
+                    BxWarning::at(kind, owner, block.name_position, library),
+                ));
             }
 
             let kind = BxWarningKind::CombinationalBlock;
@@ -174,9 +204,40 @@ impl<'m> WarningCollector<'m> {
             {
                 continue;
             }
-            warnings.push(BxWarning::for_block(kind, block, library));
+            warnings.push((
+                owner,
+                BxWarning::at(kind, owner, block.name_position, library),
+            ));
         }
-        warnings
+        if !self.splats.is_empty() {
+            let kind = BxWarningKind::UselessStructSplat;
+            let allowed: BTreeSet<_> = module
+                .blocks
+                .iter()
+                .map(|b| (&b.name, &b.allowed_warnings))
+                .chain(&module.declaration_allowances)
+                .filter_map(|(name, allowances)| {
+                    allowances.contains(&kind).then_some(name.as_str())
+                })
+                .collect();
+            for (owner, sites) in self.splats {
+                if !allowed.contains(owner) {
+                    let library = library_for(owner);
+                    warnings.extend(
+                        sites
+                            .into_iter()
+                            .map(|site| (owner, BxWarning::at(kind, owner, site, library))),
+                    );
+                }
+            }
+            warnings.sort_by_key(|(owner, warning)| {
+                (
+                    positions.get(owner).copied().unwrap_or(usize::MAX),
+                    warning.position,
+                )
+            });
+        }
+        warnings.into_iter().map(|(_, warning)| warning).collect()
     }
 }
 
