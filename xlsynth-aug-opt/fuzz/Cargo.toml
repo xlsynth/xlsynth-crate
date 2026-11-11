@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-aug-opt-fuzz"
-version = "0.81.0"
+version = "0.82.0"
 publish = false
 edition = "2024"
 
