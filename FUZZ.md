@@ -444,6 +444,16 @@ rejections, crashes, and timeouts for inline and let-bound bases.
 The `audit-v16` grammar checks unsigned values forwarded into signed
 parametrics of local or imported nested structs. It requires rejection of
 out-of-range values and proves the widened result for in-range controls.
+The `audit-v17` grammar proves that calls specialized on distinct aggregate
+values observe the correct values even when their interfaces have the same
+shape. It also compares equivalent bit-type spellings used to infer struct
+width parameters, requiring the raw source to convert and preserve the
+field value and inferred width. It requires a clean type error for widths
+that do not fit the parametric's type.
+The `audit-v18` grammar checks comparisons through indexed array literals in
+standalone IR and bytecode, including module constants. It checks that typed
+empty array literals preserve their return type and probes frontend acceptance
+of equivalent array ellipsis spellings and length contexts.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

@@ -311,6 +311,42 @@ nested struct is imported. Unexpected acceptance records `X` and retains the
 source and emitted IR. Crashes and unrelated errors record `R`.
 Prefix any audit-v15 input with one zero byte to preserve it in audit-v16.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v17` to exercise aggregate-valued
+function parametrics and struct width inference. `04` specializes a function
+on two distinct tuple values with the same IR signature and calls the first
+specialization again on a different input. It checks each field in order
+against independent IR. The next byte varies tuple, array and record shapes,
+signedness, constant names, forwarding, and imports. An aggregate type alias
+lets the native typechecker reach function specialization. Aggregate-valued
+struct parametrics in the pinned compiler still fail before IR emission.
+`05` and `05 01` infer a struct's `u5` width parameter from `u5` and
+`uN[5]` witnesses. They submit both spellings directly to the converter and
+check the resulting field and inferred width against the same IR. `05 05`
+uses a `u32` width parameter and `05 11` binds the narrow parameter explicitly. `05 40`
+requires a clean rejection when inference would put `5` into `u2`.
+Crashes and unexpected rejections retain the original source and replay bytes.
+Prefix any audit-v16 input with one zero byte to preserve it in audit-v17.
+
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v18` for array literal and ellipsis
+coverage.
+
+- `04` submits `[255, 255][i] == u16:255` to the converter. `04 02` checks
+  the original bytecode result for both valid indices. `04 20` folds the
+  comparison with a constant index in a module constant. Set the low bit of
+  the option byte for explicitly typed controls with the same expected value.
+- `05` converts `u8[0]:[]` and checks the exact array return type in
+  unoptimized IR. `05 08` checks its bytecode result. `05 02` supplies a
+  nonempty control. The options also vary element types and type annotations.
+- `06` probes raw `()[2]:[x, ...]` syntax. `06 01` uses the declared return
+  type and `06 02` uses an explicit unit type alias. All three have the same
+  IR reference.
+- `07` uses the length of an inline `make(y)` call to infer a sibling
+  `[x, ...]`. `07 01` binds the call first and `07 02` annotates the result.
+  The reference checks the inferred array length and selected element. This
+  probes how the frontend propagates context to the unannotated literal.
+
+Prefix any audit-v17 input with one zero byte to preserve it in audit-v18.
+
 Replay a retained finding with the same grammar and the retained seed file.
 The target recreates the import tree from the seed, including nested modules.
 

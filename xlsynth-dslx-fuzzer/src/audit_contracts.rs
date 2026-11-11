@@ -5,15 +5,17 @@
 
 use crate::converter_contracts::{self, ContractCase};
 use crate::{
-    SourceModule, aggregate_method_contracts, array_cast_contracts, array_concat_contracts,
-    bound_parametric_contracts, builtin_contracts, cross_module_parametric_contracts,
-    dead_branch_contracts, empty_builtin_contracts, enum_width_contracts, inferred_flow_contracts,
-    lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
-    mixed_literal_contracts, nested_scope_contracts, nested_struct_parametric_contracts,
-    nominal_contracts, observable_value_contracts, observer_contracts, parametric_splat_contracts,
-    pattern_acceptance, scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
-    signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
-    unrolled_loop_contracts, zero_width_cast_contracts,
+    SourceModule, aggregate_method_contracts, aggregate_value_parametric_contracts,
+    array_cast_contracts, array_concat_contracts, array_ellipsis_contracts,
+    array_literal_contracts, bound_parametric_contracts, builtin_contracts,
+    cross_module_parametric_contracts, dead_branch_contracts, empty_builtin_contracts,
+    enum_width_contracts, inferred_flow_contracts, lambda_dimension_contracts,
+    literal_order_contracts, map_parametric_contracts, mixed_literal_contracts,
+    nested_scope_contracts, nested_struct_parametric_contracts, nominal_contracts,
+    observable_value_contracts, observer_contracts, parametric_splat_contracts,
+    parametric_witness_contracts, pattern_acceptance, scalar_update_builtin_contracts,
+    scope_contracts, self_dimension_contracts, signed_array_cast_contracts, signed_call_contracts,
+    tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -313,6 +315,34 @@ pub fn generate_v16(data: &[u8]) -> Result<AuditCase, String> {
     }
 }
 
+/// Checks aggregate function specialization and equivalent width witnesses.
+/// A zero prefix preserves audit-v16 inputs.
+pub fn generate_v17(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 16 {
+        4 => Ok(AuditCase::Semantic(
+            aggregate_value_parametric_contracts::generate(options),
+        )),
+        5 => Ok(parametric_witness_contracts::generate(options)),
+        _ => generate_v16(options),
+    }
+}
+
+/// Checks array-literal indexing, empty construction, and ellipsis contexts.
+/// A zero prefix preserves audit-v17 inputs.
+pub fn generate_v18(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 16 {
+        4 => Ok(array_literal_contracts::indexed_comparison(options)),
+        5 => Ok(array_literal_contracts::empty(options)),
+        6 => Ok(AuditCase::Semantic(array_ellipsis_contracts::unit(options))),
+        7 => Ok(AuditCase::Semantic(array_ellipsis_contracts::sibling_call(
+            options,
+        ))),
+        _ => generate_v17(options),
+    }
+}
+
 /// Varies whether a checked call's result is bound or discarded. The call
 /// must execute even when the final constant does not use its return value.
 fn constexpr_block(data: &[u8]) -> AuditCase {
@@ -362,7 +392,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {{
 mod tests {
     use super::{
         AuditCase, generate, generate_v2, generate_v6, generate_v7, generate_v8, generate_v9,
-        generate_v10, generate_v11, generate_v12,
+        generate_v10, generate_v11, generate_v12, generate_v16, generate_v17, generate_v18,
     };
 
     #[test]
@@ -439,6 +469,43 @@ mod tests {
         };
         assert_eq!(old.modules, new.modules);
         assert_eq!(old.expected_ir, new.expected_ir);
+        Ok(())
+    }
+
+    #[test]
+    fn audit_v17_preserves_nested_struct_range_contracts() -> Result<(), String> {
+        for selector in [0, 1] {
+            let (
+                AuditCase::ExpectedTypeRejection { family, modules },
+                AuditCase::ExpectedTypeRejection {
+                    family: migrated_family,
+                    modules: migrated_modules,
+                },
+            ) = (
+                generate_v16(&[6, selector])?,
+                generate_v17(&[0, 6, selector])?,
+            )
+            else {
+                return Err("expected both out-of-range forwards to require rejection".into());
+            };
+            assert_eq!(family, migrated_family);
+            assert_eq!(modules, migrated_modules);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn audit_v18_preserves_aggregate_and_width_contracts() -> Result<(), String> {
+        for selector in [4, 5] {
+            let (AuditCase::Semantic(old), AuditCase::Semantic(new)) =
+                (generate_v17(&[selector])?, generate_v18(&[0, selector])?)
+            else {
+                return Err("expected the audit-v17 semantic contract".into());
+            };
+            assert_eq!(old.family, new.family);
+            assert_eq!(old.modules, new.modules);
+            assert_eq!(old.expected_ir, new.expected_ir);
+        }
         Ok(())
     }
 
