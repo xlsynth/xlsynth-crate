@@ -10,10 +10,10 @@ use std::collections::BTreeSet;
 
 /// Static iteration shape and the value from which the loop reads its elements.
 pub(super) struct Iteration {
-    ty: Type,
-    widths: Option<BindingWidths>,
-    iterable: TypedIterable,
-    count: usize,
+    pub(super) ty: Type,
+    pub(super) widths: Option<BindingWidths>,
+    pub(super) iterable: TypedIterable,
+    pub(super) count: usize,
 }
 
 /// Carry type evidence from an expected type, a struct update's partial

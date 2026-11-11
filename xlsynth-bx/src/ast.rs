@@ -697,6 +697,69 @@ pub struct SourcePosition {
     pub column: usize,
 }
 
+/// Function tests evaluate pure expressions. Block tests can drive and clock
+/// hardware.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestKind {
+    Function,
+    Block,
+}
+
+/// A source test with its declared name and ordered procedural body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestDecl {
+    pub name: String,
+    pub kind: TestKind,
+    pub position: SourcePosition,
+    pub statements: Vec<TestStmt>,
+    /// Module names referenced in annotations replaced by an outer annotation.
+    pub overwritten_literal_types: BTreeSet<String>,
+}
+
+/// One test action and the location used to report its outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestStmt {
+    pub position: SourcePosition,
+    pub kind: TestStmtKind,
+}
+
+/// Procedural operations available inside BX test declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TestStmtKind {
+    Reg {
+        name: String,
+        ty: Type,
+        /// An omitted initializer drives the type's all-zero value.
+        init: Option<Expr>,
+    },
+    Let(LetBinding),
+    Assign {
+        name: String,
+        value: Expr,
+    },
+    Tick {
+        reset: Option<Expr>,
+    },
+    Assert {
+        predicate: Expr,
+        label: Option<String>,
+    },
+    AssertEq {
+        actual: Expr,
+        expected: Expr,
+    },
+    For {
+        pattern: BindingPattern,
+        iterable: ForIterable,
+        body: Vec<TestStmt>,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<TestStmt>,
+        else_body: Vec<TestStmt>,
+    },
+}
+
 /// The byte range of a construct within a BX source file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
@@ -813,4 +876,6 @@ pub struct Module {
     pub functions: Vec<Function>,
     pub extern_blocks: Vec<ExternBlock>,
     pub blocks: Vec<Block>,
+    /// Tests declared in this source file, in execution order.
+    pub tests: Vec<TestDecl>,
 }

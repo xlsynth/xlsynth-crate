@@ -4,6 +4,7 @@
 
 pub mod outline;
 pub(crate) mod source_bytes;
+mod test_declarations;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -350,6 +351,13 @@ enum Dialect {
     Dslx,
 }
 
+/// Declaration attributes select a test body or configure ordinary warning
+/// handling.
+enum DeclarationAttributes {
+    Test,
+    Warnings(BTreeSet<BxWarningKind>),
+}
+
 /// Decode one DSLX byte character and return its value and token length.
 fn scan_character(source: &str) -> Option<(u8, usize)> {
     let bytes = source.as_bytes();
@@ -386,9 +394,6 @@ fn scan_byte_escape(bytes: &[u8]) -> Option<(u8, usize)> {
 /// Decode the UTF-8 bytes and escape sequences inside a DSLX string literal.
 fn decode_byte_string(text: &str) -> Result<Vec<u8>, &'static str> {
     let mut remaining = &text.as_bytes()[1..text.len() - 1];
-    if remaining.is_empty() {
-        return Err("zero-length DSLX strings are not supported");
-    }
     let mut value = Vec::new();
     // The concrete layout charges eight bits per byte plus the array node.
     let max_bytes = (crate::check::MAX_TYPE_SIZE - 1) / 8;
@@ -943,6 +948,16 @@ impl<'s> Parser<'s> {
             match token.text {
                 "{" => depth += 1,
                 "}" => depth = depth.saturating_sub(1),
+                "#" if depth == 0
+                    && self.peek(0) == "["
+                    && self.peek(1) == "test"
+                    && self.peek(2) == "]"
+                    && matches!(self.peek(3), "fn" | "block") =>
+                {
+                    // Test names never bind call targets, including the map
+                    // builtin.
+                    self.pos += 4;
+                }
                 "fn" | "block" | "struct"
                     if depth == 0
                         && self.peek(0) == "map"
@@ -1011,7 +1026,15 @@ impl<'s> Parser<'s> {
         let mut use_bindings = BTreeSet::new();
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let mut allowed_warnings = self.attributes(&mut module)?;
+            let mut allowed_warnings = match self.attributes(&mut module)? {
+                DeclarationAttributes::Test => {
+                    let test = self.test_declaration()?;
+                    module.declaration_order.push(test.name.clone());
+                    module.tests.push(test);
+                    continue;
+                }
+                DeclarationAttributes::Warnings(warnings) => warnings,
+            };
             if self.peek(0).is_empty() && allowed_warnings.is_empty() {
                 break;
             }
@@ -1126,12 +1149,30 @@ impl<'s> Parser<'s> {
                     .cloned(),
             );
         }
+        if !module.tests.is_empty() {
+            let test_positions: BTreeMap<_, _> = module
+                .tests
+                .iter()
+                .map(|t| (t.name.as_str(), t.position))
+                .collect();
+            let mut seen = HashSet::new();
+            for name in &module.declaration_order {
+                if let Some(position) = test_positions.get(name.as_str())
+                    && !seen.insert(name)
+                {
+                    return Err(format!(
+                        "{}:{}: duplicate declaration for BX test '{name}'",
+                        position.line, position.column
+                    ));
+                }
+            }
+        }
         Ok(module)
     }
 
-    /// Record file-wide attributes and return warning allowances for the next
+    /// Record file-wide attributes and identify warning allowances or a test
     /// declaration.
-    fn attributes(&mut self, module: &mut Module) -> Result<BTreeSet<BxWarningKind>, String> {
+    fn attributes(&mut self, module: &mut Module) -> Result<DeclarationAttributes, String> {
         let mut allowed = BTreeSet::new();
         while self.eat("#") {
             let module_attribute = self.eat("!");
@@ -1157,6 +1198,13 @@ impl<'s> Parser<'s> {
             if matches!(name, "require_block_timing" | "require_define_before_use") {
                 return Err(self.error(&format!("use #![{name}] at module scope")));
             }
+            if self.eat("test") {
+                if !allowed.is_empty() {
+                    return Err(self.error("BX warning allowances apply to hardware declarations"));
+                }
+                self.expect("]")?;
+                return Ok(DeclarationAttributes::Test);
+            }
             self.expect("allow")?;
             self.expect("(")?;
             if self.peek(0) == ")" {
@@ -1175,7 +1223,7 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             self.expect("]")?;
         }
-        Ok(allowed)
+        Ok(DeclarationAttributes::Warnings(allowed))
     }
 
     /// Flatten one DSLX use tree in source order. BX additionally bounds the
@@ -3153,6 +3201,13 @@ impl<'s> Parser<'s> {
         if text.starts_with('"') {
             let bytes = decode_byte_string(text)
                 .map_err(|error| diagnostic(self.source, self.tokens[self.pos].start, error))?;
+            if bytes.is_empty() {
+                return Err(diagnostic(
+                    self.source,
+                    self.tokens[self.pos].start,
+                    "zero-length DSLX strings are not supported",
+                ));
+            }
             self.pos += 1;
             return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }

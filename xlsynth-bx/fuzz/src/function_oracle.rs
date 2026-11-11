@@ -10,7 +10,7 @@ use std::fmt::Write;
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember};
 use xlsynth_bx::ast::Type;
@@ -462,31 +462,7 @@ fn run_bytecode_tests(
             ));
         }
     }
-    let tools = env::var_os("XLSYNTH_TOOLS")
-        .ok_or("set XLSYNTH_TOOLS to the pinned XLS tools directory")?;
-    let binary = PathBuf::from(tools).join("dslx_interpreter_main");
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let path = dir.path().join("oracle.x");
-    fs::write(&path, &source).map_err(|e| e.to_string())?;
-    let mut command = Command::new(&binary);
-    if !search_paths.is_empty() {
-        command
-            .arg("--dslx_path")
-            .arg(env::join_paths(search_paths).map_err(|e| e.to_string())?);
-    }
-    let output = command
-        .args([
-            "--evaluator=dslx-interpreter",
-            "--compare=none",
-            "--warnings_as_errors=false",
-        ])
-        .arg(format!(
-            "--dslx_stdlib_path={}",
-            xlsynth::default_dslx_stdlib_path().display()
-        ))
-        .arg(path)
-        .output()
-        .map_err(|e| format!("could not launch {}: {e}", binary.display()))?;
+    let output = run_dslx_interpreter(&source, search_paths, &[])?;
     let diagnostics = String::from_utf8_lossy(&output.stderr);
     let failed = expected_errors.len();
     let ran = failed + 1;
@@ -504,4 +480,39 @@ fn run_bytecode_tests(
         ));
     }
     Ok(())
+}
+
+/// Execute a generated module with the pinned DSLX interpreter and capture its
+/// test results.
+pub(crate) fn run_dslx_interpreter(
+    source: &str,
+    search_paths: &[&Path],
+    extra_args: &[&str],
+) -> Result<Output, String> {
+    let tools = env::var_os("XLSYNTH_TOOLS")
+        .ok_or("set XLSYNTH_TOOLS to the pinned XLS tools directory")?;
+    let binary = PathBuf::from(tools).join("dslx_interpreter_main");
+    let dir = tempfile::tempdir().map_err(|e| format!("create DSLX oracle directory: {e}"))?;
+    let path = dir.path().join("oracle.x");
+    fs::write(&path, source).map_err(|e| format!("write {}: {e}", path.display()))?;
+    let mut command = Command::new(&binary);
+    if !search_paths.is_empty() {
+        command
+            .arg("--dslx_path")
+            .arg(env::join_paths(search_paths).map_err(|e| e.to_string())?);
+    }
+    command
+        .args([
+            "--evaluator=dslx-interpreter",
+            "--compare=none",
+            "--warnings_as_errors=false",
+        ])
+        .arg(format!(
+            "--dslx_stdlib_path={}",
+            xlsynth::default_dslx_stdlib_path().display()
+        ))
+        .args(extra_args)
+        .arg(path)
+        .output()
+        .map_err(|e| format!("could not launch {}: {e}", binary.display()))
 }

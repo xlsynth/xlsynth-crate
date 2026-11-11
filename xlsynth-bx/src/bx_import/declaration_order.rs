@@ -26,11 +26,13 @@ impl DeclarationOrder {
         names: &Names,
         library: Option<&BxUse>,
     ) -> Result<Self, String> {
-        if module.declaration_order.len() != names.definitions.len() + names.uses.len()
+        if module.declaration_order.len()
+            != names.definitions.len() + names.uses.len() + module.tests.len()
             || names
                 .definitions
                 .iter()
                 .chain(names.uses.keys())
+                .chain(module.tests.iter().map(|test| &test.name))
                 .any(|name| !names.positions.contains_key(name))
         {
             return Err("require_define_before_use needs a declaration_order containing each declaration and use binding once".into());

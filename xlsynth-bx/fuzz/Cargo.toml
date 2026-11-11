@@ -42,6 +42,18 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_clocked_test"
+path = "fuzz_targets/fuzz_bx_dslx_clocked_test.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_bx_dslx_pure_test"
+path = "fuzz_targets/fuzz_bx_dslx_pure_test.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_enums"
 path = "fuzz_targets/fuzz_bx_dslx_enums.rs"
 test = false

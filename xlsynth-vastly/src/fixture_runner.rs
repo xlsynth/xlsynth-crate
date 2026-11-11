@@ -453,6 +453,16 @@ impl FixtureRunner {
         self.step_cycle_with_drive(fixtures, |_ctx| Ok(()))
     }
 
+    /// Samples settled combinational values with the current registers and
+    /// the supplied inputs, without advancing the clock or changing history.
+    pub fn sample_with_drive<F>(&self, drive: F) -> Result<BTreeMap<String, Value4>>
+    where
+        F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
+    {
+        let inputs = self.collect_inputs(&mut [], drive)?;
+        self.settled_values(&inputs)
+    }
+
     pub fn step_cycle_with_drive<F>(
         &mut self,
         fixtures: &mut [&mut dyn CycleFixture],
@@ -461,20 +471,7 @@ impl FixtureRunner {
     where
         F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
     {
-        let mut inputs = zero_inputs(&self.module)?;
-        let mut driven_bits = BTreeMap::new();
-        {
-            let mut drive_ctx = DriveContext {
-                inputs: &mut inputs,
-                driven_bits: &mut driven_bits,
-                previous_outputs: &self.last_outputs,
-            };
-            for fixture in fixtures.iter_mut() {
-                fixture.drive_cycle_inputs(self.cycle, &mut drive_ctx)?;
-            }
-            extra_drive(&mut drive_ctx)?;
-        }
-
+        let inputs = self.collect_inputs(fixtures, extra_drive)?;
         let (pre_outputs, outputs) = self.simulate_cycle(&inputs)?;
         let result = FixtureCycleResult {
             cycle: self.cycle,
@@ -498,19 +495,47 @@ impl FixtureRunner {
         Ok(result)
     }
 
+    fn collect_inputs<F>(
+        &self,
+        fixtures: &mut [&mut dyn CycleFixture],
+        extra_drive: F,
+    ) -> Result<BTreeMap<String, Value4>>
+    where
+        F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
+    {
+        let mut inputs = zero_inputs(&self.module)?;
+        let mut driven_bits = BTreeMap::new();
+        let mut drive_ctx = DriveContext {
+            inputs: &mut inputs,
+            driven_bits: &mut driven_bits,
+            previous_outputs: &self.last_outputs,
+        };
+        for fixture in fixtures {
+            fixture.drive_cycle_inputs(self.cycle, &mut drive_ctx)?;
+        }
+        extra_drive(&mut drive_ctx)?;
+        Ok(inputs)
+    }
+
+    fn settled_values(
+        &self,
+        inputs: &BTreeMap<String, Value4>,
+    ) -> Result<BTreeMap<String, Value4>> {
+        let seed = build_seed_env(&self.module, &self.state, inputs, true);
+        eval_combo_seeded(&self.module.combo, &self.plan, &seed)
+    }
+
     fn simulate_cycle(
         &mut self,
         inputs: &BTreeMap<String, Value4>,
     ) -> Result<(BTreeMap<String, Value4>, BTreeMap<String, Value4>)> {
-        let high_seed = build_seed_env(&self.module, &self.state, inputs, true);
-        let high_values = eval_combo_seeded(&self.module.combo, &self.plan, &high_seed)?;
+        let high_values = self.settled_values(inputs)?;
         if self.module.seqs.is_empty() {
             return Ok((high_values.clone(), high_values));
         }
         let env = env_from_values(&high_values);
         self.state = step_pipeline_state_with_env(&self.module, &env, &self.state)?;
-        let post_seed = build_seed_env(&self.module, &self.state, inputs, true);
-        let post_values = eval_combo_seeded(&self.module.combo, &self.plan, &post_seed)?;
+        let post_values = self.settled_values(inputs)?;
         Ok((high_values, post_values))
     }
 }

@@ -7,6 +7,7 @@ use crate::infer_literal::{
     BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type,
     has_concrete_element_type,
 };
+use crate::typed::TEST_DISCARD_PREFIX;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -621,6 +622,12 @@ impl BodyChecker<'_, '_> {
                     K::Literal(IrValue::Tuple(fields)) => Some(Arc::clone(fields)),
                     _ => None,
                 };
+                // A constructor owns the field computations. A named tuple has
+                // already evaluated them and a literal has no runtime
+                // contracts.
+                let evaluate_discards = self.decls.evaluate_discarded_tuple_fields
+                    && self.source_kind == super::BodyKind::Function
+                    && matches!(&value.kind, K::Tuple(_));
                 let mut fields: Box<dyn Iterator<Item = TypedExpr>> = match value.kind {
                     K::Tuple(fields) => Box::new(fields.into_iter()),
                     K::Literal(IrValue::Tuple(fields)) => {
@@ -645,6 +652,28 @@ impl BodyChecker<'_, '_> {
                     if matches!(pattern, BindingPattern::Rest)
                         || matches!(pattern, BindingPattern::Name(n) if n == "_")
                     {
+                        if evaluate_discards {
+                            let skipped = if matches!(pattern, BindingPattern::Rest) {
+                                count - required
+                            } else {
+                                1
+                            };
+                            for field in fields.by_ref().take(skipped) {
+                                // Names were already evaluated and literals
+                                // have no contracts.
+                                if !matches!(field.kind, K::Name(_) | K::Literal(_)) {
+                                    self.decls.has_test_discards.set(true);
+                                    self.statements.push(CheckedStmt::Let {
+                                        name: format!(
+                                            "{TEST_DISCARD_PREFIX}{}",
+                                            self.statements.len()
+                                        ),
+                                        value: field,
+                                    });
+                                }
+                            }
+                            cursor += skipped;
+                        }
                         continue;
                     }
                     let index = if rest.is_some_and(|r| i > r) {
