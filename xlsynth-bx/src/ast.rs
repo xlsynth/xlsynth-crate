@@ -750,7 +750,12 @@ pub struct Module {
     /// `#![require_block_timing]` requires output timing on this file's block
     /// definitions.
     pub require_block_timing: bool,
+    /// `#![require_define_before_use]` requires this file's declarations to
+    /// precede their uses.
+    pub require_define_before_use: bool,
     /// Bound names in declaration order, including each leaf of a use tree.
+    /// AST callers opting into `require_define_before_use` must list every
+    /// module declaration and use binding exactly once.
     pub declaration_order: Vec<String>,
     /// Explicit warning allowances on declarations other than block
     /// definitions.

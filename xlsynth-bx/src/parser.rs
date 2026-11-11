@@ -1104,14 +1104,26 @@ impl<'s> Parser<'s> {
         while self.eat("#") {
             let module_attribute = self.eat("!");
             self.expect("[")?;
+            let name = self.peek(0);
             if module_attribute {
-                self.expect("require_block_timing")?;
+                match name {
+                    "require_block_timing" => module.require_block_timing = true,
+                    "require_define_before_use" => {
+                        if !module.declaration_order.is_empty() {
+                            return Err(self.error(
+                                "place #![require_define_before_use] before the first declaration",
+                            ));
+                        }
+                        module.require_define_before_use = true;
+                    }
+                    _ => return Err(self.error("unknown BX module attribute")),
+                }
+                self.pos += 1;
                 self.expect("]")?;
-                module.require_block_timing = true;
                 continue;
             }
-            if self.peek(0) == "require_block_timing" {
-                return Err(self.error("use #![require_block_timing] at module scope"));
+            if matches!(name, "require_block_timing" | "require_define_before_use") {
+                return Err(self.error(&format!("use #![{name}] at module scope")));
             }
             self.expect("allow")?;
             self.expect("(")?;
@@ -4328,6 +4340,69 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
             BTreeSet::from([BxWarningKind::CombinationalBlock])
         );
         assert!(third.allowed_warnings.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn module_attributes_record_each_requirement_independently() -> Result<(), String> {
+        let default = parse_module("const X = u8:0;")?;
+        assert!(!default.require_define_before_use);
+        assert!(!default.require_block_timing);
+        let order = parse_module("#![require_define_before_use]")?;
+        assert!(order.require_define_before_use);
+        assert!(!order.require_block_timing);
+        let timing = parse_module("#![require_block_timing]")?;
+        assert!(!timing.require_define_before_use);
+        assert!(timing.require_block_timing);
+        for attrs in [
+            "#![require_define_before_use]\n#![require_block_timing]",
+            "#![require_block_timing]\n#![require_define_before_use]",
+        ] {
+            let module = parse_module(&format!("{attrs}\nuse lib;"))?;
+            assert!(module.require_define_before_use);
+            assert!(module.require_block_timing);
+            assert_eq!(module.declaration_order, ["lib"]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn define_before_use_attribute_requires_module_header() {
+        for (source, expected) in [
+            (
+                "const X = u8:0;\n#![require_define_before_use]",
+                "2:4: place #![require_define_before_use] before the first declaration, found 'require_define_before_use'",
+            ),
+            (
+                "use lib;\n#![require_define_before_use]",
+                "2:4: place #![require_define_before_use] before the first declaration, found 'require_define_before_use'",
+            ),
+            (
+                "#[require_define_before_use] const X = u8:0;",
+                "1:3: use #![require_define_before_use] at module scope, found 'require_define_before_use'",
+            ),
+            (
+                "block b(clk) -> u8 { #![require_define_before_use] u8:0 }",
+                "1:22: write #![...] at the top level of the BX file",
+            ),
+        ] {
+            assert_eq!(parse_module(source).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn define_before_use_attribute_preserves_call_syntax() -> Result<(), String> {
+        let source = r#"
+block before(clk) -> (u32, u8, u8) {
+    (bit_count<1>(), zero!<2>(), map(u8:1, u8:2))
+}
+fn bit_count<N: u32>() -> u32 { N }
+fn zero!<N: u32>() -> u8 { N as u8 }
+fn map(x: u8, y: u8) -> u8 { x + y }
+"#;
+        let plain = parse_module(source)?;
+        let ordered = parse_module(&format!("#![require_define_before_use]\n{source}"))?;
+        assert_eq!(ordered.blocks[0].output, plain.blocks[0].output);
         Ok(())
     }
 
