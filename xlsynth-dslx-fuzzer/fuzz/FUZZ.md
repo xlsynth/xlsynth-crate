@@ -347,6 +347,24 @@ coverage.
 
 Prefix any audit-v17 input with one zero byte to preserve it in audit-v18.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v19` for value-parametric widths
+and imported scalar aliases.
+
+- `04` specializes a function declared with `<N: uN[N]>` while a module
+  constant also supplies `N`. `04 04` specializes the analogous struct.
+  `04 01` and `04 05` use `N + u32:1` as the width. A normal source type
+  or constexpr diagnostic is allowed for the self-referential spellings.
+  A signal or internal failure in the standalone typechecker is retained.
+  Renamed binders (`04 02`, `04 06`) and literal widths (`04 03`, `04 07`)
+  must typecheck and lower. Any accepted case must prove equivalent to IR
+  that uses the explicit specialization value.
+- `05` uses `use lib::Lane; type Word = Lane;` with an exported scalar
+  alias. `05 01` uses `import lib; type Word = lib::Lane;`. The reference
+  checks the input width and signed or unsigned extension. `05 02` keeps
+  the direct `use` spelling but exports an enum.
+
+Prefix any audit-v18 input with one zero byte to preserve it in audit-v19.
+
 Replay a retained finding with the same grammar and the retained seed file.
 The target recreates the import tree from the seed, including nested modules.
 

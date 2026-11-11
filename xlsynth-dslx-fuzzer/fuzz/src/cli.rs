@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 use std::process::{Command, Output};
 use std::time::Duration;
 use xlsynth::external_tool::{ToolFailureKind, run_with_timeout_detailed};
-use xlsynth_dslx_fuzzer::audit_contracts::AuditCase;
+use xlsynth_dslx_fuzzer::audit_contracts::{AuditCase, DimensionDiagnostic};
 use xlsynth_dslx_fuzzer::converter_contracts::ContractCase;
 use xlsynth_dslx_fuzzer::{Grammar, PreparedSample, Sample, SourceModule};
 use xlsynth_pir::ir::{NaryOp, NodePayload};
@@ -142,7 +142,7 @@ pub fn check_audit_with_optimizer(
         } => check_typechecked_contract(
             case,
             &[("Casted", &runtime_module)],
-            false,
+            None,
             converter,
             stdlib,
         ),
@@ -157,7 +157,7 @@ pub fn check_audit_with_optimizer(
         } => check_typechecked_contract(
             case,
             &[("Uncast", &raw_runtime_module), ("Casted", &runtime_module)],
-            false,
+            None,
             converter,
             stdlib,
         ),
@@ -166,14 +166,14 @@ pub fn check_audit_with_optimizer(
             runtime_module,
         } => match runtime_module {
             Some(module) => {
-                check_typechecked_contract(case, &[("Original", &module)], false, converter, stdlib)
+                check_typechecked_contract(case, &[("Original", &module)], None, converter, stdlib)
             }
-            None => check_typechecked_contract(case, &[], false, converter, stdlib),
+            None => check_typechecked_contract(case, &[], None, converter, stdlib),
         },
         AuditCase::DimensionScope {
             case,
-            shadows_dimension,
-        } => check_typechecked_contract(case, &[], shadows_dimension, converter, stdlib),
+            allowed_rejection,
+        } => check_typechecked_contract(case, &[], allowed_rejection, converter, stdlib),
         AuditCase::ParametricSplat(case) => check_parametric_splat(case, converter, stdlib),
         AuditCase::ExpectedTypeRejection { modules, .. } => {
             let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -285,14 +285,12 @@ fn check_optimized_contract(
     Ok(outcome)
 }
 
-/// Recognizes a normal DSLX type error with a source diagnostic. Signals,
+/// Recognizes a normal DSLX error with the named source diagnostic. Signals,
 /// parse errors and internal failures remain distinguishable findings.
-fn is_source_type_error(output: &Output) -> bool {
+fn is_source_diagnostic(output: &Output, diagnostic: &str) -> bool {
     let stderr = String::from_utf8_lossy(&output.stderr);
     output.status.code() == Some(1)
-        && stderr
-            .lines()
-            .any(|line| line.contains("^ TypeInferenceError:"))
+        && stderr.lines().any(|line| line.contains(diagnostic))
         && stderr.lines().any(|line| {
             line == "Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking."
         })
@@ -313,7 +311,7 @@ fn check_pattern_acceptance(
         // Independent pattern and value shapes intentionally include type
         // errors. Require the typechecker's source diagnostic and normal exit
         // so a syntax error, internal error, or crash remains a finding.
-        if is_source_type_error(&typecheck) {
+        if is_source_diagnostic(&typecheck, "^ TypeInferenceError:") {
             return Ok(EquivResult::Proved);
         }
         return Err(rejection("typecheck_main", &typecheck, modules));
@@ -356,7 +354,7 @@ fn check_pattern_acceptance(
 fn check_typechecked_contract(
     case: ContractCase,
     runtime_modules: &[(&str, &SourceModule)],
-    allow_type_error: bool,
+    allowed_rejection: Option<DimensionDiagnostic>,
     converter: &Path,
     stdlib: &Path,
 ) -> Result<EquivResult, CheckFailure> {
@@ -365,9 +363,19 @@ fn check_typechecked_contract(
     write_modules(&case.modules, directory)?;
     let typecheck = run_typechecker(converter, stdlib, directory)?;
     if !typecheck.status.success() {
-        // A self-shadowing parameter dimension may be rejected by the
-        // type system. Its unambiguous controls must still typecheck.
-        if allow_type_error && is_source_type_error(&typecheck) {
+        // Self-shadowing widths may receive a clean source diagnostic.
+        // A signal or unrelated diagnostic still fails the contract.
+        let expected = match allowed_rejection {
+            None => false,
+            Some(DimensionDiagnostic::Type) => {
+                is_source_diagnostic(&typecheck, "^ TypeInferenceError:")
+            }
+            Some(DimensionDiagnostic::TypeOrNonconstant) => {
+                is_source_diagnostic(&typecheck, "^ TypeInferenceError:")
+                    || is_source_diagnostic(&typecheck, "^ NotConstantError:")
+            }
+        };
+        if expected {
             return Ok(EquivResult::Proved);
         }
         return Err(rejection("typecheck_main", &typecheck, &case.modules));

@@ -9,14 +9,21 @@ use crate::{
     array_cast_contracts, array_concat_contracts, array_ellipsis_contracts,
     array_literal_contracts, bound_parametric_contracts, builtin_contracts,
     cross_module_parametric_contracts, dead_branch_contracts, empty_builtin_contracts,
-    enum_width_contracts, inferred_flow_contracts, lambda_dimension_contracts,
-    literal_order_contracts, map_parametric_contracts, mixed_literal_contracts,
-    nested_scope_contracts, nested_struct_parametric_contracts, nominal_contracts,
-    observable_value_contracts, observer_contracts, parametric_splat_contracts,
+    enum_width_contracts, imported_alias_contracts, inferred_flow_contracts,
+    lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
+    mixed_literal_contracts, nested_scope_contracts, nested_struct_parametric_contracts,
+    nominal_contracts, observable_value_contracts, observer_contracts, parametric_splat_contracts,
     parametric_witness_contracts, pattern_acceptance, scalar_update_builtin_contracts,
     scope_contracts, self_dimension_contracts, signed_array_cast_contracts, signed_call_contracts,
     tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
 };
+
+/// A source diagnostic allowed for an ambiguous parameter dimension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DimensionDiagnostic {
+    Type,
+    TypeOrNonconstant,
+}
 
 /// The observable property of a generated program under the standalone
 /// converter.
@@ -74,7 +81,7 @@ pub enum AuditCase {
     /// must convert to the declared interface and preserve their input bits.
     DimensionScope {
         case: ContractCase,
-        shadows_dimension: bool,
+        allowed_rejection: Option<DimensionDiagnostic>,
     },
     /// Checks computed struct splat bases with a bounded standalone converter.
     ParametricSplat(ContractCase),
@@ -340,6 +347,19 @@ pub fn generate_v18(data: &[u8]) -> Result<AuditCase, String> {
             options,
         ))),
         _ => generate_v17(options),
+    }
+}
+
+/// Checks self-referential value-parametric widths and imported alias names.
+/// A zero prefix preserves audit-v18 inputs.
+pub fn generate_v19(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    match selector % 16 {
+        4 => Ok(self_dimension_contracts::parametric(options)),
+        5 => Ok(AuditCase::Semantic(imported_alias_contracts::scalar_alias(
+            options,
+        ))),
+        _ => generate_v18(options),
     }
 }
 

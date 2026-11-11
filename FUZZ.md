@@ -454,6 +454,11 @@ The `audit-v18` grammar checks comparisons through indexed array literals in
 standalone IR and bytecode, including module constants. It checks that typed
 empty array literals preserve their return type and probes frontend acceptance
 of equivalent array ellipsis spellings and length contexts.
+The `audit-v19` grammar checks that specializing a function or struct with
+a self-referential parametric width either produces correct IR or receives a
+normal source diagnostic. It retains typechecker crashes and compares
+imported scalar aliases on another alias's right-hand side against qualified
+controls with independent IR.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

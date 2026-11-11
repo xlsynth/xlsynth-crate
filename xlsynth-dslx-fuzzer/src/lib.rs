@@ -24,6 +24,7 @@ mod dead_branch_contracts;
 mod empty_builtin_contracts;
 mod enum_width_contracts;
 mod generate;
+mod imported_alias_contracts;
 pub mod imported_const;
 pub mod imported_struct;
 mod inferred_flow_contracts;

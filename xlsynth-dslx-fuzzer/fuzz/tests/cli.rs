@@ -135,6 +135,39 @@ echo 'Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking.'
 }
 
 #[test]
+fn self_referential_parametric_retains_a_crash_with_a_source_diagnostic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    let typechecker = converter.with_file_name("typecheck_main");
+    let run = |seed| -> Result<_, String> {
+        Ok(check_audit(
+            audit_contracts::generate_v19(seed)?,
+            &converter,
+            xlsynth::default_dslx_stdlib_path(),
+        ))
+    };
+    let diagnostic = r#"echo '~~~^ NotConstantError: expr is not constexpr.' >&2
+echo 'Error: INVALID_ARGUMENT: An error occurred during parsing / typechecking.' >&2"#;
+    write_tool(&typechecker, &format!("{diagnostic}\nexit 1"))?;
+    assert!(matches!(run(&[4, 1])?, Ok(EquivResult::Proved)));
+    assert!(matches!(
+        run(&[4, 2])?,
+        Err(CheckFailure::ConverterRejected(_))
+    ));
+    write_tool(&typechecker, &format!("{diagnostic}\nkill -SEGV $$"))?;
+    let result = run(&[4, 4])?;
+    assert!(
+        matches!(result, Err(CheckFailure::ConverterRejected(ref message))
+            if message.contains("typecheck_main failed")
+                && message.contains("SIGSEGV")
+                && message.contains("Word<N: uN[N]>")),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn accepted_pattern_requires_successful_conversion_to_a_boolean_function()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
