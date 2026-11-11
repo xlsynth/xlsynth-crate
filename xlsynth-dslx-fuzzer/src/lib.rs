@@ -34,6 +34,7 @@ mod nested_scope_contracts;
 mod nominal_contracts;
 mod observable_value_contracts;
 mod observer_contracts;
+mod parametric_splat_contracts;
 mod pattern_acceptance;
 pub mod range_match;
 mod scalar_update_builtin_contracts;

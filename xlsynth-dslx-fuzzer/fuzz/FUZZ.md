@@ -290,6 +290,17 @@ For example, `03 80`, `03 a0`, and `03 c0` check the direct, `if`, and inner
 `match` bytecode results.
 Prefix any audit-v13 input with one zero byte to preserve it in audit-v14.
 
+Select `DSLX_FUZZ_CONTRACT_GRAMMAR=audit-v15` to check computed bases of
+parametric struct splats. `03` inherits the width-bearing field through
+`Pair { a: u8:1, ..make(x) }.b`. `03 01` binds the same call to a `let`
+before splatting it. The second byte also selects explicit call and struct
+parametrics and can observe both the replaced and inherited fields. The
+third byte varies the inherited field width. The standalone converter gets a
+two-second deadline for these small programs.
+Rejections, crashes, and deadline misses record `R` with replay bytes, and
+successful conversions proceed to the proof against independent IR.
+Prefix any audit-v14 input with one zero byte to preserve it in audit-v15.
+
 Replay a retained finding with the same grammar and the retained seed file.
 The target recreates the import tree from the seed, including nested modules.
 

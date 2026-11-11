@@ -4,6 +4,8 @@
 
 use std::path::{Component, Path};
 use std::process::{Command, Output};
+use std::time::Duration;
+use xlsynth::external_tool::{ToolFailureKind, run_with_timeout_detailed};
 use xlsynth_dslx_fuzzer::audit_contracts::AuditCase;
 use xlsynth_dslx_fuzzer::converter_contracts::ContractCase;
 use xlsynth_dslx_fuzzer::{Grammar, PreparedSample, Sample, SourceModule};
@@ -172,7 +174,38 @@ pub fn check_audit_with_optimizer(
             case,
             shadows_dimension,
         } => check_typechecked_contract(case, &[], shadows_dimension, converter, stdlib),
+        AuditCase::ParametricSplat(case) => check_parametric_splat(case, converter, stdlib),
     }
+}
+
+/// Proves the emitted splat result without exposing the fuzzer to recursive
+/// type inference in-process.
+fn check_parametric_splat(
+    case: ContractCase,
+    converter: &Path,
+    stdlib: &Path,
+) -> Result<EquivResult, CheckFailure> {
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let directory = directory.path();
+    write_modules(&case.modules, directory)?;
+    let tool = "ir_converter_main";
+    let mut command =
+        dslx_tool_command(converter, stdlib, directory, &["--emit_assert=true"], None);
+    // These programs contain a single small struct and helper. Retain a
+    // deadline miss as a converter finding and terminate the child.
+    let timeout = Duration::from_secs(2);
+    let output =
+        run_with_timeout_detailed(&mut command, directory, tool, timeout).map_err(|error| {
+            match error.kind {
+                ToolFailureKind::Timeout => {
+                    CheckFailure::ConverterRejected(format!("{error}\n{:#?}", case.modules))
+                }
+                _ => CheckFailure::Checker(error.to_string()),
+            }
+        })?;
+    let prepared = prepare_converter_output(case.modules, case.expected_ir, output)?;
+    parse_contract_ir(&prepared, "converter")?;
+    classify_with_assertions(&prepared, AssertionSemantics::Same)
 }
 
 /// Runs native optimization in a child so an optimizer failure can be
@@ -505,6 +538,15 @@ fn convert_modules(
     emit_assert: bool,
 ) -> Result<PreparedSample, CheckFailure> {
     let output = run_converter(&modules, converter, stdlib, directory, profile, emit_assert)?;
+    prepare_converter_output(modules, expected_ir, output)
+}
+
+/// Retains the generated sources with an unsuccessful converter exit.
+fn prepare_converter_output(
+    modules: Vec<SourceModule>,
+    expected_ir: String,
+    output: Output,
+) -> Result<PreparedSample, CheckFailure> {
     if !output.status.success() {
         return Err(rejection("ir_converter_main", &output, &modules));
     }
@@ -574,6 +616,21 @@ fn run_dslx_tool(
     flags: &[&str],
     profile: Option<&Path>,
 ) -> Result<Output, CheckFailure> {
+    dslx_tool_command(tool, stdlib, directory, flags, profile)
+        .output()
+        .map_err(|error| {
+            CheckFailure::Checker(format!("could not execute {}: {error}", tool.display()))
+        })
+}
+
+/// Constructs the same tool invocation for ordinary and bounded checks.
+fn dslx_tool_command(
+    tool: &Path,
+    stdlib: &Path,
+    directory: &Path,
+    flags: &[&str],
+    profile: Option<&Path>,
+) -> Command {
     let mut command = Command::new(tool);
     command
         .current_dir(directory)
@@ -585,9 +642,7 @@ fn run_dslx_tool(
     if let Some(profile) = profile {
         command.env("LLVM_PROFILE_FILE", profile);
     }
-    command.output().map_err(|error| {
-        CheckFailure::Checker(format!("could not execute {}: {error}", tool.display()))
-    })
+    command
 }
 
 fn native_feedback(

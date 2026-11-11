@@ -27,6 +27,30 @@ fn write_tool(path: &Path, script: &str) -> std::io::Result<()> {
 }
 
 #[test]
+fn parametric_splat_retains_the_inline_source_when_the_converter_stalls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let converter = directory.path().join("ir_converter_main");
+    write_tool(
+        &converter,
+        r#"set -eu
+grep -Fq '..make(x)' sample.x
+echo 'checking inline base' >&2
+sleep 4"#,
+    )?;
+    let case = audit_contracts::generate_v15(&[3])?;
+    let result = check_audit(case, &converter, xlsynth::default_dslx_stdlib_path());
+    assert!(
+        matches!(result, Err(CheckFailure::ConverterRejected(ref message))
+            if message.contains("ir_converter_main exceeded 2s")
+                && message.contains("checking inline base")
+                && message.contains("..make(x)")),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn only_a_clean_pattern_type_error_satisfies_the_frontend_contract()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

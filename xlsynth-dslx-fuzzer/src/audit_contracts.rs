@@ -10,9 +10,10 @@ use crate::{
     dead_branch_contracts, empty_builtin_contracts, enum_width_contracts, inferred_flow_contracts,
     lambda_dimension_contracts, literal_order_contracts, map_parametric_contracts,
     mixed_literal_contracts, nested_scope_contracts, nominal_contracts, observable_value_contracts,
-    observer_contracts, pattern_acceptance, scalar_update_builtin_contracts, scope_contracts,
-    self_dimension_contracts, signed_array_cast_contracts, signed_call_contracts,
-    tuple_literal_contracts, unrolled_loop_contracts, zero_width_cast_contracts,
+    observer_contracts, parametric_splat_contracts, pattern_acceptance,
+    scalar_update_builtin_contracts, scope_contracts, self_dimension_contracts,
+    signed_array_cast_contracts, signed_call_contracts, tuple_literal_contracts,
+    unrolled_loop_contracts, zero_width_cast_contracts,
 };
 
 /// The observable property of a generated program under the standalone
@@ -73,6 +74,8 @@ pub enum AuditCase {
         case: ContractCase,
         shadows_dimension: bool,
     },
+    /// Checks computed struct splat bases with a bounded standalone converter.
+    ParametricSplat(ContractCase),
 }
 
 impl AuditCase {
@@ -82,7 +85,8 @@ impl AuditCase {
             Self::Semantic(case)
             | Self::Optimized(case)
             | Self::Traces { case, .. }
-            | Self::TraceMessages { case, .. } => case.family,
+            | Self::TraceMessages { case, .. }
+            | Self::ParametricSplat(case) => case.family,
             Self::ConstexprFailure { .. } => "constexpr_block_acceptance",
             Self::PatternAcceptance { .. } => "tuple_pattern_acceptance",
             Self::LiteralRuntime { family, .. } => family,
@@ -275,6 +279,19 @@ pub fn generate_v14(data: &[u8]) -> Result<AuditCase, String> {
         Ok(tuple_literal_contracts::match_pattern(options))
     } else {
         generate_v13(options)
+    }
+}
+
+/// Checks computed bases of parametric struct splats. A zero prefix preserves
+/// audit-v14 inputs.
+pub fn generate_v15(data: &[u8]) -> Result<AuditCase, String> {
+    let (&selector, options) = data.split_first().unwrap_or((&0, &[]));
+    if selector % 16 == 3 {
+        Ok(AuditCase::ParametricSplat(
+            parametric_splat_contracts::generate(options),
+        ))
+    } else {
+        generate_v14(options)
     }
 }
 

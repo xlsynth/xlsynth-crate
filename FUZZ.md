@@ -438,6 +438,9 @@ The `audit-v14` grammar checks that the converter compares an unsized integer
 in a tuple match scrutinee at the width supplied by the typed pattern. It
 checks raw bytecode and converted IR independently, with direct, `if`, and
 nested `match` scrutinees evaluated at runtime or in a module constant.
+The `audit-v15` grammar checks computed bases of parametric struct splats.
+It compares the inherited field with independent IR and retains converter
+rejections, crashes, and timeouts for inline and let-bound bases.
 The [target guide](xlsynth-dslx-fuzzer/fuzz/FUZZ.md) lists the properties and
 how to retain each failure for replay.
 

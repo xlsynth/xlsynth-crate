@@ -34,6 +34,9 @@ pub fn check_audit(
         | AuditCase::BoundCall { case, .. }
         | AuditCase::DimensionScope { case, .. }
         | AuditCase::MixedLiteral { case, .. } => case,
+        // The splat contract requires DSLX's struct-update syntax and bounded
+        // subprocess execution.
+        AuditCase::ParametricSplat(_) => return Ok(BxOutcome::OutsideScope),
         // These contracts observe behavior outside the emitted function's value.
         AuditCase::Optimized(_)
         | AuditCase::Traces { .. }
