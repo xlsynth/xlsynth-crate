@@ -3149,6 +3149,52 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `ir-block-eval`
+
+Evaluates a block from an IR package with the PIR interpreter. Each input
+record represents one cycle. It supplies the external input ports in block
+header order, including any reset or load-enable inputs. Omit the clock port.
+Each output line shows the values observed **before** that cycle's register
+updates. A single output is printed directly, multiple outputs form a tuple in
+port order, and a block with no outputs prints `()`.
+
+- `<BLOCK_IR>` — package-form IR file.
+- `--top <BLOCK>` — choose the block. Defaults to the declared block top, or
+  to the only block if the package has no block top.
+- Provide exactly one input source: a positional `<ARG_TUPLE>` for one cycle,
+  or `--input-irvals <PATH>` for a file of positional tuples or named port
+  records. Named records must supply every input exactly once. Values retain
+  their IR types, including tuples and arrays.
+- For a block with registers, select exactly one startup policy:
+  - `--initial-state-all-zeros` — start every register at its type's zero.
+  - `--initial-state-random-seed <U64>` — select reproducible register values.
+  - `--initial-state-file <PATH>` — use one positional register tuple in
+    register declaration order (top first, then child instances in preorder)
+    or one named record containing every register. Child register names
+    include the instance path, for example `stage.r`. In a path segment a
+    literal `$` is escaped as `$$` and a literal `.` as `$d`.
+- `--final-state-irvals <PATH>` — save the registers **after** the last
+  cycle as a named record for a later `--initial-state-file` run.
+  Omit all register state flags for combinational blocks.
+
+Trace messages and runtime failures go to stderr with the one-based cycle
+number. The evaluator supports synchronous register resets and child block
+instances. Asynchronous resets and external instances produce an error.
+The block interface supplies the element type for empty arrays written as
+`[]` in input tuples and register checkpoints.
+
+A declared register reset value takes effect when the reset input is driven
+active during a cycle. For a register `r` with reset value 7 whose Q drives the
+output, a first reset cycle starting from zero prints the old value 0. The
+register then holds 7 for the next cycle.
+
+```shell
+xlsynth-driver ir-block-eval design.ir '(bits[1]:1, bits[8]:0)' \
+  --top pipeline --initial-state-all-zeros --final-state-irvals regs.irvals
+xlsynth-driver ir-block-eval design.ir --top pipeline \
+  --input-irvals samples.irvals --initial-state-file regs.irvals
+```
+
 ### `g8r-eval`
 
 Evaluates a native combinational or sequential G8R design (`.g8r` or

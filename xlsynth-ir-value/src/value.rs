@@ -742,8 +742,15 @@ impl IrValue {
     /// Parses XLS typed-value syntax for bits, tokens, tuples, and nonempty
     /// arrays without consulting libxls.
     pub fn parse_typed(text: &str) -> Result<Self, ValueError> {
+        Self::parse_typed_with_hint(text, None)
+    }
+
+    /// Parses typed text, using the optional type hint only to resolve the
+    /// element types of empty arrays. Callers can compare the parsed type
+    /// against their interface to diagnose any mismatches.
+    pub fn parse_typed_with_hint(text: &str, hint: Option<&Type>) -> Result<Self, ValueError> {
         let mut parser = TypedValueParser::new(text);
-        let value = parser.parse_value()?;
+        let value = parser.parse_value(hint)?;
         parser.skip_whitespace();
         if !parser.is_at_end() {
             return Err(ValueError(format!(
@@ -1003,11 +1010,11 @@ impl<'a> TypedValueParser<'a> {
         Self { text, offset: 0 }
     }
 
-    fn parse_value(&mut self) -> Result<IrValue, ValueError> {
+    fn parse_value(&mut self, hint: Option<&Type>) -> Result<IrValue, ValueError> {
         self.skip_whitespace();
         match self.peek_char() {
-            Some('[') => self.parse_array(),
-            Some('(') => self.parse_tuple(),
+            Some('[') => self.parse_array(hint),
+            Some('(') => self.parse_tuple(hint),
             Some(_) if self.remaining().starts_with("token") => {
                 self.offset += "token".len();
                 Ok(IrValue::Token)
@@ -1020,17 +1027,24 @@ impl<'a> TypedValueParser<'a> {
         }
     }
 
-    fn parse_array(&mut self) -> Result<IrValue, ValueError> {
+    fn parse_array(&mut self, hint: Option<&Type>) -> Result<IrValue, ValueError> {
+        let element_hint = match hint {
+            Some(Type::Array(array)) => Some(array.element_type.as_ref()),
+            _ => None,
+        };
         self.expect_char('[')?;
         self.skip_whitespace();
         if self.consume_char(']') {
+            if let Some(ty) = element_hint {
+                return IrValue::make_array_typed(ty.clone(), &[]);
+            }
             return Err(ValueError(
                 "cannot infer the element type of an empty array; use make_array_typed".to_string(),
             ));
         }
         let mut elements = Vec::new();
         loop {
-            elements.push(self.parse_value()?);
+            elements.push(self.parse_value(element_hint)?);
             self.skip_whitespace();
             if self.consume_char(']') {
                 break;
@@ -1040,7 +1054,7 @@ impl<'a> TypedValueParser<'a> {
         IrValue::make_array(&elements)
     }
 
-    fn parse_tuple(&mut self) -> Result<IrValue, ValueError> {
+    fn parse_tuple(&mut self, hint: Option<&Type>) -> Result<IrValue, ValueError> {
         self.expect_char('(')?;
         self.skip_whitespace();
         if self.consume_char(')') {
@@ -1048,7 +1062,11 @@ impl<'a> TypedValueParser<'a> {
         }
         let mut elements = Vec::new();
         loop {
-            elements.push(self.parse_value()?);
+            let element_hint = match hint {
+                Some(Type::Tuple(types)) => types.get(elements.len()).map(Box::as_ref),
+                _ => None,
+            };
+            elements.push(self.parse_value(element_hint)?);
             self.skip_whitespace();
             if self.consume_char(')') {
                 break;

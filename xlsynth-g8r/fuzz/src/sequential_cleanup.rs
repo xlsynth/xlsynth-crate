@@ -10,13 +10,14 @@ use xlsynth_g8r::aig_sim::sequential::{SequentialState, simulate};
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
     RandomOperation, StopPolicy, generate_block_package,
 };
 use xlsynth_pir::random_inputs::{generate_mixed_irbits_with_rng, generate_mixed_values_with_rng};
 
-use crate::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
+use crate::random_block::{block_output_types, flatten_value};
 
 const STARTUP_TRIALS: usize = 8;
 const CYCLES: usize = 16;
@@ -134,11 +135,16 @@ pub fn check_cleanup(data: &[u8]) -> SequentialCleanupStats {
             + result.stats.merged_register_bits
     );
 
+    let evaluator = BlockEvaluator::prepare(&generated.package, &block.name).unwrap();
     let output_types = block_output_types(block);
     for trial in 0..STARTUP_TRIALS {
-        let mut block_state =
+        let initial_values =
             generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
+        let mut block_state = evaluator
+            .initial_state(RegisterInit::Supplied(initial_values))
+            .unwrap();
         let original_values = block_state
+            .values()
             .iter()
             .zip(&block.registers)
             .map(|(value, r)| flatten_value(value, &r.ty))
@@ -165,9 +171,9 @@ pub fn check_cleanup(data: &[u8]) -> SequentialCleanupStats {
                 .zip(block.input_ports())
                 .map(|(value, port)| flatten_value(value, block.port_type(port)))
                 .collect::<Vec<_>>();
-            let (outputs, next_state) =
-                evaluate_block_cycle(block, &inputs, &block_state, &block_ir);
-            let expected = outputs
+            let cycle_result = evaluator.step(&block_state, &inputs).unwrap();
+            let expected = cycle_result
+                .outputs
                 .iter()
                 .zip(&output_types)
                 .map(|(value, ty)| flatten_value(value, ty))
@@ -179,7 +185,9 @@ pub fn check_cleanup(data: &[u8]) -> SequentialCleanupStats {
                 expected,
                 "block lowering mismatch, trial {trial}, cycle {cycle}\n{block_ir}"
             );
-            let expected_state = next_state
+            let expected_state = cycle_result
+                .next_state
+                .values()
                 .iter()
                 .zip(&block.registers)
                 .map(|(value, r)| flatten_value(value, &r.ty))
@@ -193,7 +201,7 @@ pub fn check_cleanup(data: &[u8]) -> SequentialCleanupStats {
                     emit_g8r(cleaned).unwrap()
                 );
             }
-            block_state = next_state;
+            block_state = cycle_result.next_state;
             original_state = before.final_state().clone();
             cleaned_state = after.final_state().clone();
         }

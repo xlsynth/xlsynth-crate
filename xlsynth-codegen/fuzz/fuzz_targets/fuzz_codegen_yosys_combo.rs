@@ -13,7 +13,8 @@ use xlsynth_codegen_fuzz::{
     INPUT_SAMPLE_COUNT, block_options, deterministic_rng, generate, generate_inputs, top_block,
 };
 use xlsynth_g8r_fuzz::external_yosys::required_external_yosys_context;
-use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, flatten_value};
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 
 fuzz_target!(init: {
     if let Err(error) = validate(Oracles::YosysCombinational) {
@@ -33,8 +34,10 @@ fuzz_target!(init: {
     let ir = package.to_string();
     let mapped = xlsynth_codegen_fuzz::fuzz_tool!(map_combinational(&package, context));
     let block = top_block(&package);
+    let evaluator = BlockEvaluator::prepare(&package, &block.name).unwrap();
     let output_types = block_output_types(block);
     let mut rng = deterministic_rng(&ir);
+    let state = evaluator.initial_state(RegisterInit::AllZeros).unwrap();
     for sample in 0..INPUT_SAMPLE_COUNT {
         let inputs = generate_inputs(block, &mut rng);
         let source_inputs = inputs
@@ -43,7 +46,7 @@ fuzz_target!(init: {
             .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
         let mapped_inputs = map_combinational_inputs(&mapped.mapped, block, &source_inputs);
-        let expected = evaluate_block_outputs(block, &inputs, &ir)
+        let expected = evaluator.step(&state, &inputs).unwrap().outputs
             .iter()
             .zip(output_types.iter())
             .zip(block.output_ports().map(|port| block.port_name(port)))

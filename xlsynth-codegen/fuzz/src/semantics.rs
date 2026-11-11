@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use xlsynth_g8r_fuzz::random_block::{
     block_output_types, evaluate_block_cycle_observed, flatten_value,
 };
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 use xlsynth_test_helpers::rtl_sim::{Bindings, LogicValue};
@@ -38,14 +39,15 @@ impl Trace {
     /// Uses stimulus entropy that can be mutated without changing the graph.
     pub fn with_seed(package: &Package, seed: [u8; 32]) -> Self {
         let block = top_block(package);
+        let evaluator = BlockEvaluator::prepare(package, &block.name).unwrap();
         let output_types = block_output_types(block);
         let mut rng = StdRng::from_seed(seed);
-        let mut state =
+        let values =
             generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
         let initial_state = block
             .registers
             .iter()
-            .zip(&state)
+            .zip(&values)
             .filter(|(r, _)| r.ty.bit_count() != 0)
             .map(|(r, value)| {
                 (
@@ -54,6 +56,9 @@ impl Trace {
                 )
             })
             .collect();
+        let mut state = evaluator
+            .initial_state(RegisterInit::Supplied(values))
+            .unwrap();
         let sequential = !block.registers.is_empty();
         let mut samples = Vec::new();
         let live = crate::coverage::live_nodes(block);
@@ -87,7 +92,7 @@ impl Trace {
                     )
                 })
                 .collect();
-            let evaluated = evaluate_block_cycle_observed(block, &inputs, &state);
+            let evaluated = evaluate_block_cycle_observed(&evaluator, block, &inputs, &state);
             crate::coverage::record_behaviors(
                 block,
                 &evaluated.node_values,
@@ -113,7 +118,7 @@ impl Trace {
                 block
                     .registers
                     .iter()
-                    .zip(&next_state)
+                    .zip(next_state.values())
                     .filter(|(r, _)| r.ty.bit_count() != 0)
                     .map(|(r, value)| {
                         (

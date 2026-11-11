@@ -1,0 +1,4 @@
+block 'checked', cycle 1: sample
+block 'checked', cycle 2: sample
+xlsynth-driver: ir-block-eval: block 'checked', cycle 2: block runtime failure
+  assertion 'check_ok': expected ok

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use xlsynth_pir::IrBits;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
@@ -22,7 +23,7 @@ use xlsynth_g8r::netlist::gv_eval::{
 };
 use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
-use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, flatten_value};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
@@ -239,6 +240,7 @@ fuzz_target!(init: {
         source_input_shapes,
         "Yosys changed sequential block input shape:\nIR:\n{block_ir}\nGV:\n{mapped_gv}"
     );
+    let evaluator = BlockEvaluator::prepare(&generated.package, &block.name).unwrap();
     let output_types = block_output_types(block);
     let source_output_shapes = block.output_ports().map(|port| block.port_name(port))
         .zip(&output_types)
@@ -253,7 +255,8 @@ fuzz_target!(init: {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
-    let mut block_state = generate_initial_state(block, &mut rng);
+    let initial_values = generate_initial_state(block, &mut rng);
+    let mut block_state = evaluator.initial_state(RegisterInit::Supplied(initial_values)).unwrap();
     let mut mapped_inputs = Vec::with_capacity(CYCLE_COUNT);
     let mut expected_outputs = Vec::with_capacity(CYCLE_COUNT);
     for cycle in 0..CYCLE_COUNT {
@@ -265,9 +268,8 @@ fuzz_target!(init: {
             .collect::<Vec<_>>();
         mapped_inputs.push(remap_inputs_for_design(mapped_design, block, &input_bits));
 
-        let (outputs, next_state) =
-            evaluate_block_cycle(block, &inputs, &block_state, &block_ir);
-        let output_bits = outputs
+        let cycle_result = evaluator.step(&block_state, &inputs).unwrap();
+        let output_bits = cycle_result.outputs
             .iter()
             .zip(&output_types)
             .map(|(value, ty)| flatten_value(value, ty))
@@ -277,7 +279,7 @@ fuzz_target!(init: {
             block,
             &output_bits,
         ));
-        block_state = next_state;
+        block_state = cycle_result.next_state;
     }
 
     let trace = sequential::simulate(
