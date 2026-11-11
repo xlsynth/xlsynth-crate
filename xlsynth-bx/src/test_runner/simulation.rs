@@ -246,6 +246,8 @@ fn apply_drives(
 mod tests {
     use std::path::Path;
 
+    use xlsynth_pir::ir_parser::parse_xls_ir_package;
+
     use super::*;
     use crate::{ImportOptions, ResetBehavior, compile, empty_package, run_tests};
 
@@ -346,6 +348,57 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
         for test in report.tests {
             assert_eq!(test.failure, None, "{}", test.name);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn shared_helpers_evaluate_discarded_fields_only_in_pure_tests() -> Result<(), String> {
+        let source = r#"extern fn lookup(xs: u8[2], i: u8) -> u8;
+fn keep(x: u8) -> u8 {
+    let (_, y) = (for (i, a) in u8:1..=u8:2 { lookup([a, x], i) }(x), x);
+    y
+}
+block delay(clk, x: u8) -> u8 {
+    reg q: u8;
+    q := keep(x);
+    q
+}
+#[test] block clocked() {
+    reg x: u8 = u8:10;
+    let q = delay(x);
+    tick!();
+    assert_eq(q, u8:10);
+}
+#[test] fn pure_helper() { assert_eq(keep(u8:10), u8:10); }
+#[test] fn pure_scope() {
+    assert_eq({ let (_, y) = (lookup([u8:1, u8:2], u8:2), u8:10); y }, u8:10);
+}"#;
+        let package = parse_xls_ir_package(
+            r#"package mixed
+fn lookup(xs: bits[8][2] id=1, i: bits[8] id=2) -> bits[8] {
+    ret selected: bits[8] = array_index(xs, indices=[i], assumed_in_bounds=true, id=3)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let report = run_tests(
+            source,
+            Path::new("mixed.bx"),
+            package,
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+        )?;
+        assert_eq!(report.tests.len(), 3);
+        assert_eq!(report.tests[0].failure, None);
+        let failure = "IR array_index at node 3 was out of bounds despite assumed_in_bounds=true";
+        assert_eq!(
+            report.tests[1].failure,
+            Some(format!("mixed.bx:17:28: test 'pure_helper': {failure}"))
+        );
+        assert_eq!(
+            report.tests[2].failure,
+            Some(format!("mixed.bx:19:5: test 'pure_scope': {failure}"))
+        );
         Ok(())
     }
 

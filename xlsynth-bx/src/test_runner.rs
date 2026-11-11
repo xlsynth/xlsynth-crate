@@ -150,8 +150,28 @@ pub fn run_tests(
             source.path.get_or_insert_with(|| path.to_owned());
         }
     }
+    // A mixed suite can share a helper between a pure test and a DUT. The
+    // interpreter evaluates discarded fields for their contracts, while the
+    // DUT uses the same lowering of those fields as ordinary BX hardware.
+    let clocked_seed = if !checked.functions_with_test_discards.is_empty()
+        && suite.programs.iter().any(|p| p.kind == TestKind::Block)
+    {
+        let pure_harnesses: BTreeSet<_> = suite
+            .programs
+            .iter()
+            .filter(|p| p.kind == TestKind::Function)
+            .map(|p| p.harness.as_str())
+            .collect();
+        checked
+            .functions_with_test_discards
+            .iter()
+            .any(|name| !pure_harnesses.contains(name.as_str()))
+            .then(|| (package.clone(), pure_harnesses))
+    } else {
+        None
+    };
     let package = lower_module(&checked, package, reset).map_err(at_file)?;
-    let warnings = checked.warnings;
+    let warnings = std::mem::take(&mut checked.warnings);
     if warnings_as_errors && !warnings.is_empty() {
         let messages = warnings
             .iter()
@@ -162,11 +182,24 @@ pub fn run_tests(
             messages.join("\n")
         ));
     }
+    let clocked_package = if let Some((seed, pure_harnesses)) = clocked_seed {
+        checked
+            .functions
+            .retain(|f| !pure_harnesses.contains(f.name.as_str()));
+        checked.functions_with_test_discards.clear();
+        Some(lower_module(&checked, seed, reset).map_err(at_file)?)
+    } else {
+        None
+    };
     let tests = suite
         .programs
         .into_iter()
         .map(|program| {
-            let result = run_program(&program, &package, reset.active_low)
+            let package = match program.kind {
+                TestKind::Function => &package,
+                TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
+            };
+            let result = run_program(&program, package, reset.active_low)
                 .err()
                 .map(|failure| {
                     format!(

@@ -637,6 +637,9 @@ fn bits_copy_work(bits: &IrBits) -> usize {
 #[derive(Default)]
 struct Declarations<'a> {
     warnings: RefCell<WarningCollector<'a>>,
+    /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
+    evaluate_discarded_tuple_fields: bool,
+    has_test_discards: Cell<bool>,
     block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
@@ -1808,6 +1811,11 @@ pub(crate) fn check_sources_with_tests(
         });
     }
     let mut declarations = Declarations {
+        evaluate_discarded_tuple_fields: tests.is_some()
+            && module
+                .tests
+                .iter()
+                .any(|t| t.kind == crate::ast::TestKind::Function),
         block_names: module
             .blocks
             .iter()
@@ -2012,7 +2020,7 @@ pub(crate) fn check_sources_with_tests(
         checked.push(body.block);
     }
     let mut test_functions = Vec::new();
-    if let Some(suite) = tests {
+    if let Some(suite) = tests.as_deref_mut() {
         for (test, harness) in module.tests.iter().zip(harness_names) {
             let mut checker = BodyChecker::new(
                 &declarations,
@@ -2084,6 +2092,7 @@ pub(crate) fn check_sources_with_tests(
             });
     let mut checked = CheckedModule {
         warnings,
+        functions_with_test_discards: BTreeSet::new(),
         structs: structs
             .definitions
             .into_iter()
@@ -2110,6 +2119,17 @@ pub(crate) fn check_sources_with_tests(
         blocks,
         specialized_blocks,
     };
+    if declarations.has_test_discards.get()
+        && let Some(suite) = tests
+    {
+        let harnesses = suite
+            .programs
+            .iter()
+            .filter(|p| p.kind == crate::ast::TestKind::Function)
+            .map(|p| p.harness.clone())
+            .collect();
+        checked.resolve_pure_test_dependencies(harnesses);
+    }
     checked.imports = if linked.is_some() {
         let calls = checked.retain_library_dependencies();
         checked.restore_extern_names();

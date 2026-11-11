@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::Path;
+use std::{error::Error, fs, path::Path};
+
+use tempfile::tempdir;
 
 use xlsynth_bx::{BxTestReport, ImportOptions, ResetBehavior, compile, empty_package, run_tests};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
@@ -99,6 +101,69 @@ fn clocked_test_preserves_procedural_constants_as_range_bounds() -> Result<(), S
 }
 
 #[test]
+fn discarded_runtime_captures_do_not_change_constant_range_bounds() -> Result<(), String> {
+    let source = r#"fn pick(x: u8) -> u8 {
+    let start = for (i, a) in u8:0..u8:1 {
+        let values = map([a], |word| { let (_, kept) = (x + i, word); kept });
+        values[u8:0]
+    }(u8:0);
+    for (i, a) in start..u8:3 { a + i }(u8:0)
+}
+#[test] block smoke() { tick!(); }
+#[test] fn pure() { assert_eq(pick(u8:42), u8:3); }"#;
+    let report = run(source)?;
+    assert_eq!(report.tests.len(), 2);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn only_pure_test_callees_link_discarded_fields() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    fs::write(
+        dir.path().join("lib.bx"),
+        r#"extern fn missing(x: u8) -> u8;
+fn observe(x: u8) -> u8 { let (_, kept) = (missing(x), x); kept }
+pub fn keep(x: u8) -> u8 { let (_, kept) = (observe(x), x); kept }
+#[test] fn library_test() { assert_eq(keep(u8:0), u8:0); }"#,
+    )?;
+    let options = ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let source = r#"use lib::keep;
+fn unused(x: u8) -> u8 { keep(x) }
+#[test] block clocked() { assert_eq(keep(u8:3), u8:3); }
+#[test] fn zero_trip() {
+    assert_eq(for (_, a) in u8:0..u8:0 { keep(a) }(u8:7), u8:7);
+}"#;
+    let run = |source: &str| {
+        run_tests(
+            source,
+            Path::new("suite.bx"),
+            empty_package("suite"),
+            ResetBehavior::default(),
+            &options,
+            true,
+        )
+    };
+    let report = run(source)?;
+    assert_eq!(report.tests.len(), 2);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    let reachable =
+        format!("{source}\n#[test] fn reaches_helper() {{ assert_eq(unused(u8:3), u8:3); }}");
+    assert_eq!(
+        run(&reachable).unwrap_err(),
+        "suite.bx: extern fn 'missing': no linked IR function for '__suite__missing'"
+    );
+    Ok(())
+}
+
+#[test]
 fn pure_test_skips_work_in_untaken_branches() -> Result<(), String> {
     let source = r#"fn sum(x: u32) -> u32 {
     for (i, a) in u32:0..u32:1000000 { a + i }(x)
@@ -151,6 +216,23 @@ const DATA: u8[2] = [u8:17, u8:29];
 #[test] fn skipped_scope() {
     if false { assert_eq({ let _ = lookup(DATA, u8:2); u8:7 }, u8:7); }
     assert_eq({ let value = lookup(DATA, u8:1); value }, u8:29);
+}
+fn last_item(index: u8) -> u8 {
+    let (.., last) = (u8:0, lookup(DATA, index), u8:7);
+    last
+}
+#[test] fn nested_wildcard() {
+    assert_eq({ let (v, (_, w)) = (u8:7, (lookup(DATA, u8:2), u8:1)); v + w }, u8:8);
+}
+#[test] fn helper_rest() {
+    assert_eq(last_item(u8:2), u8:7);
+}
+#[test] fn skipped_destructure() {
+    if false {
+        assert_eq({ let (_, v) = (lookup(DATA, u8:2), u8:7); v }, u8:7);
+        assert_eq(last_item(u8:2), u8:7);
+    }
+    assert_eq(last_item(u8:1), u8:7);
 }"#;
     let report = run_tests(
         source,
@@ -160,7 +242,7 @@ const DATA: u8[2] = [u8:17, u8:29];
         &ImportOptions::default(),
         true,
     )?;
-    assert_eq!(report.tests.len(), 7);
+    assert_eq!(report.tests.len(), 10);
     assert_eq!(
         report.tests[0].failure.as_deref(),
         Some(
@@ -178,6 +260,8 @@ const DATA: u8[2] = [u8:17, u8:29];
         (3, 18, "nested_unused_binding"),
         (4, 21, "condition_scope"),
         (5, 24, "iterable_scope"),
+        (7, 35, "nested_wildcard"),
+        (8, 38, "helper_rest"),
     ] {
         assert_eq!(
             report.tests[index].failure,
@@ -187,6 +271,7 @@ const DATA: u8[2] = [u8:17, u8:29];
         );
     }
     assert_eq!(report.tests[6].failure, None);
+    assert_eq!(report.tests[9].failure, None);
     Ok(())
 }
 

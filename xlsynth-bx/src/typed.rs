@@ -19,11 +19,17 @@ use crate::dslx_import::{ImportedCall, ResolvedImports};
 use crate::warnings::BxWarning;
 use TypedExprKind as K;
 
+/// Internal bindings for tuple fields evaluated only to observe pure-test
+/// contracts.
+pub(crate) const TEST_DISCARD_PREFIX: &str = "$test_discard_";
+
 /// A module with concrete signatures, single drivers, and an acyclic instance
 /// hierarchy.
 #[derive(Clone, Debug)]
 pub struct CheckedModule {
     pub(crate) warnings: Vec<BxWarning>,
+    /// Pure-test callees and harnesses containing discarded field observations.
+    pub(crate) functions_with_test_discards: BTreeSet<String>,
     pub(crate) structs: Vec<StructDef>,
     pub(crate) enums: BTreeMap<String, CheckedEnum>,
     pub(crate) constants: Vec<CheckedConstant>,
@@ -206,6 +212,12 @@ pub struct CheckedFunction {
 pub struct CheckedBinding {
     pub name: String,
     pub value: TypedExpr,
+}
+
+impl CheckedBinding {
+    pub(super) fn is_test_discard(&self) -> bool {
+        self.name.starts_with(TEST_DISCARD_PREFIX)
+    }
 }
 
 /// Ports, static hardware declarations, and connections of a type-checked
@@ -400,7 +412,7 @@ pub struct TypedFor {
     pub bindings: Vec<CheckedBinding>,
     pub output: TypedExpr,
     /// Deterministic free names computed once for the immutable body.
-    pub(super) captures: BTreeSet<String>,
+    pub(super) captures: BTreeMap<String, CaptureUse>,
     uses_element: bool,
 }
 
@@ -412,7 +424,15 @@ pub struct TypedMap {
     pub element: Param,
     pub bindings: Vec<CheckedBinding>,
     pub output: TypedExpr,
-    pub(super) captures: BTreeSet<String>,
+    pub(super) captures: BTreeMap<String, CaptureUse>,
+}
+
+/// Whether an enclosing value is needed for the source expression or only to
+/// observe a discarded tuple field when interpreting a pure test.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CaptureUse {
+    Value,
+    TestDiscard,
 }
 
 /// Resolved operations, including field projections in declaration order.
@@ -790,22 +810,28 @@ impl CountedWork<'_> {
 
 /// Collect free value names in source order so a let can read an enclosing
 /// binding before introducing its own. Nested bodies supply their captures.
-fn body_inputs(bindings: &[CheckedBinding], output: &TypedExpr) -> BTreeSet<String> {
+fn body_inputs(bindings: &[CheckedBinding], output: &TypedExpr) -> BTreeMap<String, CaptureUse> {
     let mut bound = BTreeSet::new();
-    let mut inputs = BTreeSet::new();
-    let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>| {
-        expr.all_inputs(true, &mut |name| {
+    let mut inputs = BTreeMap::new();
+    let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>, is_test_discard: bool| {
+        expr.all_inputs(true, &mut |name, usage| {
             if !bound.contains(name) {
-                inputs.insert(name.to_owned());
+                if is_test_discard || usage == CaptureUse::TestDiscard {
+                    inputs
+                        .entry(name.to_owned())
+                        .or_insert(CaptureUse::TestDiscard);
+                } else {
+                    inputs.insert(name.to_owned(), CaptureUse::Value);
+                }
             }
             true
         });
     };
     for binding in bindings {
-        record(&binding.value, &bound);
+        record(&binding.value, &bound, binding.is_test_discard());
         bound.insert(binding.name.as_str());
     }
-    record(output, &bound);
+    record(output, &bound, false);
     inputs
 }
 
@@ -822,7 +848,7 @@ impl TypedFor {
         output: TypedExpr,
     ) -> Self {
         let mut captures = body_inputs(&bindings, &output);
-        let uses_element = captures.remove(&element.name);
+        let uses_element = captures.remove(&element.name) == Some(CaptureUse::Value);
         captures.remove(&accumulator.name);
         Self {
             element,
@@ -986,7 +1012,7 @@ fn constant_iteration<'a>(
         {
             work.missing_local = None;
             let mut required = BTreeSet::from([missing]);
-            expr.all_inputs(false, &mut |name| {
+            expr.all_inputs(false, &mut |name, _| {
                 if let Some(&i) = definitions.get(name)
                     && i < index
                     && !locals.contains_key(name)
@@ -1061,17 +1087,23 @@ fn constant_match_arm<'a>(
 impl TypedExpr {
     /// Visit the value dependencies of an expression, with lexical binders
     /// removed from nested loop and map bodies.
-    fn all_inputs(&self, branches: bool, accept: &mut dyn FnMut(&str) -> bool) -> bool {
+    fn all_inputs(&self, branches: bool, accept: &mut dyn FnMut(&str, CaptureUse) -> bool) -> bool {
         match &self.kind {
-            K::Name(name) | K::BindingTupleIndex { name, .. } => accept(name),
+            K::Name(name) | K::BindingTupleIndex { name, .. } => accept(name, CaptureUse::Value),
             K::Literal(_) => true,
-            K::InstanceOutput { instance, port } => accept(&format!("{instance}.{port}")),
+            K::InstanceOutput { instance, port } => {
+                accept(&format!("{instance}.{port}"), CaptureUse::Value)
+            }
             K::For(fold) if !branches && fold.trip_count == 0 => {
                 fold.seed.all_inputs(branches, accept)
             }
             K::Map(map) => {
                 map.array.all_inputs(branches, accept)
-                    && (!branches || map.captures.iter().all(|name| accept(name)))
+                    && (!branches
+                        || map
+                            .captures
+                            .iter()
+                            .all(|(name, usage)| accept(name, *usage)))
             }
             K::Call { .. } | K::ImportedCall { .. } if !branches => true,
             K::For(fold) => {
@@ -1080,7 +1112,11 @@ impl TypedExpr {
                         TypedIterable::Array(array) => array.all_inputs(branches, accept),
                         TypedIterable::Range { .. } => true,
                     }
-                    && (!branches || fold.captures.iter().all(|name| accept(name)))
+                    && (!branches
+                        || fold
+                            .captures
+                            .iter()
+                            .all(|(name, usage)| accept(name, *usage)))
             }
             K::Tuple(items)
             | K::Array(items)
@@ -1140,7 +1176,7 @@ impl TypedExpr {
         pending: &mut BTreeSet<usize>,
         usage: ConstantUse,
     ) {
-        self.all_inputs(false, &mut |name| {
+        self.all_inputs(false, &mut |name, _| {
             if let Some(index) = names.get(name).and_then(|b| b.deferred_definition(usage)) {
                 pending.insert(index);
             }
@@ -1150,7 +1186,9 @@ impl TypedExpr {
 
     /// A DSLX type dimension requires constant inputs on every branch.
     pub(super) fn has_constant_inputs(&self, names: &BTreeSet<String>) -> bool {
-        self.all_inputs(true, &mut |name| names.contains(name))
+        self.all_inputs(true, &mut |name, usage| {
+            usage == CaptureUse::TestDiscard || names.contains(name)
+        })
     }
 
     /// Evaluate a lexical constant. Module initializers may additionally
@@ -1201,8 +1239,9 @@ impl TypedExpr {
         if remaining.usage == ConstantUse::ValueParametric
             && names.depth() == 0
             && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
-            && !self.all_inputs(true, &mut |name| {
-                remaining.charge(1).is_some() && names.read(name, remaining).is_some()
+            && !self.all_inputs(true, &mut |name, usage| {
+                usage == CaptureUse::TestDiscard
+                    || remaining.charge(1).is_some() && names.read(name, remaining).is_some()
             })
         {
             return None;
