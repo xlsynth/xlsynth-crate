@@ -310,6 +310,19 @@ mismatch reports both generated programs.
 
 Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_clocked_test`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_pure_test.rs
+
+Runs identical `#[test] fn` source through the BX test runner and the pinned
+DSLX bytecode interpreter. Each suite includes passing checks, a deliberate
+assertion failure, and a subsequent test whose outcome varies with the input.
+Inputs vary signed and unsigned word widths, helper calls, array and range
+folds, tuple destructuring, and branch-local bindings. The target compares the
+outcome of every named test and the source line of its first failing assertion.
+This catches skipped tests, assertions executed in an untaken branch, and
+runners that stop the suite after its first failure.
+
+Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_pure_test`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_let_patterns.rs
 
 Compares destructuring lets in BX blocks with the same patterns in DSLX functions. Generated programs vary nested tuple shapes, wildcards, rest spans, type annotations, inferred integer fields, lexical shadowing, and direct or child-block initializers. Invalid patterns exercise duplicate binders, extra rest markers, and shape or type mismatches. Accepted programs return selected fields or compare inferred operands, including decimal and radix-prefixed values of different widths and signs inside structural unrolls. The target compares BX block IR with compiled DSLX IR and native DSLX evaluation on shared inputs. For implicit conversions that can abort the pinned converter, it first checks the original source with both frontends, then uses explicit casts or native array-element unification to give the DSLX execution probe the common operand type.
