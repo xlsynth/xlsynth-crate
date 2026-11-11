@@ -439,8 +439,34 @@ impl FixtureRunner {
         }
     }
 
+    /// Restarts at cycle zero with unknown values in every state register.
     pub fn reset_state_x(&mut self) {
-        self.state = self.module.initial_state_x();
+        self.replace_state(self.module.initial_state_x());
+    }
+
+    /// Restarts at cycle zero with the given values for all state registers.
+    /// Invalid register names, widths or signedness leave the runner intact.
+    pub fn reset_with_state(&mut self, state: State) -> Result<()> {
+        if self.state.keys().ne(state.keys()) {
+            return Err(crate::Error::Parse(
+                "initial state must supply exactly the module's state registers".into(),
+            ));
+        }
+        for (name, value) in &state {
+            let decl = &self.module.combo.decls[name];
+            if (value.width, value.signedness) != (decl.width, decl.signedness) {
+                return Err(crate::Error::Parse(format!(
+                    "initial register `{name}` expects {:?} width {}, got {:?} width {}",
+                    decl.signedness, decl.width, value.signedness, value.width
+                )));
+            }
+        }
+        self.replace_state(state);
+        Ok(())
+    }
+
+    fn replace_state(&mut self, state: State) {
+        self.state = state;
         self.last_inputs.clear();
         self.last_outputs.clear();
         self.cycle = 0;

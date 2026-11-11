@@ -5,7 +5,8 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Block, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Unop};
+use crate::IrValue;
+use crate::ir::{Block, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
 use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::remap_payload_with;
 use crate::ir_verify::verify_package;
@@ -48,6 +49,20 @@ impl<'a> BlockInvokeInliner<'a> {
     /// when it has none. Foreign functions require explicit extern instances.
     /// Block instances, maps, and counted loops retain their IR representation.
     pub fn inline_block(&mut self, name: &str) -> Result<Cow<'a, Block>, String> {
+        self.expand_calls(name, None)
+    }
+
+    /// Also expands maps and counted loops, including those in nested callees.
+    /// The budget bounds the total number of IR nodes added to this block.
+    pub fn inline_block_with_unrolling(
+        &mut self,
+        name: &str,
+        max_added_nodes: usize,
+    ) -> Result<Cow<'a, Block>, String> {
+        self.expand_calls(name, Some(max_added_nodes))
+    }
+
+    fn expand_calls(&mut self, name: &str, limit: Option<usize>) -> Result<Cow<'a, Block>, String> {
         let &block = self
             .blocks
             .get(name)
@@ -55,7 +70,7 @@ impl<'a> BlockInvokeInliner<'a> {
         let Some(mut index) = block
             .nodes
             .iter()
-            .position(|node| matches!(node.payload, NodePayload::Invoke { .. }))
+            .position(|node| is_expandable(&node.payload, limit.is_some()))
         else {
             return Ok(Cow::Borrowed(block));
         };
@@ -66,43 +81,175 @@ impl<'a> BlockInvokeInliner<'a> {
         // once; restore operand-before-user order only after the last
         // call is expanded.
         while index < expanded.nodes.len() {
-            if let NodePayload::Invoke { to_apply, operands } = &expanded.nodes[index].payload {
-                let Some(function) = self.functions[to_apply.as_str()] else {
-                    return Err(format!(
-                        "block '{name}' invokes foreign function '{to_apply}'; use an extern instantiation to preserve its implementation"
-                    ));
-                };
-                let call_id = expanded.nodes[index].text_id;
-                let operands = operands.clone();
+            if !is_expandable(&expanded.nodes[index].payload, limit.is_some()) {
+                index += 1;
+                continue;
+            }
+            let call = expanded.nodes[index].clone();
+            let (target, iteration_nodes) = match &call.payload {
+                NodePayload::Invoke { to_apply, .. } => (to_apply, None),
+                NodePayload::Map { to_apply, .. } => {
+                    let Type::Array(layout) = &call.ty else {
+                        unreachable!("verified map type");
+                    };
+                    // Index literal, array read, callback invoke.
+                    let additional = layout
+                        .element_count
+                        .checked_mul(3)
+                        .ok_or("map expansion size overflow")?;
+                    (to_apply, Some(additional))
+                }
+                NodePayload::CountedFor {
+                    body, trip_count, ..
+                } => {
+                    // Induction literal and body invoke.
+                    let additional = trip_count
+                        .checked_mul(2)
+                        .ok_or("counted_for expansion size overflow")?;
+                    (body, Some(additional))
+                }
+                _ => unreachable!("filtered to expandable calls"),
+            };
+            let Some(function) = self.functions[target.as_str()] else {
+                return Err(format!(
+                    "block '{name}' invokes foreign function '{target}'; use an extern instantiation to preserve its implementation"
+                ));
+            };
+            // Newly added invokes and their nested bodies are visited by this
+            // same traversal. An invoke copies neither parameters nor nil.
+            let addition =
+                iteration_nodes.unwrap_or(function.nodes.len() - function.params.len() - 1);
+            if let Some(limit) = limit
+                && addition > limit.saturating_sub(expanded.nodes.len() - block.nodes.len())
+            {
+                return Err(format!(
+                    "expanding calls in block '{name}' exceeds the budget of {limit} additional IR nodes"
+                ));
+            }
+            let replacement = if let NodePayload::Invoke { operands, .. } = &call.payload {
                 let result = copy_callee(
                     function,
-                    &operands,
-                    call_id,
+                    operands,
+                    call.text_id,
                     &mut expanded.nodes,
                     &mut names,
                     &mut last_id,
                 )?;
-                // Retain the call site's user-assigned name and existing
-                // references. An explicit invoke.<id> spelling
-                // must follow the new operator instead.
-                let call = &mut expanded.nodes[index];
-                if call
-                    .name
-                    .as_deref()
-                    .and_then(|name| name.strip_prefix("invoke."))
-                    .is_some_and(|digits| {
-                        !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
-                    })
-                {
-                    call.name = None;
-                }
-                call.payload = NodePayload::Unop(Unop::Identity, result);
+                NodePayload::Unop(Unop::Identity, result)
+            } else {
+                expand_iterations(&call, function, &mut expanded.nodes, &mut last_id)?
+            };
+            // Retain user-assigned names. Explicit operator.<id> spellings
+            // must follow the new operator instead.
+            let call = &mut expanded.nodes[index];
+            if call
+                .name
+                .as_deref()
+                .and_then(|name| name.strip_prefix(call.payload.get_operator()))
+                .and_then(|suffix| suffix.strip_prefix('.'))
+                .is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
+            {
+                call.name = None;
             }
+            call.payload = replacement;
             index += 1;
         }
         expanded.compact_and_toposort()?;
         self.last_id = last_id;
         Ok(Cow::Owned(expanded))
+    }
+}
+
+fn is_expandable(payload: &NodePayload, unroll: bool) -> bool {
+    matches!(payload, NodePayload::Invoke { .. })
+        || unroll
+            && matches!(
+                payload,
+                NodePayload::Map { .. } | NodePayload::CountedFor { .. }
+            )
+}
+
+/// Builds the constant induction variable or array index of an unrolled call.
+fn index_literal(index: usize, width: usize) -> Result<NodePayload, String> {
+    let index = u64::try_from(index).map_err(|e| e.to_string())?;
+    IrValue::make_ubits(width, index)
+        .map(NodePayload::Literal)
+        .map_err(|e| e.to_string())
+}
+
+/// Appends ordinary invokes in iteration order without changing the register
+/// graph.
+fn expand_iterations(
+    call: &Node,
+    function: &Fn,
+    nodes: &mut Vec<Node>,
+    last_id: &mut usize,
+) -> Result<NodePayload, String> {
+    let mut append = |ty: Type, payload: NodePayload| -> Result<NodeRef, String> {
+        *last_id = last_id
+            .checked_add(1)
+            .ok_or("node IDs overflow while unrolling block calls")?;
+        let index = nodes.len();
+        nodes.push(Node {
+            text_id: *last_id,
+            ty,
+            payload,
+            name: None,
+            pos: call.pos.clone(),
+        });
+        Ok(NodeRef { index })
+    };
+    let invoke = |operands| NodePayload::Invoke {
+        to_apply: function.name.clone(),
+        operands,
+    };
+    match &call.payload {
+        NodePayload::Map { array, .. } => {
+            let Type::Array(layout) = &call.ty else {
+                unreachable!("verified map type");
+            };
+            let index_width = crate::math::ceil_log2(layout.element_count).max(1);
+            let mut values = Vec::with_capacity(layout.element_count);
+            for i in 0..layout.element_count {
+                let index = append(Type::Bits(index_width), index_literal(i, index_width)?)?;
+                let element = append(
+                    function.get_param(0).ty.clone(),
+                    NodePayload::ArrayIndex {
+                        array: *array,
+                        indices: vec![index],
+                        assumed_in_bounds: true,
+                    },
+                )?;
+                values.push(append(function.ret_ty.clone(), invoke(vec![element]))?);
+            }
+            Ok(NodePayload::Array(values))
+        }
+        NodePayload::CountedFor {
+            init,
+            trip_count,
+            stride,
+            invariant_args,
+            ..
+        } => {
+            let Type::Bits(width) = function.get_param(0).ty else {
+                unreachable!("verified induction type");
+            };
+            let mut carry = *init;
+            for i in 0..*trip_count {
+                let induction = i
+                    .checked_mul(*stride)
+                    .ok_or("counted_for induction overflow")?;
+                let index = append(Type::Bits(width), index_literal(induction, width)?)?;
+                let mut operands = Vec::with_capacity(2 + invariant_args.len());
+                operands.extend([index, carry]);
+                operands.extend(invariant_args);
+                carry = append(function.ret_ty.clone(), invoke(operands))?;
+            }
+            Ok(NodePayload::Unop(Unop::Identity, carry))
+        }
+        _ => unreachable!("unrolling a map or counted_for"),
     }
 }
 
@@ -204,7 +351,48 @@ fn call_scoped_name(names: &mut HashSet<String>, call_id: usize, local: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_transition::lower_block_transition;
+    use crate::ir_eval::{FnEvalResult, eval_fn_in_package};
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn unrolling_keeps_zero_trip_carry_and_strided_wide_induction() -> Result<(), String> {
+        let ir = r#"package iterations
+fn body(i: bits[81] id=1, acc: bits[81] id=2, x: bits[81] id=3) -> bits[81] {
+  biased: bits[81] = add(acc, x, id=4)
+  ret updated: bits[81] = add(biased, i, id=5)
+}
+top block sample(init: bits[81], x: bits[81], a: bits[81], b: bits[81]) {
+  init: bits[81] = input_port(name=init, id=6)
+  x: bits[81] = input_port(name=x, id=7)
+  empty: bits[81] = counted_for(init, trip_count=0, stride=3, body=body, invariant_args=[x], id=8)
+  loop_result: bits[81] = counted_for(init, trip_count=3, stride=7, body=body, invariant_args=[x], id=9)
+  a: () = output_port(empty, name=a, id=10)
+  b: () = output_port(loop_result, name=b, id=11)
+}
+"#;
+        let mut package = Parser::new(ir)
+            .parse_and_validate_package()
+            .map_err(|e| e.to_string())?;
+        let mut inliner = BlockInvokeInliner::new(&package)?;
+        let block = inliner
+            .inline_block_with_unrolling("sample", 12)?
+            .into_owned();
+        package.replace_block("sample", block)?;
+        let transition = lower_block_transition(&package, "sample")?;
+        let init =
+            IrValue::parse_typed("bits[81]:0x100000000000000000000").map_err(|e| e.to_string())?;
+        let bias = IrValue::make_ubits(81, 5).map_err(|e| e.to_string())?;
+        let FnEvalResult::Success(result) =
+            eval_fn_in_package(&package, &transition.function, &[init.clone(), bias])
+        else {
+            panic!("expanded iterations failed");
+        };
+        let expected =
+            IrValue::parse_typed("bits[81]:0x100000000000000000024").map_err(|e| e.to_string())?;
+        assert_eq!(result.value, IrValue::make_tuple(&[init, expected]));
+        Ok(())
+    }
 
     #[test]
     fn expanded_blocks_can_be_reassembled_in_one_package() {

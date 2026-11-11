@@ -10,6 +10,7 @@ pub mod array_alias_rewrite;
 pub mod block2fn;
 pub mod block_inline;
 pub mod block_invoke_inline;
+pub mod block_transition;
 pub mod corners;
 pub mod dce;
 pub mod desugar_extensions;

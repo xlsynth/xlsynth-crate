@@ -8,8 +8,9 @@ use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBind
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, TestDecl,
-    TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor, WidthSliceType,
+    MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature, Stmt, StructDef,
+    StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
+    WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
 use crate::parser::MAX_SYNTAX_DEPTH;
@@ -193,13 +194,27 @@ pub(super) fn qualify_tests(module: &Module, names: &Names) -> Result<Vec<TestDe
                 .flatten();
             let mut scope = Scope::new(names, at, &test.name);
             if test.kind == TestKind::Block {
-                scope.region = DeclarationRegion::BlockBody;
+                scope.region = DeclarationRegion::BlockSignature;
                 scope.hardware_callees = Some(&hardware);
+            }
+            let quickcheck = test
+                .quickcheck
+                .as_ref()
+                .map(|signature| -> Result<_, String> {
+                    Ok(QuickCheckSignature {
+                        params: scope.params(&signature.params, Local::Lexical)?,
+                        result: scope.ty(&signature.result)?,
+                    })
+                })
+                .transpose()?;
+            if test.kind == TestKind::Block {
+                scope.region = DeclarationRegion::BlockBody;
             }
             Ok(TestDecl {
                 kind: test.kind,
                 name: test.name.clone(),
                 position: test.position,
+                quickcheck,
                 statements: scope.test_body(&test.statements, 0)?,
                 overwritten_literal_types: test.overwritten_literal_types.clone(),
             })
@@ -634,6 +649,7 @@ impl<'a> Scope<'a> {
         body.iter()
             .map(|stmt| {
                 let kind = match &stmt.kind {
+                    TestStmtKind::Property(value) => TestStmtKind::Property(self.expr(value)?),
                     TestStmtKind::Reg { name, ty, init } => {
                         let ty = self.ty(ty)?;
                         let init = init.as_ref().map(|e| self.expr(e)).transpose()?;

@@ -2,10 +2,12 @@
 
 //! Execute test control flow over typed BX expressions and clocked hardware.
 
+mod quickcheck;
 mod simulation;
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use xlsynth_pir::ir::{Fn, NodePayload, NodeRef, Package, PackageMember};
@@ -16,13 +18,50 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{SourcePosition, TestKind};
 use crate::{BxWarning, ImportOptions, ResetBehavior, bx_import, check, lower_module};
-use simulation::Simulation;
+use simulation::{Observed, Simulation};
+
+/// Concrete trials per clocked property, reproducible from the same seed.
+#[derive(Clone, Copy, Debug)]
+pub struct QuickCheckOptions {
+    pub trials: NonZeroUsize,
+    pub seed: u64,
+    pub cross_check_vastly: bool,
+}
+
+impl Default for QuickCheckOptions {
+    fn default() -> Self {
+        Self {
+            trials: NonZeroUsize::new(100).unwrap(),
+            seed: 0,
+            cross_check_vastly: false,
+        }
+    }
+}
+
+/// Outcomes from starting the RTL at X, independent of the concrete trials.
+#[derive(Clone, Debug, Default)]
+pub struct FourValuedReport {
+    pub passed: usize,
+    pub failed: usize,
+    pub indeterminate: usize,
+    pub first_false: Option<String>,
+    pub first_indeterminate: Option<String>,
+}
+
+/// Trial count and seed for one property, with optional four-valued outcomes.
+#[derive(Clone, Debug)]
+pub struct QuickCheckReport {
+    pub seed: u64,
+    pub trials: usize,
+    pub four_valued: Option<FourValuedReport>,
+}
 
 /// Outcome of a single test, in source declaration order.
 #[derive(Clone, Debug)]
 pub struct BxTestResult {
     pub name: String,
     pub failure: Option<String>,
+    pub quickcheck: Option<QuickCheckReport>,
 }
 
 /// Results of running the tests declared in the requested BX file.
@@ -63,6 +102,8 @@ pub(crate) struct TestProgram {
     pub(crate) kind: TestKind,
     pub(crate) harness: String,
     pub(crate) steps: Vec<TestStep>,
+    pub(crate) quickcheck_params: Option<Vec<crate::ast::Param>>,
+    pub(crate) stimulus_names: BTreeMap<usize, String>,
 }
 
 /// One located action in the imperative test program.
@@ -122,6 +163,28 @@ pub fn run_tests(
     reset: ResetBehavior,
     options: &ImportOptions<'_>,
     warnings_as_errors: bool,
+) -> Result<BxTestReport, String> {
+    run_tests_with_quickcheck(
+        source,
+        path,
+        package,
+        reset,
+        options,
+        warnings_as_errors,
+        QuickCheckOptions::default(),
+    )
+}
+
+/// Execute unit tests and concrete QuickCheck trials with the selected seed and
+/// backends.
+pub fn run_tests_with_quickcheck(
+    source: &str,
+    path: &Path,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+    warnings_as_errors: bool,
+    quickcheck_options: QuickCheckOptions,
 ) -> Result<BxTestReport, String> {
     let mut suite = TestSuite {
         reserved: package
@@ -199,26 +262,24 @@ pub fn run_tests(
                 TestKind::Function => &package,
                 TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
             };
+            if let Some(params) = &program.quickcheck_params {
+                return quickcheck::run(
+                    &program,
+                    params,
+                    package,
+                    &checked,
+                    path,
+                    reset.active_low,
+                    quickcheck_options,
+                );
+            }
             let result = run_program(&program, package, reset.active_low)
                 .err()
-                .map(|failure| {
-                    format!(
-                        "{}:{}:{}: test '{}'{}: {}",
-                        path.display(),
-                        failure.position.line,
-                        failure.position.column,
-                        program.name,
-                        if program.kind == TestKind::Block {
-                            format!(" at tick {}", failure.tick)
-                        } else {
-                            String::new()
-                        },
-                        failure.message
-                    )
-                });
+                .map(|f| f.diagnostic(path, &program));
             BxTestResult {
                 name: program.name,
                 failure: result,
+                quickcheck: None,
             }
         })
         .collect();
@@ -302,7 +363,26 @@ enum Harness<'a> {
         outputs: &'a [NodeRef],
         expressions: HashMap<NodeRef, PureExpression>,
     },
-    Block(Box<Simulation>),
+    Block(&'a mut dyn ClockedHarness),
+}
+
+/// A clocked circuit driven and sampled by the procedural test interpreter.
+trait ClockedHarness {
+    fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String>;
+    fn tick(&mut self) -> Result<(), String>;
+    fn sample(&mut self, index: usize) -> Result<Observed, String>;
+}
+
+impl ClockedHarness for Simulation {
+    fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String> {
+        Simulation::drive(self, name, value)
+    }
+    fn tick(&mut self) -> Result<(), String> {
+        Simulation::tick(self)
+    }
+    fn sample(&mut self, index: usize) -> Result<Observed, String> {
+        self.output_observed(index)
+    }
 }
 
 impl Harness<'_> {
@@ -316,7 +396,7 @@ impl Harness<'_> {
         }
     }
 
-    fn output(&mut self, index: usize) -> Result<IrValue, String> {
+    fn output(&mut self, index: usize) -> Result<IrValue, ExecutionError> {
         match self {
             Self::Function {
                 package,
@@ -333,18 +413,68 @@ impl Harness<'_> {
                     Entry::Occupied(entry) => entry.into_mut(),
                     Entry::Vacant(entry) => entry.insert(PureExpression::extract(function, node)?),
                 };
-                expression.evaluate(package, inputs)
+                Ok(expression.evaluate(package, inputs)?)
             }
-            Self::Block(sim) => sim.output(index),
+            Self::Block(sim) => match sim.sample(index)? {
+                Observed::Known(value) => Ok(value),
+                Observed::Unknown(message) => Err(ExecutionError::Unknown(message)),
+            },
         }
     }
 }
 
 /// Runtime errors retain the innermost statement and edge count.
+#[derive(PartialEq)]
 struct Failure {
     position: SourcePosition,
     tick: u64,
-    message: String,
+    error: ExecutionError,
+}
+
+/// Distinguish property outcomes from simulator or linkage errors.
+#[derive(PartialEq)]
+enum ExecutionError {
+    Runtime(String),
+    Assertion(String),
+    Unknown(String),
+}
+
+impl From<String> for ExecutionError {
+    fn from(message: String) -> Self {
+        Self::Runtime(message)
+    }
+}
+
+impl TestProgram {
+    fn at_declaration(&self, message: String) -> Failure {
+        Failure {
+            position: self.position,
+            tick: 0,
+            error: ExecutionError::Runtime(message),
+        }
+    }
+}
+
+impl Failure {
+    fn diagnostic(&self, path: &Path, program: &TestProgram) -> String {
+        let message = match &self.error {
+            ExecutionError::Runtime(m)
+            | ExecutionError::Assertion(m)
+            | ExecutionError::Unknown(m) => m,
+        };
+        let edge = if program.kind == TestKind::Block {
+            format!(" at tick {}", self.tick)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}:{}:{}: test '{}'{edge}: {message}",
+            path.display(),
+            self.position.line,
+            self.position.column,
+            program.name
+        )
+    }
 }
 
 /// Program counter state shared by nested loops and conditionals.
@@ -352,14 +482,12 @@ struct Execution<'a> {
     harness: Harness<'a>,
     tick: u64,
     active_low: bool,
+    trace: Option<(&'a BTreeMap<usize, String>, &'a mut quickcheck::TrialTrace)>,
 }
 
 fn run_program(program: &TestProgram, package: &Package, active_low: bool) -> Result<(), Failure> {
-    let at_declaration = |message| Failure {
-        position: program.position,
-        tick: 0,
-        message,
-    };
+    let at_declaration = |message| program.at_declaration(message);
+    let mut simulation;
     let harness = match program.kind {
         TestKind::Function => {
             let function = package.get_fn(&program.harness).ok_or_else(|| {
@@ -382,14 +510,16 @@ fn run_program(program: &TestProgram, package: &Package, active_low: bool) -> Re
                 expressions: HashMap::new(),
             }
         }
-        TestKind::Block => Harness::Block(Box::new(
-            Simulation::new(package, &program.harness).map_err(at_declaration)?,
-        )),
+        TestKind::Block => {
+            simulation = Simulation::new(package, &program.harness).map_err(at_declaration)?;
+            Harness::Block(&mut simulation)
+        }
     };
     Execution {
         harness,
         tick: 0,
         active_low,
+        trace: None,
     }
     .execute(&program.steps)
 }
@@ -399,10 +529,10 @@ impl Execution<'_> {
     /// edges.
     fn execute(&mut self, steps: &[TestStep]) -> Result<(), Failure> {
         for step in steps {
-            let at_step = |message| Failure {
+            let at_step = |error| Failure {
                 position: step.position,
                 tick: self.tick,
-                message,
+                error,
             };
             let group = step
                 .group
@@ -411,9 +541,9 @@ impl Execution<'_> {
                 .map_err(at_step)?;
             let mut output = |index: usize| {
                 match &group {
-                    Some((first, values)) => {
-                        values.get_element(index - first).map_err(|e| e.to_string())
-                    }
+                    Some((first, values)) => values
+                        .get_element(index - first)
+                        .map_err(|e| ExecutionError::Runtime(e.to_string())),
                     None => self.harness.output(index),
                 }
                 .map_err(at_step)
@@ -424,7 +554,14 @@ impl Execution<'_> {
                 }
                 TestAction::Drive { port, value } => {
                     let value = output(*value)?;
-                    self.harness.drive(*port, value).map_err(at_step)?;
+                    if let Some((names, trace)) = &mut self.trace
+                        && names.contains_key(port)
+                    {
+                        trace.drive(*port, &value);
+                    }
+                    self.harness
+                        .drive(*port, value)
+                        .map_err(|e| at_step(e.into()))?;
                 }
                 TestAction::Tick(reset) => {
                     let asserted = reset
@@ -432,14 +569,19 @@ impl Execution<'_> {
                         .transpose()?
                         .is_some_and(|v| v.bits_equals_u64_value(1));
                     let Harness::Block(sim) = &mut self.harness else {
-                        return Err(at_step("tick! requires a block test".into()));
+                        return Err(at_step(ExecutionError::Runtime(
+                            "tick! requires a block test".into(),
+                        )));
                     };
                     sim.drive("rst", &IrValue::bool(asserted ^ self.active_low))
-                        .map_err(at_step)?;
-                    sim.tick().map_err(at_step)?;
+                        .map_err(|e| at_step(e.into()))?;
+                    sim.tick().map_err(|e| at_step(e.into()))?;
+                    if let Some((_, trace)) = &mut self.trace {
+                        trace.tick(asserted);
+                    }
                     if asserted {
                         sim.drive("rst", &IrValue::bool(self.active_low))
-                            .map_err(at_step)?;
+                            .map_err(|e| at_step(e.into()))?;
                     }
                     self.tick += 1;
                 }
@@ -449,16 +591,16 @@ impl Execution<'_> {
                             || "assertion failed".to_owned(),
                             |label| format!("assertion failed: {label}"),
                         );
-                        return Err(at_step(message));
+                        return Err(at_step(ExecutionError::Assertion(message)));
                     }
                 }
                 TestAction::AssertEq { actual, expected } => {
                     let actual = output(*actual)?;
                     let expected = output(*expected)?;
                     if actual != expected {
-                        return Err(at_step(format!(
+                        return Err(at_step(ExecutionError::Assertion(format!(
                             "assert_eq failed: actual {actual}, expected {expected}"
-                        )));
+                        ))));
                     }
                 }
                 TestAction::If {
@@ -487,7 +629,7 @@ impl Execution<'_> {
                         let at_iteration = |message| Failure {
                             position: step.position,
                             tick: self.tick,
-                            message,
+                            error: ExecutionError::Runtime(message),
                         };
                         let element = match iterable {
                             TestIterable::Array(_) => array

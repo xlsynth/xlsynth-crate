@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Arg, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_source_file_with_options, empty_package, lower_module,
-    run_tests,
+    ImportOptions, QuickCheckOptions, ResetBehavior, check_source_file_with_options, empty_package,
+    lower_module, run_tests_with_quickcheck,
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
@@ -88,7 +89,29 @@ fn add_bx_args(command: Command) -> Command {
 }
 
 pub fn bx_test_command() -> Command {
-    add_bx_source_args(Command::new("bx-test").about("Runs unit tests declared in a BX file"))
+    let command = Command::new("bx-test")
+        .about("Runs unit tests and clocked QuickCheck properties in a BX file");
+    add_bx_source_args(command)
+        .arg(
+            Arg::new("quickcheck-trials")
+                .long("quickcheck-trials")
+                .value_name("COUNT")
+                .value_parser(value_parser!(NonZeroUsize))
+                .help("Random trials per QuickCheck block (default 100)"),
+        )
+        .arg(
+            Arg::new("seed")
+                .long("seed")
+                .value_name("U64")
+                .value_parser(value_parser!(u64))
+                .help("QuickCheck random seed (default 0)"),
+        )
+        .arg(
+            Arg::new("cross-check-vastly")
+                .long("cross-check-vastly")
+                .action(ArgAction::SetTrue)
+                .help("Compare each QuickCheck sample to RTL and report a separate run from unknown register state"),
+        )
 }
 
 pub fn bx2ir_command() -> Command {
@@ -233,13 +256,25 @@ pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
             active_low: input.active_low,
             asynchronous: false,
         };
-        let report = run_tests(
+        let defaults = QuickCheckOptions::default();
+        let report = run_tests_with_quickcheck(
             &input.source,
             input.path,
             input.package,
             reset,
             &input.imports,
             input.warnings_as_errors,
+            QuickCheckOptions {
+                trials: matches
+                    .get_one::<NonZeroUsize>("quickcheck-trials")
+                    .copied()
+                    .unwrap_or(defaults.trials),
+                seed: matches
+                    .get_one::<u64>("seed")
+                    .copied()
+                    .unwrap_or(defaults.seed),
+                cross_check_vastly: matches.get_flag("cross-check-vastly"),
+            },
         )
         .map_err(anyhow::Error::msg)?;
         for warning in report.warnings {
@@ -248,6 +283,24 @@ pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
         let total = report.tests.len();
         let mut failed = 0;
         for test in report.tests {
+            if let Some(qc) = test.quickcheck {
+                write_stdout_line(&format!(
+                    "quickcheck {}: {} concrete trials (seed {})",
+                    test.name, qc.trials, qc.seed
+                ));
+                if let Some(four) = qc.four_valued {
+                    write_stdout_line(&format!(
+                        "  Vastly from X: {} true, {} false, {} indeterminate",
+                        four.passed, four.failed, four.indeterminate
+                    ));
+                    if let Some(f) = four.first_false {
+                        eprintln!("first four-valued false: {f}");
+                    }
+                    if let Some(f) = four.first_indeterminate {
+                        eprintln!("first four-valued indeterminate: {f}");
+                    }
+                }
+            }
             if let Some(failure) = test.failure {
                 failed += 1;
                 write_stdout_line(&format!("test {} ... FAILED", test.name));

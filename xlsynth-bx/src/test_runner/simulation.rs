@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog_with_register_names};
 use xlsynth_pir::IrValue;
-use xlsynth_pir::block_inline::inline_all_blocks_in_package;
-use xlsynth_pir::ir::{InstantiationKind, MemberType, NodePayload, Package, PackageMember, Type};
+use xlsynth_pir::block_inline::flatten_block_hierarchy;
+use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
+use xlsynth_pir::ir::{NodePayload, Package, Type};
 use xlsynth_pir::ir_value_utils::{
     flatten_ir_value_to_lsb0_bits_for_type, ir_value_from_lsb0_bits_with_layout,
 };
@@ -19,6 +20,22 @@ use xlsynth_vastly::{
 struct Input {
     ty: Type,
     drive: Option<(InputPortHandle, Value4)>,
+    /// Physical level of a deasserted reset for this port, if it is reset.
+    inactive_reset: Option<bool>,
+}
+
+/// Connects a flattened PIR register to its packed RTL signal. A zero-width
+/// register participates in the IR state without requiring an RTL signal.
+struct Register {
+    ty: Type,
+    rtl_name: Option<String>,
+}
+
+/// A settled output or the four-state diagnostic for an unknown observation.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Observed {
+    Known(IrValue),
+    Unknown(String),
 }
 
 /// Simulates the test's connected hardware, preserving both input drives and
@@ -26,14 +43,45 @@ struct Input {
 pub(super) struct Simulation {
     runner: FixtureRunner,
     inputs: BTreeMap<String, Input>,
+    registers: BTreeMap<String, Register>,
     outputs: Vec<(String, Type)>,
     settled: Option<BTreeMap<String, Value4>>,
 }
 
 impl Simulation {
     pub(super) fn new(package: &Package, top: &str) -> Result<Self, String> {
-        let mut package = test_hierarchy(package, top)?;
-        inline_all_blocks_in_package(&mut package)?;
+        let package = flatten_block_hierarchy(package, top)?;
+        Self::compile_rtl(&package, top)
+    }
+
+    /// Prepares RTL from the same flattened hierarchy used for PIR evaluation.
+    pub(super) fn from_flattened(package: &Package, top: &str) -> Result<Self, String> {
+        // Only the RTL cross-check needs explicit iterations. PIR keeps the
+        // compact loop/map and the ordinary test simulator uses normal codegen.
+        if package.members.iter().any(|member| {
+            member.graph().nodes.iter().any(|node| {
+                matches!(
+                    node.payload,
+                    NodePayload::Map { .. } | NodePayload::CountedFor { .. }
+                )
+            })
+        }) {
+            const MAX_UNROLLED_NODES: usize = 65_536;
+            let mut inliner = BlockInvokeInliner::new(package)?;
+            let expanded = inliner
+                .inline_block_with_unrolling(top, MAX_UNROLLED_NODES)?
+                .into_owned();
+            let mut rtl_package = package.clone();
+            rtl_package.replace_block(top, expanded)?;
+            Self::compile_rtl(&rtl_package, top)
+        } else {
+            Self::compile_rtl(package, top)
+        }
+    }
+
+    /// Compiles the supplied flattened block and binds its data ports and
+    /// state.
+    fn compile_rtl(package: &Package, top: &str) -> Result<Self, String> {
         let block = package.get_block(top).ok_or("missing inlined test block")?;
         let reset = block.reset.as_ref();
         if reset.is_some_and(|r| r.asynchronous)
@@ -44,8 +92,8 @@ impl Simulation {
         {
             return Err("BX test simulation does not support asynchronous reset".to_owned());
         }
-        let rtl = emit_system_verilog(
-            &package,
+        let rtl = emit_system_verilog_with_register_names(
+            package,
             &BlockCodegenOptions {
                 emit_sv_types: false,
                 ..Default::default()
@@ -60,6 +108,7 @@ impl Simulation {
             let name = block.port_name(port);
             let ty = block.port_type(port);
             let width = u32::try_from(ty.bit_count()).map_err(|_| "RTL input is too wide")?;
+            let inactive_reset = reset.filter(|r| r.port == port).map(|r| r.active_low);
             let drive = if width == 0 {
                 None
             } else {
@@ -67,8 +116,8 @@ impl Simulation {
                     .port_bindings()
                     .input_with_width(name, width)
                     .map_err(|e| format!("{e:?}"))?;
-                let value = if let Some(reset) = reset.filter(|r| r.port == port) {
-                    Value4::from_u64(1, Signedness::Unsigned, u64::from(reset.active_low))
+                let value = if let Some(level) = inactive_reset {
+                    Value4::from_u64(1, Signedness::Unsigned, u64::from(level))
                 } else {
                     Value4::new(
                         width,
@@ -83,6 +132,7 @@ impl Simulation {
                 Input {
                     ty: ty.clone(),
                     drive,
+                    inactive_reset,
                 },
             );
         }
@@ -95,12 +145,83 @@ impl Simulation {
                 )
             })
             .collect();
+        let mut rtl_names = rtl.top_register_names;
+        let registers = block
+            .registers
+            .iter()
+            .map(|reg| {
+                let rtl_name = rtl_names.remove(&reg.name);
+                if reg.ty.bit_count() != 0 && rtl_name.is_none() {
+                    return Err(format!(
+                        "test RTL has no signal for register '{}'",
+                        reg.name
+                    ));
+                }
+                Ok((
+                    reg.name.clone(),
+                    Register {
+                        ty: reg.ty.clone(),
+                        rtl_name,
+                    },
+                ))
+            })
+            .collect::<Result<_, String>>()?;
         Ok(Self {
             runner,
             inputs,
+            registers,
             outputs,
             settled: None,
         })
+    }
+
+    /// Clears test drives, sampled outputs and clock history, then installs the
+    /// trial's concrete power-up values, or all-X when running an X-state
+    /// check.
+    pub(super) fn reset_trial(
+        &mut self,
+        initial: Option<&BTreeMap<String, IrValue>>,
+    ) -> Result<(), String> {
+        if let Some(initial) = initial {
+            if self.registers.keys().ne(initial.keys()) {
+                return Err("initial state must supply exactly the flattened PIR registers".into());
+            }
+            let mut state = BTreeMap::new();
+            for (name, register) in &self.registers {
+                let value = &initial[name];
+                if value.type_() != register.ty {
+                    return Err(format!(
+                        "initial register '{name}' expects {}, got {}",
+                        register.ty,
+                        value.type_()
+                    ));
+                }
+                if let Some(rtl_name) = &register.rtl_name {
+                    state.insert(
+                        rtl_name.clone(),
+                        packed_value(value, &register.ty, Signedness::Unsigned)?,
+                    );
+                }
+            }
+            self.runner
+                .reset_with_state(state)
+                .map_err(|e| format!("{e:?}"))?;
+        } else {
+            self.runner.reset_state_x();
+        }
+        // Both QuickCheck executions begin with identical testbench drives.
+        // Only the DUT register state differs between concrete and X trials.
+        for input in self.inputs.values_mut() {
+            if let Some((handle, drive)) = &mut input.drive {
+                *drive = Value4::from_u64(
+                    handle.width(),
+                    handle.signedness(),
+                    u64::from(input.inactive_reset.unwrap_or(false)),
+                );
+            }
+        }
+        self.settled = None;
+        Ok(())
     }
 
     /// Updates one drive immediately; register values change at the next edge.
@@ -117,13 +238,7 @@ impl Simulation {
             ));
         }
         if let Some((handle, drive)) = &mut input.drive {
-            let mut bits = Vec::with_capacity(handle.width() as usize);
-            flatten_ir_value_to_lsb0_bits_for_type(value, &input.ty, &mut bits)?;
-            let bits = bits
-                .into_iter()
-                .map(|bit| if bit { LogicBit::One } else { LogicBit::Zero })
-                .collect();
-            *drive = Value4::new(handle.width(), handle.signedness(), bits);
+            *drive = packed_value(value, &input.ty, handle.signedness())?;
             self.settled = None;
         }
         Ok(())
@@ -140,13 +255,22 @@ impl Simulation {
     }
 
     /// Returns the typed output after the most recent stimulus or clock edge.
-    pub(super) fn output(&mut self, index: usize) -> Result<IrValue, String> {
+    #[cfg(test)]
+    fn output(&mut self, index: usize) -> Result<IrValue, String> {
+        match self.output_observed(index)? {
+            Observed::Known(value) => Ok(value),
+            Observed::Unknown(diagnostic) => Err(diagnostic),
+        }
+    }
+
+    /// Keeps X/Z observations distinct from failures to simulate or sample.
+    pub(super) fn output_observed(&mut self, index: usize) -> Result<Observed, String> {
         let (name, ty) = self
             .outputs
             .get(index)
             .ok_or_else(|| format!("no test output at index {index}"))?;
         if ty.bit_count() == 0 {
-            return ir_value_from_lsb0_bits_with_layout(ty, &[]);
+            return ir_value_from_lsb0_bits_with_layout(ty, &[]).map(Observed::Known);
         }
         if self.settled.is_none() {
             self.settled = Some(
@@ -161,74 +285,31 @@ impl Simulation {
             .and_then(|values| values.get(name))
             .ok_or_else(|| format!("test RTL has no output '{name}'"))?;
         if value.has_unknown() {
-            return Err(format!(
+            return Ok(Observed::Unknown(format!(
                 "output '{name}' contains unknown bits: {}'b{}",
                 value.width,
                 value.to_bit_string_msb_first()
-            ));
+            )));
         }
         let bits: Vec<bool> = value
             .bits_lsb_first()
             .iter()
             .map(|&b| b == LogicBit::One)
             .collect();
-        ir_value_from_lsb0_bits_with_layout(ty, &bits)
+        ir_value_from_lsb0_bits_with_layout(ty, &bits).map(Observed::Known)
     }
 }
 
-/// Copy only the hardware connected by this test and its transitive pure
-/// callees.
-fn test_hierarchy(package: &Package, top: &str) -> Result<Package, String> {
-    let members: BTreeMap<_, _> = package
-        .members
-        .iter()
-        .map(|member| (member.graph().name.as_str(), member))
+/// Packs tuple tails and array heads into the least significant RTL bits.
+fn packed_value(value: &IrValue, ty: &Type, signedness: Signedness) -> Result<Value4, String> {
+    let width = u32::try_from(ty.bit_count()).map_err(|_| "RTL value is too wide")?;
+    let mut bits = Vec::with_capacity(width as usize);
+    flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut bits)?;
+    let bits = bits
+        .into_iter()
+        .map(|bit| if bit { LogicBit::One } else { LogicBit::Zero })
         .collect();
-    let mut reachable = BTreeSet::new();
-    let mut pending = vec![top];
-    while let Some(name) = pending.pop() {
-        if !reachable.insert(name) {
-            continue;
-        }
-        let member = members
-            .get(name)
-            .ok_or_else(|| format!("missing test dependency '{name}'"))?;
-        if let PackageMember::Block(block) = member {
-            for instance in &block.instantiations {
-                if instance.kind != InstantiationKind::Block {
-                    return Err(format!(
-                        "cannot simulate external instance '{}'",
-                        instance.name
-                    ));
-                }
-                pending.push(&instance.block);
-            }
-        }
-        pending.extend(
-            member
-                .graph()
-                .nodes
-                .iter()
-                .filter_map(|node| match &node.payload {
-                    NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                        Some(to_apply.as_str())
-                    }
-                    NodePayload::CountedFor { body, .. } => Some(body.as_str()),
-                    _ => None,
-                }),
-        );
-    }
-    Ok(Package {
-        name: package.name.clone(),
-        file_table: package.file_table.clone(),
-        members: package
-            .members
-            .iter()
-            .filter(|member| reachable.contains(member.graph().name.as_str()))
-            .cloned()
-            .collect(),
-        top: Some((top.to_owned(), MemberType::Block)),
-    })
+    Ok(Value4::new(width, signedness, bits))
 }
 
 /// Applies persistent stimulus to a fresh sampling or ticking context.
@@ -331,6 +412,87 @@ pub block sample(clk, rst, data: Payload) -> (Payload, Payload, bool, ()) {
     }
 
     #[test]
+    fn trials_restart_aggregate_registers_drives_and_observations() -> Result<(), String> {
+        let package = compile(SOURCE, empty_package("sample"), ResetBehavior::default())?;
+        let flat = flatten_block_hierarchy(&package, "sample")?;
+        let register = &flat.get_block("sample").unwrap().registers[0];
+        let value =
+            IrValue::parse_typed("(bits[80]:0xabcdef12345678012345, [bits[4]:2, bits[4]:7], ())")
+                .map_err(|e| e.to_string())?;
+        let state = BTreeMap::from([(register.name.clone(), value.clone())]);
+        let mut sim = Simulation::from_flattened(&flat, "sample")?;
+        sim.reset_trial(Some(&state))?;
+        assert_eq!(sim.output(1)?, value);
+        sim.drive("data", &value)?;
+        sim.drive("rst", &IrValue::bool(true))?;
+        sim.tick()?;
+        assert_ne!(sim.output(1)?, value);
+        assert_eq!(sim.runner.cycle(), 1);
+
+        sim.reset_trial(None)?;
+        assert_eq!(sim.runner.cycle(), 0);
+        assert!(sim.runner.last_inputs().is_empty());
+        assert!(sim.runner.last_outputs().is_empty());
+        assert_eq!(
+            sim.output_observed(1)?,
+            Observed::Unknown(format!(
+                "output 'out_1' contains unknown bits: 88'b{}",
+                "x".repeat(88)
+            ))
+        );
+        let zero = IrValue::parse_typed("(bits[80]:0, [bits[4]:0, bits[4]:0], ())")
+            .map_err(|e| e.to_string())?;
+        assert_eq!(sim.output(0)?, zero);
+        assert_eq!(sim.output(2)?, IrValue::bool(false));
+        assert_eq!(sim.output(3)?, IrValue::make_tuple(&[]));
+
+        sim.reset_trial(Some(&state))?;
+        assert_eq!(sim.output(1)?, value);
+        Ok(())
+    }
+
+    #[test]
+    fn concrete_state_uses_register_names_after_both_ir_and_rtl_collisions() -> Result<(), String> {
+        let package = parse_xls_ir_package(
+            r#"package design
+block delay(clk: clock, data: bits[8], q: bits[8]) {
+  reg r(bits[8])
+  data: bits[8] = input_port(name=data, id=1)
+  read: bits[8] = register_read(register=r, id=2)
+  write: () = register_write(data, register=r, id=3)
+  q: () = output_port(read, name=q, id=4)
+}
+top block sample(clk: clock, data: bits[8], u0__r: bits[8], parent_q: bits[8]) {
+  reg u0__r(bits[8])
+  reg unit(())
+  instantiation u0(block=delay, kind=block)
+  data: bits[8] = input_port(name=data, id=11)
+  child_drive: () = instantiation_input(data, instantiation=u0, port_name=data, id=12)
+  child_q: bits[8] = instantiation_output(instantiation=u0, port_name=q, id=13)
+  u0__r: () = output_port(child_q, name=u0__r, id=14)
+  parent_read: bits[8] = register_read(register=u0__r, id=15)
+  parent_write: () = register_write(data, register=u0__r, id=16)
+  parent_q: () = output_port(parent_read, name=parent_q, id=17)
+  unit_value: () = register_read(register=unit, id=18)
+  unit_write: () = register_write(unit_value, register=unit, id=19)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let child = IrValue::make_ubits(8, 0xa1).map_err(|e| e.to_string())?;
+        let parent = IrValue::make_ubits(8, 0x3d).map_err(|e| e.to_string())?;
+        let state = BTreeMap::from([
+            ("u0__r".into(), parent.clone()),
+            ("u0__r__1".into(), child.clone()),
+            ("unit".into(), IrValue::make_tuple(&[])),
+        ]);
+        let mut sim = Simulation::new(&package, "sample")?;
+        sim.reset_trial(Some(&state))?;
+        assert_eq!(sim.output(0)?, child);
+        assert_eq!(sim.output(1)?, parent);
+        Ok(())
+    }
+
+    #[test]
     fn tests_without_dut_or_observed_outputs_can_advance_the_clock() -> Result<(), String> {
         let source = r#"
 #[test] block empty() {}
@@ -421,6 +583,41 @@ block sample(clk, words: u8[2]) -> u8 {
                 "counted_for is not supported in `sample`; unroll loops before block2sv code generation"
             ),
         );
+        Ok(())
+    }
+
+    #[test]
+    fn quickcheck_rtl_unrolls_counted_loops_inside_a_mapped_helper() -> Result<(), String> {
+        let source = r#"
+fn advance(x: u8) -> u8 {
+    for (i, a) in u8:0..u8:3 { a + x + i }(u8:1)
+}
+block sample(clk, words: u8[2]) -> u8[2] {
+    reg q: u8[2];
+    q := map(words, advance);
+    q
+}
+"#;
+        let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+        let flat = flatten_block_hierarchy(&package, "sample")?;
+        let mut inliner = BlockInvokeInliner::new(&flat)?;
+        // The top-level map adds six nodes. Its copied callbacks and counted
+        // loops must share that same allowance.
+        assert_eq!(
+            inliner
+                .inline_block_with_unrolling("sample", 6)
+                .unwrap_err(),
+            "expanding calls in block 'sample' exceeds the budget of 6 additional IR nodes"
+        );
+        let words = IrValue::parse_typed("[bits[8]:2, bits[8]:10]").map_err(|e| e.to_string())?;
+        let expected =
+            IrValue::parse_typed("[bits[8]:10, bits[8]:34]").map_err(|e| e.to_string())?;
+        let mut sim = Simulation::from_flattened(&flat, "sample")?;
+        sim.reset_trial(Some(&BTreeMap::from([("q".into(), words.clone())])))?;
+        assert_eq!(sim.output(0)?, words);
+        sim.drive("words", &words)?;
+        sim.tick()?;
+        assert_eq!(sim.output(0)?, expected);
         Ok(())
     }
 }

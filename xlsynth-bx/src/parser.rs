@@ -354,7 +354,7 @@ enum Dialect {
 /// Declaration attributes select a test body or configure ordinary warning
 /// handling.
 enum DeclarationAttributes {
-    Test,
+    Test { quickcheck: bool },
     Warnings(BTreeSet<BxWarningKind>),
 }
 
@@ -475,6 +475,8 @@ struct Parser<'s> {
     position_cursor: (usize, SourcePosition),
     dialect: Dialect,
     tokens: Vec<Token<'s>>,
+    /// Original angle tokens split during a speculative expression parse.
+    saved_angle_tokens: Option<Vec<(usize, Token<'s>)>>,
     pos: usize,
     depth: usize,
     dslx_type_display: bool,
@@ -751,6 +753,7 @@ impl<'s> Parser<'s> {
             position_cursor: (0, SOURCE_START),
             dialect: Dialect::Bx,
             tokens,
+            saved_angle_tokens: None,
             pos: 0,
             depth: 0,
             dslx_type_display,
@@ -808,6 +811,9 @@ impl<'s> Parser<'s> {
             // In a type argument list, consume just the closing angle. This
             // leaves the outer '>' of zero!<Packet<2>>() or the '=' of a let.
             let token = &mut self.tokens[self.pos];
+            if let Some(saved) = &mut self.saved_angle_tokens {
+                saved.push((self.pos, *token));
+            }
             token.text = &token.text[1..];
             token.start += 1;
             true
@@ -950,7 +956,7 @@ impl<'s> Parser<'s> {
                 "}" => depth = depth.saturating_sub(1),
                 "#" if depth == 0
                     && self.peek(0) == "["
-                    && self.peek(1) == "test"
+                    && matches!(self.peek(1), "test" | "quickcheck")
                     && self.peek(2) == "]"
                     && matches!(self.peek(3), "fn" | "block") =>
                 {
@@ -1027,8 +1033,8 @@ impl<'s> Parser<'s> {
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
             let mut allowed_warnings = match self.attributes(&mut module)? {
-                DeclarationAttributes::Test => {
-                    let test = self.test_declaration()?;
+                DeclarationAttributes::Test { quickcheck } => {
+                    let test = self.with_name_scope(|p| p.test_declaration(quickcheck))?;
                     module.declaration_order.push(test.name.clone());
                     module.tests.push(test);
                     continue;
@@ -1198,12 +1204,15 @@ impl<'s> Parser<'s> {
             if matches!(name, "require_block_timing" | "require_define_before_use") {
                 return Err(self.error(&format!("use #![{name}] at module scope")));
             }
-            if self.eat("test") {
+            if matches!(name, "test" | "quickcheck") {
+                self.pos += 1;
                 if !allowed.is_empty() {
                     return Err(self.error("BX warning allowances apply to hardware declarations"));
                 }
                 self.expect("]")?;
-                return Ok(DeclarationAttributes::Test);
+                return Ok(DeclarationAttributes::Test {
+                    quickcheck: name == "quickcheck",
+                });
             }
             self.expect("allow")?;
             self.expect("(")?;
@@ -3906,6 +3915,7 @@ impl<'s> Parser<'s> {
         let span = start..self.tokens[callback_end].start;
         let tokens = lex(self.source, Dialect::Bx, Some(span))?;
         let outer_tokens = std::mem::replace(&mut self.tokens, tokens);
+        let outer_angles = self.saved_angle_tokens.take();
         self.pos = 0;
         self.value_context = ValueContext::BlockLambda;
         let mapped = self.map_lambda(iterable).and_then(|value| {
@@ -3917,6 +3927,7 @@ impl<'s> Parser<'s> {
         });
         self.value_context = ValueContext::Block;
         self.tokens = outer_tokens;
+        self.saved_angle_tokens = outer_angles;
         self.pos = callback_end;
         mapped
     }

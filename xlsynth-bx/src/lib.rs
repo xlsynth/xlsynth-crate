@@ -27,7 +27,10 @@ pub use parser::outline::{
     parse_dslx_outline,
 };
 pub use parser::parse_module;
-pub use test_runner::{BxTestReport, BxTestResult, run_tests};
+pub use test_runner::{
+    BxTestReport, BxTestResult, FourValuedReport, QuickCheckOptions, QuickCheckReport, run_tests,
+    run_tests_with_quickcheck,
+};
 pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;

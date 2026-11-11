@@ -295,3 +295,62 @@ fn test_checker_reports_misuse_at_the_statement_even_in_empty_loops() {
         assert_eq!(run(source).unwrap_err(), expected);
     }
 }
+
+#[test]
+fn quickcheck_checks_parameter_types_and_trailing_predicates_only_in_test_mode()
+-> Result<(), String> {
+    for (source, expected) in [
+        (
+            "#[quickcheck] block p(x: u8, x: u16) -> bool { true }",
+            "suite.bx:1:21: quickcheck 'p': duplicate name 'x'",
+        ),
+        (
+            "#[quickcheck] block p(x: u8) -> bool {\n    x := u8:0;\n    true\n}",
+            "suite.bx:2:5: test 'p': 'x' is not a stimulus register",
+        ),
+        (
+            "#[quickcheck] block p(x: u8) -> bool {\n    tick!();\n    x\n}",
+            "suite.bx:3:5: test 'p': expected bool, got u8",
+        ),
+        (
+            "type Word = u8;\n#[quickcheck] block p() -> Word { true }",
+            "suite.bx:2:21: quickcheck 'p': BX quickcheck blocks must return bool, got u8",
+        ),
+    ] {
+        let hardware = compile(source, empty_package("hardware"), ResetBehavior::default())?;
+        assert!(hardware.members.is_empty());
+        assert_eq!(run(source).unwrap_err(), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn quickcheck_accepts_local_and_imported_predicate_type_aliases() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    fs::write(dir.path().join("types.bx"), "pub type Flag = bool;")?;
+    fs::write(dir.path().join("native.x"), "pub type Flag = bool;")?;
+    let source = r#"
+use types;
+use native;
+type Pred = bool;
+#[quickcheck] block local(v: Pred) -> Pred { v || !v }
+#[quickcheck] block imported(v: types::Flag) -> types::Flag { v || !v }
+#[quickcheck] block dslx(v: native::Flag) -> native::Flag { v || !v }
+"#;
+    let report = run_tests(
+        source,
+        Path::new("suite.bx"),
+        empty_package("suite"),
+        ResetBehavior::default(),
+        &ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        },
+        true,
+    )?;
+    assert_eq!(report.tests.len(), 3);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    Ok(())
+}

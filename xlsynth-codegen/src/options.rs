@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use xlsynth::vast_helpers_options::CodegenOptions;
 
@@ -59,4 +61,14 @@ impl Default for BlockCodegenOptions {
 pub struct BlockCodegenOutput {
     /// Complete, deterministically ordered SystemVerilog source.
     pub system_verilog: String,
+}
+
+/// Generated RTL together with the signal names needed to initialize top
+/// block state in a simulator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockCodegenWithRegisterNames {
+    pub system_verilog: String,
+    /// Top block register names in IR mapped to their emitted RTL signals.
+    /// Zero-width registers have no signal and are omitted.
+    pub top_register_names: BTreeMap<String, String>,
 }

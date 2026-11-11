@@ -596,11 +596,57 @@ Run `xlsynth-driver bx-test counter.bx` to execute the tests declared in
 the second row to `6` makes `counter_steps` fail at that assertion. The
 diagnostic gives its source location, clock edge, and compared values.
 
-Clocked tests use synchronous reset and the same SystemVerilog lowering as
+Clocked `#[test]` blocks use synchronous reset and the same SystemVerilog lowering as
 `block2sv`. The runner executes procedural `for` statements in a test on
 the host. Value-producing expressions in the DUT or test circuit must lower
 to supported Block IR. Raw `counted_for` and `map` IR nodes require expansion
 before SystemVerilog code generation.
+
+### Clocked QuickCheck properties
+
+A private `#[quickcheck] block` takes typed stimulus parameters and ends with a
+`bool`. Each trial draws its parameters once. Arrays of records can describe
+a sequence of inputs. Using the counter above, this property checks its
+load enable and accumulated value after each edge.
+
+```text
+#[quickcheck]
+block counter_matches(trace: Drive[4]) -> bool {
+    reg drive: Drive;
+    reg expected: u8;
+    let total = counter(drive);
+    tick!(rst: true);
+    for row in trace {
+        drive := row;
+        if row.enable { expected := expected + row.increment; }
+        tick!();
+        assert_eq(total, expected);
+    }
+    total == expected
+}
+```
+
+```shell
+xlsynth-driver bx-test counter.bx --seed 42 --quickcheck-trials 100 --cross-check-vastly
+```
+
+The PIR interpreter starts each trial with independently drawn bits in every
+DUT register, including registers with a synchronous reset value. A reset edge
+loads that value. Testbench stimulus registers use their declared initializers
+or typed zero. Enum parameters draw from their declared members. A failed
+concrete trial reports its seed, trial number, parameters, initial register
+values, and the executed stimulus assignments and clock edges.
+
+`--cross-check-vastly` first compares every sampled PIR value with generated
+RTL running from the same concrete register values. It also runs the RTL from
+all-X DUT register state with the same stimulus parameters. This second run
+reports true, false, or indeterminate. An indeterminate trial identifies the
+first procedural sample containing X or Z, including a snapshot or a branch
+condition. The four-valued counts are reported separately from the concrete
+property result. A failed concrete property, backend error, or concrete
+mismatch makes `bx-test` exit unsuccessfully. For the optional RTL run,
+maps and counted loops are expanded with a limit of 65,536 additional IR
+nodes per property harness, including nested body copies.
 
 ## Compile and link
 
