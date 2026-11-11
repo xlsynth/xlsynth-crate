@@ -506,9 +506,9 @@ impl BodyChecker<'_, '_> {
         let visited = Cell::new(0);
         let mut locals = LexicalScope::root(&self.names, &visited);
         for binding in &def.value_parametrics {
-            self.check_type_names(&binding.ty, &locals)?;
-            // The binding is visible in its own default before it has a value.
+            // The formal hides an outer type even in its own annotation.
             locals.bind_pattern_name(&binding.name);
+            self.check_type_names(&binding.ty, &locals)?;
             self.value_parametric_names.insert(binding.name.clone());
             if let Some(default) = &binding.default {
                 self.check_expr_names(default, &locals)?;
@@ -536,10 +536,10 @@ impl BodyChecker<'_, '_> {
         for formal in f.parametric_bindings() {
             match formal {
                 FunctionParametricRef::Value(binding) => {
-                    self.check_type_names(&binding.ty, &locals)?;
-                    // DSLX resolves the formal inside its own default. Its
-                    // value is unavailable if a call actually selects it.
+                    // DSLX introduces the formal before its annotation and
+                    // default.
                     locals.bind_pattern_name(&binding.name);
+                    self.check_type_names(&binding.ty, &locals)?;
                     self.value_parametric_names.insert(binding.name.clone());
                     if let Some(default) = &binding.default {
                         self.check_expr_names(default, &locals)?;
@@ -609,10 +609,11 @@ impl BodyChecker<'_, '_> {
             return Ok(false);
         }
         // A block can call imported functions declared later. An imported
-        // enum only shadows the builtin once its use enters value scope.
+        // enum or type alias shadows the builtin once its use enters value
+        // scope.
         if !self.decls.visible(target, self.block_position)
             && let Some((subject, member)) = self.resolver.lookup_enum_prefix(target)?
-            && self.resolver.is_enum_type(&subject, &member)
+            && self.resolver.is_enum_or_alias(&subject, &member)
         {
             return Ok(true);
         }
@@ -624,7 +625,8 @@ impl BodyChecker<'_, '_> {
                 || self.decls.is_block(target)
                 || self.structs.indices.contains_key(target)
                 || (self.structs.template(target).is_some()
-                    || self.structs.enums.contains_key(target))
+                    || self.structs.enums.contains_key(target)
+                    || self.decls.type_aliases.contains_key(target))
                     && self
                         .decls
                         .visible(target, self.function_position.or(self.block_position))
@@ -758,6 +760,15 @@ impl BodyChecker<'_, '_> {
         }
         self.decls
             .check_type_name_visibility(name, self.function_position)?;
+        if let Some(alias) = self.decls.type_aliases.get(name) {
+            return match usage {
+                NominalUse::AppliedStruct => Err(format!("type alias '{name}' takes no arguments")),
+                NominalUse::Constructor if !matches!(alias.ty, Type::Named(_)) => {
+                    Err(format!("type alias '{name}' does not name a struct"))
+                }
+                _ => Ok(()),
+            };
+        }
         if let Some((module, member)) =
             lookup_use(name, self.resolver, |binding| locals.contains(binding))?
         {
@@ -880,7 +891,8 @@ impl BodyChecker<'_, '_> {
             || self.decls.declares_function(name)
             || self.decls.is_block(name)
             || callee
-                && self.structs.local_enum(name).is_some()
+                && (self.structs.local_enum(name).is_some()
+                    || self.decls.type_aliases.contains_key(name))
                 && self
                     .decls
                     .visible(name, self.function_position.or(self.block_position))

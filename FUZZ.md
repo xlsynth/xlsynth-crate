@@ -309,6 +309,12 @@ Generates module constants with dependent scalar expressions, nested aggregates,
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_constants --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_type_aliases.rs
+
+Compares concrete module type aliases in BX and pinned DSLX. Generated chains refer to booleans, signed and unsigned bits from zero to 129 bits wide, nested arrays and tuples, enums, and structs including specializations with identical fields. The target checks source acceptance, constant values, and runtime outputs in BX block IR, compiled DSLX IR, and concrete DSLX calls. Paired library and consumer modules exercise qualified and directly imported public aliases, re-exported aggregates of private types, and same-named types in different scopes. Rejected programs expose lost nominal identity, invalid alias targets, declaration-order mistakes, and access to private types.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_type_aliases -- -max_len=13 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
 Generates small DSLX module graphs with two distinct, same-shaped structs,

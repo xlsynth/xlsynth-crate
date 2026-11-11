@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#[path = "frontend/alias_expressions.rs"]
+mod alias_expressions;
 #[path = "frontend/array_concat.rs"]
 mod array_concat;
 #[path = "frontend/array_update.rs"]
@@ -28,8 +30,12 @@ mod local_functions;
 mod map_lambda;
 #[path = "frontend/module_constants.rs"]
 mod module_constants;
+#[path = "frontend/module_type_aliases.rs"]
+mod module_type_aliases;
 #[path = "frontend/named_map.rs"]
 mod named_map;
+#[path = "frontend/native_aggregate_aliases.rs"]
+mod native_aggregate_aliases;
 #[path = "frontend/native_structs.rs"]
 mod native_structs;
 #[path = "frontend/numeric_enums.rs"]

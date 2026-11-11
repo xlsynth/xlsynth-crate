@@ -53,6 +53,18 @@ pub(super) enum ResolvedShape {
     Other,
 }
 
+impl ResolvedShape {
+    /// Visit the nominal leaves of this bounded, resolved tuple or array shape.
+    fn visit_nominals(&self, visit: &mut impl FnMut(&DeclId)) {
+        match self {
+            Self::Struct(id) | Self::Enum(id) => visit(id),
+            Self::Array(element) => element.visit_nominals(visit),
+            Self::Tuple(members) => members.iter().for_each(|ty| ty.visit_nominals(visit)),
+            Self::Other => { /* Primitive and opaque shapes have no known nominal leaves. */ }
+        }
+    }
+}
+
 /// A local binding established by a DSLX import or an expanded use leaf.
 enum Binding {
     Module(String),
@@ -227,6 +239,10 @@ pub(super) struct OutlineGraph {
     targets: BTreeMap<DeclId, DeclId>,
     exports: BTreeMap<DeclId, String>,
     unresolved_aliases: BTreeSet<DeclId>,
+    /// Public aggregates with a nominal element that has no public name.
+    pub(super) private_aggregate_exports: Vec<DeclId>,
+    /// Probe-only aliases for concrete private types inside public aggregates.
+    pub(super) value_aliases: BTreeMap<String, BTreeMap<String, String>>,
     member_use_names: BTreeSet<String>,
 }
 
@@ -566,6 +582,85 @@ impl OutlineGraph {
             } else {
                 self.exports.entry(target.clone()).or_insert(path);
             }
+        }
+        self.index_aggregate_aliases();
+    }
+
+    /// Give constexpr probes constructor and cast spellings for the nominal
+    /// members of exported aggregates. Reserve names used anywhere in the
+    /// original modules, including imported references and requested BX uses.
+    fn index_aggregate_aliases(&mut self) {
+        let mut pending = BTreeSet::new();
+        let mut exports = Vec::new();
+        for (target, spelling) in &self.exports {
+            let decl = &self.modules[&target.subject].outline.declarations[&target.name];
+            let OutlineKind::Alias(annotation) = &decl.kind else {
+                continue;
+            };
+            if decl.parametric
+                || !matches!(
+                    annotation.shape,
+                    OutlineShape::Array(_) | OutlineShape::Tuple(_)
+                )
+            {
+                continue;
+            }
+            let mut needs_witness = false;
+            self.resolve_type(&target.subject, annotation)
+                .visit_nominals(&mut |id| {
+                    needs_witness |= self.public_path(id).is_none();
+                    pending.insert(id.clone());
+                });
+            if needs_witness {
+                let (subject, name) = spelling.split_once("::").expect("qualified public path");
+                exports.push(DeclId {
+                    subject: subject.to_owned(),
+                    name: name.to_owned(),
+                });
+            }
+        }
+        self.private_aggregate_exports = exports;
+        let mut visited = BTreeSet::new();
+        let mut private = BTreeSet::new();
+        while let Some(id) = pending.pop_first() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            if let Some(fields) = self.fields(&id) {
+                for (_, ty) in fields {
+                    self.resolve_type(&id.subject, ty)
+                        .visit_nominals(&mut |field| {
+                            pending.insert(field.clone());
+                        });
+                }
+            }
+            if self.public_path(&id).is_none()
+                && !self.modules[&id.subject].outline.declarations[&id.name].parametric
+            {
+                private.insert(id);
+            }
+        }
+        if private.is_empty() {
+            return;
+        }
+        const PREFIX: &str = "BXConstexprType";
+        let occupied: BTreeSet<_> = self
+            .sources()
+            .flat_map(|s| s.source.split(|b| !b.is_ascii_alphanumeric()))
+            .chain(self.member_use_names.iter().map(String::as_bytes))
+            .filter_map(|word| {
+                std::str::from_utf8(word.strip_prefix(PREFIX.as_bytes())?)
+                    .ok()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .collect();
+        let names = (0..).filter(|id| !occupied.contains(id));
+        for (id, index) in private.into_iter().zip(names) {
+            self.value_aliases
+                .entry(id.subject)
+                .or_default()
+                .insert(id.name, format!("{PREFIX}{index}"));
         }
     }
 

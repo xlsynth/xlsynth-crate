@@ -224,6 +224,103 @@ block stage_external(clk, x: Lane<7>) -> u7 {{ let y = external_stage(x); y }}
 }
 
 #[test]
+fn public_bx_aliases_preserve_private_types_across_module_and_member_uses()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    write_module(
+        dir.path(),
+        "device.bx",
+        r#"
+const WIDTH = u32:7;
+type Payload = uN[WIDTH];
+enum State: u8 { Ready = 3, Busy = 5 }
+struct Frame<T> { data: T, state: State }
+pub type Packet = Frame<Payload>;
+pub type Status = State;
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "bus.bx",
+        r#"
+use device;
+pub type Data = device::Packet;
+pub type Phase = device::Status;
+"#,
+    )?;
+    let root = r#"
+use bus;
+use bus::Phase;
+type Payload = u16;
+enum State: u8 { Ready = 20 }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 {
+    let p: bus::Data = bus::Data { data: x as u7, state: Phase::Ready };
+    match p.state {
+        bus::Phase::Ready => (p.data as u8) + (p.state as u8),
+        _ => Phase::Busy as u8,
+    }
+}
+"#;
+    assert_eq!(
+        run(compile_design(root, &options)?, 250)?,
+        IrValue::make_ubits(8, 125)?
+    );
+    for source in [
+        "use device::Payload;",
+        "use device; fn bad(x:device::State) {}",
+        "use bus; fn bad(x:bus::Packet) {}",
+        "use bus::Phase; type Phase = u8;",
+        "use bus::Data; fn bad() -> u8 { Data::Ready as u8 }",
+    ] {
+        assert!(
+            check_source_with_options(source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn library_define_before_use_checks_alias_references_and_their_dimensions()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let path = dir.path().join("lib.bx");
+    let declarations = "pub block take(clk, x: Word) -> Word { x }\npub type Word = u8;";
+    fs::write(&path, declarations)?;
+    let source = "use lib; block top(clk, x: u8) -> u8 { let y = lib::take(x); y }";
+    check_source_with_options(source, &options)?;
+    for (declarations, owner, referenced) in [
+        (declarations, "take", "Word"),
+        (
+            "type Pair = (Word, Word); pub type Word = u8;",
+            "Pair",
+            "Word",
+        ),
+        (
+            "type Word = uN[WIDTH + u32:1]; const WIDTH = u32:7;",
+            "Word",
+            "WIDTH",
+        ),
+    ] {
+        fs::write(
+            &path,
+            format!("#![require_define_before_use]\n{declarations}"),
+        )?;
+        assert_eq!(
+            check_source_with_options("use lib;", &options).unwrap_err(),
+            format!(
+                "BX import 'lib' ({}): in '{owner}': '{referenced}' is declared later in the module",
+                path.display()
+            )
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn imported_bx_enum_members_resolve_through_module_and_member_uses() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(

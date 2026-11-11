@@ -101,11 +101,10 @@ impl ForwardReference {
         if let Some(alias) = &self.native_builtin
             && let Some((subject, member)) = resolver.lookup_enum_prefix(alias)?
         {
-            // An enum imported later leaves the builtin map in scope. Other
-            // ordinary builtins also stay visible before an imported struct or
-            // type alias.
-            let builtin = if self.spelling == "map" {
-                resolver.is_enum_type(&subject, &member)
+            // A later enum or alias leaves map and zero! in scope. Other
+            // ordinary builtins also stay visible before an imported struct.
+            let builtin = if matches!(self.spelling.as_str(), "map" | "zero!") {
+                resolver.is_enum_or_alias(&subject, &member)
             } else {
                 resolver.has_public_type(&subject, &member)
             };

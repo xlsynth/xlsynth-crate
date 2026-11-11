@@ -44,7 +44,7 @@ pub(crate) const BUILTIN_MAP: &str = "$builtin$map";
 struct Export {
     name: String,
     parametrics: Vec<ParametricKind>,
-    is_enum: bool,
+    can_qualify_member: bool,
     is_struct: bool,
     overrides_zero_builtin: bool,
     has_type_params: bool,
@@ -59,11 +59,11 @@ enum ParametricKind {
 }
 
 impl Export {
-    /// Enum members inherit the visibility of their declaring type.
+    /// Enum members inherit the visibility of the enum or an alias naming it.
     fn reference(&self, member: Option<&str>) -> Option<String> {
         match member {
             None => Some(self.name.clone()),
-            Some(member) if self.is_enum => Some(format!("{}::{member}", self.name)),
+            Some(member) if self.can_qualify_member => Some(format!("{}::{member}", self.name)),
             Some(_) => None,
         }
     }
@@ -108,7 +108,8 @@ struct Names {
     verification_only: bool,
     zero_binding: ZeroBinding,
     definitions: BTreeSet<String>,
-    enums: BTreeSet<String>,
+    /// A type alias can qualify a member if the checker resolves it to an enum.
+    enums_or_aliases: BTreeSet<String>,
     structs: BTreeSet<String>,
     type_structs: BTreeSet<String>,
     templates: BTreeMap<String, Vec<ParametricKind>>,
@@ -128,6 +129,7 @@ impl Names {
             .iter()
             .map(|d| &d.name)
             .chain(module.enums.iter().map(|d| &d.name))
+            .chain(module.type_aliases.iter().map(|d| &d.name))
             .chain(module.functions.iter().map(|d| &d.name))
             .chain(module.constants.iter().map(|d| &d.name))
             .chain(module.blocks.iter().map(|d| &d.name))
@@ -190,7 +192,12 @@ impl Names {
             verification_only: false,
             zero_binding,
             definitions,
-            enums: module.enums.iter().map(|d| d.name.clone()).collect(),
+            enums_or_aliases: module
+                .enums
+                .iter()
+                .map(|d| d.name.clone())
+                .chain(module.type_aliases.iter().map(|d| d.name.clone()))
+                .collect(),
             structs: module.structs.iter().map(|d| d.name.clone()).collect(),
             type_structs: module
                 .structs
@@ -328,7 +335,7 @@ impl Names {
             // spelling. A value expression resolves to the enum member.
             let binding = if matches!(kind, ReferenceKind::Value)
                 && member.is_some()
-                && self.enums.contains(head)
+                && self.enums_or_aliases.contains(head)
             {
                 head
             } else {
@@ -338,7 +345,7 @@ impl Names {
             return Ok(self.declared(name));
         }
         if let Some(member) = member
-            && self.enums.contains(head)
+            && self.enums_or_aliases.contains(head)
         {
             self.record_reference(owner, head, name, None);
             return Ok(format!("{}::{member}", self.declared(head)));
@@ -583,6 +590,11 @@ impl<'a> Graph<'a> {
             .iter()
             .map(|d| (&d.name, d.public))
             .chain(module.enums.iter().map(|d| (&d.name, d.public)))
+            .chain(module.type_aliases.iter().map(|d| {
+                // DSLX permits a declaration named self, but a qualified
+                // type reference requires an identifier after the separator.
+                (&d.name, d.public && parser::is_use_identifier(&d.name))
+            }))
             .chain(module.constants.iter().map(|d| (&d.name, d.public)))
             .chain(module.functions.iter().map(|d| (&d.name, d.public)))
             .chain(module.blocks.iter().map(|d| (&d.name, d.public)))
@@ -593,7 +605,7 @@ impl<'a> Graph<'a> {
                     Export {
                         name: names.declared(name),
                         parametrics: names.parametrics(name).to_vec(),
-                        is_enum: names.enums.contains(name),
+                        can_qualify_member: names.enums_or_aliases.contains(name),
                         is_struct: names.structs.contains(name),
                         overrides_zero_builtin: name == "zero!"
                             && names.zero_binding == ZeroBinding::BxFunction,
@@ -631,11 +643,12 @@ impl<'a> Graph<'a> {
                 .chain(source.constants.iter().map(|d| (&d.name, false)))
                 .chain(source.enums.iter().map(|d| (&d.name, false)))
                 .chain(source.structs.iter().map(|d| (&d.name, false)))
+                .chain(source.type_aliases.iter().map(|d| (&d.name, false)))
                 .chain(source.externs.iter().map(|d| (&d.name, false)))
                 .chain(source.extern_blocks.iter().map(|d| (&d.name, false)))
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
             {
-                if block && !export.is_enum
+                if block && !export.can_qualify_member
                     || use_pos
                         .zip(names.positions.get(owner))
                         .is_none_or(|(u, &d)| u <= d)
@@ -675,10 +688,16 @@ impl<'a> Graph<'a> {
                     .map(|d| d.name.clone())
                     .chain(m.externs.iter().map(|d| d.name.clone()))
                     .chain(m.constants.iter().map(|d| d.name.clone()))
+                    .chain(m.structs.iter().map(|d| d.name.clone()))
+                    .chain(m.type_aliases.iter().map(|d| d.name.clone()))
                     .chain(m.functions.iter().map(|d| d.name.clone())),
             );
         }
         linked.structs.append(&mut m.structs);
+        linked
+            .overwritten_literal_types
+            .append(&mut m.overwritten_literal_types);
+        linked.type_aliases.append(&mut m.type_aliases);
         linked.enums.append(&mut m.enums);
         linked.constants.append(&mut m.constants);
         linked.externs.append(&mut m.externs);

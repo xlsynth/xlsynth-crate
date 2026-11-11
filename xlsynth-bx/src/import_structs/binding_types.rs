@@ -80,10 +80,15 @@ impl ImportedStructs {
                 && graph.has_public_member(&id.subject, &id.name)
                 && matches!(
                     graph.named(&id.subject, &id.name),
-                    Some(ResolvedShape::Enum(_) | ResolvedShape::Struct(_))
+                    Some(
+                        ResolvedShape::Enum(_)
+                            | ResolvedShape::Struct(_)
+                            | ResolvedShape::Tuple(_)
+                            | ResolvedShape::Array(_)
+                    )
                 )
             {
-                concrete = Some(self.resolve_nominal_type(&id.subject, &id.name, data)?);
+                concrete = Some(self.resolve_exported_type(&id.subject, &id.name, data)?);
             }
             if concrete.is_none() {
                 pending.push((i, &binding.ty));
@@ -127,7 +132,7 @@ impl ImportedStructs {
                     expr: format!("value_{i}"),
                 };
                 let ty = registry.reflect_at(&ty, &mut isolated, &witness, Some(&shape), 0)?;
-                types[i] = Some(self.import_binding_type(ty, data)?);
+                types[i] = Some(self.import_binding_type(&registry, ty, data)?);
             }
         }
         Ok(types
@@ -176,7 +181,7 @@ impl ImportedStructs {
             Some(&shape),
             0,
         )?;
-        self.import_binding_type(ty, data)
+        self.import_binding_type(&registry, ty, data)
     }
 
     /// Typecheck added witness declarations without changing the native module
@@ -204,7 +209,18 @@ impl ImportedStructs {
     /// Rebind nominal layouts reflected in the type-only snapshot to handles
     /// in the main import graph. Concrete struct spellings include every
     /// binding.
-    fn import_binding_type(&mut self, ty: Type, data: &mut ImportData) -> Result<Type, String> {
+    fn import_binding_type(
+        &mut self,
+        registry: &Self,
+        ty: Type,
+        data: &mut ImportData,
+    ) -> Result<Type, String> {
+        if let Some((subject, member)) = registry
+            .aggregate_spelling(&ty)
+            .and_then(|alias| alias.split_once("::"))
+        {
+            return self.resolve_exported_type(subject, member, data);
+        }
         match ty {
             Type::Enum { ref name, .. } | Type::Named(ref name) => {
                 let (subject, spelling) = name
@@ -223,16 +239,16 @@ impl ImportedStructs {
                     self.resolve_spelling(subject, member, spelling, data)
                         .map(Type::Named)
                 } else {
-                    self.resolve_nominal_type(subject, member, data)
+                    self.resolve_exported_type(subject, member, data)
                 }
             }
             Type::Tuple(fields) => fields
                 .into_iter()
-                .map(|f| self.import_binding_type(f, data))
+                .map(|f| self.import_binding_type(registry, f, data))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Type::Tuple),
             Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.import_binding_type(*element, data)?),
+                element: Box::new(self.import_binding_type(registry, *element, data)?),
                 size,
             }),
             _ => Ok(ty),

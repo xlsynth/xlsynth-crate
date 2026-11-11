@@ -230,6 +230,8 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         dependent_types: false,
         callable_templates: Default::default(),
         type_structs: Default::default(),
+        literal_type_heads: Default::default(),
+        overwritten_literal_types: Default::default(),
         hidden_templates: Vec::new(),
         visible_names: Default::default(),
         visible_type_names: Default::default(),

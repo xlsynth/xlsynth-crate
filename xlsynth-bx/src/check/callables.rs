@@ -569,7 +569,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             let visible_type = (self.structs.indices.contains_key(name)
                 || self.structs.template(name).is_some()
-                || self.structs.enums.contains_key(name))
+                || self.structs.enums.contains_key(name)
+                || self.decls.type_aliases.contains_key(name))
                 && visible;
             if spelling == name
                 && (!self.decls.visible(name, self.function_position)

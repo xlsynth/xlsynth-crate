@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use crate::ast::{Block, CallbackParam, Expr, Param, Type};
+use crate::ast::{Block, CallbackParam, Expr, FunctionParametricRef, Param, Type};
 use crate::parser::{is_identifier, is_use_identifier};
 
 use super::{
@@ -55,11 +55,6 @@ pub(super) fn validate_declaration(block: &Block) -> Result<(), String> {
         if type_params.contains(name) || callback_names.contains(name) || !value_names.insert(name)
         {
             return Err(format!("duplicate block parameter '{name}'"));
-        }
-        if parametric.ty != super::value_parametrics::dimension_type() {
-            return Err(format!(
-                "block value parametric '{name}' must have type u32"
-            ));
         }
         if parametric.default.is_some() {
             return Err(format!(
@@ -154,6 +149,35 @@ impl<'m> BlockTemplate<'m> {
         dimensions: ModuleDimensions<'_, 'm>,
         types: &mut TypeResolver<'_, 'm>,
     ) -> Result<Self, String> {
+        let dimension_type = super::value_parametrics::dimension_type();
+        let mut preceding = BTreeSet::new();
+        for formal in block.parametric_bindings() {
+            let name = match formal {
+                FunctionParametricRef::Callback(callback) => &callback.name,
+                FunctionParametricRef::Value(value) => {
+                    let is_dimension = if matches!(value.ty, Type::Named(_)) {
+                        resolve_type(
+                            &value.ty,
+                            &|name| preceding.contains(name),
+                            Some(bindings),
+                            dimensions,
+                            types,
+                            MAX_ELABORATION_DEPTH,
+                        )? == dimension_type
+                    } else {
+                        value.ty == dimension_type
+                    };
+                    if !is_dimension {
+                        return Err(format!(
+                            "block value parametric '{}' must have type u32",
+                            value.name
+                        ));
+                    }
+                    &value.name
+                }
+            };
+            preceding.insert(name.as_str());
+        }
         let value_names: BTreeSet<_> = block
             .value_parametrics
             .iter()
