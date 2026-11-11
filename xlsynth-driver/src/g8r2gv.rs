@@ -7,21 +7,28 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::builder::ArgPredicate;
 use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use xlsynth_g8r::aig::SequentialGateFn;
-use xlsynth_g8r::liberty::io_defaults::{default_output_load_ff, resolve_reference_buffer};
-use xlsynth_g8r::liberty::load::load_library_from_path;
+use xlsynth_g8r::liberty::io_defaults::{
+    default_output_load, default_output_load_ff, load_ff_in_library_units, resolve_reference_buffer,
+};
+use xlsynth_g8r::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
 use xlsynth_g8r::liberty_model::Library;
 use xlsynth_g8r::netlist::abc::{
     AbcIoConstraints, AbcMappedDesign, AbcMappingContext, AbcMappingOptions, AbcRunDiagnostics,
     AbcToolchain,
 };
+use xlsynth_g8r::netlist::fanout_opt::FanoutOptimizationOptions;
+use xlsynth_g8r::netlist::io::ParsedNetlist;
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
+use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
 use xlsynth_g8r::netlist::sequential_mapping::{
-    SequentialMappingOptions, map_sequential_to_area_netlist,
+    SequentialMappingOptions, map_sequential_to_native_netlist,
 };
+use xlsynth_g8r::netlist::sta::StaOptions;
+use xlsynth_g8r::techmap::delay::DelayMappingOptions;
+use xlsynth_g8r::techmap::postprocess::{CoverStrategy, PostMappingOptions};
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::same_unix_file;
@@ -36,18 +43,35 @@ pub fn command() -> Command {
     let command = Command::new("g8r2gv")
         .about("Maps a .g8r or .g8rbin design to a gate-level netlist with native or ABC combinational mapping")
         .arg(Arg::new("g8r_input_file").required(true).index(1).help("Input .g8r or .g8rbin design"));
-    add_mapping_args(command)
+    add_mapping_args(command, "delay", "true")
 }
 
 /// Adds technology mapping, clock, boundary register, and netlist output
 /// options.
-pub(crate) fn add_mapping_args(command: Command) -> Command {
+pub(crate) fn add_mapping_args(
+    command: Command,
+    default_strategy: &'static str,
+    abc_resize: &'static str,
+) -> Command {
     command
         .arg(output_arg())
         .arg(format_arg())
         .arg(Arg::new("mapper").long("mapper").value_name("MAPPER").value_parser(["native", "abc"])
-            .default_value_if("liberty", ArgPredicate::IsPresent, "abc").default_value("native")
-            .help("Combinational mapper: native area mapping by default, ABC when raw --liberty is supplied"))
+            .default_value("native")
+            .help("Combinational mapper; raw --liberty requires --mapper=abc"))
+        .arg(Arg::new("strategy").long("strategy").value_parser(["area","delay"]).default_value(default_strategy)
+            .help("Native combinational covering objective"))
+        .arg(Arg::new("fanout-opt").long("fanout-opt").value_parser(clap::value_parser!(bool))
+            .help("Native combinational fanout optimization (default: on for delay, off for area)"))
+        .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
+            .help("Native combinational area recovery (default: on for delay, off for area)"))
+        .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
+            .default_value_if("mapper", "abc", abc_resize)
+            .default_value_if("strategy", "delay", "true")
+            .default_value("false").hide_default_value(true)
+            .help(format!("Resize the assembled logic and compatible flops (default: true for delay, false for area, {abc_resize} for ABC)")))
+        .arg(Arg::new("primary-input-transition").long("primary-input-transition").value_parser(clap::value_parser!(f64))
+            .help("Primary input slew in library time units for native mapping and resizing (default: 0.01)"))
         .arg(Arg::new("liberty").long("liberty").value_name("PATH").required_if_eq("mapper", "abc").action(ArgAction::Append)
             .help("Raw uncompressed Liberty file for ABC; repeat in loading order. The first one or two files must provide the usable combinational library"))
         .arg(Arg::new("liberty-proto").long("liberty-proto").value_name("PATH").required(true)
@@ -286,7 +310,6 @@ pub(crate) fn map_design(
             "abc-path",
             "abc-script",
             "driving-cell",
-            "output-load-ff",
             "timeout-seconds",
             "diagnostics-out",
             "abc-stdout-out",
@@ -297,11 +320,66 @@ pub(crate) fn map_design(
     {
         anyhow::bail!("--{flag} requires the ABC mapper (--mapper abc with --liberty)");
     }
+    if !native
+        && let Some(flag) = ["strategy", "fanout-opt", "area-recovery"]
+            .into_iter()
+            .find(|flag| matches.value_source(flag) == Some(ValueSource::CommandLine))
+    {
+        anyhow::bail!("--{flag} requires --mapper native");
+    }
+    let delay = native && matches.get_one::<String>("strategy").unwrap() == "delay";
+    let fanout = native
+        && matches
+            .get_one::<bool>("fanout-opt")
+            .copied()
+            .unwrap_or(delay);
+    let recover = native
+        && matches
+            .get_one::<bool>("area-recovery")
+            .copied()
+            .unwrap_or(delay);
+    let resize = *matches.get_one::<bool>("g8r-resize").unwrap();
+    let needs_timing = delay || fanout || recover || resize;
+    anyhow::ensure!(
+        needs_timing || matches.get_one::<f64>("primary-input-transition").is_none(),
+        "--primary-input-transition requires native timing optimization or --g8r-resize=true"
+    );
+    anyhow::ensure!(
+        !native || needs_timing || matches.get_one::<f64>("output-load-ff").is_none(),
+        "--output-load-ff requires timing optimization or the ABC mapper"
+    );
     let design = crate::g8r_cli::apply_netlist_options(matches, load_design()?)
         .map_err(anyhow::Error::msg)?;
     let library_path = matches.get_one::<String>("liberty-proto").unwrap();
-    let library = load_library_from_path(Path::new(library_path))
-        .map_err(|error| anyhow::Error::msg(error.to_string()))?;
+    let library = if needs_timing {
+        load_library_with_timing_data_from_path(Path::new(library_path))
+            .context("mapping/resizing requires a timing-enabled --liberty-proto")?
+    } else {
+        load_library_from_path(Path::new(library_path))?
+    };
+    let timing = if needs_timing {
+        let defaults = StaOptions::default();
+        let transition = matches
+            .get_one::<f64>("primary-input-transition")
+            .copied()
+            .unwrap_or(defaults.primary_input_transition);
+        anyhow::ensure!(
+            transition.is_finite() && transition >= 0.0,
+            "primary input transition must be finite and nonnegative"
+        );
+        let load = match matches.get_one::<f64>("output-load-ff") {
+            Some(ff) => load_ff_in_library_units(&library, *ff),
+            None => default_output_load(&library),
+        }
+        .map_err(anyhow::Error::msg)?;
+        StaOptions {
+            primary_input_transition: transition,
+            module_output_load: load,
+            ..defaults
+        }
+    } else {
+        StaOptions::default()
+    };
     let mut sequential_options = SequentialMappingOptions {
         cleanup_registers: matches.get_flag("cleanup-registers"),
         ..Default::default()
@@ -320,14 +398,73 @@ pub(crate) fn map_design(
     if let Some(cell) = matches.get_one::<String>("register-cell") {
         sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
-    let (mapped, diagnostics) = if native {
-        let mapped = map_sequential_to_area_netlist(&design, &library, &sequential_options)?;
-        (mapped, None)
+    let abc_context;
+    let (mut mapped, diagnostics, library) = if native {
+        let strategy = if delay {
+            CoverStrategy::Delay(DelayMappingOptions {
+                reference_transition: timing.primary_input_transition,
+                reference_load: timing.module_output_load,
+            })
+        } else {
+            CoverStrategy::Area
+        };
+        let post = PostMappingOptions {
+            fanout: fanout.then(|| FanoutOptimizationOptions {
+                primary_input_transition: timing.primary_input_transition,
+                module_output_load: timing.module_output_load,
+                wire_load: timing.wire_load,
+                ..Default::default()
+            }),
+            recovery: recover.then(|| ResizeOptions {
+                timing,
+                max_area_growth: 0.0,
+                max_upsize_rounds: 0,
+                timing_evaluation_budget: Some(0),
+                ..Default::default()
+            }),
+        };
+        let mapped = map_sequential_to_native_netlist(
+            &design,
+            &library,
+            &sequential_options,
+            strategy,
+            &post,
+        )?;
+        (mapped, None, &library)
     } else {
-        let mapped = map_with_abc(matches, &design, library, &sequential_options, format)
-            .map_err(anyhow::Error::msg)?;
-        (mapped.netlist, Some(mapped.diagnostics))
+        let mapped;
+        (mapped, abc_context) =
+            map_with_abc(matches, &design, library, &sequential_options, format)
+                .map_err(anyhow::Error::msg)?;
+        (
+            mapped.netlist,
+            Some(mapped.diagnostics),
+            abc_context.library(),
+        )
     };
+    if resize {
+        let ParsedNetlist {
+            modules,
+            nets,
+            interner,
+            ..
+        } = &mut mapped;
+        let [module] = modules.as_mut_slice() else {
+            anyhow::bail!("expected one assembled module for resizing")
+        };
+        resize_netlist(
+            module,
+            nets,
+            interner,
+            library,
+            &ResizeOptions {
+                timing,
+                resize_registers: matches.get_one::<String>("register-cell").is_none(),
+                ..Default::default()
+            },
+        )
+        .context("resizing assembled netlist")?;
+    }
     let bytes = format.encode(&mapped)?;
     let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
         .with_context(|| format!("opening mapped netlist '{}'", output_path.display()))?;
@@ -346,7 +483,7 @@ fn map_with_abc(
     library: Library,
     sequential_options: &SequentialMappingOptions,
     format: Format,
-) -> Result<AbcMappedDesign, String> {
+) -> Result<(AbcMappedDesign, AbcMappingContext), String> {
     // Resolve only omitted fields: explicit overrides must not require the
     // corresponding proto defaults (or capacitance units) to be valid.
     let driving_cell = match matches.get_one::<String>("driving-cell") {
@@ -378,17 +515,52 @@ fn map_with_abc(
         .collect::<Vec<_>>();
     let context =
         AbcMappingContext::new(toolchain, &raw_files, library).map_err(|e| e.to_string())?;
-    match format {
+    let mapped = match format {
         Format::Gv => context.map_sequential(design, sequential_options, &abc_options),
         Format::Pb => context.map_sequential_structural(design, sequential_options, &abc_options),
     }
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok((mapped, context))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{NetlistOutput, output_paths_alias, write_sidecar};
     use std::fs;
+
+    #[test]
+    fn final_resize_follows_native_strategy_unless_overridden() -> anyhow::Result<()> {
+        for (command, default_resize, abc_resize) in [
+            (super::command(), true, true),
+            (crate::bx::bx2gv_command(), false, false),
+        ] {
+            for (flags, expected) in [
+                (&[][..], default_resize),
+                (&["--strategy=area"][..], false),
+                (&["--strategy=delay"][..], true),
+                (&["--mapper=abc", "--liberty=cells.lib"][..], abc_resize),
+            ] {
+                for explicit in [None, Some(false), Some(true)] {
+                    let mut args = vec![command.get_name(), "input", "--liberty-proto=cells.proto"];
+                    args.extend_from_slice(flags);
+                    if let Some(resize) = explicit {
+                        args.push(if resize {
+                            "--g8r-resize=true"
+                        } else {
+                            "--g8r-resize=false"
+                        });
+                    }
+                    let parsed = command.clone().try_get_matches_from(&args)?;
+                    assert_eq!(
+                        parsed.get_one::<bool>("g8r-resize").copied(),
+                        Some(explicit.unwrap_or(expected)),
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn raw_log_replaced_after_preflight_cannot_overwrite_netlist() -> anyhow::Result<()> {

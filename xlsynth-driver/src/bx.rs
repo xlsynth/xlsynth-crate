@@ -92,10 +92,14 @@ pub fn bx2ir_command() -> Command {
 }
 
 pub fn bx2gv_command() -> Command {
-    g8r2gv::add_mapping_args(add_bx_args(
-        Command::new("bx2gv")
-            .about("Compiles BX source and maps it to a Liberty gate-level netlist"),
-    ))
+    g8r2gv::add_mapping_args(
+        add_bx_args(
+            Command::new("bx2gv")
+                .about("Compiles BX source and maps it to a Liberty gate-level netlist"),
+        ),
+        "area",
+        "false",
+    )
 }
 
 /// Marks the requested block, honoring the frontend's inferred top by default.

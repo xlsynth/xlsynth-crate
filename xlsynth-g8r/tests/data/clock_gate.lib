@@ -32,6 +32,8 @@ library (clock_gate_test) {
       timing () {
         related_pin: "CLK";
         timing_type: rising_edge;
+        cell_rise (scalar) { values ("2"); }
+        cell_fall (scalar) { values ("2"); }
         rise_transition (slew) { values ("1,1,6,6"); }
         fall_transition (slew) { values ("1,1,6,6"); }
       }
@@ -45,7 +47,25 @@ library (clock_gate_test) {
     area: 1;
     pin (A) { direction: input; }
     pin (B) { direction: input; }
-    pin (Y) { direction: output; function: "A & B"; }
+    pin (Y) {
+      direction: output; function: "A & B";
+      timing () {
+        related_pin: "A";
+        timing_sense: positive_unate;
+        cell_rise (scalar) { values ("1"); }
+        cell_fall (scalar) { values ("1"); }
+        rise_transition (scalar) { values ("1"); }
+        fall_transition (scalar) { values ("1"); }
+      }
+      timing () {
+        related_pin: "B";
+        timing_sense: positive_unate;
+        cell_rise (scalar) { values ("1"); }
+        cell_fall (scalar) { values ("1"); }
+        rise_transition (scalar) { values ("1"); }
+        fall_transition (scalar) { values ("1"); }
+      }
+    }
   }
   cell (INV) {
     area: 1;
@@ -88,6 +108,8 @@ library (clock_gate_test) {
       timing () {
         related_pin: "CLK";
         timing_sense: positive_unate;
+        cell_rise (scalar) { values ("3"); }
+        cell_fall (scalar) { values ("3"); }
         rise_transition (scalar) { values ("8"); }
         fall_transition (scalar) { values ("8"); }
       }

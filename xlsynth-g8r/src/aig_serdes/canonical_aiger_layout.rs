@@ -3,6 +3,46 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::aig::gate::{self, AigNode, AigOperand};
+use crate::aig_serdes::load_aiger::finish_loaded_gate_builder;
+use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+
+/// Presents the live graph to order-sensitive mappers in binary AIGER order,
+/// preserving port widths and names without formatting or parsing a file.
+pub(crate) fn canonical_mapping_graph(graph: &gate::GateFn) -> Result<gate::GateFn, String> {
+    let layout = CanonicalAigerLayout::new(graph);
+    let mut gb = GateBuilder::new(graph.name.clone(), GateBuilderOptions::no_opt());
+    let mut vars = Vec::with_capacity(layout.max_var_index as usize + 1);
+    vars.push(gb.get_false());
+    for input in &graph.inputs {
+        let bits = gb.add_input(input.name.clone(), input.get_bit_count());
+        vars.extend(bits.iter_lsb_to_msb().copied());
+    }
+    let operand = |vars: &[AigOperand], lit: u32| {
+        let mut op = vars[(lit >> 1) as usize];
+        op.negated ^= lit & 1 != 0;
+        op
+    };
+    for id in &layout.and_node_ids {
+        let (_, a, b) = layout.sorted_and_literals(graph, *id)?;
+        vars.push(gb.add_and_binary(operand(&vars, a), operand(&vars, b)));
+    }
+    for output in &graph.outputs {
+        let bits = output
+            .bit_vector
+            .iter_lsb_to_msb()
+            .map(|op| {
+                layout
+                    .operand_to_literal(graph, *op)
+                    .map(|lit| operand(&vars, lit))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        gb.add_output(
+            output.name.clone(),
+            gate::AigBitVector::from_lsb_is_index_0(&bits),
+        );
+    }
+    Ok(finish_loaded_gate_builder(gb))
+}
 
 /// Canonical variable layout shared by ASCII and binary AIGER emission.
 pub(super) struct CanonicalAigerLayout {
@@ -105,5 +145,43 @@ impl CanonicalAigerLayout {
             std::mem::swap(&mut rhs0, &mut rhs1);
         }
         Ok((lhs_lit, rhs0, rhs1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aig_serdes::{
+        emit_aiger_binary::emit_aiger_binary, load_aiger_binary::load_aiger_binary,
+    };
+
+    #[test]
+    fn mapping_view_matches_serialized_scalar_transition_order() -> Result<(), String> {
+        let mut gb = GateBuilder::new("core".into(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("i0".into(), 1).get_lsb(0);
+        let b = *gb.add_input("i1".into(), 1).get_lsb(0);
+        let _dead = gb.add_and_binary(a, b);
+        let x = gb.add_and_binary(a.negate(), b);
+        let y = gb.add_and_binary(b.negate(), a);
+        let z = gb.add_and_binary(y, x);
+        gb.add_output("o0".into(), z.negate().into());
+        gb.add_output("o1".into(), x.into());
+        let g = gb.build();
+        let reference =
+            load_aiger_binary(&emit_aiger_binary(&g, true)?, GateBuilderOptions::no_opt())?.gate_fn;
+        let got = canonical_mapping_graph(&g)?;
+        assert_eq!(got.gates, reference.gates);
+        assert_eq!(
+            got.outputs
+                .iter()
+                .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
+                .collect::<Vec<_>>(),
+            reference
+                .outputs
+                .iter()
+                .flat_map(|o| o.bit_vector.iter_lsb_to_msb())
+                .collect::<Vec<_>>()
+        );
+        Ok(())
     }
 }

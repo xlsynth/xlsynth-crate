@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod canonical_aiger_layout;
+pub(crate) use canonical_aiger_layout::canonical_mapping_graph;
 
 pub mod blif;
 pub mod emit_aiger;

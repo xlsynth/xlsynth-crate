@@ -15,14 +15,13 @@ use xlsynth_g8r::netlist::io::{load_liberty_from_path, load_liberty_with_timing_
 use xlsynth_g8r::netlist::resize::ResizeOptions;
 use xlsynth_g8r::netlist::sta::{StaOptions, WireLoadModel};
 use xlsynth_g8r::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
-use xlsynth_g8r::techmap::delay::{
-    DelayMappingLibrary, DelayMappingOptions, map_gatefn_to_delay_candidates,
-    map_gatefn_to_delay_netlist,
-};
+use xlsynth_g8r::techmap::delay::DelayMappingOptions;
 use xlsynth_g8r::techmap::nand2::{
     CellPolicy, map_gatefn_to_structural_netlist, structural_options_from_liberty,
 };
-use xlsynth_g8r::techmap::postprocess::{PostMappingOptions, PostMappingReport};
+use xlsynth_g8r::techmap::postprocess::{
+    CoverStrategy, PostMappingOptions, PostMappingReport, map_and_optimize_cover,
+};
 
 #[cfg(unix)]
 use crate::mapped_netlist_output::metadata_if_exists;
@@ -298,16 +297,8 @@ fn run_aig_tech_map(matches: &ArgMatches) -> Result<()> {
                     .get_one::<f64>("module_output_load")
                     .ok_or_else(|| anyhow::anyhow!("delay mode requires --module-output-load"))?,
             };
-            let library = DelayMappingLibrary::new(&lib, options)?;
-            let (mapped, stages) = if timing.is_some() {
-                let candidates = map_gatefn_to_delay_candidates(&gate_fn, &library)?;
-                post.select_delay_cover(candidates, &lib)?
-            } else {
-                (
-                    map_gatefn_to_delay_netlist(&gate_fn, &library)?,
-                    PostMappingReport::default(),
-                )
-            };
+            let (mapped, stages) =
+                map_and_optimize_cover(&gate_fn, &lib, CoverStrategy::Delay(options), &post)?;
             let summary = format!(
                 "using experimental strategy='delay' area={}",
                 mapped.stats.cell_area

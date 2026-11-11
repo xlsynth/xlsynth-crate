@@ -84,6 +84,20 @@ pub fn default_output_load_ff(library: &Library) -> Result<f64, String> {
     Ok(result)
 }
 
+/// Converts a nonnegative explicit output load to the units used in Liberty
+/// timing tables.
+pub fn load_ff_in_library_units(library: &Library, ff: f64) -> Result<f64, String> {
+    let units = library
+        .units
+        .as_ref()
+        .ok_or("Liberty has no capacitance units")?;
+    let load = ff / capacitance_unit_in_ff(&units.capacitance_unit)?;
+    if !ff.is_finite() || ff < 0.0 || !load.is_finite() {
+        return Err("output load must be finite and nonnegative".into());
+    }
+    Ok(load)
+}
+
 /// Converts a Liberty capacitance unit to femtofarads; omitted scales mean one.
 pub(crate) fn capacitance_unit_in_ff(unit: &str) -> Result<f64, String> {
     let normalized = unit.trim().to_ascii_lowercase();
@@ -142,6 +156,10 @@ mod tests {
         assert_eq!(lib.default_output_load, Some(0.004));
         assert_eq!(default_output_load(&lib).unwrap(), 0.004);
         assert_eq!(default_output_load_ff(&lib).unwrap(), 4.0);
+        assert_eq!(load_ff_in_library_units(&lib, 10.0).unwrap(), 0.01);
+        assert_eq!(load_ff_in_library_units(&lib, 0.0).unwrap(), 0.0);
+        assert!(load_ff_in_library_units(&lib, f64::NAN).is_err());
+        assert!(load_ff_in_library_units(&lib, -1.0).is_err());
         for (unit, expected) in [
             ("pf", 1000.0),
             ("pF", 1000.0),
@@ -159,6 +177,10 @@ mod tests {
             scaled.units.as_mut().unwrap().capacitance_unit = unit.into();
             assert_eq!(default_output_load(&scaled).unwrap(), 2.0);
             assert_eq!(default_output_load_ff(&scaled).unwrap(), 2.0 * expected);
+            assert_eq!(
+                load_ff_in_library_units(&scaled, 2.0 * expected).unwrap(),
+                2.0
+            );
         }
         let mut wire = library_to_proto(lib).unwrap();
         wire.reference_buffer_cell = None;

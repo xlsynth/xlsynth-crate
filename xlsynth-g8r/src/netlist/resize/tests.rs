@@ -9,6 +9,7 @@ use crate::netlist::sta::incremental::{TimingEdit, TimingInstance, TimingMutatio
 use rand::{Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
 use std::io::Write;
+use std::path::Path;
 use tempfile::NamedTempFile;
 
 /// A small load- and slew-sensitive library with explicitly sized equivalents.
@@ -117,6 +118,46 @@ fn resize(
         library,
         options,
     )
+}
+
+#[test]
+fn certified_clock_gate_times_external_arcs_but_is_not_a_resize_candidate() -> Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/clock_gate.lib");
+    let mut lib = parse_liberty_files(&[path]).map_err(anyhow::Error::msg)?;
+    let gate = lib.cells.iter().position(|c| c.name == "ICG").unwrap();
+    let gv = r#"module top(input clk, input data, output q, output gclk);
+      DFF ff (.CLK(gclk), .D(data), .Q(q));
+      ICG gate (.CLK(clk), .ENA(q), .SE(1'b0), .GCLK(gclk));
+    endmodule"#;
+    assert!(CellFamilies::new(&lib).alternatives(gate).is_empty());
+    let report = resize(&mut read_gv_from_str(gv)?, &lib, &options())?;
+    // CLK -> GCLK is timed. Q drives the enable but is not a launch source for
+    // the clock arc; the FF's own ideal-clock-to-Q delay remains independent.
+    let expected = BoundaryDelays {
+        input_to_output: 3.0,
+        register_to_output: 2.0,
+        ..BoundaryDelays::default()
+    };
+    assert_eq!(report.initial_delay, expected);
+    assert_eq!(report.final_delay, expected);
+
+    let exposed = gv.replace(".ENA(q)", ".ENA(q), .IQ(data)");
+    let err = resize(&mut read_gv_from_str(&exposed)?, &lib, &options()).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "instance of 'ICG' connects private internal pin 'IQ'"
+    );
+
+    // Role metadata alone does not establish the latch behavior. Nor should
+    // an ordinary cell with an internal pin acquire the clock-gate exception.
+    lib.cells[gate].clock_gate.as_mut().unwrap().behavior =
+        crate::liberty_proto::ClockGateBehavior::Unknown as i32;
+    let err = resize(&mut read_gv_from_str(gv)?, &lib, &options()).unwrap_err();
+    assert!(err.to_string().contains("lacks verified low-transparent"));
+    lib.cells[gate].clock_gate = None;
+    let err = resize(&mut read_gv_from_str(gv)?, &lib, &options()).unwrap_err();
+    assert_eq!(err.to_string(), "cell 'ICG' has unsupported pin directions");
+    Ok(())
 }
 
 #[test]

@@ -5,9 +5,10 @@ use anyhow::{Error, Result};
 use super::SequentialMappingOptions;
 use super::assembly::SequentialMappingCatalog;
 use crate::aig::SequentialGateFn;
+use crate::aig_serdes::canonical_mapping_graph;
 use crate::liberty_model::Library;
 use crate::netlist::io::ParsedNetlist;
-use crate::techmap::area::{AreaMappingLibrary, map_gatefn_to_area_netlist};
+use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions, map_and_optimize_cover};
 
 /// Maps combinational logic with g8r's area mapper and assembles the selected
 /// flops and clock gates into the same flat netlist.
@@ -19,14 +20,39 @@ pub fn map_sequential_to_area_netlist(
     library: &Library,
     options: &SequentialMappingOptions,
 ) -> Result<ParsedNetlist> {
+    map_sequential_to_native_netlist(
+        design,
+        library,
+        options,
+        CoverStrategy::Area,
+        &PostMappingOptions::default(),
+    )
+}
+
+/// Covers the transition graph, then reconnects its original ports and physical
+/// registers.
+pub fn map_sequential_to_native_netlist(
+    design: &SequentialGateFn,
+    library: &Library,
+    options: &SequentialMappingOptions,
+    strategy: CoverStrategy,
+    post: &PostMappingOptions,
+) -> Result<ParsedNetlist> {
     let catalog = SequentialMappingCatalog::new(library).map_err(Error::msg)?;
     let prepared = catalog
         .prepare(library, design, options)
         .map_err(Error::msg)?;
-    let cells = AreaMappingLibrary::new(library)?;
-    let mut netlist = map_gatefn_to_area_netlist(prepared.graph(), &cells)?
-        .netlist
-        .into();
+    let canonical;
+    let graph = if matches!(strategy, CoverStrategy::Delay(_)) {
+        // Match the node and operand ordering used by aig-tech-map's binary AIG
+        // input.
+        canonical = canonical_mapping_graph(prepared.graph()).map_err(Error::msg)?;
+        &canonical
+    } else {
+        prepared.graph()
+    };
+    let (cover, _) = map_and_optimize_cover(graph, library, strategy, post)?;
+    let mut netlist = cover.netlist.into();
     prepared.assemble(&mut netlist, "g8r").map_err(Error::msg)?;
     Ok(netlist)
 }
