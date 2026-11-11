@@ -51,7 +51,7 @@ pub fn command() -> Command {
 pub(crate) fn add_mapping_args(
     command: Command,
     default_strategy: &'static str,
-    default_resize: &'static str,
+    abc_resize: &'static str,
 ) -> Command {
     command
         .arg(output_arg())
@@ -65,8 +65,11 @@ pub(crate) fn add_mapping_args(
             .help("Native combinational fanout optimization (default: on for delay, off for area)"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
             .help("Native combinational area recovery (default: on for delay, off for area)"))
-        .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool)).default_value(default_resize)
-            .help("Resize the assembled logic and compatible flops using Liberty timing"))
+        .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
+            .default_value_if("mapper", "abc", abc_resize)
+            .default_value_if("strategy", "delay", "true")
+            .default_value("false").hide_default_value(true)
+            .help(format!("Resize the assembled logic and compatible flops (default: true for delay, false for area, {abc_resize} for ABC)")))
         .arg(Arg::new("primary-input-transition").long("primary-input-transition").value_parser(clap::value_parser!(f64))
             .help("Primary input slew in library time units for native mapping and resizing (default: 0.01)"))
         .arg(Arg::new("liberty").long("liberty").value_name("PATH").required_if_eq("mapper", "abc").action(ArgAction::Append)
@@ -524,6 +527,40 @@ fn map_with_abc(
 mod tests {
     use super::{NetlistOutput, output_paths_alias, write_sidecar};
     use std::fs;
+
+    #[test]
+    fn final_resize_follows_native_strategy_unless_overridden() -> anyhow::Result<()> {
+        for (command, default_resize, abc_resize) in [
+            (super::command(), true, true),
+            (crate::bx::bx2gv_command(), false, false),
+        ] {
+            for (flags, expected) in [
+                (&[][..], default_resize),
+                (&["--strategy=area"][..], false),
+                (&["--strategy=delay"][..], true),
+                (&["--mapper=abc", "--liberty=cells.lib"][..], abc_resize),
+            ] {
+                for explicit in [None, Some(false), Some(true)] {
+                    let mut args = vec![command.get_name(), "input", "--liberty-proto=cells.proto"];
+                    args.extend_from_slice(flags);
+                    if let Some(resize) = explicit {
+                        args.push(if resize {
+                            "--g8r-resize=true"
+                        } else {
+                            "--g8r-resize=false"
+                        });
+                    }
+                    let parsed = command.clone().try_get_matches_from(&args)?;
+                    assert_eq!(
+                        parsed.get_one::<bool>("g8r-resize").copied(),
+                        Some(explicit.unwrap_or(expected)),
+                        "{args:?}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn raw_log_replaced_after_preflight_cannot_overwrite_netlist() -> anyhow::Result<()> {

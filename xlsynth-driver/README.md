@@ -489,7 +489,8 @@ clock ports have different names. Register load enables and synchronous
 register resets are supported. Blocks with asynchronous register resets can emit RTL through
 `bx2ir` and `block2sv`. The shared mapping flags are documented under
 `g8r2gv`; `bx2gv` retains its native area strategy and disabled final resizing
-by default. Use `--strategy=delay --g8r-resize=true` to opt into both.
+by default. Use `--strategy=delay` to select delay mapping and final resizing.
+With `--mapper=abc`, `bx2gv` skips final g8r resizing unless explicitly enabled.
 
 To map the two-stage multiplier above using the native mapper, supply a
 normalized Liberty library containing combinational cells and flip-flops.
@@ -1601,10 +1602,11 @@ the matching raw `--liberty` files.
 ABC's default speed flow also buffers and resizes combinational cells.
 Both paths use g8r to legalize synchronous reset and enable controls, select
 physical flip-flops and clock gates, and assemble the netlist.
-By default both then resize the assembled logic and compatible flops in memory,
-using the same search as `gv-resize`. A fixed `--register-cell` remains fixed.
+Native delay mapping and ABC mapping then resize the assembled logic and
+compatible flops by default, using the same search as `gv-resize`. Native
+area mapping skips this stage by default. A fixed `--register-cell` remains fixed.
 Delay mapping, native cover optimization and final resizing require a timing-enabled
-proto. The timing-free native area flow is `--strategy=area --g8r-resize=false`.
+proto. For a timing-free native area flow, use `--strategy=area`.
 
 Existing direct input-to-register and register-to-output connections remain
 wires, without added buffers or inverters. FFs are selected per bit by minimum
@@ -1636,7 +1638,8 @@ Use `--clock-gating=false` to generate an ungated baseline.
   area on the native combinational cover before attaching flops. Each defaults
   to true for delay and false for area. Explicitly specifying any of these three
   native-only flags with ABC is an error, even when specifying false.
-- `--g8r-resize <BOOL>` – resize the complete mapped netlist (default: true).
+- `--g8r-resize <BOOL>` – resize the complete mapped netlist. Defaults to
+  true for native delay and ABC, false for native area. An explicit value overrides the default.
   Disabling this stage does not disable sizing/buffering inside an ABC script,
   or the native cover's fanout optimization/area recovery.
 - `--primary-input-transition <SLEW>` – input slew in library time units for

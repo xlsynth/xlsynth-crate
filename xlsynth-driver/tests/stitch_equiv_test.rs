@@ -505,7 +505,6 @@ fn pipe_cycle1(bank: Bank) -> u4 {
                 "g8r2gv",
                 "pipe.g8rbin",
                 "--strategy=area",
-                "--g8r-resize=false",
                 "--liberty-proto",
                 "cells.textproto",
                 "-o",
