@@ -83,12 +83,12 @@ impl Parser<'_> {
             let position = self.position_at(self.tokens[self.pos].start);
             if property_required {
                 let property = match self.peek(0) {
-                    "if" => self.try_control_flow_property(),
-                    "for" if self.starts_counted_for() => self.try_control_flow_property(),
+                    "if" => self.try_trailing_property(),
+                    "for" if self.starts_counted_for() => self.try_trailing_property(),
+                    "assert_eq" if self.peek(1) == "(" => self.try_trailing_property(),
                     "for" if self.peek(1) == "(" => None,
                     "for" | "reg" if is_identifier(self.peek(1)) => None,
                     "let" | "tick!" | "assert!" => None,
-                    "assert_eq" if self.peek(1) == "(" => None,
                     _ if self.peek(1) == ":=" => None,
                     _ => Some(self.expr()?.value),
                 };
@@ -125,9 +125,9 @@ impl Parser<'_> {
         Ok(body)
     }
 
-    /// An if/else or counted for can be a statement or the trailing value.
-    /// Accept the expression grammar only when it consumes the whole tail.
-    fn try_control_flow_property(&mut self) -> Option<Expr> {
+    /// For syntax shared with a test statement, accept the expression grammar
+    /// only when it consumes the whole tail of the quickcheck block.
+    fn try_trailing_property(&mut self) -> Option<Expr> {
         let start = self.pos;
         let position_cursor = self.position_cursor;
         let previous_types = std::mem::take(&mut self.overwritten_literal_types);
@@ -442,6 +442,41 @@ block mapped(clk, xs: u8[2]) -> u8[2] { map(xs, |x| x + x) }
             "#[test] fn map() {} block demo(clk, xs: u8[2]) -> u8[2] { map(xs, |x| x + x) }",
         )?;
         assert!(matches!(module.blocks[0].output, Expr::Map(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn quickcheck_distinguishes_assert_eq_property_calls_from_statements() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn assert_eq(a: u8, b: u8) -> bool { a == b }
+#[quickcheck] block direct(x: u8) -> bool {
+    assert_eq(x, x);
+    if true { assert_eq(x, x) }
+    assert_eq(x, x)
+}
+#[quickcheck] block grouped(x: u8) -> bool { (assert_eq(x, x)) }
+#[test] block ordinary() { assert_eq(true, true) }
+"#,
+        )?;
+        let direct = &module.tests[0].statements;
+        assert!(matches!(direct[0].kind, TestStmtKind::AssertEq { .. }));
+        let TestStmtKind::If { then_body, .. } = &direct[1].kind else {
+            panic!("expected a procedural branch");
+        };
+        assert!(matches!(then_body[0].kind, TestStmtKind::AssertEq { .. }));
+        assert_eq!(
+            direct[2].kind,
+            TestStmtKind::Property(Expr::Call {
+                name: "assert_eq".into(),
+                args: vec![Expr::Name("x".into()), Expr::Name("x".into())],
+            })
+        );
+        assert_eq!(direct[2].kind, module.tests[1].statements[0].kind);
+        assert!(matches!(
+            module.tests[2].statements[0].kind,
+            TestStmtKind::AssertEq { .. }
+        ));
         Ok(())
     }
 

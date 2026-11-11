@@ -11,7 +11,9 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 
 use xlsynth_pir::ir::{Fn, NodePayload, NodeRef, Package, PackageMember};
-use xlsynth_pir::ir_eval::{AssumptionFailureKind, FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_eval::{
+    AssumptionFailureKind, FnEvalFailure, FnEvalResult, eval_fn_in_package,
+};
 use xlsynth_pir::ir_fn_cone_extract::{SinkSelector, extract_fn_cone_to_params};
 use xlsynth_pir::ir_value_utils::zero_ir_value_for_type;
 use xlsynth_pir::{IrBits, IrValue};
@@ -286,17 +288,37 @@ pub fn run_tests_with_quickcheck(
     Ok(BxTestReport { tests, warnings })
 }
 
+/// Pure calls check assertions when evaluated. Clocked hardware checks them on
+/// the active edge, including assertions inside linked function calls.
+#[derive(Clone, Copy)]
+enum AssertionTiming {
+    Expression,
+    ClockEdge,
+}
+
+/// Reports the first linked IR assertion triggered in one evaluation.
+fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), String> {
+    if let Some(assertion) = failure.assertion_failures.first() {
+        return Err(format!(
+            "IR assertion '{}' failed: {}",
+            assertion.label, assertion.message
+        ));
+    }
+    Ok(())
+}
+
 /// An expression's IR dependencies and the harness input ports they read.
-struct PureExpression {
+struct TestExpression {
     function: Fn,
     ports: Vec<usize>,
+    assertions: AssertionTiming,
     last: Option<(Vec<IrValue>, IrValue)>,
 }
 
-impl PureExpression {
+impl TestExpression {
     /// Extract the selected output once. The original package supplies its
     /// callees.
-    fn extract(harness: &Fn, node: NodeRef) -> Result<Self, String> {
+    fn extract(harness: &Fn, node: NodeRef, assertions: AssertionTiming) -> Result<Self, String> {
         let sink = SinkSelector::TextId(harness.get_node(node).text_id);
         let mut cone = extract_fn_cone_to_params(harness, None, sink, false)?;
         let ports = cone
@@ -310,6 +332,7 @@ impl PureExpression {
         Ok(Self {
             function,
             ports,
+            assertions,
             last: None,
         })
     }
@@ -329,24 +352,20 @@ impl PureExpression {
         let value = match eval_fn_in_package(package, &self.function, &args) {
             FnEvalResult::Success(success) => success.value,
             FnEvalResult::Failure(failure) => {
-                if let Some(assertion) = failure.assertion_failures.first() {
+                if matches!(self.assertions, AssertionTiming::Expression) {
+                    check_ir_assertions(&failure)?;
+                }
+                if let Some(assumption) = failure.assumption_failures.first() {
+                    let operation = match assumption.kind {
+                        AssumptionFailureKind::ArrayIndexOutOfBounds => "array_index",
+                        AssumptionFailureKind::ArrayUpdateOutOfBounds => "array_update",
+                    };
                     return Err(format!(
-                        "IR assertion '{}' failed: {}",
-                        assertion.label, assertion.message
+                        "IR {operation} at node {} was out of bounds despite assumed_in_bounds=true",
+                        assumption.node_text_id
                     ));
                 }
-                let assumption = failure
-                    .assumption_failures
-                    .first()
-                    .expect("failed evaluation contains an assertion or assumption failure");
-                let operation = match assumption.kind {
-                    AssumptionFailureKind::ArrayIndexOutOfBounds => "array_index",
-                    AssumptionFailureKind::ArrayUpdateOutOfBounds => "array_update",
-                };
-                return Err(format!(
-                    "IR {operation} at node {} was out of bounds despite assumed_in_bounds=true",
-                    assumption.node_text_id
-                ));
+                failure.value
             }
         };
         self.last = Some((args, value.clone()));
@@ -361,7 +380,7 @@ enum Harness<'a> {
         function: &'a Fn,
         inputs: Vec<IrValue>,
         outputs: &'a [NodeRef],
-        expressions: HashMap<NodeRef, PureExpression>,
+        expressions: HashMap<NodeRef, TestExpression>,
     },
     Block(&'a mut dyn ClockedHarness),
 }
@@ -411,7 +430,11 @@ impl Harness<'_> {
                 }
                 let expression = match expressions.entry(node) {
                     Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => entry.insert(PureExpression::extract(function, node)?),
+                    Entry::Vacant(entry) => entry.insert(TestExpression::extract(
+                        function,
+                        node,
+                        AssertionTiming::Expression,
+                    )?),
                 };
                 Ok(expression.evaluate(package, inputs)?)
             }
@@ -575,10 +598,10 @@ impl Execution<'_> {
                     };
                     sim.drive("rst", &IrValue::bool(asserted ^ self.active_low))
                         .map_err(|e| at_step(e.into()))?;
-                    sim.tick().map_err(|e| at_step(e.into()))?;
                     if let Some((_, trace)) = &mut self.trace {
                         trace.tick(asserted);
                     }
+                    sim.tick().map_err(|e| at_step(e.into()))?;
                     if asserted {
                         sim.drive("rst", &IrValue::bool(self.active_low))
                             .map_err(|e| at_step(e.into()))?;

@@ -17,8 +17,9 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use super::simulation::{Observed, Simulation};
 use super::{
-    BxTestResult, ClockedHarness, Execution, ExecutionError, Failure, FourValuedReport, Harness,
-    PureExpression, QuickCheckOptions, QuickCheckReport, TestProgram, input_name,
+    AssertionTiming, BxTestResult, ClockedHarness, Execution, ExecutionError, Failure,
+    FourValuedReport, Harness, QuickCheckOptions, QuickCheckReport, TestExpression, TestProgram,
+    check_ir_assertions, input_name,
 };
 use crate::ast::{Param, Type};
 use crate::typed::CheckedModule;
@@ -123,7 +124,7 @@ struct PirCircuit<'a> {
     inputs: BTreeMap<String, usize>,
     args: Vec<IrValue>,
     settled: Option<FnEvalResult>,
-    expressions: HashMap<NodeRef, PureExpression>,
+    expressions: HashMap<NodeRef, TestExpression>,
 }
 
 impl<'a> PirCircuit<'a> {
@@ -150,7 +151,7 @@ impl<'a> PirCircuit<'a> {
         })
     }
 
-    fn reset_trial(&mut self, state: &BTreeMap<String, IrValue>, active_low: bool) {
+    fn reset_trial(&mut self, state: &BTreeMap<String, IrValue>) {
         self.args.clear();
         self.args.extend(
             self.transition
@@ -158,8 +159,8 @@ impl<'a> PirCircuit<'a> {
                 .iter()
                 .map(|p| zero_ir_value_for_type(&p.ty)),
         );
-        if let Some(i) = self.inputs.get("rst") {
-            self.args[*i] = IrValue::bool(active_low);
+        if let Some(reset) = &self.transition.reset {
+            self.args[self.inputs[&reset.name]] = IrValue::bool(reset.active_low);
         }
         self.args.extend(
             self.transition
@@ -170,19 +171,10 @@ impl<'a> PirCircuit<'a> {
         self.settled = None;
     }
 
-    fn settle(&mut self) -> Result<(), String> {
-        let result = self.settled.get_or_insert_with(|| {
+    fn settle(&mut self) -> &FnEvalResult {
+        self.settled.get_or_insert_with(|| {
             eval_fn_in_package(self.package, &self.transition.function, &self.args)
-        });
-        if let FnEvalResult::Failure(failure) = result
-            && let Some(assertion) = failure.assertion_failures.first()
-        {
-            return Err(format!(
-                "IR assertion '{}' failed: {}",
-                assertion.label, assertion.message
-            ));
-        }
-        Ok(())
+        })
     }
 
     /// The circuit also computes expressions for later or skipped test
@@ -190,9 +182,15 @@ impl<'a> PirCircuit<'a> {
     /// sampled port or register update before attributing that failure to the
     /// current statement.
     fn sample(&mut self, index: usize) -> Result<IrValue, String> {
-        self.settle()?;
-        if let Some(FnEvalResult::Success(result)) = &self.settled {
-            return result.value.get_element(index).map_err(|e| e.to_string());
+        let value = match self.settle() {
+            FnEvalResult::Success(result) => Some(&result.value),
+            FnEvalResult::Failure(failure) if failure.assumption_failures.is_empty() => {
+                Some(&failure.value)
+            }
+            FnEvalResult::Failure(_) => None,
+        };
+        if let Some(value) = value {
+            return value.get_element(index).map_err(|e| e.to_string());
         }
         let function = &self.transition.function;
         let ret = function.ret_node_ref.expect("transition result");
@@ -202,7 +200,11 @@ impl<'a> PirCircuit<'a> {
         let node = fields[index];
         let expr = match self.expressions.entry(node) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(PureExpression::extract(function, node)?),
+            Entry::Vacant(e) => e.insert(TestExpression::extract(
+                function,
+                node,
+                AssertionTiming::ClockEdge,
+            )?),
         };
         expr.evaluate(self.package, &self.args)
     }
@@ -225,7 +227,14 @@ impl<'a> PirCircuit<'a> {
     fn tick(&mut self) -> Result<(), String> {
         let first = self.transition.outputs.len();
         let count = self.transition.registers.len();
-        self.settle()?;
+        // The emitted RTL clocks all assertions in the flattened block and
+        // disables them while its physical reset is asserted.
+        let in_reset = self.transition.reset.as_ref().is_some_and(|reset| {
+            self.args[self.inputs[&reset.name]].bits_equals_u64_value(u64::from(!reset.active_low))
+        });
+        if !in_reset && let FnEvalResult::Failure(failure) = self.settle() {
+            check_ir_assertions(failure)?;
+        }
         let next = (first..first + count)
             .map(|i| self.sample(i))
             .collect::<Result<Vec<_>, _>>()?;
@@ -345,7 +354,7 @@ impl Trial<'_> {
         rtl: Option<&mut Simulation>,
         trace: Option<&mut TrialTrace>,
     ) -> Result<(), Failure> {
-        pir.reset_trial(&self.registers, self.active_low);
+        pir.reset_trial(&self.registers);
         let mut concrete = Concrete { pir, rtl };
         if let Some(sim) = &mut concrete.rtl {
             sim.reset_trial(Some(&self.registers))
@@ -537,6 +546,150 @@ mod tests {
     use xlsynth_pir::ir_parser::parse_xls_ir_package;
 
     #[test]
+    fn linked_block_assertions_sample_only_on_unmasked_rising_edges() -> Result<(), String> {
+        let ir = r#"package linked
+block guarded(clk: clock, rst: bits[1], good: bits[1], out: bits[1]) {
+  #![reset(port="rst", asynchronous=false, active_low=false)]
+  rst: bits[1] = input_port(name=rst, id=1)
+  good: bits[1] = input_port(name=good, id=2)
+  t: token = after_all(id=3)
+  checked: token = assert(t, good, message="bad value", label="value_ok", id=4)
+  out: () = output_port(good, name=out, id=5)
+}
+block resetless(clk: clock, good: bits[1], out: bits[1]) {
+  good: bits[1] = input_port(name=good, id=6)
+  t: token = after_all(id=7)
+  checked: token = assert(t, good, message="resetless value", label="resetless_ok", id=8)
+  out: () = output_port(good, name=out, id=9)
+}"#;
+        let source = r#"extern block guarded(clk, rst, good: bool) -> bool;
+extern block resetless(clk, good: bool) -> bool;
+#[quickcheck] block between_edges() -> bool {
+    reg good: bool;
+    let value = guarded(good);
+    assert_eq(value, false);
+    good := true;
+    tick!();
+    good := false;
+    !value
+}
+#[quickcheck] block during_reset() -> bool {
+    let a = guarded(false);
+    let b = resetless(false);
+    tick!(rst: true);
+    !(a || b)
+}
+#[quickcheck] block after_reset() -> bool {
+    let value = guarded(false);
+    tick!(rst: true);
+    tick!();
+    value
+}"#;
+        for active_low in [false, true] {
+            let ir = ir.replace("active_low=false", &format!("active_low={active_low}"));
+            let package = parse_xls_ir_package(&ir).map_err(|e| e.to_string())?;
+            let report = run_tests_with_quickcheck(
+                source,
+                Path::new("edges.bx"),
+                package,
+                ResetBehavior {
+                    asynchronous: false,
+                    active_low,
+                },
+                &ImportOptions::default(),
+                true,
+                QuickCheckOptions {
+                    trials: std::num::NonZeroUsize::MIN,
+                    ..Default::default()
+                },
+            )?;
+            assert_eq!(report.tests[0].failure, None);
+            assert_eq!(report.tests[1].failure, None);
+            assert_eq!(
+                report.tests[2]
+                    .failure
+                    .as_deref()
+                    .and_then(|f| f.lines().next()),
+                Some(
+                    "edges.bx:21:5: test 'after_reset' at tick 1: IR assertion 'value_ok' failed: bad value"
+                )
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn clocked_samples_scope_bounds_even_when_linked_calls_also_assert() -> Result<(), String> {
+        let package = parse_xls_ir_package(
+            r#"package linked
+fn lookup(xs: bits[8][2] id=1, i: bits[8] id=2) -> bits[8] {
+  t: token = after_all(id=3)
+  bad: bits[1] = literal(value=0, id=4)
+  checked: token = assert(t, bad, message="bad call", label="called", id=5)
+  ret selected: bits[8] = array_index(xs, indices=[i], assumed_in_bounds=true, id=6)
+}
+block select_word(clk: clock, i: bits[8], out: bits[8]) {
+  i: bits[8] = input_port(name=i, id=7)
+  xs: bits[8][2] = literal(value=[17, 29], id=8)
+  value: bits[8] = invoke(xs, i, to_apply=lookup, id=9)
+  out: () = output_port(value, name=out, id=10)
+}"#,
+        )
+        .map_err(|e| e.to_string())?;
+        let source = r#"extern block select_word(clk, i: u8) -> u8;
+block store(clk, i: u8) -> u8 { let d = select_word(i); reg q: u8; q := d; q }
+#[quickcheck] block valid_sample() -> bool {
+    let good = select_word(u8:0);
+    let bad = select_word(u8:2);
+    if false { assert_eq(bad, u8:29); }
+    good == u8:17
+}
+#[quickcheck] block bad_sample() -> bool {
+    let bad = select_word(u8:2);
+    bad == u8:29
+}
+#[quickcheck] block bad_update() -> bool {
+    let q = store(u8:2);
+    tick!(rst: true);
+    true
+}"#;
+        let report = run_tests_with_quickcheck(
+            source,
+            Path::new("contracts.bx"),
+            package,
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+            QuickCheckOptions {
+                trials: std::num::NonZeroUsize::MIN,
+                ..Default::default()
+            },
+        )?;
+        let diagnostics: Vec<_> = report
+            .tests
+            .iter()
+            .map(|test| {
+                test.failure
+                    .as_deref()
+                    .and_then(|failure| failure.lines().next())
+            })
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [
+                None,
+                Some(
+                    "contracts.bx:11:5: test 'bad_sample' at tick 0: IR array_index at node 6 was out of bounds despite assumed_in_bounds=true"
+                ),
+                Some(
+                    "contracts.bx:15:5: test 'bad_update' at tick 0: IR array_index at node 6 was out of bounds despite assumed_in_bounds=true"
+                ),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn only_the_observed_expression_or_register_update_checks_its_bounds() -> Result<(), String> {
         let package = parse_xls_ir_package(
             r#"package linked
@@ -570,6 +723,14 @@ block read(clk, idx: u8) -> u8 {
     let q = read(u8:2);
     tick!();
     true
+}
+#[quickcheck] block write_on_reset() -> bool {
+    reg idx: u8;
+    let q = read(idx);
+    tick!();
+    idx := u8:2;
+    tick!(rst: true);
+    true
 }"#;
         let options = QuickCheckOptions {
             trials: std::num::NonZeroUsize::MIN,
@@ -586,7 +747,13 @@ block read(clk, idx: u8) -> u8 {
         )?;
         assert_eq!(report.tests[0].failure, None);
         assert_eq!(report.tests[1].failure, None);
-        for test in &report.tests[2..] {
+        let traces = [
+            "  stimulus trace: []",
+            "  stimulus trace: [tick!()]",
+            "  stimulus trace: [idx := bits[8]:0, tick!(), idx := bits[8]:2, tick!(rst: true)]",
+        ];
+        assert_eq!(report.tests.len(), 2 + traces.len());
+        for (test, trace) in report.tests[2..].iter().zip(traces) {
             let failure = test
                 .failure
                 .as_deref()
@@ -595,6 +762,7 @@ block read(clk, idx: u8) -> u8 {
                 failure.contains("despite assumed_in_bounds=true"),
                 "{failure}"
             );
+            assert_eq!(failure.lines().last(), Some(trace));
         }
         Ok(())
     }
@@ -611,7 +779,7 @@ block read(clk, idx: u8) -> u8 {
         let mut rtl = Simulation::from_flattened(&flat, "sample")?;
         let zero = IrValue::make_ubits(8, 0).map_err(|e| e.to_string())?;
         let one = IrValue::make_ubits(8, 1).map_err(|e| e.to_string())?;
-        pir.reset_trial(&BTreeMap::from([("q".to_owned(), zero)]), false);
+        pir.reset_trial(&BTreeMap::from([("q".to_owned(), zero)]));
         rtl.reset_trial(Some(&BTreeMap::from([("q".to_owned(), one)])))?;
         let mut circuit = Concrete {
             pir: &mut pir,

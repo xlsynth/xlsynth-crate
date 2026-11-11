@@ -633,9 +633,12 @@ xlsynth-driver bx-test counter.bx --seed 42 --quickcheck-trials 100 --cross-chec
 The PIR interpreter starts each trial with independently drawn bits in every
 DUT register, including registers with a synchronous reset value. A reset edge
 loads that value. Testbench stimulus registers use their declared initializers
-or typed zero. Enum parameters draw from their declared members. A failed
-concrete trial reports its seed, trial number, parameters, initial register
-values, and the executed stimulus assignments and clock edges.
+or typed zero. Enum parameters draw from their declared members. PIR checks
+linked hardware assertions on rising edges with the flattened block's reset
+deasserted. Procedural BX assertions sample at their source statement.
+A failed concrete trial reports its seed, trial number, parameters, initial
+register values, and stimulus trace. If a clock edge fails, the trace includes
+the attempted tick and its reset setting.
 
 `--cross-check-vastly` first compares every sampled PIR value with generated
 RTL running from the same concrete register values. It also runs the RTL from
@@ -646,7 +649,9 @@ condition. The four-valued counts are reported separately from the concrete
 property result. A failed concrete property, backend error, or concrete
 mismatch makes `bx-test` exit unsuccessfully. For the optional RTL run,
 maps and counted loops are expanded with a limit of 65,536 additional IR
-nodes per property harness, including nested body copies.
+nodes per property harness, including nested body copies. Use the PIR backend
+for linked hardware that emits SystemVerilog `assert property` statements.
+Vastly currently cannot parse this syntax.
 
 ## Compile and link
 
