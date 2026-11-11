@@ -8,7 +8,7 @@ use super::{BValue, Builder, BuilderError, check_name, check_package_name, check
 use crate::IrValue;
 use crate::ir::{
     self, Block, BlockPort, BlockReset, Instantiation, InstantiationKind, NodePayload, NodeRef,
-    Package, PackageMember, Register, Type,
+    Package, PackageMember, Register, Type, Unop,
 };
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
 use crate::ir_verify::{verify_block_in_package, verify_function_signature, verify_package};
@@ -95,6 +95,7 @@ pub struct BlockState {
     reset: Option<BlockReset>,
     registers: Vec<RegisterState>,
     instances: Vec<InstanceState>,
+    wires: BTreeSet<usize>,
 }
 
 impl super::sealed::State for BlockState {
@@ -132,6 +133,42 @@ impl Builder<BlockState> {
     /// Creates an empty builder; the block name is checked when building.
     pub fn new(name: &str) -> Self {
         Self::from_state(name, BlockState::default())
+    }
+
+    /// Declares a typed wire that can be read before its driver is attached.
+    pub fn declare_wire(&mut self, ty: Type) -> Result<BValue, BuilderError> {
+        // A parameter carries the wire's type while the graph is being built.
+        // Finalization requires every placeholder to be replaced.
+        let wire = self.add_node(NodePayload::Param, Some(ty))?;
+        self.state.wires.insert(wire.node.index);
+        Ok(wire)
+    }
+
+    /// Attaches the sole driver of a wire declared by this builder.
+    pub fn drive_wire(&mut self, wire: BValue, value: BValue) -> Result<(), BuilderError> {
+        let wire = self.node(wire)?;
+        let driver = self.node(value)?;
+        if !self.state.wires.contains(&wire.index) {
+            return Err(invalid("value is not a wire"));
+        }
+        let expected = &self.graph.get_node(wire).ty;
+        let actual = &self.graph.get_node(driver).ty;
+        if !matches!(self.graph.get_node(wire).payload, NodePayload::Param) {
+            return Err(invalid(format!("wire {} already has a driver", wire.index)));
+        }
+        if expected != actual {
+            return Err(invalid(format!(
+                "wire {} expects {expected}, got {actual}",
+                wire.index
+            )));
+        }
+        self.graph.get_node_mut(wire).payload = NodePayload::Unop(Unop::Identity, driver);
+        Ok(())
+    }
+
+    /// Returns the block-local IR text ID before package rebasing.
+    pub fn value_id(&self, value: BValue) -> Result<usize, BuilderError> {
+        Ok(self.graph.get_node(self.node(value)?).text_id)
     }
 
     /// Adds an input port in declaration order, even after body nodes.
@@ -590,6 +627,28 @@ impl Builder<BlockState> {
         }
     }
 
+    /// Resolves wire ordering and verifies the completed block in its package.
+    fn finish_block(self, package: &Package) -> Result<Block, BuilderError> {
+        for &index in &self.state.wires {
+            if matches!(self.graph.nodes[index].payload, NodePayload::Param) {
+                return Err(invalid(format!("wire {index} has no driver")));
+            }
+        }
+        let has_wires = !self.state.wires.is_empty();
+        let mut block = self.into_block();
+        if has_wires {
+            // Preserve a cycle witness before reordering explicit operands.
+            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+            block.compact_and_toposort().map_err(invalid)?;
+        }
+        verify_block_in_package(&block, package, package.members.len())
+            .map_err(|error| invalid(error.to_string()))?;
+        if !has_wires && !block.instantiations.is_empty() {
+            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
+        }
+        Ok(block)
+    }
+
     /// Consumes and verifies a standalone block with no calls or instances.
     pub fn build(self) -> Result<Block, BuilderError> {
         check_name(&self.graph.name)?;
@@ -598,10 +657,7 @@ impl Builder<BlockState> {
                 "blocks containing calls or instances require package-aware finalization",
             ));
         }
-        let block = self.into_block();
-        let package = empty_package("builder_context");
-        verify_block_in_package(&block, &package, 0).map_err(|error| invalid(error.to_string()))?;
-        Ok(block)
+        self.finish_block(&empty_package("builder_context"))
     }
 
     /// Builds a one-block package with the block selected as top.
@@ -668,12 +724,7 @@ impl Builder<BlockState> {
                 )));
             }
         }
-        let mut block = self.into_block();
-        verify_block_in_package(&block, package, package.members.len())
-            .map_err(|error| invalid(error.to_string()))?;
-        if !block.instantiations.is_empty() {
-            super::block_cycles::verify_block_combinational_cycles(&block, package)?;
-        }
+        let mut block = self.finish_block(package)?;
         rebase_block_ids_in_place(&mut block, package_max_emitted_node_id(package))
             .map_err(|error| invalid(error.to_string()))?;
         Ok(block)

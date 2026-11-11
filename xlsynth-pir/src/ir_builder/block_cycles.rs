@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::BuilderError;
+use super::{BlockCycleConnection, BlockCycleStep, BuilderError};
 use crate::ir::{Block, BlockPort, InstantiationKind, NodePayload, NodeRef, Package};
 use crate::ir_utils::operands;
 
@@ -74,18 +74,18 @@ impl Hierarchy {
                 self.summarize(child, package)?;
             }
         }
-        let mut input_drivers: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
-        for node in &block.nodes {
+        let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
+        for (index, node) in block.nodes.iter().enumerate() {
             if let NodePayload::InstantiationInput {
                 instantiation,
                 port_name,
-                arg,
+                ..
             } = &node.payload
             {
-                input_drivers
+                input_connections
                     .entry(instantiation)
                     .or_default()
-                    .insert(port_name, *arg);
+                    .insert(port_name, NodeRef { index });
             }
         }
         let definitions: BTreeMap<_, _> = block
@@ -107,7 +107,10 @@ impl Hierarchy {
                         block.name
                     ))
                 })?;
-                let connected = input_drivers.get(instantiation.as_str());
+                // Follow the input sink node so a cycle can name the
+                // connection. Its explicit operand already
+                // points to the driving value.
+                let connected = input_connections.get(instantiation.as_str());
                 match definition.kind {
                     InstantiationKind::Block => {
                         let summary = &self.summaries[&definition.block];
@@ -118,14 +121,14 @@ impl Hierarchy {
                             ))
                         })?;
                         for input in inputs {
-                            let driver = connected
+                            let connection = connected
                                 .and_then(|ports| ports.get(input.as_str()))
                                 .ok_or_else(|| {
                                     invalid(format!(
                                         "unconnected input '{input}' on instance '{instantiation}'"
                                     ))
                                 })?;
-                            edges.push(*driver);
+                            edges.push(*connection);
                         }
                     }
                     InstantiationKind::Extern => {
@@ -164,10 +167,11 @@ fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<
                 })?;
                 match color {
                     1 => {
-                        return Err(invalid(format!(
-                            "combinational cycle in block '{}' through node {}",
-                            block.name, block.nodes[index].text_id
-                        )));
+                        let start = pending
+                            .iter()
+                            .position(|(node, _)| *node == index)
+                            .expect("active node is on the DFS path");
+                        return Err(cycle_error(block, &pending[start..]));
                     }
                     0 => {
                         colors[index] = 1;
@@ -184,6 +188,44 @@ fn verify_graph_acyclic(block: &Block, dependencies: &[Vec<NodeRef>]) -> Result<
         }
     }
     Ok(())
+}
+
+/// Converts the cyclic segment of the DFS path into block-local text IDs.
+fn cycle_error(block: &Block, path: &[(usize, usize)]) -> BuilderError {
+    let steps = path
+        .iter()
+        .zip(path.iter().cycle().skip(1))
+        .map(|(&(index, _), &(next, _))| {
+            let node = &block.nodes[index];
+            let dependency = &block.nodes[next];
+            let connection = match (&node.payload, &dependency.payload) {
+                (
+                    NodePayload::InstantiationOutput {
+                        instantiation,
+                        port_name: output_port,
+                    },
+                    NodePayload::InstantiationInput {
+                        port_name: input_port,
+                        ..
+                    },
+                ) => Some(BlockCycleConnection {
+                    instance: instantiation.clone(),
+                    input_port: input_port.clone(),
+                    output_port: output_port.clone(),
+                    input_node_id: dependency.text_id,
+                }),
+                _ => None,
+            };
+            BlockCycleStep {
+                node_id: node.text_id,
+                connection,
+            }
+        })
+        .collect();
+    BuilderError::CombinationalCycle {
+        block: block.name.clone(),
+        steps,
+    }
 }
 
 /// Traces each output cone in a checked graph, retaining only interface sets.
@@ -315,8 +357,26 @@ top block parent(out: bits[8]) {
   out: () = output_port(value, name=out, id=5)
 }
 "#;
-        assert!(
-            matches!(check(source), Err(BuilderError::InvalidOperation(message)) if message.contains("combinational cycle"))
+        assert_eq!(
+            check(source),
+            Err(BuilderError::CombinationalCycle {
+                block: "parent".into(),
+                steps: vec![
+                    BlockCycleStep {
+                        node_id: 3,
+                        connection: Some(BlockCycleConnection {
+                            instance: "child_instance".into(),
+                            input_port: "x".into(),
+                            output_port: "y".into(),
+                            input_node_id: 4,
+                        }),
+                    },
+                    BlockCycleStep {
+                        node_id: 4,
+                        connection: None,
+                    },
+                ],
+            })
         );
     }
 
@@ -378,9 +438,10 @@ top block parent(out: bits[8]) {
   out: () = output_port(left, name=out, id=11)
 }
 "#;
-        assert!(
-            matches!(check(source), Err(BuilderError::InvalidOperation(message)) if message.contains("combinational cycle"))
-        );
+        assert!(matches!(
+            check(source),
+            Err(BuilderError::CombinationalCycle { .. })
+        ));
     }
 
     #[test]
@@ -399,9 +460,10 @@ top block parent() {
   instantiation hidden_instance(block=child, kind=block)
 }
 "#;
-        assert!(
-            matches!(check(source), Err(BuilderError::InvalidOperation(message)) if message.contains("combinational cycle"))
-        );
+        assert!(matches!(
+            check(source),
+            Err(BuilderError::CombinationalCycle { .. })
+        ));
     }
 
     #[test]
@@ -443,8 +505,9 @@ top block parent(out: bits[8]) {
   out: () = output_port(value, name=out, id=5)
 }
 "#;
-        assert!(
-            matches!(check(source), Err(BuilderError::InvalidOperation(message)) if message.contains("combinational cycle"))
-        );
+        assert!(matches!(
+            check(source),
+            Err(BuilderError::CombinationalCycle { .. })
+        ));
     }
 }

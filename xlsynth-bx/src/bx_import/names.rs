@@ -543,6 +543,7 @@ impl<'a> Scope<'a> {
         Ok(Block {
             name: self.names.declared(&def.name),
             name_position: def.name_position,
+            source: def.source.clone(),
             allowed_warnings: def.allowed_warnings.clone(),
             public: def.public,
             type_params: def.type_params.clone(),
@@ -585,6 +586,18 @@ impl<'a> Scope<'a> {
                 }
             }
             Stmt::LetPattern(binding) => Stmt::LetPattern(self.binding(binding)?),
+            Stmt::Wire { name, ty } => {
+                let ty = self.ty(ty)?;
+                self.bind_as(name, local);
+                Stmt::Wire {
+                    name: name.clone(),
+                    ty,
+                }
+            }
+            Stmt::DriveWire { name, value } => Stmt::DriveWire {
+                name: name.clone(),
+                value: self.expr(value)?,
+            },
             Stmt::Write { name, value } => Stmt::Write {
                 name: name.clone(),
                 value: self.expr(value)?,

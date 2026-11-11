@@ -210,7 +210,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
             SourceNode::Statement(
                 Stmt::Reg { .. } | Stmt::Inst { .. } | Stmt::Write { .. } | Stmt::Connect { .. },
             ) => return TemplateHardware::Known(true),
-            SourceNode::Statement(Stmt::Let { name, .. }) => {
+            SourceNode::Statement(Stmt::Let { name, .. } | Stmt::Wire { name, .. }) => {
                 binders.insert(name.clone());
             }
             SourceNode::Statement(Stmt::LetPattern(binding)) => {

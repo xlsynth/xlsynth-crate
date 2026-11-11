@@ -749,6 +749,32 @@ Use the same call syntax for a BX block defined anywhere in the module. An `exte
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 
+### Deferred wire bindings
+
+Declare a wire directly in a block body with `let name: Type;`. You can read
+it after the declaration, including before its driver and when inferring a
+generic child block's type parameters. Supply exactly one unconditional
+driver with `name = value;`. The driver may be an `if` expression.
+
+```text
+block delay<T>(clk, rst, data: T) -> T {
+    reg q: T = zero!<T>();
+    q := data;
+    q
+}
+
+pub block accumulate(clk, rst, step: u8) -> u8 {
+    let next: u8;
+    let current = delay(next);
+    next = current + step;
+    current
+}
+```
+
+The register in `delay` breaks the feedback path across cycles. BX checks
+same-cycle dependencies at Block IR node and child port granularity and
+reports combinational cycles at their participating source connections.
+
 ### Generic blocks
 
 Declare a type parameter after the block name and use it for ports, registers, and local type annotations. At each call, BX infers the type parameter from the data arguments.

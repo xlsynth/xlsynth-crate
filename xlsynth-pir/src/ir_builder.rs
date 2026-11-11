@@ -35,7 +35,24 @@ pub struct BValue {
     node: NodeRef,
 }
 
-/// An invalid construction request; rejected requests leave the builder usable.
+/// An implicit dependency from an instance output to a connected input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockCycleConnection {
+    pub instance: String,
+    pub input_port: String,
+    pub output_port: String,
+    pub input_node_id: usize,
+}
+
+/// A node in a cycle, identified by its block-local IR text ID before rebasing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockCycleStep {
+    pub node_id: usize,
+    /// The connection to the next node when this step is an instance output.
+    pub connection: Option<BlockCycleConnection>,
+}
+
+/// An invalid construction or finalization request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuilderError {
     ForeignValue,
@@ -45,6 +62,11 @@ pub enum BuilderError {
     InvalidName(String),
     DuplicateName(String),
     InvalidOperation(String),
+    /// The steps follow dependencies and the last step depends on the first.
+    CombinationalCycle {
+        block: String,
+        steps: Vec<BlockCycleStep>,
+    },
     WidthOverflow,
 }
 
@@ -58,6 +80,13 @@ impl std::fmt::Display for BuilderError {
             Self::InvalidName(name) => write!(f, "invalid IR identifier: {name:?}"),
             Self::DuplicateName(name) => write!(f, "duplicate IR identifier: {name:?}"),
             Self::InvalidOperation(reason) => f.write_str(reason),
+            Self::CombinationalCycle { block, steps } => {
+                write!(f, "combinational cycle in block '{block}'")?;
+                if let Some(step) = steps.first() {
+                    write!(f, " through node {}", step.node_id)?;
+                }
+                Ok(())
+            }
             Self::WidthOverflow => write!(f, "IR width or element count overflows usize"),
         }
     }

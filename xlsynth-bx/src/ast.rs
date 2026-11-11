@@ -5,6 +5,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    path::PathBuf,
+    sync::Arc,
 };
 
 use crate::BxWarningKind;
@@ -589,6 +591,16 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
     },
+    /// Declare a typed combinational value before its driver is available.
+    Wire {
+        name: String,
+        ty: Type,
+    },
+    /// Supply the single driver for a previously declared wire.
+    DriveWire {
+        name: String,
+        value: Expr,
+    },
     /// Destructure a tuple or discard an initializer using the DSLX let
     /// grammar.
     LetPattern(LetBinding),
@@ -618,6 +630,28 @@ pub struct SourcePosition {
     pub column: usize,
 }
 
+/// The byte range of a construct within a BX source file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The source snapshot used to render BX diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFile {
+    pub text: Arc<str>,
+    pub path: Option<PathBuf>,
+}
+
+/// Diagnostic source ranges for the statements in a BX block body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockSource {
+    pub file: SourceFile,
+    pub(crate) statements: Vec<SourceSpan>,
+    pub(crate) output: SourceSpan,
+}
+
 /// Declared cycle offsets for a block's output ports.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutputCycles {
@@ -632,6 +666,8 @@ pub struct Block {
     pub name: String,
     /// Location of the declared name, when parsed from a source file.
     pub name_position: Option<SourcePosition>,
+    /// Source text and ranges for blocks that declare deferred bindings.
+    pub source: Option<BlockSource>,
     /// Warning kinds suppressed for this definition by `#[allow(...)]`.
     pub allowed_warnings: BTreeSet<BxWarningKind>,
     pub public: bool,

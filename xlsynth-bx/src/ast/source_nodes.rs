@@ -24,7 +24,10 @@ impl<'a> SourceNode<'a> {
                     pending.push(Expression(value));
                     pending.extend(ty.iter().map(Annotation));
                 }
-                Stmt::Write { value, .. } | Stmt::Connect { value, .. } => {
+                Stmt::Wire { ty, .. } => pending.push(Annotation(ty)),
+                Stmt::Write { value, .. }
+                | Stmt::DriveWire { value, .. }
+                | Stmt::Connect { value, .. } => {
                     pending.push(Expression(value));
                 }
                 Stmt::If { condition, body } => {

@@ -76,13 +76,15 @@ impl Dependencies {
                         self.named.insert(block.clone());
                     }
                     CheckedStmt::Let { value, .. }
+                    | CheckedStmt::DriveWire { value, .. }
                     | CheckedStmt::Write { value, .. }
                     | CheckedStmt::Connect { value, .. } => expressions.push(value),
                     CheckedStmt::If { condition, body } => {
                         expressions.push(condition);
                         statements.push(body);
                     }
-                    CheckedStmt::Reg { .. } => { /* A register reset is already a concrete value. */
+                    CheckedStmt::Reg { .. } | CheckedStmt::Wire { .. } => {
+                        // Only runtime expressions can introduce dependencies.
                     }
                 }
             }

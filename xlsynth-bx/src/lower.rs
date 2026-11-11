@@ -23,6 +23,7 @@ use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
     TypedMatchArm, literal_copy_work, output_ports,
 };
+use crate::cycle_diagnostic::{CycleSources, WireDriver};
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
 use crate::typed::{
@@ -74,7 +75,17 @@ pub fn lower_module(
     reset: ResetBehavior,
 ) -> Result<Package, String> {
     lower_checked_module(module, package, reset, crate::check::MAX_TYPE_SIZE)
-        .map_err(crate::bx_import::diagnostic)
+        .map_err(|error| error.0)
+}
+
+/// A lowering diagnostic ready for display, including any source excerpt.
+#[derive(Debug)]
+struct LowerError(String);
+
+impl From<String> for LowerError {
+    fn from(message: String) -> Self {
+        Self(crate::bx_import::diagnostic(message))
+    }
 }
 
 fn lower_checked_module(
@@ -82,7 +93,7 @@ fn lower_checked_module(
     mut package: Package,
     reset: ResetBehavior,
     empty_array_limit: usize,
-) -> Result<Package, String> {
+) -> Result<Package, LowerError> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
     let named = link_externs(module, &package, &mut layouts)?;
@@ -177,25 +188,31 @@ fn lower_checked_module(
     let mut block_specializations =
         EmptyArrayBudget::new("generic block specialization", empty_array_limit);
     for block in &module.blocks {
+        let ir_block = block_symbols.get(&block.name);
         let budget = if module.specialized_blocks.contains(&block.name) {
             &mut block_specializations
         } else {
             &mut EmptyArrayBudget::new("body", empty_array_limit)
         };
         let body = LowerBody::new(
-            BlockBuilder::new(block_symbols.get(&block.name)),
+            BlockBuilder::new(ir_block),
             &mut destination,
             &functions,
             &mut layouts,
             budget,
         );
-        let builder = body
+        let (builder, sources) = body
             .build_block(block, &block_symbols, &module.structs, reset)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
-        destination
-            .batch
-            .append_block(builder)
-            .map_err(|error| format!("block '{}': {error}", block.name))?;
+        destination.batch.append_block(builder).map_err(|error| {
+            sources.render(&error, block, ir_block).map_or_else(
+                || format!("block '{}': {error}", block.name).into(),
+                LowerError,
+            )
+        })?;
+        if let Some(error) = &block.timing_error {
+            return Err(format!("block '{}': {error}", block.name).into());
+        }
     }
     let mut concrete = module.blocks.iter().filter(|block| {
         library_item(&block.name).is_none() && !module.specialized_blocks.contains(&block.name)
@@ -551,6 +568,7 @@ struct Register {
 struct BlockResources {
     registers: BTreeMap<String, Register>,
     instances: BTreeMap<String, BInstantiation>,
+    cycle_sources: CycleSources,
 }
 
 /// The destination package and symbols reserved for user definitions and
@@ -779,7 +797,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         symbols: &BlockSymbols,
         structs: &[StructDef],
         reset_behavior: ResetBehavior,
-    ) -> Result<BlockBuilder, BuilderError> {
+    ) -> Result<(BlockBuilder, CycleSources), BuilderError> {
         let mut resources = BlockResources::default();
         self.builder.clock_port(&block.clock)?;
         let reset = if let Some(name) = &block.reset {
@@ -819,7 +837,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                 let value = self.expr(field)?;
                 self.builder.output_port(&port.name, value)?;
             }
-            return Ok(self.builder);
+            return Ok((self.builder, resources.cycle_sources));
         }
         let value = self.expr(&block.output)?;
         for (index, port) in ports.iter().enumerate() {
@@ -839,7 +857,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
             };
             self.builder.output_port(&port.name, field)?;
         }
-        Ok(self.builder)
+        Ok((self.builder, resources.cycle_sources))
     }
 
     /// Wires register updates using one shared load-enable node for each
@@ -905,6 +923,25 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     let value = self.expr(value)?;
                     self.values.insert(name.clone(), value);
                 }
+                CheckedStmt::Wire { name, ty, .. } => {
+                    let wire = self.builder.declare_wire(self.layouts.lower(ty)?)?;
+                    self.values.insert(name.clone(), wire);
+                }
+                CheckedStmt::DriveWire { name, value, span } => {
+                    let wire = self.values[name];
+                    let value = self.expr(value)?;
+                    self.builder.drive_wire(wire, value)?;
+                    if let Some(span) = span {
+                        let id = self.builder.value_id(wire)?;
+                        resources.cycle_sources.wires.insert(
+                            id,
+                            WireDriver {
+                                name: name.clone(),
+                                span: *span,
+                            },
+                        );
+                    }
+                }
                 CheckedStmt::Write { name, value } => {
                     let reg = &resources.registers[name];
                     let data = self.expr(value)?;
@@ -938,10 +975,18 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     instance,
                     port,
                     value,
+                    span,
                 } => {
                     let value = self.expr(value)?;
-                    self.builder
-                        .instantiation_input(resources.instances[instance], port, value)?;
+                    let sink = self.builder.instantiation_input(
+                        resources.instances[instance],
+                        port,
+                        value,
+                    )?;
+                    if let Some(span) = span {
+                        let id = self.builder.value_id(sink)?;
+                        resources.cycle_sources.inputs.insert(id, *span);
+                    }
                 }
             }
         }
@@ -1668,7 +1713,8 @@ block both(clk, x: u1) -> u1 {
                 empty_package("design"),
                 ResetBehavior::default(),
                 limit,
-            );
+            )
+            .map_err(|error| error.0);
             if let Some(scope) = exhausted_scope {
                 let error = result.unwrap_err();
                 assert!(

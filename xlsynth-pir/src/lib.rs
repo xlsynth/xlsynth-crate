@@ -60,8 +60,9 @@ pub mod structural_similarity;
 pub use xlsynth_ir_value::{ir_values, value};
 
 pub use ir_builder::{
-    BInstantiation, BRegister, BValue, BlockBuilder, BuilderError, FnBuilder, NaryAddOptions,
-    NaryAddTerm, NormalizeLeftOptions, RegisterWriteOptions, ResetBehavior,
+    BInstantiation, BRegister, BValue, BlockBuilder, BlockCycleConnection, BlockCycleStep,
+    BuilderError, FnBuilder, NaryAddOptions, NaryAddTerm, NormalizeLeftOptions,
+    RegisterWriteOptions, ResetBehavior,
 };
 pub use ir_inline::{IrInlineBackend, IrInlineOptions, run_ir_inline_over_ir_text};
 pub use ir_values::{

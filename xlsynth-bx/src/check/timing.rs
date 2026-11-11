@@ -148,7 +148,9 @@ impl<'a> Checker<'a> {
         };
         for stmt in statements {
             let (owner, name, binding) = match stmt {
-                CheckedStmt::Let { name, value } => (scope, name, Binding::Let(driver(value))),
+                CheckedStmt::Let { name, value } | CheckedStmt::DriveWire { name, value, .. } => {
+                    (scope, name, Binding::Let(driver(value)))
+                }
                 CheckedStmt::Write { name, value } => {
                     (BLOCK_SCOPE, name, Binding::Register(driver(value)))
                 }

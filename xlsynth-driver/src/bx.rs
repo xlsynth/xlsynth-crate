@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgMatches, Command, value_parser};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_source_with_options, empty_package, lower_module,
+    ImportOptions, ResetBehavior, check_source_file_with_options, empty_package, lower_module,
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
@@ -165,7 +165,7 @@ fn compile_input(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Resu
         active_low: matches.get_flag("reset-active-low"),
         asynchronous: matches.get_flag("reset-asynchronous"),
     };
-    let checked = check_source_with_options(&source, &imports)
+    let checked = check_source_file_with_options(&source, path, &imports)
         .map_err(|error| anyhow!("{}: {error}", path.display()))?;
     let mut package = lower_module(&checked, package, reset)
         .map_err(|error| anyhow!("{}: {error}", path.display()))?;

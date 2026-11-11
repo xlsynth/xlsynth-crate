@@ -13,7 +13,7 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, Param, Stmt, StructDef, Type, UnaryOp,
+    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef, Type, UnaryOp,
     WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
@@ -2052,6 +2052,10 @@ struct BodyChecker<'a, 'm> {
     inferred_bindings: InferredBindings,
     regs: BTreeMap<String, Type>,
     writes: BTreeSet<String>,
+    /// Deferred bindings in lexical scope and whether each has a driver.
+    wires: BTreeMap<String, bool>,
+    /// Location of the enclosing block statement during elaboration.
+    statement_span: Option<SourceSpan>,
     instances: BTreeMap<String, &'a BlockInterface>,
     connections: BTreeSet<(String, String)>,
     statements: Vec<CheckedStmt>,
@@ -2294,6 +2298,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             inferred_bindings: BTreeMap::new(),
             regs: BTreeMap::new(),
             writes: BTreeSet::new(),
+            wires: BTreeMap::new(),
+            statement_span: None,
             instances: BTreeMap::new(),
             connections: BTreeSet::new(),
             statements: Vec::new(),
@@ -2403,7 +2409,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         reserved_hardware_names.extend(block.params.iter().map(|p| p.name.clone()));
         for statement in &block.statements {
             match statement {
-                Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Inst { name, .. } => {
+                Stmt::Reg { name, .. }
+                | Stmt::Let { name, .. }
+                | Stmt::Wire { name, .. }
+                | Stmt::Inst { name, .. } => {
                     reserved_hardware_names.insert(name.clone());
                 }
                 Stmt::LetPattern(binding) => {
@@ -2490,6 +2499,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         c.body(block, &block.statements, false)?;
+        for (name, driven) in &c.wires {
+            if !driven {
+                return Err(format!("wire '{name}' has no driver"));
+            }
+        }
         for reg in c.regs.keys() {
             if !c.writes.contains(reg) {
                 return Err(format!("register '{reg}' has no update"));
@@ -2502,12 +2516,15 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 }
             }
         }
+        c.statement_span = block.source.as_ref().map(|source| source.output);
         let output = c
             .scoped_result(&block.output, Some(&interface.result), true)
             .map_err(|e| format!("result: {e}"))?;
         let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
-        let block = CheckedBlock {
+        let mut block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
+            source_name: block.name.clone(),
+            source: block.source.as_ref().map(|source| source.file.clone()),
             public: specialization.is_none() && block.public,
             clock: block.clock.clone(),
             reset: block.reset.clone(),
@@ -2515,10 +2532,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             input_cycles: block.input_cycles.clone(),
             result: interface.result.clone(),
             output_cycles: block.output_cycles.clone(),
+            timing_error: None,
             statements: c.statements,
             output,
         };
-        timing::check_outputs(&block, &interface.outputs, &c.outputs, c.structs)?;
+        let timing = timing::check_outputs(&block, &interface.outputs, &c.outputs, c.structs);
+        if c.wires.is_empty() {
+            timing?;
+        } else {
+            // Timing inference can stop at feedback. Give the block IR cycle
+            // checker a chance to report the driver and child connections.
+            block.timing_error = timing.err();
+        }
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -2704,6 +2729,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 instance: instance.clone(),
                 port: param.name.clone(),
                 value,
+                span: self.statement_span,
             });
         }
         let mut outputs = child.outputs.iter().map(|port| TypedExpr {
@@ -2779,7 +2805,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     ) -> Result<(), String> {
         let mut locals = Vec::new();
         let mut pattern_bindings = Vec::new();
-        for stmt in statements {
+        for (index, stmt) in statements.iter().enumerate() {
+            if !conditional {
+                self.statement_span = block
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.statements.get(index))
+                    .copied();
+            }
             let checked = match stmt {
                 Stmt::Reg { name, ty, reset } => {
                     if conditional {
@@ -2852,6 +2885,44 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         instance: instance.clone(),
                         port: port.clone(),
                         value,
+                        span: self.statement_span,
+                    }
+                }
+                Stmt::Wire { name, ty } => {
+                    if conditional {
+                        return Err(format!("conditional declaration of wire '{name}'"));
+                    }
+                    let ty = self.source_type(ty)?;
+                    if self.function_values.contains_key(name) {
+                        return Err(format!("duplicate name '{name}'"));
+                    }
+                    declare(&mut self.names, name)?;
+                    self.values.insert(name.clone(), ty.clone());
+                    self.wires.insert(name.clone(), false);
+                    CheckedStmt::Wire {
+                        name: name.clone(),
+                        ty,
+                    }
+                }
+                Stmt::DriveWire { name, value } => {
+                    if conditional {
+                        return Err(format!("conditional driver for wire '{name}'"));
+                    }
+                    let driven = self
+                        .wires
+                        .get_mut(name)
+                        .ok_or_else(|| format!("'{name}' is not a declared wire"))?;
+                    if std::mem::replace(driven, true) {
+                        return Err(format!("multiple drivers for wire '{name}'"));
+                    }
+                    let ty = self.values[name].clone();
+                    let value = self
+                        .expr(value, Some(&ty))
+                        .map_err(|e| format!("driver of wire '{name}': {e}"))?;
+                    CheckedStmt::DriveWire {
+                        name: name.clone(),
+                        value,
+                        span: self.statement_span,
                     }
                 }
                 Stmt::Let {
@@ -2884,6 +2955,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         if name == block.clock
                             || block.reset.as_deref() == Some(name)
                             || self.regs.contains_key(name)
+                            || self.wires.contains_key(name)
                             || self.instances.contains_key(name)
                         {
                             collision = Some(name.to_owned());
@@ -2906,6 +2978,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     continue;
                 }
                 Stmt::Write { name, value } => {
+                    if self.wires.contains_key(name) {
+                        return Err(format!("wire '{name}' must be driven with '='"));
+                    }
                     let ty = self
                         .regs
                         .get(name)
