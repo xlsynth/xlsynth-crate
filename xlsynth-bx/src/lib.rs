@@ -6,6 +6,7 @@ pub mod ast;
 mod builtin;
 mod bx_import;
 pub mod check;
+mod cycle_diagnostic;
 mod dslx_import;
 mod effect_diagnostic;
 mod import_link;
@@ -58,13 +59,31 @@ pub fn parse_module_with_options(
 }
 
 /// Check BX source and its imports in one snapshot. The returned module
-/// carries warnings alongside its checked declarations.
+/// carries warnings alongside its checked declarations. Lowering reports
+/// combinational cycles and timing errors deferred by the wire checker.
 pub fn check_source_with_options(
     source: &str,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
     let (module, imports) = bx_import::read(source, options)?;
     check::check_sources(&module, imports, options).map_err(bx_import::diagnostic)
+}
+
+/// Check BX source and its imports, retaining the root path for diagnostics.
+pub fn check_source_file_with_options(
+    source: &str,
+    path: &Path,
+    options: &ImportOptions<'_>,
+) -> Result<CheckedModule, String> {
+    let mut checked = check_source_with_options(source, options)?;
+    for block in &mut checked.blocks {
+        if let Some(source) = &mut block.source
+            && source.path.is_none()
+        {
+            source.path = Some(path.to_owned());
+        }
+    }
+    Ok(checked)
 }
 
 /// Compile BX source with the specified module search paths and treat

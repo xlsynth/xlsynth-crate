@@ -11,8 +11,8 @@ use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_rebase_ids::package_max_emitted_node_id;
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{
-    BValue, BlockBuilder, BuilderError, FnBuilder, IrValue, NaryAddOptions, NaryAddTerm,
-    NormalizeLeftOptions, RegisterWriteOptions, ResetBehavior,
+    BValue, BlockBuilder, BlockCycleStep, BuilderError, FnBuilder, IrValue, NaryAddOptions,
+    NaryAddTerm, NormalizeLeftOptions, RegisterWriteOptions, ResetBehavior,
 };
 
 fn bits(width: usize, value: u64) -> IrValue {
@@ -59,6 +59,71 @@ fn empty_block_has_no_synthetic_return_or_data_ports() {
     assert_eq!(block.nodes.len(), 1);
     assert!(block.ports.is_empty());
     assert_standard_package(&package);
+}
+
+#[test]
+fn deferred_wires_roundtrip_and_reject_invalid_drivers() {
+    let mut builder = BlockBuilder::new("forward");
+    let wire = builder.declare_wire(Type::Bits(8)).unwrap();
+    let inverted = builder.not(wire).unwrap();
+    builder.output_port("out", inverted).unwrap();
+    let input = builder.input_port("input", Type::Bits(8)).unwrap();
+    let wrong_type = builder.literal(bits(1, 0)).unwrap();
+    let foreign = BlockBuilder::new("other")
+        .declare_wire(Type::Bits(8))
+        .unwrap();
+    assert_eq!(
+        builder.drive_wire(wire, foreign),
+        Err(BuilderError::ForeignValue)
+    );
+    assert!(builder.drive_wire(wire, wrong_type).is_err());
+    assert!(builder.drive_wire(input, wire).is_err());
+    builder.drive_wire(wire, input).unwrap();
+    assert!(builder.drive_wire(wire, inverted).is_err());
+
+    let package = builder.build_package("deferred").unwrap();
+    assert_standard_package(&package);
+    assert_eq!(
+        successful_value(evaluate_block(&package, "forward", &[bits(8, 0xa5)])),
+        bits(8, 0x5a)
+    );
+}
+
+#[test]
+fn unused_deferred_wires_still_require_a_driver() {
+    let mut builder = BlockBuilder::new("undriven");
+    let wire = builder.declare_wire(Type::Bits(8)).unwrap();
+    let id = builder.value_id(wire).unwrap();
+    assert_eq!(
+        builder.build().unwrap_err(),
+        BuilderError::InvalidOperation(format!("wire {id} has no driver"))
+    );
+}
+
+#[test]
+fn deferred_wire_alias_cycle_reports_pre_rebase_ids() {
+    let mut builder = BlockBuilder::new("alias_cycle");
+    let left = builder.declare_wire(Type::Bits(8)).unwrap();
+    let right = builder.declare_wire(Type::Bits(8)).unwrap();
+    builder.drive_wire(left, right).unwrap();
+    builder.drive_wire(right, left).unwrap();
+    let steps = [left, right]
+        .into_iter()
+        .map(|wire| BlockCycleStep {
+            node_id: builder.value_id(wire).unwrap(),
+            connection: None,
+        })
+        .collect();
+    let mut existing = BlockBuilder::new("existing");
+    existing.input_port("input", Type::Bits(8)).unwrap();
+    let package = existing.build_package("existing").unwrap();
+    assert_eq!(
+        builder.build_in_package(&package).unwrap_err(),
+        BuilderError::CombinationalCycle {
+            block: "alias_cycle".into(),
+            steps,
+        }
+    );
 }
 
 #[test]

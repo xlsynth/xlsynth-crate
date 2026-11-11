@@ -6,15 +6,16 @@ pub mod outline;
 pub(crate) mod source_bytes;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 
 use xlsynth_pir::{IrBits, IrValue};
 
 use crate::BxWarningKind;
 use crate::ast::{
-    BinaryOp, BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr,
-    ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourcePosition, Stmt, StructDef,
-    Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
+    Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
+    MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourceFile, SourcePosition,
+    SourceSpan, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -460,6 +461,7 @@ pub(crate) fn parse_value_type(source: &str) -> Result<Type, String> {
 /// Cursor over the token stream, whose final element always represents EOF.
 struct Parser<'s> {
     source: &'s str,
+    diagnostic_source: Option<Arc<str>>,
     dialect: Dialect,
     tokens: Vec<Token<'s>>,
     pos: usize,
@@ -567,7 +569,15 @@ struct ParsedAngleArguments {
 /// Contents of braces before determining whether they form a guard or a value.
 struct Body {
     statements: Vec<Stmt>,
-    output: Option<ParsedExpr>,
+    statement_spans: Vec<SourceSpan>,
+    output: Option<(ParsedExpr, SourceSpan)>,
+}
+
+/// A let pattern and annotation before introducing its names into scope.
+struct LetHead {
+    pattern: BindingPattern,
+    ty: Option<Type>,
+    names: BTreeSet<String>,
 }
 
 /// A block's inferred types and explicit value and callable formals.
@@ -710,6 +720,7 @@ impl<'s> Parser<'s> {
         }
         Ok(Self {
             source,
+            diagnostic_source: None,
             dialect: Dialect::Bx,
             tokens,
             pos: 0,
@@ -1694,12 +1705,28 @@ impl<'s> Parser<'s> {
         let body = self.body()?;
         self.dependent_types = false;
         self.type_params.clear();
-        let output = body
+        let (output, output_span) = body
             .output
             .ok_or_else(|| self.error("block requires an output expression"))?;
+        let source = body
+            .statements
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::Wire { .. }))
+            .then(|| BlockSource {
+                file: SourceFile {
+                    text: self
+                        .diagnostic_source
+                        .get_or_insert_with(|| Arc::from(self.source))
+                        .clone(),
+                    path: None,
+                },
+                statements: body.statement_spans,
+                output: output_span,
+            });
         Ok(Block {
             name: signature.name,
             name_position: Some(name_position),
+            source,
             allowed_warnings,
             public,
             type_params: params.type_params,
@@ -2094,7 +2121,9 @@ impl<'s> Parser<'s> {
 
     fn block_body_contents(&mut self) -> Result<Body, String> {
         let mut statements = Vec::new();
+        let mut statement_spans = Vec::new();
         while !self.eat("}") {
+            let start = self.tokens[self.pos].start;
             // A DSLX use leaf can be named reg or inst. A following name
             // distinguishes a hardware declaration from a call or constructor.
             if self.peek(0) == "reg" && is_identifier(self.peek(1)) {
@@ -2112,7 +2141,7 @@ impl<'s> Parser<'s> {
                     reset,
                 });
             } else if self.eat("let") {
-                statements.push(self.let_stmt()?.0);
+                statements.push(self.let_stmt(/* allow_wire= */ true)?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
                 self.pos += 1;
                 let name = self.ident()?;
@@ -2133,6 +2162,13 @@ impl<'s> Parser<'s> {
                     name,
                     value: self.expr()?.value,
                 });
+            } else if self.peek(1) == "=" {
+                let name = self.ident()?;
+                self.expect("=")?;
+                statements.push(Stmt::DriveWire {
+                    name,
+                    value: self.expr()?.value,
+                });
             } else if self.peek(1) == "." && self.peek(3) == ":=" {
                 let instance = self.ident()?;
                 self.expect(".")?;
@@ -2150,10 +2186,12 @@ impl<'s> Parser<'s> {
                     self.expect("else")?;
                     let expr = self.if_tail(condition, then_value)?;
                     let output = self.expr_tail(expr, 0, Braces::Struct)?;
+                    let span = self.span_since(start);
                     self.expect("}")?;
                     return Ok(Body {
                         statements,
-                        output: Some(output),
+                        statement_spans,
+                        output: Some((output, span)),
                     });
                 }
                 let then_body = self.nested(Self::body)?;
@@ -2164,21 +2202,35 @@ impl<'s> Parser<'s> {
                     condition: condition.value,
                     body: then_body.statements,
                 });
-                continue;
             } else {
                 let output = self.expr()?;
+                let span = self.span_since(start);
                 self.expect("}")?;
                 return Ok(Body {
                     statements,
-                    output: Some(output),
+                    statement_spans,
+                    output: Some((output, span)),
                 });
             }
-            self.expect(";")?;
+            if !matches!(statements.last(), Some(Stmt::If { .. })) {
+                self.expect(";")?;
+            }
+            statement_spans.push(self.span_since(start));
         }
         Ok(Body {
             statements,
+            statement_spans,
             output: None,
         })
+    }
+
+    /// Cover the tokens consumed since the given source offset.
+    fn span_since(&self, start: usize) -> SourceSpan {
+        let last = self.tokens[self.pos - 1];
+        SourceSpan {
+            start,
+            end: last.start + last.text.len(),
+        }
     }
 
     /// A block-level `if` with an `else` has two pure value scopes. A guard
@@ -2198,8 +2250,18 @@ impl<'s> Parser<'s> {
     }
 
     /// Keep the named block statement representation for a simple binding.
-    fn let_stmt(&mut self) -> Result<(Stmt, usize), String> {
-        let (binding, height) = self.let_binding(true)?;
+    fn let_stmt(&mut self, allow_wire: bool) -> Result<(Stmt, usize), String> {
+        let head = self.let_head(true)?;
+        if allow_wire && self.peek(0) == ";" {
+            return match (head.pattern, head.ty) {
+                (BindingPattern::Name(name), Some(ty)) if name != "_" => {
+                    self.shadow_callable(&name);
+                    Ok((Stmt::Wire { name, ty }, 0))
+                }
+                _ => Err(self.error("deferred let requires a single name and an explicit type")),
+            };
+        }
+        let (binding, height) = self.let_initializer(head)?;
         let statement = match binding {
             LetBinding {
                 pattern: BindingPattern::Name(name),
@@ -2214,6 +2276,12 @@ impl<'s> Parser<'s> {
     /// Parse block and function let patterns alike. Each name enters scope
     /// after the entire initializer, including its annotation.
     fn let_binding(&mut self, dslx_tuple_patterns: bool) -> Result<(LetBinding, usize), String> {
+        let head = self.let_head(dslx_tuple_patterns)?;
+        self.let_initializer(head)
+    }
+
+    /// Parse a let pattern and its optional type without binding its names.
+    fn let_head(&mut self, dslx_tuple_patterns: bool) -> Result<LetHead, String> {
         let mut names = BTreeSet::new();
         // Simple block lets can name child instances. Tuple members are
         // lexical values and can use primes and bangs in either dialect.
@@ -2237,15 +2305,20 @@ impl<'s> Parser<'s> {
         } else {
             None
         };
+        Ok(LetHead { pattern, ty, names })
+    }
+
+    /// Parse the initializer in the enclosing scope and introduce the names.
+    fn let_initializer(&mut self, head: LetHead) -> Result<(LetBinding, usize), String> {
         self.expect("=")?;
         let value = self.expr()?;
-        for name in names {
+        for name in head.names {
             self.shadow_callable(&name);
         }
         Ok((
             LetBinding {
-                pattern,
-                ty,
+                pattern: head.pattern,
+                ty: head.ty,
                 value: value.value,
             },
             value.height,
@@ -2711,7 +2784,7 @@ impl<'s> Parser<'s> {
                 return p.expression_scope();
             }
             while p.eat("let") {
-                let (stmt, initializer_height) = p.let_stmt()?;
+                let (stmt, initializer_height) = p.let_stmt(/* allow_wire= */ false)?;
                 p.expect(";")?;
                 height = height.max(initializer_height);
                 body.push(stmt);

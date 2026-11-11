@@ -9,7 +9,10 @@ use xlsynth_pir::{
     ir_value_utils::{ir_bits_to_usize, ir_bits_to_usize_in_range},
 };
 
-use crate::ast::{BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, StructDef, Type, UnaryOp};
+use crate::ast::{
+    BinaryOp, ExternBlock, ExternFn, OutputCycles, Param, SourceFile, SourceSpan, StructDef, Type,
+    UnaryOp,
+};
 use crate::builtin::BuiltinOp;
 use crate::bx_import::library_item;
 use crate::dslx_import::{ImportedCall, ResolvedImports};
@@ -210,6 +213,10 @@ pub struct CheckedBinding {
 #[derive(Clone, Debug)]
 pub struct CheckedBlock {
     pub name: String,
+    /// Declared BX name before specialization and IR symbol assignment.
+    pub source_name: String,
+    /// Original file for statement diagnostic ranges, when available.
+    pub source: Option<SourceFile>,
     pub public: bool,
     pub clock: String,
     pub reset: Option<String>,
@@ -219,6 +226,8 @@ pub struct CheckedBlock {
     pub result: Type,
     /// Declared output timing, if the block opts into checking it.
     pub output_cycles: Option<OutputCycles>,
+    /// Timing error to report after verifying a block with deferred wires.
+    pub timing_error: Option<String>,
     pub statements: Vec<CheckedStmt>,
     pub output: TypedExpr,
 }
@@ -240,6 +249,17 @@ pub enum CheckedStmt {
         name: String,
         value: TypedExpr,
     },
+    /// Declare a typed wire whose driver is supplied in a later statement.
+    Wire {
+        name: String,
+        ty: Type,
+    },
+    /// Drive a deferred wire.
+    DriveWire {
+        name: String,
+        value: TypedExpr,
+        span: Option<SourceSpan>,
+    },
     Write {
         name: String,
         value: TypedExpr,
@@ -252,6 +272,7 @@ pub enum CheckedStmt {
         instance: String,
         port: String,
         value: TypedExpr,
+        span: Option<SourceSpan>,
     },
 }
 

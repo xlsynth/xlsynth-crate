@@ -466,7 +466,12 @@ impl<'a> Graph<'a> {
         bindings: BTreeMap<String, Binding>,
         depth: usize,
     ) -> Result<Library, String> {
-        let module = self.parse_with_bindings(&source.text, &source.uses, &bindings)?;
+        let mut module = self.parse_with_bindings(&source.text, &source.uses, &bindings)?;
+        for block in &mut module.blocks {
+            if let Some(block_source) = &mut block.source {
+                block_source.file.path = Some(source.target.path.clone());
+            }
+        }
         let names = Names::new(&module, Some(&source.target.subject), bindings)?;
         let exports = module
             .structs
