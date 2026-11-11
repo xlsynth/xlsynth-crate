@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 annotate-snippets = "=0.12.16"
 num-bigint = "0.4.6"
+petgraph = { version = "0.8.3", default-features = false, features = ["graphmap", "std"] }
 stacker = "0.1.25"
 tempfile = "3.20"
 xlsynth = { path = "../xlsynth", version = "0.82.0" }

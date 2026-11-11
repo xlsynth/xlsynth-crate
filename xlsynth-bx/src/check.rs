@@ -42,6 +42,7 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
+use struct_parametrics::StructApplication;
 mod timing;
 mod tuple_match;
 mod unroll;
@@ -727,8 +728,13 @@ struct StructTable<'m> {
     definitions: Vec<StructDef>,
     indices: BTreeMap<String, (usize, TypeShape)>,
     imported_count: usize,
+    /// Ordinary BX declarations, including records whose layout is still
+    /// pending.
+    declared_records: BTreeSet<&'m str>,
     templates: BTreeMap<&'m str, &'m StructDef>,
     instances: BTreeMap<String, struct_parametrics::StructInstance<'m>>,
+    /// Explicit prefixes whose trailing defaults have already been evaluated.
+    default_instances: BTreeMap<String, usize>,
     instance_layout_nodes: usize,
     active_templates: BTreeSet<&'m str>,
 }
@@ -797,8 +803,8 @@ fn resolve_type<'m>(
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
             checker.function_type_bindings = bindings.cloned();
-            let ty = checker.struct_actual_type(name, args)?;
-            resolve_type(&ty, is_local, bindings, dimensions, types, remaining)
+            let args = checker.struct_argument_values(name, args)?;
+            checker.struct_value_type(name, &args, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
@@ -830,11 +836,12 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
+                let args = checker.struct_literal_arguments(name, args)?;
                 checker.specialize_struct(
                     template,
                     struct_parametrics::StructArguments::Values {
-                        explicit: args,
-                        inferred: &[],
+                        explicit: &args,
+                        inferred: None,
                     },
                     remaining,
                 )
@@ -1366,14 +1373,19 @@ impl StructTable<'_> {
     /// selection.
     fn index(&mut self, index: usize) -> Result<TypeShape, String> {
         let def = &self.definitions[index];
-        let shape = TypeShape::aggregate(
+        let shape = self.definition_shape(def)?;
+        self.indices.insert(def.name.clone(), (index, shape));
+        Ok(shape)
+    }
+
+    /// Check the complete field layout before registering the nominal type.
+    fn definition_shape(&self, def: &StructDef) -> Result<TypeShape, String> {
+        TypeShape::aggregate(
             def.fields.iter().map(|p| &p.ty),
             MAX_ELABORATION_DEPTH,
             &|name| self.named_shape(name),
         )
-        .map_err(|e| format!("struct '{}': {e}", def.name))?;
-        self.indices.insert(def.name.clone(), (index, shape));
-        Ok(shape)
+        .map_err(|e| format!("struct '{}': {e}", def.name))
     }
 
     /// Import newly reflected definitions in dependency order. A call can
@@ -1728,6 +1740,9 @@ pub(crate) fn check_sources(
             declare(&mut fields, &field.name).map_err(|e| format!("struct '{}': {e}", def.name))?;
         }
         structs.register_template(def)?;
+        if !def.is_parametric() {
+            structs.declared_records.insert(&def.name);
+        }
         structs.definitions.push(StructDef {
             name: def.name.clone(),
             public: def.public,
@@ -2058,6 +2073,9 @@ struct BodyChecker<'a, 'm> {
     /// Visible function value parametrics, which can appear as named match
     /// patterns.
     value_parametric_names: BTreeSet<String>,
+    /// Bare dimension bindings in a struct declaration can have any integer
+    /// type.
+    in_struct_definition: bool,
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -2308,6 +2326,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
             value_parametric_names: BTreeSet::new(),
+            in_struct_definition: false,
             outputs: BTreeSet::new(),
             reserved_hardware_names: BTreeSet::new(),
             values: BTreeMap::new(),
@@ -3170,31 +3189,39 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields, base } => {
-                self.struct_literal(Type::Named(name.clone()), fields, base.as_deref(), expected)
-            }
+            Expr::Struct { name, fields, base } => self.struct_literal(
+                StructApplication::Named(name),
+                fields,
+                base.as_deref(),
+                expected,
+            ),
             Expr::AppliedStruct {
                 name,
                 args,
                 fields,
                 base,
-            } => self.struct_literal(
-                Type::Applied {
-                    name: name.clone(),
-                    args: args.clone(),
-                },
-                fields,
-                base.as_deref(),
-                expected,
-            ),
+            } => {
+                let args = self.struct_literal_arguments(name, args)?;
+                self.struct_literal(
+                    StructApplication::Values(name, &args),
+                    fields,
+                    base.as_deref(),
+                    expected,
+                )
+            }
             Expr::ParametricStruct {
                 name,
                 args,
                 fields,
                 base,
             } => {
-                let ty = self.struct_actual_type(name, args)?;
-                self.struct_literal(ty, fields, base.as_deref(), expected)
+                let args = self.struct_argument_values(name, args)?;
+                self.struct_literal(
+                    StructApplication::Values(name, &args),
+                    fields,
+                    base.as_deref(),
+                    expected,
+                )
             }
             Expr::TypeAppliedStruct {
                 name,
@@ -3202,10 +3229,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 fields,
                 base,
             } => self.struct_literal(
-                Type::TypeApplied {
-                    name: name.clone(),
-                    args: args.clone(),
-                },
+                StructApplication::Types(name, args),
                 fields,
                 base.as_deref(),
                 expected,
@@ -3573,18 +3597,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve the struct and check its fields in declaration order.
     fn struct_literal(
         &mut self,
-        source: Type,
+        source: StructApplication<'_>,
         fields: &[(String, Expr)],
         base: Option<&StructSplat>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         let base = base
             .map(|splat| {
-                self.struct_splat_base(&source, &splat.value, expected)
+                self.struct_splat_base(source, &splat.value, expected)
                     .map(|value| (splat, value))
             })
             .transpose()?;
-        self.check_struct_literal(&source, fields, base, expected)
+        self.check_struct_literal(source, fields, base, expected)
             .map_err(struct_parametrics::StructLiteralError::into_message)
     }
 
@@ -3592,7 +3616,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// from invalid fields or types.
     fn check_struct_literal(
         &mut self,
-        source: &Type,
+        source: StructApplication<'_>,
         fields: &[(String, Expr)],
         base: Option<(&StructSplat, TypedExpr)>,
         expected: Option<&Type>,

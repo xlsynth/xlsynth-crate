@@ -5,7 +5,7 @@
 use super::{BodyChecker, CheckedBinding, CheckedStmt, K, Param, Type, TypedExpr, compatible};
 use crate::ast::{Expr, ForIterable, ForLoop};
 use crate::infer_literal::{BindingWidths, Member, binding_widths, minimum_type};
-use crate::typed::{TypedFor, TypedIterable};
+use crate::typed::{BoundParametricValue, TypedFor, TypedIterable};
 use std::collections::BTreeSet;
 
 /// Static iteration shape and the value from which the loop reads its elements.
@@ -21,7 +21,10 @@ pub(super) struct Iteration {
 pub(super) enum CarryContext<'a> {
     Expected(Option<&'a Type>),
     Prepared(TypedExpr),
-    StructPrefix { name: &'a str, args: &'a [u32] },
+    StructPrefix {
+        name: &'a str,
+        args: &'a [BoundParametricValue],
+    },
 }
 
 impl BodyChecker<'_, '_> {
