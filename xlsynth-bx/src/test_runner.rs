@@ -2,6 +2,8 @@
 
 //! Execute test control flow over typed BX expressions and clocked hardware.
 
+#[cfg(test)]
+mod mixed_suite_tests;
 mod quickcheck;
 mod simulation;
 
@@ -80,6 +82,39 @@ pub(crate) struct TestSuite {
 }
 
 impl TestSuite {
+    /// A separate hardware lowering is needed only when a clocked harness
+    /// reaches a helper whose discarded fields are observed by a pure test.
+    /// The pure harnesses themselves can then be omitted from that lowering.
+    fn pure_harnesses_for_clocked_lowering(
+        &self,
+        checked: &crate::CheckedModule,
+    ) -> Option<BTreeSet<&str>> {
+        let mut clocked = self
+            .programs
+            .iter()
+            .filter(|p| p.kind == TestKind::Block)
+            .peekable();
+        if checked.functions_with_test_discards.is_empty() || clocked.peek().is_none() {
+            return None;
+        }
+        let pure_harnesses: BTreeSet<_> = self
+            .programs
+            .iter()
+            .filter(|p| p.kind == TestKind::Function)
+            .map(|p| p.harness.as_str())
+            .collect();
+        if checked
+            .functions_with_test_discards
+            .iter()
+            .all(|name| pure_harnesses.contains(name.as_str()))
+        {
+            return None;
+        }
+        checked
+            .blocks_reach_test_discards(clocked.map(|p| p.harness.clone()))
+            .then_some(pure_harnesses)
+    }
+
     pub(crate) fn reserve_names(&mut self, names: &BTreeSet<String>) {
         self.reserved.extend(names.iter().cloned());
     }
@@ -215,26 +250,9 @@ pub fn run_tests_with_quickcheck(
             source.path.get_or_insert_with(|| path.to_owned());
         }
     }
-    // A mixed suite can share a helper between a pure test and a DUT. The
-    // interpreter evaluates discarded fields for their contracts, while the
-    // DUT uses the same lowering of those fields as ordinary BX hardware.
-    let clocked_seed = if !checked.functions_with_test_discards.is_empty()
-        && suite.programs.iter().any(|p| p.kind == TestKind::Block)
-    {
-        let pure_harnesses: BTreeSet<_> = suite
-            .programs
-            .iter()
-            .filter(|p| p.kind == TestKind::Function)
-            .map(|p| p.harness.as_str())
-            .collect();
-        checked
-            .functions_with_test_discards
-            .iter()
-            .any(|name| !pure_harnesses.contains(name.as_str()))
-            .then(|| (package.clone(), pure_harnesses))
-    } else {
-        None
-    };
+    let clocked_seed = suite
+        .pure_harnesses_for_clocked_lowering(&checked)
+        .map(|pure_harnesses| (package.clone(), pure_harnesses));
     let package = lower_module(&checked, package, reset).map_err(at_file)?;
     let warnings = std::mem::take(&mut checked.warnings);
     if warnings_as_errors && !warnings.is_empty() {

@@ -11,6 +11,25 @@ use crate::typed::{
 };
 
 impl CheckedModule {
+    /// Whether these hardware roots reach a function with extra pure-test
+    /// observations. Follow the same expressions and calls hardware emits.
+    pub(crate) fn blocks_reach_test_discards(&self, roots: impl Iterator<Item = String>) -> bool {
+        let mut used = Dependencies {
+            named: roots.collect(),
+            ..Default::default()
+        };
+        used.visit_blocks(&self.blocks);
+        for function in self.functions.iter().rev() {
+            if used.named.contains(&function.name) {
+                if self.functions_with_test_discards.contains(&function.name) {
+                    return true;
+                }
+                used.function(function, false);
+            }
+        }
+        false
+    }
+
     /// Select the functions whose discarded fields execute in a pure test.
     /// Visit callers before their callees, including calls inside those fields.
     pub(crate) fn resolve_pure_test_dependencies(&mut self, harnesses: BTreeSet<String>) {
@@ -49,11 +68,7 @@ impl CheckedModule {
         };
         // Both collections are already in dependency order. Visit each
         // caller before its children, then visit functions called by blocks.
-        for block in self.blocks.iter().rev() {
-            if used.named.contains(&block.name) {
-                used.block(block);
-            }
-        }
+        used.visit_blocks(&self.blocks);
         for function in self.functions.iter().rev() {
             if used.named.contains(&function.name) {
                 used.function(
@@ -85,6 +100,16 @@ struct Dependencies {
 }
 
 impl Dependencies {
+    /// Checked blocks are ordered child-first. Walking backwards discovers
+    /// each reachable child before its turn and gathers the functions it calls.
+    fn visit_blocks(&mut self, blocks: &[CheckedBlock]) {
+        for block in blocks.iter().rev() {
+            if self.named.contains(&block.name) {
+                self.block(block);
+            }
+        }
+    }
+
     /// Follow a function's result and the bindings that its lowering emits.
     fn function(&mut self, function: &CheckedFunction, evaluate_discards: bool) {
         let mut expressions = vec![&function.output];
