@@ -42,6 +42,13 @@ struct ImportedStructInstance {
     values: Rc<[u32]>,
 }
 
+/// A projection from a public DSLX aggregate to a type containing private
+/// nominal declarations.
+struct AggregateProjection {
+    alias: Rc<str>,
+    suffix: String,
+}
+
 /// A frozen module graph and its concrete struct types. Ordinary DSLX imports
 /// check dependencies with the same rules as native DSLX callers.
 pub(crate) struct ImportedStructs {
@@ -50,6 +57,18 @@ pub(crate) struct ImportedStructs {
     bindings: HashMap<dslx::StructDef, StructBinding>,
     declarations: BTreeMap<DeclId, dslx::StructDef>,
     explicit_types: BTreeMap<String, dslx::Type>,
+    /// Concrete non-record exports already reflected from the native snapshot.
+    reflected_aliases: BTreeMap<String, Type>,
+    /// Public DSLX names for whole aggregates, including private nominal
+    /// leaves.
+    aggregate_spellings: HashMap<Type, String>,
+    /// Snapshot constructor or cast names for reflected private nominal values.
+    value_spellings: HashMap<String, String>,
+    aggregate_projections: HashMap<Type, AggregateProjection>,
+    /// A native type display narrows the public alias witnesses to reflect.
+    /// The canonical BX type, including declaration identities, selects the
+    /// spelling.
+    aggregate_candidates: HashMap<String, Vec<DeclId>>,
     named_layouts: BTreeMap<String, usize>,
     parametric_instances: BTreeMap<usize, ImportedStructInstance>,
     /// Reflected layouts that contain a concrete parametric struct, including
@@ -117,6 +136,11 @@ impl ImportedStructs {
             bindings: HashMap::new(),
             declarations: BTreeMap::new(),
             explicit_types: BTreeMap::new(),
+            reflected_aliases: BTreeMap::new(),
+            aggregate_spellings: HashMap::new(),
+            value_spellings: HashMap::new(),
+            aggregate_projections: HashMap::new(),
+            aggregate_candidates: HashMap::new(),
             named_layouts: BTreeMap::new(),
             parametric_instances: BTreeMap::new(),
             instance_layouts: BTreeSet::new(),
@@ -143,6 +167,13 @@ impl ImportedStructs {
             .chain(
                 self.graph
                     .unresolved_aliases()
+                    .cloned()
+                    .map(|name| (name, None)),
+            )
+            .chain(
+                self.graph
+                    .private_aggregate_exports
+                    .iter()
                     .cloned()
                     .map(|name| (name, None)),
             )
@@ -219,6 +250,16 @@ impl ImportedStructs {
                             .get_or_insert_with(|| name.clone());
                     }
                     self.explicit_types.insert(name, ty);
+                } else {
+                    let display = ty.to_string().map_err(|e| e.to_string())?;
+                    if ty.is_array() || display.starts_with('(') {
+                        self.explicit_types
+                            .insert(format!("{}::{}", export.subject, export.name), ty);
+                        self.aggregate_candidates
+                            .entry(display)
+                            .or_default()
+                            .push(export);
+                    }
                 }
                 continue;
             };
@@ -307,6 +348,17 @@ impl ImportedStructs {
         self.graph.has_public_type(subject, member)
     }
 
+    /// A public alias keeps its declaration kind even when it names a struct.
+    pub(crate) fn is_public_alias(&self, subject: &str, member: &str) -> bool {
+        self.graph
+            .module_reference(subject, &[])
+            .and_then(|module| module.outline.declarations.get(member))
+            .is_some_and(|decl| {
+                decl.has_public_spelling(member)
+                    && matches!(decl.kind, crate::OutlineKind::Alias(_))
+            })
+    }
+
     pub(crate) fn public_struct_template_arity(
         &self,
         subject: &str,
@@ -365,6 +417,73 @@ impl ImportedStructs {
         &self.enums.definitions
     }
 
+    pub(crate) fn aggregate_spelling(&self, ty: &Type) -> Option<&str> {
+        self.aggregate_spellings.get(ty).map(String::as_str)
+    }
+
+    pub(crate) fn value_spelling(&self, ty: &Type) -> Option<&str> {
+        match ty {
+            Type::Named(name) | Type::Enum { name, .. } => {
+                self.value_spellings.get(name).map(String::as_str)
+            }
+            _ => None,
+        }
+    }
+
+    /// Supply a typed expression for a probe operand that has no public name.
+    pub(crate) fn aggregate_projection(&self, ty: &Type) -> Option<(&str, &str)> {
+        let member = self.aggregate_projections.get(ty)?;
+        Some((&member.alias, &member.suffix))
+    }
+
+    /// Index projections for private members without a snapshot spelling.
+    /// A chain of array aliases can exceed the outline traversal limit while
+    /// its concrete native layout still fits the BX type-depth limit.
+    fn index_aggregate_members(
+        &mut self,
+        ty: &Type,
+        alias: &Rc<str>,
+        suffix: &mut String,
+        reachable: bool,
+    ) -> bool {
+        let start = suffix.len();
+        let private = match ty {
+            Type::Named(name) | Type::Enum { name, .. } => {
+                self.value_spelling(ty).is_none()
+                    && name
+                        .split_once("::")
+                        .is_some_and(|(subject, _)| !self.graph.has_module(subject))
+            }
+            Type::Array { element, size } => {
+                suffix.push_str("[u32:0]");
+                let private =
+                    self.index_aggregate_members(element, alias, suffix, reachable && *size > 0);
+                suffix.truncate(start);
+                private
+            }
+            Type::Tuple(fields) => {
+                let mut private = false;
+                for (i, field) in fields.iter().enumerate() {
+                    suffix.push_str(&format!(".{i}"));
+                    private |= self.index_aggregate_members(field, alias, suffix, reachable);
+                    suffix.truncate(start);
+                }
+                private
+            }
+            _ => false,
+        };
+        if private && reachable && start != 0 && !self.aggregate_projections.contains_key(ty) {
+            self.aggregate_projections.insert(
+                ty.clone(),
+                AggregateProjection {
+                    alias: Rc::clone(alias),
+                    suffix: suffix.clone(),
+                },
+            );
+        }
+        private
+    }
+
     pub(crate) fn contains_parametric_instance(&self, ty: &Type) -> bool {
         match ty {
             Type::Named(name) => self
@@ -421,12 +540,21 @@ impl ImportedStructs {
         ))
     }
 
-    pub(crate) fn resolve_nominal_type(
+    pub(crate) fn resolve_exported_type(
         &mut self,
         subject: &str,
         member: &str,
         data: &mut ImportData,
     ) -> Result<Type, String> {
+        if member.starts_with("BXConstexprType")
+            && self
+                .graph
+                .value_aliases
+                .get(subject)
+                .is_some_and(|aliases| aliases.values().any(|alias| alias == member))
+        {
+            return Err(format!("unknown DSLX type '{subject}::{member}'"));
+        }
         if self.graph.has_public_member(subject, member)
             && self.graph.is_sum(subject, &[member.to_owned()])
         {
@@ -434,19 +562,10 @@ impl ImportedStructs {
                 "BX supports numeric enums and '{subject}::{member}' is a DSLX sum enum"
             ));
         }
-        self.bind_exports(data)?;
-        let path = format!("{subject}::{member}");
-        if let Some(ty) = self
-            .explicit_types
-            .get(&path)
-            .filter(|ty| ty.is_enum())
-            .cloned()
-        {
-            return self.reflect_enum(&ty, data);
-        }
-        self.resolve_named(subject, member, data).map(Type::Named)
+        self.reflect_spelling(subject, member, member, data)
     }
 
+    #[cfg(test)]
     fn resolve_named(
         &mut self,
         subject: &str,
@@ -492,10 +611,28 @@ impl ImportedStructs {
         spelling: &str,
         data: &mut ImportData,
     ) -> Result<String, String> {
+        match self.reflect_spelling(subject, member, spelling, data)? {
+            Type::Named(name) => Ok(name),
+            _ => Err(format!("DSLX type '{subject}::{spelling}' is not a struct")),
+        }
+    }
+
+    /// Reflect a publicly accessible type, preserving the identity of any
+    /// structs and enums nested inside a transparent alias.
+    fn reflect_spelling(
+        &mut self,
+        subject: &str,
+        member: &str,
+        spelling: &str,
+        data: &mut ImportData,
+    ) -> Result<Type, String> {
         self.bind_exports(data)?;
         let path = format!("{subject}::{spelling}");
         if let Some(&index) = self.named_layouts.get(&path) {
-            return Ok(self.definitions[index].name.clone());
+            return Ok(Type::Named(self.definitions[index].name.clone()));
+        }
+        if let Some(ty) = self.reflected_aliases.get(&path) {
+            return Ok(ty.clone());
         }
         let witness = TypeWitness {
             imports: format!("import {subject} as bx_module;\n"),
@@ -520,10 +657,9 @@ impl ImportedStructs {
                 .get_type_info()
                 .get_type_for_type_annotation(&function.get_param(0).get_type_annotation())
                 .ok_or_else(|| format!("could not resolve DSLX type '{path}'"))?;
-            let def = ty
-                .get_struct_def()
-                .map_err(|_| format!("DSLX type '{path}' is not a struct"))?;
-            if !def.is_parametric() {
+            if let Ok(def) = ty.get_struct_def()
+                && !def.is_parametric()
+            {
                 self.bindings
                     .entry(def)
                     .or_default()
@@ -532,14 +668,27 @@ impl ImportedStructs {
             }
             ty
         };
-        let written = match self.graph.named(subject, member) {
-            Some(ResolvedShape::Struct(id)) => Some(id),
-            _ => None,
-        };
-        let canonical = self.reflect_struct(&ty, data, &witness, written.as_ref(), 0)?;
-        let index = self.named_layouts[&canonical];
-        self.named_layouts.insert(path, index);
-        Ok(canonical)
+        let written = self.graph.named(subject, member);
+        let reflected = self.reflect_at(&ty, data, &witness, written.as_ref(), 0)?;
+        if let Type::Named(canonical) = &reflected {
+            let index = self.named_layouts[canonical];
+            self.named_layouts.insert(path, index);
+        } else {
+            if matches!(reflected, Type::Tuple(_) | Type::Array { .. })
+                && !self.aggregate_spellings.contains_key(&reflected)
+            {
+                self.index_aggregate_members(
+                    &reflected,
+                    &Rc::from(path.as_str()),
+                    &mut String::new(),
+                    true,
+                );
+                self.aggregate_spellings
+                    .insert(reflected.clone(), path.clone());
+            }
+            self.reflected_aliases.insert(path, reflected.clone());
+        }
+        Ok(reflected)
     }
 
     pub(crate) fn reflect_result(
@@ -568,21 +717,40 @@ impl ImportedStructs {
                 "DSLX import type nesting exceeds {MAX_ELABORATION_DEPTH} levels"
             ));
         }
-        if ty.is_enum() {
-            self.bind_exports(data)?;
-            return self.reflect_enum(ty, data);
+        if ty.is_enum() || ty.is_struct() {
+            let (reflected, id) = if ty.is_enum() {
+                self.bind_exports(data)?;
+                let id = match written {
+                    Some(ResolvedShape::Enum(id)) => Some(id),
+                    _ => None,
+                };
+                (self.reflect_enum(ty, data)?, id)
+            } else {
+                let id = match written {
+                    Some(ResolvedShape::Struct(id)) => Some(id),
+                    _ => None,
+                };
+                (
+                    Type::Named(self.reflect_struct(ty, data, witness, id, depth)?),
+                    id,
+                )
+            };
+            if let Some(id) = id
+                && let Some(alias) = self
+                    .graph
+                    .value_aliases
+                    .get(&id.subject)
+                    .and_then(|aliases| aliases.get(&id.name))
+                && let Type::Named(name) | Type::Enum { name, .. } = &reflected
+            {
+                self.value_spellings
+                    .entry(name.clone())
+                    .or_insert_with(|| format!("{}::{alias}", id.subject));
+            }
+            return Ok(reflected);
         }
         if let Some((signed, width)) = ty.is_bits_like() {
             return Ok(Type::Bits { signed, width });
-        }
-        if ty.is_struct() {
-            let id = match written {
-                Some(ResolvedShape::Struct(id)) => Some(id),
-                _ => None,
-            };
-            return self
-                .reflect_struct(ty, data, witness, id, depth)
-                .map(Type::Named);
         }
         if ty.is_array() {
             let size = ty.get_array_size();
@@ -595,7 +763,7 @@ impl ImportedStructs {
                 Some(ResolvedShape::Array(element)) => Some(element.as_ref()),
                 _ => None,
             };
-            return Ok(Type::Array {
+            let result = Type::Array {
                 element: Box::new(self.reflect_at(
                     &ty.get_array_element_type(),
                     data,
@@ -604,7 +772,9 @@ impl ImportedStructs {
                     depth + 1,
                 )?),
                 size,
-            });
+            };
+            self.bind_matching_aggregates(ty, data)?;
+            return Ok(result);
         }
         let text = ty.to_string().map_err(|e| e.to_string())?;
         match parse_value_type(&text) {
@@ -627,10 +797,41 @@ impl ImportedStructs {
                         depth + 1,
                     )?);
                 }
+                self.bind_matching_aggregates(ty, data)?;
                 Ok(Type::Tuple(members))
             }
             Err(e) => Err(format!("unsupported result type '{text}': {e}")),
         }
+    }
+
+    /// Resolve matching public aliases against their own native declarations.
+    /// Equal type displays from different modules can contain distinct private
+    /// records or enums, so the display never supplies a BX type identity.
+    fn bind_matching_aggregates(
+        &mut self,
+        native: &dslx::Type,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        if !self.aggregate_candidates.is_empty() {
+            let display = native.to_string().map_err(|e| e.to_string())?;
+            self.bind_aggregate_display(&display, data)?;
+        }
+        Ok(())
+    }
+
+    /// Consume candidates before reflecting them, since walking an alias can
+    /// encounter the same native aggregate.
+    pub(crate) fn bind_aggregate_display(
+        &mut self,
+        display: &str,
+        data: &mut ImportData,
+    ) -> Result<(), String> {
+        if let Some(exports) = self.aggregate_candidates.remove(display) {
+            for export in exports {
+                self.resolve_exported_type(&export.subject, &export.name, data)?;
+            }
+        }
+        Ok(())
     }
 
     /// Use the Rust declaration's field order with DSLX's concrete field types.
@@ -1081,8 +1282,8 @@ pub enum Empty : sN[33] {}
             "import pkg.flags; pub type Forward = flags::Mode;",
         )?;
         let (mut registry, mut data) = load("use forward; use pkg::flags;", &[dir.path()])?;
-        let first = registry.resolve_nominal_type("forward", "Forward", &mut data)?;
-        let second = registry.resolve_nominal_type("pkg.flags", "Mode", &mut data)?;
+        let first = registry.resolve_exported_type("forward", "Forward", &mut data)?;
+        let second = registry.resolve_exported_type("pkg.flags", "Mode", &mut data)?;
         assert_eq!(first, second);
         let def = &registry.enum_definitions()[0];
         assert!(def.signed);
@@ -1092,7 +1293,7 @@ pub enum Empty : sN[33] {}
             [vec![254], vec![255; 15], vec![1]].concat()
         );
         assert_eq!(
-            registry.resolve_nominal_type("pkg.flags", "Empty", &mut data)?,
+            registry.resolve_exported_type("pkg.flags", "Empty", &mut data)?,
             Type::Enum {
                 name: "pkg.flags::Empty".into(),
                 signed: true,

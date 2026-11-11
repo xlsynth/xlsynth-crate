@@ -177,6 +177,41 @@ use its name in the type. A public BX library constant can be qualified, as
 in `u8[packet::LANES]`. Width slices and value-parametric functions also
 accept dimension expressions.
 
+## Module-level type aliases
+
+Use `type` to give a concrete type another name. Mark an alias `pub` to export
+it from a `.bx` library.
+
+```text
+// bus.bx
+const LANES = u32:4;
+type Lane = u8;
+pub type Payload = Lane[LANES];
+```
+
+```text
+// consumer.bx
+use bus::Payload;
+fn last(x: Payload) -> u8 { x[3] }
+```
+
+`Payload` and `u8[4]` are interchangeable. An alias for a struct or enum
+preserves the original declaration's identity, including the arguments of a
+concrete struct specialization. Two different structs with identical fields
+remain distinct. The alias's dimensions and names resolve in the module that
+declares it, so callers can use a public alias whose definition mentions
+private declarations.
+
+The same import syntax works for a public concrete alias in a `.x` library.
+For example, a DSLX library can export `pub type Sample = (Hidden, bool);`
+and BX can pass a `Sample` between imported functions while `Hidden` stays
+private to the library.
+
+Declare an alias before another alias or function that uses it. Under BX's
+default declaration-order rules a block can use a later alias in a type
+annotation. Enum member expressions such as `Mode::Idle` require `Mode` to be
+in scope at the block declaration.
+
 ## Native parametric structs
 
 A BX struct can declare compile-time value parameters of any concrete BX

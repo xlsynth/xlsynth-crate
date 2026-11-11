@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use petgraph::{algo::kosaraju_scc, graphmap::DiGraphMap};
 use xlsynth_pir::IrBits;
 
-use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_dependencies};
+use super::{
+    BodyChecker, CheckedEnum, Declarations, StructTable, bits, dependency_order, type_dependencies,
+};
 use crate::ast::{EnumDef, Expr, Module, SourceNode, Type};
 
 impl StructTable<'_> {
@@ -19,6 +21,15 @@ impl StructTable<'_> {
             return None;
         }
         self.enums.get(name)
+    }
+
+    /// A BX alias can qualify a member of either a local or an imported enum.
+    fn enum_subject(&self, prefix: &str, decls: &Declarations<'_>) -> Option<&CheckedEnum> {
+        match decls.type_aliases.get(prefix).map(|alias| &alias.ty) {
+            Some(Type::Enum { name, .. }) => self.enums.get(name),
+            Some(_) => None,
+            None => self.local_enum(prefix),
+        }
     }
 
     /// Check that zero initialization yields a declared value for each enum.
@@ -64,10 +75,16 @@ impl StructTable<'_> {
         module: &Module,
         position: impl Fn(&str) -> usize,
     ) -> Result<Vec<(usize, usize)>, String> {
-        let enum_positions: BTreeMap<_, _> = module
+        let type_positions: BTreeMap<_, _> = module
             .enums
             .iter()
-            .map(|def| (def.name.as_str(), position(&def.name)))
+            .map(|def| (def.name.as_str(), (position(&def.name), "enum")))
+            .chain(
+                module
+                    .type_aliases
+                    .iter()
+                    .map(|def| (def.name.as_str(), (position(&def.name), "type alias"))),
+            )
             .collect();
         let constant_positions: BTreeMap<_, _> = module
             .constants
@@ -219,14 +236,16 @@ impl StructTable<'_> {
                         def.name
                     ));
                 }
-                if let Some(&enum_at) = enum_positions.get(dep) {
-                    if enum_at > position(&def.name) {
+                if let Some(&(type_at, kind)) = type_positions.get(dep) {
+                    // An AST without a cross-kind declaration order can index
+                    // the struct as soon as its field types are available.
+                    if !module.declaration_order.is_empty() && type_at > position(&def.name) {
                         return Err(format!(
-                            "enum '{dep}' is declared after struct '{}'",
+                            "{kind} '{dep}' is declared after struct '{}'",
                             def.name
                         ));
                     }
-                    at = at.max(enum_at);
+                    at = at.max(type_at);
                 }
             }
             ready.push(at);
@@ -358,7 +377,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(false);
         };
-        if let Some(def) = self.structs.local_enum(prefix) {
+        if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
             crate::parser::validate_dslx_value_path(name)?;
             self.decls.check_type_name_visibility(
                 prefix,
@@ -396,7 +415,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.decls
             .check_type_name_visibility(prefix, self.function_position.or(self.block_position))?;
         let canonical;
-        let def = if let Some(def) = self.structs.local_enum(prefix) {
+        let def = if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
             def
         } else if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
             let Type::Enum { name, .. } = self.resolver.resolve_named(&subject, &ty)? else {

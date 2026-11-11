@@ -26,6 +26,7 @@ mod struct_parametrics;
 mod struct_type_parameters;
 mod struct_updates;
 mod tuple_match;
+mod type_aliases;
 mod unroll_types;
 
 pub use array_concat::check_array_concat;
@@ -51,6 +52,7 @@ pub use struct_parametrics::check_struct_parametrics;
 pub use struct_type_parameters::check_struct_type_parameters;
 pub use struct_updates::check_struct_updates;
 pub use tuple_match::check_tuple_match;
+pub use type_aliases::check_type_aliases;
 pub use unroll_types::check_unroll_types;
 
 /// Generate a shared expression and compare both frontends on reproducible

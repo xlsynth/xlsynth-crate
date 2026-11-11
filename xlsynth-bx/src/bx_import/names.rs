@@ -8,8 +8,8 @@ use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBind
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, Type, UnrollFor,
-    WidthSliceType,
+    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, Type, TypeAlias,
+    UnrollFor, WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
 use crate::parser::MAX_SYNTAX_DEPTH;
@@ -34,6 +34,33 @@ pub(crate) fn local_callee_name(callee: &str) -> Option<&str> {
 pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> {
     let position = |name: &str| names.positions.get(name).copied();
     let mut out = Module::default();
+    for (owner, types) in &module.overwritten_literal_types {
+        if names.order.is_some() && !names.positions.contains_key(owner) {
+            return Err(format!("unknown owner '{owner}' of literal annotation"));
+        }
+        let mut bare_types = BTreeSet::new();
+        for name in types {
+            if let Some((head, _)) = name.split_once("::") {
+                // The outer annotation discards the member before typechecking.
+                if !names.uses.contains_key(head) && !names.definitions.contains(head) {
+                    return Err(format!("unknown name '{head}' in literal annotation"));
+                }
+                names.record_reference(Some(owner), head, name, None);
+            } else {
+                bare_types.insert(names.resolve(name, None, Some(owner), ReferenceKind::Name)?);
+            }
+        }
+        out.overwritten_literal_types
+            .insert(names.declared(owner), bare_types);
+    }
+    for def in &module.type_aliases {
+        let mut scope = Scope::new(names, position(&def.name), &def.name);
+        out.type_aliases.push(TypeAlias {
+            name: names.declared(&def.name),
+            public: def.public,
+            ty: scope.ty(&def.ty)?,
+        });
+    }
     for def in &module.structs {
         let at = position(&def.name);
         let mut scope = Scope::new(names, at, &def.name);
@@ -43,7 +70,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         let value_parametrics = def
             .value_parametrics
             .iter()
-            .map(|value| scope.value_parametric(value))
+            .map(|value| scope.dslx_value_parametric(value))
             .collect::<Result<_, _>>()?;
         // A struct field can name a later declaration.
         scope.at = None;
@@ -115,7 +142,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         for formal in def.parametric_bindings() {
             match formal {
                 FunctionParametricRef::Value(value) => {
-                    value_parametrics.push(scope.value_parametric(value)?);
+                    value_parametrics.push(scope.dslx_value_parametric(value)?);
                 }
                 FunctionParametricRef::Callback(callback) => {
                     callback_params.push(scope.callback(callback)?);
@@ -372,11 +399,11 @@ impl<'a> Scope<'a> {
     /// module binding supplies its value.
     fn builtin_reference(&self, name: &str, fallback: &str) -> Result<String, String> {
         let member = self.names.uses.get(name);
-        let enum_binding = self.names.enums.contains(name)
-            || matches!(member, Some(Binding::Member(export)) if export.is_enum);
+        let enum_or_alias = self.names.enums_or_aliases.contains(name)
+            || matches!(member, Some(Binding::Member(export)) if export.can_qualify_member);
         let struct_binding = self.names.structs.contains(name)
             || matches!(member, Some(Binding::Member(export)) if export.is_struct);
-        let at = if enum_binding || is_call_builtin(name) && struct_binding {
+        let at = if enum_or_alias || is_call_builtin(name) && struct_binding {
             self.value_at
         } else {
             self.at
@@ -389,7 +416,7 @@ impl<'a> Scope<'a> {
             && !matches!(member, Some(Binding::Member(_)));
         // A BX type cannot supply the callee. The checker decides whether
         // that type leaves the builtin in scope.
-        let owner = if enum_binding || struct_binding || ordered_builtin {
+        let owner = if enum_or_alias || struct_binding || ordered_builtin {
             None
         } else {
             self.source_owner
@@ -496,6 +523,16 @@ impl<'a> Scope<'a> {
         fields.iter().map(|p| self.param(p)).collect()
     }
 
+    /// A DSLX function or struct introduces a value formal before its
+    /// annotation.
+    fn dslx_value_parametric(
+        &mut self,
+        value: &ParametricBinding,
+    ) -> Result<ParametricBinding, String> {
+        self.bind(&value.name);
+        self.value_parametric(value)
+    }
+
     /// Qualify one value binding and bring it into scope for following formals.
     fn value_parametric(&mut self, value: &ParametricBinding) -> Result<ParametricBinding, String> {
         let ty = self.ty(&value.ty)?;
@@ -567,11 +604,26 @@ impl<'a> Scope<'a> {
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
-        let value_parametrics = def
-            .value_parametrics
-            .iter()
-            .map(|p| self.value_parametric(p))
-            .collect::<Result<_, String>>()?;
+        // Value-formal annotations see preceding explicit binders. Callback
+        // signatures retain their block-wide value-formal scope below.
+        let value_parametrics = self.nested(|scope| {
+            let mut values = Vec::with_capacity(def.value_parametrics.len());
+            for formal in def.parametric_bindings() {
+                match formal {
+                    FunctionParametricRef::Value(value) => {
+                        values.push(scope.value_parametric(value)?)
+                    }
+                    FunctionParametricRef::Callback(callback) => scope.bind(&callback.name),
+                }
+            }
+            if values.len() != def.value_parametrics.len() {
+                return Err("invalid argument position for block value parametric".into());
+            }
+            Ok(values)
+        })?;
+        for value in &def.value_parametrics {
+            self.bind(&value.name);
+        }
         let callback_params = def
             .callback_params
             .iter()
@@ -804,8 +856,12 @@ impl<'a> Scope<'a> {
                     ZeroBinding::Intrinsic => false,
                 };
                 if calls_override && !self.locals.contains_key("zero!") {
+                    let native = match self.names.uses.get("zero!") {
+                        Some(Binding::Dslx(alias)) => Some(alias.as_str()),
+                        _ => None,
+                    };
                     self.names
-                        .record_reference(self.source_owner, "zero!", "zero!", None);
+                        .record_reference(self.source_owner, "zero!", "zero!", native);
                 }
                 Expr::Zero(self.ty(ty)?)
             }

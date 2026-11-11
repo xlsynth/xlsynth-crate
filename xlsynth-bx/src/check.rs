@@ -639,6 +639,10 @@ struct Declarations<'a> {
     block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
+    /// Canonical types evaluated in each alias's declaration scope.
+    type_aliases: BTreeMap<&'a str, CheckedTypeAlias>,
+    /// Aggregate type nodes copied when substituting transparent aliases.
+    alias_copy_work: Cell<usize>,
     constants: BTreeMap<&'a str, CheckedConstant>,
     functions: BTreeMap<&'a str, FunctionInterface>,
     function_templates: BTreeMap<&'a str, &'a Function>,
@@ -648,6 +652,12 @@ struct Declarations<'a> {
     has_block_value_parametrics: bool,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
+}
+
+/// A transparent alias and the cost of copying its expanded type at a use site.
+struct CheckedTypeAlias {
+    ty: Type,
+    copy_work: usize,
 }
 
 impl Declarations<'_> {
@@ -824,6 +834,25 @@ fn resolve_type<'m>(
                     return Ok(ty.clone());
                 }
                 bindings.reject_value(name)?;
+            }
+            if let Some(alias) = dimensions.decls.type_aliases.get(name.as_str()) {
+                if !matches!(ty, Type::Named(_)) {
+                    return Err(format!("type alias '{name}' takes no arguments"));
+                }
+                // A short chain of tuple aliases can describe exponentially
+                // many source nodes. Budget the expansion before cloning it.
+                let work = dimensions
+                    .decls
+                    .alias_copy_work
+                    .get()
+                    .saturating_add(alias.copy_work);
+                if work > MAX_TYPE_SIZE {
+                    return Err(format!(
+                        "type alias '{name}' exceeds the type expansion limit of {MAX_TYPE_SIZE}"
+                    ));
+                }
+                dimensions.decls.alias_copy_work.set(work);
+                return Ok(alias.ty.clone());
             }
             if let Some((subject, member)) = lookup_use(name, types.resolver, is_local)? {
                 if let Type::Applied { args, .. } = ty {
@@ -1726,6 +1755,14 @@ pub(crate) fn check_sources(
         order.verify(&resolver)?;
     }
     let mut structs = StructTable::default();
+    for alias in &module.type_aliases {
+        let name =
+            crate::bx_import::library_item(&alias.name).map_or(alias.name.as_str(), |(_, n)| n);
+        if !(crate::parser::is_use_identifier(name) || name == "self") {
+            return Err(format!("invalid type alias name '{name}'"));
+        }
+        declare(&mut names, &alias.name)?;
+    }
     for def in &module.enums {
         let name = crate::bx_import::library_item(&def.name).map_or(def.name.as_str(), |(_, n)| n);
         if !(crate::parser::is_use_identifier(name) || name == "self") {
@@ -1785,6 +1822,7 @@ pub(crate) fn check_sources(
                 .chain(module.externs.iter().map(|f| f.name.as_str()))
                 .chain(module.constants.iter().map(|c| c.name.as_str()))
                 .chain(module.structs.iter().map(|s| s.name.as_str()))
+                .chain(module.type_aliases.iter().map(|a| a.name.as_str()))
                 .chain(module.functions.iter().map(|f| f.name.as_str()))
                 .enumerate()
                 .map(|(i, name)| (name, i + 1)),
@@ -1813,6 +1851,32 @@ pub(crate) fn check_sources(
     let mut function_registry = FunctionSpecializations::new(names.clone());
     let function_bodies =
         function_registry.check_sources(module, &mut declarations, &mut resolver, &mut structs)?;
+    for (owner, types) in &module.overwritten_literal_types {
+        for name in types {
+            if let Some((head, _)) = name.split_once("::") {
+                // An unlinked module retains its qualified source spelling.
+                // Only the qualifier's scope matters after the outer type wins.
+                if !names.contains(head) {
+                    return Err(format!("unknown name '{head}' in literal annotation"));
+                }
+                continue;
+            }
+            let is_type = match resolver.lookup(name)? {
+                Some((subject, member)) => resolver.has_public_type(&subject, &member),
+                None => {
+                    declarations.type_aliases.contains_key(name.as_str())
+                        || structs.enums.contains_key(name)
+                        || structs.declared_records.contains(name.as_str())
+                        || structs.template(name).is_some()
+                }
+            };
+            if !is_type {
+                return Err(format!(
+                    "in '{owner}': '{name}' does not name a type in literal annotation"
+                ));
+            }
+        }
+    }
     let externs = module
         .externs
         .iter()
@@ -2704,16 +2768,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             for (formal, actual) in template.block.parametric_bindings().zip(parametrics) {
                 match formal {
                     FunctionParametricRef::Value(formal) => {
-                        let value = self.parametric_value(actual, &formal.ty).map_err(|e| {
+                        // Block template validation resolves each value formal
+                        // to u32.
+                        let ty = value_parametrics::dimension_type();
+                        let value = self.parametric_value(actual, &ty).map_err(|e| {
                             format!(
                                 "value parametric '{}' of block '{target}': {e}",
                                 formal.name
                             )
                         })?;
-                        values.push(BoundParametricValue {
-                            ty: formal.ty.clone(),
-                            value,
-                        });
+                        values.push(BoundParametricValue { ty, value });
                     }
                     FunctionParametricRef::Callback(_) => {
                         callbacks.push(generic_blocks::callback_argument_name(actual)?.to_owned());
@@ -4519,16 +4583,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
-            _ if self.decls.visible(
-                &self.zero_binding,
-                self.function_position.or(self.block_position),
-            ) && (self.structs.enums.contains_key(&self.zero_binding)
+            _ if self.structs.enums.contains_key(&self.zero_binding)
+                || self
+                    .decls
+                    .type_aliases
+                    .contains_key(self.zero_binding.as_str())
                 || self
                     .resolver
                     .lookup_enum_prefix(&self.zero_binding)?
-                    .is_some_and(|(module, name)| self.resolver.is_enum_type(&module, &name))) =>
+                    .is_some_and(|(module, name)| {
+                        self.resolver.is_enum_or_alias(&module, &name)
+                    }) =>
             {
-                Err("enum 'zero!' cannot be called as a function".into())
+                if self.decls.visible(
+                    &self.zero_binding,
+                    self.function_position.or(self.block_position),
+                ) {
+                    Err("type 'zero!' cannot be called as a function".into())
+                } else {
+                    Ok(false)
+                }
             }
             BodyKind::Function => Ok(self
                 .decls
@@ -4752,6 +4826,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         }
         if visible_value && self.structs.enums.contains_key(name) {
             return Err(format!("enum '{name}' cannot be called as a function"));
+        }
+        if visible_value && self.decls.type_aliases.contains_key(name) {
+            return Err(format!(
+                "type alias '{spelling}' cannot be called as a function"
+            ));
         }
         if visible_value
             && is_call_builtin(spelling)

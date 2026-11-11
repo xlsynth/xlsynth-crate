@@ -165,6 +165,14 @@ pub struct EnumMember {
     pub value: Expr,
 }
 
+/// A module-level name for a concrete value type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeAlias {
+    pub name: String,
+    pub public: bool,
+    pub ty: Type,
+}
+
 /// A nominal bits-backed type with ordered member initializers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnumDef {
@@ -792,8 +800,13 @@ pub struct Module {
     /// Explicit warning allowances on declarations other than block
     /// definitions.
     pub declaration_allowances: BTreeMap<String, BTreeSet<BxWarningKind>>,
+    /// Module references in literal annotations replaced by an outer
+    /// annotation, grouped by the declaration that used them. A bare name must
+    /// denote a type. A qualified name requires only its head to be in scope.
+    pub overwritten_literal_types: BTreeMap<String, BTreeSet<String>>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
+    pub type_aliases: Vec<TypeAlias>,
     pub enums: Vec<EnumDef>,
     pub constants: Vec<ConstDef>,
     pub externs: Vec<ExternFn>,
