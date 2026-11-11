@@ -481,6 +481,7 @@ struct PreparedCellCoverage {
     electrical_pin_order: OnceLock<Vec<usize>>,
     supported: OnceLock<bool>,
     functional_semantics: OnceLock<Result<(), String>>,
+    clock_gate_semantics: OnceLock<Result<(), String>>,
     driver_semantics: OnceLock<Result<(), String>>,
     pins: OnceLock<Vec<PreparedOutputCoverage>>,
 }
@@ -1047,6 +1048,20 @@ impl<'a> PreparedStaLibrary<'a> {
         self.coverage[cell_idx]
             .functional_semantics
             .get_or_init(|| self.library.cells[cell_idx].validate_functional_semantics())
+            .clone()
+    }
+
+    /// An existing clock gate needs a verified external interface, not a
+    /// combinational Boolean model of its private latch. Keep cell replacement
+    /// and Boolean analysis on the stricter functional validation path.
+    fn validate_instance_timing_semantics(&self, cell_idx: usize) -> Result<(), String> {
+        let cell = &self.library.cells[cell_idx];
+        if cell.clock_gate.is_none() {
+            return self.validate_functional_semantics(cell_idx);
+        }
+        self.coverage[cell_idx]
+            .clock_gate_semantics
+            .get_or_init(|| cell.positive_edge_clock_gate(self.library).map(|_| ()))
             .clone()
     }
 

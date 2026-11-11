@@ -17,7 +17,7 @@ use crate::liberty::Library;
 use crate::liberty_model::{PinDirection, TimingArc};
 use crate::netlist::normalized::{BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use serde::Serialize;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
@@ -398,7 +398,7 @@ impl<'lib> IncrementalSta<'lib> {
                 .cell_index(&name)
                 .ok_or_else(|| anyhow!("unknown cell {name}"))?;
             let cell = &library.cells[cell_idx];
-            lib.validate_functional_semantics(cell_idx)
+            lib.validate_instance_timing_semantics(cell_idx)
                 .map_err(anyhow::Error::msg)?;
             let mut pins = HashMap::new();
             let mut pin_order = Vec::new();
@@ -409,6 +409,11 @@ impl<'lib> IncrementalSta<'lib> {
                 let pin = lib
                     .pin(cell_idx, &name)
                     .ok_or_else(|| anyhow!("unknown pin {name}"))?;
+                ensure!(
+                    pin.direction != PinDirection::Internal as i32,
+                    "instance of '{}' connects private internal pin '{name}'",
+                    cell.name
+                );
                 let sources: Vec<_> = conn
                     .bits
                     .iter()

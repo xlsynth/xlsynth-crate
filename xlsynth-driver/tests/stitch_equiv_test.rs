@@ -478,7 +478,14 @@ fn pipe_cycle1(bank: Bank) -> u4 {
         SPEC.replace("flop_outputs = true", "flop_outputs = false"),
     )?;
     for args in [
-        &["lib2proto", "--output", "cells.textproto", CLOCK_GATE_LIB][..],
+        &[
+            "lib2proto",
+            "--include-timing",
+            "--default-output-load=1",
+            "--output",
+            "cells.textproto",
+            CLOCK_GATE_LIB,
+        ][..],
         &[
             "dslx-stitch-g8r-pipeline",
             "--spec",
@@ -496,6 +503,7 @@ fn pipe_cycle1(bank: Bank) -> u4 {
     }
     for (args, icg_count) in [
         (&[][..], 1),
+        (&["--g8r-resize=true"][..], 1),
         (&["--mapper", "native", "--clock-gating=false"][..], 0),
     ] {
         let mapped = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
