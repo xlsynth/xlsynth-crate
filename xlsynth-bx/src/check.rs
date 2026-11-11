@@ -1704,6 +1704,9 @@ pub(crate) fn check_sources(
         linked.map(|l| l.dslx_bindings.as_slice()),
         imports.native,
     )?;
+    for order in imports.declaration_orders {
+        order.verify(&resolver)?;
+    }
     let mut structs = StructTable::default();
     for def in &module.enums {
         let name = crate::bx_import::library_item(&def.name).map_or(def.name.as_str(), |(_, n)| n);

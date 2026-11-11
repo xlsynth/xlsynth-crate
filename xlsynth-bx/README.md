@@ -273,7 +273,32 @@ With `let n = 1`, BX infers `u1`. The pinned DSLX typechecker can accept the
 wider call, but its interpreter can retain the narrower value and IR conversion
 can fail on the mismatched signature.
 
-Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
+Define a helper before the functions that call it, as in DSLX. By default, a BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
+
+### Module declaration order
+
+Put `#![require_define_before_use]` before the first declaration to require
+module names to be defined before use throughout a `.bx` file. This includes
+block calls, explicit child instances, callback arguments, type annotations,
+and `use` bindings. Each BX library chooses its own policy. BX resolves names
+as usual, then checks the declaration order. For example, if a block's
+`rev(x)` resolves to a later function named `rev`, the verifier reports that
+function. A forward reference is an error even when warnings are allowed.
+
+```text
+#![require_define_before_use]
+
+fn increment(x: u8) -> u8 { x + u8:1 }
+
+pub block counter(clk, rst) -> u8 {
+    reg q: u8 = u8:0;
+    q := increment(q);
+    q
+}
+```
+
+Moving `increment` below `counter` makes the call an error. Inside a block,
+a declared wire can still be read before its driver is connected.
 
 For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking.
 
@@ -768,7 +793,7 @@ block pair(clk, rst, x: u8, y: u8) -> (LaneOut, LaneOut) {
 }
 ```
 
-Use the same call syntax for a BX block defined anywhere in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
+Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 

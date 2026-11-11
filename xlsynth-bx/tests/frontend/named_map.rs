@@ -6,9 +6,11 @@ use super::directed_expr_eval::{
 use super::expr_eval::BlockEvaluator;
 use std::{error::Error, fs};
 use tempfile::tempdir;
+use xlsynth_bx::ast::Expr;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_source_with_options, compile,
-    compile_with_options, empty_package, parse_module,
+    ImportOptions, ResetBehavior, check_module, check_module_with_options,
+    check_source_with_options, compile, compile_with_options, empty_package, lower_module,
+    parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -125,7 +127,28 @@ fn parametric_struct_shadows_map_from_its_declaration() -> Result<(), Box<dyn Er
 block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) { (map(xs, flip), map(xs, |x| x)) }
 "#;
     let source = format!("{callback}\n{block}\n{declaration}");
-    check_module(&parse_module(&source)?)?;
+    let plain = lower_module(
+        &check_module(&parse_module(&source)?)?,
+        empty_package("test"),
+        ResetBehavior::default(),
+    )?;
+    let mut module = parse_module(&source)?;
+    module.require_define_before_use = true;
+    let strict = lower_module(
+        &check_module(&module)?,
+        empty_package("test"),
+        ResetBehavior::default(),
+    )?;
+    assert_eq!(strict.to_string(), plain.to_string());
+
+    // The block's map still calls a later local function named rev.
+    let source = format!(
+        "#![require_define_before_use]\nblock sample(clk, xs: u8[2]) -> u8[2] {{ map(xs, rev) }}\nfn rev(x: u8) -> u8 {{ x }}\n{declaration}"
+    );
+    assert_eq!(
+        check_module(&parse_module(&source)?).unwrap_err(),
+        "in 'sample': 'rev' is declared later in the module",
+    );
 
     let source = format!("{callback}\n{declaration}\n{sample}");
     assert!(
@@ -143,6 +166,62 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) { (map(xs, flip), map(xs, |x| x))
     assert!(
         error.contains("an inline lambda argument requires the built-in map"),
         "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn declaration_order_checks_the_selected_map_arguments() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    fs::write(dir.path().join("enums.x"), "pub enum map : u8 { A = 0 }")?;
+    let options = ImportOptions {
+        additional_search_paths: vec![dir.path()],
+        ..Default::default()
+    };
+    let mut module = parse_module(
+        r#"
+block sample(clk, xs: u8[2]) -> u8[2] { map(xs, rev) }
+fn later(xs: u8[2]) -> u8[2] { xs }
+use enums::map;
+"#,
+    )?;
+    // AST callers can retain distinct ordinary and builtin interpretations.
+    // The later enum selects the builtin, whose operands have no forward use.
+    module.blocks[0].output = Expr::MapBeforeUse {
+        name: "map".into(),
+        args: vec![
+            Expr::Call {
+                name: "later".into(),
+                args: vec![Expr::Name("xs".into())],
+            },
+            Expr::Name("rev".into()),
+        ],
+        builtin_args: Some(vec![Expr::Name("xs".into()), Expr::Name("rev".into())]),
+    };
+    let plain = lower_module(
+        &check_module_with_options(&module, &options)?,
+        empty_package("test"),
+        ResetBehavior::default(),
+    )?;
+    module.require_define_before_use = true;
+    let strict = lower_module(
+        &check_module_with_options(&module, &options)?,
+        empty_package("test"),
+        ResetBehavior::default(),
+    )?;
+    assert_eq!(strict.to_string(), plain.to_string());
+    let Expr::MapBeforeUse {
+        args,
+        builtin_args: Some(builtin_args),
+        ..
+    } = &mut module.blocks[0].output
+    else {
+        unreachable!("constructed an ambiguous map call");
+    };
+    std::mem::swap(args, builtin_args);
+    assert_eq!(
+        check_module_with_options(&module, &options).unwrap_err(),
+        "in 'sample': 'later' is declared later in the module",
     );
     Ok(())
 }

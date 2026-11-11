@@ -3,6 +3,7 @@
 //! Load BX libraries in dependency order and resolve names in their declaring
 //! module.
 
+mod declaration_order;
 mod lookup;
 mod names;
 mod reachable;
@@ -17,6 +18,7 @@ use crate::ast::{FunctionParametricRef, Module, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::import_structs::DslxSourceLoader;
 use crate::parser;
+use declaration_order::DeclarationOrder;
 use lookup::{BxUse, UseLookup};
 
 pub(crate) use lookup::validate_use_path;
@@ -44,6 +46,7 @@ struct Export {
     parametrics: Vec<ParametricKind>,
     is_enum: bool,
     is_struct: bool,
+    overrides_zero_builtin: bool,
     has_type_params: bool,
 }
 
@@ -80,9 +83,30 @@ enum Binding {
     Dslx(String),
 }
 
+/// The callable that can shadow a typed zero in this source file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ZeroBinding {
+    Intrinsic,
+    BxFunction,
+    ExternOrDslx,
+}
+
+/// Syntax that distinguishes enum values, named callees, and builtin fallbacks.
+#[derive(Clone, Copy)]
+enum ReferenceKind<'a> {
+    Name,
+    Value,
+    Builtin(&'a str),
+}
+
 /// Bindings available in one file before its declarations are linked together.
 struct Names {
     subject: Option<String>,
+    order: Option<DeclarationOrder>,
+    /// The unlinked checker handles ordinary binding errors on the original
+    /// AST.
+    verification_only: bool,
+    zero_binding: ZeroBinding,
     definitions: BTreeSet<String>,
     enums: BTreeSet<String>,
     structs: BTreeSet<String>,
@@ -142,8 +166,29 @@ impl Names {
                 templates.insert(b.name.clone(), b.parametric_bindings().map(kind).collect());
             }
         }
+        let positions: BTreeMap<_, _> = module
+            .declaration_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let zero_binding = if module.functions.iter().any(|f| f.name == "zero!")
+            || matches!(uses.get("zero!"), Some(Binding::Member(export)) if export.overrides_zero_builtin)
+        {
+            ZeroBinding::BxFunction
+        } else if module.externs.iter().any(|f| f.name == "zero!")
+            || matches!(uses.get("zero!"), Some(Binding::Dslx(_)))
+        {
+            ZeroBinding::ExternOrDslx
+        } else {
+            ZeroBinding::Intrinsic
+        };
         Ok(Self {
             subject: subject.map(str::to_owned),
+            order: None,
+            verification_only: false,
+            zero_binding,
             definitions,
             enums: module.enums.iter().map(|d| d.name.clone()).collect(),
             structs: module.structs.iter().map(|d| d.name.clone()).collect(),
@@ -155,13 +200,22 @@ impl Names {
                 .collect(),
             templates,
             uses,
-            positions: module
-                .declaration_order
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.clone(), i))
-                .collect(),
+            positions,
         })
+    }
+
+    /// Enable source-reference collection only for the initial pass over an
+    /// opted-in file. Subsequent elaboration uses the ordinary namespace.
+    fn for_source(
+        module: &Module,
+        library: Option<&BxUse>,
+        uses: BTreeMap<String, Binding>,
+    ) -> Result<Self, String> {
+        let mut names = Self::new(module, library.map(|lib| lib.subject.as_str()), uses)?;
+        if module.require_define_before_use {
+            names.order = Some(DeclarationOrder::new(module, &names, library)?);
+        }
+        Ok(names)
     }
 
     fn declared(&self, name: &str) -> String {
@@ -182,21 +236,46 @@ impl Names {
         }
     }
 
-    /// Resolve one free reference before it can see another file's bindings.
-    fn resolve(&self, name: &str, at: Option<usize>) -> Result<String, String> {
-        self.resolve_with_root_fallback(name, at, name)
+    /// Record a use only after ordinary resolution selects a declaration or
+    /// import from this file. Builtins and lexical binders have no position.
+    fn record_reference(
+        &self,
+        owner: Option<&str>,
+        binding: &str,
+        spelling: &str,
+        native_builtin: Option<&str>,
+    ) {
+        if let (Some(order), Some(owner)) = (&self.order, owner) {
+            let owner_position = self.positions[owner];
+            if owner_position < self.positions[binding] {
+                order.record(owner_position, owner, spelling, native_builtin);
+            }
+        }
     }
 
-    /// Preserve the caller's interpretation of a name with no visible root
-    /// binding.
-    fn resolve_with_root_fallback(
+    /// An unresolved name has no declaration-order edge. During a standalone
+    /// verification walk, leave its ordinary diagnostic to the checker, which
+    /// may defer checking a template body until instantiation.
+    fn unresolved(&self, name: &str, diagnostic: String) -> Result<String, String> {
+        if self.verification_only {
+            Ok(name.to_owned())
+        } else {
+            Err(diagnostic)
+        }
+    }
+
+    /// Resolve one free reference in the original source namespace. The
+    /// owner identifies the declaration being verified and does not affect
+    /// visibility at the lookup site.
+    fn resolve(
         &self,
         name: &str,
         at: Option<usize>,
-        fallback: &str,
+        owner: Option<&str>,
+        kind: ReferenceKind<'_>,
     ) -> Result<String, String> {
         if name.contains('$') {
-            return Err(format!("invalid source reference '{name}'"));
+            return self.unresolved(name, format!("invalid source reference '{name}'"));
         }
         let (head, member) = name
             .split_once("::")
@@ -211,10 +290,17 @@ impl Names {
                 if builtin {
                     return Ok(format!("{}{name}", crate::check::BUILTIN_PREFIX));
                 }
-                return Err(format!(
-                    "use binding '{head}' is declared later in the module"
-                ));
+                self.record_reference(owner, head, name, None);
+                return self.unresolved(
+                    name,
+                    format!("use binding '{head}' is declared later in the module"),
+                );
             }
+            let native_builtin = match (kind, binding) {
+                (ReferenceKind::Builtin(_), Binding::Dslx(alias)) => Some(alias.as_str()),
+                _ => None,
+            };
+            self.record_reference(owner, head, name, native_builtin);
             return match (binding, member) {
                 (Binding::Module(lib), Some(m)) => {
                     let (name, member) = m
@@ -238,11 +324,23 @@ impl Names {
             };
         }
         if self.definitions.contains(name) && (visible || !builtin) {
+            // A qualified extern and an enum member may have the same
+            // spelling. A value expression resolves to the enum member.
+            let binding = if matches!(kind, ReferenceKind::Value)
+                && member.is_some()
+                && self.enums.contains(head)
+            {
+                head
+            } else {
+                name
+            };
+            self.record_reference(owner, binding, name, None);
             return Ok(self.declared(name));
         }
         if let Some(member) = member
             && self.enums.contains(head)
         {
+            self.record_reference(owner, head, name, None);
             return Ok(format!("{}::{member}", self.declared(head)));
         }
         if let Some(subject) = &self.subject {
@@ -254,7 +352,11 @@ impl Names {
             }
             return Err(format!("unknown name '{name}' in BX module '{subject}'"));
         }
-        Ok(fallback.to_owned())
+        Ok(match kind {
+            ReferenceKind::Builtin(fallback) => fallback,
+            ReferenceKind::Name | ReferenceKind::Value => name,
+        }
+        .to_owned())
     }
 }
 
@@ -279,6 +381,7 @@ pub(crate) struct LinkedSources {
 
 /// BX declarations and the DSLX source snapshot used to parse their calls.
 pub(crate) struct SourceImports<'a> {
+    pub(crate) declaration_orders: Vec<DeclarationOrder>,
     pub libraries: Option<LinkedSources>,
     pub native: DslxSourceLoader<'a>,
 }
@@ -350,6 +453,7 @@ struct Graph<'a> {
     lookup: UseLookup<'a>,
     loaded: BTreeMap<PathBuf, Rc<Library>>,
     linked: LinkedSources,
+    declaration_orders: Vec<DeclarationOrder>,
 }
 
 impl<'a> Graph<'a> {
@@ -358,6 +462,7 @@ impl<'a> Graph<'a> {
             lookup: UseLookup::new(options),
             loaded: BTreeMap::new(),
             linked: LinkedSources::default(),
+            declaration_orders: Vec::new(),
         }
     }
 
@@ -472,7 +577,7 @@ impl<'a> Graph<'a> {
                 block_source.file.path = Some(source.target.path.clone());
             }
         }
-        let names = Names::new(&module, Some(&source.target.subject), bindings)?;
+        let names = Names::for_source(&module, Some(&source.target), bindings)?;
         let exports = module
             .structs
             .iter()
@@ -490,12 +595,15 @@ impl<'a> Graph<'a> {
                         parametrics: names.parametrics(name).to_vec(),
                         is_enum: names.enums.contains(name),
                         is_struct: names.structs.contains(name),
+                        overrides_zero_builtin: name == "zero!"
+                            && names.zero_binding == ZeroBinding::BxFunction,
                         has_type_params: names.type_structs.contains(name),
                     },
                 )
             })
             .collect();
         self.append(&module, &names)?;
+        self.declaration_orders.extend(names.order);
         self.linked.library_modules.insert(
             source.target.subject.clone(),
             LibraryModuleInfo {
@@ -619,11 +727,31 @@ impl<'a> Graph<'a> {
         parser::parse_with_imports(source, &names, &type_structs)
     }
 
-    fn finish(self) -> SourceImports<'a> {
-        SourceImports {
-            libraries: (!self.loaded.is_empty()).then_some(self.linked),
-            native: self.lookup.native,
+    /// Collect source references before BX imports lose their local spellings.
+    fn finish(
+        mut self,
+        root: &Module,
+        bindings: BTreeMap<String, Binding>,
+    ) -> Result<SourceImports<'a>, String> {
+        let linked = !self.loaded.is_empty();
+        if linked || root.require_define_before_use {
+            let mut names = Names::for_source(root, None, bindings)?;
+            if linked {
+                self.append(root, &names)?;
+            } else {
+                // Verify the unlinked root using the same lexical walk. The
+                // checker consumes the original AST exactly as it normally
+                // does.
+                names.verification_only = true;
+                names::qualify(root, &names)?;
+            }
+            self.declaration_orders.extend(names.order);
         }
+        Ok(SourceImports {
+            libraries: linked.then_some(self.linked),
+            native: self.lookup.native,
+            declaration_orders: self.declaration_orders,
+        })
     }
 }
 
@@ -635,11 +763,7 @@ pub(crate) fn link<'a>(
 ) -> Result<SourceImports<'a>, String> {
     let mut graph = Graph::new(options);
     let bindings = graph.bindings(module.uses.clone())?;
-    if !graph.loaded.is_empty() {
-        let names = Names::new(module, None, bindings)?;
-        graph.append(module, &names)?;
-    }
-    Ok(graph.finish())
+    graph.finish(module, bindings)
 }
 
 impl Graph<'_> {
@@ -671,10 +795,8 @@ pub(crate) fn read<'a>(
 ) -> Result<(Module, SourceImports<'a>), String> {
     let mut graph = Graph::new(options);
     let (module, bindings) = graph.parse_root(source)?;
-    if !graph.loaded.is_empty() {
-        graph.append(&module, &Names::new(&module, None, bindings)?)?;
-    }
-    Ok((module, graph.finish()))
+    let imports = graph.finish(&module, bindings)?;
+    Ok((module, imports))
 }
 
 /// Render internal module-qualified symbols using BX source spelling.
