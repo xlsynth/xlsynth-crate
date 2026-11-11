@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{collections::BTreeSet, error::Error, fs, io, path::Path};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
@@ -87,10 +90,7 @@ block sample(clk, x:u8)->(u3, u4[2], uN[81], uN[81][2], uN[81]) {
     (lsbs<n>(x), map([x, x], msbs<{n+u32:1}>), math::mix<HIGH>(x), lanes::mapped<HIGH>(x), math::mix<1>(x))
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let package = compile_with_options(
         source,
         empty_package("test"),
@@ -116,10 +116,7 @@ fn invalid_explicit_import_arguments_are_rejected_for_direct_and_mapped_calls()
         "logic.x",
         "pub fn flip<K:u8, N:u32>(x:uN[N])->uN[N] { x ^ (K as uN[N]) }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     for actuals in ["<u16:3>", "<x>", "<3,7>", "<3,8,true>", "<256>"] {
         for (call, result) in [
             (format!("logic::flip{actuals}(x)"), "u8"),
@@ -145,10 +142,7 @@ pub fn lanes<N:u32>(xs:uN[N][2])->uN[N] { xs[u32:0] ^ xs[u32:1] }
 pub fn width<K:u32,N:u32>(x:uN[N])->u32 { N + K }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let helper = "fn increment(v:u32)->u32 { v + u32:1 }";
     let body = r#"
     let width = increment(u32:7);
@@ -452,10 +446,7 @@ fn imported_lambda_symbols_match_native_source_spans_across_checks() -> Result<(
         "import wire; pub fn score(x: u8, arr: u8[2]) -> u8[2] { map(arr, |i| wire::adjust(i + x)) }",
     )?;
     let bx = "use wire_x; #[allow(combinational_block)] block run(clk, x: u8, arr: u8[2]) -> u8[2] { wire_x::score(x, arr) }";
-    let options = ImportOptions {
-        additional_search_paths: vec![&modules],
-        ..Default::default()
-    };
+    let options = search_paths(&[&modules]);
     let compile = || {
         compile_with_options(
             bx,
@@ -574,10 +565,7 @@ pub fn shifted<K: u8>(x: u8) -> u8 {
 }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let package = compile_with_options(
         "use bias; #[allow(combinational_block)] block b(clk, x:u8)->u8 { bias::shifted<2>(x) }",
         empty_package("test"),

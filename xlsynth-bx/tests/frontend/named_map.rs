@@ -4,13 +4,13 @@ use super::directed_expr_eval::{
     assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx_module,
 };
 use super::expr_eval::BlockEvaluator;
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::ast::Expr;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_module_with_options,
-    check_source_with_options, compile, compile_with_options, empty_package, lower_module,
-    parse_module,
+    ResetBehavior, check_module, check_module_with_options, check_source_with_options, compile,
+    compile_with_options, empty_package, lower_module, parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -174,10 +174,7 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) { (map(xs, flip), map(xs, |x| x))
 fn declaration_order_checks_the_selected_map_arguments() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(dir.path().join("enums.x"), "pub enum map : u8 { A = 0 }")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let mut module = parse_module(
         r#"
 block sample(clk, xs: u8[2]) -> u8[2] { map(xs, rev) }
@@ -241,10 +238,7 @@ block sample(clk, xs: u8[2]) -> (u8[2], u8[2]) {
     (lanes::flip(xs), map(xs, rev))
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let package = compile_with_options(
         bx,
         empty_package("test"),
@@ -282,10 +276,7 @@ fn direct_and_named_map_builtins_precede_a_later_imported_type() -> Result<(), B
 #[allow(combinational_block)]
 block sample(clk, xs: u8[2]) -> (u8, u8[2]) { (rev(xs[u32:0]), map(xs, rev)) }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     for (module, expected) in [
         ("types", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
         ("enums", "(bits[8]:128, [bits[8]:128, bits[8]:1])"),
@@ -487,10 +478,7 @@ use math::inc;
 block sample(clk, a:u8[2], b:u16[2])->(bool[2], u8[2], u16[2]) {
     (map(a, lanes::high), bumps(a), map(b, inc))
 }"#;
-    let opts = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let opts = search_paths(&[root.path()]);
     let package = compile_with_options(bx, empty_package("test"), ResetBehavior::default(), &opts)?;
     xlsynth::IrPackage::parse_ir(&package.to_string(), None)?;
     let sample = combinational_block_to_fn(package.get_block("sample").ok_or("missing sample")?)?;
@@ -530,10 +518,7 @@ fn sext(x: bits[8] id=1) -> bits[16] {
         root.path().join("helpers.bx"),
         "pub fn identity(x:bool)->bool { x }",
     )?;
-    let opts = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let opts = search_paths(&[root.path()]);
     for source in [bx.to_owned(), format!("use helpers;\n{bx}")] {
         let package =
             compile_with_options(&source, linked.clone(), ResetBehavior::default(), &opts)?;
@@ -720,10 +705,7 @@ use effects;
 #[allow(combinational_block)]
 block sample(clk, xs:u8[2])->u8[2] { map(xs, effects::checked) }
 "#;
-    let opts = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let opts = search_paths(&[root.path()]);
     let error = compile_with_options(bx, empty_package("test"), ResetBehavior::default(), &opts)
         .unwrap_err();
     assert!(

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs, path::Path};
+use support::search_paths;
 
 use tempfile::tempdir;
 
@@ -129,10 +132,7 @@ fn observe(x: u8) -> u8 { let (_, kept) = (missing(x), x); kept }
 pub fn keep(x: u8) -> u8 { let (_, kept) = (observe(x), x); kept }
 #[test] fn library_test() { assert_eq(keep(u8:0), u8:0); }"#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let source = r#"use lib::keep;
 fn unused(x: u8) -> u8 { keep(x) }
 #[test] block clocked() { assert_eq(keep(u8:3), u8:3); }
@@ -342,10 +342,7 @@ type Pred = bool;
         Path::new("suite.bx"),
         empty_package("suite"),
         ResetBehavior::default(),
-        &ImportOptions {
-            additional_search_paths: vec![dir.path()],
-            ..Default::default()
-        },
+        &search_paths(&[dir.path()]),
         true,
     )?;
     assert_eq!(report.tests.len(), 3);

@@ -532,10 +532,9 @@ impl<'a> Scope<'a> {
                     .map(|field| self.type_at_depth(field, depth + 1))
                     .collect::<Result<_, _>>()?,
             ),
-            Type::Array { element, size } => Type::Array {
-                element: Box::new(self.type_at_depth(element, depth + 1)?),
-                size: *size,
-            },
+            Type::Array { element, size } => {
+                Type::array(self.type_at_depth(element, depth + 1)?, *size)
+            }
             Type::ParametricArray { element, size } => Type::ParametricArray {
                 element: Box::new(self.type_at_depth(element, depth + 1)?),
                 size: Box::new(self.type_expression(size, depth)?),

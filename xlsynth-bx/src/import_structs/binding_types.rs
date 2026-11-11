@@ -247,10 +247,10 @@ impl ImportedStructs {
                 .map(|f| self.import_binding_type(registry, f, data))
                 .collect::<Result<Vec<_>, _>>()
                 .map(Type::Tuple),
-            Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.import_binding_type(registry, *element, data)?),
+            Type::Array { element, size } => Ok(Type::array(
+                self.import_binding_type(registry, *element, data)?,
                 size,
-            }),
+            )),
             _ => Ok(ty),
         }
     }

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs};
 
 use super::directed_expr_eval::compile_dslx_module;
 use super::expr_eval::{BlockEvaluator, bx_source, dslx_source};
 use tempfile::tempdir;
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
-use xlsynth_bx::{ImportOptions, check_module, check_source_with_options, parse_module};
+use xlsynth_bx::{check_module, check_source_with_options, parse_module};
 use xlsynth_pir::{IrValue, ir::NodePayload};
 
 #[test]
@@ -47,10 +48,7 @@ fn a_parametric_binding_can_name_a_concrete_imported_dslx_struct() -> Result<(),
         directory.path().join("cfg.x"),
         "pub struct Config<N:u32> { gain:uN[N] }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let declaration = "fn gain<C:cfg::Config<8> = {cfg::Config<8> {gain:u8:3}}>() -> u8 { C.gain }";
     let result = "(u8,u8)";
     let body = "(gain(), gain<{cfg::Config<8> {gain:u8:9}}>())";
@@ -91,10 +89,7 @@ pub fn gain<C:Config={Config {gain:u8:3}}>() -> u8 { C.gain }
 
     let directory = tempdir()?;
     fs::write(directory.path().join("settings.bx"), declarations)?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let imported = format!(
         "use settings::{{code,gain,Config,Phase}};\n{}",
         bx_source("", result, body)

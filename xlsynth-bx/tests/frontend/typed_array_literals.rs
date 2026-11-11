@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::error::Error;
 use std::fs;
 use tempfile::tempdir;
@@ -65,10 +66,7 @@ fn imported_calls_get_array_dimensions_from_typed_arguments_and_siblings()
         directory.path().join("rows.x"),
         "pub fn last<N: u32>(a: u8[N]) -> u8 { a[N - u32:1] }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     for (body, expected) in [
         ("rows::last(u8[4]:[1, x, ...])", [37, 37]),
         ("rows::last<4>(u8[4]:[1, x, ...])", [37, 37]),
@@ -109,10 +107,7 @@ fn imported_array_parametrics_infer_unrolled_seeds_from_branch_siblings()
         directory.path().join("rows.x"),
         "pub fn head<N: u32>(a: u8[N]) -> u8 { a[0] }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let params = "x: u8, sel: bool";
     let fold = "unroll_for! (_, a) in u32:0..u32:1 { u8[3]:[a[0] + u8:1, ...] }([x, ...])";
     for head in ["rows::head", "rows::head<3>"] {

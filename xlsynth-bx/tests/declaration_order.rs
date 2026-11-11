@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::{
@@ -197,10 +200,7 @@ const wire = u8:5;
 #[test]
 fn each_bx_file_controls_its_own_declaration_order() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     fs::write(dir.path().join("leaf.bx"), "pub fn id(x: u8) -> u8 { x }")?;
     let library = dir.path().join("stages.bx");
     let top = "pub block top(clk, x: u8) -> u8 { let q = stages::stage(x); q }";
@@ -335,10 +335,7 @@ extern block pipe(clk, p: Tag<{rev(u32:0)}>) -> u8;"#;
 #[test]
 fn declaration_type_arguments_use_the_resolved_import() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let definitions = "pub fn rev(x:u32) -> u32 { u32:7 } pub fn zero!() -> u32 { u32:7 }";
     fs::write(dir.path().join("native.x"), definitions)?;
     fs::write(dir.path().join("library.bx"), definitions)?;
@@ -365,10 +362,7 @@ fn declaration_type_arguments_use_the_resolved_import() -> Result<(), Box<dyn Er
 #[test]
 fn verification_uses_the_kind_of_the_imported_member() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (path, source) in [
         (
             "enums.x",
@@ -502,10 +496,7 @@ fn external_zero() -> bits[8] { ret result: bits[8] = literal(value=7, id=1) }
 #[test]
 fn an_unused_block_map_lambda_verifies_its_native_zero_import() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     fs::write(dir.path().join("native.x"), "pub fn zero!() -> u8 { u8:7 }")?;
     let template = "pub block lazy<T>(clk, x:T) -> T { let y = map([u8:0], |v| zero!<u8>()); x }";
     let import = "use native::zero!;";

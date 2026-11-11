@@ -133,6 +133,24 @@ pub enum Type {
     },
 }
 
+impl Type {
+    /// Construct an unsigned bit-vector type of the given width.
+    pub(crate) fn unsigned(width: usize) -> Self {
+        Self::Bits {
+            signed: false,
+            width,
+        }
+    }
+
+    /// Construct an array type from its element type and length.
+    pub(crate) fn array(element: Type, size: usize) -> Self {
+        Self::Array {
+            element: Box::new(element),
+            size,
+        }
+    }
+}
+
 /// A typed name in a parameter list or struct declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Param {
@@ -558,7 +576,57 @@ pub enum Expr {
     For(Box<ForLoop>),
 }
 
+/// The argument syntax written on a struct constructor.
+#[derive(Clone, Copy)]
+pub(crate) enum StructLiteralArgs<'a> {
+    Omitted,
+    Integers(&'a [u32]),
+    Expressions(&'a [Expr]),
+    Types(&'a [Type]),
+}
+
+/// A borrowed view of a struct constructor's arguments, fields, and splat.
+pub(crate) struct StructLiteral<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) args: StructLiteralArgs<'a>,
+    pub(crate) fields: &'a [(String, Expr)],
+    pub(crate) base: Option<&'a StructSplat>,
+}
+
 impl Expr {
+    /// Borrow the common parts of a struct literal, preserving its argument
+    /// syntax.
+    pub(crate) fn struct_literal(&self) -> Option<StructLiteral<'_>> {
+        let (name, args, fields, base) = match self {
+            Self::Struct { name, fields, base } => (name, StructLiteralArgs::Omitted, fields, base),
+            Self::AppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Integers(args), fields, base),
+            Self::ParametricStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Expressions(args), fields, base),
+            Self::TypeAppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Types(args), fields, base),
+            _ => return None,
+        };
+        Some(StructLiteral {
+            name,
+            args,
+            fields,
+            base: base.as_deref(),
+        })
+    }
+
     /// A loop without an accumulator annotation takes its carry type from its
     /// seed.
     pub(crate) fn unannotated_loop_seed(&self) -> Option<&Expr> {

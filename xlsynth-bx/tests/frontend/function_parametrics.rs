@@ -2,11 +2,12 @@
 
 use super::directed_expr_eval::compile_dslx_module;
 use super::expr_eval::{BlockEvaluator, bx_source};
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_module_with_options, empty_package,
-    lower_module, parse_module,
+    ResetBehavior, check_module, check_module_with_options, empty_package, lower_module,
+    parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -200,10 +201,7 @@ pub fn signed_result(x:u8, y:u8) -> s8 { (x+y) as s8 }
         dir.path().join("other.x"),
         "pub fn combine(x:u8, y:u8) -> u8 { x+y }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..ImportOptions::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let bx = r#"
 fn apply<F: fn(u8,u8) -> u8>(x:u8, y:u8) -> u8 { F(x,y) }
 use math;
@@ -255,10 +253,7 @@ pub fn sink(_x: u8) { () }
 pub fn checked(x: u8) -> u8 { if x == u8:0 { fail!("zero", x) } else { x } }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..ImportOptions::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for trips in [0, 1] {
         for member in ["identity", "ALIAS", "Payload"] {
             let source = format!(

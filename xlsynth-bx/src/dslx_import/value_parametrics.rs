@@ -412,10 +412,7 @@ fn contextual_shape<'d>(
                 .iter()
                 .find_map(|a| contextual_shape(a, element, aggregates))
                 .or_else(|| parse_value_type(element).ok())?;
-            Some(Type::Array {
-                element: Box::new(element),
-                size,
-            })
+            Some(Type::array(element, size))
         }
     }?;
     if matches!(ty, Type::Tuple(_) | Type::Array { .. }) {

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
-use xlsynth_bx::{ImportOptions, check_module_with_options, parse_module};
+use xlsynth_bx::{check_module_with_options, parse_module};
 use xlsynth_pir::IrValue;
 
 use super::directed_expr_eval::compile_dslx_module;
@@ -34,10 +35,7 @@ fn public_native_aggregate_spelling_survives_bx_aliases_and_inferred_calls()
             .replace("->Modes", "->State[2]")
             .replace("->(Pair,Modes)", "->((Hidden,u8),State[2])"),
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let declarations = r#"
 type Named = left::Pair;
 type States = left::Modes;
@@ -119,10 +117,7 @@ pub fn modes<M:Modes>(x:u8)->u8 { (M[0] as u8) + (M[1] as u8) + x }
 pub fn nested<P:Wrapped>(x:u8)->u8 { P.0.inner.x + P.1 + x }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let bx = format!(
         "use lib; type UserAlias = lib::BXConstexprType0; fn record<T>(_:T)->T {{ T {{ x:u8:19 }} }} fn mode<T>(_:T)->T {{ u2:1 as T }} {}",
         bx_source(
@@ -204,10 +199,7 @@ pub fn read_hidden_parametric<N:u32>(p:Hidden,y:u8)->u8 { p.n + y + (N as u8) }
     for name in ["wire.x", "peer.x"] {
         fs::write(directory.path().join(name), library)?;
     }
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let params = "x:u8,b:bool";
     let values = "let p=wire::pair(x); let m=wire::modes(b);";
     let body = format!(
@@ -285,10 +277,7 @@ pub fn consume<N:u32>(p:Pair)->u8 { p.0.x + p.1 + (N as u8) }
 pub fn nested<N:u32>(p:(Pair,bool))->u8 { p.0.0.x + p.0.1 + (p.1 as u8) + (N as u8) }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let params = "w:wire::Wrap";
     for body in [
         "wire::consume<2>((w.h, 3))",
@@ -325,10 +314,7 @@ fn inline_array_projects_a_private_member_beyond_the_outline_depth() -> Result<(
     library
         .push_str("pub type Packet = Level34[1]; pub fn consume<N:u32>(p:Packet)->u8 { N as u8 }");
     fs::write(directory.path().join("wire.x"), library)?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let sample = "fn sample(p:wire::Packet)->u8 { wire::consume<2>([p[0]]) }";
     compile_dslx_module(&format!("import wire; {sample}"), &[directory.path()])?;
     check_module_with_options(&parse_module(&format!("use wire; {sample}"))?, &options)?;

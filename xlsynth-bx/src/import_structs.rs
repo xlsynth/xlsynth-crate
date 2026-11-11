@@ -763,16 +763,16 @@ impl ImportedStructs {
                 Some(ResolvedShape::Array(element)) => Some(element.as_ref()),
                 _ => None,
             };
-            let result = Type::Array {
-                element: Box::new(self.reflect_at(
+            let result = Type::array(
+                self.reflect_at(
                     &ty.get_array_element_type(),
                     data,
                     &witness.project(index),
                     element,
                     depth + 1,
-                )?),
+                )?,
                 size,
-            };
+            );
             self.bind_matching_aggregates(ty, data)?;
             return Ok(result);
         }

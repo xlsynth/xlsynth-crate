@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs};
 
 use tempfile::tempdir;
-use xlsynth_bx::{ImportOptions, check_module, check_source_with_options, parse_module};
+use xlsynth_bx::{check_module, check_source_with_options, parse_module};
 use xlsynth_pir::IrValue;
 
 use super::expr_eval::{BlockEvaluator, bx_source, compile_bundled_module, dslx_source};
@@ -291,10 +292,7 @@ pub fn widened(x: u5) -> Packet<3> { Packet<3> { data: Data<5> { value: x } } }
 pub fn read(p: Packet<3>) -> u5 { p.data.value }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let source = r#"
 use wire;
 use wire::Packet;

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, compile, compile_with_options, empty_package,
-    parse_module,
+    ResetBehavior, check_module, compile, compile_with_options, empty_package, parse_module,
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
@@ -250,10 +252,7 @@ pub block sample(clk, x: records::Record<u8>, flags: bool[2]) -> records::Record
     records::with_flags(x, flags)
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let package = compile_with_options(
         source,
         empty_package("sample"),
@@ -309,10 +308,7 @@ fn from_sibling(b: records::Byte, q: bool) -> u8 {
     x.a
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let package = compile_with_options(
         source,
         empty_package("splat"),

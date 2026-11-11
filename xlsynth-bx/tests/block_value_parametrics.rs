@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth::{DslxConvertOptions, XlsIrValue, convert_dslx_to_ir};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_module_with_options, compile,
-    compile_with_options, empty_package, parse_module,
+    ResetBehavior, check_module, check_module_with_options, compile, compile_with_options,
+    empty_package, parse_module,
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
@@ -56,10 +59,7 @@ pub block pipeline(clk, rst, x: u8, y: u8) -> (u8, u8, u8, u8) {
         source,
         empty_package("design"),
         ResetBehavior::default(),
-        &ImportOptions {
-            additional_search_paths: vec![directory.path()],
-            ..Default::default()
-        },
+        &search_paths(&[directory.path()]),
     )?;
     let top = package.get_top_block().expect("pipeline is the top");
     let [bypass, short, deep, other] = top.instantiations.as_slice() else {
@@ -177,10 +177,7 @@ pub block pipeline(clk, x: u8) -> (u8, u32) {
 fn block_value_formals_resolve_u32_aliases_in_their_declaration_scope() -> Result<(), Box<dyn Error>>
 {
     let directory = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     fs::write(directory.path().join("shape.bx"), "pub type Dim = u32;")?;
     fs::write(directory.path().join("native.x"), "pub type Count = u32;")?;
     fs::write(
@@ -310,12 +307,6 @@ pub block pipeline(clk, x: u8) -> u8 {
 }
 "#,
     )?;
-    check_module_with_options(
-        &module,
-        &ImportOptions {
-            additional_search_paths: vec![directory.path()],
-            ..Default::default()
-        },
-    )?;
+    check_module_with_options(&module, &search_paths(&[directory.path()]))?;
     Ok(())
 }

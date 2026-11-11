@@ -13,8 +13,8 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef, StructSplat,
-    Type, UnaryOp, WidthSliceType,
+    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef,
+    StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -811,7 +811,7 @@ fn resolve_type<'m>(
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
             checker.function_type_bindings = bindings.cloned();
-            let args = checker.struct_argument_values(name, args)?;
+            let args = checker.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
             checker.struct_value_type(name, &args, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
@@ -863,7 +863,7 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
-                let args = checker.struct_literal_arguments(name, args)?;
+                let args = checker.struct_value_prefix(name, StructLiteralArgs::Integers(args))?;
                 checker.specialize_struct(
                     template,
                     struct_parametrics::StructArguments::Values {
@@ -884,17 +884,17 @@ fn resolve_type<'m>(
                     .map_or_else(|| ty.clone(), CheckedEnum::ty))
             }
         }
-        Type::Array { element, size } => Ok(Type::Array {
-            element: Box::new(resolve_type(
+        Type::Array { element, size } => Ok(Type::array(
+            resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?),
-            size: *size,
-        }),
+            )?,
+            *size,
+        )),
         Type::Tuple(items) => {
             let child_budget = child_type_budget(remaining)?;
             items
@@ -927,17 +927,17 @@ fn resolve_type<'m>(
             signed: dimensions.signed(signed, is_local, bindings)?,
             width: dimensions.size(width, is_local, bindings)?,
         }),
-        Type::ParametricArray { element, size } => Ok(Type::Array {
-            element: Box::new(resolve_type(
+        Type::ParametricArray { element, size } => Ok(Type::array(
+            resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?),
-            size: dimensions.size(size, is_local, bindings)?,
-        }),
+            )?,
+            dimensions.size(size, is_local, bindings)?,
+        )),
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
@@ -1008,14 +1008,14 @@ impl<'m> TypeResolver<'_, 'm> {
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
-            Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.materialize_type_applications(
+            Type::Array { element, size } => Ok(Type::array(
+                self.materialize_type_applications(
                     *element,
                     dimensions,
                     child_type_budget(remaining)?,
-                )?),
+                )?,
                 size,
-            }),
+            )),
             _ => Ok(ty),
         }
     }
@@ -3362,51 +3362,24 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields, base } => self.struct_literal(
-                StructApplication::Named(name),
-                fields,
-                base.as_deref(),
-                expected,
-            ),
-            Expr::AppliedStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => {
-                let args = self.struct_literal_arguments(name, args)?;
-                self.struct_literal(
-                    StructApplication::Values(name, &args),
-                    fields,
-                    base.as_deref(),
-                    expected,
-                )
+            Expr::Struct { .. }
+            | Expr::AppliedStruct { .. }
+            | Expr::ParametricStruct { .. }
+            | Expr::TypeAppliedStruct { .. } => {
+                let literal = expr.struct_literal().expect("struct literal");
+                let values;
+                let application = match literal.args {
+                    StructLiteralArgs::Omitted => StructApplication::Named(literal.name),
+                    StructLiteralArgs::Types(types) => {
+                        StructApplication::Types(literal.name, types)
+                    }
+                    _ => {
+                        values = self.struct_value_prefix(literal.name, literal.args)?;
+                        StructApplication::Values(literal.name, &values)
+                    }
+                };
+                self.struct_literal(application, literal.fields, literal.base, expected)
             }
-            Expr::ParametricStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => {
-                let args = self.struct_argument_values(name, args)?;
-                self.struct_literal(
-                    StructApplication::Values(name, &args),
-                    fields,
-                    base.as_deref(),
-                    expected,
-                )
-            }
-            Expr::TypeAppliedStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => self.struct_literal(
-                StructApplication::Types(name, args),
-                fields,
-                base.as_deref(),
-                expected,
-            ),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
             Expr::MapBeforeUse {
@@ -3702,26 +3675,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .collect::<Result<Vec<_>, _>>()?,
                 None => self.unify_values(&items.iter().collect::<Vec<_>>())?,
             };
-            (
-                Type::Array {
-                    element: Box::new(values[0].ty.clone()),
-                    size: length,
-                },
-                K::Array(values),
-            )
+            (Type::array(values[0].ty.clone(), length), K::Array(values))
         } else {
             let element =
                 hint.ok_or_else(|| "empty array literal requires an array type".to_owned())?;
             let mut layouts = crate::layout::Layouts::new(&self.structs.definitions);
             let element_ir = layouts.lower(element).map_err(|e| e.to_string())?;
             let empty = IrValue::make_array_typed(element_ir, &[]).map_err(|e| e.to_string())?;
-            (
-                Type::Array {
-                    element: Box::new(element.clone()),
-                    size: 0,
-                },
-                K::Literal(empty),
-            )
+            (Type::array(element.clone(), 0), K::Literal(empty))
         })
     }
 
@@ -4317,14 +4278,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                     Ok(Some(Type::Tuple(types)))
                 }
-                Expr::Array(items) => {
-                    Ok(
-                        merged_operands(checker, items.iter())?.map(|element| Type::Array {
-                            element: Box::new(element),
-                            size: items.len(),
-                        }),
-                    )
-                }
+                Expr::Array(items) => Ok(merged_operands(checker, items.iter())?
+                    .map(|element| Type::array(element, items.len()))),
                 Expr::If {
                     then_value,
                     else_value,
@@ -4429,10 +4384,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let Some(fields) = check_elements(self, &fields)? else {
             return Ok(None);
         };
-        let ty = Type::Array {
-            element: Box::new(fields[0].ty.clone()),
-            size: length,
-        };
+        let ty = Type::array(fields[0].ty.clone(), length);
         self.structs.validate_type(&ty)?;
         let mut fields = fields.into_iter();
         items
@@ -5068,10 +5020,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             _ => {
                 let operands = context_operands(expr, &self.inferred_bindings, context_width)?;
-                let context = Type::Bits {
-                    signed: false,
-                    width: context_width,
-                };
+                let context = Type::unsigned(context_width);
                 self.expr(
                     expr,
                     (operands != ContextOperands::Bound).then_some(&context),
@@ -5164,10 +5113,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let hint = match standard_width {
             Some(width) => {
                 let operands = context_operands(expr, &self.inferred_bindings, width)?;
-                (operands == ContextOperands::Inline).then_some(Type::Bits {
-                    signed: false,
-                    width,
-                })
+                (operands == ContextOperands::Inline).then_some(Type::unsigned(width))
             }
             None => minimum_type(expr)?,
         };

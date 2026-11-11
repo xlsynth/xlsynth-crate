@@ -107,10 +107,7 @@ impl BodyChecker<'_, '_> {
                 } else {
                     BuiltinOp::Umulp { width }
                 };
-                let unsigned = Type::Bits {
-                    signed: false,
-                    width,
-                };
+                let unsigned = Type::unsigned(width);
                 (
                     Type::Tuple(vec![unsigned.clone(), unsigned]),
                     op,
@@ -140,13 +137,7 @@ impl BodyChecker<'_, '_> {
                     "xor_reduce" => (Type::Bool, BuiltinOp::XorReduce),
                     "encode" => {
                         let width = usize::BITS - width.saturating_sub(1).leading_zeros();
-                        (
-                            Type::Bits {
-                                signed: false,
-                                width: width as usize,
-                            },
-                            BuiltinOp::Encode,
-                        )
+                        (Type::unsigned(width as usize), BuiltinOp::Encode)
                     }
                     "one_hot" => {
                         let priority = self
@@ -154,13 +145,7 @@ impl BodyChecker<'_, '_> {
                             .map_err(|e| format!("'one_hot' priority: {e}"))?;
                         let lsb_priority = priority == IrValue::bool(true);
                         let width = width.checked_add(1).ok_or("'one_hot' width overflow")?;
-                        (
-                            Type::Bits {
-                                signed: false,
-                                width,
-                            },
-                            BuiltinOp::OneHot { lsb_priority },
-                        )
+                        (Type::unsigned(width), BuiltinOp::OneHot { lsb_priority })
                     }
                     _ => return Err(format!("unknown builtin '{name}'")),
                 };
@@ -182,10 +167,7 @@ impl BodyChecker<'_, '_> {
             ));
         };
         require_bits(name, element, None)?;
-        let selector_type = Type::Bits {
-            signed: false,
-            width: *size,
-        };
+        let selector_type = Type::unsigned(*size);
         let selector = self
             .dslx_argument(&args[0], &selector_type)
             .map_err(|e| format!("'{name}' selector: {e}"))?;

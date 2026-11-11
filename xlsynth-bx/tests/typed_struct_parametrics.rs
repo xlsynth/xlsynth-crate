@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::{
@@ -126,10 +129,7 @@ pub struct Lane<N: u32 = {WIDTH}, K: uN[N] = {uN[N]:3}, S: bool = {SIGN}> {
     x: xN[S][K as u32],
 }"#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let source = r#"
 use lanes::Lane;
 const WIDTH = u32:6;

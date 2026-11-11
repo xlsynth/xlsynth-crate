@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs, io, path::Path};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::ast::{Expr, Stmt};
@@ -20,13 +23,6 @@ fn write_module(root: &Path, name: &str, source: &str) -> io::Result<()> {
     let path = root.join(name);
     fs::create_dir_all(path.parent().unwrap())?;
     fs::write(path, source)
-}
-
-fn search_paths<'a>(roots: &[&'a Path]) -> ImportOptions<'a> {
-    ImportOptions {
-        additional_search_paths: roots.to_vec(),
-        ..Default::default()
-    }
 }
 
 fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, String> {

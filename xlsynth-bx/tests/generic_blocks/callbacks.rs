@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::PIPE_REG;
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::{
@@ -78,10 +79,7 @@ pub fn widen(x:u8) -> u16 { x as u16 }
 pub fn square(x:u16) -> u32 { let wide = x as u32; wide * wide }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let generic = r#"
 pub block chain(clk, rst, valid: bool, data: u8) -> (bool, u32) {
     let widened = advance<math::widen>((valid, data));
@@ -212,10 +210,7 @@ block sample(clk, a:u8, b:u16)->(u8,u8,u8,u16) {{
         &source,
         empty_package("bindings"),
         ResetBehavior::default(),
-        &ImportOptions {
-            additional_search_paths: vec![dir.path()],
-            ..Default::default()
-        },
+        &search_paths(&[dir.path()]),
     )?;
     let [left, right, increment, wide] = package.get_top_block().unwrap().instantiations.as_slice()
     else {
@@ -259,10 +254,7 @@ block sample(clk,x:u8)->u8 {{
 }}
 "#
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let package = compile_with_options(
         &source,
         empty_package("nominal"),
@@ -385,10 +377,7 @@ block sample(clk,x:u8)->u16 { let child=wrapper<widen>(x); child }
     let private = format!(
         "use math; {TRANSFORM} block sample(clk,x:u8)->u16 {{ let child=transform<math::private_fn>(x); child }}"
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     assert!(check_module_with_options(&parse_module(&private)?, &options).is_err());
     Ok(())
 }
