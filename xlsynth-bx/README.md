@@ -551,9 +551,13 @@ tick, assertion, loop, or conditional executes, each subsequent `let`
 samples its value at that statement. For example, `let before = total;`
 at that point saves the current total for a comparison after another tick.
 `tick!()` advances one edge with reset deasserted. `tick!(rst: true)`
-advances one edge with reset asserted. A stimulus declaration without an
-initializer starts at the typed zero. DUT registers retain their usual
-power-up behavior. Sampling a value that contains unknown bits fails the test.
+asserts reset for that edge and releases it afterward. The optional `rst:`
+clause belongs to `tick!`, much like `target:` in Rust’s
+[`log::info!(target: "sim", "tick")`](https://docs.rs/log/latest/log/macro.info.html).
+
+A stimulus declaration without an initializer starts at the typed zero.
+DUT registers retain their usual power-up behavior. Sampling a value that
+contains unknown bits fails the test.
 
 This counter uses a table of `(Drive, u8)` pairs. The middle row disables
 the update and checks that the counter holds the previous total.
