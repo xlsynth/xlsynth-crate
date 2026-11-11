@@ -15,7 +15,7 @@ use crate::ast::{
     BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
     Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
     MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourceFile, SourcePosition,
-    SourceSpan, Stmt, StructDef, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    SourceSpan, Stmt, StructDef, StructSplat, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -462,6 +462,8 @@ pub(crate) fn parse_value_type(source: &str) -> Result<Type, String> {
 struct Parser<'s> {
     source: &'s str,
     diagnostic_source: Option<Arc<str>>,
+    /// Last byte offset and line/column recorded for a diagnostic.
+    position_cursor: (usize, SourcePosition),
     dialect: Dialect,
     tokens: Vec<Token<'s>>,
     pos: usize,
@@ -557,6 +559,12 @@ enum StructArguments {
     Concrete(Vec<u32>),
     Computed { args: Vec<Expr>, height: usize },
     Types { args: Vec<Type>, height: usize },
+}
+
+/// The explicit fields and optional final base in a struct literal.
+struct StructMembers {
+    fields: Vec<(String, Expr)>,
+    base: Option<Box<StructSplat>>,
 }
 
 /// Parsed value arguments and their token spans for struct-literal validation.
@@ -721,6 +729,7 @@ impl<'s> Parser<'s> {
         Ok(Self {
             source,
             diagnostic_source: None,
+            position_cursor: (0, SOURCE_START),
             dialect: Dialect::Bx,
             tokens,
             pos: 0,
@@ -740,6 +749,15 @@ impl<'s> Parser<'s> {
             local_names: Vec::new(),
             literal_type_context: LiteralTypeContext::Live,
         })
+    }
+
+    /// Advance from the preceding diagnostic site so many sites on one line
+    /// take linear work in total.
+    fn position_at(&mut self, offset: usize) -> SourcePosition {
+        let (start, position) = self.position_cursor;
+        let position = advance_position(position, &self.source[start..offset]);
+        self.position_cursor = (offset, position);
+        position
     }
 
     /// Report excessive nesting before recursion consumes the host thread
@@ -797,7 +815,7 @@ impl<'s> Parser<'s> {
             return diagnostic(
                 self.source,
                 token.start,
-                "place a BX warning attribute before the block definition, including its optional 'pub'",
+                "place a BX warning attribute before the declaration, including its optional 'pub'",
             );
         }
         if self.dialect == Dialect::Bx && token.text == "#" && self.peek(1) == "!" {
@@ -974,13 +992,9 @@ impl<'s> Parser<'s> {
     fn module(&mut self) -> Result<Module, String> {
         let mut module = Module::default();
         let mut use_bindings = BTreeSet::new();
-        // Advance from the previous name so recording positions is linear
-        // across all declarations, including multiple blocks on one line.
-        let mut position = SOURCE_START;
-        let mut offset = 0;
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let allowed_warnings = self.attributes(&mut module)?;
+            let mut allowed_warnings = self.attributes(&mut module)?;
             if self.peek(0).is_empty() && allowed_warnings.is_empty() {
                 break;
             }
@@ -988,13 +1002,16 @@ impl<'s> Parser<'s> {
             let declares_type = matches!(self.peek(0), "enum" | "struct");
             if self.eat("block") {
                 let name_offset = self.tokens[self.pos].start;
-                position = advance_position(position, &self.source[offset..name_offset]);
-                offset = name_offset;
-                let block =
-                    self.with_name_scope(|p| p.block(public, position, allowed_warnings))?;
+                let position = self.position_at(name_offset);
+                let block = self.with_name_scope(|p| {
+                    p.block(public, position, std::mem::take(&mut allowed_warnings))
+                })?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
-            } else if !allowed_warnings.is_empty() {
+            } else if allowed_warnings
+                .iter()
+                .any(|&kind| kind != BxWarningKind::UselessStructSplat)
+            {
                 return Err(self.error("expected a block definition after #[allow(...)]"));
             } else if self.eat("fn") {
                 self.value_context = ValueContext::DslxItem;
@@ -1021,6 +1038,8 @@ impl<'s> Parser<'s> {
                 module.enums.push(def);
             } else if public {
                 return Err(self.error("expected block, const, enum, fn, or struct after pub"));
+            } else if self.peek(0) == "use" && !allowed_warnings.is_empty() {
+                return Err(self.error("a use declaration cannot have a warning allowance"));
             } else if self.eat("use") {
                 let start = module.uses.len();
                 self.use_tree(&mut module.uses, Some(&mut use_bindings))?;
@@ -1058,6 +1077,12 @@ impl<'s> Parser<'s> {
                     "expected a block, const, enum, fn, struct, extern, or use declaration",
                 ));
             }
+            if !allowed_warnings.is_empty() {
+                let name = &module.declaration_order[first_declaration];
+                module
+                    .declaration_allowances
+                    .insert(name.clone(), allowed_warnings);
+            }
             let names = if declares_type {
                 &mut self.visible_type_names
             } else {
@@ -1073,7 +1098,7 @@ impl<'s> Parser<'s> {
     }
 
     /// Record file-wide attributes and return warning allowances for the next
-    /// block.
+    /// declaration.
     fn attributes(&mut self, module: &mut Module) -> Result<BTreeSet<BxWarningKind>, String> {
         let mut allowed = BTreeSet::new();
         while self.eat("#") {
@@ -2541,6 +2566,9 @@ impl<'s> Parser<'s> {
             Braces::MatchArms => {
                 let first = self.peek(1);
                 let next = self.peek(2);
+                if first == ".." {
+                    return true;
+                }
                 if first == "}" {
                     return matches!(next, "." | "[" | "as" | "{")
                         || BinaryOp::from_spelling(next).is_some();
@@ -3111,25 +3139,27 @@ impl<'s> Parser<'s> {
                 ) => *height,
                 _ => 0,
             };
-            let fields = self.list("}", |parser| {
-                let field = parser.take_identifier(is_dslx_member_name)?;
-                let value = if parser.eat(":") {
-                    parser.expr()?
-                } else {
-                    ParsedExpr::leaf(Expr::Name(field.clone()))
-                };
-                height = height.max(value.height);
-                Ok((field, value.value))
-            })?;
+            let StructMembers { fields, base } = self.struct_members(&mut height)?;
             let value = match struct_args {
-                Some(StructArguments::Concrete(args)) => Expr::AppliedStruct { name, args, fields },
-                Some(StructArguments::Computed { args, .. }) => {
-                    Expr::ParametricStruct { name, args, fields }
-                }
-                Some(StructArguments::Types { args, .. }) => {
-                    Expr::TypeAppliedStruct { name, args, fields }
-                }
-                None => Expr::Struct { name, fields },
+                Some(StructArguments::Concrete(args)) => Expr::AppliedStruct {
+                    name,
+                    args,
+                    fields,
+                    base,
+                },
+                Some(StructArguments::Computed { args, .. }) => Expr::ParametricStruct {
+                    name,
+                    args,
+                    fields,
+                    base,
+                },
+                Some(StructArguments::Types { args, .. }) => Expr::TypeAppliedStruct {
+                    name,
+                    args,
+                    fields,
+                    base,
+                },
+                None => Expr::Struct { name, fields, base },
             };
             return self.compose(height, value);
         }
@@ -3137,6 +3167,39 @@ impl<'s> Parser<'s> {
             return Err(self.error("parenthesize the struct literal in this expression"));
         }
         Ok(ParsedExpr::leaf(self.named_value(name)?))
+    }
+
+    /// Parse fields and an optional DSLX-style splat before the closing brace.
+    fn struct_members(&mut self, height: &mut usize) -> Result<StructMembers, String> {
+        let mut fields = Vec::new();
+        while !self.eat("}") {
+            if self.eat("..") {
+                let position = self.position_at(self.tokens[self.pos - 1].start);
+                let base = self.expr()?;
+                *height = (*height).max(base.height);
+                self.expect("}")?;
+                return Ok(StructMembers {
+                    fields,
+                    base: Some(Box::new(StructSplat {
+                        value: base.value,
+                        position: Some(position),
+                    })),
+                });
+            }
+            let field = self.take_identifier(is_dslx_member_name)?;
+            let value = if self.eat(":") {
+                self.expr()?
+            } else {
+                ParsedExpr::leaf(Expr::Name(field.clone()))
+            };
+            *height = (*height).max(value.height);
+            fields.push((field, value.value));
+            if self.eat("}") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        Ok(StructMembers { fields, base: None })
     }
 
     /// Parse the runtime arguments of a call with explicit value arguments.
@@ -3518,19 +3581,23 @@ impl<'s> Parser<'s> {
             }
         }
         self.block_map_shadowed = true;
+        let position_start = self.position_cursor;
         let ordinary = self.list(")", Self::expr);
         self.block_map_shadowed = false;
         let ordinary_end = self.pos;
+        let ordinary_position = self.position_cursor;
         for &(index, token) in &split_candidates {
             self.tokens[index] = token;
         }
         self.pos = start;
+        self.position_cursor = position_start;
         self.forward_map_import = false;
         let builtin = self.map_call(target.clone(), false, ordinary.is_err());
         self.forward_map_import = true;
         match ordinary {
             Ok(args) => {
                 self.pos = ordinary_end;
+                self.position_cursor = ordinary_position;
                 for (index, token) in split_candidates {
                     self.tokens[index] = token;
                 }
@@ -4288,12 +4355,20 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
                 "expected a block definition after #[allow(...)]",
             ),
             (
+                "#[allow(useless_struct_splat, missing_block_timing)] const X = u8:0;",
+                "expected a block definition after #[allow(...)]",
+            ),
+            (
+                "#[allow(useless_struct_splat)] use lib;",
+                "a use declaration cannot have a warning allowance",
+            ),
+            (
                 "pub #[allow(combinational_block)] block b(clk) -> u8 { u8:0 }",
-                "place a BX warning attribute before the block definition",
+                "place a BX warning attribute before the declaration",
             ),
             (
                 "block b(clk) -> u8 { #[allow(combinational_block)] u8:0 }",
-                "place a BX warning attribute before the block definition",
+                "place a BX warning attribute before the declaration",
             ),
         ] {
             let error = parse_module(source).unwrap_err();
@@ -4741,6 +4816,7 @@ block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> 
                 name: "packets::Packet".into(),
                 args: vec![255, 2],
                 fields: vec![("x".into(), Expr::Name("x".into()))],
+                base: None,
             }
         );
         let stage = &module.blocks[0];
@@ -4807,7 +4883,7 @@ fn wrap<N: u32>(data: uN[N], nested: Other<{N + u32:1}>) -> Packet<N> {
             }
         );
         assert!(
-            matches!(&wrap.body, Expr::ParametricStruct { name, args, fields }
+            matches!(&wrap.body, Expr::ParametricStruct { name, args, fields, base: None }
             if name == "Packet"
                 && matches!(&args[..], [Expr::Name(n), Expr::Binary { op: BinaryOp::Add, .. }] if n == "N")
                 && fields.len() == 3)
@@ -5204,6 +5280,7 @@ block sample(clk) -> u8[2] {{ map({zero}.data, |x| x) }}
                         args: vec![]
                     })
                 )],
+                base: None,
             }
         );
         Ok(())
@@ -5440,6 +5517,77 @@ block dispatch(clk, match: u8) -> u8 {
             matches!(&arms[0].value, Expr::Match { subject, .. } if subject.as_ref() == &Expr::Name("match".into()))
         );
         assert!(matches!(arms[1].value, Expr::Match { .. }));
+    }
+
+    #[test]
+    fn struct_splat_disambiguates_the_match_subject() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct S { flag: bool }
+fn test(x: S) -> u8 {
+    match S { ..x }.flag { true => u8:1, false => u8:0 }
+}
+"#,
+        )?;
+        let Expr::Match { subject, .. } = &module.functions[0].body else {
+            panic!("expected match");
+        };
+        let Expr::Field { name, value } = subject.as_ref() else {
+            panic!("expected field projection");
+        };
+        assert_eq!(name, "flag");
+        let Expr::Struct {
+            name,
+            fields,
+            base: Some(base),
+        } = value.as_ref()
+        else {
+            panic!("expected struct update");
+        };
+        assert_eq!(name, "S");
+        assert!(fields.is_empty());
+        assert_eq!(base.value, Expr::Name("x".into()));
+        assert_eq!(
+            base.position,
+            Some(SourcePosition {
+                line: 4,
+                column: 15
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn struct_splat_must_end_the_constructor() {
+        for tail in ["..x,", "..x, a: u8:0", "..x, ..x", "a: u8:0 ..x"] {
+            let source = format!("struct S {{ a: u8 }} fn test(x: S) -> S {{ S {{ {tail} }} }}");
+            assert!(parse_module(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn struct_splat_position_survives_reparsing_a_forward_map_import() -> Result<(), String> {
+        let module = parse_module(
+            r#"struct S { a: u8 }
+block first(clk, x: S) -> S { map(S { a: u8:3, ..x }, x) }
+use helpers::map;
+block second(clk, x: S) -> S { S { ..x } }
+"#,
+        )?;
+        let Expr::Struct {
+            base: Some(base), ..
+        } = &module.blocks[1].output
+        else {
+            panic!("expected a struct update");
+        };
+        assert_eq!(
+            base.position,
+            Some(SourcePosition {
+                line: 4,
+                column: 36
+            })
+        );
+        Ok(())
     }
 
     #[test]

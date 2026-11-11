@@ -23,6 +23,7 @@ mod module_graph;
 mod scalar_match;
 mod struct_parametrics;
 mod struct_type_parameters;
+mod struct_updates;
 mod tuple_match;
 mod unroll_types;
 
@@ -46,6 +47,7 @@ pub use module_graph::check_module_graph;
 pub use scalar_match::check_scalar_match;
 pub use struct_parametrics::check_struct_parametrics;
 pub use struct_type_parameters::check_struct_type_parameters;
+pub use struct_updates::check_struct_updates;
 pub use tuple_match::check_tuple_match;
 pub use unroll_types::check_unroll_types;
 

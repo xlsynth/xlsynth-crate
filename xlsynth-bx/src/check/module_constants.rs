@@ -12,6 +12,7 @@ use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
 pub(super) struct ModuleDimensions<'a, 'm> {
     pub(super) decls: &'a Declarations<'m>,
     pub(super) position: Option<usize>,
+    pub(super) warning_owner: Option<&'m str>,
     zero_binding: ZeroBinding<'a>,
 }
 
@@ -28,6 +29,7 @@ impl<'m> Declarations<'m> {
         ModuleDimensions {
             decls: self,
             position: self.positions.get(owner).copied(),
+            warning_owner: self.positions.get_key_value(owner).map(|(&name, _)| name),
             zero_binding: ZeroBinding::Owner(owner),
         }
     }
@@ -36,10 +38,12 @@ impl<'m> Declarations<'m> {
         &'a self,
         position: Option<usize>,
         zero_binding: &'a str,
+        warning_owner: Option<&'m str>,
     ) -> ModuleDimensions<'a, 'm> {
         ModuleDimensions {
             decls: self,
             position,
+            warning_owner,
             zero_binding: ZeroBinding::Resolved(zero_binding),
         }
     }
@@ -133,10 +137,11 @@ impl ModuleDimensions<'_, '_> {
     }
 }
 
-impl<'a> BodyChecker<'a, '_> {
+impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve a pure initializer in declaration order and retain its concrete
     /// type and value for subsequent uses.
-    pub(super) fn check_constant(&mut self, decl: &ConstDef) -> Result<CheckedConstant, String> {
+    pub(super) fn check_constant(&mut self, decl: &'m ConstDef) -> Result<CheckedConstant, String> {
+        self.warning_owner = Some(&decl.name);
         self.zero_binding = self.decls.zero_binding(&decl.name);
         self.function_position = self.decls.positions.get(decl.name.as_str()).copied();
         self.enable_constant_functions();

@@ -162,10 +162,11 @@ impl StructTable<'_> {
     }
 }
 
-impl<'a> BodyChecker<'a, '_> {
+impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Infer a common underlying bit type and evaluate every discriminant in
     /// the scope immediately preceding the declaration.
-    pub(super) fn check_enum(&mut self, def: &EnumDef) -> Result<CheckedEnum, String> {
+    pub(super) fn check_enum(&mut self, def: &'m EnumDef) -> Result<CheckedEnum, String> {
+        self.warning_owner = Some(&def.name);
         self.zero_binding = self.decls.zero_binding(&def.name);
         self.function_position = self.decls.positions.get(def.name.as_str()).copied();
         self.enable_constant_functions();

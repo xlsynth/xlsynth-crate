@@ -242,6 +242,25 @@ Each specialization exposes `pop_valid` and `pop_data` as named output ports.
 Here `pop_data` is one port of type `Packet`. A caller can read its fields with
 expressions such as `stage.pop_data.tag`.
 
+### Struct updates
+
+Use `..base` at the end of a struct literal to copy fields that the literal
+doesn't specify. Place `..base` after any explicit fields, with no trailing
+comma. The base expression is evaluated once and must have the same nominal
+struct type as the literal. The base can supply omitted value parametrics or
+infer a struct's type parameters when the entire argument list is omitted.
+Explicit arguments must agree with its specialization.
+
+When the literal supplies every field explicitly, BX emits
+`useless_struct_splat` at `..`. To remove the splat, spell out any parametric
+arguments that were inferred only from the base.
+
+```text
+fn invalidate<T>(previous: FlowOut<T>) -> FlowOut<T> {
+    FlowOut { pop_valid: false, ..previous }
+}
+```
+
 ## Defining functions
 
 Write `fn name(parameters) -> ResultType { ... }` or `pub fn` at module scope. Function signatures can include bits, structs, tuples, and arrays. In function type annotations, both `(u8)` and `(u8,)` mean a one-element tuple. In a value expression, write `(x,)` to construct that tuple.
@@ -478,11 +497,15 @@ still receive their own diagnostics.
 pub block increment_port(clk, x: u8) -> u8 { x + u8:1 }
 ```
 
+Use `#[allow(useless_struct_splat)]` on the declaration containing the update.
+This applies to blocks, functions, constants, enums, structs, and extern
+signatures, including expressions in parametric defaults and type dimensions.
+
 To inspect all warnings and still emit output, pass `--warnings-as-errors=false`
 to either driver command. Rust callers can use `check_source_with_options`
 and inspect `CheckedModule::warnings()` before calling `lower_module`. Each
 warning identifies its source declaration and location. Repeated calls,
-specializations, and imports of the same declaration share one diagnostic.
+specializations, and imports share one diagnostic for the same warning site.
 
 ### Using BX libraries
 

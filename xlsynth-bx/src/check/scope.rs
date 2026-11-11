@@ -214,7 +214,8 @@ impl BodyChecker<'_, '_> {
         // Constructors and branches share their members' contexts. A
         // self-determined leaf such as a function call can supply its actual
         // type now and use the same checked value during final elaboration.
-        // A bare type-parametric struct may need a sibling's type first.
+        // A constructor with missing nominal arguments may need a sibling's
+        // type first.
         if capture_anchors
             && !matches!(
                 expr,
@@ -227,9 +228,7 @@ impl BodyChecker<'_, '_> {
                     | Expr::Match { .. }
             )
             && !super::has_aggregate_literal(expr)
-            && self
-                .inferred_struct_constructor(expr)
-                .is_none_or(|template| template.type_params.is_empty())
+            && self.contextual_struct_constructor(expr).is_none()
             && self.reference_type(expr).is_none()
             && has_concrete_element_type(expr, self.common_widths())?
         {
@@ -780,28 +779,35 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         Expr::Tuple(fields) | Expr::Array(fields) => {
             fields.iter_mut().for_each(|f| capture_names(f, aliases))
         }
-        Expr::Struct { name, fields } | Expr::AppliedStruct { name, fields, .. } => {
+        Expr::Struct { name, fields, base }
+        | Expr::AppliedStruct {
+            name, fields, base, ..
+        }
+        | Expr::ParametricStruct {
+            name, fields, base, ..
+        }
+        | Expr::TypeAppliedStruct {
+            name, fields, base, ..
+        } => {
             rename(name, aliases);
             for (_, value) in fields {
                 capture_names(value, aliases);
             }
-        }
-        Expr::ParametricStruct { name, args, fields } => {
-            rename(name, aliases);
-            for expr in args
-                .iter_mut()
-                .chain(fields.iter_mut().map(|(_, value)| value))
-            {
-                capture_names(expr, aliases);
+            if let Some(base) = base {
+                capture_names(&mut base.value, aliases);
             }
-        }
-        Expr::TypeAppliedStruct { name, args, fields } => {
-            rename(name, aliases);
-            for arg in args {
-                rename_type(arg, aliases);
-            }
-            for (_, value) in fields {
-                capture_names(value, aliases);
+            match expr {
+                Expr::ParametricStruct { args, .. } => {
+                    for arg in args {
+                        capture_names(arg, aliases);
+                    }
+                }
+                Expr::TypeAppliedStruct { args, .. } => {
+                    for arg in args {
+                        rename_type(arg, aliases);
+                    }
+                }
+                _ => { /* The other constructors have no source parametrics to rename. */ }
             }
         }
         Expr::Call { name, args } => {

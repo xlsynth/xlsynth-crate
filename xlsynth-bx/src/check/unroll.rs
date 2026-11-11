@@ -102,7 +102,9 @@ impl BodyChecker<'_, '_> {
         structural: bool,
     ) -> Result<TypedExpr, String> {
         match expr {
-            Expr::UnrollFor(fold) => self.unroll(fold, expected, structural),
+            Expr::UnrollFor(fold) => {
+                self.unroll(fold, CarryContext::Expected(expected), structural)
+            }
             _ if expected.is_none() => self.inferred_expr(expr),
             _ => self.expr(expr, expected),
         }
@@ -327,7 +329,7 @@ impl BodyChecker<'_, '_> {
     pub(super) fn unroll(
         &mut self,
         fold: &UnrollFor,
-        expected: Option<&Type>,
+        context: CarryContext,
         structural: bool,
     ) -> Result<TypedExpr, String> {
         if fold.index == fold.accumulator && fold.index != "_" {
@@ -339,7 +341,6 @@ impl BodyChecker<'_, '_> {
             .map(|(i, a)| Ok::<_, String>((self.source_type(i)?, self.source_type(a)?)))
             .transpose()?;
         let index_hint = annotation.as_ref().map(|(i, _)| i);
-        let acc_hint = annotation.as_ref().map(|(_, a)| a).or(expected);
         let range =
             self.static_range(&fold.start, &fold.limit, index_hint, false, "unroll_for!")?;
         let count = range.count;
@@ -351,18 +352,20 @@ impl BodyChecker<'_, '_> {
             "unroll_for!",
             count.saturating_mul(fold.body.len().saturating_add(width.div_ceil(64).max(1))),
         )?;
-        if acc_hint.is_none() && minimum_type(&fold.seed)?.is_some() {
-            return Err(
-                "unroll_for! needs a typed seed or accumulator for an implicit literal result"
-                    .into(),
-            );
-        }
-        let seed = self.scoped_result(&fold.seed, acc_hint, false)?;
-        if let Some(expected) = expected
-            && !compatible(expected, &seed.ty)
-        {
-            return Err(format!("expected {expected}, got {}", seed.ty));
-        }
+        let seed = self.loop_seed(
+            &fold.seed,
+            annotation.as_ref().map(|(_, a)| a),
+            context,
+            |checker, acc_hint| {
+                if acc_hint.is_none() && minimum_type(&fold.seed)?.is_some() {
+                    return Err(
+                    "unroll_for! needs a typed seed or accumulator for an implicit literal result"
+                        .into(),
+                );
+                }
+                checker.scoped_result(&fold.seed, acc_hint, false)
+            },
+        )?;
         let mut carry = self.share_loop_value(seed);
         if count == 0 {
             self.check_empty_loop_names(fold)?;
@@ -1035,10 +1038,16 @@ impl BodyChecker<'_, '_> {
                     self.check_expr_names(arg, locals)?;
                 }
             }
-            Expr::Struct { name, fields }
-            | Expr::AppliedStruct { name, fields, .. }
-            | Expr::ParametricStruct { name, fields, .. }
-            | Expr::TypeAppliedStruct { name, fields, .. } => {
+            Expr::Struct { name, fields, base }
+            | Expr::AppliedStruct {
+                name, fields, base, ..
+            }
+            | Expr::ParametricStruct {
+                name, fields, base, ..
+            }
+            | Expr::TypeAppliedStruct {
+                name, fields, base, ..
+            } => {
                 locals.visited.set(locals.visited.get().saturating_add(1));
                 let usage = match expr {
                     Expr::Struct { .. } => NominalUse::Constructor,
@@ -1057,6 +1066,9 @@ impl BodyChecker<'_, '_> {
                 }
                 for (_, value) in fields {
                     self.check_expr_names(value, locals)?;
+                }
+                if let Some(base) = base {
+                    self.check_expr_names(&base.value, locals)?;
                 }
             }
             Expr::Cast { value, ty } => {

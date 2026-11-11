@@ -39,16 +39,25 @@ pub fn compile_bundled_dslx(params: &str, result: &str, body: &str) -> Result<Ir
 
 /// Compile a reference function with the same module search paths used by BX.
 pub fn compile_bundled_module(source: &str, paths: &[&Path]) -> Result<IrFunction, String> {
+    compile_bundled_module_with_warnings(source, paths).map(|(function, _)| function)
+}
+
+/// Keep DSLX typechecking warnings alongside the compiled sample function.
+pub fn compile_bundled_module_with_warnings(
+    source: &str,
+    paths: &[&Path],
+) -> Result<(IrFunction, Vec<String>), String> {
     let options = DslxConvertOptions {
         additional_search_paths: paths.to_vec(),
         ..Default::default()
     };
     let package = convert_dslx_to_ir(source, Path::new("expr_eval.x"), &options)
         .map_err(|e| e.to_string())?;
-    package
+    let function = package
         .ir
         .get_function("__expr_eval__sample")
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok((function, package.warnings))
 }
 
 /// The BX block projected to a function, together with its local callees.
