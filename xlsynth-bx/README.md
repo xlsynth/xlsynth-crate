@@ -680,9 +680,9 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 
 ### Pipeline stage annotations
 
-An output annotation such as `-> u8 @1` opts a block into stage checking. Data
-inputs default to `@0`. An input annotation such as `r: u8 @1` says the caller
-already supplies that input at stage 1.
+An output annotation such as `-> u8 @1` opts a block into stage checking. In
+that block, data inputs default to `@0`. An input annotation such as
+`r: u8 @1` places that input at stage 1 relative to the block's own origin.
 
 Put `#![require_block_timing]` at the top of a `.bx` file to require an output
 stage on every block defined there. A missing annotation emits
@@ -728,16 +728,39 @@ with `x: u8 @0` and `q := Payload { data: x, tag: u8:7 };`, `q.data` is
 cannot establish `@1`. If an `@0` enable guards that write, it supplies the
 stage for capturing the tag and both fields are `@1`.
 
-Each child instance uses one offset to translate its stages into the parent's
-stages. For a child with `x @0`, `r @1`, and an output at `@1`, connecting
+Each instance of a child with a declared output stage uses one offset to
+translate its stages into the parent's stages. For a child with `x @0`,
+`r @1`, and an output at `@1`, connecting
 `x` at parent stage 4 sets the offset to 4. Connecting `r` at stage 5 then
 passes and the output is at stage 5. Connecting `r` at stage 4 fails. A
 second instance of the same child can start at a different stage.
 
 A constant argument fits any stage. At least one argument with a known stage
 must set the offset, and the checker must be able to follow the other
-arguments. An unannotated child or an extern block supplies no output stage.
-Register feedback such as `q := q + x;` is legal BX. Following a timed
+arguments.
+
+A timed caller can also use a BX child with no annotations. BX follows each
+output to the inputs it uses and saves the stage checks for that output.
+
+```text
+block add_saved(clk, x: u8, r: u8) -> u8 {
+    reg q: u8;
+    q := x;
+    q + r
+}
+```
+
+The register puts `q` one stage after `x`. The adder requires `r` at that
+same stage. A call with `x @4, r @5` gives `@5`. A second call with
+`x @8, r @9` gives `@9`. A call with `x @4, r @4` fails at the adder.
+Reading one output port checks only the inputs that feed it. If the child
+declares input stages, BX also enforces their relative spacing at each call.
+In that case, any unlabelled data input defaults to local stage zero.
+
+A hierarchy without output annotations skips timing inference.
+`#![require_block_timing]` still requires an explicit output annotation in
+that file. An extern block has no BX body to infer from, so its output stage
+is unknown. Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic.
 
 #### Related work
