@@ -819,6 +819,15 @@ impl<'a> Scope<'a> {
             },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
+            Expr::ArrayLiteral {
+                annotation,
+                members,
+                has_ellipsis,
+            } => Expr::ArrayLiteral {
+                annotation: annotation.as_ref().map(|ty| self.ty(ty)).transpose()?,
+                members: self.expressions(members)?,
+                has_ellipsis: *has_ellipsis,
+            },
             Expr::Struct { name, fields, base }
             | Expr::AppliedStruct {
                 name, fields, base, ..

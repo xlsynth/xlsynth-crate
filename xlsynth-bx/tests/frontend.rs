@@ -38,6 +38,8 @@ mod numeric_enums;
 mod scalar_match;
 #[path = "frontend/tuple_match.rs"]
 mod tuple_match;
+#[path = "frontend/typed_array_literals.rs"]
+mod typed_array_literals;
 #[path = "frontend/unroll_for.rs"]
 mod unroll_for;
 

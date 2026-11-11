@@ -197,10 +197,16 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
 
 /// Aggregate constructors share member types with the other operand or branch.
 fn has_aggregate_literal(expr: &Expr) -> bool {
+    if let Some(seed) = expr.unannotated_loop_seed() {
+        return has_aggregate_literal(seed);
+    }
     match expr {
-        Expr::For(fold) if fold.annotation.is_none() => has_aggregate_literal(&fold.seed),
         Expr::Scope { result, .. } => has_aggregate_literal(result),
-        Expr::Array(_) | Expr::Tuple(_) => true,
+        Expr::Array(_)
+        | Expr::Tuple(_)
+        | Expr::ArrayLiteral {
+            annotation: None, ..
+        } => true,
         Expr::If {
             then_value,
             else_value,
@@ -3182,7 +3188,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Zero(ty) => self.zero_value(ty),
             Expr::Literal { ty, text } => self.bit_literal(ty.as_ref(), text, expected),
             Expr::Tuple(items) => self.tuple_literal(items, expected),
-            Expr::Array(items) => self.array_literal(items, expected),
+            Expr::Array(items) => self.array_literal(items, expected, false),
+            Expr::ArrayLiteral {
+                annotation,
+                members,
+                has_ellipsis,
+            } => {
+                let ty = annotation
+                    .as_ref()
+                    .map(|ty| self.source_type(ty))
+                    .transpose()?;
+                let (inferred, kind) =
+                    self.array_literal(members, ty.as_ref().or(expected), *has_ellipsis)?;
+                Ok((ty.unwrap_or(inferred), kind))
+            }
             Expr::Index { value, index } => self.array_index(value, index),
             Expr::WidthSlice {
                 value,
@@ -3475,22 +3494,45 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ))
     }
 
+    /// Validate the explicit prefix and budget the implicit IR operands.
+    fn check_array_length(
+        &mut self,
+        written: usize,
+        length: usize,
+        fill: bool,
+        charged_fill: usize,
+    ) -> Result<(), String> {
+        if written > length || (!fill && written != length) {
+            return Err(format!("expected array length {length}, got {written}"));
+        }
+        if fill {
+            if written == 0 {
+                return Err("array ellipsis requires an element to repeat".into());
+            }
+            self.charge_expansion(
+                "array ellipsis",
+                (length - written).saturating_sub(charged_fill),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Infer a common element type and preserve the type of an empty array.
     fn array_literal(
         &mut self,
         items: &[Expr],
         expected: Option<&Type>,
+        has_ellipsis: bool,
     ) -> Result<(Type, K), String> {
-        let hint = match expected {
-            Some(Type::Array { element, size }) => {
-                if *size != items.len() {
-                    return Err(format!("expected array length {size}, got {}", items.len()));
-                }
-                Some(element.as_ref())
-            }
+        let (hint, length) = match expected {
+            Some(Type::Array { element, size }) => (Some(element.as_ref()), *size),
             Some(other) => return Err(format!("expected {other}, got an array")),
-            None => None,
+            None if has_ellipsis => {
+                return Err("array ellipsis requires a known array length".into());
+            }
+            None => (None, items.len()),
         };
+        self.check_array_length(items.len(), length, has_ellipsis, 0)?;
         Ok(if !items.is_empty() {
             let values = match hint {
                 Some(element) => items
@@ -3502,7 +3544,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             (
                 Type::Array {
                     element: Box::new(values[0].ty.clone()),
-                    size: items.len(),
+                    size: length,
                 },
                 K::Array(values),
             )
@@ -3944,7 +3986,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             return Err(format!("expected {expected}, got {ty}"));
         }
-        if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
+        if matches!(
+            expr,
+            Expr::Tuple(_) | Expr::Array(_) | Expr::ArrayLiteral { .. }
+        ) {
             self.structs.validate_type(&ty)?;
         }
         let value = TypedExpr { ty, kind };
@@ -4025,6 +4070,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
+            Expr::ArrayLiteral {
+                annotation: None, ..
+            } => true,
             Expr::Scope { result, .. } => self.contains_inferred_aggregate(result),
             Expr::If {
                 then_value,
@@ -4178,7 +4226,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        if items.iter().any(|e| matches!(e, Expr::For(fold) if fold.annotation.is_none() && has_aggregate_literal(&fold.seed))) {
+        if items.iter().any(|expr| {
+            expr.unannotated_loop_seed()
+                .is_some_and(has_aggregate_literal)
+        }) {
             return self.with_dslx_value_context(|checker| checker.unify_loop_seeds(items));
         }
         if self.dslx_widths().is_none()
@@ -4195,6 +4246,48 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return self.with_aggregate_operands(items, Self::unify_prepared_values);
         }
         self.unify_prepared_values(items)
+    }
+
+    /// Use a complete sibling row for the length and any written element for
+    /// type inference, e.g. `[[x, ...], [1, 2]]` with `x: u8`.
+    fn check_array_rows(
+        &mut self,
+        items: &[&Expr],
+        rows: Vec<(&[Expr], bool)>,
+        check_elements: impl FnOnce(&mut Self, &[&Expr]) -> Result<Option<Vec<TypedExpr>>, String>,
+    ) -> Result<Option<Vec<TypedExpr>>, String> {
+        let Some(length) = rows
+            .iter()
+            .find_map(|(row, fill)| (!fill).then_some(row.len()))
+        else {
+            // A caller may still obtain the complete array type from another
+            // argument.
+            return Ok(None);
+        };
+        let fields: Vec<_> = rows.iter().flat_map(|(row, _)| row.iter()).collect();
+        let Some(fields) = check_elements(self, &fields)? else {
+            return Ok(None);
+        };
+        let ty = Type::Array {
+            element: Box::new(fields[0].ty.clone()),
+            size: length,
+        };
+        self.structs.validate_type(&ty)?;
+        let mut fields = fields.into_iter();
+        items
+            .iter()
+            .zip(rows)
+            .map(|(expr, (row, fill))| {
+                self.check_array_length(row.len(), length, fill, 0)?;
+                self.finish_expr(
+                    expr,
+                    None,
+                    ty.clone(),
+                    K::Array(fields.by_ref().take(row.len()).collect()),
+                )
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
     }
 
     /// Elaborate operands while any concrete anchors and lexical scope aliases
@@ -4229,32 +4322,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .check_tuple_results(&tuples, |checker, _, fields| checker.unify_values(fields));
         }
         if !first_has_type
-            && let Expr::Array(first) = items[0]
-            && let Some(arrays) = items
+            && let Some(rows) = items
                 .iter()
-                .map(|item| match item {
-                    Expr::Array(elements) if elements.len() == first.len() => Some(elements),
-                    _ => None,
-                })
+                .map(|item| item.unannotated_array())
                 .collect::<Option<Vec<_>>>()
+            && let Some(arrays) = self.check_array_rows(items, rows, |checker, fields| {
+                if fields.is_empty() {
+                    return Err("empty array literal requires an array type".into());
+                }
+                checker.unify_values(fields).map(Some)
+            })?
         {
-            let fields: Vec<_> = arrays.into_iter().flatten().collect();
-            if fields.is_empty() {
-                return Err("empty array literal requires an array type".into());
-            }
-            let fields = self.unify_values(&fields)?;
-            let ty = Type::Array {
-                element: Box::new(fields[0].ty.clone()),
-                size: first.len(),
-            };
-            let mut fields = fields.into_iter();
-            return Ok(items
-                .iter()
-                .map(|_| TypedExpr {
-                    ty: ty.clone(),
-                    kind: K::Array(fields.by_ref().take(first.len()).collect()),
-                })
-                .collect());
+            return Ok(arrays);
         }
         let hint = if first_has_type {
             CommonTypeHint::FromExpr(0)
@@ -4380,30 +4459,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// An aggregate carry may obtain different field types from different
     /// siblings. Unify its seed once and use the resulting value for the loop.
     fn unify_loop_seeds(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        let folds: Vec<_> = items
+        let (seeds, loops): (Vec<_>, Vec<_>) = items
             .iter()
-            .map(|item| match item {
-                Expr::For(fold)
-                    if fold.annotation.is_none() && has_aggregate_literal(&fold.seed) =>
-                {
-                    Some(fold)
-                }
-                _ => None,
+            .map(|expr| match expr.unannotated_loop_seed() {
+                Some(seed) if has_aggregate_literal(seed) => (seed, Some(*expr)),
+                _ => (*expr, None),
             })
-            .collect();
-        let seeds: Vec<_> = items
-            .iter()
-            .zip(&folds)
-            .map(|(item, fold)| fold.map_or(*item, |f| &f.seed))
-            .collect();
+            .unzip();
         let values = self.unify_values(&seeds)?;
-        folds
+        loops
             .into_iter()
             .zip(values)
-            .map(|(fold, value)| match fold {
-                Some(f) => self.with_dslx_value_context(|checker| {
-                    checker.counted_for(f, CarryContext::Prepared(value))
-                }),
+            .map(|(expr, value)| match expr {
+                Some(Expr::For(fold)) => self.counted_for(fold, CarryContext::Prepared(value)),
+                Some(Expr::UnrollFor(fold)) => {
+                    self.unroll(fold, CarryContext::Prepared(value), false)
+                }
+                Some(_) => unreachable!("only loop expressions have accumulator seeds"),
                 None => Ok(value),
             })
             .collect()
@@ -5131,6 +5203,63 @@ block tap(clk, x: u8) -> Ports {annotation} {{
             error.contains("array cast exceeds the function expansion limit"),
             "{error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_array_elements_share_the_function_expansion_budget() -> Result<(), String> {
+        let fill = "bool[600000]:[x, ...]";
+        check_bx(&format!("fn fill(x: bool) -> bool[600000] {{ {fill} }}"))?;
+        let error = check_bx(&format!(
+            "fn compare(x: bool) -> bool {{ {fill} == {fill} }}"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "fn 'compare': result: array ellipsis exceeds the function expansion limit of 1048576"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inferred_generic_array_inputs_charge_each_fill_once() -> Result<(), String> {
+        let declarations = r#"
+fn first<T>(a: T[550000]) -> T { a[0] }
+fn id<T>(a: T) -> T { a }
+"#;
+        for body in [
+            "first(if c { [x, ...] } else { y })",
+            "id(if c { [x, ...] } else { y })[0]",
+            "id(if c { ([x, ...],) } else { (y,) }).0[0]",
+            "id(if c { for (_, a) in u32:0..u32:1 { a }([x, ...]) } else { y })[0]",
+        ] {
+            check_bx(&format!(
+                "{declarations}\nfn f(x: bool, c: bool, y: bool[550000]) -> bool {{ {body} }}"
+            ))?;
+        }
+        // Two distinct prefixes each still contribute 549999 implicit operands.
+        let error = check_bx(&format!(
+            "{declarations}\nfn f(x: bool, c: bool, y: bool[550000]) -> bool {{
+                first(if c {{ [x, ...] }} else {{ y }}) == first(if c {{ [x, ...] }} else {{ y }})
+            }}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("array ellipsis exceeds the function expansion limit"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_literals_supply_generic_arguments() -> Result<(), String> {
+        check_bx(
+            r#"
+fn first<T, N: u32>(xs: T[N]) -> T { xs[0] }
+fn repeat<T, N: u32>(x: T) -> T[N] { T[N]:[x, ...] }
+fn sample(x: u8) -> (u8, u8[4]) { (first(u8[3]:[x, ...]), repeat<4>(x)) }
+"#,
+        )?;
         Ok(())
     }
 

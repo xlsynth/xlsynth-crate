@@ -32,6 +32,8 @@ The expression subset includes arithmetic, comparisons, bitwise and logical oper
 
 Use `++` to concatenate arrays with the same element type. The result length is the sum of the operand lengths, and the left operand's elements come first. Each operand is typed independently. For example, `[u8:1, u8:2] ++ [u8:3]` produces a `u8[3]`.
 
+Give an array literal its type directly, as in `u8[4]:[1, 2, 3, 4]`. A trailing `...` fills the remaining slots with the last written value, which can be computed at runtime. For example, `u8[4]:[1, x, ...]` produces `[1, x, x, x]`. An enclosing annotation can supply the length too, as in `let lanes: u8[4] = [1, x, ...];`. When passing a filled literal directly to a pure function, put the size on the argument, as in `sum(u8[4]:[1, x, ...])`.
+
 Use `as` to unpack a bit value into a one-dimensional array of bits or to pack the array back into a bit value. The scalar width must equal the element width times the array length. Element zero holds the most significant bits. For example, `u16:0x12ab as u8[2]` gives `[u8:0x12, u8:0xab]`, and casting that array to `u16` gives `0x12ab`. Signed, unsigned, and `bool` elements preserve their bit patterns. The rule also applies to zero-width values and empty arrays.
 
 BX uses the declared signedness in both hardware and constant expressions. For example, `([u4:8, u4:3] as s8) as s16` sign-extends to `-125`. Compiled DSLX hardware agrees. The pinned DSLX bytecode evaluator can lose the signed tag on an array cast and evaluate the same constant as `131`. BX preserves empty-array types in its IR. The pinned XLS IR interpreter and constant-folding pass can fail when they need to materialize an empty array value.

@@ -29,10 +29,15 @@ pub(super) enum Input<'e> {
         expr: Option<&'e Expr>,
         value: TypedExpr,
     },
-    Contextual(&'e Expr),
+    Contextual {
+        expr: &'e Expr,
+        prepared: Option<TypedExpr>,
+    },
     Aggregate {
         expr: &'e Expr,
         members: Vec<Input<'e>>,
+        /// Implicit operands already budgeted while preparing this array.
+        charged_fill: usize,
     },
     Branches {
         expr: &'e Expr,
@@ -49,6 +54,15 @@ pub(super) enum InputPattern {
 }
 
 impl InputPattern {
+    /// Defer to the final formal type while retaining any dimension witness.
+    fn contextual(self, expr: &Expr) -> Input<'_> {
+        let prepared = match self {
+            Self::Block => None,
+            Self::Function(value) => value,
+        };
+        Input::Contextual { expr, prepared }
+    }
+
     fn child(&self, value: Option<TypedExpr>) -> Self {
         match self {
             Self::Block => Self::Block,
@@ -111,10 +125,10 @@ impl<'e> Input<'e> {
         bindings: &Bindings,
         groups: &mut BTreeMap<&'a str, Vec<(&'e Expr, &'a mut Self)>>,
     ) {
-        if let (Type::Named(name), Self::Contextual(expr)) = (formal, &*self)
+        if let (Type::Named(name), Self::Contextual { expr, .. }) = (formal, &*self)
             && bindings.declares(name)
             && bindings.get(name).is_none()
-            && matches!(expr, Expr::Tuple(_) | Expr::Array(_))
+            && (matches!(expr, Expr::Tuple(_)) || expr.unannotated_array().is_some())
         {
             groups.entry(name).or_default().push((*expr, self));
             return;
@@ -353,33 +367,16 @@ impl<'m> BodyChecker<'_, 'm> {
                 .collect::<Result<_, _>>()?;
             return Ok(Some(checked));
         }
-        if let Some(Expr::Array(first)) = items.first()
-            && let Some(arrays) = items
-                .iter()
-                .map(|item| match item {
-                    Expr::Array(elements) if elements.len() == first.len() => Some(elements),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()
+        if let Some(rows) = items
+            .iter()
+            .map(|item| item.unannotated_array())
+            .collect::<Option<Vec<_>>>()
         {
-            let elements: Vec<_> = arrays.into_iter().flatten().collect();
-            let Some(checked) = self.infer_constructors(&elements, infer_literal_widths)? else {
-                return Ok(None);
-            };
-            let ty = Type::Array {
-                element: Box::new(checked[0].ty.clone()),
-                size: first.len(),
-            };
-            self.structs.validate_type(&ty)?;
-            let mut values = checked.into_iter();
-            let arrays = items
-                .iter()
-                .map(|expr| {
-                    let members = values.by_ref().take(first.len()).collect();
-                    self.finish_expr(expr, None, ty.clone(), K::Array(members))
-                })
-                .collect::<Result<_, _>>()?;
-            return Ok(Some(arrays));
+            // An unresolved element (such as Wrap { value: 9 }) must wait for
+            // another port to bind its type before the array can be checked.
+            return self.check_array_rows(items, rows, |checker, elements| {
+                checker.infer_constructors(elements, infer_literal_widths)
+            });
         }
         let mut deferred = false;
         for (index, item) in items.iter().enumerate() {
@@ -413,7 +410,7 @@ impl<'m> BodyChecker<'_, 'm> {
         if matches!(pattern, InputPattern::Function(None)) && !bindings.has_unbound_variable(formal)
         {
             // Bound formals give their arguments context for literal widths.
-            return Ok(Input::Contextual(arg));
+            return Ok(pattern.contextual(arg));
         }
         let branches = matches!(arg, Expr::If { .. } | Expr::Match { .. });
         let partial_constructor = branches
@@ -480,6 +477,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 _ => { /* An ordinary aggregate has a single result constructor below. */ }
             }
         }
+        let mut charged_fill = 0;
         let members = match (formal, arg) {
             (Type::Tuple(types), Expr::Tuple(items)) => {
                 if types.len() != items.len() {
@@ -500,9 +498,15 @@ impl<'m> BodyChecker<'_, 'm> {
             }
             (
                 Type::Array { element, .. } | Type::ParametricArray { element, .. },
-                Expr::Array(items),
+                Expr::Array(items)
+                | Expr::ArrayLiteral {
+                    annotation: None,
+                    members: items,
+                    ..
+                },
             ) => {
                 if let Type::Array { size, .. } = formal
+                    && matches!(arg, Expr::Array(_))
                     && items.len() != *size
                 {
                     return Err(format!("expected array length {size}, got {}", items.len()));
@@ -510,7 +514,14 @@ impl<'m> BodyChecker<'_, 'm> {
                 if items.is_empty() {
                     // The checker constructs an empty IR array from its element
                     // type.
-                    return Ok(Input::Contextual(arg));
+                    return Ok(pattern.contextual(arg));
+                }
+                if let InputPattern::Function(Some(TypedExpr {
+                    ty: Type::Array { size, .. },
+                    kind: K::Array(written),
+                })) = &pattern
+                {
+                    charged_fill = size - written.len();
                 }
                 let mut checked = pattern.take_members();
                 items
@@ -523,28 +534,28 @@ impl<'m> BodyChecker<'_, 'm> {
             (Type::Bits { .. } | Type::Bool, _)
                 if !matches!(pattern, InputPattern::Function(Some(_))) =>
             {
-                return Ok(Input::Contextual(arg));
+                return Ok(pattern.contextual(arg));
             }
             (Type::Named(name), _)
                 if !bindings.declares(name)
                     && !matches!(pattern, InputPattern::Function(Some(_))) =>
             {
-                return Ok(Input::Contextual(arg));
+                return Ok(pattern.contextual(arg));
             }
             (Type::TypeApplied { .. }, _) if !bindings.has_unbound_variable(formal) => {
-                return Ok(Input::Contextual(arg));
+                return Ok(pattern.contextual(arg));
             }
             _ => {
-                if matches!(arg, Expr::Tuple(_) | Expr::Array(_))
+                if (matches!(arg, Expr::Tuple(_)) || arg.unannotated_array().is_some())
                     && !matches!(pattern, InputPattern::Function(Some(_)))
                     && self.contains_type_struct_constructor(arg)
                 {
                     // A whole-aggregate type variable may receive its type
                     // from another argument or from the constructor group.
-                    return Ok(Input::Contextual(arg));
+                    return Ok(pattern.contextual(arg));
                 }
                 if !has_concrete_element_type(arg, self.common_widths())? {
-                    return Ok(Input::Contextual(arg));
+                    return Ok(pattern.contextual(arg));
                 }
                 let checked = match &mut pattern {
                     InputPattern::Block => None,
@@ -555,7 +566,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 } else {
                     match self.type_struct_witness(arg)? {
                         StructWitness::Other => self.expr(arg, None)?,
-                        StructWitness::Deferred => return Ok(Input::Contextual(arg)),
+                        StructWitness::Deferred => return Ok(pattern.contextual(arg)),
                         StructWitness::Checked(value) => value,
                     }
                 };
@@ -581,13 +592,17 @@ impl<'m> BodyChecker<'_, 'm> {
                 });
             }
         };
-        Ok(Input::Aggregate { expr: arg, members })
+        Ok(Input::Aggregate {
+            expr: arg,
+            members,
+            charged_fill,
+        })
     }
 
     /// Assemble constructors and check previously unsized operands once the
     /// full interface is known, reusing the values that supplied its types.
     pub(super) fn finish_input(&mut self, input: Input, ty: &Type) -> Result<TypedExpr, String> {
-        let (expr, members) = match input {
+        let (expr, members, charged_fill) = match input {
             Input::Checked { value, .. } if super::compatible(ty, &value.ty) => return Ok(value),
             Input::Checked {
                 expr: Some(expr),
@@ -598,8 +613,18 @@ impl<'m> BodyChecker<'_, 'm> {
             Input::Checked { expr: None, value } => {
                 return Err(format!("expected {ty}, got {}", value.ty));
             }
-            Input::Contextual(expr) => return self.expr(expr, Some(ty)),
-            Input::Aggregate { expr, members } => (expr, members),
+            Input::Contextual {
+                prepared: Some(value),
+                ..
+            } if super::compatible(ty, &value.ty) => {
+                return Ok(value);
+            }
+            Input::Contextual { expr, .. } => return self.expr(expr, Some(ty)),
+            Input::Aggregate {
+                expr,
+                members,
+                charged_fill,
+            } => (expr, members, charged_fill),
             Input::Branches {
                 expr,
                 selector,
@@ -642,13 +667,15 @@ impl<'m> BodyChecker<'_, 'm> {
                 };
             }
         };
-        if let Type::Array { size, .. } = ty
-            && members.len() != *size
-        {
-            return Err(format!(
-                "expected array length {size}, got {}",
-                members.len()
-            ));
+        if let Type::Array { size, .. } = ty {
+            let fill = matches!(
+                expr,
+                Expr::ArrayLiteral {
+                    has_ellipsis: true,
+                    ..
+                }
+            );
+            self.check_array_length(members.len(), *size, fill, charged_fill)?;
         }
         let kind = match ty {
             Type::Tuple(types) => K::Tuple(

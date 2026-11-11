@@ -444,6 +444,13 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// An array with an explicit type or a trailing ellipsis that repeats
+    /// its final member up to the declared size.
+    ArrayLiteral {
+        annotation: Option<Type>,
+        members: Vec<Expr>,
+        has_ellipsis: bool,
+    },
     Struct {
         name: String,
         fields: Vec<(String, Expr)>,
@@ -541,6 +548,31 @@ pub enum Expr {
     },
     UnrollFor(Box<UnrollFor>),
     For(Box<ForLoop>),
+}
+
+impl Expr {
+    /// A loop without an accumulator annotation takes its carry type from its
+    /// seed.
+    pub(crate) fn unannotated_loop_seed(&self) -> Option<&Expr> {
+        match self {
+            Self::For(fold) if fold.annotation.is_none() => Some(&fold.seed),
+            Self::UnrollFor(fold) if fold.annotation.is_none() => Some(&fold.seed),
+            _ => None,
+        }
+    }
+
+    /// The written elements and fill flag of an array without an explicit type.
+    pub(crate) fn unannotated_array(&self) -> Option<(&[Expr], bool)> {
+        match self {
+            Self::Array(members) => Some((members, false)),
+            Self::ArrayLiteral {
+                annotation: None,
+                members,
+                has_ellipsis,
+            } => Some((members, *has_ellipsis)),
+            _ => None,
+        }
+    }
 }
 
 /// An array mapped by an inline unary lambda. The checker verifies that the

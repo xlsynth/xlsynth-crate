@@ -423,6 +423,8 @@ pub enum TypedExprKind {
     Name(String),
     Literal(IrValue),
     Tuple(Vec<TypedExpr>),
+    /// Explicit elements. Trailing fill reuses the last value up to the
+    /// array length in the enclosing expression's type.
     Array(Vec<TypedExpr>),
     Index {
         value: Box<TypedExpr>,
@@ -1227,10 +1229,19 @@ impl TypedExpr {
                     .collect::<Option<_>>()?,
             )),
             K::Array(elements) => {
-                let elements = elements
+                let Type::Array { size, .. } = &self.ty else {
+                    return None;
+                };
+                let mut elements = elements
                     .iter()
                     .map(|e| e.constant_with_budget(names, remaining))
                     .collect::<Option<Vec<_>>>()?;
+                let fill = size.checked_sub(elements.len())?;
+                if fill > 0 {
+                    let last = elements.last()?;
+                    remaining.charge(fill.saturating_mul(constant_work(last)))?;
+                    elements.resize(*size, last.clone());
+                }
                 IrValue::make_array(&elements).ok()
             }
             K::Index { value, index } => {
@@ -1537,6 +1548,28 @@ block folded(clk) -> u16 {{
                 expected
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn constant_fill_charges_the_shape_of_each_repeated_element() -> Result<(), String> {
+        let source = "fn tile(row: uN[256][1]) -> uN[256][1][4] { uN[256][1][4]:[row, ...] }";
+        let module = check_module(&parse_module(source)?)?;
+        let row =
+            IrValue::make_array(&[IrValue::Bits(IrBits::zero(256))]).map_err(|e| e.to_string())?;
+        let names = BTreeMap::from([("row".to_owned(), ConstantBinding::Known(row))]);
+        let mut remaining = 4;
+        assert_eq!(
+            module.functions()[0].output.constant(
+                &names,
+                &mut remaining,
+                false,
+                ConstantUse::Bx,
+                None,
+                &BTreeMap::new(),
+            ),
+            Err(ConstantFailure::WorkLimit),
+        );
         Ok(())
     }
 

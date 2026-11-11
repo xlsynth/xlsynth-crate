@@ -1433,15 +1433,21 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             TypedExprKind::For(fold) => self.counted_for(fold),
             TypedExprKind::Map(map) => self.map(map),
             TypedExprKind::Array(items) => {
-                let Type::Array { element, .. } = &expr.ty else {
+                let Type::Array { element, size } = &expr.ty else {
                     return Err(BuilderError::InvalidOperation(
                         "array expression requires an array type".into(),
                     ));
                 };
-                let values = items
+                let mut values = items
                     .iter()
                     .map(|item| self.expr(item))
                     .collect::<Result<Vec<_>, _>>()?;
+                if values.len() < *size {
+                    let last = values.last().ok_or_else(|| {
+                        BuilderError::InvalidOperation("array fill requires a value".into())
+                    })?;
+                    values.resize(*size, *last);
+                }
                 self.builder.array(self.layouts.lower(element)?, &values)
             }
             TypedExprKind::Index { value, index } => {

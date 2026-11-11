@@ -16,7 +16,10 @@ pub(crate) enum NativeDataArg {
     Inferred(String),
     BoundLiteral(String),
     Tuple(Vec<Self>),
-    Array(Vec<Self>),
+    Array {
+        members: Vec<Self>,
+        has_ellipsis: bool,
+    },
     Branches(Vec<Self>),
 }
 
@@ -26,9 +29,11 @@ impl NativeDataArg {
         match self {
             Self::Typed(ty) => crate::check::source_type_nodes(ty),
             Self::Inferred(literal) | Self::BoundLiteral(literal) => literal.len().max(1),
-            Self::Array(items) | Self::Tuple(items) | Self::Branches(items) => items
-                .iter()
-                .fold(1usize, |sum, item| sum.saturating_add(item.storage_work())),
+            Self::Array { members: items, .. } | Self::Tuple(items) | Self::Branches(items) => {
+                items
+                    .iter()
+                    .fold(1usize, |sum, item| sum.saturating_add(item.storage_work()))
+            }
         }
     }
 }
@@ -173,12 +178,21 @@ impl ProbeImports {
                 Ok(name)
             }
             NativeDataArg::Tuple(items)
-            | NativeDataArg::Array(items)
+            | NativeDataArg::Array { members: items, .. }
             | NativeDataArg::Branches(items) => {
-                let values = items
+                let mut values = items
                     .iter()
                     .map(|a| self.render_argument(a, structs, params, lets))
                     .collect::<Result<Vec<_>, _>>()?;
+                if matches!(
+                    arg,
+                    NativeDataArg::Array {
+                        has_ellipsis: true,
+                        ..
+                    }
+                ) {
+                    values.push("...".to_owned());
+                }
                 Ok(match arg {
                     NativeDataArg::Tuple(_) => tuple(&values),
                     NativeDataArg::Branches(_) => format!("[{}][u32:0]", values.join(", ")),
@@ -359,7 +373,7 @@ fn contextual_shape(arg: &NativeDataArg, display: &str) -> Option<Type> {
             }
             (types.len() == fields.len()).then_some(Type::Tuple(types))
         }
-        NativeDataArg::Array(items) => {
+        NativeDataArg::Array { members: items, .. } => {
             let (element, size) = display.strip_suffix(']')?.rsplit_once('[')?;
             let size = size.parse().ok()?;
             let element = items
@@ -408,8 +422,14 @@ pub fn f<N:u32>(_:Operand)->u32 { N }
         }];
         let operand = NativeDataArg::Tuple(vec![
             NativeDataArg::Inferred("3".into()),
-            NativeDataArg::Array(vec![]),
-            NativeDataArg::Array(vec![]),
+            NativeDataArg::Array {
+                members: vec![],
+                has_ellipsis: false,
+            },
+            NativeDataArg::Array {
+                members: vec![],
+                has_ellipsis: false,
+            },
         ]);
         let types = resolver.contextual_data_types("wire", "f", &values, &[operand])?;
         let expected = Type::Tuple(vec![

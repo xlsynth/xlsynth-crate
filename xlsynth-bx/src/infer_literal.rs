@@ -569,7 +569,10 @@ fn collect_projected_with_calls(
             Some(field) => collect_projected_with_calls(field, rest, bindings, minimum, calls),
             None => Ok(false),
         },
-        (Expr::Array(items), Some((Member::ArrayElement, rest))) => {
+        (_, Some((Member::ArrayElement, rest)))
+            if let Some((items, _)) = expr.unannotated_array() =>
+        {
+            // The implicit copies of the last element share its constraint.
             for item in items {
                 if !collect_projected_with_calls(item, rest, bindings, minimum, calls)? {
                     return Ok(false);
@@ -578,6 +581,9 @@ fn collect_projected_with_calls(
             Ok(!items.is_empty())
         }
         (Expr::For(fold), Some(_)) if fold.annotation.is_none() => {
+            collect_projected_with_calls(&fold.seed, path, bindings, minimum, calls)
+        }
+        (Expr::UnrollFor(fold), Some(_)) if fold.annotation.is_none() => {
             collect_projected_with_calls(&fold.seed, path, bindings, minimum, calls)
         }
         (
@@ -786,7 +792,9 @@ fn has_match_result(expr: &Expr, path: &[Member]) -> bool {
         (Expr::Tuple(fields), Some((Member::TupleField(i), rest))) => fields
             .get(*i)
             .is_some_and(|field| has_match_result(field, rest)),
-        (Expr::Array(items), Some((Member::ArrayElement, rest))) => {
+        (_, Some((Member::ArrayElement, rest)))
+            if let Some((items, _)) = expr.unannotated_array() =>
+        {
             items.iter().any(|item| has_match_result(item, rest))
         }
         (
@@ -931,7 +939,10 @@ fn check_projected_argument(
                 return check_projected_argument(item, rest, ty, width, bindings, zero_is_call);
             }
         }
-        (Expr::Array(items), Some((Member::ArrayElement, rest))) if !rest.is_empty() => {
+        (_, Some((Member::ArrayElement, rest)))
+            if !rest.is_empty()
+                && let Some((items, _)) = expr.unannotated_array() =>
+        {
             for item in items {
                 check_projected_argument(item, rest, ty, width, bindings, zero_is_call)?;
             }
@@ -1070,14 +1081,100 @@ pub(crate) enum CommonTypeHint {
     FromExpr(usize),
 }
 
+/// DSLX resolves an argument's elliptical array dimensions before applying
+/// the function signature. Rows share a dimension, as do corresponding tuple
+/// fields and branch results. A typed expression supplies all its dimensions.
+pub(crate) fn check_argument_array_sizes(arg: &Expr) -> Result<(), String> {
+    fn has_fill(expr: &Expr) -> bool {
+        if let Some(seed) = expr.unannotated_loop_seed() {
+            return has_fill(seed);
+        }
+        match expr {
+            Expr::ArrayLiteral {
+                annotation: None, ..
+            } => true,
+            Expr::Array(items) | Expr::Tuple(items) => items.iter().any(has_fill),
+            Expr::Scope { result, .. } => has_fill(result),
+            Expr::If {
+                then_value,
+                else_value,
+                ..
+            } => has_fill(then_value) || has_fill(else_value),
+            Expr::Match { arms, .. } => arms.iter().any(|arm| has_fill(&arm.value)),
+            _ => false,
+        }
+    }
+
+    fn check_group(mut group: Vec<&Expr>) -> Result<(), String> {
+        let mut needs_length = false;
+        let mut has_length = false;
+        let mut elements = Vec::new();
+        let mut fields: Vec<Vec<&Expr>> = Vec::new();
+        while let Some(expr) = group.pop() {
+            if let Some(seed) = expr.unannotated_loop_seed() {
+                group.push(seed);
+                continue;
+            }
+            match expr {
+                Expr::ArrayLiteral {
+                    annotation: None,
+                    members,
+                    ..
+                } => {
+                    needs_length = true;
+                    elements.extend(members);
+                }
+                Expr::Array(items) => {
+                    has_length = true;
+                    elements.extend(items);
+                }
+                Expr::Tuple(items) => {
+                    fields.resize_with(fields.len().max(items.len()), Vec::new);
+                    for (field, item) in fields.iter_mut().zip(items) {
+                        field.push(item);
+                    }
+                }
+                Expr::Scope { result, .. } => group.push(result),
+                Expr::If {
+                    then_value,
+                    else_value,
+                    ..
+                } => group.extend([then_value.as_ref(), else_value]),
+                Expr::Match { arms, .. } => group.extend(arms.iter().map(|arm| &arm.value)),
+                // This operand supplies its own shape. Ordinary checking
+                // still verifies that every operand matches the formal type.
+                _ => return Ok(()),
+            }
+        }
+        if needs_length && !has_length {
+            return Err(
+                "array ellipsis in a function argument requires a known array length".into(),
+            );
+        }
+        for group in fields.into_iter().chain(std::iter::once(elements)) {
+            if !group.is_empty() {
+                check_group(group)?;
+            }
+        }
+        Ok(())
+    }
+
+    if has_fill(arg) {
+        check_group(vec![arg])?;
+    }
+    Ok(())
+}
+
 /// Whether this element's type is fully specified without any of its array
 /// siblings. In that case checking the elements in source order suffices.
 pub(crate) fn has_concrete_element_type(
     expr: &Expr,
     locals: Option<WidthLookup<'_>>,
 ) -> Result<bool, String> {
+    if let Some(seed) = expr.unannotated_loop_seed() {
+        return has_concrete_element_type(seed, None);
+    }
     match expr {
-        Expr::For(fold) if fold.annotation.is_none() => has_concrete_element_type(&fold.seed, None),
         Expr::If {
             then_value,
             else_value,
@@ -1108,6 +1205,9 @@ pub(crate) fn has_concrete_element_type(
             }
             Ok(false)
         }
+        // An ellipsis without an annotation needs another operand or its
+        // enclosing declaration to supply the full array length.
+        Expr::ArrayLiteral { annotation, .. } => Ok(annotation.is_some()),
         _ => Ok(!collect_minimum(expr, locals, &mut None)?),
     }
 }
@@ -1122,7 +1222,15 @@ pub(crate) fn common_type_hint(
     let mut minimum = None;
     let mut constructor = None;
     for (i, expr) in items.iter().enumerate() {
-        if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
+        if matches!(
+            expr,
+            Expr::Tuple(_)
+                | Expr::Array(_)
+                | Expr::ArrayLiteral {
+                    annotation: None,
+                    ..
+                }
+        ) {
             constructor.get_or_insert(i);
         } else if !collect_minimum(expr, locals, &mut minimum)? {
             return Ok(CommonTypeHint::FromExpr(i));

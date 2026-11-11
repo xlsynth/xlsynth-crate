@@ -314,12 +314,21 @@ impl BodyChecker<'_, '_> {
                     }
                 }
             }
-            Expr::Tuple(items) | Expr::Array(items) => {
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members: items,
+                ..
+            } => {
                 for (i, item) in items.iter().enumerate() {
                     if let Cow::Owned(item) =
                         self.prepare_scopes(item, capture_anchors, before_scope)?
                     {
-                        let (Expr::Tuple(items) | Expr::Array(items)) = prepared.to_mut() else {
+                        let (Expr::Tuple(items)
+                        | Expr::Array(items)
+                        | Expr::ArrayLiteral { members: items, .. }) = prepared.to_mut()
+                        else {
                             unreachable!()
                         };
                         items[i] = item;
@@ -778,6 +787,18 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::Tuple(fields) | Expr::Array(fields) => {
             fields.iter_mut().for_each(|f| capture_names(f, aliases))
+        }
+        Expr::ArrayLiteral {
+            annotation,
+            members,
+            ..
+        } => {
+            if let Some(ty) = annotation {
+                rename_type(ty, aliases);
+            }
+            for member in members {
+                capture_names(member, aliases);
+            }
         }
         Expr::Struct { name, fields, base }
         | Expr::AppliedStruct {
