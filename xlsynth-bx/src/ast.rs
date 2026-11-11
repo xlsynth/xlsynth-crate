@@ -705,12 +705,20 @@ pub enum TestKind {
     Block,
 }
 
+/// A property block's random inputs and its source-level predicate result type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuickCheckSignature {
+    pub params: Vec<Param>,
+    pub result: Type,
+}
+
 /// A source test with its declared name and ordered procedural body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestDecl {
     pub name: String,
     pub kind: TestKind,
     pub position: SourcePosition,
+    pub quickcheck: Option<QuickCheckSignature>,
     pub statements: Vec<TestStmt>,
     /// Module names referenced in annotations replaced by an outer annotation.
     pub overwritten_literal_types: BTreeSet<String>,
@@ -726,6 +734,8 @@ pub struct TestStmt {
 /// Procedural operations available inside BX test declarations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TestStmtKind {
+    /// The trailing boolean expression of a quickcheck block.
+    Property(Expr),
     Reg {
         name: String,
         ty: Type,

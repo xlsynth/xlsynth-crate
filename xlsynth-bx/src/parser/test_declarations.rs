@@ -4,18 +4,19 @@
 
 use std::collections::BTreeSet;
 
-use super::{Braces, Parser, ValueContext, decode_byte_string};
-use crate::ast::{TestDecl, TestKind, TestStmt, TestStmtKind, Type};
+use super::{Braces, Parser, ValueContext, decode_byte_string, diagnostic, is_identifier};
+use crate::ast::{Expr, QuickCheckSignature, TestDecl, TestKind, TestStmt, TestStmtKind, Type};
 
 impl Parser<'_> {
-    /// Parse a parameterless test using its declaration's normal expression
-    /// dialect.
-    pub(super) fn test_declaration(&mut self) -> Result<TestDecl, String> {
-        let kind = if self.eat("fn") {
+    /// Parse a test using its declaration's normal expression dialect.
+    pub(super) fn test_declaration(&mut self, quickcheck: bool) -> Result<TestDecl, String> {
+        let kind = if !quickcheck && self.eat("fn") {
             self.value_context = ValueContext::DslxItem;
             TestKind::Function
         } else if self.eat("block") {
             TestKind::Block
+        } else if quickcheck {
+            return Err(self.error("expected private block after #[quickcheck]"));
         } else {
             return Err(self.error("expected private fn or block after #[test]"));
         };
@@ -25,36 +26,81 @@ impl Parser<'_> {
             return Err(self.error("BX tests cannot have parametric bindings"));
         }
         self.expect("(")?;
-        if !self.eat(")") {
-            return Err(self.error("BX tests take no arguments"));
-        }
-        if self.eat("->") && self.ty()? != Type::Tuple(Vec::new()) {
-            return Err(self.error("BX tests must return unit"));
-        }
+        let signature = if quickcheck {
+            let params = self.list(")", Self::param)?;
+            for param in &params {
+                self.shadow_callable(&param.name);
+            }
+            self.expect("->")?;
+            let result_offset = self.tokens[self.pos].start;
+            let result = self.ty()?;
+            if crate::typed::bits(&result) != Some((false, 1))
+                && !matches!(result, Type::Named(_) | Type::ParametricBits { .. })
+            {
+                return Err(diagnostic(
+                    self.source,
+                    result_offset,
+                    &format!("BX quickcheck blocks must return bool, got {result}"),
+                ));
+            }
+            Some(QuickCheckSignature { params, result })
+        } else {
+            if !self.eat(")") {
+                return Err(self.error("BX tests take no arguments"));
+            }
+            if self.eat("->") && self.ty()? != Type::Tuple(Vec::new()) {
+                return Err(self.error("BX tests must return unit"));
+            }
+            None
+        };
         self.expect("{")?;
-        let statements = self.with_name_scope(|p| p.test_body(kind))?;
+        let statements = self.test_body(kind, quickcheck)?;
         self.value_context = ValueContext::Block;
         Ok(TestDecl {
             kind,
             name,
             position,
+            quickcheck: signature,
             statements,
             overwritten_literal_types: std::mem::take(&mut self.overwritten_literal_types),
         })
     }
 
-    /// Parse the statements after an opening brace, allowing a trailing unit
-    /// value.
-    fn test_body(&mut self, test: TestKind) -> Result<Vec<TestStmt>, String> {
+    /// Parse procedural statements and, at quickcheck block scope, the final
+    /// property in the same lexical scope as the preceding statements.
+    fn test_body(
+        &mut self,
+        test: TestKind,
+        property_required: bool,
+    ) -> Result<Vec<TestStmt>, String> {
         let mut body = Vec::new();
-        while !self.eat("}") {
-            if self.peek(0) == "(" && self.peek(1) == ")" {
+        while self.peek(0) != "}" {
+            if !property_required && self.peek(0) == "(" && self.peek(1) == ")" {
                 self.pos += 2;
                 self.eat(";");
-                self.expect("}")?;
                 break;
             }
             let position = self.position_at(self.tokens[self.pos].start);
+            if property_required {
+                let property = match self.peek(0) {
+                    "if" => self.try_trailing_property(),
+                    "for" if self.starts_counted_for() => self.try_trailing_property(),
+                    "assert_eq" if self.peek(1) == "(" => self.try_trailing_property(),
+                    "for" if self.peek(1) == "(" => None,
+                    "for" | "reg" if is_identifier(self.peek(1)) => None,
+                    "let" | "tick!" | "assert!" => None,
+                    _ if self.peek(1) == ":=" => None,
+                    _ => Some(self.expr()?.value),
+                };
+                if let Some(value) = property {
+                    self.expect("}")?;
+                    body.push(TestStmt {
+                        position,
+                        kind: TestStmtKind::Property(value),
+                    });
+                    return Ok(body);
+                }
+            }
             let kind = self.test_statement(test)?;
             match kind {
                 TestStmtKind::If { .. } | TestStmtKind::For { .. } => {
@@ -72,7 +118,35 @@ impl Parser<'_> {
             }
             body.push(TestStmt { position, kind });
         }
+        if property_required {
+            return Err(self.error("BX quickcheck block requires a final bool expression"));
+        }
+        self.expect("}")?;
         Ok(body)
+    }
+
+    /// For syntax shared with a test statement, accept the expression grammar
+    /// only when it consumes the whole tail of the quickcheck block.
+    fn try_trailing_property(&mut self) -> Option<Expr> {
+        let start = self.pos;
+        let position_cursor = self.position_cursor;
+        let previous_types = std::mem::take(&mut self.overwritten_literal_types);
+        self.saved_angle_tokens = Some(Vec::new());
+        let parsed = self.with_name_scope(Self::expr);
+        let saved_tokens = self.saved_angle_tokens.take().unwrap();
+        if let Ok(expr) = parsed
+            && self.peek(0) == "}"
+        {
+            self.overwritten_literal_types.extend(previous_types);
+            return Some(expr.value);
+        }
+        self.pos = start;
+        self.position_cursor = position_cursor;
+        self.overwritten_literal_types = previous_types;
+        for (index, token) in saved_tokens {
+            self.tokens[index] = token;
+        }
+        None
     }
 
     /// Parse one test action, keeping loop binders and branch lets in their own
@@ -161,7 +235,7 @@ impl Parser<'_> {
                     for name in names {
                         p.shadow_callable(&name);
                     }
-                    p.test_body(test)
+                    p.test_body(test, false)
                 })
             })?;
             return Ok(TestStmtKind::For {
@@ -172,7 +246,7 @@ impl Parser<'_> {
         }
         if self.eat("if") {
             let condition = self.condition()?.value;
-            let then_body = self.nested(|p| p.with_name_scope(|p| p.test_body(test)))?;
+            let then_body = self.nested(|p| p.with_name_scope(|p| p.test_body(test, false)))?;
             let else_body = if !self.eat("else") {
                 Vec::new()
             } else if self.peek(0) == "if" {
@@ -181,7 +255,7 @@ impl Parser<'_> {
                 vec![TestStmt { position, kind }]
             } else {
                 self.expect("{")?;
-                self.nested(|p| p.with_name_scope(|p| p.test_body(test)))?
+                self.nested(|p| p.with_name_scope(|p| p.test_body(test, false)))?
             };
             return Ok(TestStmtKind::If {
                 condition,
@@ -309,11 +383,118 @@ fn twice(x: u8) -> u8 { x + x }
     }
 
     #[test]
+    fn quickcheck_requires_a_private_concrete_block_with_a_trailing_value() {
+        for source in [
+            "#[quickcheck] fn p(x: bool) -> bool { x }",
+            "#[quickcheck] pub block p(x: bool) -> bool { x }",
+            "#[quickcheck] block p<T>(x: T) -> bool { true }",
+            "#[quickcheck] block p(clk) -> bool { true }",
+            "#[quickcheck] block p(x: bool) { x }",
+            "#[quickcheck] block p(x: bool) -> () { () }",
+            "#[quickcheck] block p() -> bool {}",
+            "#[quickcheck] block p() -> bool { tick!(); }",
+            "#[quickcheck] block p(x: bool) -> bool { x; }",
+            "#[quickcheck] block p() -> bool { true } #[test] fn p() {}",
+        ] {
+            assert!(parse_module(source).is_err(), "{source}");
+        }
+        assert_eq!(
+            parse_module("#[quickcheck] block p() -> u8 { true }").unwrap_err(),
+            "1:28: BX quickcheck blocks must return bool, got u8"
+        );
+    }
+
+    #[test]
+    fn quickcheck_distinguishes_procedural_control_flow_from_result_expressions()
+    -> Result<(), String> {
+        let module = parse_module(
+            r#"
+#[quickcheck] block map(x: bool, xs: bool[2]) -> bool {
+    if x { tick!(); } else { assert!(true); }
+    for (v, want) in [(x, x)] { assert_eq(v, want); }
+    if x { xs[u32:0] } else { x }
+}
+#[quickcheck] block fold(xs: bool[2]) -> bool {
+    for (v, acc) in xs { v || acc }(false)
+}
+block mapped(clk, xs: u8[2]) -> u8[2] { map(xs, |x| x + x) }
+"#,
+        )?;
+        let test = &module.tests[0];
+        assert_eq!(test.quickcheck.as_ref().unwrap().params.len(), 2);
+        assert!(matches!(test.statements[0].kind, TestStmtKind::If { .. }));
+        assert!(matches!(test.statements[1].kind, TestStmtKind::For { .. }));
+        assert!(matches!(
+            test.statements[2].kind,
+            TestStmtKind::Property(Expr::If { .. })
+        ));
+        assert!(matches!(
+            module.tests[1].statements[0].kind,
+            TestStmtKind::Property(Expr::For(_))
+        ));
+        assert!(matches!(module.blocks[0].output, Expr::Map(_)));
+        Ok(())
+    }
+
+    #[test]
     fn test_names_do_not_shadow_hardware_builtins() -> Result<(), String> {
         let module = parse_module(
             "#[test] fn map() {} block demo(clk, xs: u8[2]) -> u8[2] { map(xs, |x| x + x) }",
         )?;
         assert!(matches!(module.blocks[0].output, Expr::Map(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn quickcheck_distinguishes_assert_eq_property_calls_from_statements() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+fn assert_eq(a: u8, b: u8) -> bool { a == b }
+#[quickcheck] block direct(x: u8) -> bool {
+    assert_eq(x, x);
+    if true { assert_eq(x, x) }
+    assert_eq(x, x)
+}
+#[quickcheck] block grouped(x: u8) -> bool { (assert_eq(x, x)) }
+#[test] block ordinary() { assert_eq(true, true) }
+"#,
+        )?;
+        let direct = &module.tests[0].statements;
+        assert!(matches!(direct[0].kind, TestStmtKind::AssertEq { .. }));
+        let TestStmtKind::If { then_body, .. } = &direct[1].kind else {
+            panic!("expected a procedural branch");
+        };
+        assert!(matches!(then_body[0].kind, TestStmtKind::AssertEq { .. }));
+        assert_eq!(
+            direct[2].kind,
+            TestStmtKind::Property(Expr::Call {
+                name: "assert_eq".into(),
+                args: vec![Expr::Name("x".into()), Expr::Name("x".into())],
+            })
+        );
+        assert_eq!(direct[2].kind, module.tests[1].statements[0].kind);
+        assert!(matches!(
+            module.tests[2].statements[0].kind,
+            TestStmtKind::AssertEq { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn procedural_if_reuses_split_angles_in_its_condition_and_lambda() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+struct Wrap<T: type> { v: T }
+#[quickcheck] block property(xs: u8[1], assert_eq: bool) -> bool {
+    if zero!<Wrap<u8>>().v == map(xs, |v| zero!<Wrap<u8>>().v + v)[u32:0] {
+        tick!();
+    }
+    assert_eq
+}
+"#,
+        )?;
+        assert!(matches!(&module.tests[0].statements[1].kind,
+            TestStmtKind::Property(Expr::Name(name)) if name == "assert_eq"));
         Ok(())
     }
 

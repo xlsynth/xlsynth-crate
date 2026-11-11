@@ -112,6 +112,115 @@ block counter_steps() {
 }
 
 #[test]
+fn bx_quickcheck_compares_each_sample_and_reports_four_valued_outcomes() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("counter.bx"),
+        r#"
+enum Op : u3 { Hold = 1, Load = 5 }
+struct Drive { op: Op, data: uN[71] }
+block capture(clk, rst, d: Drive) -> uN[71] {
+    reg q: uN[71] = uN[71]:7;
+    if d.op == Op::Load { q := d.data; }
+    q
+}
+#[quickcheck]
+block checked(trace: Drive[4]) -> bool {
+    reg d: Drive = Drive { op: Op::Hold, data: uN[71]:0 };
+    reg expected: uN[71] = uN[71]:7;
+    let q = capture(d);
+    tick!(rst: true);
+    assert_eq(q, expected);
+    for row in trace {
+        assert!(row.op == Op::Hold || row.op == Op::Load);
+        d := row;
+        if row.op == Op::Load { expected := row.data; }
+        tick!();
+        assert_eq(q, expected);
+    }
+    q == expected
+}
+#[quickcheck]
+block observes_power_up() -> bool {
+    reg d: Drive = Drive { op: Op::Hold, data: uN[71]:0 };
+    let q = capture(d);
+    if q == uN[71]:0 { assert!(true); }
+    true
+}
+"#,
+    )?;
+    for active_low in [false, true] {
+        let mut args = vec![
+            "bx-test",
+            "counter.bx",
+            "--quickcheck-trials",
+            "12",
+            "--seed",
+            "38",
+            "--cross-check-vastly",
+        ];
+        if active_low {
+            args.push("--reset-active-low");
+        }
+        let result = driver(directory.path(), &args)?;
+        anyhow::ensure!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout)?,
+            "quickcheck checked: 12 concrete trials (seed 38)\n  Vastly from X: 12 true, 0 false, 0 indeterminate\ntest checked ... ok\nquickcheck observes_power_up: 12 concrete trials (seed 38)\n  Vastly from X: 0 true, 0 false, 12 indeterminate\ntest observes_power_up ... ok\n2 passed; 0 failed\n"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bx_quickcheck_replays_a_concrete_counterexample() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::write(
+        directory.path().join("replay.bx"),
+        r#"block delay(clk, d: u16) -> u16 {
+    reg q: u16;
+    q := d;
+    q
+}
+#[quickcheck] block fails(d: u16) -> bool {
+    let q = delay(d);
+    assert_eq(d, d);
+    tick!();
+    q != d
+}
+#[test] fn after() { assert!(true); }
+"#,
+    )?;
+    let args = [
+        "bx-test",
+        "replay.bx",
+        "--quickcheck-trials",
+        "5",
+        "--seed",
+        "3",
+    ];
+    let first = driver(directory.path(), &args)?;
+    assert_eq!(first.status.code(), Some(1));
+    assert_eq!(first.stdout, b"quickcheck fails: 1 concrete trials (seed 3)\ntest fails ... FAILED\ntest after ... ok\n1 passed; 1 failed\n");
+    let replay = driver(directory.path(), &args)?;
+    assert_eq!(first.stderr, replay.stderr);
+    compare_golden_text(
+        &String::from_utf8(first.stderr)?,
+        "tests/bx_quickcheck_counterexample.golden.txt",
+    );
+    let mut cross_check_args = args.to_vec();
+    cross_check_args.push("--cross-check-vastly");
+    let from_x = driver(directory.path(), &cross_check_args)?;
+    assert_eq!(from_x.status.code(), Some(1));
+    assert_eq!(from_x.stdout, b"quickcheck fails: 1 concrete trials (seed 3)\n  Vastly from X: 0 true, 1 false, 0 indeterminate\ntest fails ... FAILED\ntest after ... ok\n1 passed; 1 failed\n");
+    Ok(())
+}
+
+#[test]
 fn bx_test_reports_the_failed_edge_and_continues_with_the_next_test() -> Result<()> {
     let directory = tempfile::tempdir()?;
     fs::write(

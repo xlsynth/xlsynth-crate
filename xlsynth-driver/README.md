@@ -479,9 +479,9 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
   block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
 
-### `bx-test` runs BX unit tests
+### `bx-test` runs BX unit tests and clocked QuickCheck properties
 
-Runs the `#[test] fn` and `#[test] block` declarations in the input file.
+Runs the `#[test] fn`, `#[test] block`, and `#[quickcheck] block` declarations in the input file.
 Tests execute in declaration order and each test starts with fresh state.
 Imported modules provide functions, blocks, types, and constants. Run
 `bx-test` on a library's own file to execute its tests.
@@ -506,9 +506,18 @@ tests still run, and the command exits with a nonzero status if any test fails.
 - `--reset-active-low[=true|false]` configures reset polarity for the
   block hierarchy. The default is active-high. Tests use synchronous reset
   and `tick!(rst: true)` asserts reset at an edge with either polarity.
+- `--quickcheck-trials <COUNT>` sets the positive number of concrete trials per
+  `#[quickcheck] block`. The default is 100. A concrete failure stops that property.
+- `--seed <U64>` seeds parameter and DUT register generation for each property.
+  The default is 0. Rerun with the same seed and trial count to reproduce a failure.
+- `--cross-check-vastly` compares each QuickCheck sample against generated RTL
+  from identical concrete state and reports an additional four-valued run from
+  unknown DUT register state. By default QuickCheck runs in the PIR interpreter.
 
 See the [BX unit test examples](../xlsynth-bx/README.md#unit-tests) for
 combinational assertions and a clocked test with a table of drive/expect pairs.
+The [clocked QuickCheck example](../xlsynth-bx/README.md#clocked-quickcheck-properties)
+checks a counter against a reference using a randomly generated sequence of drives.
 
 ### `bx2gv`: BX to mapped gate-level netlist
 

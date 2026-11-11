@@ -913,15 +913,46 @@ fn later(x: u8) -> u8 { x }
     }
 
     #[test]
+    fn quickcheck_signatures_and_predicates_observe_define_before_use() -> Result<(), String> {
+        let options = ImportOptions::default();
+        for (test, declaration, later) in [
+            (
+                "block p(x: Word) -> bool { true }",
+                "type Word = u8;",
+                "Word",
+            ),
+            (
+                "block p() -> bool { holds() }",
+                "fn holds() -> bool { true }",
+                "holds",
+            ),
+            ("block p() -> Pred { true }", "type Pred = bool;", "Pred"),
+        ] {
+            let source =
+                format!("#![require_define_before_use]\n#[quickcheck] {test}\n{declaration}");
+            crate::check_source_with_options(&source, &options)?;
+            let (module, imports) = read_for_tests(&source, &options)?;
+            let error = crate::check::check_sources(&module, imports, &options).unwrap_err();
+            assert_eq!(
+                error,
+                format!("in 'p': '{later}' is declared later in the module")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_linking_uses_root_imports_and_preserves_inner_bindings() -> Result<(), Box<dyn Error>> {
         let dir = tempdir()?;
         fs::write(
             dir.path().join("lib.bx"),
             r#"
 pub type Word = u8;
+pub type Pred = bool;
 pub const VALUE = u8:4;
 pub fn double(x: Word) -> Word { x + x }
 #[test] fn private_test() { assert!(false); }
+#[quickcheck] block private_property(x: bool) -> bool { x }
 "#,
         )?;
         let options = ImportOptions {
@@ -930,7 +961,7 @@ pub fn double(x: Word) -> Word { x + x }
         };
         let source = r#"
 #![require_define_before_use]
-use lib::{Word, VALUE, double};
+use lib::{Word, Pred, VALUE, double};
 #[test] block local_test() {
     reg drive: Word = VALUE;
     for VALUE in [VALUE] {
@@ -939,12 +970,16 @@ use lib::{Word, VALUE, double};
     }
     assert_eq(drive, VALUE);
 }
+#[quickcheck] block property(VALUE: Word) -> Pred {
+    let expected = double(VALUE);
+    VALUE + VALUE == expected
+}
 "#;
         let (_, imports) = read(source, &options)?;
         assert!(imports.libraries.unwrap().module.tests.is_empty());
         let (_, imports) = read_for_tests(source, &options)?;
         let module = imports.libraries.unwrap().module;
-        assert_eq!(module.tests.len(), 1);
+        assert_eq!(module.tests.len(), 2);
         let statements = &module.tests[0].statements;
         assert!(
             matches!(&statements[0].kind, TestStmtKind::Reg { ty: Type::Named(name), init: Some(Expr::Name(value)), .. } if name == "$bx$lib$Word" && value == "$bx$lib$VALUE")
@@ -959,6 +994,23 @@ use lib::{Word, VALUE, double};
             matches!(&statements[2].kind, TestStmtKind::AssertEq { expected: Expr::Name(name), .. } if name == "$bx$lib$VALUE")
         );
         assert!(read_for_tests("use lib::private_test;", &options).is_err());
+        let property = &module.tests[1];
+        let signature = property.quickcheck.as_ref().unwrap();
+        assert_eq!(signature.params[0].ty, Type::Named("$bx$lib$Word".into()));
+        assert_eq!(signature.result, Type::Named("$bx$lib$Pred".into()));
+        assert!(matches!(&property.statements[0].kind,
+            TestStmtKind::Let(binding) if matches!(&binding.value, Expr::Call { name, args }
+                if name == "$bx$lib$double" && args == &[Expr::Name("VALUE".into())])));
+        assert!(matches!(&property.statements[1].kind,
+            TestStmtKind::Property(Expr::Binary { left, .. })
+                if matches!(left.as_ref(), Expr::Binary { left, right, .. }
+                    if **left == Expr::Name("VALUE".into()) && **right == Expr::Name("VALUE".into()))));
+        assert!(read_for_tests("use lib::private_property;", &options).is_err());
+        let shadowed = "use lib; #[quickcheck] block p(lib: bool) -> lib::Pred { true }";
+        assert_eq!(
+            read_for_tests(shadowed, &options).err().unwrap(),
+            "'lib' names a local value here"
+        );
         Ok(())
     }
 

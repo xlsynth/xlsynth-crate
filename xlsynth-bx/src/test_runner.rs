@@ -2,27 +2,70 @@
 
 //! Execute test control flow over typed BX expressions and clocked hardware.
 
+#[cfg(test)]
+mod mixed_suite_tests;
+mod quickcheck;
 mod simulation;
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use xlsynth_pir::ir::{Fn, NodePayload, NodeRef, Package, PackageMember};
-use xlsynth_pir::ir_eval::{AssumptionFailureKind, FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_eval::{
+    AssumptionFailureKind, FnEvalFailure, FnEvalResult, eval_fn_in_package,
+};
 use xlsynth_pir::ir_fn_cone_extract::{SinkSelector, extract_fn_cone_to_params};
 use xlsynth_pir::ir_value_utils::zero_ir_value_for_type;
 use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{SourcePosition, TestKind};
 use crate::{BxWarning, ImportOptions, ResetBehavior, bx_import, check, lower_module};
-use simulation::Simulation;
+use simulation::{Observed, Simulation};
+
+/// Concrete trials per clocked property, reproducible from the same seed.
+#[derive(Clone, Copy, Debug)]
+pub struct QuickCheckOptions {
+    pub trials: NonZeroUsize,
+    pub seed: u64,
+    pub cross_check_vastly: bool,
+}
+
+impl Default for QuickCheckOptions {
+    fn default() -> Self {
+        Self {
+            trials: NonZeroUsize::new(100).unwrap(),
+            seed: 0,
+            cross_check_vastly: false,
+        }
+    }
+}
+
+/// Outcomes from starting the RTL at X, independent of the concrete trials.
+#[derive(Clone, Debug, Default)]
+pub struct FourValuedReport {
+    pub passed: usize,
+    pub failed: usize,
+    pub indeterminate: usize,
+    pub first_false: Option<String>,
+    pub first_indeterminate: Option<String>,
+}
+
+/// Trial count and seed for one property, with optional four-valued outcomes.
+#[derive(Clone, Debug)]
+pub struct QuickCheckReport {
+    pub seed: u64,
+    pub trials: usize,
+    pub four_valued: Option<FourValuedReport>,
+}
 
 /// Outcome of a single test, in source declaration order.
 #[derive(Clone, Debug)]
 pub struct BxTestResult {
     pub name: String,
     pub failure: Option<String>,
+    pub quickcheck: Option<QuickCheckReport>,
 }
 
 /// Results of running the tests declared in the requested BX file.
@@ -39,6 +82,39 @@ pub(crate) struct TestSuite {
 }
 
 impl TestSuite {
+    /// A separate hardware lowering is needed only when a clocked harness
+    /// reaches a helper whose discarded fields are observed by a pure test.
+    /// The pure harnesses themselves can then be omitted from that lowering.
+    fn pure_harnesses_for_clocked_lowering(
+        &self,
+        checked: &crate::CheckedModule,
+    ) -> Option<BTreeSet<&str>> {
+        let mut clocked = self
+            .programs
+            .iter()
+            .filter(|p| p.kind == TestKind::Block)
+            .peekable();
+        if checked.functions_with_test_discards.is_empty() || clocked.peek().is_none() {
+            return None;
+        }
+        let pure_harnesses: BTreeSet<_> = self
+            .programs
+            .iter()
+            .filter(|p| p.kind == TestKind::Function)
+            .map(|p| p.harness.as_str())
+            .collect();
+        if checked
+            .functions_with_test_discards
+            .iter()
+            .all(|name| pure_harnesses.contains(name.as_str()))
+        {
+            return None;
+        }
+        checked
+            .blocks_reach_test_discards(clocked.map(|p| p.harness.clone()))
+            .then_some(pure_harnesses)
+    }
+
     pub(crate) fn reserve_names(&mut self, names: &BTreeSet<String>) {
         self.reserved.extend(names.iter().cloned());
     }
@@ -63,6 +139,8 @@ pub(crate) struct TestProgram {
     pub(crate) kind: TestKind,
     pub(crate) harness: String,
     pub(crate) steps: Vec<TestStep>,
+    pub(crate) quickcheck_params: Option<Vec<crate::ast::Param>>,
+    pub(crate) stimulus_names: BTreeMap<usize, String>,
 }
 
 /// One located action in the imperative test program.
@@ -123,6 +201,28 @@ pub fn run_tests(
     options: &ImportOptions<'_>,
     warnings_as_errors: bool,
 ) -> Result<BxTestReport, String> {
+    run_tests_with_quickcheck(
+        source,
+        path,
+        package,
+        reset,
+        options,
+        warnings_as_errors,
+        QuickCheckOptions::default(),
+    )
+}
+
+/// Execute unit tests and concrete QuickCheck trials with the selected seed and
+/// backends.
+pub fn run_tests_with_quickcheck(
+    source: &str,
+    path: &Path,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+    warnings_as_errors: bool,
+    quickcheck_options: QuickCheckOptions,
+) -> Result<BxTestReport, String> {
     let mut suite = TestSuite {
         reserved: package
             .members
@@ -150,26 +250,9 @@ pub fn run_tests(
             source.path.get_or_insert_with(|| path.to_owned());
         }
     }
-    // A mixed suite can share a helper between a pure test and a DUT. The
-    // interpreter evaluates discarded fields for their contracts, while the
-    // DUT uses the same lowering of those fields as ordinary BX hardware.
-    let clocked_seed = if !checked.functions_with_test_discards.is_empty()
-        && suite.programs.iter().any(|p| p.kind == TestKind::Block)
-    {
-        let pure_harnesses: BTreeSet<_> = suite
-            .programs
-            .iter()
-            .filter(|p| p.kind == TestKind::Function)
-            .map(|p| p.harness.as_str())
-            .collect();
-        checked
-            .functions_with_test_discards
-            .iter()
-            .any(|name| !pure_harnesses.contains(name.as_str()))
-            .then(|| (package.clone(), pure_harnesses))
-    } else {
-        None
-    };
+    let clocked_seed = suite
+        .pure_harnesses_for_clocked_lowering(&checked)
+        .map(|pure_harnesses| (package.clone(), pure_harnesses));
     let package = lower_module(&checked, package, reset).map_err(at_file)?;
     let warnings = std::mem::take(&mut checked.warnings);
     if warnings_as_errors && !warnings.is_empty() {
@@ -199,43 +282,61 @@ pub fn run_tests(
                 TestKind::Function => &package,
                 TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
             };
+            if let Some(params) = &program.quickcheck_params {
+                return quickcheck::run(
+                    &program,
+                    params,
+                    package,
+                    &checked,
+                    path,
+                    reset.active_low,
+                    quickcheck_options,
+                );
+            }
             let result = run_program(&program, package, reset.active_low)
                 .err()
-                .map(|failure| {
-                    format!(
-                        "{}:{}:{}: test '{}'{}: {}",
-                        path.display(),
-                        failure.position.line,
-                        failure.position.column,
-                        program.name,
-                        if program.kind == TestKind::Block {
-                            format!(" at tick {}", failure.tick)
-                        } else {
-                            String::new()
-                        },
-                        failure.message
-                    )
-                });
+                .map(|f| f.diagnostic(path, &program));
             BxTestResult {
                 name: program.name,
                 failure: result,
+                quickcheck: None,
             }
         })
         .collect();
     Ok(BxTestReport { tests, warnings })
 }
 
+/// Pure calls check assertions when evaluated. Clocked hardware checks them on
+/// the active edge, including assertions inside linked function calls.
+#[derive(Clone, Copy)]
+enum AssertionTiming {
+    Expression,
+    ClockEdge,
+}
+
+/// Reports the first linked IR assertion triggered in one evaluation.
+fn check_ir_assertions(failure: &FnEvalFailure) -> Result<(), String> {
+    if let Some(assertion) = failure.assertion_failures.first() {
+        return Err(format!(
+            "IR assertion '{}' failed: {}",
+            assertion.label, assertion.message
+        ));
+    }
+    Ok(())
+}
+
 /// An expression's IR dependencies and the harness input ports they read.
-struct PureExpression {
+struct TestExpression {
     function: Fn,
     ports: Vec<usize>,
+    assertions: AssertionTiming,
     last: Option<(Vec<IrValue>, IrValue)>,
 }
 
-impl PureExpression {
+impl TestExpression {
     /// Extract the selected output once. The original package supplies its
     /// callees.
-    fn extract(harness: &Fn, node: NodeRef) -> Result<Self, String> {
+    fn extract(harness: &Fn, node: NodeRef, assertions: AssertionTiming) -> Result<Self, String> {
         let sink = SinkSelector::TextId(harness.get_node(node).text_id);
         let mut cone = extract_fn_cone_to_params(harness, None, sink, false)?;
         let ports = cone
@@ -249,6 +350,7 @@ impl PureExpression {
         Ok(Self {
             function,
             ports,
+            assertions,
             last: None,
         })
     }
@@ -268,24 +370,20 @@ impl PureExpression {
         let value = match eval_fn_in_package(package, &self.function, &args) {
             FnEvalResult::Success(success) => success.value,
             FnEvalResult::Failure(failure) => {
-                if let Some(assertion) = failure.assertion_failures.first() {
+                if matches!(self.assertions, AssertionTiming::Expression) {
+                    check_ir_assertions(&failure)?;
+                }
+                if let Some(assumption) = failure.assumption_failures.first() {
+                    let operation = match assumption.kind {
+                        AssumptionFailureKind::ArrayIndexOutOfBounds => "array_index",
+                        AssumptionFailureKind::ArrayUpdateOutOfBounds => "array_update",
+                    };
                     return Err(format!(
-                        "IR assertion '{}' failed: {}",
-                        assertion.label, assertion.message
+                        "IR {operation} at node {} was out of bounds despite assumed_in_bounds=true",
+                        assumption.node_text_id
                     ));
                 }
-                let assumption = failure
-                    .assumption_failures
-                    .first()
-                    .expect("failed evaluation contains an assertion or assumption failure");
-                let operation = match assumption.kind {
-                    AssumptionFailureKind::ArrayIndexOutOfBounds => "array_index",
-                    AssumptionFailureKind::ArrayUpdateOutOfBounds => "array_update",
-                };
-                return Err(format!(
-                    "IR {operation} at node {} was out of bounds despite assumed_in_bounds=true",
-                    assumption.node_text_id
-                ));
+                failure.value
             }
         };
         self.last = Some((args, value.clone()));
@@ -300,9 +398,28 @@ enum Harness<'a> {
         function: &'a Fn,
         inputs: Vec<IrValue>,
         outputs: &'a [NodeRef],
-        expressions: HashMap<NodeRef, PureExpression>,
+        expressions: HashMap<NodeRef, TestExpression>,
     },
-    Block(Box<Simulation>),
+    Block(&'a mut dyn ClockedHarness),
+}
+
+/// A clocked circuit driven and sampled by the procedural test interpreter.
+trait ClockedHarness {
+    fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String>;
+    fn tick(&mut self) -> Result<(), String>;
+    fn sample(&mut self, index: usize) -> Result<Observed, String>;
+}
+
+impl ClockedHarness for Simulation {
+    fn drive(&mut self, name: &str, value: &IrValue) -> Result<(), String> {
+        Simulation::drive(self, name, value)
+    }
+    fn tick(&mut self) -> Result<(), String> {
+        Simulation::tick(self)
+    }
+    fn sample(&mut self, index: usize) -> Result<Observed, String> {
+        self.output_observed(index)
+    }
 }
 
 impl Harness<'_> {
@@ -316,7 +433,7 @@ impl Harness<'_> {
         }
     }
 
-    fn output(&mut self, index: usize) -> Result<IrValue, String> {
+    fn output(&mut self, index: usize) -> Result<IrValue, ExecutionError> {
         match self {
             Self::Function {
                 package,
@@ -331,20 +448,74 @@ impl Harness<'_> {
                 }
                 let expression = match expressions.entry(node) {
                     Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => entry.insert(PureExpression::extract(function, node)?),
+                    Entry::Vacant(entry) => entry.insert(TestExpression::extract(
+                        function,
+                        node,
+                        AssertionTiming::Expression,
+                    )?),
                 };
-                expression.evaluate(package, inputs)
+                Ok(expression.evaluate(package, inputs)?)
             }
-            Self::Block(sim) => sim.output(index),
+            Self::Block(sim) => match sim.sample(index)? {
+                Observed::Known(value) => Ok(value),
+                Observed::Unknown(message) => Err(ExecutionError::Unknown(message)),
+            },
         }
     }
 }
 
 /// Runtime errors retain the innermost statement and edge count.
+#[derive(PartialEq)]
 struct Failure {
     position: SourcePosition,
     tick: u64,
-    message: String,
+    error: ExecutionError,
+}
+
+/// Distinguish property outcomes from simulator or linkage errors.
+#[derive(PartialEq)]
+enum ExecutionError {
+    Runtime(String),
+    Assertion(String),
+    Unknown(String),
+}
+
+impl From<String> for ExecutionError {
+    fn from(message: String) -> Self {
+        Self::Runtime(message)
+    }
+}
+
+impl TestProgram {
+    fn at_declaration(&self, message: String) -> Failure {
+        Failure {
+            position: self.position,
+            tick: 0,
+            error: ExecutionError::Runtime(message),
+        }
+    }
+}
+
+impl Failure {
+    fn diagnostic(&self, path: &Path, program: &TestProgram) -> String {
+        let message = match &self.error {
+            ExecutionError::Runtime(m)
+            | ExecutionError::Assertion(m)
+            | ExecutionError::Unknown(m) => m,
+        };
+        let edge = if program.kind == TestKind::Block {
+            format!(" at tick {}", self.tick)
+        } else {
+            String::new()
+        };
+        format!(
+            "{}:{}:{}: test '{}'{edge}: {message}",
+            path.display(),
+            self.position.line,
+            self.position.column,
+            program.name
+        )
+    }
 }
 
 /// Program counter state shared by nested loops and conditionals.
@@ -352,14 +523,12 @@ struct Execution<'a> {
     harness: Harness<'a>,
     tick: u64,
     active_low: bool,
+    trace: Option<(&'a BTreeMap<usize, String>, &'a mut quickcheck::TrialTrace)>,
 }
 
 fn run_program(program: &TestProgram, package: &Package, active_low: bool) -> Result<(), Failure> {
-    let at_declaration = |message| Failure {
-        position: program.position,
-        tick: 0,
-        message,
-    };
+    let at_declaration = |message| program.at_declaration(message);
+    let mut simulation;
     let harness = match program.kind {
         TestKind::Function => {
             let function = package.get_fn(&program.harness).ok_or_else(|| {
@@ -382,14 +551,16 @@ fn run_program(program: &TestProgram, package: &Package, active_low: bool) -> Re
                 expressions: HashMap::new(),
             }
         }
-        TestKind::Block => Harness::Block(Box::new(
-            Simulation::new(package, &program.harness).map_err(at_declaration)?,
-        )),
+        TestKind::Block => {
+            simulation = Simulation::new(package, &program.harness).map_err(at_declaration)?;
+            Harness::Block(&mut simulation)
+        }
     };
     Execution {
         harness,
         tick: 0,
         active_low,
+        trace: None,
     }
     .execute(&program.steps)
 }
@@ -399,10 +570,10 @@ impl Execution<'_> {
     /// edges.
     fn execute(&mut self, steps: &[TestStep]) -> Result<(), Failure> {
         for step in steps {
-            let at_step = |message| Failure {
+            let at_step = |error| Failure {
                 position: step.position,
                 tick: self.tick,
-                message,
+                error,
             };
             let group = step
                 .group
@@ -411,9 +582,9 @@ impl Execution<'_> {
                 .map_err(at_step)?;
             let mut output = |index: usize| {
                 match &group {
-                    Some((first, values)) => {
-                        values.get_element(index - first).map_err(|e| e.to_string())
-                    }
+                    Some((first, values)) => values
+                        .get_element(index - first)
+                        .map_err(|e| ExecutionError::Runtime(e.to_string())),
                     None => self.harness.output(index),
                 }
                 .map_err(at_step)
@@ -424,7 +595,14 @@ impl Execution<'_> {
                 }
                 TestAction::Drive { port, value } => {
                     let value = output(*value)?;
-                    self.harness.drive(*port, value).map_err(at_step)?;
+                    if let Some((names, trace)) = &mut self.trace
+                        && names.contains_key(port)
+                    {
+                        trace.drive(*port, &value);
+                    }
+                    self.harness
+                        .drive(*port, value)
+                        .map_err(|e| at_step(e.into()))?;
                 }
                 TestAction::Tick(reset) => {
                     let asserted = reset
@@ -432,14 +610,19 @@ impl Execution<'_> {
                         .transpose()?
                         .is_some_and(|v| v.bits_equals_u64_value(1));
                     let Harness::Block(sim) = &mut self.harness else {
-                        return Err(at_step("tick! requires a block test".into()));
+                        return Err(at_step(ExecutionError::Runtime(
+                            "tick! requires a block test".into(),
+                        )));
                     };
                     sim.drive("rst", &IrValue::bool(asserted ^ self.active_low))
-                        .map_err(at_step)?;
-                    sim.tick().map_err(at_step)?;
+                        .map_err(|e| at_step(e.into()))?;
+                    if let Some((_, trace)) = &mut self.trace {
+                        trace.tick(asserted);
+                    }
+                    sim.tick().map_err(|e| at_step(e.into()))?;
                     if asserted {
                         sim.drive("rst", &IrValue::bool(self.active_low))
-                            .map_err(at_step)?;
+                            .map_err(|e| at_step(e.into()))?;
                     }
                     self.tick += 1;
                 }
@@ -449,16 +632,16 @@ impl Execution<'_> {
                             || "assertion failed".to_owned(),
                             |label| format!("assertion failed: {label}"),
                         );
-                        return Err(at_step(message));
+                        return Err(at_step(ExecutionError::Assertion(message)));
                     }
                 }
                 TestAction::AssertEq { actual, expected } => {
                     let actual = output(*actual)?;
                     let expected = output(*expected)?;
                     if actual != expected {
-                        return Err(at_step(format!(
+                        return Err(at_step(ExecutionError::Assertion(format!(
                             "assert_eq failed: actual {actual}, expected {expected}"
-                        )));
+                        ))));
                     }
                 }
                 TestAction::If {
@@ -487,7 +670,7 @@ impl Execution<'_> {
                         let at_iteration = |message| Failure {
                             position: step.position,
                             tick: self.tick,
-                            message,
+                            error: ExecutionError::Runtime(message),
                         };
                         let element = match iterable {
                             TestIterable::Array(_) => array

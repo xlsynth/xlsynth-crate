@@ -10,7 +10,9 @@ use super::{
     BodyChecker, CheckedBinding, CheckedBlock, CheckedFunction, CheckedStmt, K, TypedExpr,
     TypedIterable,
 };
-use crate::ast::{BindingPattern, Param, TestDecl, TestKind, TestStmt, TestStmtKind, Type};
+use crate::ast::{
+    BindingPattern, Param, QuickCheckSignature, TestDecl, TestKind, TestStmt, TestStmtKind, Type,
+};
 use crate::test_runner::{TestAction, TestIterable, TestProgram, TestStep, TestSuite, input_name};
 
 /// The synthetic harness interface and the source registers that can be driven.
@@ -115,6 +117,17 @@ impl<'m> BodyChecker<'_, 'm> {
             outputs: Vec::new(),
             drivers: BTreeMap::new(),
         };
+        let quickcheck_params = test
+            .quickcheck
+            .as_ref()
+            .map(|signature| self.check_quickcheck_signature(signature, &mut ports))
+            .transpose()
+            .map_err(|message| {
+                format!(
+                    "{}:{}: quickcheck '{}': {message}",
+                    test.position.line, test.position.column, test.name
+                )
+            })?;
         let steps = self.test_steps(test, &test.statements, &mut ports, true)?;
         let result = Type::Tuple(
             ports
@@ -166,10 +179,43 @@ impl<'m> BodyChecker<'_, 'm> {
             name: test.name.clone(),
             position: test.position,
             kind: test.kind,
+            quickcheck_params,
+            stimulus_names: ports
+                .drivers
+                .into_iter()
+                .map(|(name, port)| (port, name))
+                .collect(),
             harness,
             steps,
         });
         Ok(())
+    }
+
+    /// Bind each generated argument to a fixed harness input before allocating
+    /// any stimulus or procedural snapshot ports.
+    fn check_quickcheck_signature(
+        &mut self,
+        signature: &QuickCheckSignature,
+        ports: &mut TestPorts,
+    ) -> Result<Vec<Param>, String> {
+        let mut checked = Vec::with_capacity(signature.params.len());
+        for param in &signature.params {
+            super::declare(&mut self.names, &param.name)?;
+            let ty = self.source_type(&param.ty)?;
+            let (_, input) = ports.input(ty.clone());
+            self.function_values.insert(param.name.clone(), input);
+            checked.push(Param {
+                name: param.name.clone(),
+                ty,
+            });
+        }
+        let result = self.source_type(&signature.result)?;
+        if !super::compatible(&result, &Type::Bool) {
+            return Err(format!(
+                "BX quickcheck blocks must return bool, got {result}"
+            ));
+        }
+        Ok(checked)
     }
 
     /// A clocked test's initial declarations form a static circuit. Lets in
@@ -275,6 +321,10 @@ impl<'m> BodyChecker<'_, 'm> {
         saved: &mut Vec<Shadowed>,
     ) -> Result<Option<TestAction>, String> {
         Ok(Some(match stmt {
+            TestStmtKind::Property(value) => TestAction::Assert {
+                predicate: ports.output(self.expr(value, Some(&Type::Bool))?),
+                label: Some("quickcheck property returned false".into()),
+            },
             TestStmtKind::Reg { name, ty, init } => {
                 if kind != TestKind::Block || !setup {
                     return Err("declare stimulus registers in the initial block test setup".into());

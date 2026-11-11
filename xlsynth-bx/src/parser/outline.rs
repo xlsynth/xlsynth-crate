@@ -220,6 +220,7 @@ fn outline_parser(source: &str) -> Result<Parser<'_>, String> {
         diagnostic_source: None,
         dialect: Dialect::Dslx,
         tokens: lex(source, Dialect::Dslx, None)?,
+        saved_angle_tokens: None,
         pos: 0,
         position_cursor: (0, super::SOURCE_START),
         depth: 0,

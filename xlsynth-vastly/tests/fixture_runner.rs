@@ -5,6 +5,7 @@ use xlsynth_vastly::DriveContext;
 use xlsynth_vastly::FixtureRunner;
 use xlsynth_vastly::ObserveContext;
 use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::{Signedness, State, Value4};
 
 #[test]
 fn port_binding_rejects_missing_or_wrong_width() {
@@ -34,6 +35,41 @@ endmodule
 
     let err = ports.output_with_width("done", 2).unwrap_err();
     assert!(format!("{err:?}").contains("output port `done` has width 1, expected 2"));
+}
+
+#[test]
+fn invalid_initial_state_preserves_register_values_and_cycle_history() {
+    let module = compile_pipeline_module(
+        r#"
+module delay(input logic clk, input logic [7:0] d, output logic [7:0] y);
+  logic [7:0] q;
+  always_ff @(posedge clk) begin
+    q <= d;
+  end
+  assign y = q;
+endmodule
+"#,
+    )
+    .unwrap();
+    let mut runner = FixtureRunner::new(&module).unwrap();
+    let d = runner.port_bindings().input("d").unwrap();
+    runner
+        .step_cycle_with_drive(&mut [], |ctx| ctx.set_u64(&d, 0x53))
+        .unwrap();
+    for (name, width, signedness) in [
+        ("missing", 8, Signedness::Unsigned),
+        ("q", 7, Signedness::Unsigned),
+        ("q", 8, Signedness::Signed),
+    ] {
+        let state = State::from([(name.into(), Value4::zeros(width, signedness))]);
+        assert!(runner.reset_with_state(state).is_err());
+        assert_eq!(runner.cycle(), 1);
+        assert_eq!(runner.last_outputs()["y"].to_u64_if_known(), Some(0x53));
+        assert_eq!(
+            runner.sample_with_drive(|_| Ok(())).unwrap()["y"].to_u64_if_known(),
+            Some(0x53)
+        );
+    }
 }
 
 #[test]
