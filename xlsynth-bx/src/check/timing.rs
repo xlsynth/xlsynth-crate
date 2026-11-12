@@ -25,8 +25,10 @@ pub(super) fn check_blocks(
     structs: &StructTable<'_>,
     invariant_harnesses: &BTreeSet<&str>,
 ) -> Result<(), String> {
-    // An invariant harness bundles its predicate with generated lemma ports.
-    // The source annotation applies only to the first field, named 'out' in BX.
+    // In BX, `#[invariant] ... -> bool @0` promises stage 0 for the
+    // returned Boolean. The harness exposes it as tuple field 0, followed
+    // by the lemmas. Passing just "out" makes check_outputs visit field 0
+    // even if a lemma reads a stage-1 register.
     let predicate_port = [Param {
         name: "out".into(),
         ty: Type::Bool,
@@ -74,7 +76,7 @@ pub(super) fn check_blocks(
     Ok(())
 }
 
-/// Check a declared stage against each physical output of this block.
+/// Check the declared stages of the source output ports in projection order.
 fn check_outputs(
     block: &CheckedBlock,
     expected: &OutputCycles,
@@ -287,8 +289,10 @@ impl<'a> Checker<'a> {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
             root.names.insert(&param.name, Binding::Input(stage));
         }
-        // `lane.x := x;` can precede `inst lane: tap;`. Index connections
-        // before pairing them with the child's ports in declaration order.
+        // Body checking turns `let lane = tap(x);` into an Inst for tap
+        // and a Connect from x to its input, just like explicit instance
+        // wiring. A Connect can precede its Inst, so collect connections
+        // first and look them up by instance and port below.
         let connections: BTreeMap<_, _> = block
             .statements
             .iter()

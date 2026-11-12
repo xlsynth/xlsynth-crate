@@ -734,6 +734,13 @@ idle cycles. Proving `lhs_is_live` excludes that state from the induction step.
 The engine checks that all helpers hold from reset and proves their conjunction
 is preserved before using it in the proof of the trailing Boolean.
 
+BX builds a block called a *harness* so the prover can read these values.
+For `parity_equivalent`, its two outputs are the final parity comparison
+and `lhs_is_live`, in that order. An output stage annotation on an
+invariant applies to the final Boolean expression. For example, a property
+returning `x || !x` for `x: bool @0` satisfies `-> bool @0` even if one of
+its lemmas reads a register at `@1`.
+
 ```shell
 xlsynth-driver bx-test parity.bx --seed 42 --invariant-cycles 16
 xlsynth-driver bx-prove-invariant parity.bx --mode=bmc --max-depth 16

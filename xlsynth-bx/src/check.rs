@@ -2174,6 +2174,8 @@ pub(crate) fn check_sources_with_tests(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
+    // Harnesses are now mixed in with ordinary blocks. Their generated
+    // names let timing find the ones whose source result is just a predicate.
     let invariant_harnesses = tests
         .as_deref()
         .into_iter()
@@ -2804,8 +2806,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         c.statement_span = block.source.as_ref().map(|source| source.output);
-        // The source predicate is a structural block result, even though the
-        // verification harness subsequently bundles it with the lemmas.
+        // An invariant returns one Boolean. Check the trailing expression
+        // against that type before building the tuple the prover reads.
         let result = if invariant.is_some() {
             &interface.outputs[0].ty
         } else {
@@ -2815,6 +2817,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .scoped_result(&block.output, Some(result), true)
             .map_err(|e| format!("result: {e}"))?;
         let output = if let Some(property) = invariant {
+            // Field 0 is the returned predicate. Each #[lemma] gets the next
+            // field in declaration order so the prover can sample it by index.
             let mut observations = vec![main];
             for index in 0..property.lemmas.len() {
                 let value = Expr::Name(InvariantLemma::observation_name(index));
