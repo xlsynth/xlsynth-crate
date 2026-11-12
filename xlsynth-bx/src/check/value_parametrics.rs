@@ -555,16 +555,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .iter()
                     .map(|arg| self.resolve_dimensions(arg, budget))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ty = Type::TypeApplied {
-                    name: name.clone(),
-                    args,
-                };
-                let ty = match self.type_bindings() {
-                    Some(bindings) if bindings.has_unbound_variable(&ty) => return Ok(ty),
-                    Some(bindings) => bindings.concrete_type(&ty)?,
-                    None => ty,
-                };
-                self.materialize_type_applications(ty, remaining)
+                self.with_type_resolver(|types, dimensions, bindings| {
+                    types.resolve_struct_type_application(
+                        name, args, bindings, dimensions, remaining,
+                    )
+                })
             }
             Type::ParametricStruct { name, args } => {
                 let args = self.struct_argument_values(name, args)?;

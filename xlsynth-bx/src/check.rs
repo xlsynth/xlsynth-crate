@@ -805,19 +805,7 @@ fn resolve_type<'m>(
                 .iter()
                 .map(|arg| resolve_type(arg, is_local, bindings, dimensions, types, budget))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ty = Type::TypeApplied {
-                name: name.clone(),
-                args,
-            };
-            let ty = if let Some(bindings) = bindings {
-                if bindings.has_unbound_variable(&ty) {
-                    return Ok(ty);
-                }
-                bindings.concrete_type(&ty)?
-            } else {
-                ty
-            };
-            types.materialize_type_applications(ty, dimensions, remaining)
+            types.resolve_struct_type_application(name, args, bindings, dimensions, remaining)
         }
         Type::ParametricStruct { name, args } => {
             let mut checker = types.struct_scope(dimensions);
@@ -962,6 +950,30 @@ struct TypeResolver<'a, 'm> {
 }
 
 impl<'m> TypeResolver<'_, 'm> {
+    /// Keep a struct application symbolic until its type arguments are bound,
+    /// then substitute the caller's bindings and resolve the struct's fields.
+    fn resolve_struct_type_application(
+        &mut self,
+        name: &str,
+        args: Vec<Type>,
+        bindings: Option<&Bindings>,
+        dimensions: ModuleDimensions<'_, 'm>,
+        remaining: usize,
+    ) -> Result<Type, String> {
+        let application = Type::TypeApplied {
+            name: name.to_owned(),
+            args,
+        };
+        let ty = match bindings {
+            Some(bindings) if bindings.has_unbound_variable(&application) => {
+                return Ok(application);
+            }
+            Some(bindings) => bindings.concrete_type(&application)?,
+            None => application,
+        };
+        self.materialize_type_applications(ty, dimensions, remaining)
+    }
+
     /// Resolve struct applications whose arguments have already been resolved
     /// and substituted. Their fields are evaluated in the declaration scope.
     fn materialize_type_applications(
@@ -2749,25 +2761,37 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Instantiate a type from a resolved block signature at a call site.
     fn bound_block_type(&mut self, ty: &Type, bindings: &Bindings) -> Result<Type, String> {
-        self.materialize_type_applications(bindings.concrete_type(ty)?, MAX_ELABORATION_DEPTH)
+        let ty = bindings.concrete_type(ty)?;
+        self.with_type_resolver(|types, dimensions, _| {
+            types.materialize_type_applications(ty, dimensions, MAX_ELABORATION_DEPTH)
+        })
     }
 
-    fn materialize_type_applications(
+    /// Borrow the module type resolver alongside this body's lexical scope and
+    /// bindings.
+    fn with_type_resolver(
         &mut self,
-        ty: Type,
-        remaining: usize,
+        resolve: impl FnOnce(
+            &mut TypeResolver<'_, 'm>,
+            ModuleDimensions<'_, 'm>,
+            Option<&Bindings>,
+        ) -> Result<Type, String>,
     ) -> Result<Type, String> {
         let dimensions = self.decls.dimensions_at(
             self.function_position.or(self.block_position),
             &self.zero_binding,
             self.warning_owner,
         );
-        TypeResolver {
+        let bindings = self
+            .function_type_bindings
+            .as_ref()
+            .or_else(|| self.specialization.map(|s| &s.bindings));
+        let mut types = TypeResolver {
             resolver: self.resolver,
             structs: self.structs,
             functions: self.function_registry.as_deref_mut(),
-        }
-        .materialize_type_applications(ty, dimensions, remaining)
+        };
+        resolve(&mut types, dimensions, bindings)
     }
 
     fn hardware_name(&mut self, name: &str) -> Result<(), String> {
