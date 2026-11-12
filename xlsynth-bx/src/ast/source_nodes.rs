@@ -25,16 +25,13 @@ impl<'a> SourceNode<'a> {
                     pending.extend(ty.iter().map(Annotation));
                 }
                 Stmt::Wire { ty, .. } => pending.push(Annotation(ty)),
-                Stmt::Write { value, .. }
-                | Stmt::DriveWire { value, .. }
-                | Stmt::Connect { value, .. } => {
+                Stmt::Write { value, .. } | Stmt::DriveWire { value, .. } => {
                     pending.push(Expression(value));
                 }
                 Stmt::If { condition, body } => {
                     pending.push(Expression(condition));
                     pending.extend(body.iter().map(Statement));
                 }
-                Stmt::Inst { .. } => { /* Explicit instances have no value expressions. */ }
             },
             Iterable(ForIterable::Array(expr)) => pending.push(Expression(expr)),
             Iterable(ForIterable::Range { start, limit, .. }) => {

@@ -73,7 +73,7 @@ fn constant_drives_register_reset_and_block_datapath() -> xlsynth_vastly::Result
 const BIAS = u8:7;
 fn adjust(x: u8) -> u8 { x + BIAS }
 const INITIAL = adjust(u8:250);
-pub block delay(clk, rst, data: u8) -> u8 {
+pub block delay(clk, data: u8) -> u8 {
     reg q: u8 = INITIAL;
     let const = data;
     if const!=BIAS { q := const + BIAS; }
@@ -250,7 +250,7 @@ fn named_dimensions_in_registers_preserve_the_concrete_reset_shape() -> Result<(
 const WIDTH = u32:5;
 const LANES = u32:2;
 const RESET: uN[WIDTH][LANES] = [31, 7];
-pub block delay(clk, rst, data: uN[WIDTH][LANES]) -> uN[WIDTH][LANES] {
+pub block delay(clk, data: uN[WIDTH][LANES]) -> uN[WIDTH][LANES] {
     reg q: uN[WIDTH][LANES] = RESET;
     q := data;
     q

@@ -21,7 +21,7 @@ use std::{umul, smul};
 extern fn supplied(a: u8, b: u5) -> u13 = "__std__umul__5_8_13";
 
 struct Results { saved: u13, wide: u20, negative: bool, pow2: bool, caller: u13 }
-block products(clk, rst, valid: bool, a: u8, b: u5, c: u12) -> Results {
+block products(clk, valid: bool, a: u8, b: u5, c: u12) -> Results {
     let product = umul(a, b);
     let signed_product = smul(a as s8, b as s5);
     reg q: u13 = u13:0;

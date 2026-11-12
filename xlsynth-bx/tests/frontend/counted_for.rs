@@ -23,10 +23,9 @@ fn specialized_fold_captures_a_child_output() -> Result<(), Box<dyn Error>> {
 #[allow(combinational_block)]
 block offset(clk, bias: u8) -> u8 { bias }
 block accumulate<T>(clk, data: T[2], bias: u8) -> T {
-    inst adjust: offset;
-    adjust.bias := bias;
+    let adjust = offset(bias);
     for (word, total): (T, T) in data {
-        total + word + (adjust.out as T)
+        total + word + (adjust as T)
     }(zero!<T>())
 }
 pub block wrapper(clk, data: u16[2], bias: u8) -> u16 {
@@ -421,7 +420,7 @@ fn large_counted_ranges_emit_a_single_loop_node() -> Result<(), Box<dyn Error>> 
 #[test]
 fn register_reset_evaluates_a_constant_counted_loop() -> Result<(), Box<dyn Error>> {
     let source = r#"
-block reset_fold(clk, rst, x: u8) -> u8 {
+block reset_fold(clk, x: u8) -> u8 {
     reg q: u8 = for (v, a) in [u8:2, u8:5, u8:7] { a * u8:3 + v }(u8:1);
     q := x;
     q
@@ -482,7 +481,7 @@ fn nested_counted_bodies_compile_on_a_small_stack() -> Result<(), String> {
     let runtime =
         format!("#[allow(combinational_block)] block folded(clk, x: u8) -> u8 {{ {body} }}");
     let reset = format!(
-        "block folded(clk, rst, x: u8) -> u8 {{ reg q: u8 = {}; q := x; q }}",
+        "block folded(clk, x: u8) -> u8 {{ reg q: u8 = {}; q := x; q }}",
         body.replace('x', "u8:7"),
     );
     std::thread::Builder::new()
@@ -518,13 +517,12 @@ fn counted_loop_scoped_iterable_and_seed_use_enclosing_values() -> Result<(), Bo
 }
 
 #[test]
-fn lexical_lets_in_iterables_and_seeds_hide_instances_and_externs() -> Result<(), String> {
+fn lexical_lets_in_iterables_and_seeds_hide_child_results_and_externs() -> Result<(), String> {
     let source = r#"
 #[allow(combinational_block)]
 block child(clk, z: u8) -> u8 { z }
 pub block wrapper(clk, x: u8) -> u8 {
-    inst pair: child;
-    pair.z := x;
+    let pair = child(x);
     for (e, a) in { let pair = (x, x); let v = pair.0; [v] } {
         a + e
     }({ let pair = (x, x); let v = pair.1; v })

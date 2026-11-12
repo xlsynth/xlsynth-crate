@@ -16,7 +16,7 @@ use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 const PIPE_REG: &str = r#"
-block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
+block pipe_reg<T>(clk, valid_in: bool, data_in: T) -> (bool, T) {
     reg valid_q: bool = false;
     reg data_q: T;
     valid_q := valid_in;
@@ -29,12 +29,12 @@ block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
 fn generic_register_preserves_an_imported_apfloat_instance() -> xlsynth_vastly::Result<()> {
     let source = r#"
 use float32::F32;
-block hold<T>(clk, rst, en: bool, x: T) -> T {
+block hold<T>(clk, en: bool, x: T) -> T {
     reg q: T = zero!<T>();
     if en { q := x; }
     q
 }
-pub block fp_register(clk, rst, en: bool, s: u1, e: u8, f: u23) -> F32 {
+pub block fp_register(clk, en: bool, s: u1, e: u8, f: u23) -> F32 {
     let input = F32 { fraction: f, sign: s, bexp: e };
     let saved = hold(en, input);
     saved
@@ -124,7 +124,7 @@ fn generic_boolean_and_byte_literals_preserve_their_intrinsic_width() -> Result<
 fn shared_pipe_reg_specialization_has_independent_state() -> xlsynth_vastly::Result<()> {
     let lanes = r#"
 struct Lanes { left_valid: bool, left_data: u8, right_valid: bool, right_data: u8 }
-block lanes(clk, rst, en_l: bool, x: u8, en_r: bool, y: u8) -> Lanes {
+block lanes(clk, en_l: bool, x: u8, en_r: bool, y: u8) -> Lanes {
     let left = pipe_reg(en_l, x);
     let right = pipe_reg(en_r, y);
     Lanes { left_valid: left.0, left_data: left.1, right_valid: right.0, right_data: right.1 }
@@ -182,7 +182,7 @@ fn pipe_payloads_retain_width_signedness_and_nominal_identity() -> Result<(), Bo
     let lanes = r#"
 struct Request { id: u8 }
 struct Reply { id: u8 }
-block lanes(clk, rst, v: bool, one: u1, x: u8, y: s8, w: uN[97], p: (u2, bool),
+block lanes(clk, v: bool, one: u1, x: u8, y: s8, w: uN[97], p: (u2, bool),
             a: u4[3], req: Request, rep: Reply) -> (bool, u8, s8, uN[97], (u2, bool), u4[3], Request, Reply) {
     let flag = pipe_reg(v, v);
     let single_bit = pipe_reg(v, one);
@@ -214,13 +214,13 @@ block lanes(clk, rst, v: bool, one: u1, x: u8, y: s8, w: uN[97], p: (u2, bool),
 #[test]
 fn unrolling_specializes_nested_generic_calls_and_register_resets() -> Result<(), Box<dyn Error>> {
     let blocks = r#"
-block channels(clk, rst, xs: (u8, u4[2])[2]) -> (u8, u4)[2] {
+block channels(clk, xs: (u8, u4[2])[2]) -> (u8, u4)[2] {
     unroll_for! (i, acc) in u32:0..u32:2 {
         let sample = capture(xs[i]);
         update(acc, i, sample)
     }(zero!<(u8, u4)[2]>())
 }
-block capture<A, B>(clk, rst, x: (A, B[2])) -> (A, B) {
+block capture<A, B>(clk, x: (A, B[2])) -> (A, B) {
     let first = pipe_reg(true, x.0);
     reg last: B = zero!<B>();
     last := x.1[1];
@@ -449,11 +449,6 @@ block same<T>(clk, x: T, y: T) -> T { x }
             "let bad = missing();",
             "block 'missing': cannot infer type parameter 'T': it does not appear in any data input",
         ),
-        (
-            same,
-            "inst bad: same; bad.x := u8:0; bad.y := u8:0;",
-            "block 'wrapper': generic block 'same' needs data arguments to infer its type parameters; use 'let bad = same(...)'",
-        ),
     ] {
         let source = format!("{template} block wrapper(clk) -> () {{ {statement} () }}");
         let parsed = parse_module(&source).unwrap();
@@ -542,13 +537,13 @@ fn bound_payload_keeps_its_nominal_type_in_the_callees_scope() -> Result<(), Box
     let source = r#"
 use payload_types::Packet;
 struct Local { value: s8 }
-block held<T>(clk, rst, data: T) -> T {
+block held<T>(clk, data: T) -> T {
     let Local = true;
     reg q: T = zero!<T>();
     if Local { q := data; }
     q
 }
-block capture(clk, rst, wire: Packet, local: Local) -> (u8, s8) {
+block capture(clk, wire: Packet, local: Local) -> (u8, s8) {
     let saved_wire = held(wire);
     let saved_local = held(local);
     (saved_wire.value, saved_local.value)
@@ -706,17 +701,16 @@ block sample(clk, x: Tree14) -> u8 {{ let result = many<collapse>({arguments}); 
 }
 
 #[test]
-fn both_child_instance_forms_charge_wiring_in_each_callback_specialization() -> Result<(), String> {
+fn child_calls_charge_wiring_in_each_callback_specialization() -> Result<(), String> {
     let types = tree_payload_declarations(17);
-    for instance in ["inst child: wide;", "let child = wide();"] {
-        let source = format!(
-            r#"
+    let source = format!(
+        r#"
 {types}
 extern block wide(clk) -> Tree17;
 extern fn a(x:u8) -> u8;
 extern fn b(x:u8) -> u8;
 extern fn c(x:u8) -> u8;
-block keep<T,F:fn(T)->T>(clk, x:T) -> T {{ {instance} F(x) }}
+block keep<T,F:fn(T)->T>(clk, x:T) -> T {{ let child = wide(); F(x) }}
 block sample(clk, x:u8) -> u8 {{
     let first = keep<a>(x);
     let second = keep<b>(first);
@@ -724,16 +718,15 @@ block sample(clk, x:u8) -> u8 {{
     third
 }}
 "#,
-        );
-        check_module(&parse_module(&source)?)?;
-        let distinct = source.replace("keep<a>(second)", "keep<c>(second)");
-        let error = check_module(&parse_module(&distinct)?).unwrap_err();
-        assert!(
-            error.contains(
-                "child block wiring exceeds the generic block specialization expansion limit"
-            ),
-            "{instance}: {error}"
-        );
-    }
+    );
+    check_module(&parse_module(&source)?)?;
+    let distinct = source.replace("keep<a>(second)", "keep<c>(second)");
+    let error = check_module(&parse_module(&distinct)?).unwrap_err();
+    assert!(
+        error.contains(
+            "child block wiring exceeds the generic block specialization expansion limit"
+        ),
+        "{error}"
+    );
     Ok(())
 }

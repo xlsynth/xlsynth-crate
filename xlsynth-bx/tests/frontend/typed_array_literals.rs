@@ -218,12 +218,12 @@ pub block sample(clk, x: bool, c: bool, y: bool[3]) -> bool {{ {select} }}
 fn trailing_fill_invokes_a_helper_once_on_a_clocked_child_output() -> Result<(), Box<dyn Error>> {
     let source = r#"
 fn bump(x: u8) -> u8 { x + u8:1 }
-block delay(clk, rst, x: u8) -> u8 {
+block delay(clk, x: u8) -> u8 {
     reg q: u8 = 0;
     q := x;
     q
 }
-pub block sample(clk, rst, x: u8) -> u8[4] {
+pub block sample(clk, x: u8) -> u8[4] {
     let q = delay(x);
     u8[4]:[1, bump(q), ...]
 }

@@ -495,12 +495,11 @@ fn map_reads_register_and_child_output_at_the_current_cycle() -> xlsynth_vastly:
     let source = r#"
 #[allow(combinational_block)]
 block child(clk, d: u8) -> u8 { d + u8:1 }
-pub block sample(clk, rst, en: bool, d: u8) -> (u8, u8) {
+pub block sample(clk, en: bool, d: u8) -> (u8, u8) {
     reg q: u8 = u8:0;
     if en { q := d; }
-    inst c: child;
-    c.d := d;
-    let ys = map(u8:0..u8:2, |i| i + q + c.out);
+    let c = child(d);
+    let ys = map(u8:0..u8:2, |i| i + q + c);
     (ys[u32:0], ys[u32:1])
 }
 "#;
@@ -653,7 +652,7 @@ fn local_map_binding_shadows_the_builtin_in_a_scoped_expression() -> Result<(), 
 #[test]
 fn map_computes_a_constant_register_reset_with_a_captured_binding() -> Result<(), Box<dyn Error>> {
     let source = r#"
-block sample(clk, rst, data: u16[3]) -> u16[3] {
+block sample(clk, data: u16[3]) -> u16[3] {
     let offset = u16:1;
     reg q: u16[3] = map([u8:3,u8:5,u8:255], |v| {
         let wide = v as u16;

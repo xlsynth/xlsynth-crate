@@ -747,15 +747,6 @@ pub enum Stmt {
         condition: Expr,
         body: Vec<Stmt>,
     },
-    Inst {
-        name: String,
-        block: String,
-    },
-    Connect {
-        instance: String,
-        port: String,
-        value: Expr,
-    },
 }
 
 /// A one-based source line and character column within a BX file.
@@ -884,10 +875,12 @@ pub struct BlockSource {
     pub(crate) output: SourceSpan,
 }
 
-/// Declared cycle offsets for a block's output ports.
+/// Output stages declared in this block's local stage numbering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutputCycles {
+    /// `-> Ports @1` places every output port at stage 1.
     Uniform(u64),
+    /// `-> Ports @(live: 0, saved: 1)` gives each physical port its own stage.
     ByPort(BTreeMap<String, u64>),
 }
 
@@ -952,6 +945,9 @@ impl UsePath {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// `#![allow(block_reset_signal)]` permits ordinary blocks in this file
+    /// to declare an explicit reset signal.
+    pub allow_block_reset_signal: bool,
     /// `#![require_block_timing]` requires output timing on this file's block
     /// definitions.
     pub require_block_timing: bool,

@@ -268,9 +268,9 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
     pending.extend(block.statements.iter().map(SourceNode::Statement));
     while let Some(node) = pending.pop() {
         match node {
-            SourceNode::Statement(
-                Stmt::Reg { .. } | Stmt::Inst { .. } | Stmt::Write { .. } | Stmt::Connect { .. },
-            ) => return TemplateHardware::Known(true),
+            SourceNode::Statement(Stmt::Reg { .. } | Stmt::Write { .. }) => {
+                return TemplateHardware::Known(true);
+            }
             SourceNode::Statement(Stmt::Let { name, .. } | Stmt::Wire { name, .. }) => {
                 binders.insert(name.clone());
             }
@@ -343,10 +343,9 @@ block composed(clk, x: u8) -> u8 {
     let y = pure(x);
     y
 }
-block explicit(clk, x: u8) -> u8 {
-    inst d: device;
-    d.x := x;
-    d.out
+block external(clk, x: u8) -> u8 {
+    let d = device(x);
+    d
 }
 block skipped(clk, x: u8) -> u8 {
     unroll_for! (_, a) in u8:0..u8:0 {

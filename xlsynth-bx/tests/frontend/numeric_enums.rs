@@ -97,12 +97,12 @@ fn narrow(x:u8)->u2 {
 fn enum_register_ports_and_generic_block_reset_use_scalar_layouts() -> Result<(), Box<dyn Error>> {
     let bx = r#"
 enum State:u3 { Idle=0, Busy=5 }
-block delay<T>(clk, rst, x:T)->T {
+block delay<T>(clk, x:T)->T {
     reg q:T = zero!<T>();
     q := x;
     q
 }
-block sample(clk, rst, run:bool)->State {
+block sample(clk, run:bool)->State {
     let next = if run { State::Busy } else { State::Idle };
     let old = delay(next);
     old

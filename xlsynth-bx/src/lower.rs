@@ -1783,7 +1783,7 @@ block both(clk, x: u1) -> u1 {
         let ty = format!("(u1[0], S8){}", "[2]".repeat(7));
         for body in [
             "#[allow(combinational_block)] block b(clk) -> u1 { let _v = A8; u1:0 }".into(),
-            format!("block b(clk, rst) -> u1 {{ reg q: {ty} = A7; q := q; u1:0 }}"),
+            format!("block b(clk) -> u1 {{ reg q: {ty} = A7; q := q; u1:0 }}"),
         ] {
             let checked = check_module(&parse_module(&format!("{source}{body}"))?)?;
             let error = lower_module(&checked, empty_package("design"), ResetBehavior::default())

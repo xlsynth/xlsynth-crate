@@ -66,7 +66,7 @@ fn update_infers_its_arguments_independently() {
 
 #[test]
 fn array_update_in_constant_contexts_requires_an_in_bounds_index() {
-    let source = r#"block seeded(clk, rst) -> u8[2] {
+    let source = r#"block seeded(clk) -> u8[2] {
         reg q: u8[2] = update(zero!<u8[2]>(), u3:1, u8:23);
         q := q;
         q
