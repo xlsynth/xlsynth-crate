@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-bx-fuzz"
-version = "0.83.0"
+version = "0.84.0"
 publish = false
 edition = "2024"
 
@@ -10,9 +10,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.20"
-xlsynth = { path = "../../xlsynth", version = "0.83.0" }
-xlsynth-bx = { path = "..", version = "0.83.0" }
-xlsynth-pir = { path = "../../xlsynth-pir", version = "0.83.0" }
+xlsynth = { path = "../../xlsynth", version = "0.84.0" }
+xlsynth-bx = { path = "..", version = "0.84.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.84.0" }
 
 [workspace]
 members = ["."]
