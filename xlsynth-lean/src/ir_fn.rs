@@ -4,15 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::ir_expr::{check_supported, emit_pure_expr, lean_type, width};
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir::{
-    Binop, Fn, FunctionType, NaryOp, Node, NodePayload as P, NodeRef, Package, PackageMember, Type,
-    Unop,
+    Fn as IrFunction, FunctionType, NodePayload as P, NodeRef, Package, PackageMember, Type,
 };
-use xlsynth_pir::ir_inline::package_with_reachable_callees;
+use xlsynth_pir::ir_inline::package_with_reachable_functions;
 use xlsynth_pir::ir_utils::{compact_and_toposort_in_place, external_function_references};
 use xlsynth_pir::ir_verify::verify_package;
-use xlsynth_pir::{IrFormatPreference, IrValue};
 
 use crate::support::{IR_FUNCTION_SUPPORT, write_file};
 use crate::{LeanError, LeanModuleName};
@@ -90,8 +89,50 @@ pub(crate) fn export_with_bindings(
         None => package.get_top_or_sole_fn(),
     }
     .map_err(LeanError::InvalidIr)?;
+    let ns = module_name.lean_identifier();
+    let mut source =
+        format!("{MODULE_HEADER}namespace {ns}\nset_option linter.unusedVariables false\n\n");
+    source.push_str(&emit_function_defs(
+        package,
+        &[&entry.name],
+        bindings,
+        &|name| Ok(function_name(name)),
+    )?);
+    let signature = entry.get_type();
+    let mut input_width = 0usize;
+    let mut call = "eval".to_owned();
+    for ty in &signature.param_types {
+        write!(
+            call,
+            " (_root_.XlsynthLean.IR.Packed.unpack (inputs.toNat >>> {input_width}))"
+        )
+        .unwrap();
+        input_width = input_width
+            .checked_add(width(ty)?)
+            .ok_or_else(|| LeanError::InvalidIr("combined input width overflow".into()))?;
+    }
+    let result_width = width(&signature.return_type)?;
+    writeln!(source, "abbrev eval := {}\n", function_name(&entry.name)).unwrap();
+    writeln!(source, "def evalPacked (inputs : BitVec {input_width}) : BitVec {result_width} :=\n  BitVec.ofNat _ (_root_.XlsynthLean.IR.Packed.pack ({call}))\n\nend {ns}").unwrap();
+    Ok(LeanFunction {
+        module_name: module_name.clone(),
+        signature,
+        source,
+    })
+}
+
+/// Emits definitions for the union of the roots and their callees, in
+/// dependency order. The caller supplies the enclosing namespace and the
+/// XlsynthLean.IR support definitions. Use the same unambiguous Lean name for
+/// each function's declaration and all references to it.
+pub(crate) fn emit_function_defs(
+    package: &Package,
+    roots: &[&str],
+    bindings: Bindings,
+    callee_name: &dyn Fn(&str) -> Result<String, LeanError>,
+) -> Result<String, LeanError> {
     let mut reachable =
-        package_with_reachable_callees(package, entry).map_err(LeanError::InvalidIr)?;
+        package_with_reachable_functions(package, roots).map_err(LeanError::InvalidIr)?;
     for member in &mut reachable.members {
         if let PackageMember::Function(f) = member {
             for node in &f.nodes {
@@ -110,11 +151,13 @@ pub(crate) fn export_with_bindings(
     }
 
     // Emit callees in postorder. Package verification has ruled out recursion.
-    let mut work = vec![(entry.name.clone(), false)];
+    let mut work: Vec<_> = roots
+        .iter()
+        .rev()
+        .map(|&name| (name.to_owned(), false))
+        .collect();
+    let mut source = String::new();
     let mut emitted = HashSet::new();
-    let ns = module_name.lean_identifier();
-    let mut source =
-        format!("{MODULE_HEADER}namespace {ns}\nset_option linter.unusedVariables false\n\n");
     let functions: HashMap<_, _> = reachable
         .members
         .iter()
@@ -162,7 +205,7 @@ pub(crate) fn export_with_bindings(
         }
         let f = functions[name.as_str()];
         if ready {
-            emit_function(&mut source, f, bindings)?;
+            emit_function(&mut source, f, bindings, callee_name)?;
             emitted.insert(name);
         } else {
             work.push((name, true));
@@ -174,32 +217,7 @@ pub(crate) fn export_with_bindings(
             );
         }
     }
-    let signature = entry.get_type();
-    let mut input_width = 0usize;
-    let mut call = "eval".to_owned();
-    for ty in &signature.param_types {
-        write!(
-            call,
-            " (_root_.XlsynthLean.IR.Packed.unpack (inputs.toNat >>> {input_width}))"
-        )
-        .unwrap();
-        input_width = input_width
-            .checked_add(width(ty)?)
-            .ok_or_else(|| LeanError::InvalidIr("combined input width overflow".into()))?;
-    }
-    let result_width = width(&signature.return_type)?;
-    writeln!(source, "abbrev eval := {}\n", function_name(&entry.name)).unwrap();
-    writeln!(source, "def evalPacked (inputs : BitVec {input_width}) : BitVec {result_width} :=\n  BitVec.ofNat _ (_root_.XlsynthLean.IR.Packed.pack ({call}))\n\nend {ns}").unwrap();
-    Ok(LeanFunction {
-        module_name: module_name.clone(),
-        signature,
-        source,
-    })
-}
-
-fn width(ty: &Type) -> Result<usize, LeanError> {
-    ty.checked_bit_count()
-        .ok_or_else(|| LeanError::InvalidIr(format!("bit width overflows for {ty}")))
+    Ok(source)
 }
 
 fn packed_instance_size(ty: &Type) -> usize {
@@ -228,165 +246,14 @@ fn function_name(name: &str) -> String {
     result
 }
 
-fn unsupported_type_reason(ty: &Type) -> Option<&'static str> {
-    match ty {
-        Type::Token => Some("token-valued type"),
-        Type::Bits(_) => None,
-        Type::Tuple(fields) => fields
-            .iter()
-            .find_map(|field| unsupported_type_reason(field)),
-        Type::Array(a) if a.element_count == 0 => Some("zero-length array"),
-        Type::Array(a) => unsupported_type_reason(&a.element_type),
-    }
-}
-
-/// Check even unused nodes so an unsupported observation cannot silently
-/// disappear.
-fn check_supported(f: &Fn, node: &Node) -> Result<(), LeanError> {
-    let reason = match &node.payload {
-        P::Binop(Binop::Smulp | Binop::Umulp, ..) => "partial-product multiply",
-        P::CountedFor { .. } => "loop",
-        P::AfterAll(_) | P::Assert { .. } | P::Trace { .. } | P::Cover { .. } => "token or event",
-        P::InputPort { .. }
-        | P::OutputPort { .. }
-        | P::InstantiationInput { .. }
-        | P::InstantiationOutput { .. }
-        | P::RegisterRead { .. }
-        | P::RegisterWrite { .. } => "block operation",
-        _ => match unsupported_type_reason(&node.ty) {
-            Some(reason) => reason,
-            None => return Ok(()),
-        },
-    };
-    Err(LeanError::UnsupportedIr {
-        function: f.name.clone(),
-        op: node.payload.get_operator().to_owned(),
-        id: node.text_id,
-        reason,
-    })
-}
-
-fn lean_type(ty: &Type) -> String {
-    match ty {
-        Type::Bits(w) => format!("BitVec {w}"),
-        Type::Array(a) => format!(
-            "Vector ({}) {}",
-            lean_type(&a.element_type),
-            a.element_count
-        ),
-        Type::Tuple(fields) if fields.is_empty() => "Unit".to_string(),
-        Type::Tuple(fields) => format!(
-            "({} × Unit)",
-            fields
-                .iter()
-                .map(|t| lean_type(t))
-                .collect::<Vec<_>>()
-                .join(" × ")
-        ),
-        Type::Token => unreachable!("token types were rejected before emission"),
-    }
-}
-
-/// Preserve operand order while keeping the Lean expression depth logarithmic.
-fn balanced_infix(operands: &[String], separator: &str) -> String {
-    fn emit(out: &mut String, operands: &[String], separator: &str) {
-        match operands {
-            [] => {}
-            [operand] => out.push_str(operand),
-            _ => {
-                let (left, right) = operands.split_at(operands.len() / 2);
-                out.push('(');
-                emit(out, left, separator);
-                out.push_str(separator);
-                emit(out, right, separator);
-                out.push(')');
-            }
-        }
-    }
-
-    let mut expression = String::new();
-    emit(&mut expression, operands, separator);
-    expression
-}
-
-fn tuple(fields: &[String]) -> String {
-    if fields.is_empty() {
-        "()".into()
-    } else {
-        format!("({}, ())", fields.join(", "))
-    }
-}
-
-/// `Array.toVector` avoids unfolding computed elements in a `#v` size proof.
-/// Explicit append lengths keep size checks local to each leaf.
-fn vector_literal(fields: &[String]) -> String {
-    if fields.len() <= 64 {
-        return format!("#[{}].toVector", fields.join(", "));
-    }
-    let (left, right) = fields.split_at(fields.len() / 2);
-    format!(
-        "(@Vector.append _ {} {} {} {})",
-        left.len(),
-        right.len(),
-        vector_literal(left),
-        vector_literal(right)
-    )
-}
-
-fn literal(value: &IrValue) -> Result<String, LeanError> {
-    Ok(match value.type_() {
-        Type::Bits(w) => format!(
-            "BitVec.ofNat {w} 0x{}",
-            value.to_string_fmt_no_prefix(IrFormatPreference::PlainHex)
-        ),
-        Type::Tuple(_) | Type::Array(_) => {
-            let fields = value
-                .as_elements()?
-                .iter()
-                .map(literal)
-                .collect::<Result<Vec<_>, _>>()?;
-            if matches!(value.type_(), Type::Tuple(_)) {
-                tuple(&fields)
-            } else {
-                vector_literal(&fields)
-            }
-        }
-        Type::Token => unreachable!("token literals were rejected before emission"),
-    })
-}
-
-/// The declared result width is significant for ordinary multiply and shifts.
-fn binary(op: Binop, a: &str, b: &str, w: usize) -> String {
-    match op {
-        Binop::Add => format!("{a} + {b}"),
-        Binop::Sub => format!("{a} - {b}"),
-        Binop::Umul => format!("{a}.setWidth {w} * {b}.setWidth {w}"),
-        Binop::Smul => format!("{a}.signExtend {w} * {b}.signExtend {w}"),
-        Binop::Udiv => format!("BitVec.smtUDiv {a} {b}"),
-        Binop::Sdiv => format!("_root_.XlsynthLean.IR.sdiv {a} {b}"),
-        Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
-        Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
-        Binop::Shll => format!("{a} <<< (min {b}.toNat {w})"),
-        Binop::Shrl => format!("{a} >>> (min {b}.toNat {w})"),
-        Binop::Shra => format!("{a}.sshiftRight (min {b}.toNat {w})"),
-        Binop::Eq => format!("BitVec.ofBool ({a} == {b})"),
-        Binop::Ne => format!("BitVec.ofBool ({a} != {b})"),
-        Binop::Ult => format!("BitVec.ofBool ({a}.ult {b})"),
-        Binop::Ule => format!("BitVec.ofBool ({a}.ule {b})"),
-        Binop::Ugt => format!("BitVec.ofBool ({b}.ult {a})"),
-        Binop::Uge => format!("BitVec.ofBool ({b}.ule {a})"),
-        Binop::Slt => format!("BitVec.ofBool ({a}.slt {b})"),
-        Binop::Sle => format!("BitVec.ofBool ({a}.sle {b})"),
-        Binop::Sgt => format!("BitVec.ofBool ({b}.slt {a})"),
-        Binop::Sge => format!("BitVec.ofBool ({b}.sle {a})"),
-        Binop::Gate => format!("if {a} == 1 then {b} else default"),
-        Binop::Smulp | Binop::Umulp => unreachable!("unsupported partial product"),
-    }
-}
-
 /// Emits one typed binding per IR node, retaining shared operands and calls.
-fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), LeanError> {
-    let function = function_name(&f.name);
+fn emit_function(
+    out: &mut String,
+    f: &IrFunction,
+    bindings: Bindings,
+    callee_name: &dyn Fn(&str) -> Result<String, LeanError>,
+) -> Result<(), LeanError> {
+    let function = callee_name(&f.name)?;
     let parameters: Vec<_> = f.param_nodes().collect();
     let signature = parameters
         .iter()
@@ -409,173 +276,17 @@ fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), Lea
             local
         }
     };
-    let names = |rs: &[NodeRef]| rs.iter().copied().map(name).collect::<Vec<_>>();
     match bindings {
         Bindings::LocalLets => {
             writeln!(out, "def {function}{signature} : {result_type} :=").unwrap()
         }
         Bindings::NamedNodes => writeln!(out, "namespace {function}").unwrap(),
     }
-    for n in &f.nodes {
-        let e = match &n.payload {
-            P::Nil | P::Param => continue,
-            P::Literal(v) => literal(v)?,
-            P::Tuple(rs) => tuple(&names(rs)),
-            P::Array(rs) => vector_literal(&names(rs)),
-            P::ArrayConcat(rs) => balanced_infix(&names(rs), " ++ "),
-            P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple), ".2".repeat(*index)),
-            P::ArrayIndex { array, indices, .. } => indices.iter().fold(name(*array), |base, i| {
-                format!(
-                    "(_root_.XlsynthLean.IR.arrayIndex {base} {}.toNat)",
-                    name(*i)
-                )
-            }),
-            P::ArrayUpdate {
-                array,
-                value,
-                indices,
-                ..
-            } => {
-                let mut expr = name(*value);
-                for (depth, idx) in indices.iter().enumerate().rev() {
-                    let base = if depth == 0 {
-                        name(*array)
-                    } else {
-                        format!("v{}", depth - 1)
-                    };
-                    let binder = if depth + 1 == indices.len() {
-                        "_".to_owned()
-                    } else {
-                        format!("v{depth}")
-                    };
-                    expr = format!(
-                        "_root_.XlsynthLean.IR.arrayModify {base} {}.toNat (fun {binder} => {expr})",
-                        name(*idx)
-                    );
-                }
-                expr
-            }
-            P::ArraySlice {
-                array,
-                start,
-                width,
-            } => format!(
-                "_root_.XlsynthLean.IR.arraySlice {width} {} {}.toNat",
-                name(*array),
-                name(*start)
-            ),
-            P::Binop(op, a, b) => binary(*op, &name(*a), &name(*b), width(&n.ty)?),
-            P::Unop(op, a) => {
-                let a = name(*a);
-                match op {
-                    Unop::Identity => a,
-                    Unop::Neg => format!("-{a}"),
-                    Unop::Not => format!("~~~{a}"),
-                    Unop::Reverse => format!("{a}.reverse"),
-                    Unop::OrReduce => format!("BitVec.ofBool ({a} != 0)"),
-                    Unop::AndReduce => format!("BitVec.ofBool ({a} == BitVec.allOnes _)"),
-                    Unop::XorReduce => format!("{a}.cpop.setWidth 1"),
-                }
-            }
-            P::Nary(NaryOp::Concat, rs) if rs.is_empty() => "0".to_owned(),
-            P::Nary(op, rs) => {
-                let sep = match op {
-                    NaryOp::And | NaryOp::Nand => " &&& ",
-                    NaryOp::Or | NaryOp::Nor => " ||| ",
-                    NaryOp::Xor => " ^^^ ",
-                    NaryOp::Concat => " ++ ",
-                };
-                let args = balanced_infix(&names(rs), sep);
-                if matches!(op, NaryOp::Nand | NaryOp::Nor) {
-                    format!("~~~({args})")
-                } else {
-                    args
-                }
-            }
-            P::SignExt { arg, new_bit_count } => {
-                format!("{}.signExtend {new_bit_count}", name(*arg))
-            }
-            P::ZeroExt { arg, new_bit_count } => format!("{}.setWidth {new_bit_count}", name(*arg)),
-            P::BitSlice { arg, start, width } => {
-                format!("BitVec.extractLsb' {start} {width} {}", name(*arg))
-            }
-            P::DynamicBitSlice {
-                arg,
-                start,
-                width: w,
-            } => format!(
-                "BitVec.extractLsb' (min {}.toNat {}) {w} {}",
-                name(*start),
-                width(f.get_node_ty(*arg))?,
-                name(*arg)
-            ),
-            P::BitSliceUpdate {
-                arg,
-                start,
-                update_value,
-            } => format!(
-                "_root_.XlsynthLean.IR.bitSliceUpdate {} {} {}",
-                name(*arg),
-                name(*start),
-                name(*update_value)
-            ),
-            P::Decode { arg, width } => {
-                format!("BitVec.twoPow {width} (min {}.toNat {width})", name(*arg))
-            }
-            P::Encode { arg } => format!(
-                "_root_.XlsynthLean.IR.encode {} {}",
-                width(&n.ty)?,
-                name(*arg)
-            ),
-            P::OneHot { arg, lsb_prio } => {
-                format!("_root_.XlsynthLean.IR.oneHot {lsb_prio} {}", name(*arg))
-            }
-            P::OneHotSel { selector, cases } => format!(
-                "_root_.XlsynthLean.IR.oneHotSel {} #[{}]",
-                name(*selector),
-                names(cases).join(", ")
-            ),
-            P::PrioritySel {
-                selector,
-                cases,
-                default,
-            } => format!(
-                "_root_.XlsynthLean.IR.prioritySel {} #[{}] {}",
-                name(*selector),
-                names(cases).join(", "),
-                name(default.expect("verified priority default"))
-            ),
-            P::Sel {
-                selector,
-                cases,
-                default,
-            } => {
-                let fallback = default
-                    .or_else(|| cases.last().copied())
-                    .expect("verified selector has an arm");
-                format!(
-                    "#[{}].getD {}.toNat {}",
-                    names(cases).join(", "),
-                    name(*selector),
-                    name(fallback)
-                )
-            }
-            P::Map { array, to_apply } => {
-                format!("Vector.map {} {}", function_name(to_apply), name(*array))
-            }
-            P::Invoke { to_apply, operands } => std::iter::once(function_name(to_apply))
-                .chain(names(operands))
-                .collect::<Vec<_>>()
-                .join(" "),
-            other => {
-                return Err(LeanError::UnsupportedIr {
-                    function: f.name.clone(),
-                    op: other.get_operator().to_owned(),
-                    id: n.text_id,
-                    reason: "no word-level translation",
-                });
-            }
-        };
+    for (index, n) in f.nodes.iter().enumerate() {
+        if matches!(n.payload, P::Nil | P::Param) {
+            continue;
+        }
+        let e = emit_pure_expr(f, NodeRef { index }, &|r| Ok(name(r)), callee_name)?;
         let ty = lean_type(&n.ty);
         match bindings {
             Bindings::LocalLets => writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap(),
@@ -602,4 +313,66 @@ fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), Lea
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser::Parser;
+    use xlsynth_pir::ir_utils::direct_function_references;
+
+    #[test]
+    fn block_roots_share_a_named_callee_and_use_block_operands() {
+        let ir = r#"package helpers
+fn widen(x: bits[4] id=1) -> bits[8] {
+  ret y: bits[8] = sign_ext(x, new_bit_count=8, id=2)
+}
+fn scalar(x: bits[4] id=3) -> bits[8] {
+  ret y: bits[8] = invoke(x, to_apply=widen, id=4)
+}
+fn lanes(a: bits[4][2] id=5) -> bits[8][2] {
+  ret y: bits[8][2] = map(a, to_apply=widen, id=6)
+}
+top block consumer(x: bits[4], a: bits[4][2], y: bits[8], ys: bits[8][2]) {
+  x: bits[4] = input_port(name=x, id=7)
+  result: bits[8] = invoke(x, to_apply=scalar, id=8)
+  y: () = output_port(result, name=y, id=9)
+  a: bits[4][2] = input_port(name=a, id=10)
+  many: bits[8][2] = invoke(a, to_apply=lanes, id=11)
+  ys: () = output_port(many, name=ys, id=12)
+}"#;
+        let package = Parser::new(ir).parse_and_validate_package().unwrap();
+        let helper_name = |name: &str| Ok(format!("Helpers.«{name}»"));
+        let block = package.get_top_block().unwrap();
+        let callees = direct_function_references(block);
+        let roots: Vec<_> = callees.iter().map(String::as_str).collect();
+        let defs = emit_function_defs(&package, &roots, Bindings::LocalLets, &helper_name).unwrap();
+
+        let result = block.output_value(block.output_ports().next().unwrap());
+        let expr = emit_pure_expr(
+            block,
+            result,
+            &|r| {
+                assert!(matches!(block.get_node(r).payload, P::InputPort { .. }));
+                Ok("(x + 1)".to_string())
+            },
+            &helper_name,
+        )
+        .unwrap();
+        let module = format!(
+            r#"-- SPDX-License-Identifier: Apache-2.0
+import Std
+
+namespace Example
+
+{defs}def observe (x : BitVec 4) : BitVec 8 := {expr}
+
+#guard observe 7 == 248
+#guard Helpers.«lanes» #[1, 15].toVector == #[1, 255].toVector
+
+end Example
+"#
+        );
+        assert_eq!(module, include_str!("../tests/goldens/shared_helpers.lean"));
+    }
 }
