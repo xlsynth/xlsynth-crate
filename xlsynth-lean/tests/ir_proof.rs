@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
+#[cfg(feature = "lean-tests")]
 use std::path::PathBuf;
 
+use xlsynth_lean::prepare_ir_function_equivalence_target;
+#[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
     LeanError, LeanIrProofSources, LeanModuleName, LeanTheoremName, export_ir_function,
-    prepare_ir_function_equivalence_target, run_ir_function_equivalence_proof,
+    run_ir_function_equivalence_proof,
 };
 use xlsynth_pir::ir_parser::Parser;
 
@@ -34,8 +37,8 @@ fn pointwise_target_preserves_argument_and_result_shapes() {
     assert!(prepare_ir_function_equivalence_target(&pkg, None, &other, None).is_err());
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn checks_ir_proofs_and_rejects_unproved_assumptions() {
     let lean = PathBuf::from(
         std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable"),
@@ -96,8 +99,8 @@ theorem identity_proof : Target.Equivalent := by cases falseCheck
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn checks_nullary_and_inequivalent_functions() {
     let lean = PathBuf::from(
         std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable"),
@@ -132,8 +135,8 @@ fn checks_nullary_and_inequivalent_functions() {
     }
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn rejects_a_helper_that_reinterprets_the_generated_goal() {
     let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
     let zero = "package p\ntop fn c() -> bits[1] { ret v: bits[1] = literal(value=0, id=1) }";
@@ -178,8 +181,8 @@ fn rejects_a_helper_that_reinterprets_the_generated_goal() {
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn proves_distinct_graphs_and_agrees_with_the_executable_export() {
     let lean = PathBuf::from(
         std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable"),
@@ -257,8 +260,8 @@ theorem add_commutes : Target.Equivalent := by
 
 /// The cut generalizes both tuple results and preserves the condition on each
 /// local contract. Changing one control input invalidates the full proof.
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn factors_repeated_helper_calls_with_pointwise_contracts() {
     let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
     let ir = include_str!("fixtures/decomposition/route.ir");

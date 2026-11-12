@@ -852,11 +852,14 @@ fn validate_ports<'lhs, 'rhs>(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "lean-tests")]
     use std::path::{Path, PathBuf};
 
+    use super::LeanTheoremName;
+    #[cfg(feature = "lean-tests")]
     use super::{
-        LeanError, LeanProofOutput, LeanTheoremName, compile_module, read_compiled_modules,
-        verify_compiled_proof, write_file,
+        LeanError, LeanProofOutput, compile_module, read_compiled_modules, verify_compiled_proof,
+        write_file,
     };
 
     #[test]
@@ -877,8 +880,8 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "lean-tests")]
     #[test]
-    #[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
     fn rejects_a_precompiled_proof_for_a_different_target() {
         let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
         let dir = tempfile::tempdir().unwrap();

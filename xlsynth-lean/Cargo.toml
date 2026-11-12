@@ -11,6 +11,14 @@ documentation = "https://docs.rs/xlsynth-lean"
 [lints]
 workspace = true
 
+[features]
+default = []
+lean-tests = []
+
+[[test]]
+name = "lean_eval"
+required-features = ["lean-tests"]
+
 [dependencies]
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.82.0" }
 xlsynth-ir-value = { path = "../xlsynth-ir-value", version = "0.82.0" }

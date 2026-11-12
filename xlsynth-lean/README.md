@@ -357,32 +357,22 @@ are trusted inputs.
 
 ## Validation
 
-Rust export tests run normally:
+Run the Rust-only tests with
 
 ```sh
 cargo test -p xlsynth-lean
 ```
 
-Lean integration tests are explicitly enabled with a toolchain path:
+To also run the AIG and XLS IR evaluation and proof tests, enable `lean-tests`
+and set `XLSYNTH_LEAN` to the executable from the [pinned toolchain](lean/lean-toolchain).
 
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test lean_eval -- --ignored
+  cargo test -p xlsynth-lean --features lean-tests
 ```
 
-Run the real Lean word-level evaluation tests with the same toolchain:
-
-```sh
-XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test ir_fn -- --include-ignored
-```
-
-Proof integration tests use the same explicit toolchain configuration:
-
-```sh
-XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test proof -- --ignored
-```
+Ubuntu 24.04 CI runs this suite with the official Linux x86-64 Lean release.
+When updating `lean/lean-toolchain`, update the [release checksum](../scripts/lean_linux_x64.sha256) to match.
 
 The differential fuzz target generates bounded graphs, permutes their node
 storage, and compares Lean output batches with `PreparedGateSim`:

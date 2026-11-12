@@ -2,13 +2,15 @@
 
 mod common;
 
+#[cfg(feature = "lean-tests")]
 use std::path::{Path, PathBuf};
 
 use xlsynth_g8r::aig::{AigBitVector, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_lean::{InterfaceDirection, LeanError, prepare_equivalence_target};
+#[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
-    InterfaceDirection, LeanError, LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof,
-    prepare_equivalence_target, run_equivalence_proof,
+    LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof, run_equivalence_proof,
 };
 
 /// Creates `a && (b && c)` with the same interface as `common::and3`.
@@ -24,11 +26,13 @@ fn right_associated_and3() -> GateFn {
 }
 
 /// Returns the explicitly configured Lean executable for external tests.
+#[cfg(feature = "lean-tests")]
 fn lean_executable() -> Option<PathBuf> {
     std::env::var_os("XLSYNTH_LEAN").map(PathBuf::from)
 }
 
 /// Returns the checked-in proof source for the two three-input AND graphs.
+#[cfg(feature = "lean-tests")]
 fn proof_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/and3_equivalent.lean")
 }
@@ -58,8 +62,8 @@ fn prepared_target_uses_aag_files_and_the_fixed_root_contract() {
     assert!(!target_root.join("XlsynthLean/IR.lean").exists());
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn prepared_target_accepts_helpers_and_bv_decide() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -87,8 +91,8 @@ fn prepared_target_accepts_helpers_and_bv_decide() {
     .unwrap();
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn equivalent_graphs_succeed_and_return_lean_diagnostics() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -120,8 +124,8 @@ fn equivalent_graphs_succeed_and_return_lean_diagnostics() {
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn changed_rhs_rejects_the_same_proof() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let mut rhs = right_associated_and3();
@@ -142,8 +146,8 @@ fn changed_rhs_rejects_the_same_proof() {
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn empty_or_wrong_type_proof_body_is_rejected() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -165,8 +169,8 @@ fn empty_or_wrong_type_proof_body_is_rejected() {
     }
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn rejects_a_helper_that_reinterprets_gate_equivalence() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let dir = tempfile::tempdir().unwrap();
