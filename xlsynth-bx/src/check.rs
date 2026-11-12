@@ -2180,6 +2180,8 @@ pub(crate) fn check_sources_with_tests(
         .flat_map(|suite| &suite.invariants)
         .map(|property| property.harness.as_str())
         .collect();
+    // A parent may call a generic child defined later in the file. At this
+    // point its concrete specialization appears before the parent in `blocks`.
     timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
     let warnings =
         declarations
@@ -6007,7 +6009,8 @@ block tap(clk, x: u8 @3) -> Ports @(live: 3, saved: 4) {
 block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
     lane.x := x;
     inst lane: tap;
-    Ports { live: lane.live, saved: lane.saved }
+    // Reading lane.live must leave x on the adder's operand stack.
+    Ports { live: x + lane.live, saved: lane.saved }
 }
 "#;
         check_bx(source)?;

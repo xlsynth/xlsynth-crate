@@ -18,8 +18,8 @@ use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 
 const BLOCK_SCOPE: usize = 0;
 
-/// The elaborator orders concrete blocks child-first, including
-/// specializations.
+/// Check annotated blocks in child-first order so parents can use each
+/// child's verified output declaration.
 pub(super) fn check_blocks(
     blocks: &mut [CheckedBlock],
     structs: &StructTable<'_>,
@@ -34,6 +34,8 @@ pub(super) fn check_blocks(
     let mut children: BTreeMap<&str, &CheckedBlock> = BTreeMap::new();
     for block in blocks {
         let Some(expected) = &block.output_cycles else {
+            // The caller needs an output annotation even if all inputs have
+            // stages.
             continue;
         };
         let invariant = invariant_harnesses.contains(block.name.as_str());
@@ -51,8 +53,8 @@ pub(super) fn check_blocks(
                 _ => false,
             });
             if deferred {
-                // Let block IR diagnose feedback in this block or its child
-                // first.
+                // Lowering can point to the wire that closes a combinational
+                // loop. Report that first, or this timing error if IR is valid.
                 block.timing_error = Some(error);
             } else if invariant {
                 return Err(format!("invariant '{}': {error}", block.source_name));
@@ -65,7 +67,9 @@ pub(super) fn check_blocks(
                 return Err(format!("block '{}': {error}", block.name));
             }
         }
-        children.insert(block.name.as_str(), &*block);
+        // Keep deferred errors visible so callers can defer in turn. Only
+        // successful children supply stage information to an instance.
+        children.insert(block.name.as_str(), block);
     }
     Ok(())
 }
@@ -78,12 +82,6 @@ fn check_outputs(
     structs: &StructTable<'_>,
     children: &BTreeMap<&str, &CheckedBlock>,
 ) -> Result<(), String> {
-    let checker = Checker::new(block, structs, children);
-    let check = |fields: &[usize], expected| checker.infer(&block.output, fields)?.check(expected);
-    let aggregate = matches!(block.result, Type::Named(_) | Type::Tuple(_));
-    if !aggregate && let OutputCycles::Uniform(cycle) = expected {
-        return check(&[], *cycle);
-    }
     if let OutputCycles::ByPort(expected) = expected {
         let port_names: BTreeSet<_> = ports.iter().map(|p| p.name.as_str()).collect();
         if let Some(port) = expected
@@ -100,22 +98,36 @@ fn check_outputs(
         }
     }
 
+    let checker = Checker::new(block, structs, children);
+    let check = |fields: &[usize], expected| checker.infer(&block.output, fields)?.check(expected);
+    let aggregate = matches!(block.result, Type::Named(_) | Type::Tuple(_));
+    if !aggregate && let OutputCycles::Uniform(cycle) = expected {
+        return check(&[], *cycle);
+    }
     for (index, port) in ports.iter().enumerate() {
         // Suppose `saved` is field 0. In `@(live: 0, saved: 1)`, its stage
         // is 1. Use its name for the annotation and its index for the value.
-        let cycle = match expected {
-            OutputCycles::Uniform(cycle) => *cycle,
-            OutputCycles::ByPort(cycles) => cycles[&port.name],
-        };
+        let cycle = expected.stage_for_port(&port.name);
         let field = aggregate.then_some(index);
         check(field.as_slice(), cycle).map_err(|err| format!("output '{}': {err}", port.name))?;
     }
     Ok(())
 }
 
+impl OutputCycles {
+    /// Look up a local stage after validating the declared port names.
+    fn stage_for_port(&self, port: &str) -> u64 {
+        match self {
+            Self::Uniform(stage) => *stage,
+            Self::ByPort(stages) => stages[port],
+        }
+    }
+}
+
 /// What the checker knows about the stage of an expression.
 #[derive(Clone, Copy)]
 enum Cycle {
+    /// A known stage in the block whose expression is being checked.
     At(u64),
     /// A literal such as `u8:1` can join `q + u8:1` at whatever stage `q` has.
     Independent,
@@ -149,8 +161,11 @@ impl Cycle {
 
 /// A name either supplies an input stage or has an RHS to follow.
 enum Binding<'a> {
+    /// A data port supplies its declared stage, defaulting to zero.
     Input(u64),
+    /// A let or a deferred wire takes its driver's stage directly.
     Let(Driver<'a>),
+    /// A register read is one stage past the data and enable at its write.
     Register(Driver<'a>),
 }
 
@@ -159,6 +174,8 @@ enum Binding<'a> {
 struct Driver<'a> {
     rhs: &'a TypedExpr,
     scope: usize,
+    /// A missing key starts a read. `None` marks an active read for feedback
+    /// detection. `Some(Unknown)` is a completed read with no provable stage.
     reads: RefCell<BTreeMap<Vec<usize>, Option<Cycle>>>,
 }
 
@@ -174,8 +191,8 @@ struct Scope<'a> {
 /// A parent expression connected to a child port with a fixed local stage.
 struct InstanceInput<'a> {
     port: &'a str,
-    stage: u64,
-    value: &'a TypedExpr,
+    local_stage: u64,
+    parent_expr: &'a TypedExpr,
 }
 
 /// All outputs of one instance share the same translation into parent stages.
@@ -186,41 +203,68 @@ struct Instance<'a> {
     offset: Cell<InstanceOffset>,
 }
 
-/// An offset can be negative when the child numbers its stages from a later
-/// origin.
+/// DFS state for one instance's shared offset (`parent_stage - child_stage`).
 #[derive(Clone, Copy)]
 enum InstanceOffset {
+    /// The first output read will schedule the connected input expressions.
     Unseen,
+    /// Those inputs are being evaluated. Reading this instance again on
+    /// that path is feedback, e.g. `lane.x := lane.out;`.
     Visiting,
+    /// Every output can reuse the computed offset. `None` means an input
+    /// stage was unknown or no staged input established an offset.
     Done(Option<i128>),
 }
 
 impl Instance<'_> {
     /// Each staged input must agree on parent stage minus child stage.
-    fn infer_offset(&self, stages: impl Iterator<Item = Cycle>) -> Result<Option<i128>, String> {
+    fn infer_offset(
+        &self,
+        parent_stages: impl Iterator<Item = Cycle>,
+    ) -> Result<Option<i128>, String> {
         let mut offset = None;
-        let mut unknown = false;
-        for (input, actual) in self.inputs.iter().zip(stages) {
-            match actual {
-                Cycle::At(stage) => {
-                    let local = i128::from(input.stage);
-                    if let Some(offset) = offset
-                        && local + offset != i128::from(stage)
-                    {
+        let mut has_unknown_input = false;
+        for (input, stage) in self.inputs.iter().zip(parent_stages) {
+            match stage {
+                Cycle::At(parent) => {
+                    // Child x @0 connected to parent x @4 sets offset +4.
+                    // A second child port at @1 must then connect at parent @5.
+                    let local = i128::from(input.local_stage);
+                    let candidate = i128::from(parent) - local;
+                    let agreed = *offset.get_or_insert(candidate);
+                    if agreed != candidate {
                         return Err(format!(
-                            "instance '{}' input '{}': expected parent cycle {}, got {stage}",
+                            "instance '{}' input '{}': expected parent cycle {}, got {parent}",
                             self.name,
                             input.port,
-                            local + offset
+                            local + agreed
                         ));
                     }
-                    offset = Some(i128::from(stage) - local);
                 }
                 Cycle::Independent => { /* A constant fits any stage and supplies no offset. */ }
-                Cycle::Unknown => unknown = true,
+                // Keep scanning so a mismatch between other known inputs
+                // still gets reported, regardless of port order.
+                Cycle::Unknown => has_unknown_input = true,
             }
         }
-        Ok(if unknown { None } else { offset })
+        Ok(if has_unknown_input { None } else { offset })
+    }
+
+    /// Translate a verified child output into the stage seen by its caller.
+    fn output_cycle(&self, port: &str, offset: Option<i128>) -> Result<Cycle, String> {
+        let Some(offset) = offset else {
+            return Ok(Cycle::Unknown);
+        };
+        // Connecting child @3 to parent @0 gives offset -3. Only the
+        // translated port stage has to fit the unsigned BX stage range.
+        let translated = i128::from(self.outputs.stage_for_port(port)) + offset;
+        let stage = u64::try_from(translated).map_err(|_| {
+            format!(
+                "instance '{}.{port}': translated cycle {translated} is out of range",
+                self.name
+            )
+        })?;
+        Ok(Cycle::At(stage))
     }
 }
 
@@ -243,9 +287,8 @@ impl<'a> Checker<'a> {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
             root.names.insert(&param.name, Binding::Input(stage));
         }
-        // An explicit connection may precede its inst declaration. Both it
-        // and a let-call connection have already been checked for a single
-        // driver.
+        // `lane.x := x;` can precede `inst lane: tap;`. Index connections
+        // before pairing them with the child's ports in declaration order.
         let connections: BTreeMap<_, _> = block
             .statements
             .iter()
@@ -271,8 +314,10 @@ impl<'a> Checker<'a> {
                     .iter()
                     .map(|p| InstanceInput {
                         port: &p.name,
-                        stage: child.input_cycles.get(&p.name).copied().unwrap_or(0),
-                        value: connections[&(name.as_str(), p.name.as_str())],
+                        local_stage: child.input_cycles.get(&p.name).copied().unwrap_or(0),
+                        // Body checking requires exactly one driver per data
+                        // port.
+                        parent_expr: connections[&(name.as_str(), p.name.as_str())],
                     })
                     .collect();
                 instances.insert(
@@ -370,46 +415,19 @@ impl<'a> Checker<'a> {
         };
         while let Some(step) = walk.pending.pop() {
             match step {
-                Step::Expr(expr, scope, fields) => self.visit_expr(&mut walk, expr, scope, fields),
+                Step::Expr(expr, scope, fields) => {
+                    self.visit_expr(&mut walk, expr, scope, fields)?
+                }
                 Step::Read(name, binding, fields) => {
                     self.visit_read(&mut walk, name, binding, fields)?
                 }
-                Step::Output(instance, port) => match instance.offset.get() {
-                    InstanceOffset::Unseen => {
-                        instance.offset.set(InstanceOffset::Visiting);
-                        walk.pending.push(Step::Output(instance, port));
-                        walk.pending.push(Step::SaveOffset(instance));
-                        for input in instance.inputs.iter().rev() {
-                            walk.pending
-                                .push(Step::Expr(input.value, BLOCK_SCOPE, vec![]));
-                        }
-                    }
-                    InstanceOffset::Visiting => {
-                        return Err(format!(
-                            "timing feedback through instance '{}' is unsupported",
-                            instance.name
-                        ));
-                    }
-                    InstanceOffset::Done(None) => walk.values.push(Cycle::Unknown),
-                    InstanceOffset::Done(Some(offset)) => {
-                        let local = match instance.outputs {
-                            OutputCycles::Uniform(stage) => *stage,
-                            OutputCycles::ByPort(stages) => stages[port],
-                        };
-                        let translated = i128::from(local) + offset;
-                        let stage = u64::try_from(translated).map_err(|_| {
-                            format!(
-                                "instance '{}.{port}': translated cycle {translated} is out of range",
-                                instance.name
-                            )
-                        })?;
-                        walk.values.push(Cycle::At(stage));
-                    }
-                },
-                Step::SaveOffset(instance) => {
+                Step::FinishInstanceOutput(instance, port) => {
+                    // In `a + lane.out`, keep a's stage below the input stages
+                    // so the pending adder can consume it after this read.
                     let start = walk.values.len() - instance.inputs.len();
                     let offset = instance.infer_offset(walk.values.drain(start..))?;
                     instance.offset.set(InstanceOffset::Done(offset));
+                    walk.values.push(instance.output_cycle(port, offset)?);
                 }
                 Step::Guard(scope) => {
                     let body = &self.scopes[scope];
@@ -503,7 +521,7 @@ impl<'a> Checker<'a> {
         expr: &'s TypedExpr,
         scope: usize,
         mut fields: Vec<usize>,
-    ) {
+    ) -> Result<(), String> {
         let operand = |value| Step::Expr(value, scope, vec![]);
         let mut read = |name: &'s str, fields| match self.binding(scope, name) {
             Some(binding) => walk.pending.push(Step::Read(name, binding, fields)),
@@ -512,7 +530,9 @@ impl<'a> Checker<'a> {
         match &expr.kind {
             K::Name(name) => read(name, fields),
             K::InstanceOutput { instance, port } => match self.instances.get(instance.as_str()) {
-                Some(child) => walk.pending.push(Step::Output(child, port)),
+                Some(child) => walk.read_instance_output(child, port)?,
+                // Externs and children without a verified output annotation
+                // have no timing interface to use here.
                 None => walk.values.push(Cycle::Unknown),
             },
             K::BindingTupleIndex { name, index } => {
@@ -562,6 +582,7 @@ impl<'a> Checker<'a> {
             }
             _ => walk.values.push(Cycle::Unknown),
         }
+        Ok(())
     }
 }
 
@@ -572,6 +593,36 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
+    /// Read a child output using the instance offset, evaluating its inputs
+    /// on the first read. A later read of another port uses the same offset.
+    fn read_instance_output(
+        &mut self,
+        instance: &'a Instance<'a>,
+        port: &'a str,
+    ) -> Result<(), String> {
+        match instance.offset.get() {
+            InstanceOffset::Unseen => {
+                instance.offset.set(InstanceOffset::Visiting);
+                self.pending
+                    .push(Step::FinishInstanceOutput(instance, port));
+                // The stack pops inputs in declaration order, which is the
+                // order infer_offset uses to pair each stage with its port.
+                for input in instance.inputs.iter().rev() {
+                    self.pending
+                        .push(Step::Expr(input.parent_expr, BLOCK_SCOPE, vec![]));
+                }
+            }
+            InstanceOffset::Visiting => {
+                return Err(format!(
+                    "timing feedback through instance '{}' is unsupported",
+                    instance.name
+                ));
+            }
+            InstanceOffset::Done(offset) => self.values.push(instance.output_cycle(port, offset)?),
+        }
+        Ok(())
+    }
+
     /// Callers list steps in execution order. The stack pops the first one
     /// next.
     fn schedule<const N: usize>(&mut self, steps: [Step<'a>; N]) {
@@ -588,25 +639,44 @@ impl<'a> Walk<'a> {
     }
 }
 
-/// A pending expression, enable, or operation on already evaluated operands.
+/// One piece of pending DFS work. Operand steps leave stages on the value
+/// stack for the step that consumes them.
 enum Step<'a> {
+    /// Evaluate an expression in its scope. The last field index is the
+    /// next projection to follow (e.g. `header` in `p.header.id`).
     Expr(&'a TypedExpr, usize, Vec<usize>),
-    Output(&'a Instance<'a>, &'a str),
-    SaveOffset(&'a Instance<'a>),
+    /// After the connected inputs are evaluated, cache the instance offset
+    /// and push this port's translated stage. For offset +4 and `saved @1`,
+    /// the cache holds +4 and the value stack receives `At(5)`.
+    FinishInstanceOutput(&'a Instance<'a>, &'a str),
+    /// Follow the driver of a bound name, selecting only the requested fields.
     Read(&'a str, &'a Binding<'a>, Vec<usize>),
+    /// Evaluate the enclosing write guards. The outermost scope is
+    /// unconditional.
     Guard(usize),
+    /// Consume two operand stages and push the result of their timing rule.
     Join(Join<'a>),
+    /// Cache the completed stage for this driver's field path (empty for the
+    /// whole value).
     SaveRead(&'a Driver<'a>, Vec<usize>),
+    /// Cache the combined guard stage for other writes in this scope.
     SaveGuard(usize),
 }
 
 /// The hardware operation where two operand stages meet.
 enum Join<'a> {
+    /// The two inputs of a combinational operator such as `q + r`.
     Operator(BinaryOp),
+    /// Members of a struct or tuple read as one value.
     Fields,
+    /// The two data arms of an `if` expression.
     Branches,
+    /// The condition and the data stage established by `Branches`.
     Select,
+    /// An enclosing write guard and the next nested `if` condition.
     Guards,
+    /// A register's data and load enable meet before the edge advances the
+    /// stage.
     Register(&'a str),
 }
 
