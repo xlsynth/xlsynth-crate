@@ -28,7 +28,8 @@ pub use parser::outline::{
 };
 pub use parser::parse_module;
 pub use test_runner::{
-    BxTestReport, BxTestResult, FourValuedReport, QuickCheckOptions, QuickCheckReport, run_tests,
+    BxProofCase, BxProofSuite, BxQuickCheckProof, BxTestReport, BxTestResult, FourValuedReport,
+    QuickCheckOptions, QuickCheckReport, prepare_quickcheck_proofs, run_tests,
     run_tests_with_quickcheck,
 };
 pub use typed::BoundParametricValue;

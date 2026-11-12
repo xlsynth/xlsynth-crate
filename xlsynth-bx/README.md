@@ -653,6 +653,35 @@ nodes per property harness, including nested body copies. Use the PIR backend
 for linked hardware that emits SystemVerilog `assert property` statements.
 Vastly currently cannot parse this syntax.
 
+### Bounded proofs for clocked properties
+
+```shell
+xlsynth-driver bx-prove-quickcheck counter.bx
+```
+
+This proves `counter_matches` for every value of its four `Drive` records
+and every initial bit pattern in the DUT registers. The reset edge loads
+the counter's reset value. On each of the four subsequent edges the solver
+checks the assertion against the reference, including when the enable is
+false. It also checks the final boolean. Testbench registers start at their
+declared initializer or typed zero. Enum-valued stimulus ranges over the
+declared members, including inside aggregates.
+
+The proof checks the tick schedule syntactically. A tick can appear at the top
+level or in fixed-length loops. A loop over a stimulus array qualifies because
+its type fixes the number of iterations. A procedural `if` can choose values,
+update testbench registers, or guard an assertion. Place every tick outside
+such conditionals, including those with literal conditions. The reset argument
+in `tick!(rst: drive.reset)` can itself be symbolic.
+
+A property that exceeds the static expansion limit is reported as inconclusive.
+The command continues checking the other properties in the file.
+Reachable hardware assertions in linked IR, array operations marked
+`assumed_in_bounds=true`, and partial-product multiplies (`umulp` and `smulp`)
+are currently unsupported. A solver counterexample is replayed through the
+concrete BX runner to report the failing observation, clock edge, and stimulus
+trace. The proof covers the edges executed by the property.
+
 ## Compile and link
 
 Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.

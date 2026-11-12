@@ -519,6 +519,43 @@ combinational assertions and a clocked test with a table of drive/expect pairs.
 The [clocked QuickCheck example](../xlsynth-bx/README.md#clocked-quickcheck-properties)
 checks a counter against a reference using a randomly generated sequence of drives.
 
+### `bx-prove-quickcheck` proves bounded clocked properties
+
+Proves the `#[quickcheck] block` declarations in a BX file. The command unrolls
+each property's ticks into word-level IR and asks an SMT solver whether any
+legal stimulus and initial DUT register state can fail an assertion or return
+`false`. A property can tick inside a loop over a fixed-size array. Stimulus
+can control reset, load enables, and the values sampled at each edge.
+
+```shell
+xlsynth-driver bx-prove-quickcheck counter.bx
+xlsynth-driver bx-prove-quickcheck design.bx --solver=bitwuzla --time-limit-ms=30000
+```
+
+- `--solver <SOLVER>` selects an SMT backend and defaults to in-process
+  Bitwuzla. Build with `with-bitwuzla-system` or `with-bitwuzla-built` to use
+  that backend. Run the command with `--help` for the choices in your build.
+- `--time-limit-ms <MS>` sets a positive per-check time limit for in-process
+  Bitwuzla. The default is unlimited.
+- `--dslx-path 'dir1;dir2'` sets the BX and DSLX import directories. The
+  default uses the toolchain search path and the input file's directory.
+- `--dslx-stdlib-path <DIR>` overrides the configured or bundled DSLX standard
+  library directory.
+- `--link-ir <PACKAGE>` supplies IR definitions for BX externs. The default
+  is an empty package.
+- `--warnings-as-errors[=true|false]` defaults to `true`. Set it to `false`
+  to print source warnings and continue.
+- `--reset-active-low[=true|false]` configures synchronous reset polarity for
+  the block hierarchy. The default is active-high.
+
+A disproof prints a concrete BX replay with the stimulus and initial register
+state. A solver that returns unknown, an unsupported property, or a property
+that exceeds the expansion limit yields an inconclusive result. The command
+checks the remaining properties and exits successfully when it finds at least one and proves
+every property for the number of edges specified in its body. A clocked
+counter example and the current proof limits are in the
+[BX guide](../xlsynth-bx/README.md#bounded-proofs-for-clocked-properties).
+
 ### `bx2gv`: BX to mapped gate-level netlist
 
 Maps a `.bx` design to Liberty cells. The command compiles the selected BX

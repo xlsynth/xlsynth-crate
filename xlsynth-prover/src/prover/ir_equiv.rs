@@ -1690,6 +1690,47 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
         assert!(matches!(result, EquivResult::Proved));
     }
 
+    /// The empty bit-vector has one value, with distinct AND and OR identities.
+    pub fn test_zero_width_slice_and_reductions<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(x: bits[8] id=1, index: bits[4] id=2) -> bits[7] {
+                empty: bits[0] = dynamic_bit_slice(x, index, width=0, id=3)
+                a: bits[1] = and_reduce(empty, id=4)
+                o: bits[1] = or_reduce(empty, id=5)
+                p: bits[1] = xor_reduce(empty, id=6)
+                z: bits[4] = zero_ext(empty, new_bit_count=4, id=7)
+                ret result: bits[7] = concat(a, o, p, z, id=8)
+            }"#,
+            r#"fn g(x: bits[8] id=1, index: bits[4] id=2) -> bits[7] {
+                ret result: bits[7] = literal(value=64, id=3)
+            }"#,
+            false,
+        );
+    }
+
+    /// A zero-width selector chooses case zero and an empty update has no
+    /// effect.
+    pub fn test_empty_update_and_single_choice_selects<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(x: bits[8] id=1, i: bits[0] id=2, a: bits[8][0] id=3, b: bits[8][2] id=4) -> (bits[8][0], bits[8][2]) {
+                d: bits[8] = sel(i, cases=[], default=x, id=5)
+                v: bits[8] = sel(i, cases=[d], id=6)
+                empty: bits[8][0] = array_update(a, v, indices=[i], id=7)
+                first: bits[8][2] = array_update(b, v, indices=[i], id=8)
+                ret result: (bits[8][0], bits[8][2]) = tuple(empty, first, id=9)
+            }"#,
+            r#"fn g(x: bits[8] id=1, i: bits[0] id=2, a: bits[8][0] id=3, b: bits[8][2] id=4) -> (bits[8][0], bits[8][2]) {
+                one: bits[1] = literal(value=1, id=5)
+                second: bits[8] = array_index(b, indices=[one], id=6)
+                updated: bits[8][2] = array(x, second, id=7)
+                ret result: (bits[8][0], bits[8][2]) = tuple(a, updated, id=8)
+            }"#,
+            false,
+        );
+    }
+
     pub fn test_ir_value_tuple<S: Solver>(solver_config: &S::Config) {
         assert_ir_value_to_bv_eq::<S>(
             solver_config,
@@ -1930,6 +1971,32 @@ fn expected(a: bits[8] id=201, b: bits[8] id=202) -> bits[8] {
                 let array = inputs.inputs.get("input").unwrap().bitvec.clone();
                 solver.extract(&array, 39, 32)
             },
+        );
+    }
+
+    pub fn test_mixed_literal_and_symbolic_indices<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(j: bits[2] id=1, empty: bits[0][2] id=2) -> (bits[3], bits[3], bits[0]) {
+                a: bits[3][3][2] = literal(value=[[1,2,3],[4,5,6]], id=3)
+                huge: bits[129] = literal(value=0x100000000000000000000000000000000, id=4)
+                one: bits[129] = literal(value=1, id=5)
+                row: bits[3] = array_index(a, indices=[huge, j], id=6)
+                col: bits[3] = array_index(a, indices=[j, one], id=7)
+                z: bits[0] = array_index(empty, indices=[huge], id=8)
+                ret result: (bits[3], bits[3], bits[0]) = tuple(row, col, z, id=9)
+            }"#,
+            r#"fn g(j: bits[2] id=1, empty: bits[0][2] id=2) -> (bits[3], bits[3], bits[0]) {
+                two: bits[3] = literal(value=2, id=3)
+                four: bits[3] = literal(value=4, id=4)
+                five: bits[3] = literal(value=5, id=5)
+                six: bits[3] = literal(value=6, id=6)
+                row: bits[3] = sel(j, cases=[four, five, six, six], id=7)
+                col: bits[3] = sel(j, cases=[two, five, five, five], id=8)
+                z: bits[0] = literal(value=0, id=9)
+                ret result: (bits[3], bits[3], bits[0]) = tuple(row, col, z, id=10)
+            }"#,
+            false,
         );
     }
 
@@ -3064,6 +3131,16 @@ macro_rules! test_with_solver {
                 test_utils::test_empty_tuple_eq_nil_is_true::<$solver_type>($solver_config);
             }
             #[test]
+            fn test_zero_width_slice_and_reductions() {
+                test_utils::test_zero_width_slice_and_reductions::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_empty_update_and_single_choice_selects() {
+                test_utils::test_empty_update_and_single_choice_selects::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
             fn test_ir_value_tuple() {
                 test_utils::test_ir_value_tuple::<$solver_type>($solver_config);
             }
@@ -3315,6 +3392,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_ir_array_index_deep_multi_level() {
                 test_utils::test_ir_array_index_deep_multi_level::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_mixed_literal_and_symbolic_indices() {
+                test_utils::test_mixed_literal_and_symbolic_indices::<$solver_type>($solver_config);
             }
             #[test]
             fn test_array_update_inbound_value() {
@@ -3679,6 +3760,39 @@ test_with_solver!(
     crate::solver::easy_smt::EasySmtSolver,
     &crate::solver::easy_smt::EasySmtConfig::z3()
 );
+
+#[cfg(all(test, feature = "with-z3-binary-test"))]
+mod array_index_encoding_tests {
+    use crate::prover::translate::{get_fn_inputs, ir_to_smt_data};
+    use crate::prover::types::ProverFn;
+    use crate::solver::Solver;
+    use crate::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
+    use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn literal_reads_extract_only_the_requested_array_elements() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let mut config = EasySmtConfig::z3();
+        config.replay_file = Some(transcript.path().to_owned());
+        let mut solver = EasySmtSolver::new(&config).unwrap();
+        let f = Parser::new(
+            r#"fn read(a: bits[8][256] id=1) -> bits[8] {
+            i: bits[32] = literal(value=3, id=2)
+            j: bits[32] = literal(value=200, id=3)
+            x: bits[8] = array_index(a, indices=[i], id=4)
+            y: bits[8] = array_index(a, indices=[j], id=5)
+            ret sum: bits[8] = add(x, y, id=6)
+        }"#,
+        )
+        .parse_fn()
+        .unwrap();
+        let inputs = get_fn_inputs(&mut solver, ProverFn::new(&f, None), None).unwrap();
+        ir_to_smt_data(&mut solver, &inputs);
+        let commands = std::fs::read_to_string(transcript.path()).unwrap();
+        assert_eq!(commands.matches("(_ extract ").count(), 2);
+        assert_eq!(commands.matches("(ite ").count(), 0);
+    }
+}
 
 #[cfg(test)]
 #[cfg(feature = "with-bitwuzla-built")]

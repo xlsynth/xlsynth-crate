@@ -299,8 +299,9 @@ fn expect_type(actual: &Type, expected: &Type, context: &str) -> Result<(), Stri
 fn indexed_array_type<'a>(
     array_ty: &'a Type,
     index_count: usize,
-    context: &str,
+    operation: &NodePayload,
 ) -> Result<&'a Type, String> {
+    let context = operation.get_operator();
     if !matches!(array_ty, Type::Array(_)) {
         return Err(format!(
             "{} operand must have array type, got {}",
@@ -315,6 +316,9 @@ fn indexed_array_type<'a>(
                 context, array_ty
             ));
         };
+        if array.element_count == 0 && matches!(operation, NodePayload::ArrayIndex { .. }) {
+            return Err("array_index cannot be applied to an empty array".to_string());
+        }
         current = &array.element_type;
     }
     Ok(current)
@@ -550,23 +554,16 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
             ..
         } => {
             expect_type(&node.ty, ty(*array), "array_update result")?;
-            let indexed_ty = indexed_array_type(ty(*array), indices.len(), "array_update")?;
+            let indexed_ty = indexed_array_type(ty(*array), indices.len(), &node.payload)?;
             for index in indices {
                 expect_bits_width(ty(*index), "array_update index")?;
             }
             expect_type(ty(*value), indexed_ty, "array_update value")
         }
         NodePayload::ArrayIndex { array, indices, .. } => {
-            let indexed_ty = indexed_array_type(ty(*array), indices.len(), "array_index")?;
+            let indexed_ty = indexed_array_type(ty(*array), indices.len(), &node.payload)?;
             for index in indices {
                 expect_bits_width(ty(*index), "array_index index")?;
-            }
-            if !indices.is_empty() {
-                if let Type::Array(array_ty) = ty(*array) {
-                    if array_ty.element_count == 0 {
-                        return Err("array_index cannot be applied to an empty array".to_string());
-                    }
-                }
             }
             if node.ty.contains_token() {
                 return Err("array_index result may not contain token values".to_string());
@@ -1014,6 +1011,19 @@ mod tests {
             verify_graph_xls_node_semantics_after_bounds_check(&function),
             expected
         );
+    }
+
+    #[test]
+    fn array_index_rejects_an_index_into_an_empty_inner_dimension() {
+        let function = Parser::new(
+            r#"fn read(a: bits[8][0][2] id=1, i: bits[1] id=2) -> bits[8] {
+            ret read: bits[8] = array_index(a, indices=[i, i], id=3)
+        }"#,
+        )
+        .parse_fn()
+        .unwrap();
+        assert_eq!(verify_graph_xls_node_semantics(&function),
+            Err("invalid node 3 (array_index) in graph 'read': array_index cannot be applied to an empty array".to_owned()));
     }
 
     #[test]

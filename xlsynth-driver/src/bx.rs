@@ -8,13 +8,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use xlsynth_bx::{
     ImportOptions, QuickCheckOptions, ResetBehavior, check_source_file_with_options, empty_package,
-    lower_module, run_tests_with_quickcheck,
+    lower_module, prepare_quickcheck_proofs, run_tests_with_quickcheck,
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
+use xlsynth_prover::prover::types::{BoolPropertyResult, ProverFn};
+use xlsynth_prover::prover::{SolverChoice, SolverLimits, prover_for_choice_with_limits};
 
 use crate::common::{DEFAULT_WARNINGS_AS_ERRORS, write_stdout, write_stdout_line};
 use crate::toolchain_config::{ToolchainConfig, get_dslx_search_paths, get_dslx_stdlib_path};
@@ -116,6 +118,20 @@ pub fn bx_test_command() -> Command {
 
 pub fn bx2ir_command() -> Command {
     add_bx_args(Command::new("bx2ir").about("Compiles BX source to an XLS block IR package"))
+}
+
+pub fn bx_prove_quickcheck_command() -> Command {
+    let command = Command::new("bx-prove-quickcheck")
+        .about("Proves clocked QuickCheck properties over their bounded tick schedules");
+    add_bx_source_args(command)
+        .arg(crate::solver_arg_with_toolchain("SMT solver for the bounded proof", false))
+        .arg(
+            Arg::new("time-limit-ms")
+                .long("time-limit-ms")
+                .value_name("MS")
+                .value_parser(value_parser!(u64).range(1..))
+                .help("Positive time limit per solver check in milliseconds (in-process Bitwuzla only)"),
+        )
 }
 
 pub fn bx2gv_command() -> Command {
@@ -312,6 +328,110 @@ pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
         write_stdout_line(&format!("{} passed; {failed} failed", total - failed));
         if failed != 0 {
             bail!("BX tests failed");
+        }
+        Ok(())
+    })
+}
+
+/// Proves each clocked property and replays any solver counterexample in BX.
+pub fn bx_prove_quickcheck(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+    let choice = matches
+        .get_one::<String>("solver")
+        .expect("clap supplies a default solver")
+        .parse::<SolverChoice>()
+        .map_err(anyhow::Error::msg)?;
+    let limit = matches.get_one::<u64>("time-limit-ms").copied();
+    if limit.is_some() && choice != SolverChoice::Bitwuzla {
+        bail!("--time-limit-ms requires --solver=bitwuzla");
+    }
+    let prover = prover_for_choice_with_limits(
+        choice,
+        None,
+        SolverLimits {
+            time_limit_per_ms: limit,
+            ..Default::default()
+        },
+    );
+    with_bx_input(matches, config, |input| {
+        let suite = prepare_quickcheck_proofs(
+            &input.source,
+            input.path,
+            input.package,
+            ResetBehavior {
+                active_low: input.active_low,
+                asynchronous: false,
+            },
+            &input.imports,
+            input.warnings_as_errors,
+        )
+        .map_err(anyhow::Error::msg)?;
+        for warning in suite.warnings {
+            eprintln!("{}", warning.display_with_root(input.path));
+        }
+        if suite.properties.is_empty() {
+            bail!("no #[quickcheck] blocks in {}", input.path.display());
+        }
+        let mut proved = 0;
+        let mut disproved = 0;
+        let mut inconclusive = 0;
+        let mut errors = 0;
+        for case in suite.properties {
+            let property = match case.proof {
+                Ok(property) => property,
+                Err(diagnostic) => {
+                    inconclusive += 1;
+                    write_stdout_line(&format!("quickcheck {} ... INCONCLUSIVE", case.name));
+                    eprintln!("{diagnostic}");
+                    continue;
+                }
+            };
+            let result = match property.package.get_top_fn() {
+                Some(top) => {
+                    prover.prove_ir_fn_quickcheck(&ProverFn::new(top, Some(&property.package)))
+                }
+                None => BoolPropertyResult::Error("proof package has no top function".into()),
+            };
+            let (status, diagnostic) = match result {
+                BoolPropertyResult::Proved => {
+                    proved += 1;
+                    ("proved", None)
+                }
+                BoolPropertyResult::Disproved { inputs, .. } => {
+                    let inputs: Vec<_> = inputs.into_iter().map(|input| input.value).collect();
+                    match property.replay(&inputs) {
+                        Ok(trace) => {
+                            disproved += 1;
+                            ("DISPROVED", Some(trace))
+                        }
+                        Err(error) => {
+                            errors += 1;
+                            (
+                                "ERROR",
+                                Some(format!("counterexample replay failed: {error}")),
+                            )
+                        }
+                    }
+                }
+                BoolPropertyResult::Inconclusive(reason) => {
+                    inconclusive += 1;
+                    ("INCONCLUSIVE", Some(reason))
+                }
+                BoolPropertyResult::Error(error)
+                | BoolPropertyResult::ToolchainDisproved(error) => {
+                    errors += 1;
+                    ("ERROR", Some(error))
+                }
+            };
+            write_stdout_line(&format!("quickcheck {} ... {status}", case.name));
+            if let Some(message) = diagnostic {
+                eprintln!("{message}");
+            }
+        }
+        write_stdout_line(&format!(
+            "{proved} proved; {disproved} disproved; {inconclusive} inconclusive; {errors} errors"
+        ));
+        if disproved + inconclusive + errors != 0 {
+            bail!("BX QuickCheck proof suite did not pass");
         }
         Ok(())
     })

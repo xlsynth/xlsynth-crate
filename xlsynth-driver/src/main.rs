@@ -184,22 +184,29 @@ fn aug_opt_tuning_args() -> [Arg; 2] {
 
 /// Builds the shared solver-selection argument used by formal subcommands.
 fn solver_arg(help: &'static str) -> Arg {
+    solver_arg_with_toolchain(help, true)
+}
+
+fn solver_arg_with_toolchain(help: &'static str, allow_toolchain: bool) -> Arg {
+    let mut choices = vec![
+        #[cfg(feature = "has-easy-smt")]
+        "z3-binary",
+        #[cfg(feature = "has-easy-smt")]
+        "bitwuzla-binary",
+        #[cfg(feature = "has-easy-smt")]
+        "boolector-binary",
+        "bitwuzla",
+        #[cfg(feature = "has-boolector")]
+        "boolector",
+    ];
+    if allow_toolchain {
+        choices.push("toolchain");
+    }
     Arg::new("solver")
         .long("solver")
         .value_name("SOLVER")
         .help(help)
-        .value_parser([
-            #[cfg(feature = "has-easy-smt")]
-            "z3-binary",
-            #[cfg(feature = "has-easy-smt")]
-            "bitwuzla-binary",
-            #[cfg(feature = "has-easy-smt")]
-            "boolector-binary",
-            "bitwuzla",
-            #[cfg(feature = "has-boolector")]
-            "boolector",
-            "toolchain",
-        ])
+        .value_parser(clap::builder::PossibleValuesParser::new(choices))
         .default_value("bitwuzla")
         .action(ArgAction::Set)
 }
@@ -945,6 +952,7 @@ fn main() {
         .subcommand(bx::bx2ir_command())
         .subcommand(bx::bx2gv_command())
         .subcommand(bx::bx_test_command())
+        .subcommand(bx::bx_prove_quickcheck_command())
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx-show")
@@ -4107,6 +4115,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx-test", subm)) => {
             if let Err(error) = bx::bx_test(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx-test"), vec![]);
+            }
+        }
+        Some(("bx-prove-quickcheck", subm)) => {
+            if let Err(error) = bx::bx_prove_quickcheck(subm, &config) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("bx-prove-quickcheck"),
+                    vec![],
+                );
             }
         }
         #[cfg(feature = "unstable-dslx-specialize")]
