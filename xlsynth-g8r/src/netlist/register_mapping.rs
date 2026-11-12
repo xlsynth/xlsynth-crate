@@ -16,7 +16,7 @@ use crate::aig::sequential_gate::{
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, PinDirection};
 use crate::netlist::sequential_liberty::{
-    GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec,
+    GvEvalSequentialCellSpec, get_gv_eval_sequential_cell_spec, input_polarity,
 };
 
 // Exhaustive tie-off checking is intentionally bounded: at most 9 candidate
@@ -526,14 +526,11 @@ fn data_polarity(
     let mut polarity = None;
     for old_state in [false, true] {
         bind_state(&mut values, spec, old_state);
-        values.insert(data.to_string(), false);
-        let at_zero = spec.next_state.evaluate_partial(&values)?;
-        values.insert(data.to_string(), true);
-        let at_one = spec.next_state.evaluate_partial(&values)?;
-        if at_zero == at_one || polarity.is_some_and(|previous| previous != at_zero) {
+        let inverted = input_polarity(&spec.next_state, data, &mut values)?;
+        if polarity.is_some_and(|previous| previous != inverted) {
             return None;
         }
-        polarity = Some(at_zero);
+        polarity = Some(inverted);
     }
     polarity
 }

@@ -325,6 +325,19 @@ impl<'lib> IncrementalSta<'lib> {
         )
     }
 
+    /// Initializes both launch classes on a new topology using the same
+    /// characterized cells, including independent full timing validation of the
+    /// new connectivity.
+    pub(crate) fn with_registered_library(
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        prepared: Arc<PreparedStaLibrary<'lib>>,
+        options: StaOptions,
+    ) -> Result<Self> {
+        Self::new_mode(module, nets, interner, prepared, options, true, None)
+    }
+
     /// Constructs an explicitly combinational session. Unused output arcs do
     /// not turn otherwise combinational instances into register boundaries.
     pub fn new_combinational(
@@ -1132,6 +1145,28 @@ impl<'lib> IncrementalSta<'lib> {
     /// entries.
     pub fn cached_electrical_violations(&self, i: usize) -> &[ElectricalViolations] {
         &self.electrical[i]
+    }
+
+    /// Driving output of the net observed by an electrical pin check.
+    pub(crate) fn electrical_driver(
+        &self,
+        instance: usize,
+        ordinal: usize,
+    ) -> Option<(usize, &str)> {
+        let cell = self.cells[instance];
+        let pin = &self.lib.library.cells[cell].pins
+            [*self.lib.electrical_pin_order(cell).get(ordinal)?];
+        let name = self.lib.library.resolve_string(&pin.name);
+        if pin.direction == PinDirection::Output as i32 {
+            return Some((instance, name));
+        }
+        let [BitSource::Bit(bit)] = self.instances[instance].pins.get(name)?.as_slice() else {
+            return None;
+        };
+        let driver = self.driver_for_bit(*bit)?;
+        let index = self.output_pin_index(driver, *bit)?;
+        let pin = &self.lib.library.cells[self.cells[driver]].pins[index];
+        Some((driver, self.lib.library.resolve_string(&pin.name)))
     }
 
     /// Reports current componentwise violations in stable pin-name order.
