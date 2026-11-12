@@ -211,7 +211,7 @@ enum InstanceOffset {
     /// The first output read will schedule the connected input expressions.
     Unseen,
     /// Those inputs are being evaluated. Reading this instance again on
-    /// that path is feedback, e.g. `lane.x := lane.out;`.
+    /// that path is feedback, for example through a deferred wire.
     Visiting,
     /// Every output can reuse the computed offset. `None` means an input
     /// stage was unknown or no staged input established an offset.
@@ -289,10 +289,8 @@ impl<'a> Checker<'a> {
             let stage = block.input_cycles.get(&param.name).copied().unwrap_or(0);
             root.names.insert(&param.name, Binding::Input(stage));
         }
-        // Body checking turns `let lane = tap(x);` into an Inst for tap
-        // and a Connect from x to its input, just like explicit instance
-        // wiring. A Connect can precede its Inst, so collect connections
-        // first and look them up by instance and port below.
+        // Body checking emits an Inst for each child call and a Connect for
+        // each argument. Index those connections by instance and port.
         let connections: BTreeMap<_, _> = block
             .statements
             .iter()

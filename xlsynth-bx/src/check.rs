@@ -5957,15 +5957,14 @@ block top(clk, x: u8 @4, r: u8 @5) -> u8 @5 {
     }
 
     #[test]
-    fn explicit_instance_translates_each_output_port_with_a_signed_offset() -> Result<(), String> {
+    fn child_call_translates_each_output_port_with_a_signed_offset() -> Result<(), String> {
         let source = r#"
 struct Ports { live: u8, saved: u8 }
 block tap(clk, x: u8 @3) -> Ports @(live: 3, saved: 4) {
     reg q: u8; q := x; Ports { live: x, saved: q }
 }
 block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
-    lane.x := x;
-    inst lane: tap;
+    let lane = tap(x);
     // Reading lane.live must leave x on the adder's operand stack.
     Ports { live: x + lane.live, saved: lane.saved }
 }
@@ -6000,20 +5999,35 @@ block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
     }
 
     #[test]
-    fn child_translation_checks_stage_range_and_feedback() {
+    fn child_translation_rejects_stage_overflow() {
         let source = r#"
 block delay(clk, x: u8) -> u8 @1 { reg q: u8; q := x; q }
 block top(clk, x: u8 @18446744073709551615) -> u8 @0 {
-    inst lane: delay; lane.x := x; lane.out
+    let lane = delay(x);
+    lane
 }
 "#;
         assert_eq!(
             check_bx(source).unwrap_err(),
             "block 'top': instance 'lane.out': translated cycle 18446744073709551616 is out of range"
         );
+    }
+
+    #[test]
+    fn timed_child_call_rejects_feedback() {
+        let source = r#"
+block delay(clk, x: u8) -> (u8, u8) @1 { reg q: u8; q := x; (q, q) }
+block loopback(clk) -> u8 @0 {
+    let feedback: u8;
+    let lane = delay(feedback);
+    feedback = lane.1;
+    lane.0
+}
+"#;
+        // Lowering validates the deferred wire before reporting timing errors.
         assert_eq!(
-            check_bx(&source.replace("lane.x := x", "lane.x := lane.out")).unwrap_err(),
-            "block 'top': timing feedback through instance 'lane' is unsupported"
+            compile(source, empty_package("feedback"), ResetBehavior::default()).unwrap_err(),
+            "block 'loopback': timing feedback through instance 'lane' is unsupported"
         );
     }
 
