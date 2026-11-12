@@ -11,7 +11,7 @@ use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::cut_db::loader::CutDb;
 use crate::cut_db::tt16::TruthTable16;
 
-use super::{Replacement, ReplacementImpl, live_forward_depth};
+use super::{CutFaninWalk, Replacement, ReplacementImpl, live_forward_depth};
 
 const EMPTY_LEAF_OPERAND: AigOperand = AigOperand {
     node: AigRef { id: 0 },
@@ -171,6 +171,7 @@ impl CutEnumerationStats {
 pub(super) struct CutEnumerator {
     max_cuts_per_node: usize,
     memo: Vec<Option<Vec<Cut>>>,
+    walk: CutFaninWalk,
     stats: CutEnumerationStats,
 }
 
@@ -179,6 +180,7 @@ impl CutEnumerator {
         Self {
             max_cuts_per_node,
             memo: vec![None; g.gates.len()],
+            walk: CutFaninWalk::default(),
             stats: CutEnumerationStats::default(),
         }
     }
@@ -223,45 +225,8 @@ impl CutEnumerator {
 
     fn ensure_cuts_for_node(&mut self, g: &GateFn, root: AigRef) {
         self.sync_len(g);
-        if self.memo[root.id].is_some() {
-            return;
-        }
-
-        let mut stack = vec![(root, false)];
-        while let Some((node, expanded)) = stack.pop() {
-            if self.memo[node.id].is_some() {
-                continue;
-            }
-            let fanins = match &g.gates[node.id] {
-                AigNode::And2 { a, b, .. } => Some((*a, *b)),
-                AigNode::Input { .. } | AigNode::Literal { .. } => None,
-            };
-            if !expanded {
-                stack.push((node, true));
-                if let Some((a, b)) = fanins {
-                    if self.memo[b.node.id].is_none() {
-                        stack.push((b.node, false));
-                    }
-                    if self.memo[a.node.id].is_none() {
-                        stack.push((a.node, false));
-                    }
-                }
-                continue;
-            }
-
-            if let Some((a, b)) = fanins {
-                if self.memo[a.node.id].is_none() || self.memo[b.node.id].is_none() {
-                    stack.push((node, true));
-                    if self.memo[b.node.id].is_none() {
-                        stack.push((b.node, false));
-                    }
-                    if self.memo[a.node.id].is_none() {
-                        stack.push((a.node, false));
-                    }
-                    continue;
-                }
-            }
-
+        self.walk.start(root);
+        while let Some(node) = self.walk.next_ready(g, |n| self.memo[n.id].is_some()) {
             let cuts = self.compute_cuts_for_node_from_memo(g, node);
             self.memo[node.id] = Some(cuts);
         }
@@ -391,6 +356,42 @@ pub(super) fn choose_candidate_replacements_for_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig::AigBitVector;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+
+    #[test]
+    fn deep_shared_cuts_recompute_only_the_edited_root_and_its_new_fanin() {
+        let mut gb = GateBuilder::new("deep-shared".into(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".into(), 1).get_lsb(0);
+        let b = *gb.add_input("b".into(), 1).get_lsb(0);
+        let mut shared = a;
+        for _ in 0..4096 {
+            shared = gb.add_and_binary(shared, b);
+        }
+        let root = gb.add_and_binary(shared, shared.negate());
+        gb.add_output("out".into(), AigBitVector::from_bit(root));
+        let g = gb.clone().build();
+        let mut cuts = CutEnumerator::new(&g, 8);
+        cuts.cuts_for_root(&g, root.node);
+        cuts.cuts_for_root(&g, root.node);
+        // Each AND and both inputs are visited once across both root queries.
+        let computed = cuts.stats().computed_nodes;
+        assert_eq!(computed, 4096 + 1 + 2);
+
+        let new_fanin = gb.add_and_binary(a, b.negate());
+        let mut edited = gb.build();
+        let AigNode::And2 { b, .. } = &mut edited.gates[root.node.id] else {
+            unreachable!();
+        };
+        *b = new_fanin;
+        cuts.invalidate_nodes(&[root.node]);
+        let mut fresh = CutEnumerator::new(&edited, 8);
+        assert_eq!(
+            cuts.cuts_for_root(&edited, root.node),
+            fresh.cuts_for_root(&edited, root.node)
+        );
+        assert_eq!(cuts.stats().computed_nodes, computed + 2);
+    }
 
     #[test]
     fn joined_cuts_match_scalar_projection_on_overlaps_and_signature_collisions() {
