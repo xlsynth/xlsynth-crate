@@ -19,7 +19,7 @@ use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 const FLOW_STAGES: &str = r#"
 struct FlowOut<T> { push_ready: bool, pop_valid: bool, pop_data: T }
 
-block flow_reg_rev<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
+block flow_reg_rev<T>(clk, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
     reg saved_valid: bool = false;
     reg saved_data: T = zero!<T>();
     let hold = !saved_valid && push_valid && !pop_ready;
@@ -32,7 +32,7 @@ block flow_reg_rev<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool)
     }
 }
 
-block flow_reg_fwd<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
+block flow_reg_fwd<T>(clk, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
     reg valid_q: bool = false;
     reg data_q: T = zero!<T>();
     let push_ready = !valid_q || pop_ready;
@@ -43,7 +43,7 @@ block flow_reg_fwd<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool)
 "#;
 
 const DEFERRED_FLOW: &str = r#"
-block flow_reg_both<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
+block flow_reg_both<T>(clk, push_valid: bool, push_data: T, pop_ready: bool) -> FlowOut<T> {
     let mid_ready: bool;
     let rev = flow_reg_rev(push_valid, push_data, mid_ready);
     let fwd = flow_reg_fwd(rev.pop_valid, rev.pop_data, pop_ready);
@@ -51,24 +51,24 @@ block flow_reg_both<T>(clk, rst, push_valid: bool, push_data: T, pop_ready: bool
     FlowOut { push_ready: rev.push_ready, pop_valid: fwd.pop_valid, pop_data: fwd.pop_data }
 }
 
-pub block pipeline(clk, rst, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
+pub block pipeline(clk, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
     let flow = flow_reg_both(push_valid, push_data, pop_ready);
     flow
 }
 "#;
 
 const EXPLICIT_FLOW: &str = r#"
-block rev_byte(clk, rst, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
+block rev_byte(clk, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
     let stage = flow_reg_rev(push_valid, push_data, pop_ready);
     stage
 }
 
-block fwd_byte(clk, rst, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
+block fwd_byte(clk, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
     let stage = flow_reg_fwd(push_valid, push_data, pop_ready);
     stage
 }
 
-pub block pipeline(clk, rst, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
+pub block pipeline(clk, push_valid: bool, push_data: u8, pop_ready: bool) -> FlowOut<u8> {
     inst rev: rev_byte;
     inst fwd: fwd_byte;
     rev.push_valid := push_valid;

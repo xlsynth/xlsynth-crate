@@ -320,13 +320,11 @@ fn compatible(a: &Type, b: &Type) -> bool {
     }
 }
 
-/// Data arguments, output wires, and reset requirement of a local or linked
-/// child.
+/// Data arguments and output wires of a local or linked child.
 struct BlockInterface {
     params: Vec<Param>,
     result: Type,
     outputs: Vec<Param>,
-    requires_reset: bool,
     /// Concrete type nodes for wiring one instance of this interface.
     port_type_nodes: usize,
 }
@@ -1374,7 +1372,6 @@ impl BlockInterface {
             params,
             result,
             outputs: layout.outputs,
-            requires_reset: reset.is_some(),
             port_type_nodes: layout.type_nodes,
         })
     }
@@ -1962,6 +1959,18 @@ pub(crate) fn check_sources_with_tests(
         })
         .collect();
     for b in &module.blocks {
+        if b.reset.is_some() {
+            let library = crate::bx_import::library_item(&b.name)
+                .and_then(|(subject, _)| linked?.library_modules.get(subject));
+            if !library.map_or(root.allow_block_reset_signal, |m| {
+                m.allow_block_reset_signal
+            }) {
+                return Err(format!(
+                    "block '{}': declaring an explicit reset signal requires #![allow(block_reset_signal)] in the defining module; omit `rst` to infer reset",
+                    b.name
+                ));
+            }
+        }
         let reserved_ports = std::iter::once(&b.clock)
             .chain(&b.reset)
             .chain(b.callback_params.iter().map(|p| &p.name))
@@ -2022,11 +2031,13 @@ pub(crate) fn check_sources_with_tests(
             },
         )?;
         structs.update_imports(&resolver)?;
+        // The extern's reset is a role. Its physical name comes from linked
+        // IR, so a data output can use the BX role's spelling.
         declarations
             .add_block(
                 &b.name,
                 &b.clock,
-                b.reset.as_deref(),
+                None,
                 params.clone(),
                 result.clone(),
                 &structs,
@@ -2069,7 +2080,7 @@ pub(crate) fn check_sources_with_tests(
                 &mut structs,
                 match test.kind {
                     crate::ast::TestKind::Function => BodyKind::Function,
-                    crate::ast::TestKind::Block => BodyKind::Block { has_reset: true },
+                    crate::ast::TestKind::Block => BodyKind::Block,
                 },
             );
             checker.specializations = Some(&mut specializations);
@@ -2170,10 +2181,16 @@ pub(crate) fn check_sources_with_tests(
     graph.extend(extern_blocks.iter().map(|b| (b.name.as_str(), Vec::new())));
     let order = dependency_order("block", &graph)?;
     let mut checked: Vec<_> = checked.into_iter().map(Some).collect();
-    let blocks = order
+    let mut blocks: Vec<_> = order
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
+    let invariant_harnesses = tests
+        .iter()
+        .flat_map(|suite| &suite.invariants)
+        .map(|invariant| invariant.harness.as_str())
+        .collect();
+    infer_block_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
     let warnings =
         declarations
             .warnings
@@ -2231,6 +2248,93 @@ pub(crate) fn check_sources_with_tests(
     Ok(checked)
 }
 
+/// Propagate reset demand in child-first order, after specialization and
+/// structural unrolling determine which instances actually exist.
+fn infer_block_resets(
+    blocks: &mut [CheckedBlock],
+    externs: &[ExternBlock],
+    invariant_harnesses: &BTreeSet<&str>,
+) -> Result<(), String> {
+    let mut resetful: BTreeMap<_, _> = externs
+        .iter()
+        .filter(|b| b.reset.is_some())
+        .map(|b| (b.name.as_str(), b.name.as_str()))
+        .collect();
+    for block in blocks {
+        if block.reset.is_none() {
+            for stmt in &block.statements {
+                match stmt {
+                    CheckedStmt::Reg {
+                        name,
+                        reset: Some(_),
+                        ..
+                    } => {
+                        if invariant_harnesses.contains(block.name.as_str()) {
+                            return Err(format!(
+                                "invariant '{}': initializer on register '{name}' requires a reset",
+                                block.source_name
+                            ));
+                        }
+                    }
+                    CheckedStmt::Inst {
+                        name,
+                        block: target,
+                    } => {
+                        let Some(child) = resetful.get(target.as_str()) else {
+                            continue;
+                        };
+                        if invariant_harnesses.contains(block.name.as_str()) {
+                            return Err(format!(
+                                "invariant '{}': instance '{name}' of '{child}' requires a parent reset",
+                                block.source_name
+                            ));
+                        }
+                    }
+                    // Register and instance declarations are unconditional.
+                    // Updates, including conditional updates, add no reset
+                    // demand.
+                    _ => continue,
+                }
+                block.reset = Some(inferred_reset_port(block));
+                break;
+            }
+        }
+        if block.reset.is_some() {
+            resetful.insert(&block.name, &block.source_name);
+        }
+    }
+    Ok(())
+}
+
+/// Keep source port, register, and instance names when introducing a reset
+/// into a block whose author could use `rst` as an ordinary name.
+fn inferred_reset_port(block: &CheckedBlock) -> String {
+    let names = std::iter::once(block.clock.as_str())
+        .chain(
+            block
+                .params
+                .iter()
+                .chain(&block.output_ports)
+                .map(|p| p.name.as_str()),
+        )
+        .chain(block.statements.iter().filter_map(|s| match s {
+            CheckedStmt::Reg { name, .. } | CheckedStmt::Inst { name, .. } => Some(name.as_str()),
+            _ => None,
+        }));
+    if !names.clone().any(|name| name == "rst") {
+        return "rst".into();
+    }
+    let occupied: BTreeSet<_> = names.collect();
+    let mut suffix = 1;
+    loop {
+        let candidate = format!("rst_{suffix}");
+        if !occupied.contains(candidate.as_str()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 /// Reserve source bindings before allocating instance or observation port
 /// names.
 fn block_binding_names(block: &Block) -> BTreeSet<String> {
@@ -2264,7 +2368,7 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BodyKind {
     Function,
-    Block { has_reset: bool },
+    Block,
 }
 
 /// The callback that owns local width inference and any loops opened inside it.
@@ -2700,14 +2804,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .collect::<BTreeSet<_>>();
         let mut reserved_hardware_names = block_binding_names(block);
         reserved_hardware_names.extend(outputs.iter().cloned());
-        let mut c = Self::new(
-            decls,
-            resolver,
-            structs,
-            BodyKind::Block {
-                has_reset: block.reset.is_some(),
-            },
-        );
+        let mut c = Self::new(decls, resolver, structs, BodyKind::Block);
         c.zero_binding = decls.zero_binding(&block.name);
         c.warning_owner = Some(&block.name);
         c.outputs = outputs;
@@ -2767,9 +2864,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .blocks
                     .get(child.as_str())
                     .ok_or_else(|| format!("unknown child block '{child}'"))?;
-                c.check_child_instance(
-                    name,
-                    child,
+                c.account_for_child_instance(
                     child_block,
                     /* has_explicit_parametrics= */ false,
                 )?;
@@ -2924,19 +3019,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         declare(&mut self.names, name)
     }
 
-    /// Check the reset and account for the data ports wired for this instance.
-    fn check_child_instance(
+    /// Account for the data ports wired for this instance.
+    fn account_for_child_instance(
         &mut self,
-        name: &str,
-        target: &str,
         child: &BlockInterface,
         has_explicit_parametrics: bool,
     ) -> Result<(), String> {
-        if child.requires_reset && !matches!(self.kind, BodyKind::Block { has_reset: true }) {
-            return Err(format!(
-                "instance '{name}' of '{target}' requires a parent reset"
-            ));
-        }
         // Every instance materializes its own ports, even when its definition
         // is shared and its outputs are unused.
         if self.replaying_body() || has_explicit_parametrics {
@@ -3024,7 +3112,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             (target, &self.decls.blocks[target])
         };
-        self.check_child_instance(binding, target, child, !parametrics.is_empty())?;
+        self.account_for_child_instance(child, !parametrics.is_empty())?;
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3147,11 +3235,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     let reset = match reset {
                         None => None,
                         Some(expr) => {
-                            if !matches!(self.kind, BodyKind::Block { has_reset: true }) {
-                                return Err(format!(
-                                    "initializer on register '{name}' requires a reset"
-                                ));
-                            }
                             let value = self
                                 .expr(expr, Some(&ty))
                                 .map_err(|e| format!("reset of register '{name}': {e}"))?;
@@ -4796,7 +4879,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 && (self.decls.declares_function(&self.zero_binding)
                     || self.resolver.lookup(&self.zero_binding)?.is_some())),
             // Only a local function can override zero! in a BX block.
-            BodyKind::Block { .. } => Ok(self
+            BodyKind::Block => Ok(self
                 .decls
                 .value_template_callbacks
                 .contains_key(self.zero_binding.as_str())
@@ -6115,7 +6198,7 @@ block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
     fn constant_aggregate_resets_preserve_field_order_and_wide_signed_values() {
         let source = r#"
 struct Payload { words: u8[2], wide: sN[130] }
-block seeded(clk, rst) -> Payload {
+block seeded(clk) -> Payload {
     let seed = u8:9 * u8:4;
     reg q: Payload = Payload { wide: sN[130]:-2, words: [seed, seed + 1] };
     q := q;
@@ -6213,7 +6296,8 @@ block wrap(clk, x: u8) -> u8 {
 
     #[test]
     fn guards_have_lexical_scope_and_reset_is_a_logical_value() {
-        let source = r#"block stage(clk, rst, x: u8) -> u8 {
+        let source = r#"#![allow(block_reset_signal)]
+block stage(clk, rst, x: u8) -> u8 {
     reg q: u8;
     if !rst { let local = x; q := local; }
     q
@@ -6336,7 +6420,7 @@ block same(clk, a: (s8, u8[3]), b: (s8, u8[3])) -> bool { a == b }
     #[test]
     fn constant_array_index_and_zero_width_cast_in_register_reset() {
         let source = r#"
-block constants(clk, rst) -> (s8, u8) {
+block constants(clk) -> (s8, u8) {
     let samples = [s8:0xff, s8:0b1000_0000];
     reg q: (s8, u8) = (samples[uN[100]:1], sN[0]:0 as u8);
     q := q;

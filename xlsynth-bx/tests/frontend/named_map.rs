@@ -323,7 +323,7 @@ fn named_map_uses_its_callee_for_runtime_and_constant_values() -> Result<(), Box
 fn widen(x: s8) -> (s16, bool) { (x as s16, x < s8:0) }
 fn mapped(xs: s8[3]) -> (s16, bool)[3] { map(xs, widen) }
 const INITIAL = map(s8:-1..=s8:1, widen);
-block sample(clk, rst, xs: s8[3]) -> (s16, bool)[3] {
+block sample(clk, xs: s8[3]) -> (s16, bool)[3] {
     reg q: (s16, bool)[3] = INITIAL;
     q := mapped(xs);
     q

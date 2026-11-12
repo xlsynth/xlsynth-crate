@@ -117,7 +117,8 @@ fn rust_compile_helpers_deny_collected_warnings_by_default() -> Result<(), Box<d
 
 #[test]
 fn using_an_implicit_reset_as_data_keeps_a_leaf_block_combinational() -> Result<(), String> {
-    let source = "block reset_asserted(clk, rst) -> bool { rst }";
+    let source = r#"#![allow(block_reset_signal)]
+block reset_asserted(clk, rst) -> bool { rst }"#;
     let checked = check_source_with_options(source, &ImportOptions::default())?;
     let [warning] = checked.warnings() else {
         panic!("expected one combinational block warning");

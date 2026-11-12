@@ -25,7 +25,7 @@ fn run(source: &str) -> Result<BxTestReport, String> {
 #[test]
 fn one_edge_advances_all_children_and_procedural_lets_take_snapshots() -> Result<(), String> {
     let source = r#"
-block delay<T>(clk, rst, x: T) -> T {
+block delay<T>(clk, x: T) -> T {
     reg q: T = zero!<T>();
     q := x;
     q
@@ -43,6 +43,9 @@ block delay<T>(clk, rst, x: T) -> T {
         assert_eq(second, before);
         assert_eq(first, i);
     }
+    tick!(rst: true);
+    assert_eq(first, u8:0);
+    assert_eq(second, u8:0);
 }"#;
     let report = run(source)?;
     assert_eq!(report.tests.len(), 1);

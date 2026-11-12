@@ -37,14 +37,14 @@ fn nested_let_patterns_require_matching_tuple_members() -> Result<(), String> {
 fn destructuring_a_clocked_callback_block_reads_one_instance() {
     let source = r#"
 fn widen(x: u8) -> u16 { x as u16 }
-block stage<In, Out, F: fn(In) -> Out>(clk, rst, en: bool, x: In) -> (bool, (In, Out)) {
+block stage<In, Out, F: fn(In) -> Out>(clk, en: bool, x: In) -> (bool, (In, Out)) {
     reg valid: bool = false;
     reg data: Out = zero!<Out>();
     valid := en;
     if en { data := F(x); }
     (valid, (x, data))
 }
-pub block pipeline(clk, rst, en: bool, x: u8) -> (bool, u16) {
+pub block pipeline(clk, en: bool, x: u8) -> (bool, u16) {
     let (valid, (.., data)): (bool, (u8, u16)) = stage<widen>(en, x);
     (valid, data)
 }
@@ -85,12 +85,12 @@ pub block pipeline(clk, rst, en: bool, x: u8) -> (bool, u16) {
 #[test]
 fn two_call_bindings_create_the_same_hardware_as_two_explicit_instances() {
     let child = r#"
-block delay(clk, rst, x: u8, en: bool) -> u8 {
+block delay(clk, x: u8, en: bool) -> u8 {
     reg q: u8 = 0;
     if en { q := x; }
     q
 }"#;
-    let signature = "pub block lanes(clk, rst, x: u8, en: bool) -> (u8, u8)";
+    let signature = "pub block lanes(clk, x: u8, en: bool) -> (u8, u8)";
     let calls = r#"{
     let a = delay(x, en);
     let b = delay(x + u8:1, !en);
@@ -134,14 +134,14 @@ block delay(clk, rst, x: u8, en: bool) -> u8 {
 #[test]
 fn unrolled_and_explicit_delay_arrays_agree_across_cycles() {
     let source = r#"
-pub block delay_array(clk, rst, data: u8[4], enable: bool[4]) -> u8[4] {
+pub block delay_array(clk, data: u8[4], enable: bool[4]) -> u8[4] {
     unroll_for! (i, values): (u32, u8[4]) in u32:0..u32:4 {
         let element = delay(data[i], enable[i]);
         update(values, i, element)
     }(zero!<u8[4]>())
 }
 
-block explicit_array(clk, rst, data: u8[4], enable: bool[4]) -> u8[4] {
+block explicit_array(clk, data: u8[4], enable: bool[4]) -> u8[4] {
     inst a: delay;
     inst b: delay;
     inst c: delay;
@@ -152,7 +152,7 @@ block explicit_array(clk, rst, data: u8[4], enable: bool[4]) -> u8[4] {
     d.data := data[3]; d.enable := enable[3];
     [a.out, b.out, c.out, d.out]
 }
-block delay(clk, rst, data: u8, enable: bool) -> u8 {
+block delay(clk, data: u8, enable: bool) -> u8 {
     reg saved: u8 = 0;
     if enable { saved := data; }
     saved
@@ -364,7 +364,7 @@ block history(din: bits[8], previous: bits[8], fast_clock: clock, en: bits[1], c
 const IMPORTED_CALL: &str = r#"
 struct Samples { observed: u8, previous: u8 }
 extern block history(clk, rst, en: bool, din: u8) -> Samples;
-block parent(clk, rst, valid: bool, x: u8) -> u8 {
+block parent(clk, valid: bool, x: u8) -> u8 {
     let outputs = history(valid, x);
     outputs.previous
 }"#;
@@ -417,6 +417,53 @@ fn imported_block_checks_by_name_and_wires_real_clock_and_reset_ports() {
 }
 
 #[test]
+fn inferred_reset_wires_by_role_when_a_child_has_an_output_named_rst() -> Result<(), String> {
+    let outputs = "struct Outputs { rst: u8 }";
+    let child = r#"block child(clk, x: u8) -> Outputs {
+    reg q: u8 = 42;
+    q := x;
+    Outputs { rst: q }
+}"#;
+    let parent = r#"pub block parent(clk, x: u8) -> u8 {
+    let sample = child(x);
+    sample.rst
+}"#;
+    let reset = ResetBehavior::default();
+    let local = compile(
+        &format!("{outputs}\n{child}\n{parent}"),
+        empty_package("design"),
+        reset,
+    )?;
+    let child_package = compile(
+        &format!("{outputs}\n{child}"),
+        empty_package("design"),
+        reset,
+    )?;
+    let external = "extern block child(clk, rst, x: u8) -> Outputs;";
+    let linked = compile(
+        &format!("{outputs}\n{external}\n{parent}"),
+        child_package,
+        reset,
+    )?;
+    for package in [local, linked] {
+        let child = package.get_block("child").unwrap();
+        let child_reset = child.port_name(child.reset.as_ref().unwrap().port);
+        assert_ne!(child_reset, "rst");
+        assert!(child.get_output_port("rst").is_some());
+        let parent = package.get_block("parent").unwrap();
+        let parent_reset = parent.reset.as_ref().unwrap().port;
+        assert_eq!(parent.port_name(parent_reset), "rst");
+        assert!(parent.nodes.iter().any(|node| matches!(
+            &node.payload,
+            NodePayload::InstantiationInput { instantiation, port_name, arg }
+                if instantiation == "sample" && port_name == child_reset && *arg == parent_reset
+        )));
+        xlsynth::IrPackage::parse_ir(&package.to_string(), None).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[test]
 fn linking_rejects_incompatible_block_interfaces_and_reset_policies() {
     let ir = Parser::new(HISTORY).parse_and_validate_package().unwrap();
     for source in [
@@ -448,16 +495,15 @@ fn linking_rejects_incompatible_block_interfaces_and_reset_policies() {
 
 #[test]
 fn block_calls_require_an_unconditional_binding_and_an_acyclic_hierarchy() {
-    let delay = "block delay(clk, rst, d: u8) -> u8 { reg q: u8 = 0; q := d; q }";
+    let delay = "block delay(clk, d: u8) -> u8 { reg q: u8 = 0; q := d; q }";
     for parent in [
-        "block top(clk, rst, x: u8) -> u8 { if true { let q = delay(x); } x }",
-        "block top(clk, rst, x: u8) -> u8 { delay(x) }",
-        "block top(clk, rst, x: u8) -> u8 { let q = delay(delay(x)); q }",
-        "block top(clk, rst, x: u8) -> u8 { let q = delay(x, x); q }",
-        "block top(clk, rst, x: u8) -> u8 { let q: u16 = delay(x); x }",
-        "block top(clk, x: u8) -> u8 { let q = delay(x); q }",
+        "block top(clk, x: u8) -> u8 { if true { let q = delay(x); } x }",
+        "block top(clk, x: u8) -> u8 { delay(x) }",
+        "block top(clk, x: u8) -> u8 { let q = delay(delay(x)); q }",
+        "block top(clk, x: u8) -> u8 { let q = delay(x, x); q }",
+        "block top(clk, x: u8) -> u8 { let q: u16 = delay(x); x }",
         "block top(clk, x: u8) -> u8 { let q = top(x); q }",
-        "block top(clk, rst, x: u8) -> u8 { let q = delay(x); q.d := x; q }",
+        "block top(clk, x: u8) -> u8 { let q = delay(x); q.d := x; q }",
     ] {
         let parsed = parse_module(&format!("{parent}\n{delay}")).unwrap();
         assert!(check_module(&parsed).is_err(), "{parent}");

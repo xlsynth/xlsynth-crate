@@ -266,7 +266,7 @@ fn captured_projections_retain_inferred_literal_widths() -> Result<(), Box<dyn E
 #[test]
 fn a_projected_constant_can_initialize_a_register() -> Result<(), Box<dyn Error>> {
     let source = r#"
-        block sample(clk, rst, x:u8) -> u8 {
+        block sample(clk, x:u8) -> u8 {
             let packet = (u8:1, (false, u8:7));
             let (_, (.., initial)) = packet;
             reg q:u8 = initial;
@@ -734,7 +734,7 @@ fn compare(x: s8) -> (bool, bool, bool, bool, bool, bool, bool, bool) {
 fn local_function_drives_a_clock_enabled_register() -> xlsynth_vastly::Result<()> {
     let source = r#"
 fn add_one(x: u8) -> u8 { x + u8:1 }
-pub block capture(clk, rst, en: bool, x: u8) -> u8 {
+pub block capture(clk, en: bool, x: u8) -> u8 {
     reg q: u8 = u8:0;
     if en { q := add_one(x); }
     q

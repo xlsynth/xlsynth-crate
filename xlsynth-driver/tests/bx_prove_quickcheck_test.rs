@@ -32,7 +32,7 @@ fn run(root: &Path, args: &[&str], success: bool) -> Result<(String, String)> {
 }
 
 const COUNTER: &str = r#"struct Drive { increment: u8, enable: bool }
-block counter(clk, rst, drive: Drive) -> u8 {
+block counter(clk, drive: Drive) -> u8 {
     reg total: u8 = u8:0;
     if drive.enable { total := total + drive.increment; }
     total
@@ -98,7 +98,7 @@ fn proves_counter_and_replays_broken_enable_and_reset() -> Result<()> {
 #[test]
 fn quantifies_each_initial_register_and_checks_samples_and_the_final_value() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let source = r#"block latch(clk, rst, en: bool, d: u8) -> u8 {
+    let source = r#"block latch(clk, en: bool, d: u8) -> u8 {
     reg q: u8 = u8:0;
     if en { q := d; }
     q
@@ -264,7 +264,7 @@ block expensive(x: u8) -> bool {
 fn bounds_block_instance_expansion_before_flattening_only_the_selected_hierarchy() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let mut source = String::from(
-        r#"block level0(clk, rst, x: bool) -> bool {
+        r#"block level0(clk, x: bool) -> bool {
     reg q: bool;
     q := x;
     q
@@ -274,7 +274,7 @@ fn bounds_block_instance_expansion_before_flattening_only_the_selected_hierarchy
     for level in 1..=20 {
         let child = level - 1;
         source.push_str(&format!(
-            r#"block level{level}(clk, rst, x: bool) -> bool {{
+            r#"block level{level}(clk, x: bool) -> bool {{
     let a = level{child}(x);
     let b = level{child}(!x);
     a ^ b

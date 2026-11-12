@@ -231,6 +231,7 @@ pub struct CheckedBlock {
     pub source: Option<SourceFile>,
     pub public: bool,
     pub clock: String,
+    /// Physical reset port, including one inferred from elaborated hardware.
     pub reset: Option<String>,
     pub params: Vec<Param>,
     /// Explicit cycle offsets by data input name.
@@ -1531,7 +1532,7 @@ mod tests {
         let source = |body| {
             format!(
                 r#"
-block folded(clk, rst, x: u8) -> u8 {{
+block folded(clk, x: u8) -> u8 {{
     let xs = [u8:2, u8:3];
     reg q: u8 = for (i, a) in u32:0..u32:3 {{ {body} }}(u8:0);
     q := x;
@@ -1708,9 +1709,9 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
         "#;
         let source = format!(
             r#"
-block ordinary(clk, rst) -> u32 {{ {} }}
-block folded<T>(clk, rst, unused: T) -> u32 {{ {} }}
-block wrapper(clk, rst, x: u8, y: u16) -> (u32, u32) {{
+block ordinary(clk) -> u32 {{ {} }}
+block folded<T>(clk, unused: T) -> u32 {{ {} }}
+block wrapper(clk, x: u8, y: u16) -> (u32, u32) {{
     let a = folded(x);
     let b = folded(y);
     (a, b)
@@ -1753,7 +1754,7 @@ block wrapper(clk, rst, x: u8, y: u16) -> (u32, u32) {{
     fn required_uses_replay_a_small_counted_let_after_speculative_exhaustion() -> Result<(), String>
     {
         let source = r#"
-block stage(clk, rst, input: u8) -> (u8, u8) {
+block stage(clk, input: u8) -> (u8, u8) {
     let spent = for (i, a) in uN[1048576]:0..uN[1048576]:128 { a + (i as u8) }(u8:0);
     let small = for (_, a) in u32:0..u32:3 { a + u8:2 }(u8:0);
     let alias = if true { small + u8:1 } else { spent };
@@ -1786,7 +1787,7 @@ block stage(clk, rst, input: u8) -> (u8, u8) {
     fn counted_constants_read_captures_and_body_lets_only_on_selected_paths() -> Result<(), String>
     {
         let source = r#"
-block stage(clk, rst, x: u32) -> u32 {
+block stage(clk, x: u32) -> u32 {
     let spent = for (i, b) in uN[1048576]:0..uN[1048576]:128 { b + (i as u32) }(u32:0);
     reg q: u32 = for (_, a) in u32:0..u32:2 {
         let runtime = x + u32:1;
@@ -1818,7 +1819,7 @@ block stage(clk, rst, x: u32) -> u32 {
     #[test]
     fn required_constant_reports_a_work_limited_let_through_its_alias() -> Result<(), String> {
         let source = r#"
-block wrapper(clk, rst) -> u8 {
+block wrapper(clk) -> u8 {
     let deferred = for (i, acc) in uN[1048576]:0..uN[1048576]:128 { acc + (i as u8) }(u8:0);
     let alias = deferred + u8:1;
     reg q: u8 = alias;
