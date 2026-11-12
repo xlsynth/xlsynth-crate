@@ -4,6 +4,7 @@
 
 use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
+use std::collections::HashMap;
 
 /// One supported Liberty FF clock, including its active-edge polarity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +21,49 @@ pub(crate) struct GvEvalSequentialCellSpec {
     pub next_state: Term,
     pub next_state_text: String,
     pub clock: SequentialClockSpec,
+}
+
+/// Identify a physical FF input that determines next_state in either polarity
+/// after binding the instance's constant inputs. Every other pin and prior
+/// state stay unknown. For example, (test & scan) | (!test & data) selects data
+/// when the actual test pin is wired to zero. An unbound test pin makes neither
+/// branch eligible. Unknown formula variables are never assigned defaults.
+pub(crate) fn classify_tied_ff_data(
+    next: &Term,
+    pin_names_and_constants: &HashMap<String, bool>,
+    inputs: &[String],
+) -> Option<String> {
+    // A tie may constrain a physical input only; state variables are not ties.
+    if pin_names_and_constants
+        .keys()
+        .any(|name| !inputs.contains(name))
+    {
+        return None;
+    }
+    let mut values = pin_names_and_constants.clone();
+    inputs
+        .iter()
+        .find(|pin| input_polarity(next, pin, &mut values).is_some())
+        .cloned()
+}
+
+/// Prove that the formula reduces to one untied pin or its complement.
+/// Unbound variables are unknown. Returns true for the inverted polarity.
+pub(crate) fn input_polarity(
+    formula: &Term,
+    pin: &str,
+    values: &mut HashMap<String, bool>,
+) -> Option<bool> {
+    if values.contains_key(pin) {
+        return None;
+    }
+    values.insert(pin.to_owned(), false);
+    let at_zero = formula.evaluate_partial(values);
+    values.insert(pin.to_owned(), true);
+    let at_one = formula.evaluate_partial(values);
+    values.remove(pin);
+    let at_zero = at_zero?;
+    (at_zero != at_one?).then_some(at_zero)
 }
 
 /// Resolves the one supported FF clock expression for a Liberty cell.

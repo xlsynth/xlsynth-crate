@@ -5,7 +5,9 @@
 pub(crate) mod assembly;
 mod native;
 
-pub use native::{map_sequential_to_area_netlist, map_sequential_to_native_netlist};
+pub use native::{
+    map_sequential_to_area_netlist, map_sequential_to_native_netlist, map_sequential_with_policy,
+};
 
 use std::collections::BTreeMap;
 

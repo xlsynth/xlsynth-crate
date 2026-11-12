@@ -64,6 +64,7 @@ use crate::liberty::cell_formula::{Term, parse_formula};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, StringId, TimingArc, TimingTable};
 use crate::liberty_proto::{TimingSense as WireTimingSense, TimingType as WireTimingType};
+use crate::netlist::bit_ref::NetBit;
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -93,7 +94,17 @@ struct CachedInterpolation {
 /// Parsed conditional arc and its applicability without known constant pins.
 struct PreparedWhen {
     formula: Term,
-    without_constants: bool,
+    without_constants: Option<bool>,
+}
+
+impl PreparedWhen {
+    fn evaluate(&self, known_pin_values: &HashMap<String, bool>) -> Option<bool> {
+        if known_pin_values.is_empty() {
+            self.without_constants
+        } else {
+            self.formula.evaluate_partial(known_pin_values)
+        }
+    }
 }
 
 /// Query-invariant table geometry and monotone delay/slew values, prepared
@@ -360,7 +371,7 @@ fn parse_trace_env_flag(value: &str) -> bool {
     )
 }
 
-fn sta_trace_enabled() -> bool {
+pub(crate) fn sta_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("XLSYNTH_G8R_STA_TRACE")
@@ -1270,7 +1281,9 @@ impl PreparedStaLibrary<'_> {
             self,
             options,
             StaAnalysisMode::CombinationalOnly,
+            &[],
         )
+        .map(|(report, _)| report)
     }
 
     /// Analyzes selected launch sources while reusing prepared library data.
@@ -1283,6 +1296,31 @@ impl PreparedStaLibrary<'_> {
         launch_primary_inputs: bool,
         launch_register_instances: &[usize],
     ) -> Result<StaReport> {
+        self.analyze_register_boundary_with_slews(
+            module,
+            nets,
+            interner,
+            options,
+            launch_primary_inputs,
+            launch_register_instances,
+            &[],
+        )
+        .map(|(report, _)| report)
+    }
+
+    /// Measures the worst rise/fall transition on each requested bit in the
+    /// same analysis. An unlaunched bit has no slew; results follow input
+    /// order.
+    pub(crate) fn analyze_register_boundary_with_slews(
+        &self,
+        module: &NetlistModule,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+        options: StaOptions,
+        launch_primary_inputs: bool,
+        launch_register_instances: &[usize],
+        observed: &[NetBit],
+    ) -> Result<(StaReport, Vec<Option<f64>>)> {
         let launch_register_instances: FxHashSet<usize> =
             launch_register_instances.iter().copied().collect();
         analyze_max_arrival_proto_with_mode(
@@ -1295,6 +1333,7 @@ impl PreparedStaLibrary<'_> {
                 launch_primary_inputs,
                 launch_register_instances: &launch_register_instances,
             },
+            observed,
         )
     }
 }
@@ -1313,6 +1352,103 @@ pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> 
                     )
                 })
         })
+}
+
+/// Requires both physical data transitions to have characterized timing on the
+/// actual active clock edge under the proven scalar ties of this instance.
+pub(crate) fn has_complete_register_pin_timing(
+    library: &Library,
+    cell: &crate::liberty_model::Cell,
+    pin: &Pin,
+    known_pin_values: &HashMap<String, bool>,
+) -> bool {
+    let Ok(Some(clock)) =
+        crate::netlist::sequential_liberty::get_sequential_ff_clock_spec(cell, library)
+    else {
+        return false;
+    };
+    let name = library.resolve_string(&pin.name);
+    if pin.is_clocking_pin
+        || name == clock.pin_name
+        || cell.sequential[0].clock_expr.is_empty()
+        || !cell.pins.iter().any(|p| {
+            p.direction == PinDirection::Input as i32
+                && library.resolve_string(&p.name) == clock.pin_name
+        })
+    {
+        return false;
+    }
+    let capture = pin.direction == PinDirection::Input as i32;
+    if !capture && pin.direction != PinDirection::Output as i32 {
+        return false;
+    }
+    let active = match (capture, clock.is_negated) {
+        (true, false) => StaTimingType::SetupRising,
+        (true, true) => StaTimingType::SetupFalling,
+        (false, false) => StaTimingType::RisingEdge,
+        (false, true) => StaTimingType::FallingEdge,
+    };
+    let mut priced = [false; 2];
+    let mut evaluation = TimingEvaluationContext::new(library);
+    for arc in &pin.timing_arcs {
+        if StaTimingType::from_arc(arc, library) != active
+            || library.resolve_string(&arc.related_pin) != clock.pin_name
+        {
+            continue;
+        }
+        let guard = library.resolve_string(&arc.when);
+        if !guard.is_empty()
+            && !parse_formula(guard)
+                .is_ok_and(|t| t.evaluate_partial(known_pin_values) == Some(true))
+        {
+            continue;
+        }
+        for (edge, (setup, delay, slew)) in [
+            (
+                StaTimingTableKind::RiseConstraint,
+                StaTimingTableKind::CellRise,
+                StaTimingTableKind::RiseTransition,
+            ),
+            (
+                StaTimingTableKind::FallConstraint,
+                StaTimingTableKind::CellFall,
+                StaTimingTableKind::FallTransition,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if priced[edge] {
+                continue;
+            }
+            let mut usable = |table: &TimingTable| {
+                let query = if capture {
+                    TimingTableQuery::ideal_clock_setup(0.0)
+                } else {
+                    TimingTableQuery::ideal_clock_to_output(0.0)
+                };
+                validate_timing_table_structure(library, table, &name).is_ok()
+                    && evaluate_table_with_query_and_diagnostics(
+                        library,
+                        table,
+                        query,
+                        &mut evaluation,
+                        &name,
+                    )
+                    .is_ok_and(f64::is_finite)
+            };
+            priced[edge] = if capture {
+                matches!(find_optional_unique_table(arc, setup, &name), Ok(Some(table)) if usable(table))
+            } else {
+                matches!(find_optional_delay_slew_tables(arc, delay, slew, &name),
+                    Ok(Some((delay_table, slew_table))) if usable(delay_table) && usable(slew_table))
+            };
+        }
+        if priced == [true, true] {
+            return true;
+        }
+    }
+    false
 }
 
 /// Launch-source policy for combinational or register-boundary timing.
@@ -1368,7 +1504,8 @@ fn analyze_max_arrival_proto_with_mode(
     lib: &PreparedStaLibrary<'_>,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
-) -> Result<StaReport> {
+    observed: &[NetBit],
+) -> Result<(StaReport, Vec<Option<f64>>)> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
             "primary_input_transition must be finite; got {}",
@@ -2006,7 +2143,24 @@ fn analyze_max_arrival_proto_with_mode(
         .map(|timing| timing.and_then(|timing| timing.register_path_breakdown))
         .collect();
 
-    Ok(StaReport {
+    let mut slews = Vec::with_capacity(observed.len());
+    for &bit in observed {
+        let index = normalized.canonical_bit(normalized.bit_index(bit)?);
+        let slew = timing_set_for_resolved_source(
+            resolved_timing_sources[index],
+            &bit_timing_sets,
+            &literal_source_timing_set,
+        )
+        .and_then(|set| {
+            set.rise
+                .iter()
+                .chain(set.fall.iter())
+                .map(|edge| edge.timing.transition)
+                .reduce(f64::max)
+        });
+        slews.push(slew);
+    }
+    let report = StaReport {
         net_timing,
         worst_output_arrival: worst_output
             .map(|timing| timing.timing.arrival)
@@ -2021,7 +2175,8 @@ fn analyze_max_arrival_proto_with_mode(
         register_input_breakdowns,
         timing_query_diagnostic_counts: evaluation.diagnostics,
         cell_levels,
-    })
+    };
+    Ok((report, slews))
 }
 
 /// Immutable connectivity and cell metadata for the shared timing kernel.
@@ -3046,27 +3201,34 @@ fn arc_when_may_apply(
     evaluation: &mut TimingEvaluationContext<'_>,
     context: &(impl std::fmt::Display + ?Sized),
 ) -> Result<bool> {
+    Ok(evaluate_arc_when(library, arc, known_pin_values, evaluation, context)? != Some(false))
+}
+
+/// Evaluates an arc's condition, returning None for an unresolved predicate.
+fn evaluate_arc_when(
+    library: &Library,
+    arc: &TimingArc,
+    known_pin_values: &HashMap<String, bool>,
+    evaluation: &mut TimingEvaluationContext<'_>,
+    context: &(impl std::fmt::Display + ?Sized),
+) -> Result<Option<bool>> {
     debug_assert!(std::ptr::eq(library, evaluation.library));
     let when_text = library.resolve_string(&arc.when);
     if when_text.is_empty() {
-        return Ok(true);
+        return Ok(Some(true));
     }
     if let Some(when) = evaluation.when_formulas.get(&arc.when) {
-        return Ok(if known_pin_values.is_empty() {
-            when.without_constants
-        } else {
-            when.formula.evaluate_partial(known_pin_values) != Some(false)
-        });
+        return Ok(when.evaluate(known_pin_values));
     }
     let when = parse_formula(when_text)
         .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", when_text, e))?;
-    let applicable = when.evaluate_partial(known_pin_values) != Some(false);
+    let applicable = when.evaluate_partial(known_pin_values);
     // Only the empty-binding result is instance-independent. All nonempty
     // bindings must still evaluate the formula with this instance's constants.
     let without_constants = if known_pin_values.is_empty() {
         applicable
     } else {
-        when.evaluate_partial(&HashMap::new()) != Some(false)
+        when.evaluate_partial(&HashMap::new())
     };
     evaluation.when_formulas.insert(
         arc.when,
@@ -3412,6 +3574,59 @@ fn evaluate_register_launch_output_set(
 struct RegisterCaptureTimingCandidate {
     arrival: f64,
     register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+}
+
+/// Checks that a substitution keeps each setup transition that STA can
+/// measure at this pin under the instance's tied inputs.
+fn validate_setup_coverage(
+    old: &Pin,
+    new: &Pin,
+    known_pin_values: &HashMap<String, bool>,
+    evaluation: &mut TimingEvaluationContext<'_>,
+) -> Result<()> {
+    let library = evaluation.library;
+    let name = library.resolve_string(&old.name);
+    let mut constraints = |pin: &Pin| -> Result<SmallVec<[_; 2]>> {
+        let mut result = SmallVec::new();
+        for arc in &pin.timing_arcs {
+            let clock_edge = StaTimingType::from_arc(arc, library);
+            if !clock_edge.is_setup() {
+                continue;
+            }
+            let guard = match evaluate_arc_when(library, arc, known_pin_values, evaluation, name)? {
+                Some(false) => continue,
+                Some(true) => "",
+                None => library.resolve_string(&arc.when),
+            };
+            let clock = library.resolve_string(&arc.related_pin);
+            for table in &arc.tables {
+                if matches!(
+                    table.kind,
+                    crate::liberty_proto::TimingTableKind::RiseConstraint
+                        | crate::liberty_proto::TimingTableKind::FallConstraint
+                ) {
+                    result.push(((clock, clock_edge, table.kind), guard));
+                }
+            }
+        }
+        Ok(result)
+    };
+    let previous = constraints(old)?;
+    if !previous.is_empty() {
+        let replacement = constraints(new)?;
+        for (required, guard) in previous {
+            // For a live mode pin the same setup transition can be priced
+            // differently in each mode. Require the same guard or an arc
+            // proven active in every mode, without solving Boolean implication.
+            anyhow::ensure!(
+                replacement.iter().any(|(transition, when)| {
+                    *transition == required && (when.is_empty() || *when == guard)
+                }),
+                "replacement pin {name} loses setup timing coverage for {required:?} when '{guard}'"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Returns the worst data arrival plus setup requirement at one capture pin.
@@ -6616,6 +6831,50 @@ endmodule
             },
         ];
         builder.finish()
+    }
+
+    // Two flops of different strengths drive adjacent bits of an ascending
+    // bus. An alias must observe the matching bit, and an input without a
+    // register launch must report no observation.
+    #[test]
+    fn register_slew_probes_distinguish_packed_bits_and_follow_aliases() -> Result<()> {
+        let library = crate::netlist::resize::tests::library()?;
+        let prepared = PreparedStaLibrary::new(&library)?;
+        let (module, nets, interner) = parse_single_module(
+            r#"module top(input clk, input d, output [7:8] q, output a);
+                DFF1 weak(.CLK(clk), .D(d), .Q(q[7]));
+                DFF4 strong(.CLK(clk), .D(d), .Q(q[8]));
+                assign a = q[8];
+            endmodule"#,
+        );
+        let q = find_net_index(&nets, &interner, "q");
+        let a = find_net_index(&nets, &interner, "a");
+        let input = find_net_index(&nets, &interner, "d");
+        let bit = |net, bit_number| NetBit { net, bit_number };
+        let probes = [bit(q, 7), bit(q, 8), bit(a, 0), bit(input, 0)];
+        let options = StaOptions::default();
+        let (observed, slews) = prepared.analyze_register_boundary_with_slews(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+            &probes,
+        )?;
+        let original = prepared.analyze_register_boundary_max_arrival(
+            &module,
+            &nets,
+            &interner,
+            options,
+            false,
+            &[0, 1],
+        )?;
+        assert_eq!(observed, original);
+        assert!(slews[0].unwrap() > slews[1].unwrap());
+        assert_eq!(slews[1], slews[2]);
+        assert_eq!(slews[3], None);
+        Ok(())
     }
 
     #[test]

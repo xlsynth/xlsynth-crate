@@ -24,7 +24,7 @@ use xlsynth_g8r::netlist::io::ParsedNetlist;
 use xlsynth_g8r::netlist::register_mapping::RegisterCellSelection;
 use xlsynth_g8r::netlist::resize::{ResizeOptions, resize_netlist};
 use xlsynth_g8r::netlist::sequential_mapping::{
-    SequentialMappingOptions, map_sequential_to_native_netlist,
+    SequentialMappingOptions, map_sequential_with_policy,
 };
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::techmap::delay::DelayMappingOptions;
@@ -62,9 +62,9 @@ pub(crate) fn add_mapping_args(
         .arg(Arg::new("strategy").long("strategy").value_parser(["area","delay"]).default_value(default_strategy)
             .help("Native combinational covering objective"))
         .arg(Arg::new("fanout-opt").long("fanout-opt").value_parser(clap::value_parser!(bool))
-            .help("Native combinational fanout optimization (default: on for delay, off for area)"))
+            .help("Optimize native data fanout with the assembled register loads (default: on for delay, off for area)"))
         .arg(Arg::new("area-recovery").long("area-recovery").value_parser(clap::value_parser!(bool))
-            .help("Native combinational area recovery (default: on for delay, off for area)"))
+            .help("Recover native mapped area using measured timing (default: on for delay, off for area)"))
         .arg(Arg::new("g8r-resize").long("g8r-resize").value_parser(clap::value_parser!(bool))
             .default_value_if("mapper", "abc", abc_resize)
             .default_value_if("strategy", "delay", "true")
@@ -398,6 +398,11 @@ pub(crate) fn map_design(
     if let Some(cell) = matches.get_one::<String>("register-cell") {
         sequential_options.register_selection = RegisterCellSelection::FixedCell(cell.clone());
     }
+    let sizing = resize.then(|| ResizeOptions {
+        timing,
+        resize_registers: matches.get_one::<String>("register-cell").is_none(),
+        ..Default::default()
+    });
     let abc_context;
     let (mut mapped, diagnostics, library) = if native {
         let strategy = if delay {
@@ -423,12 +428,13 @@ pub(crate) fn map_design(
                 ..Default::default()
             }),
         };
-        let mapped = map_sequential_to_native_netlist(
+        let mapped = map_sequential_with_policy(
             &design,
             &library,
             &sequential_options,
             strategy,
             &post,
+            sizing.as_ref(),
         )?;
         (mapped, None, &library)
     } else {
@@ -442,7 +448,7 @@ pub(crate) fn map_design(
             abc_context.library(),
         )
     };
-    if resize {
+    if !native && let Some(sizing) = &sizing {
         let ParsedNetlist {
             modules,
             nets,
@@ -452,18 +458,8 @@ pub(crate) fn map_design(
         let [module] = modules.as_mut_slice() else {
             anyhow::bail!("expected one assembled module for resizing")
         };
-        resize_netlist(
-            module,
-            nets,
-            interner,
-            library,
-            &ResizeOptions {
-                timing,
-                resize_registers: matches.get_one::<String>("register-cell").is_none(),
-                ..Default::default()
-            },
-        )
-        .context("resizing assembled netlist")?;
+        resize_netlist(module, nets, interner, library, sizing)
+            .context("resizing assembled netlist")?;
     }
     let bytes = format.encode(&mapped)?;
     let netlist = NetlistOutput::open(output_path, pb_stderr.as_ref())
