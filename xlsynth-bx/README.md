@@ -1064,6 +1064,23 @@ An output annotation such as `-> u8 @1` opts a block into stage checking. Data
 inputs default to `@0`. An input annotation such as `r: u8 @1` says the caller
 already supplies that input at stage 1.
 
+A stage can also name an earlier BX module constant. For example, these
+annotations give the input stage 2 and the registered output stage 3.
+
+```text
+const INPUT = u32:2;
+const SAVED = INPUT + u32:1;
+block delay(clk, x: u8 @INPUT) -> u8 @SAVED {
+    reg q: u8;
+    q := x;
+    q
+}
+```
+
+The same names work in per-port annotations such as `@(live: INPUT, saved: SAVED)`.
+The constant must be an unsigned integer whose value fits in `u64`. Put
+arithmetic or calls to pure BX helpers in the constant initializer.
+
 Put `#![require_block_timing]` at the top of a `.bx` file to require an output
 stage on every block defined there. A missing annotation emits
 `missing_block_timing`, which fails compilation by default. Imported files set

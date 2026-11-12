@@ -16,8 +16,8 @@ use crate::ast::{
     BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
     Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, InvariantDecl, InvariantLemma,
     LetBinding, MapExpr, MatchArm, MatchPattern, Module, OutputCycles, Param, ParametricBinding,
-    SourceFile, SourcePosition, SourceSpan, Stmt, StructDef, StructSplat, Type, TypeAlias, UnaryOp,
-    UnrollFor, UsePath, WidthSliceType,
+    SourceFile, SourcePosition, SourceSpan, StageAnnotation, Stmt, StructDef, StructSplat, Type,
+    TypeAlias, UnaryOp, UnrollFor, UsePath, WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 
@@ -1809,29 +1809,36 @@ impl<'s> Parser<'s> {
         })
     }
 
-    /// Parse a decimal cycle number in an input or output annotation.
-    fn cycle_number(&mut self, port_kind: &str) -> Result<u64, String> {
+    /// Preserve a stage name until its defining module's constants are known.
+    fn stage_annotation(&mut self, port_kind: &str) -> Result<StageAnnotation, String> {
+        if is_value_identifier(self.peek(0)) {
+            let name = self.name_or_qualified_member()?;
+            validate_dslx_value_path(&name)?;
+            return Ok(StageAnnotation::Constant(name));
+        }
         let cycle = self.peek(0).parse::<u64>().map_err(|_| {
             self.error(&format!(
-                "expected an unsigned 64-bit decimal {port_kind} cycle"
+                "expected an unsigned 64-bit decimal {port_kind} cycle or a module constant"
             ))
         })?;
         self.pos += 1;
-        Ok(cycle)
+        Ok(StageAnnotation::Literal(cycle))
     }
 
     /// Parse `@N` or `@(port: N, ...)` after the result type.
-    fn output_cycles(&mut self) -> Result<Option<OutputCycles>, String> {
+    fn output_cycles(&mut self) -> Result<Option<OutputCycles<StageAnnotation>>, String> {
         if !self.eat("@") {
             return Ok(None);
         }
         if !self.eat("(") {
-            return Ok(Some(OutputCycles::Uniform(self.cycle_number("output")?)));
+            return Ok(Some(OutputCycles::Uniform(
+                self.stage_annotation("output")?,
+            )));
         }
         let entries = self.list(")", |parser| {
             let name = parser.ident()?;
             parser.expect(":")?;
-            Ok((name, parser.cycle_number("output")?))
+            Ok((name, parser.stage_annotation("output")?))
         })?;
         let mut cycles = BTreeMap::new();
         for (name, cycle) in entries {
@@ -1923,7 +1930,7 @@ impl<'s> Parser<'s> {
         let signature = self.block_signature(name, |parser| {
             let param = parser.param()?;
             if parser.eat("@") {
-                input_cycles.insert(param.name.clone(), parser.cycle_number("input")?);
+                input_cycles.insert(param.name.clone(), parser.stage_annotation("input")?);
             }
             Ok(param)
         })?;
@@ -6492,8 +6499,18 @@ block i(clk, x: u8) -> u8 { inst(x) }
     fn block_output_cycle_distinguishes_absent_from_explicit_zero() {
         for (suffix, expected) in [
             ("", None),
-            (" @0", Some(OutputCycles::Uniform(0))),
-            (" @3", Some(OutputCycles::Uniform(3))),
+            (
+                " @0",
+                Some(OutputCycles::Uniform(StageAnnotation::Literal(0))),
+            ),
+            (
+                " @3",
+                Some(OutputCycles::Uniform(StageAnnotation::Literal(3))),
+            ),
+            (
+                " @W",
+                Some(OutputCycles::Uniform(StageAnnotation::Constant("W".into()))),
+            ),
         ] {
             let source = format!("block b(clk, x: u8) -> u8{suffix} {{ x }}");
             let module = parse_module(&source).unwrap();
@@ -6515,8 +6532,8 @@ block tap(clk, x: u8) -> Ports @(saved: 1, live: 0) {
         assert_eq!(
             module.blocks[0].output_cycles,
             Some(OutputCycles::ByPort(BTreeMap::from([
-                ("saved".to_owned(), 1),
-                ("live".to_owned(), 0),
+                ("saved".to_owned(), StageAnnotation::Literal(1)),
+                ("live".to_owned(), StageAnnotation::Literal(0)),
             ])))
         );
     }
@@ -6536,9 +6553,18 @@ block tap(clk, x: u8) -> Ports @(saved: 1, live: 0) {
         let module = parse_module(source).unwrap();
         let block = &module.blocks[0];
         assert_eq!(block.input_cycles.get("x"), None);
-        assert_eq!(block.input_cycles.get("y"), Some(&1));
-        assert_eq!(block.input_cycles.get("z"), Some(&0));
-        assert_eq!(block.output_cycles, Some(OutputCycles::Uniform(2)));
+        assert_eq!(
+            block.input_cycles.get("y"),
+            Some(&StageAnnotation::Literal(1))
+        );
+        assert_eq!(
+            block.input_cycles.get("z"),
+            Some(&StageAnnotation::Literal(0))
+        );
+        assert_eq!(
+            block.output_cycles,
+            Some(OutputCycles::Uniform(StageAnnotation::Literal(2)))
+        );
     }
 
     #[test]

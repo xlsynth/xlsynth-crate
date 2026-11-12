@@ -12,9 +12,10 @@ use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ImportOptions;
 use crate::ast::{
-    BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan,
-    Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
+    BinaryOp, Block, BlockStages, CallbackParam, Expr, ExternBlock, ExternFn, Function,
+    FunctionParametricRef, InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern,
+    Module, Param, SourceSpan, Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp,
+    WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -339,6 +340,8 @@ struct BlockPortLayout {
 /// scope.
 struct BlockTemplate<'m> {
     block: &'m Block,
+    /// Module constants give every specialization the same local port stages.
+    stages: BlockStages<u64>,
     params: Vec<Param>,
     result: Type,
     callback_params: Vec<BlockCallbackFormal>,
@@ -2904,6 +2907,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             BlockDefinition::Specialized(spec) => (spec.block, &spec.interface, Some(spec), None),
         };
+        let stages = if specialization.is_some() {
+            decls.templates[block.name.as_str()].stages.clone()
+        } else {
+            decls.module_dimensions(&block.name).block_stages(block)?
+        };
         let outputs = interface
             .outputs
             .iter()
@@ -2989,10 +2997,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             clock: block.clock.clone(),
             reset: block.reset.clone(),
             params: interface.params.clone(),
-            input_cycles: block.input_cycles.clone(),
+            input_cycles: stages.inputs,
             result: interface.result.clone(),
             output_ports: interface.outputs.clone(),
-            output_cycles: block.output_cycles.clone(),
+            output_cycles: stages.output,
             timing_error: None,
             statements: c.statements,
             output,
@@ -5924,6 +5932,67 @@ block b(clk, x: u8, y: u8 @1) -> u8 @1 {
 }
 "#;
         check_bx(source).unwrap();
+    }
+
+    #[test]
+    fn stage_constants_resolve_before_child_stages_are_translated() -> Result<(), String> {
+        let source = r#"
+const INPUT = u32:2;
+fn next_stage(x: u32) -> u32 { x + u32:1 }
+const SAVED = next_stage(INPUT);
+block tap<T>(clk, x: T @INPUT) -> (T, T) @(out_0: INPUT, out_1: SAVED) {
+    reg q: T;
+    q := x;
+    (x, q)
+}
+block top(clk, x: u8 @4) -> u8 @5 {
+    let pair = tap(x);
+    pair.1
+}
+"#;
+        check_bx(source)?;
+        assert_eq!(
+            check_bx(&source.replace("-> u8 @5", "-> u8 @SAVED")).unwrap_err(),
+            "block 'top': expected cycle 3, got cycle 5"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stage_constant_must_be_visible_unsigned_and_fit_u64() -> Result<(), String> {
+        let block = "block b(clk, x: u8 @W) -> u8 @W { x }";
+        check_bx(&format!("const W = uN[80]:0xffff_ffff_ffff_ffff; {block}"))?;
+        for (declaration, diagnostic) in [
+            ("", "unknown module constant 'W' in stage annotation"),
+            (
+                "const W = s32:-1;",
+                "stage constant 'W' must be an unsigned integer, got s32",
+            ),
+            (
+                "const W = true;",
+                "stage constant 'W' must be an unsigned integer, got bool",
+            ),
+            (
+                "const W = uN[80]:0x1_0000_0000_0000_0000;",
+                "stage constant 'W' does not fit in u64",
+            ),
+        ] {
+            assert_eq!(
+                check_bx(&format!("{declaration} {block}")).unwrap_err(),
+                format!("block 'b': {diagnostic}")
+            );
+        }
+        assert_eq!(
+            check_bx(&format!("{block} const W = u32:0;")).unwrap_err(),
+            "block 'b': stage constant 'W' is declared later in the module"
+        );
+        let prefix = "const W = u32:0; block b(clk, x: u8 @W, W: u8)";
+        check_bx(&format!("{prefix} -> u8 @0 {{ x }}"))?;
+        assert_eq!(
+            check_bx(&format!("{prefix} -> u8 @W {{ x }}")).unwrap_err(),
+            "block 'b': stage 'W' refers to a block parameter, expected a module constant"
+        );
+        Ok(())
     }
 
     #[test]

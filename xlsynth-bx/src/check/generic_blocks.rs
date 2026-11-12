@@ -231,6 +231,7 @@ impl<'m> BlockTemplate<'m> {
         )?;
         Ok(Self {
             block,
+            stages: dimensions.block_stages(block)?,
             params,
             result,
             callback_params,

@@ -8,9 +8,9 @@ use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBind
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
     ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
-    MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature, Stmt,
-    StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
-    WidthSliceType,
+    MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature,
+    StageAnnotation, Stmt, StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind,
+    Type, TypeAlias, UnrollFor, WidthSliceType,
 };
 use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -748,6 +748,13 @@ impl<'a> Scope<'a> {
 
     /// Resolve each block binding in source order.
     fn block(&mut self, def: &Block) -> Result<Block, String> {
+        // A library's `@LATENCY` belongs to the library even if its caller
+        // defines a constant with the same spelling.
+        let stages = def.map_stages(|name| {
+            self.names
+                .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
+                .map(StageAnnotation::Constant)
+        })?;
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
@@ -797,9 +804,9 @@ impl<'a> Scope<'a> {
             clock: def.clock.clone(),
             reset: def.reset.clone(),
             params,
-            input_cycles: def.input_cycles.clone(),
+            input_cycles: stages.inputs,
             result,
-            output_cycles: def.output_cycles.clone(),
+            output_cycles: stages.output,
             statements,
             output: self.expr(&def.output)?,
         })
