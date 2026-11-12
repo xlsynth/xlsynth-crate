@@ -5613,7 +5613,7 @@ block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
     fn missing_child_timing_or_an_unknown_connection_stays_unknown() {
         for (child, argument) in [
             ("extern block child(clk, x: u8, r: u8) -> u8;", "x"),
-            ("block child(clk, x: u8, r: u8) -> u8 { [x, r][u1:0] }", "x"),
+            ("block child(clk, x: u8, r: u8) -> u8 { x + r }", "x"),
             (
                 "block child(clk, x: u8, r: u8) -> u8 @0 { x + r }",
                 "arr[u1:0]",
@@ -5627,114 +5627,6 @@ block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
                 "block 'top': cannot infer output cycle for this expression"
             );
         }
-    }
-
-    #[test]
-    fn inferred_child_reuses_the_input_requirement_at_each_call() -> Result<(), String> {
-        let source = r#"
-block add_saved(clk, x: u8, r: u8) -> u8 { reg q: u8; q := x; q + r }
-block wrap(clk, x: u8, r: u8) -> u8 { let sum = add_saved(x, r); sum }
-block top(clk, a: u8 @4, b: u8 @5, c: u8 @8, d: u8 @9) -> (u8,u8) @(out_0: 5, out_1: 9) {
-    let early = wrap(a, b);
-    let late = wrap(c, d);
-    (early, late)
-}
-"#;
-        check_bx(source)?;
-        assert_eq!(
-            check_bx(&source.replace("b: u8 @5", "b: u8 @4")).unwrap_err(),
-            "block 'top': output 'out_0': instance 'early.out': operator '+' combines cycle 5 with cycle 4"
-        );
-        // A caller that never asks for timing can still use these blocks.
-        check_bx(
-            &source
-                .replace("b: u8 @5", "b: u8 @4")
-                .replace("@(out_0: 5, out_1: 9)", ""),
-        )?;
-        Ok(())
-    }
-
-    #[test]
-    fn inferred_outputs_only_require_inputs_used_by_that_port() -> Result<(), String> {
-        let source = r#"
-struct Ports { live: u8, saved: u8 }
-block tap(clk, x: u8, y: u8) -> Ports {
-    reg q: u8; q := y; Ports { live: x, saved: q }
-}
-block top(clk, x: u8 @4, arr: u8[2]) -> u8 @4 {
-    let p = tap(x, arr[u1:0]); p.live
-}
-"#;
-        check_bx(source)?;
-        assert_eq!(
-            check_bx(&source.replace("p.live", "p.saved")).unwrap_err(),
-            "block 'top': cannot infer output cycle for this expression"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn feedback_in_one_child_port_does_not_poison_other_ports() -> Result<(), String> {
-        let source = r#"
-struct Ports { running: u8, live: u8 }
-block tap(clk, x: u8) -> Ports {
-    reg q: u8; q := q + x; Ports { running: q, live: x }
-}
-block top(clk, x: u8 @4) -> u8 @4 { let p = tap(x); p.live }
-"#;
-        check_bx(source)?;
-        assert_eq!(
-            check_bx(&source.replace("p.live", "p.running")).unwrap_err(),
-            "block 'top': instance 'p.running': timing feedback through 'q' is unsupported"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn an_inferred_constant_output_needs_no_stage_anchor() -> Result<(), String> {
-        check_bx(
-            "block seven(clk) -> u8 { u8:7 } block top(clk, x: u8 @4) -> u8 @4 { let k = seven(); k + x }",
-        )?;
-        Ok(())
-    }
-
-    #[test]
-    fn inferred_child_preserves_register_guards_and_declared_child_offsets() -> Result<(), String> {
-        let source = r#"
-block save(clk, en: bool, x: u8) -> u8 { reg q: u8; if en { q := x; } q }
-block tail(clk, x: u8 @2) -> u8 @3 { reg q: u8; q := x; q }
-block wrap(clk, en: bool, x: u8) -> u8 {
-    let q = save(en, x); let y = tail(q); y
-}
-block top(clk, en: bool @4, x: u8 @4) -> u8 @6 {
-    let y = wrap(en, x); y
-}
-"#;
-        check_bx(source)?;
-        check_bx(&source.replace("wrap(en, x)", "wrap(en, u8:7)"))?;
-        assert_eq!(
-            check_bx(&source.replace("en: bool @4", "en: bool @3")).unwrap_err(),
-            "block 'top': instance 'y.out': write to 'q' has guard at cycle 3 and data at cycle 4"
-        );
-        assert_eq!(
-            check_bx(&source.replace("wrap(en, x)", "wrap(true, u8:7)")).unwrap_err(),
-            "block 'top': cannot infer output cycle for this expression"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn input_annotations_still_constrain_an_inferred_child() -> Result<(), String> {
-        let source = r#"
-block pick(clk, x: u8, r: u8 @1) -> u8 { r }
-block top(clk, a: u8 @4, b: u8 @5) -> u8 @5 { let y = pick(a, b); y }
-"#;
-        check_bx(source)?;
-        assert_eq!(
-            check_bx(&source.replace("b: u8 @5", "b: u8 @4")).unwrap_err(),
-            "block 'top': instance 'y.out': instance 'pick' input 'r': expected parent cycle 5, got 4"
-        );
-        Ok(())
     }
 
     #[test]
@@ -5760,8 +5652,7 @@ block top(clk, x: u8 @18446744073709551615) -> u8 @0 {
         let checked = check_bx(
             r#"
 block child(clk, x: u8) -> u8 @1 { let w: u8; w = x; w }
-block wrap(clk, x: u8) -> u8 { let y = child(x); y }
-block top(clk, x: u8) -> u8 @1 { let y = wrap(x); y }
+block top(clk, x: u8) -> u8 @1 { let y = child(x); y }
 "#,
         )?;
         let blocks = checked.blocks();
@@ -5770,7 +5661,7 @@ block top(clk, x: u8) -> u8 @1 { let y = wrap(x); y }
             Some("expected cycle 1, got cycle 0")
         );
         assert_eq!(
-            blocks[2].timing_error.as_deref(),
+            blocks[1].timing_error.as_deref(),
             Some("cannot infer output cycle for this expression")
         );
         Ok(())
