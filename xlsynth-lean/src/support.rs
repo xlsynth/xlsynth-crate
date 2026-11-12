@@ -20,10 +20,8 @@ const XLSYNTH_LEAN: Module = (
     include_bytes!("../lean/XlsynthLean.lean"),
 );
 const EVAL_MAIN: Module = ("EvalMain.lean", include_bytes!("../lean/EvalMain.lean"));
-const IR: Module = (
-    "XlsynthLean/IR.lean",
-    include_bytes!("../lean/XlsynthLean/IR.lean"),
-);
+pub(crate) const IR_SOURCE: &str = include_str!("../lean/XlsynthLean/IR.lean");
+const IR: Module = ("XlsynthLean/IR.lean", IR_SOURCE.as_bytes());
 const TOOLCHAIN_PATH: &str = "lean-toolchain";
 
 /// The modules a consumer needs, in Lean compilation order, plus the common

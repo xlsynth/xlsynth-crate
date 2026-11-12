@@ -7,6 +7,26 @@ use xlsynth_pir::ir_parser::Parser;
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
 
+fn check_standalone_lean(source: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("Block.lean");
+    std::fs::write(&path, source).unwrap();
+    let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
+    let output = std::process::Command::new(lean)
+        .current_dir(directory.path())
+        .env_remove("LEAN_SYSROOT")
+        .env_remove("LEAN_PATH")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Lean failed to check the emitted block:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // Verifies: Raw emission preserves old outputs, simultaneous writes, and
 // assertions. Catches: Port adaptation that changes clock-step semantics or
 // drops assertions.
@@ -14,13 +34,105 @@ const BLOCK: &str = include_str!("fixtures/block_step.ir");
 fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertions() {
     let package = Parser::new(BLOCK).parse_and_validate_package().unwrap();
     let source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    // Compare the whole model, including imports and helper namespace
+    // placement. The shared IR library is already maintained as Lean
+    // source.
+    let start = "namespace XlsBlock.IR\n";
+    let end = "\nend XlsBlock.IR\n";
+    let (header, support_and_model) = source.split_once(start).unwrap();
+    let (_, model) = support_and_model.split_once(end).unwrap();
+    let model = format!("{header}{start}-- Shared IR library omitted.{end}{model}");
     // The golden reads output/a and next/b from old_a, next/a from old_b,
     // gives reset precedence over enable, and retains the unused assertion.
     // The checked-in fixture's license is metadata, not generated user text.
     let golden = include_str!("fixtures/block_step.lean")
         .strip_prefix("-- SPDX-License-Identifier: Apache-2.0\n\n")
         .unwrap();
-    pretty_assertions::assert_eq!(source, golden);
+    pretty_assertions::assert_eq!(model, golden);
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn evaluates_swap_reset_and_disconnected_assertion_in_lean() {
+    let package = Parser::new(BLOCK).parse_and_validate_package().unwrap();
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    source.push_str(
+        r#"
+open XlsBlock
+def sample (rst en : BitVec 1) :=
+  let v := eval { a := 2, b := 3 } { rst := rst, en := en }
+  (v.output.out, v.next.a, v.next.b, v.assertions.checked)
+example : sample 1 1 = (2, 3, 2, true) := by decide
+example : sample 0 1 = (2, 1, 2, true) := by decide
+example : sample 1 0 = (2, 2, 2, false) := by decide
+"#,
+    );
+    check_standalone_lean(&source);
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn lowering_carry_preserves_source_identity_and_port_order() {
+    let package = Parser::new(
+        r#"package adder
+file_number 0 "adder.x"
+top block adder(rhs: bits[4], cin: bits[1], lhs: bits[4], copied: bits[4], cout: bits[1]) {
+  lhs: bits[4] = input_port(name=lhs, id=1)
+  rhs: bits[4] = input_port(name=rhs, id=2)
+  cin: bits[1] = input_port(name=cin, id=3)
+  carry: bits[1] = ext_carry_out(lhs, rhs, cin, id=40, pos=[(0,2,3)])
+  cout: () = output_port(carry, name=cout, id=41)
+  copied: () = output_port(rhs, name=copied, id=42)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    assert!(
+        source
+            .lines()
+            .any(|line| line.contains("node carry [id=40,") && line.contains("adder.x:3:4")),
+        "missing source identity for the lowered carry:\n{source}"
+    );
+
+    // Positional construction and matching use the port list in the block
+    // header. Both inputs and outputs appear in a different order in the body.
+    source.push_str(
+        r#"
+open XlsBlock
+def outputs (cin : BitVec 1) :=
+  let ⟨copied, cout⟩ := observe {} (Input.Constructors.mk 3 cin 12)
+  (copied, cout)
+example : outputs 0 = (3, 0) := by decide
+example : outputs 1 = (3, 1) := by decide
+"#,
+    );
+    check_standalone_lean(&source);
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn indexes_array_literal_of_tuples_with_zero_width_field() {
+    let package = Parser::new(
+        r#"package lookup
+top block lookup(i: bits[2], y: (bits[0], bits[4])) {
+  i: bits[2] = input_port(name=i, id=1)
+  values: (bits[0], bits[4])[2] = literal(value=[(0, 2), (0, 9)], id=2)
+  selected: (bits[0], bits[4]) = array_index(values, indices=[i], id=3)
+  y: () = output_port(selected, name=y, id=4)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    source.push_str(
+        r#"
+open XlsBlock
+example : (observe {} { i := 0 }).y = (0#0, 2#4, ()) := by decide
+example : (observe {} { i := 3 }).y = (0#0, 9#4, ()) := by decide
+"#,
+    );
+    check_standalone_lean(&source);
 }
 
 // Each field becomes a projection in the Lean structure's namespace.
@@ -102,21 +214,73 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
 #check Evaluation.Constructors.mk
 "#,
     );
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("Ports.lean");
-    std::fs::write(&path, source).unwrap();
+    check_standalone_lean(&source);
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn tuple_one_hot_select_agrees_with_pir_for_functions_and_blocks() {
+    use xlsynth_lean::{LeanEvaluator, LeanModuleName, export_ir_function};
+    use xlsynth_pir::{
+        IrValue,
+        block_eval::{BlockEvaluator, RegisterInit},
+        ir_eval::eval_fn_in_package_value,
+    };
+
+    let package = Parser::new(
+        r#"package selection
+fn select_pair(s: bits[2] id=1, a: (bits[4], bits[4]) id=2, b: (bits[4], bits[4]) id=3) -> (bits[4], bits[4]) {
+  ret chosen: (bits[4], bits[4]) = one_hot_sel(s, cases=[a, b], id=4)
+}
+top block select_ports(s: bits[2], a: (bits[4], bits[4]), b: (bits[4], bits[4]), y: (bits[4], bits[4])) {
+  s: bits[2] = input_port(name=s, id=5)
+  a: (bits[4], bits[4]) = input_port(name=a, id=6)
+  b: (bits[4], bits[4]) = input_port(name=b, id=7)
+  chosen: (bits[4], bits[4]) = one_hot_sel(s, cases=[a, b], id=8)
+  y: () = output_port(chosen, name=y, id=9)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let args = [
+        "bits[2]:3",
+        "(bits[4]:1, bits[4]:2)",
+        "(bits[4]:4, bits[4]:8)",
+    ]
+    .map(|s| IrValue::parse_typed(s).unwrap())
+    .to_vec();
+    // Both selector bits are set, so the result ORs the cases field by field.
+    let expected = IrValue::parse_typed("(bits[4]:5, bits[4]:10)").unwrap();
+    let pir_function = package.get_fn("select_pair").unwrap();
+    assert_eq!(
+        eval_fn_in_package_value(&package, pir_function, &args),
+        expected
+    );
+    let pir_block = BlockEvaluator::prepare(&package, "select_ports").unwrap();
+    let state = pir_block.initial_state(RegisterInit::AllZeros).unwrap();
+    assert_eq!(
+        pir_block.step(&state, &args).unwrap().outputs.as_slice(),
+        std::slice::from_ref(&expected)
+    );
+
+    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    source.push_str(
+        r#"
+open XlsBlock
+example : (observe {} { s := 3, a := (1, 2, ()), b := (4, 8, ()) }).y = (5, 10, ()) := by decide
+"#,
+    );
+    check_standalone_lean(&source);
+
+    let module = LeanModuleName::new("Generated.Selection").unwrap();
+    let function = export_ir_function(&package, Some("select_pair"), &module).unwrap();
     let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
-    let output = std::process::Command::new(lean)
-        .current_dir(directory.path())
-        .env_remove("LEAN_SYSROOT")
-        .arg(&path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "Lean failed to check the emitted port projections:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+    let evaluator = LeanEvaluator::new(lean).unwrap();
+    assert_eq!(
+        evaluator
+            .eval_ir_function_batch(&function, &[args])
+            .unwrap(),
+        [expected]
     );
 }
 
@@ -165,14 +329,19 @@ fn emission_rejects_asynchronous_reset_and_unsupported_operations() {
         .unwrap();
     let error = emit(&asynchronous, asynchronous.get_top_block().unwrap()).unwrap_err();
     assert!(format!("{error:#}").contains("asynchronous reset"));
-    let unsupported = BLOCK.replace("package swap", "package swap\n\nfile_number 0 \"counter.x\"").replace(
-        "  out: () = output_port(old_a,",
-        "  reversed: bits[2] = reverse(old_a, id=10, pos=[(0,1,2)])\n  out: () = output_port(reversed,",
-    );
+    let unsupported = BLOCK
+        .replace(
+            "package swap",
+            "package swap\n\nfile_number 0 \"counter.x\"",
+        )
+        .replace(
+            "  out: ()",
+            "  hit: () = cover(en, label=\"hit\", id=10, pos=[(0,1,2)])\n  out: ()",
+        );
     let unsupported = Parser::new(&unsupported)
         .parse_and_validate_package()
         .unwrap();
     let error = emit(&unsupported, unsupported.get_top_block().unwrap()).unwrap_err();
-    assert!(format!("{error:#}").contains("unsupported Lean operation reverse"));
+    assert!(format!("{error:#}").contains("unsupported Lean operation cover"));
     assert!(format!("{error:#}").contains("counter.x:2:3"));
 }

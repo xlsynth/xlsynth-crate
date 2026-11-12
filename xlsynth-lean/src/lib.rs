@@ -17,6 +17,7 @@ mod evaluate;
 mod gate_fn;
 mod ir_fn;
 mod ir_proof;
+mod local_expr;
 mod process;
 mod proof;
 mod support;

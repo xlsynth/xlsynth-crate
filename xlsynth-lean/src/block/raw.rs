@@ -8,15 +8,16 @@
 //! No assertion narrows the input/state domain. Tuples remain typed products;
 //! no enum decoding or payload projection is part of this translation.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use std::fmt::Write;
-use xlsynth_ir_value::{IrFormatPreference, IrValue};
 use xlsynth_pir::{
-    ir::{self, Binop, NaryOp, NodePayload, NodeRef, Register, Type, Unop},
+    ir::{self, NodePayload, NodeRef, Register, Type},
     ir_utils,
 };
 
 use crate::block::BlockContext;
+use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_elaboration_limits};
+use crate::support::IR_SOURCE;
 
 /// Emit a self-contained Lean model of a verified XLS block.
 /// Return an error if the block uses an unsupported operation.
@@ -34,8 +35,8 @@ use crate::block::BlockContext;
 /// `j` second projections followed by a first projection. Tokens are `Unit`.
 /// `reset q x` forces only the reset port and evaluates an ordinary clock; it
 /// does not invent an initial value for unreset storage or clear old outputs.
-/// One-hot selection supports bits only; ordinary and priority selects retain
-/// tuple structure, matching the native reference evaluator's supported subset.
+/// Bits of any width, tokens, tuples and nonempty arrays retain their physical
+/// layout, including for aggregate one-hot and priority selects.
 /// Records derive `Repr`, but whole-record `DecidableEq` is left to callers:
 /// deriving it exceeds Lean's instance-search size limit on nested state.
 /// Unsupported nodes, types, or reset/instance shapes return a source error.
@@ -72,7 +73,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         );
     }
 
-    let graph = block.graph;
+    let graph = &*block.graph;
     let writes = block
         .graph
         .registers
@@ -104,7 +105,8 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         .collect();
     let names: Vec<_> = (0..graph.nodes.len())
         .map(|index| {
-            let source_name = ir::node_textual_id(graph, NodeRef { index });
+            let reference = NodeRef { index };
+            let source_name = ir::node_textual_id(block.source_graph(reference), reference);
             let suffix: String = source_name
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -119,11 +121,15 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         "-- Generated from XLS block {} in package {}.\n\
          -- Exact BitVec values; tuple elements end in Unit.\n\
          -- Outputs read old registers; all writes commit together.\n\
-         -- Source assertions are results, never assumptions.\n\
-         import Std\n\nnamespace XlsBlock\n\n",
+         -- Source assertions are results, never assumptions.\n\n",
         comment(&graph.name),
         comment(block.package_name)
     );
+    // Standalone block modules can be imported alongside function modules.
+    // Both get their helpers from the same Lean declarations.
+    source.push_str(&IR_SOURCE.replace("XlsynthLean.IR", "XlsBlock.IR"));
+    source.push_str("\nnamespace XlsBlock\n\n");
+    write_elaboration_limits(&mut source, [&graph.graph]);
     source.push_str(&record_type(
         "State",
         block
@@ -152,7 +158,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
             validate_lean_member("Assertions", &field)?;
             writeln!(
                 source,
-                "  -- id={}; label={}; message={}\n  {} : Bool",
+                "  -- id={}; label={}; message={}\n  {} : _root_.Bool",
                 node.text_id,
                 comment(label),
                 comment(message),
@@ -175,9 +181,10 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         if !matches!(node.payload, NodePayload::Nil) {
             let context = node_context(block, reference);
             let ty = lean_type(&node.ty).with_context(|| context.clone())?;
-            let expression =
-                node_expression(block, reference, |operand| Ok(names[operand.index].clone()))
-                    .with_context(|| context.clone())?;
+            let expression = node_expression(block, reference, |operand| {
+                Ok(LeanOperand::Atom(names[operand.index].clone()))
+            })
+            .with_context(|| context.clone())?;
             writeln!(source, "  -- {}", comment(&context))?;
             writeln!(
                 source,
@@ -261,23 +268,17 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     Ok(source)
 }
 
-/// Render physical bits, tokens, and tuples, rejecting arrays and zero-width
-/// bits.
+/// Array reads clamp to the last element, so every dimension must be nonempty.
 pub(crate) fn lean_type(ty: &Type) -> Result<String> {
-    match ty {
-        Type::Bits(width) => {
-            ensure!(*width > 0, "bits[0] is outside the supported Lean subset");
-            Ok(format!("BitVec {width}"))
+    fn contains_empty_array(ty: &Type) -> bool {
+        match ty {
+            Type::Array(a) => a.element_count == 0 || contains_empty_array(&a.element_type),
+            Type::Tuple(fields) => fields.iter().any(|field| contains_empty_array(field)),
+            Type::Bits(_) | Type::Token => false,
         }
-        Type::Tuple(elements) => elements
-            .iter()
-            .rev()
-            .try_fold("Unit".to_string(), |tail, element| {
-                Ok(format!("Prod ({}) ({tail})", lean_type(element)?))
-            }),
-        Type::Token => Ok("Unit".to_string()),
-        Type::Array(_) => bail!("arrays are outside the supported Lean subset"),
     }
+    ensure!(!contains_empty_array(ty), "zero-length array in {ty}");
+    Ok(LocalRenderer::Block.lean_type(ty))
 }
 
 /// Lean 4.34.1 generates these declarations in the same namespace as field
@@ -336,43 +337,6 @@ pub(crate) fn record_value(fields: &[(String, String)]) -> String {
     )
 }
 
-/// Preserve tuple order in nested pairs terminated by the unit value.
-pub(crate) fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
-    elements.rev().fold("()".to_string(), |tail, element| {
-        format!("({element}, {tail})")
-    })
-}
-
-/// Project a zero-based tuple position using the nested-pair representation.
-pub(crate) fn tuple_element(tuple: &str, index: usize) -> String {
-    format!("({tuple}){}.1", ".2".repeat(index))
-}
-
-/// Render a physical literal whose type and shape were checked by the parser.
-pub(crate) fn literal(ty: &Type, value: &IrValue) -> Result<String> {
-    match ty {
-        Type::Bits(width) => Ok(format!(
-            "(BitVec.ofNat {width} {})",
-            value
-                .to_bits()
-                .context("literal bits")?
-                .to_string_fmt(IrFormatPreference::Hex, false)
-                .replace('_', "")
-        )),
-        Type::Tuple(types) => {
-            let values = value.get_elements().context("tuple literal elements")?;
-            let elements = types
-                .iter()
-                .zip(&values)
-                .map(|(ty, value)| literal(ty, value))
-                .collect::<Result<Vec<_>>>()?;
-            Ok(tuple_value(elements.into_iter()))
-        }
-        Type::Token => Ok("()".to_string()),
-        Type::Array(_) => bail!("array literal is outside the supported Lean subset"),
-    }
-}
-
 /// Interpret a rendered one-bit value as the Boolean condition that it is set.
 fn predicate(value: &str) -> String {
     format!("({value} == (BitVec.ofNat 1 1))")
@@ -386,149 +350,34 @@ fn predicate(value: &str) -> String {
 pub(crate) fn node_expression(
     block: &BlockContext<'_>,
     reference: NodeRef,
-    operand: impl Fn(NodeRef) -> Result<String>,
+    operand: impl Fn(NodeRef) -> Result<LeanOperand>,
 ) -> Result<String> {
-    let graph = block.graph;
+    let graph = &*block.graph;
     let node = graph.get_node(reference);
     match &node.payload {
         NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
-        // Output values are collected separately in declaration order. The
-        // graph-resident output operation itself has the empty tuple type.
-        NodePayload::OutputPort { .. } => Ok("()".to_string()),
-        NodePayload::Literal(value) => literal(&node.ty, value),
         NodePayload::RegisterRead { register } => {
             ensure!(
-                block.graph.registers.iter().any(|r| r.name == *register),
+                graph.registers.iter().any(|r| r.name == *register),
                 "no declaration for register {register}"
             );
             Ok(format!("q.{}", identifier(register)?))
         }
-        NodePayload::RegisterWrite { .. } => Ok("()".to_string()),
-        NodePayload::Tuple(args) => Ok(tuple_value(
-            args.iter()
-                .map(|r| operand(*r))
-                .collect::<Result<Vec<_>>>()?
-                .into_iter(),
-        )),
-        NodePayload::TupleIndex { tuple, index } => Ok(tuple_element(&operand(*tuple)?, *index)),
-        NodePayload::Unop(Unop::Not, arg) => Ok(format!("BitVec.not {}", operand(*arg)?)),
-        NodePayload::Binop(Binop::Add, lhs, rhs) => {
-            Ok(format!("BitVec.add {} {}", operand(*lhs)?, operand(*rhs)?))
-        }
-        NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) => {
-            let operator = if *op == Binop::Eq { "==" } else { "!=" };
-            Ok(format!(
-                "BitVec.ofBool ({} {operator} {})",
-                operand(*lhs)?,
-                operand(*rhs)?
-            ))
-        }
-        NodePayload::Nary(NaryOp::Concat, args) => {
-            let (first, rest) = args.split_first().context("concat has no operands")?;
-            rest.iter().try_fold(operand(*first)?, |left, right| {
-                Ok(format!("(BitVec.append {left} {})", operand(*right)?))
-            })
-        }
-        NodePayload::Nary(op @ (NaryOp::And | NaryOp::Or | NaryOp::Nor), args) => {
-            let (first, rest) = args
-                .split_first()
-                .context("bitwise operation has no operands")?;
-            let operator = if *op == NaryOp::And { "and" } else { "or" };
-            let reduced = rest.iter().try_fold(operand(*first)?, |left, right| {
-                Ok::<_, anyhow::Error>(format!("(BitVec.{operator} {left} {})", operand(*right)?))
-            })?;
-            Ok(if *op == NaryOp::Nor {
-                format!("BitVec.not {reduced}")
-            } else {
-                reduced
-            })
-        }
-        NodePayload::BitSlice { arg, start, width } => Ok(format!(
-            "BitVec.extractLsb' {start} {width} {}",
-            operand(*arg)?
-        )),
-        NodePayload::SignExt { arg, new_bit_count } => Ok(format!(
-            "BitVec.signExtend {new_bit_count} {}",
-            operand(*arg)?
-        )),
-        NodePayload::Sel {
-            selector,
-            cases,
-            default,
-        } => {
-            // Native/PIR verification checks complete coverage when no default
-            // exists; only that final covered case becomes the last branch.
-            let (fallback, tested) = if let Some(default) = default {
-                (*default, cases.as_slice())
-            } else {
-                let (last, rest) = cases.split_last().context("sel has no cases")?;
-                (*last, rest)
-            };
-            let selector = operand(*selector)?;
-            tested.iter().enumerate().rev().try_fold(
-                operand(fallback)?,
-                |otherwise, (index, case)| {
-                    Ok(format!(
-                        "(if {selector}.toNat == {index} then {} else {otherwise})",
-                        operand(*case)?
-                    ))
-                },
-            )
-        }
-        NodePayload::PrioritySel {
-            selector,
-            cases,
-            default,
-        } => {
-            let fallback = default.context("priority_sel requires an explicit default")?;
-            let selector = operand(*selector)?;
-            cases.iter().enumerate().rev().try_fold(
-                operand(fallback)?,
-                |otherwise, (index, case)| {
-                    Ok(format!(
-                        "(if {selector}.getLsbD {index} then {} else {otherwise})",
-                        operand(*case)?
-                    ))
-                },
-            )
-        }
-        NodePayload::OneHot { arg, lsb_prio } => {
-            let input = operand(*arg)?;
-            let candidate = if *lsb_prio {
-                input.clone()
-            } else {
-                format!("(BitVec.reverse {input})")
-            };
-            let low = format!("(BitVec.and {candidate} (BitVec.neg {candidate}))");
-            let selected = if *lsb_prio {
-                low
-            } else {
-                format!("(BitVec.reverse {low})")
-            };
-            Ok(format!(
-                "BitVec.append (BitVec.ofBool ({input} == 0)) {selected}"
-            ))
-        }
-        NodePayload::OneHotSel { selector, cases } => {
-            let Type::Bits(width) = &node.ty else {
-                bail!("only bits-valued one_hot_sel is supported by Lean")
-            };
-            let selector = operand(*selector)?;
-            cases.iter().enumerate().try_fold(
-                format!("(BitVec.ofNat {width} 0)"),
-                |merged, (index, case)| {
-                    let case = operand(*case)?;
-                    Ok(format!(
-                        "(BitVec.or {merged} (if {selector}.getLsbD {index} then {case} else (BitVec.ofNat {width} 0)))"
-                    ))
-                },
-            )
-        }
-        // Tokens have one value. All assertion predicates are returned
-        // independently, so ignoring token data never drops an obligation.
-        NodePayload::Assert { token, .. } => operand(*token),
-        NodePayload::AfterAll(_) => Ok("()".to_string()),
-        other => bail!("unsupported Lean operation {}", other.get_operator()),
+        // These effects are collected by emit_block, including disconnected
+        // assertions. The output and write nodes themselves have unit type.
+        NodePayload::OutputPort { .. }
+        | NodePayload::RegisterWrite { .. }
+        | NodePayload::AfterAll(_) => Ok("()".to_string()),
+        NodePayload::Assert { token, .. } => Ok(operand(*token)?.into_argument()),
+        other => LocalRenderer::Block
+            .local_rhs(&graph.graph, reference, operand)
+            .map_err(|error| match error {
+                RenderError::Operand(error) => error,
+                RenderError::Invalid(reason) => anyhow::anyhow!("{reason}"),
+                RenderError::Unsupported => {
+                    anyhow::anyhow!("unsupported Lean operation {}", other.get_operator())
+                }
+            }),
     }
 }
 
@@ -575,7 +424,7 @@ fn register_update(
             "(if {} == (BitVec.ofNat 1 {}) then {} else {enabled})",
             names[signal.index],
             u8::from(!behavior.active_low),
-            literal(&register.ty, value)?
+            LocalRenderer::Block.literal(value)
         ))
     } else {
         Ok(enabled)
@@ -596,7 +445,8 @@ pub(crate) fn identifier(source: &str) -> Result<String> {
 /// Describe a node and its available source locations for errors and Lean
 /// comments.
 pub(crate) fn node_context(block: &BlockContext<'_>, reference: NodeRef) -> String {
-    let node = block.graph.get_node(reference);
+    let source_graph = block.source_graph(reference);
+    let node = source_graph.get_node(reference);
     let locations = node
         .pos
         .iter()
@@ -616,7 +466,7 @@ pub(crate) fn node_context(block: &BlockContext<'_>, reference: NodeRef) -> Stri
         .collect::<Vec<_>>();
     format!(
         "node {} [id={}, op={}, type={}]{}",
-        ir::node_textual_id(block.graph, reference),
+        ir::node_textual_id(source_graph, reference),
         node.text_id,
         node.payload.get_operator(),
         node.ty,

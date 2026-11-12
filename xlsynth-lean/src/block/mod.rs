@@ -7,6 +7,8 @@
 //! proofs.
 
 use anyhow::{Context, Result, bail, ensure};
+use std::borrow::Cow;
+use xlsynth_pir::desugar_extensions::desugar_extensions_in_graph;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod raw;
@@ -16,7 +18,8 @@ pub use raw::emit;
 pub(crate) struct BlockContext<'a> {
     pub(crate) package_name: &'a str,
     pub(crate) file_table: &'a ir::FileTable,
-    pub(crate) graph: &'a ir::Block,
+    pub(crate) graph: Cow<'a, ir::Block>,
+    source_block: &'a ir::Block,
 }
 
 impl<'a> BlockContext<'a> {
@@ -29,11 +32,34 @@ impl<'a> BlockContext<'a> {
             graph.name,
             package.name
         );
+        let normalized = if graph
+            .nodes
+            .iter()
+            .any(|node| node.payload.is_extension_op())
+        {
+            let mut lowered = graph.clone();
+            desugar_extensions_in_graph(&mut lowered.graph)
+                .with_context(|| format!("lowering extensions in block {}", graph.name))?;
+            Cow::Owned(lowered)
+        } else {
+            Cow::Borrowed(graph)
+        };
         Ok(Self {
             package_name: &package.name,
             file_table: &package.file_table,
-            graph,
+            graph: normalized,
+            source_block: graph,
         })
+    }
+
+    /// Original nodes keep their indices during lowering. Appended helper
+    /// nodes have fresh text IDs and belong only to the lowered graph.
+    fn source_graph(&self, reference: ir::NodeRef) -> &ir::NodeGraph {
+        if reference.index < self.source_block.nodes.len() {
+            &self.source_block.graph
+        } else {
+            &self.graph.graph
+        }
     }
 }
 

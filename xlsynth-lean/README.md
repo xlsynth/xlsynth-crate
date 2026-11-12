@@ -85,9 +85,10 @@ without a top must contain exactly one block for automatic selection.
 `emit` returns a self-contained Lean module and does not run Lean.
 
 The generated clock step preserves old-state outputs, simultaneous register
-writes, reset precedence and source assertions. Unsupported operations and
-asynchronous resets return errors. The supported subset covers the arbiter and
-operator-control examples; it is not a general XLS translator.
+writes, reset precedence and source assertions. Blocks use the function
+emitter's translation of PIR types, literals and local operations, including
+one-hot selection over tuples and arrays. Block emission reports an error for
+unsupported operations, including function calls, and for asynchronous resets.
 
 ## Evaluate through Lean
 
