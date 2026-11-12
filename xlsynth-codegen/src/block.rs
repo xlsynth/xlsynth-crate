@@ -122,6 +122,7 @@ pub(crate) struct BlockEmitter<'a, 'file> {
 pub(crate) fn emit_package(
     package: &Package,
     options: &BlockCodegenOptions,
+    mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
     let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
@@ -169,6 +170,16 @@ pub(crate) fn emit_package(
         let module = file.add_module(module_name);
         let mut emitter = BlockEmitter::new(package, &blocks, options, block, &mut file, module);
         emitter.emit(&mut child_timings, block.name != top)?;
+        if block.name == top
+            && let Some(names) = top_register_names.take()
+        {
+            names.extend(
+                emitter
+                    .register_refs
+                    .into_iter()
+                    .map(|(name, signal)| (name, emitter.file.logic_ref_name(signal))),
+            );
+        }
     }
 
     Ok(BlockCodegenOutput {

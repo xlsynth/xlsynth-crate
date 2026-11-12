@@ -98,6 +98,7 @@ mod ir2opt;
 mod ir2pipeline;
 mod ir_aig_sharing;
 mod ir_annotate_ranges;
+mod ir_block_eval;
 mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
@@ -184,22 +185,29 @@ fn aug_opt_tuning_args() -> [Arg; 2] {
 
 /// Builds the shared solver-selection argument used by formal subcommands.
 fn solver_arg(help: &'static str) -> Arg {
+    solver_arg_with_toolchain(help, true)
+}
+
+fn solver_arg_with_toolchain(help: &'static str, allow_toolchain: bool) -> Arg {
+    let mut choices = vec![
+        #[cfg(feature = "has-easy-smt")]
+        "z3-binary",
+        #[cfg(feature = "has-easy-smt")]
+        "bitwuzla-binary",
+        #[cfg(feature = "has-easy-smt")]
+        "boolector-binary",
+        "bitwuzla",
+        #[cfg(feature = "has-boolector")]
+        "boolector",
+    ];
+    if allow_toolchain {
+        choices.push("toolchain");
+    }
     Arg::new("solver")
         .long("solver")
         .value_name("SOLVER")
         .help(help)
-        .value_parser([
-            #[cfg(feature = "has-easy-smt")]
-            "z3-binary",
-            #[cfg(feature = "has-easy-smt")]
-            "bitwuzla-binary",
-            #[cfg(feature = "has-easy-smt")]
-            "boolector-binary",
-            "bitwuzla",
-            #[cfg(feature = "has-boolector")]
-            "boolector",
-            "toolchain",
-        ])
+        .value_parser(clap::builder::PossibleValuesParser::new(choices))
         .default_value("bitwuzla")
         .action(ArgAction::Set)
 }
@@ -944,6 +952,9 @@ fn main() {
         )
         .subcommand(bx::bx2ir_command())
         .subcommand(bx::bx2gv_command())
+        .subcommand(bx::bx_test_command())
+        .subcommand(bx::bx_prove_quickcheck_command())
+        .subcommand(bx::bx_prove_invariant_command())
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx-show")
@@ -2706,7 +2717,9 @@ fn main() {
         .subcommand(g8r2gv::command())
         .subcommand(g8r_lean::prepare_command())
         .subcommand(ir_fn_to_lean::command())
-        .subcommand(g8r_lean::check_command())
+        .subcommand(g8r_lean::check_command("g8r-lean-check"))
+        .subcommand(ir_fn_to_lean::prepare_command())
+        .subcommand(g8r_lean::check_command("ir-fn-lean-check"))
         .subcommand(gv_resize::command())
         .subcommand(
             clap::Command::new("g8r2ugv")
@@ -3453,6 +3466,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .action(clap::ArgAction::Append),
                 ),
         )
+        .subcommand(ir_block_eval::command())
         .subcommand(
             clap::Command::new("ir-fn-eval")
                 .about("Interprets an IR function with the provided argument tuple")
@@ -4103,6 +4117,29 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2gv"), vec![]);
             }
         }
+        Some(("bx-test", subm)) => {
+            if let Err(error) = bx::bx_test(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx-test"), vec![]);
+            }
+        }
+        Some(("bx-prove-invariant", subm)) => {
+            if let Err(error) = bx::bx_prove_invariant(subm, &config) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("bx-prove-invariant"),
+                    vec![],
+                );
+            }
+        }
+        Some(("bx-prove-quickcheck", subm)) => {
+            if let Err(error) = bx::bx_prove_quickcheck(subm, &config) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("bx-prove-quickcheck"),
+                    vec![],
+                );
+            }
+        }
         #[cfg(feature = "unstable-dslx-specialize")]
         Some(("dslx-specialize", subm)) => {
             dslx_specialize::handle_dslx_specialize(subm, &config);
@@ -4303,9 +4340,14 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-prepare"), vec![]);
             }
         }
-        Some(("g8r-lean-check", subm)) => {
-            if let Err(e) = g8r_lean::handle_check(subm) {
-                report_cli_error::report_cli_error_and_exit(&e, Some("g8r-lean-check"), vec![]);
+        Some(("ir-fn-lean-prepare", subm)) => {
+            if let Err(e) = ir_fn_to_lean::handle_prepare(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("ir-fn-lean-prepare"), vec![]);
+            }
+        }
+        Some((name @ ("g8r-lean-check" | "ir-fn-lean-check"), subm)) => {
+            if let Err(e) = g8r_lean::handle_check(subm, name == "ir-fn-lean-check") {
+                report_cli_error::report_cli_error_and_exit(&e, Some(name), vec![]);
             }
         }
         Some(("gv-resize", subm)) => {
@@ -4399,6 +4441,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-fn-generate-inputs", subm)) => {
             ir_fn_generate_inputs::handle_ir_fn_generate_inputs(subm, &config);
+        }
+        Some(("ir-block-eval", subm)) => {
+            if let Err(error) = ir_block_eval::run(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("ir-block-eval"), vec![]);
+            }
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);

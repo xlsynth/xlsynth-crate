@@ -14,7 +14,7 @@ use super::{
     FunctionInterface, ImportResolver, MAX_ELABORATION_DEPTH, MAX_SPECIALIZATIONS, MAX_TYPE_SIZE,
     StructTable, TypeResolver, dependency_order, source_type_nodes,
 };
-use crate::ast::{ConstDef, EnumDef, ExternFn, Module, Type};
+use crate::ast::{ConstDef, EnumDef, ExternFn, Module, Type, TypeAlias};
 use crate::typed::BoundParametricValue;
 use crate::typed::{AvailableFunctions, constant_work};
 
@@ -299,6 +299,7 @@ impl<'m> FunctionSpecializations<'m> {
             Struct(usize),
             Extern(&'m ExternFn),
             Enum(&'m EnumDef),
+            Alias(&'m TypeAlias),
             Constant(&'m ConstDef),
             Function(&'m Function),
         }
@@ -307,6 +308,12 @@ impl<'m> FunctionSpecializations<'m> {
             .enums
             .iter()
             .map(|e| (position(&e.name), Definition::Enum(e)))
+            .chain(
+                module
+                    .type_aliases
+                    .iter()
+                    .map(|alias| (position(&alias.name), Definition::Alias(alias))),
+            )
             .chain(
                 module
                     .externs
@@ -340,6 +347,25 @@ impl<'m> FunctionSpecializations<'m> {
         let mut depths = BTreeMap::new();
         for (_, definition) in definitions {
             let function = match definition {
+                Definition::Alias(alias) => {
+                    let mut checker =
+                        BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                    checker.function_registry = Some(self);
+                    checker.function_position = decls.positions.get(alias.name.as_str()).copied();
+                    checker.warning_owner = Some(&alias.name);
+                    checker.zero_binding = decls.zero_binding(&alias.name);
+                    checker.enable_constant_functions();
+                    let ty = checker
+                        .source_type(&alias.ty)
+                        .map_err(|e| format!("type alias '{}': {e}", alias.name))?;
+                    let shape = structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
+                    let copy_work = (shape.source_nodes - 1)
+                        .saturating_add(shape.name_bytes.saturating_sub(alias.name.len()));
+                    decls
+                        .type_aliases
+                        .insert(&alias.name, super::CheckedTypeAlias { ty, copy_work });
+                    continue;
+                }
                 Definition::Struct(index) => {
                     let def = &module.structs[index];
                     if def.is_parametric() {

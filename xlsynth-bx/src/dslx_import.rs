@@ -237,6 +237,11 @@ impl ImportResolver {
         self.structs.is_enum_type(subject, member)
     }
 
+    /// Enum and alias declarations hide a builtin once their use is in scope.
+    pub(crate) fn is_enum_or_alias(&self, subject: &str, member: &str) -> bool {
+        self.structs.is_enum_type(subject, member) || self.structs.is_public_alias(subject, member)
+    }
+
     pub(crate) fn has_public_type(&self, subject: &str, member: &str) -> bool {
         self.structs.has_public_type(subject, member)
     }
@@ -309,7 +314,7 @@ impl ImportResolver {
         }
         self.with_imports(|structs, imports| {
             structs
-                .resolve_nominal_type(subject, member, imports)
+                .resolve_exported_type(subject, member, imports)
                 .map_err(|e| structs.remap_diagnostic(e))
         })
     }
@@ -577,12 +582,7 @@ fn normalize_import_type(
     enums: &[CheckedEnum],
 ) -> Result<(), String> {
     match ty {
-        Type::Bool => {
-            *ty = Type::Bits {
-                signed: false,
-                width: 1,
-            }
-        }
+        Type::Bool => *ty = Type::unsigned(1),
         Type::Tuple(items) => items
             .iter_mut()
             .try_for_each(|item| normalize_import_type(item, structs, enums))?,
@@ -591,9 +591,9 @@ fn normalize_import_type(
             name,
             signed,
             width,
-        } if !enums.iter().any(|def| {
-            def.name == *name && def.signed == *signed && def.width == *width && def.public
-        }) =>
+        } if !enums
+            .iter()
+            .any(|def| def.name == *name && def.signed == *signed && def.width == *width) =>
         {
             return Err(format!(
                 "unsupported nominal type '{name}' in imported function signature"
@@ -645,8 +645,42 @@ impl ProbeImports {
 
     /// Render nominal arguments using aliases valid in the generated module.
     fn render_type(&mut self, ty: &Type, structs: &ImportedStructs) -> Result<String, String> {
+        self.render_probe_type(ty, structs, false)
+    }
+
+    /// Private nominal spellings can reproduce an aggregate's constexpr
+    /// contents or supply a typed leaf for native argument inference.
+    fn render_probe_type(
+        &mut self,
+        ty: &Type,
+        structs: &ImportedStructs,
+        aggregate_value: bool,
+    ) -> Result<String, String> {
+        if aggregate_value
+            && let Some((subject, member)) = structs
+                .value_spelling(ty)
+                .and_then(|name| name.split_once("::"))
+        {
+            return Ok(self.qualify(subject, member));
+        }
+        if matches!(ty, Type::Array { .. } | Type::Tuple(_))
+            && let Some((subject, member)) = structs
+                .aggregate_spelling(ty)
+                .and_then(|p| p.split_once("::"))
+        {
+            return Ok(self.qualify(subject, member));
+        }
         match ty {
             Type::Enum { name, .. } => {
+                if !structs
+                    .enum_definitions()
+                    .iter()
+                    .any(|def| def.name == *name && def.public)
+                {
+                    return Err(format!(
+                        "unsupported nominal type '{name}' in imported function signature"
+                    ));
+                }
                 let (subject, member) = name
                     .split_once("::")
                     .ok_or_else(|| format!("missing DSLX import for enum '{name}'"))?;
@@ -662,14 +696,15 @@ impl ProbeImports {
             Type::Tuple(items) => {
                 let members = items
                     .iter()
-                    .map(|t| self.render_type(t, structs))
+                    .map(|t| self.render_probe_type(t, structs, aggregate_value))
                     .collect::<Result<Vec<_>, _>>()?;
                 let trailing = if members.len() == 1 { "," } else { "" };
                 Ok(format!("({}{trailing})", members.join(", ")))
             }
-            Type::Array { element, size } => {
-                Ok(format!("{}[{size}]", self.render_type(element, structs)?))
-            }
+            Type::Array { element, size } => Ok(format!(
+                "{}[{size}]",
+                self.render_probe_type(element, structs, aggregate_value)?
+            )),
             Type::Bits { .. } | Type::Bool => Ok(ty.to_string()),
             Type::Applied { name, .. }
             | Type::ParametricStruct { name, .. }

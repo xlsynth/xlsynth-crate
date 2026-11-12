@@ -164,11 +164,24 @@ impl BodyChecker<'_, '_> {
         };
         let evidence = match expr {
             Expr::Tuple(items) => NativeDataArg::Tuple(group(self, items)?),
-            Expr::Array(items) => NativeDataArg::Array(group(self, items)?),
-            Expr::For(fold) if fold.annotation.is_none() && has_aggregate_literal(&fold.seed) => {
+            Expr::Array(items) => NativeDataArg::Array {
+                members: group(self, items)?,
+                has_ellipsis: false,
+            },
+            Expr::ArrayLiteral {
+                members,
+                annotation: None,
+                has_ellipsis,
+            } => NativeDataArg::Array {
+                members: group(self, members)?,
+                has_ellipsis: *has_ellipsis,
+            },
+            _ if let Some(seed) = expr.unannotated_loop_seed()
+                && has_aggregate_literal(seed) =>
+            {
                 // The caller's expected accumulator type reaches the seed as
                 // well as the loop body during final elaboration.
-                self.import_operand(&fold.seed, child)?.into_evidence()
+                self.import_operand(seed, child)?.into_evidence()
             }
             Expr::If {
                 then_value,

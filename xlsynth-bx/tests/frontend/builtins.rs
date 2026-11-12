@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::error::Error;
 use std::fs;
 
@@ -33,10 +34,7 @@ block sample(clk, x: u8) -> (u8, u8, u8) {
     (lanes::FIRST, lanes::reversed(x), rev(x))
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let package = compile_with_options(
         source,
         empty_package("test"),
@@ -63,10 +61,7 @@ fn update_builtin_yields_to_a_struct_only_after_it_is_visible() -> Result<(), Bo
         root.path().join("dslx_types.x"),
         format!("pub {declaration}"),
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let block = r#"
 #[allow(combinational_block)]
 pub block sample(clk, xs: u8[2]) -> u8[2] { update(xs, u1:1, u8:3) }

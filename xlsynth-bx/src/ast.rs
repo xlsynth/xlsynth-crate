@@ -133,6 +133,24 @@ pub enum Type {
     },
 }
 
+impl Type {
+    /// Construct an unsigned bit-vector type of the given width.
+    pub(crate) fn unsigned(width: usize) -> Self {
+        Self::Bits {
+            signed: false,
+            width,
+        }
+    }
+
+    /// Construct an array type from its element type and length.
+    pub(crate) fn array(element: Type, size: usize) -> Self {
+        Self::Array {
+            element: Box::new(element),
+            size,
+        }
+    }
+}
+
 /// A typed name in a parameter list or struct declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Param {
@@ -163,6 +181,14 @@ impl StructDef {
 pub struct EnumMember {
     pub name: String,
     pub value: Expr,
+}
+
+/// A module-level name for a concrete value type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeAlias {
+    pub name: String,
+    pub public: bool,
+    pub ty: Type,
 }
 
 /// A nominal bits-backed type with ordered member initializers.
@@ -444,6 +470,13 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// An array with an explicit type or a trailing ellipsis that repeats
+    /// its final member up to the declared size.
+    ArrayLiteral {
+        annotation: Option<Type>,
+        members: Vec<Expr>,
+        has_ellipsis: bool,
+    },
     Struct {
         name: String,
         fields: Vec<(String, Expr)>,
@@ -541,6 +574,81 @@ pub enum Expr {
     },
     UnrollFor(Box<UnrollFor>),
     For(Box<ForLoop>),
+}
+
+/// The argument syntax written on a struct constructor.
+#[derive(Clone, Copy)]
+pub(crate) enum StructLiteralArgs<'a> {
+    Omitted,
+    Integers(&'a [u32]),
+    Expressions(&'a [Expr]),
+    Types(&'a [Type]),
+}
+
+/// A borrowed view of a struct constructor's arguments, fields, and splat.
+pub(crate) struct StructLiteral<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) args: StructLiteralArgs<'a>,
+    pub(crate) fields: &'a [(String, Expr)],
+    pub(crate) base: Option<&'a StructSplat>,
+}
+
+impl Expr {
+    /// Borrow the common parts of a struct literal, preserving its argument
+    /// syntax.
+    pub(crate) fn struct_literal(&self) -> Option<StructLiteral<'_>> {
+        let (name, args, fields, base) = match self {
+            Self::Struct { name, fields, base } => (name, StructLiteralArgs::Omitted, fields, base),
+            Self::AppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Integers(args), fields, base),
+            Self::ParametricStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Expressions(args), fields, base),
+            Self::TypeAppliedStruct {
+                name,
+                args,
+                fields,
+                base,
+            } => (name, StructLiteralArgs::Types(args), fields, base),
+            _ => return None,
+        };
+        Some(StructLiteral {
+            name,
+            args,
+            fields,
+            base: base.as_deref(),
+        })
+    }
+
+    /// A loop without an accumulator annotation takes its carry type from its
+    /// seed.
+    pub(crate) fn unannotated_loop_seed(&self) -> Option<&Expr> {
+        match self {
+            Self::For(fold) if fold.annotation.is_none() => Some(&fold.seed),
+            Self::UnrollFor(fold) if fold.annotation.is_none() => Some(&fold.seed),
+            _ => None,
+        }
+    }
+
+    /// The written elements and fill flag of an array without an explicit type.
+    pub(crate) fn unannotated_array(&self) -> Option<(&[Expr], bool)> {
+        match self {
+            Self::Array(members) => Some((members, false)),
+            Self::ArrayLiteral {
+                annotation: None,
+                members,
+                has_ellipsis,
+            } => Some((members, *has_ellipsis)),
+            _ => None,
+        }
+    }
 }
 
 /// An array mapped by an inline unary lambda. The checker verifies that the
@@ -657,6 +765,103 @@ pub struct SourcePosition {
     pub column: usize,
 }
 
+/// Function tests evaluate pure expressions. Block tests can drive and clock
+/// hardware.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TestKind {
+    Function,
+    Block,
+}
+
+/// A property block's random inputs and its source-level predicate result type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuickCheckSignature {
+    pub params: Vec<Param>,
+    pub result: Type,
+}
+
+/// A source test with its declared name and ordered procedural body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestDecl {
+    pub name: String,
+    pub kind: TestKind,
+    pub position: SourcePosition,
+    pub quickcheck: Option<QuickCheckSignature>,
+    pub statements: Vec<TestStmt>,
+    /// Module names referenced in annotations replaced by an outer annotation.
+    pub overwritten_literal_types: BTreeSet<String>,
+}
+
+/// A named Boolean fact checked on each observation of an invariant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvariantLemma {
+    pub name: String,
+    pub position: SourcePosition,
+}
+
+impl InvariantLemma {
+    /// Capture the marked binding before later lets can shadow its spelling.
+    /// A dot cannot occur in a source BX binding identifier.
+    pub(crate) fn observation_name(index: usize) -> String {
+        format!("bx.lemma.{index}")
+    }
+}
+
+/// A private clocked property with named lemmas sampled in the same cycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvariantDecl {
+    pub block: Block,
+    pub position: SourcePosition,
+    pub lemmas: Vec<InvariantLemma>,
+    pub overwritten_literal_types: BTreeSet<String>,
+}
+
+/// One test action and the location used to report its outcome.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TestStmt {
+    pub position: SourcePosition,
+    pub kind: TestStmtKind,
+}
+
+/// Procedural operations available inside BX test declarations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TestStmtKind {
+    /// The trailing boolean expression of a quickcheck block.
+    Property(Expr),
+    Reg {
+        name: String,
+        ty: Type,
+        /// An omitted initializer drives the type's all-zero value.
+        init: Option<Expr>,
+    },
+    Let(LetBinding),
+    Assign {
+        name: String,
+        value: Expr,
+    },
+    Tick {
+        reset: Option<Expr>,
+    },
+    Assert {
+        predicate: Expr,
+        label: Option<String>,
+    },
+    AssertEq {
+        actual: Expr,
+        expected: Expr,
+    },
+    For {
+        pattern: BindingPattern,
+        iterable: ForIterable,
+        body: Vec<TestStmt>,
+    },
+    If {
+        condition: Expr,
+        then_body: Vec<TestStmt>,
+        else_body: Vec<TestStmt>,
+    },
+}
+
 /// The byte range of a construct within a BX source file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SourceSpan {
@@ -750,17 +955,31 @@ pub struct Module {
     /// `#![require_block_timing]` requires output timing on this file's block
     /// definitions.
     pub require_block_timing: bool,
+    /// `#![require_define_before_use]` requires this file's declarations to
+    /// precede their uses.
+    pub require_define_before_use: bool,
     /// Bound names in declaration order, including each leaf of a use tree.
+    /// AST callers opting into `require_define_before_use` must list every
+    /// module declaration and use binding exactly once.
     pub declaration_order: Vec<String>,
     /// Explicit warning allowances on declarations other than block
     /// definitions.
     pub declaration_allowances: BTreeMap<String, BTreeSet<BxWarningKind>>,
+    /// Module references in literal annotations replaced by an outer
+    /// annotation, grouped by the declaration that used them. A bare name must
+    /// denote a type. A qualified name requires only its head to be in scope.
+    pub overwritten_literal_types: BTreeMap<String, BTreeSet<String>>,
     pub uses: Vec<UsePath>,
     pub structs: Vec<StructDef>,
+    pub type_aliases: Vec<TypeAlias>,
     pub enums: Vec<EnumDef>,
     pub constants: Vec<ConstDef>,
     pub externs: Vec<ExternFn>,
     pub functions: Vec<Function>,
     pub extern_blocks: Vec<ExternBlock>,
     pub blocks: Vec<Block>,
+    /// Tests declared in this source file, in execution order.
+    pub tests: Vec<TestDecl>,
+    /// Private property circuits compiled by the verification commands.
+    pub invariants: Vec<InvariantDecl>,
 }

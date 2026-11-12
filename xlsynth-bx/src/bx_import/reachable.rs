@@ -6,11 +6,49 @@ use std::collections::BTreeSet;
 
 use super::library_item;
 use crate::typed::{
-    CheckedBlock, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind as K, TypedIterable,
-    TypedMatchPattern,
+    CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr,
+    TypedExprKind as K, TypedIterable, TypedMatchPattern,
 };
 
 impl CheckedModule {
+    /// Whether these hardware roots reach a function with extra pure-test
+    /// observations. Follow the same expressions and calls hardware emits.
+    pub(crate) fn blocks_reach_test_discards(&self, roots: impl Iterator<Item = String>) -> bool {
+        let mut used = Dependencies {
+            named: roots.collect(),
+            ..Default::default()
+        };
+        used.visit_blocks(&self.blocks);
+        for function in self.functions.iter().rev() {
+            if used.named.contains(&function.name) {
+                if self.functions_with_test_discards.contains(&function.name) {
+                    return true;
+                }
+                used.function(function, false);
+            }
+        }
+        false
+    }
+
+    /// Select the functions whose discarded fields execute in a pure test.
+    /// Visit callers before their callees, including calls inside those fields.
+    pub(crate) fn resolve_pure_test_dependencies(&mut self, harnesses: BTreeSet<String>) {
+        let mut used = Dependencies {
+            named: harnesses,
+            ..Default::default()
+        };
+        for function in self.functions.iter().rev() {
+            if used.named.contains(&function.name) {
+                used.has_test_discards = false;
+                used.function(function, true);
+                if used.has_test_discards {
+                    self.functions_with_test_discards
+                        .insert(function.name.clone());
+                }
+            }
+        }
+    }
+
     /// Retain the root's definitions and the library bodies and externs they
     /// call. Return the DSLX specialization IDs needed by those bodies.
     pub(crate) fn retain_library_dependencies(&mut self) -> BTreeSet<usize> {
@@ -26,21 +64,17 @@ impl CheckedModule {
             });
         let mut used = Dependencies {
             named: roots.map(str::to_owned).collect(),
-            dslx: BTreeSet::new(),
+            ..Default::default()
         };
         // Both collections are already in dependency order. Visit each
         // caller before its children, then visit functions called by blocks.
-        for block in self.blocks.iter().rev() {
-            if used.named.contains(&block.name) {
-                used.block(block);
-            }
-        }
+        used.visit_blocks(&self.blocks);
         for function in self.functions.iter().rev() {
             if used.named.contains(&function.name) {
-                let expressions = std::iter::once(&function.output)
-                    .chain(function.bindings.iter().map(|b| &b.value))
-                    .collect();
-                used.expressions(expressions);
+                used.function(
+                    function,
+                    self.functions_with_test_discards.contains(&function.name),
+                );
             }
         }
         self.blocks.retain(|b| used.named.contains(&b.name));
@@ -58,12 +92,49 @@ impl CheckedModule {
 
 /// Concrete BX callees, child blocks and DSLX specializations in emitted
 /// bodies.
+#[derive(Default)]
 struct Dependencies {
     named: BTreeSet<String>,
     dslx: BTreeSet<usize>,
+    has_test_discards: bool,
 }
 
 impl Dependencies {
+    /// Checked blocks are ordered child-first. Walking backwards discovers
+    /// each reachable child before its turn and gathers the functions it calls.
+    fn visit_blocks(&mut self, blocks: &[CheckedBlock]) {
+        for block in blocks.iter().rev() {
+            if self.named.contains(&block.name) {
+                self.block(block);
+            }
+        }
+    }
+
+    /// Follow a function's result and the bindings that its lowering emits.
+    fn function(&mut self, function: &CheckedFunction, evaluate_discards: bool) {
+        let mut expressions = vec![&function.output];
+        self.bindings(&function.bindings, evaluate_discards, &mut expressions);
+        self.expressions(expressions, evaluate_discards);
+    }
+
+    /// Queue the emitted initializers and record any observed test discard.
+    fn bindings<'a>(
+        &mut self,
+        bindings: &'a [CheckedBinding],
+        evaluate_discards: bool,
+        pending: &mut Vec<&'a TypedExpr>,
+    ) {
+        for binding in bindings {
+            if binding.is_test_discard() {
+                if !evaluate_discards {
+                    continue;
+                }
+                self.has_test_discards = true;
+            }
+            pending.push(&binding.value);
+        }
+    }
+
     /// A block can instantiate children and call functions from its wires,
     /// enables and output expression.
     fn block(&mut self, block: &CheckedBlock) {
@@ -89,11 +160,11 @@ impl Dependencies {
                 }
             }
         }
-        self.expressions(expressions);
+        self.expressions(expressions, false);
     }
 
     /// Follow checked calls, including those in callback and iteration bodies.
-    fn expressions(&mut self, mut pending: Vec<&TypedExpr>) {
+    fn expressions(&mut self, mut pending: Vec<&TypedExpr>, evaluate_discards: bool) {
         while let Some(expr) = pending.pop() {
             match &expr.kind {
                 K::Call { name, args } => {
@@ -149,7 +220,7 @@ impl Dependencies {
                 }
                 K::Map(map) => {
                     pending.extend([&map.array, &map.output]);
-                    pending.extend(map.bindings.iter().map(|b| &b.value));
+                    self.bindings(&map.bindings, evaluate_discards, &mut pending);
                 }
                 K::For(fold) => {
                     pending.push(&fold.seed);
@@ -158,7 +229,7 @@ impl Dependencies {
                             pending.push(array);
                         }
                         pending.push(&fold.output);
-                        pending.extend(fold.bindings.iter().map(|b| &b.value));
+                        self.bindings(&fold.bindings, evaluate_discards, &mut pending);
                     }
                 }
                 K::Name(_)

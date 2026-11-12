@@ -3,6 +3,7 @@
 //! Load BX libraries in dependency order and resolve names in their declaring
 //! module.
 
+mod declaration_order;
 mod lookup;
 mod names;
 mod reachable;
@@ -13,10 +14,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::ImportOptions;
-use crate::ast::{FunctionParametricRef, Module, UsePath};
+use crate::ast::{FunctionParametricRef, Module, TestKind, UsePath};
 use crate::check::MAX_ELABORATION_DEPTH;
 use crate::import_structs::DslxSourceLoader;
 use crate::parser;
+use declaration_order::DeclarationOrder;
 use lookup::{BxUse, UseLookup};
 
 pub(crate) use lookup::validate_use_path;
@@ -42,8 +44,9 @@ pub(crate) const BUILTIN_MAP: &str = "$builtin$map";
 struct Export {
     name: String,
     parametrics: Vec<ParametricKind>,
-    is_enum: bool,
+    can_qualify_member: bool,
     is_struct: bool,
+    overrides_zero_builtin: bool,
     has_type_params: bool,
 }
 
@@ -56,11 +59,11 @@ enum ParametricKind {
 }
 
 impl Export {
-    /// Enum members inherit the visibility of their declaring type.
+    /// Enum members inherit the visibility of the enum or an alias naming it.
     fn reference(&self, member: Option<&str>) -> Option<String> {
         match member {
             None => Some(self.name.clone()),
-            Some(member) if self.is_enum => Some(format!("{}::{member}", self.name)),
+            Some(member) if self.can_qualify_member => Some(format!("{}::{member}", self.name)),
             Some(_) => None,
         }
     }
@@ -80,11 +83,33 @@ enum Binding {
     Dslx(String),
 }
 
+/// The callable that can shadow a typed zero in this source file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ZeroBinding {
+    Intrinsic,
+    BxFunction,
+    ExternOrDslx,
+}
+
+/// Syntax that distinguishes enum values, named callees, and builtin fallbacks.
+#[derive(Clone, Copy)]
+enum ReferenceKind<'a> {
+    Name,
+    Value,
+    Builtin(&'a str),
+}
+
 /// Bindings available in one file before its declarations are linked together.
 struct Names {
     subject: Option<String>,
+    order: Option<DeclarationOrder>,
+    /// The unlinked checker handles ordinary binding errors on the original
+    /// AST.
+    verification_only: bool,
+    zero_binding: ZeroBinding,
     definitions: BTreeSet<String>,
-    enums: BTreeSet<String>,
+    /// A type alias can qualify a member if the checker resolves it to an enum.
+    enums_or_aliases: BTreeSet<String>,
     structs: BTreeSet<String>,
     type_structs: BTreeSet<String>,
     templates: BTreeMap<String, Vec<ParametricKind>>,
@@ -104,6 +129,7 @@ impl Names {
             .iter()
             .map(|d| &d.name)
             .chain(module.enums.iter().map(|d| &d.name))
+            .chain(module.type_aliases.iter().map(|d| &d.name))
             .chain(module.functions.iter().map(|d| &d.name))
             .chain(module.constants.iter().map(|d| &d.name))
             .chain(module.blocks.iter().map(|d| &d.name))
@@ -142,10 +168,36 @@ impl Names {
                 templates.insert(b.name.clone(), b.parametric_bindings().map(kind).collect());
             }
         }
+        let positions: BTreeMap<_, _> = module
+            .declaration_order
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+
+        let zero_binding = if module.functions.iter().any(|f| f.name == "zero!")
+            || matches!(uses.get("zero!"), Some(Binding::Member(export)) if export.overrides_zero_builtin)
+        {
+            ZeroBinding::BxFunction
+        } else if module.externs.iter().any(|f| f.name == "zero!")
+            || matches!(uses.get("zero!"), Some(Binding::Dslx(_)))
+        {
+            ZeroBinding::ExternOrDslx
+        } else {
+            ZeroBinding::Intrinsic
+        };
         Ok(Self {
             subject: subject.map(str::to_owned),
+            order: None,
+            verification_only: false,
+            zero_binding,
             definitions,
-            enums: module.enums.iter().map(|d| d.name.clone()).collect(),
+            enums_or_aliases: module
+                .enums
+                .iter()
+                .map(|d| d.name.clone())
+                .chain(module.type_aliases.iter().map(|d| d.name.clone()))
+                .collect(),
             structs: module.structs.iter().map(|d| d.name.clone()).collect(),
             type_structs: module
                 .structs
@@ -155,13 +207,22 @@ impl Names {
                 .collect(),
             templates,
             uses,
-            positions: module
-                .declaration_order
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.clone(), i))
-                .collect(),
+            positions,
         })
+    }
+
+    /// Enable source-reference collection only for the initial pass over an
+    /// opted-in file. Subsequent elaboration uses the ordinary namespace.
+    fn for_source(
+        module: &Module,
+        library: Option<&BxUse>,
+        uses: BTreeMap<String, Binding>,
+    ) -> Result<Self, String> {
+        let mut names = Self::new(module, library.map(|lib| lib.subject.as_str()), uses)?;
+        if module.require_define_before_use {
+            names.order = Some(DeclarationOrder::new(module, &names, library)?);
+        }
+        Ok(names)
     }
 
     fn declared(&self, name: &str) -> String {
@@ -182,21 +243,46 @@ impl Names {
         }
     }
 
-    /// Resolve one free reference before it can see another file's bindings.
-    fn resolve(&self, name: &str, at: Option<usize>) -> Result<String, String> {
-        self.resolve_with_root_fallback(name, at, name)
+    /// Record a use only after ordinary resolution selects a declaration or
+    /// import from this file. Builtins and lexical binders have no position.
+    fn record_reference(
+        &self,
+        owner: Option<&str>,
+        binding: &str,
+        spelling: &str,
+        native_builtin: Option<&str>,
+    ) {
+        if let (Some(order), Some(owner)) = (&self.order, owner) {
+            let owner_position = self.positions[owner];
+            if owner_position < self.positions[binding] {
+                order.record(owner_position, owner, spelling, native_builtin);
+            }
+        }
     }
 
-    /// Preserve the caller's interpretation of a name with no visible root
-    /// binding.
-    fn resolve_with_root_fallback(
+    /// An unresolved name has no declaration-order edge. During a standalone
+    /// verification walk, leave its ordinary diagnostic to the checker, which
+    /// may defer checking a template body until instantiation.
+    fn unresolved(&self, name: &str, diagnostic: String) -> Result<String, String> {
+        if self.verification_only {
+            Ok(name.to_owned())
+        } else {
+            Err(diagnostic)
+        }
+    }
+
+    /// Resolve one free reference in the original source namespace. The
+    /// owner identifies the declaration being verified and does not affect
+    /// visibility at the lookup site.
+    fn resolve(
         &self,
         name: &str,
         at: Option<usize>,
-        fallback: &str,
+        owner: Option<&str>,
+        kind: ReferenceKind<'_>,
     ) -> Result<String, String> {
         if name.contains('$') {
-            return Err(format!("invalid source reference '{name}'"));
+            return self.unresolved(name, format!("invalid source reference '{name}'"));
         }
         let (head, member) = name
             .split_once("::")
@@ -211,10 +297,17 @@ impl Names {
                 if builtin {
                     return Ok(format!("{}{name}", crate::check::BUILTIN_PREFIX));
                 }
-                return Err(format!(
-                    "use binding '{head}' is declared later in the module"
-                ));
+                self.record_reference(owner, head, name, None);
+                return self.unresolved(
+                    name,
+                    format!("use binding '{head}' is declared later in the module"),
+                );
             }
+            let native_builtin = match (kind, binding) {
+                (ReferenceKind::Builtin(_), Binding::Dslx(alias)) => Some(alias.as_str()),
+                _ => None,
+            };
+            self.record_reference(owner, head, name, native_builtin);
             return match (binding, member) {
                 (Binding::Module(lib), Some(m)) => {
                     let (name, member) = m
@@ -238,11 +331,23 @@ impl Names {
             };
         }
         if self.definitions.contains(name) && (visible || !builtin) {
+            // A qualified extern and an enum member may have the same
+            // spelling. A value expression resolves to the enum member.
+            let binding = if matches!(kind, ReferenceKind::Value)
+                && member.is_some()
+                && self.enums_or_aliases.contains(head)
+            {
+                head
+            } else {
+                name
+            };
+            self.record_reference(owner, binding, name, None);
             return Ok(self.declared(name));
         }
         if let Some(member) = member
-            && self.enums.contains(head)
+            && self.enums_or_aliases.contains(head)
         {
+            self.record_reference(owner, head, name, None);
             return Ok(format!("{}::{member}", self.declared(head)));
         }
         if let Some(subject) = &self.subject {
@@ -254,7 +359,11 @@ impl Names {
             }
             return Err(format!("unknown name '{name}' in BX module '{subject}'"));
         }
-        Ok(fallback.to_owned())
+        Ok(match kind {
+            ReferenceKind::Builtin(fallback) => fallback,
+            ReferenceKind::Name | ReferenceKind::Value => name,
+        }
+        .to_owned())
     }
 }
 
@@ -279,6 +388,7 @@ pub(crate) struct LinkedSources {
 
 /// BX declarations and the DSLX source snapshot used to parse their calls.
 pub(crate) struct SourceImports<'a> {
+    pub(crate) declaration_orders: Vec<DeclarationOrder>,
     pub libraries: Option<LinkedSources>,
     pub native: DslxSourceLoader<'a>,
 }
@@ -350,6 +460,7 @@ struct Graph<'a> {
     lookup: UseLookup<'a>,
     loaded: BTreeMap<PathBuf, Rc<Library>>,
     linked: LinkedSources,
+    declaration_orders: Vec<DeclarationOrder>,
 }
 
 impl<'a> Graph<'a> {
@@ -358,6 +469,7 @@ impl<'a> Graph<'a> {
             lookup: UseLookup::new(options),
             loaded: BTreeMap::new(),
             linked: LinkedSources::default(),
+            declaration_orders: Vec::new(),
         }
     }
 
@@ -472,12 +584,17 @@ impl<'a> Graph<'a> {
                 block_source.file.path = Some(source.target.path.clone());
             }
         }
-        let names = Names::new(&module, Some(&source.target.subject), bindings)?;
+        let names = Names::for_source(&module, Some(&source.target), bindings)?;
         let exports = module
             .structs
             .iter()
             .map(|d| (&d.name, d.public))
             .chain(module.enums.iter().map(|d| (&d.name, d.public)))
+            .chain(module.type_aliases.iter().map(|d| {
+                // DSLX permits a declaration named self, but a qualified
+                // type reference requires an identifier after the separator.
+                (&d.name, d.public && parser::is_use_identifier(&d.name))
+            }))
             .chain(module.constants.iter().map(|d| (&d.name, d.public)))
             .chain(module.functions.iter().map(|d| (&d.name, d.public)))
             .chain(module.blocks.iter().map(|d| (&d.name, d.public)))
@@ -488,14 +605,17 @@ impl<'a> Graph<'a> {
                     Export {
                         name: names.declared(name),
                         parametrics: names.parametrics(name).to_vec(),
-                        is_enum: names.enums.contains(name),
+                        can_qualify_member: names.enums_or_aliases.contains(name),
                         is_struct: names.structs.contains(name),
+                        overrides_zero_builtin: name == "zero!"
+                            && names.zero_binding == ZeroBinding::BxFunction,
                         has_type_params: names.type_structs.contains(name),
                     },
                 )
             })
             .collect();
         self.append(&module, &names)?;
+        self.declaration_orders.extend(names.order);
         self.linked.library_modules.insert(
             source.target.subject.clone(),
             LibraryModuleInfo {
@@ -523,11 +643,26 @@ impl<'a> Graph<'a> {
                 .chain(source.constants.iter().map(|d| (&d.name, false)))
                 .chain(source.enums.iter().map(|d| (&d.name, false)))
                 .chain(source.structs.iter().map(|d| (&d.name, false)))
+                .chain(source.type_aliases.iter().map(|d| (&d.name, false)))
                 .chain(source.externs.iter().map(|d| (&d.name, false)))
                 .chain(source.extern_blocks.iter().map(|d| (&d.name, false)))
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
+                .chain(
+                    source
+                        .invariants
+                        .iter()
+                        .filter(|_| names.subject.is_none())
+                        .map(|i| (&i.block.name, true)),
+                )
+                .chain(
+                    source
+                        .tests
+                        .iter()
+                        .filter(|_| names.subject.is_none())
+                        .map(|t| (&t.name, t.kind == TestKind::Block)),
+                )
             {
-                if block && !export.is_enum
+                if block && !export.can_qualify_member
                     || use_pos
                         .zip(names.positions.get(owner))
                         .is_none_or(|(u, &d)| u <= d)
@@ -557,7 +692,10 @@ impl<'a> Graph<'a> {
             match names.uses.get(name) {
                 Some(Binding::Dslx(alias)) => linked.declaration_order.push(alias.clone()),
                 Some(_) => { /* BX use visibility was checked in its source module. */ }
-                None => linked.declaration_order.push(names.declared(name)),
+                None if names.subject.is_none() || names.definitions.contains(name) => {
+                    linked.declaration_order.push(names.declared(name));
+                }
+                None => { /* Imported test declarations do not enter the linked module. */ }
             }
         }
         if source.declaration_order.is_empty() {
@@ -567,10 +705,16 @@ impl<'a> Graph<'a> {
                     .map(|d| d.name.clone())
                     .chain(m.externs.iter().map(|d| d.name.clone()))
                     .chain(m.constants.iter().map(|d| d.name.clone()))
+                    .chain(m.structs.iter().map(|d| d.name.clone()))
+                    .chain(m.type_aliases.iter().map(|d| d.name.clone()))
                     .chain(m.functions.iter().map(|d| d.name.clone())),
             );
         }
         linked.structs.append(&mut m.structs);
+        linked
+            .overwritten_literal_types
+            .append(&mut m.overwritten_literal_types);
+        linked.type_aliases.append(&mut m.type_aliases);
         linked.enums.append(&mut m.enums);
         linked.constants.append(&mut m.constants);
         linked.externs.append(&mut m.externs);
@@ -619,11 +763,40 @@ impl<'a> Graph<'a> {
         parser::parse_with_imports(source, &names, &type_structs)
     }
 
-    fn finish(self) -> SourceImports<'a> {
-        SourceImports {
-            libraries: (!self.loaded.is_empty()).then_some(self.linked),
-            native: self.lookup.native,
+    /// Collect source references before BX imports lose their local spellings.
+    fn finish(
+        mut self,
+        root: &Module,
+        bindings: BTreeMap<String, Binding>,
+        include_tests: bool,
+    ) -> Result<SourceImports<'a>, String> {
+        let linked = !self.loaded.is_empty();
+        if linked || root.require_define_before_use {
+            let mut names = Names::for_source(root, None, bindings)?;
+            if linked {
+                self.append(root, &names)?;
+            } else {
+                // Verify the unlinked root using the same lexical walk. The
+                // checker consumes the original AST exactly as it normally
+                // does.
+                names.verification_only = true;
+                names::qualify(root, &names)?;
+            }
+            if include_tests {
+                let tests = names::qualify_tests(root, &names)?;
+                let invariants = names::qualify_invariants(root, &names)?;
+                if linked {
+                    self.linked.module.tests = tests;
+                    self.linked.module.invariants = invariants;
+                }
+            }
+            self.declaration_orders.extend(names.order);
         }
+        Ok(SourceImports {
+            libraries: linked.then_some(self.linked),
+            native: self.lookup.native,
+            declaration_orders: self.declaration_orders,
+        })
     }
 }
 
@@ -635,11 +808,7 @@ pub(crate) fn link<'a>(
 ) -> Result<SourceImports<'a>, String> {
     let mut graph = Graph::new(options);
     let bindings = graph.bindings(module.uses.clone())?;
-    if !graph.loaded.is_empty() {
-        let names = Names::new(module, None, bindings)?;
-        graph.append(module, &names)?;
-    }
-    Ok(graph.finish())
+    graph.finish(module, bindings, /* include_tests= */ false)
 }
 
 impl Graph<'_> {
@@ -669,12 +838,47 @@ pub(crate) fn read<'a>(
     source: &str,
     options: &'a ImportOptions<'a>,
 ) -> Result<(Module, SourceImports<'a>), String> {
+    read_root(source, options, false)
+}
+
+/// Resolve the root's test bodies in their original import and declaration
+/// scope.
+pub(crate) fn read_for_tests<'a>(
+    source: &str,
+    options: &'a ImportOptions<'a>,
+) -> Result<(Module, SourceImports<'a>), String> {
+    read_root(source, options, true)
+}
+
+/// Parse and link one source snapshot for compilation or test execution.
+fn read_root<'a>(
+    source: &str,
+    options: &'a ImportOptions<'a>,
+    include_tests: bool,
+) -> Result<(Module, SourceImports<'a>), String> {
     let mut graph = Graph::new(options);
-    let (module, bindings) = graph.parse_root(source)?;
-    if !graph.loaded.is_empty() {
-        graph.append(&module, &Names::new(&module, None, bindings)?)?;
+    let (mut module, bindings) = graph.parse_root(source)?;
+    if include_tests {
+        for (name, types) in module
+            .tests
+            .iter()
+            .map(|t| (&t.name, &t.overwritten_literal_types))
+            .chain(
+                module
+                    .invariants
+                    .iter()
+                    .map(|i| (&i.block.name, &i.overwritten_literal_types)),
+            )
+        {
+            if !types.is_empty() {
+                module
+                    .overwritten_literal_types
+                    .insert(name.clone(), types.clone());
+            }
+        }
     }
-    Ok((module, graph.finish()))
+    let imports = graph.finish(&module, bindings, include_tests)?;
+    Ok((module, imports))
 }
 
 /// Render internal module-qualified symbols using BX source spelling.
@@ -705,8 +909,129 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read};
-    use crate::ast::{BinaryOp, Expr, Type};
+    use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read, read_for_tests};
+    use crate::ast::{BinaryOp, Expr, TestStmtKind, Type};
+
+    #[test]
+    fn test_runs_check_forward_references_without_compiling_test_bodies() -> Result<(), String> {
+        let source = r#"#![require_define_before_use]
+#[test] block earlier() { assert_eq(later(u8:0), u8:0); }
+fn later(x: u8) -> u8 { x }
+"#;
+        let options = ImportOptions::default();
+        crate::check_source_with_options(source, &options)?;
+        let (module, imports) = read_for_tests(source, &options)?;
+        let error = crate::check::check_sources(&module, imports, &options)
+            .err()
+            .expect("test uses a later declaration");
+        assert_eq!(
+            error,
+            "in 'earlier': 'later' is declared later in the module"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quickcheck_signatures_and_predicates_observe_define_before_use() -> Result<(), String> {
+        let options = ImportOptions::default();
+        for (test, declaration, later) in [
+            (
+                "block p(x: Word) -> bool { true }",
+                "type Word = u8;",
+                "Word",
+            ),
+            (
+                "block p() -> bool { holds() }",
+                "fn holds() -> bool { true }",
+                "holds",
+            ),
+            ("block p() -> Pred { true }", "type Pred = bool;", "Pred"),
+        ] {
+            let source =
+                format!("#![require_define_before_use]\n#[quickcheck] {test}\n{declaration}");
+            crate::check_source_with_options(&source, &options)?;
+            let (module, imports) = read_for_tests(&source, &options)?;
+            let error = crate::check::check_sources(&module, imports, &options).unwrap_err();
+            assert_eq!(
+                error,
+                format!("in 'p': '{later}' is declared later in the module")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_linking_uses_root_imports_and_preserves_inner_bindings() -> Result<(), Box<dyn Error>> {
+        let dir = tempdir()?;
+        fs::write(
+            dir.path().join("lib.bx"),
+            r#"
+pub type Word = u8;
+pub type Pred = bool;
+pub const VALUE = u8:4;
+pub fn double(x: Word) -> Word { x + x }
+#[test] fn private_test() { assert!(false); }
+#[quickcheck] block private_property(x: bool) -> bool { x }
+"#,
+        )?;
+        let options = ImportOptions {
+            additional_search_paths: vec![dir.path()],
+            ..Default::default()
+        };
+        let source = r#"
+#![require_define_before_use]
+use lib::{Word, Pred, VALUE, double};
+#[test] block local_test() {
+    reg drive: Word = VALUE;
+    for VALUE in [VALUE] {
+        drive := double(VALUE);
+        tick!();
+    }
+    assert_eq(drive, VALUE);
+}
+#[quickcheck] block property(VALUE: Word) -> Pred {
+    let expected = double(VALUE);
+    VALUE + VALUE == expected
+}
+"#;
+        let (_, imports) = read(source, &options)?;
+        assert!(imports.libraries.unwrap().module.tests.is_empty());
+        let (_, imports) = read_for_tests(source, &options)?;
+        let module = imports.libraries.unwrap().module;
+        assert_eq!(module.tests.len(), 2);
+        let statements = &module.tests[0].statements;
+        assert!(
+            matches!(&statements[0].kind, TestStmtKind::Reg { ty: Type::Named(name), init: Some(Expr::Name(value)), .. } if name == "$bx$lib$Word" && value == "$bx$lib$VALUE")
+        );
+        let TestStmtKind::For { body, .. } = &statements[1].kind else {
+            panic!("expected a loop")
+        };
+        assert!(
+            matches!(&body[0].kind, TestStmtKind::Assign { value: Expr::Call { name, args }, .. } if name == "$bx$lib$double" && args == &[Expr::Name("VALUE".into())])
+        );
+        assert!(
+            matches!(&statements[2].kind, TestStmtKind::AssertEq { expected: Expr::Name(name), .. } if name == "$bx$lib$VALUE")
+        );
+        assert!(read_for_tests("use lib::private_test;", &options).is_err());
+        let property = &module.tests[1];
+        let signature = property.quickcheck.as_ref().unwrap();
+        assert_eq!(signature.params[0].ty, Type::Named("$bx$lib$Word".into()));
+        assert_eq!(signature.result, Type::Named("$bx$lib$Pred".into()));
+        assert!(matches!(&property.statements[0].kind,
+            TestStmtKind::Let(binding) if matches!(&binding.value, Expr::Call { name, args }
+                if name == "$bx$lib$double" && args == &[Expr::Name("VALUE".into())])));
+        assert!(matches!(&property.statements[1].kind,
+            TestStmtKind::Property(Expr::Binary { left, .. })
+                if matches!(left.as_ref(), Expr::Binary { left, right, .. }
+                    if **left == Expr::Name("VALUE".into()) && **right == Expr::Name("VALUE".into()))));
+        assert!(read_for_tests("use lib::private_property;", &options).is_err());
+        let shadowed = "use lib; #[quickcheck] block p(lib: bool) -> lib::Pred { true }";
+        assert_eq!(
+            read_for_tests(shadowed, &options).err().unwrap(),
+            "'lib' names a local value here"
+        );
+        Ok(())
+    }
 
     #[test]
     fn linked_type_dimensions_follow_their_declaring_modules() -> Result<(), Box<dyn Error>> {

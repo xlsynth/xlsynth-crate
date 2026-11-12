@@ -439,8 +439,34 @@ impl FixtureRunner {
         }
     }
 
+    /// Restarts at cycle zero with unknown values in every state register.
     pub fn reset_state_x(&mut self) {
-        self.state = self.module.initial_state_x();
+        self.replace_state(self.module.initial_state_x());
+    }
+
+    /// Restarts at cycle zero with the given values for all state registers.
+    /// Invalid register names, widths or signedness leave the runner intact.
+    pub fn reset_with_state(&mut self, state: State) -> Result<()> {
+        if self.state.keys().ne(state.keys()) {
+            return Err(crate::Error::Parse(
+                "initial state must supply exactly the module's state registers".into(),
+            ));
+        }
+        for (name, value) in &state {
+            let decl = &self.module.combo.decls[name];
+            if (value.width, value.signedness) != (decl.width, decl.signedness) {
+                return Err(crate::Error::Parse(format!(
+                    "initial register `{name}` expects {:?} width {}, got {:?} width {}",
+                    decl.signedness, decl.width, value.signedness, value.width
+                )));
+            }
+        }
+        self.replace_state(state);
+        Ok(())
+    }
+
+    fn replace_state(&mut self, state: State) {
+        self.state = state;
         self.last_inputs.clear();
         self.last_outputs.clear();
         self.cycle = 0;
@@ -453,6 +479,16 @@ impl FixtureRunner {
         self.step_cycle_with_drive(fixtures, |_ctx| Ok(()))
     }
 
+    /// Samples settled combinational values with the current registers and
+    /// the supplied inputs, without advancing the clock or changing history.
+    pub fn sample_with_drive<F>(&self, drive: F) -> Result<BTreeMap<String, Value4>>
+    where
+        F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
+    {
+        let inputs = self.collect_inputs(&mut [], drive)?;
+        self.settled_values(&inputs)
+    }
+
     pub fn step_cycle_with_drive<F>(
         &mut self,
         fixtures: &mut [&mut dyn CycleFixture],
@@ -461,20 +497,7 @@ impl FixtureRunner {
     where
         F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
     {
-        let mut inputs = zero_inputs(&self.module)?;
-        let mut driven_bits = BTreeMap::new();
-        {
-            let mut drive_ctx = DriveContext {
-                inputs: &mut inputs,
-                driven_bits: &mut driven_bits,
-                previous_outputs: &self.last_outputs,
-            };
-            for fixture in fixtures.iter_mut() {
-                fixture.drive_cycle_inputs(self.cycle, &mut drive_ctx)?;
-            }
-            extra_drive(&mut drive_ctx)?;
-        }
-
+        let inputs = self.collect_inputs(fixtures, extra_drive)?;
         let (pre_outputs, outputs) = self.simulate_cycle(&inputs)?;
         let result = FixtureCycleResult {
             cycle: self.cycle,
@@ -498,19 +521,47 @@ impl FixtureRunner {
         Ok(result)
     }
 
+    fn collect_inputs<F>(
+        &self,
+        fixtures: &mut [&mut dyn CycleFixture],
+        extra_drive: F,
+    ) -> Result<BTreeMap<String, Value4>>
+    where
+        F: FnOnce(&mut DriveContext<'_>) -> Result<()>,
+    {
+        let mut inputs = zero_inputs(&self.module)?;
+        let mut driven_bits = BTreeMap::new();
+        let mut drive_ctx = DriveContext {
+            inputs: &mut inputs,
+            driven_bits: &mut driven_bits,
+            previous_outputs: &self.last_outputs,
+        };
+        for fixture in fixtures {
+            fixture.drive_cycle_inputs(self.cycle, &mut drive_ctx)?;
+        }
+        extra_drive(&mut drive_ctx)?;
+        Ok(inputs)
+    }
+
+    fn settled_values(
+        &self,
+        inputs: &BTreeMap<String, Value4>,
+    ) -> Result<BTreeMap<String, Value4>> {
+        let seed = build_seed_env(&self.module, &self.state, inputs, true);
+        eval_combo_seeded(&self.module.combo, &self.plan, &seed)
+    }
+
     fn simulate_cycle(
         &mut self,
         inputs: &BTreeMap<String, Value4>,
     ) -> Result<(BTreeMap<String, Value4>, BTreeMap<String, Value4>)> {
-        let high_seed = build_seed_env(&self.module, &self.state, inputs, true);
-        let high_values = eval_combo_seeded(&self.module.combo, &self.plan, &high_seed)?;
+        let high_values = self.settled_values(inputs)?;
         if self.module.seqs.is_empty() {
             return Ok((high_values.clone(), high_values));
         }
         let env = env_from_values(&high_values);
         self.state = step_pipeline_state_with_env(&self.module, &env, &self.state)?;
-        let post_seed = build_seed_env(&self.module, &self.state, inputs, true);
-        let post_values = eval_combo_seeded(&self.module.combo, &self.plan, &post_seed)?;
+        let post_values = self.settled_values(inputs)?;
         Ok((high_values, post_values))
     }
 }

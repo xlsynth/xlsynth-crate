@@ -57,12 +57,16 @@ impl LeanModuleName {
 
     /// Renders every component as a quoted Lean identifier.
     pub(crate) fn lean_identifier(&self) -> String {
-        self.0
-            .split('.')
-            .map(|part| format!("«{part}»"))
-            .collect::<Vec<_>>()
-            .join(".")
+        quoted_lean_name(&self.0)
     }
+}
+
+/// Renders the components of a validated dotted Lean name as identifiers.
+pub(crate) fn quoted_lean_name(name: &str) -> String {
+    name.split('.')
+        .map(|part| format!("«{part}»"))
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Options controlling the generated Lean module name.

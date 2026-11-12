@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth::{DslxConvertOptions, XlsIrValue, convert_dslx_to_ir};
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_module_with_options, compile,
-    compile_with_options, empty_package, parse_module,
+    ResetBehavior, check_module, check_module_with_options, compile, compile_with_options,
+    empty_package, parse_module,
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
@@ -56,10 +59,7 @@ pub block pipeline(clk, rst, x: u8, y: u8) -> (u8, u8, u8, u8) {
         source,
         empty_package("design"),
         ResetBehavior::default(),
-        &ImportOptions {
-            additional_search_paths: vec![directory.path()],
-            ..Default::default()
-        },
+        &search_paths(&[directory.path()]),
     )?;
     let top = package.get_top_block().expect("pipeline is the top");
     let [bypass, short, deep, other] = top.instantiations.as_slice() else {
@@ -174,6 +174,72 @@ pub block pipeline(clk, x: u8) -> (u8, u32) {
 }
 
 #[test]
+fn block_value_formals_resolve_u32_aliases_in_their_declaration_scope() -> Result<(), Box<dyn Error>>
+{
+    let directory = tempdir()?;
+    let options = search_paths(&[directory.path()]);
+    fs::write(directory.path().join("shape.bx"), "pub type Dim = u32;")?;
+    fs::write(directory.path().join("native.x"), "pub type Count = u32;")?;
+    fs::write(
+        directory.path().join("pipe.bx"),
+        r#"
+use shape;
+type Word = shape::Dim;
+#[allow(combinational_block)]
+pub block bump<N: Word>(clk, x:u32) -> u32 { x + N }
+"#,
+    )?;
+    let source = r#"
+use pipe;
+use native::Count;
+use shape;
+type Word = u8;
+block relay<N: shape::Dim, M: Count>(clk, x:u32) -> u32 {
+    let first = pipe::bump<N>(x);
+    let second = pipe::bump<M>(first);
+    second
+}
+block circuit(clk, x:u32) -> u32 { let q = relay<3, u32:5>(x); q }
+"#;
+    let mut package = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    inline_all_blocks_in_package(&mut package)?;
+    let function = combinational_block_to_fn(package.get_top_block().ok_or("missing circuit")?)?;
+    assert_eq!(
+        eval_fn_in_package_value(&package, &function, &[IrValue::make_ubits(32, 10)?]),
+        IrValue::make_ubits(32, 18)?
+    );
+    for source in [
+        "type Dim = s32; block b<N:Dim>(clk, x:u32)->u32 { x }",
+        "type Dim = (u32,); block b<N:Dim>(clk, x:u32)->u32 { x }",
+        "type Dim = u32; block b<Dim,N:Dim>(clk,x:Dim)->Dim { x }",
+        "use shape; block b<shape:u32,N:shape::Dim>(clk,x:u32)->u32 { x }",
+        "use shape; block b<shape:fn(u8)->u8,N:shape::Dim>(clk,x:u32)->u32 { x }",
+        "use shape::Dim; block b<Dim:fn(u8)->u8,N:Dim>(clk,x:u32)->u32 { x }",
+        "type Dim = u32; block b<N:Dim>(clk,x:u32)->u32 { x } block c(clk,x:u32)->u32 { let q=b<u8:1>(x); q }",
+    ] {
+        assert!(
+            check_module_with_options(&parse_module(source)?, &options).is_err(),
+            "{source}"
+        );
+    }
+    let forward = "block b<N:Dim>(clk,x:u32)->u32 { x } type Dim=u32;";
+    check_module(&parse_module(forward)?)?;
+    assert_eq!(
+        check_module(&parse_module(&format!(
+            "#![require_define_before_use]\n{forward}"
+        ))?)
+        .unwrap_err(),
+        "in 'b': 'Dim' is declared later in the module"
+    );
+    Ok(())
+}
+
+#[test]
 fn block_value_actuals_must_be_explicit_compile_time_u32_values() -> Result<(), String> {
     for (call, expected) in [
         (
@@ -241,12 +307,6 @@ pub block pipeline(clk, x: u8) -> u8 {
 }
 "#,
     )?;
-    check_module_with_options(
-        &module,
-        &ImportOptions {
-            additional_search_paths: vec![directory.path()],
-            ..Default::default()
-        },
-    )?;
+    check_module_with_options(&module, &search_paths(&[directory.path()]))?;
     Ok(())
 }

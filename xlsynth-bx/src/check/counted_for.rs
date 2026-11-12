@@ -5,15 +5,15 @@
 use super::{BodyChecker, CheckedBinding, CheckedStmt, K, Param, Type, TypedExpr, compatible};
 use crate::ast::{Expr, ForIterable, ForLoop};
 use crate::infer_literal::{BindingWidths, Member, binding_widths, minimum_type};
-use crate::typed::{TypedFor, TypedIterable};
+use crate::typed::{BoundParametricValue, TypedFor, TypedIterable};
 use std::collections::BTreeSet;
 
 /// Static iteration shape and the value from which the loop reads its elements.
 pub(super) struct Iteration {
-    ty: Type,
-    widths: Option<BindingWidths>,
-    iterable: TypedIterable,
-    count: usize,
+    pub(super) ty: Type,
+    pub(super) widths: Option<BindingWidths>,
+    pub(super) iterable: TypedIterable,
+    pub(super) count: usize,
 }
 
 /// Carry type evidence from an expected type, a struct update's partial
@@ -21,7 +21,10 @@ pub(super) struct Iteration {
 pub(super) enum CarryContext<'a> {
     Expected(Option<&'a Type>),
     Prepared(TypedExpr),
-    StructPrefix { name: &'a str, args: &'a [u32] },
+    StructPrefix {
+        name: &'a str,
+        args: &'a [BoundParametricValue],
+    },
 }
 
 impl BodyChecker<'_, '_> {
@@ -178,10 +181,9 @@ impl BodyChecker<'_, '_> {
     fn counted_array(&mut self, expr: &Expr, hint: Option<&Type>) -> Result<Iteration, String> {
         self.with_prepared_value(expr, |checker, expr| {
             let length = checker.iterable_length(expr, &[])?;
-            let array_hint = hint.zip(length).map(|(ty, size)| Type::Array {
-                element: Box::new(ty.clone()),
-                size,
-            });
+            let array_hint = hint
+                .zip(length)
+                .map(|(ty, size)| Type::array(ty.clone(), size));
             let value = checker.elaborate_result(expr, array_hint.as_ref(), false)?;
             let Type::Array { element, size } = &value.ty else {
                 return Err(format!(

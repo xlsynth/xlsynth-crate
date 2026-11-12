@@ -326,7 +326,9 @@ impl Solver for Boolector {
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Term> {
-        assert!(width > 0, "Width must be positive");
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         if width < 64 {
             let mask = (1u64 << width) - 1;
             value &= mask;

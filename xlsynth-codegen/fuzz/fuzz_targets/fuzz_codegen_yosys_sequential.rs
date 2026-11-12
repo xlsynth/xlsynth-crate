@@ -12,7 +12,8 @@ use xlsynth_codegen_fuzz::{
 };
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r_fuzz::external_yosys::required_external_yosys_context;
-use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, flatten_value};
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 fuzz_target!(init: {
@@ -34,12 +35,14 @@ fuzz_target!(init: {
     let ir = package.to_string();
     let mapped = xlsynth_codegen_fuzz::fuzz_tool!(map_sequential(&package, context));
     let block = top_block(&package);
+    let evaluator = BlockEvaluator::prepare(&package, &block.name).unwrap();
     let output_types = block_output_types(block);
     let design = &mapped.mapped.sequential_gate_fn;
     let mut rng = deterministic_rng(&ir);
-    let mut state = generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
+    let values = generate_mixed_values_with_rng(&mut rng, block.registers.iter().map(|r| &r.ty));
     let mut stimuli = Vec::with_capacity(CYCLE_COUNT);
     let mut expected_outputs = Vec::with_capacity(CYCLE_COUNT);
+    let mut state = evaluator.initial_state(RegisterInit::Supplied(values)).unwrap();
     for cycle in 0..CYCLE_COUNT {
         let inputs = generate_cycle_inputs(block, &mut rng, cycle, true);
         let bits = inputs
@@ -48,14 +51,14 @@ fuzz_target!(init: {
             .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
         stimuli.push(map_sequential_inputs(design, block, &bits));
-        let (outputs, next_state) = evaluate_block_cycle(block, &inputs, &state, &ir);
-        let output_bits = outputs
+        let evaluated = evaluator.step(&state, &inputs).unwrap();
+        let output_bits = evaluated.outputs
             .iter()
             .zip(output_types.iter())
             .map(|(value, ty)| flatten_value(value, ty))
             .collect::<Vec<_>>();
         expected_outputs.push(map_sequential_outputs(design, block, &output_bits));
-        state = next_state;
+        state = evaluated.next_state;
     }
     let trace = sequential::simulate(design, &stimuli, SequentialState::all_zeros(design))
         .unwrap_or_else(|error| {

@@ -4,11 +4,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{BUILTIN_MAP, Binding, Names, ParametricKind};
+use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBinding};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
-    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, Stmt, StructDef, StructSplat, Type, UnrollFor,
+    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
+    MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature, Stmt,
+    StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
     WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -34,18 +35,45 @@ pub(crate) fn local_callee_name(callee: &str) -> Option<&str> {
 pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> {
     let position = |name: &str| names.positions.get(name).copied();
     let mut out = Module::default();
+    for (owner, types) in &module.overwritten_literal_types {
+        if names.order.is_some() && !names.positions.contains_key(owner) {
+            return Err(format!("unknown owner '{owner}' of literal annotation"));
+        }
+        let mut bare_types = BTreeSet::new();
+        for name in types {
+            if let Some((head, _)) = name.split_once("::") {
+                // The outer annotation discards the member before typechecking.
+                if !names.uses.contains_key(head) && !names.definitions.contains(head) {
+                    return Err(format!("unknown name '{head}' in literal annotation"));
+                }
+                names.record_reference(Some(owner), head, name, None);
+            } else {
+                bare_types.insert(names.resolve(name, None, Some(owner), ReferenceKind::Name)?);
+            }
+        }
+        out.overwritten_literal_types
+            .insert(names.declared(owner), bare_types);
+    }
+    for def in &module.type_aliases {
+        let mut scope = Scope::new(names, position(&def.name), &def.name);
+        out.type_aliases.push(TypeAlias {
+            name: names.declared(&def.name),
+            public: def.public,
+            ty: scope.ty(&def.ty)?,
+        });
+    }
     for def in &module.structs {
         let at = position(&def.name);
-        let mut scope = Scope::new(names, at, at);
+        let mut scope = Scope::new(names, at, &def.name);
         for name in &def.type_params {
             scope.bind_as(name, Local::Formal);
         }
         let value_parametrics = def
             .value_parametrics
             .iter()
-            .map(|value| scope.value_parametric(value))
+            .map(|value| scope.dslx_value_parametric(value))
             .collect::<Result<_, _>>()?;
-        // Struct field annotations can name a later struct declaration.
+        // A struct field can name a later declaration.
         scope.at = None;
         out.structs.push(StructDef {
             name: names.declared(&def.name),
@@ -57,7 +85,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     }
     for def in &module.enums {
         let at = position(&def.name);
-        let mut scope = Scope::new(names, at, at);
+        let mut scope = Scope::new(names, at, &def.name);
         out.enums.push(EnumDef {
             name: names.declared(&def.name),
             public: def.public,
@@ -76,7 +104,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     }
     for def in &module.constants {
         let at = position(&def.name);
-        let mut scope = Scope::new(names, at, at);
+        let mut scope = Scope::new(names, at, &def.name);
         out.constants.push(ConstDef {
             name: names.declared(&def.name),
             public: def.public,
@@ -85,7 +113,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         });
     }
     for def in &module.externs {
-        let mut scope = Scope::new(names, None, position(&def.name));
+        let mut scope = Scope::new(names, None, &def.name);
         out.externs.push(ExternFn {
             name: names.declared(&def.name),
             params: scope.params(&def.params, Local::Lexical)?,
@@ -94,7 +122,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         });
     }
     for def in &module.extern_blocks {
-        let mut scope = Scope::new(names, None, position(&def.name));
+        let mut scope = Scope::new(names, None, &def.name);
         scope.timing_ports(&def.clock, def.reset.as_deref());
         out.extern_blocks.push(ExternBlock {
             name: names.declared(&def.name),
@@ -106,7 +134,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     }
     for def in &module.functions {
         let at = position(&def.name);
-        let mut scope = Scope::new(names, at, at);
+        let mut scope = Scope::new(names, at, &def.name);
         for name in &def.type_params {
             scope.bind_as(name, Local::Formal);
         }
@@ -115,7 +143,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
         for formal in def.parametric_bindings() {
             match formal {
                 FunctionParametricRef::Value(value) => {
-                    value_parametrics.push(scope.value_parametric(value)?);
+                    value_parametrics.push(scope.dslx_value_parametric(value)?);
                 }
                 FunctionParametricRef::Callback(callback) => {
                     callback_params.push(scope.callback(callback)?);
@@ -153,14 +181,75 @@ fn hardware_callees(module: &Module) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Blocks can call blocks and functions declared later. A constant read by a
-/// block must already have been introduced.
+/// Resolve only the tests requested by the runner, using their own lexical
+/// scopes.
+pub(super) fn qualify_tests(module: &Module, names: &Names) -> Result<Vec<TestDecl>, String> {
+    let hardware = hardware_callees(module);
+    module
+        .tests
+        .iter()
+        .map(|test| {
+            let at = (test.kind == TestKind::Function)
+                .then(|| names.positions.get(&test.name).copied())
+                .flatten();
+            let mut scope = Scope::new(names, at, &test.name);
+            if test.kind == TestKind::Block {
+                scope.region = DeclarationRegion::BlockSignature;
+                scope.hardware_callees = Some(&hardware);
+            }
+            let quickcheck = test
+                .quickcheck
+                .as_ref()
+                .map(|signature| -> Result<_, String> {
+                    Ok(QuickCheckSignature {
+                        params: scope.params(&signature.params, Local::Lexical)?,
+                        result: scope.ty(&signature.result)?,
+                    })
+                })
+                .transpose()?;
+            if test.kind == TestKind::Block {
+                scope.region = DeclarationRegion::BlockBody;
+            }
+            Ok(TestDecl {
+                kind: test.kind,
+                name: test.name.clone(),
+                position: test.position,
+                quickcheck,
+                statements: scope.test_body(&test.statements, 0)?,
+                overwritten_literal_types: test.overwritten_literal_types.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Resolve root property circuits without introducing their names as callees.
+pub(super) fn qualify_invariants(
+    module: &Module,
+    names: &Names,
+) -> Result<Vec<InvariantDecl>, String> {
+    let hardware = hardware_callees(module);
+    module
+        .invariants
+        .iter()
+        .map(|i| {
+            Ok(InvariantDecl {
+                block: qualify_block(&i.block, names, &hardware)?,
+                position: i.position,
+                lemmas: i.lemmas.clone(),
+                overwritten_literal_types: i.overwritten_literal_types.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Qualify a block with module-wide callable visibility.
 fn qualify_block(
     block: &Block,
     names: &Names,
     hardware_callees: &BTreeSet<&str>,
 ) -> Result<Block, String> {
-    let mut scope = Scope::new(names, None, names.positions.get(&block.name).copied());
+    let mut scope = Scope::new(names, None, &block.name);
+    scope.region = DeclarationRegion::BlockSignature;
     scope.hardware_callees = Some(hardware_callees);
     scope.block(block)
 }
@@ -209,30 +298,44 @@ enum CallSite {
     Structural,
 }
 
+/// The block body can call later functions, while declaration types evaluate
+/// their constexpr arguments in function scope.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclarationRegion {
+    Other,
+    BlockSignature,
+    BlockBody,
+}
+
 /// Local binders hide module names until the end of their lexical scope.
 struct Scope<'a> {
     names: &'a Names,
     at: Option<usize>,
     value_at: Option<usize>,
+    /// Source declaration whose selected references are being verified.
+    source_owner: Option<&'a str>,
     locals: BTreeMap<String, Local>,
     /// A declaration's type and callable formals keep module callees hidden
     /// even when a nearer data binding shadows the formal itself.
     formals: BTreeSet<String>,
     introduced: Vec<(String, Option<Local>)>,
     hardware_callees: Option<&'a BTreeSet<&'a str>>,
+    region: DeclarationRegion,
     expression_depth: usize,
     guard_depth: usize,
 }
 
 impl<'a> Scope<'a> {
-    fn new(names: &'a Names, at: Option<usize>, value_at: Option<usize>) -> Self {
+    fn new(names: &'a Names, at: Option<usize>, owner: &'a str) -> Self {
         Self {
             names,
             at,
-            value_at,
+            value_at: names.positions.get(owner).copied(),
+            source_owner: names.order.as_ref().map(|_| owner),
             locals: BTreeMap::new(),
             formals: BTreeSet::new(),
             hardware_callees: None,
+            region: DeclarationRegion::Other,
             introduced: Vec::new(),
             expression_depth: 0,
             guard_depth: 0,
@@ -274,18 +377,31 @@ impl<'a> Scope<'a> {
     }
 
     fn reference(&self, name: &str, at: Option<usize>) -> Result<String, String> {
+        self.reference_in_scope(name, at, ReferenceKind::Name)
+    }
+
+    fn reference_in_scope(
+        &self,
+        name: &str,
+        at: Option<usize>,
+        kind: ReferenceKind<'_>,
+    ) -> Result<String, String> {
         if name.contains('$') {
-            return Err(format!("invalid source reference '{name}'"));
+            return self
+                .names
+                .unresolved(name, format!("invalid source reference '{name}'"));
         }
         if let Some((head, _)) = name.split_once("::")
             && self.locals.contains_key(head)
         {
-            return Err(format!("'{head}' names a local value here"));
+            return self
+                .names
+                .unresolved(name, format!("'{head}' names a local value here"));
         }
         if self.locals.contains_key(name) {
             Ok(name.to_owned())
         } else {
-            self.names.resolve(name, at)
+            self.names.resolve(name, at, self.source_owner, kind)
         }
     }
 
@@ -307,7 +423,9 @@ impl<'a> Scope<'a> {
             && self.names.definitions.contains(name)
             && self.locals.get(head) != Some(&Local::Formal)
         {
-            return self.names.resolve(name, self.at);
+            return self
+                .names
+                .resolve(name, self.at, self.source_owner, ReferenceKind::Name);
         }
         match self.locals.get(name) {
             Some(Local::Hardware)
@@ -316,7 +434,8 @@ impl<'a> Scope<'a> {
                         .hardware_callees
                         .is_some_and(|known| known.contains(name)) =>
             {
-                self.names.resolve(name, self.at)
+                self.names
+                    .resolve(name, self.at, self.source_owner, ReferenceKind::Name)
             }
             Some(Local::Lexical | Local::Hardware)
                 if site == CallSite::Direct
@@ -328,33 +447,53 @@ impl<'a> Scope<'a> {
                 // it only when an iteration is typechecked.
                 Ok(mark_local_callee(name))
             }
-            Some(Local::Lexical | Local::Hardware) => {
-                Err(format!("'{name}' names a local value here"))
-            }
+            Some(Local::Lexical | Local::Hardware) => self
+                .names
+                .unresolved(name, format!("'{name}' names a local value here")),
             None if site == CallSite::Direct && (name == "map" || is_call_builtin(name)) => {
-                self.names.resolve_with_root_fallback(
-                    name,
-                    self.builtin_at(name),
-                    &format!("{BUILTIN_PREFIX}{name}"),
-                )
+                self.builtin_reference(name, &format!("{BUILTIN_PREFIX}{name}"))
             }
             Some(Local::Formal) | None => self.reference(name, self.at),
         }
     }
 
-    /// A block sees callable declarations throughout its module. Types that
-    /// shadow a direct builtin call follow the order of value declarations.
-    fn builtin_at(&self, name: &str) -> Option<usize> {
+    /// Resolve a builtin spelling and record a dependency when a callable
+    /// module binding supplies its value.
+    fn builtin_reference(&self, name: &str, fallback: &str) -> Result<String, String> {
         let member = self.names.uses.get(name);
-        let enum_binding = self.names.enums.contains(name)
-            || matches!(member, Some(Binding::Member(export)) if export.is_enum);
-        let struct_binding = is_call_builtin(name)
-            && (self.names.structs.contains(name)
-                || matches!(member, Some(Binding::Member(export)) if export.is_struct));
-        if enum_binding || struct_binding {
+        let enum_or_alias = self.names.enums_or_aliases.contains(name)
+            || matches!(member, Some(Binding::Member(export)) if export.can_qualify_member);
+        let struct_binding = self.names.structs.contains(name)
+            || matches!(member, Some(Binding::Member(export)) if export.is_struct);
+        let at = if enum_or_alias || is_call_builtin(name) && struct_binding {
             self.value_at
         } else {
             self.at
+        };
+        // A root signature or struct field evaluates its type arguments with
+        // declaration-order function visibility. Direct BX member imports
+        // already name the linked declaration in its dependency module.
+        let ordered_builtin = self.region != DeclarationRegion::BlockBody
+            && self.names.subject.is_none()
+            && !matches!(member, Some(Binding::Member(_)));
+        // A BX type cannot supply the callee. The checker decides whether
+        // that type leaves the builtin in scope.
+        let owner = if enum_or_alias || struct_binding || ordered_builtin {
+            None
+        } else {
+            self.source_owner
+        };
+        self.names
+            .resolve(name, at, owner, ReferenceKind::Builtin(fallback))
+    }
+
+    /// A map target or named builtin callback can resolve to a later native
+    /// import. The checker distinguishes an imported function from a type.
+    fn map_reference(&self, name: &str) -> Result<String, String> {
+        if !self.locals.contains_key(name) && (name == "map" || is_call_builtin(name)) {
+            self.builtin_reference(name, name)
+        } else {
+            self.reference(name, self.at)
         }
     }
 
@@ -364,7 +503,7 @@ impl<'a> Scope<'a> {
         if name.contains("::") {
             self.callee(name, CallSite::Direct)
         } else if is_call_builtin(name) {
-            self.reference(name, self.builtin_at(name))
+            self.map_reference(name)
         } else {
             self.reference(name, self.at)
         }
@@ -413,10 +552,9 @@ impl<'a> Scope<'a> {
                     .map(|field| self.type_at_depth(field, depth + 1))
                     .collect::<Result<_, _>>()?,
             ),
-            Type::Array { element, size } => Type::Array {
-                element: Box::new(self.type_at_depth(element, depth + 1)?),
-                size: *size,
-            },
+            Type::Array { element, size } => {
+                Type::array(self.type_at_depth(element, depth + 1)?, *size)
+            }
             Type::ParametricArray { element, size } => Type::ParametricArray {
                 element: Box::new(self.type_at_depth(element, depth + 1)?),
                 size: Box::new(self.type_expression(size, depth)?),
@@ -444,6 +582,16 @@ impl<'a> Scope<'a> {
     /// Struct field names do not shadow other field types.
     fn fields(&mut self, fields: &[Param]) -> Result<Vec<Param>, String> {
         fields.iter().map(|p| self.param(p)).collect()
+    }
+
+    /// A DSLX function or struct introduces a value formal before its
+    /// annotation.
+    fn dslx_value_parametric(
+        &mut self,
+        value: &ParametricBinding,
+    ) -> Result<ParametricBinding, String> {
+        self.bind(&value.name);
+        self.value_parametric(value)
     }
 
     /// Qualify one value binding and bring it into scope for following formals.
@@ -511,17 +659,103 @@ impl<'a> Scope<'a> {
         Ok(result)
     }
 
+    /// Qualify statement operands before bringing their result binders into
+    /// scope.
+    fn test_body(&mut self, body: &[TestStmt], depth: usize) -> Result<Vec<TestStmt>, String> {
+        if depth > MAX_SYNTAX_DEPTH {
+            return Err(format!("BX test exceeds {MAX_SYNTAX_DEPTH} nesting levels"));
+        }
+        body.iter()
+            .map(|stmt| {
+                let kind = match &stmt.kind {
+                    TestStmtKind::Property(value) => TestStmtKind::Property(self.expr(value)?),
+                    TestStmtKind::Reg { name, ty, init } => {
+                        let ty = self.ty(ty)?;
+                        let init = init.as_ref().map(|e| self.expr(e)).transpose()?;
+                        self.bind(name);
+                        TestStmtKind::Reg {
+                            name: name.clone(),
+                            ty,
+                            init,
+                        }
+                    }
+                    TestStmtKind::Let(binding) => TestStmtKind::Let(self.binding(binding)?),
+                    TestStmtKind::Assign { name, value } => TestStmtKind::Assign {
+                        name: name.clone(),
+                        value: self.expr(value)?,
+                    },
+                    TestStmtKind::Tick { reset } => TestStmtKind::Tick {
+                        reset: reset.as_ref().map(|e| self.expr(e)).transpose()?,
+                    },
+                    TestStmtKind::Assert { predicate, label } => TestStmtKind::Assert {
+                        predicate: self.expr(predicate)?,
+                        label: label.clone(),
+                    },
+                    TestStmtKind::AssertEq { actual, expected } => TestStmtKind::AssertEq {
+                        actual: self.expr(actual)?,
+                        expected: self.expr(expected)?,
+                    },
+                    TestStmtKind::For {
+                        pattern,
+                        iterable,
+                        body,
+                    } => {
+                        let iterable = self.iterable(iterable)?;
+                        let pattern = copy_pattern(pattern, 0)?;
+                        let body = self.nested(|scope| {
+                            scope.bind_pattern(&pattern);
+                            scope.test_body(body, depth + 1)
+                        })?;
+                        TestStmtKind::For {
+                            pattern,
+                            iterable,
+                            body,
+                        }
+                    }
+                    TestStmtKind::If {
+                        condition,
+                        then_body,
+                        else_body,
+                    } => TestStmtKind::If {
+                        condition: self.expr(condition)?,
+                        then_body: self.nested(|scope| scope.test_body(then_body, depth + 1))?,
+                        else_body: self.nested(|scope| scope.test_body(else_body, depth + 1))?,
+                    },
+                };
+                Ok(TestStmt {
+                    position: stmt.position,
+                    kind,
+                })
+            })
+            .collect()
+    }
+
     /// Resolve a block body with explicit instances visible before their
     /// statements.
     fn block(&mut self, def: &Block) -> Result<Block, String> {
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }
-        let value_parametrics = def
-            .value_parametrics
-            .iter()
-            .map(|p| self.value_parametric(p))
-            .collect::<Result<_, String>>()?;
+        // Value-formal annotations see preceding explicit binders. Callback
+        // signatures retain their block-wide value-formal scope below.
+        let value_parametrics = self.nested(|scope| {
+            let mut values = Vec::with_capacity(def.value_parametrics.len());
+            for formal in def.parametric_bindings() {
+                match formal {
+                    FunctionParametricRef::Value(value) => {
+                        values.push(scope.value_parametric(value)?)
+                    }
+                    FunctionParametricRef::Callback(callback) => scope.bind(&callback.name),
+                }
+            }
+            if values.len() != def.value_parametrics.len() {
+                return Err("invalid argument position for block value parametric".into());
+            }
+            Ok(values)
+        })?;
+        for value in &def.value_parametrics {
+            self.bind(&value.name);
+        }
         let callback_params = def
             .callback_params
             .iter()
@@ -530,6 +764,7 @@ impl<'a> Scope<'a> {
         self.timing_ports(&def.clock, def.reset.as_deref());
         let params = self.params(&def.params, Local::Hardware)?;
         let result = self.ty(&def.result)?;
+        self.region = DeclarationRegion::BlockBody;
         for stmt in &def.statements {
             if let Stmt::Inst { name, .. } = stmt {
                 self.bind_as(name, Local::Hardware);
@@ -704,7 +939,9 @@ impl<'a> Scope<'a> {
             ));
         }
         self.expression_depth += 1;
-        let result = self.expr_kind(expr);
+        // A full-height expression can start inside an already deeply nested
+        // guard.
+        let result = stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || self.expr_kind(expr));
         self.expression_depth -= 1;
         result
     }
@@ -721,8 +958,9 @@ impl<'a> Scope<'a> {
                 })
             })?,
             Expr::Name(name) => {
-                let reference = self.reference(name, self.value_at)?;
-                if reference.contains("::") {
+                let reference =
+                    self.reference_in_scope(name, self.value_at, ReferenceKind::Value)?;
+                if reference.contains("::") && !self.names.verification_only {
                     // Qualification can remove the distinction between `_::A`
                     // and `module::_::A`. Check the original value path first.
                     crate::parser::validate_dslx_value_path(name)?;
@@ -735,7 +973,32 @@ impl<'a> Scope<'a> {
                 ty: self.optional_type(ty)?,
                 text: text.clone(),
             },
-            Expr::Zero(ty) => Expr::Zero(self.ty(ty)?),
+            Expr::Zero(ty) => {
+                // A block lambda drops the hardware scope and checks its result
+                // and body as a function with the enclosing block's call
+                // visibility.
+                let calls_override = match self.names.zero_binding {
+                    ZeroBinding::BxFunction => {
+                        self.region == DeclarationRegion::BlockBody
+                            || (self.region == DeclarationRegion::BlockSignature
+                                && self.names.uses.contains_key("zero!"))
+                    }
+                    ZeroBinding::ExternOrDslx => {
+                        self.region == DeclarationRegion::BlockBody
+                            && self.hardware_callees.is_none()
+                    }
+                    ZeroBinding::Intrinsic => false,
+                };
+                if calls_override && !self.locals.contains_key("zero!") {
+                    let native = match self.names.uses.get("zero!") {
+                        Some(Binding::Dslx(alias)) => Some(alias.as_str()),
+                        _ => None,
+                    };
+                    self.names
+                        .record_reference(self.source_owner, "zero!", "zero!", native);
+                }
+                Expr::Zero(self.ty(ty)?)
+            }
             Expr::TypeBuiltin { name, types, args } => Expr::TypeBuiltin {
                 name: name.clone(),
                 types: types
@@ -746,6 +1009,15 @@ impl<'a> Scope<'a> {
             },
             Expr::Tuple(fields) => Expr::Tuple(self.expressions(fields)?),
             Expr::Array(items) => Expr::Array(self.expressions(items)?),
+            Expr::ArrayLiteral {
+                annotation,
+                members,
+                has_ellipsis,
+            } => Expr::ArrayLiteral {
+                annotation: annotation.as_ref().map(|ty| self.ty(ty)).transpose()?,
+                members: self.expressions(members)?,
+                has_ellipsis: *has_ellipsis,
+            },
             Expr::Struct { name, fields, base }
             | Expr::AppliedStruct {
                 name, fields, base, ..
@@ -850,12 +1122,21 @@ impl<'a> Scope<'a> {
                         .value_at
                         .zip(self.names.positions.get(name))
                         .is_some_and(|(at, &pos)| at < pos);
+                // A root's later parametric struct can leave the builtin map
+                // visible. Its named callback still resolves in callable scope.
+                let local_struct_map = self.source_owner.is_some()
+                    && callee == "map"
+                    && self.names.structs.contains("map");
                 // A later DSLX use named map can denote a function or an enum.
                 // A callback visible only in callable scope requires the
                 // builtin.
-                if later_dslx_map && let Some([array, Expr::Name(callback)]) = builtin_args {
+                if (later_dslx_map || local_struct_map)
+                    && let Some([array, Expr::Name(callback)]) = builtin_args
+                {
                     let callable = self.map_callback(callback)?;
-                    if self.reference(callback, self.value_at).as_ref() != Ok(&callable) {
+                    if later_dslx_map
+                        && self.reference(callback, self.value_at).as_ref() != Ok(&callable)
+                    {
                         return Ok(Expr::NamedMap {
                             target: callee,
                             iterable: Box::new(ForIterable::Array(self.expr(array)?)),
@@ -864,19 +1145,27 @@ impl<'a> Scope<'a> {
                         });
                     }
                 }
-                let args = self.expressions(args)?;
                 if matches!(expr, Expr::MapBeforeUse { .. })
                     && (later_dslx_map || callee == BUILTIN_MAP)
                 {
+                    // A later native function already violates the order at
+                    // the map target. A later enum selects the builtin, so the
+                    // ordinary operands cannot contribute an order violation.
+                    let owner = self.source_owner.take();
+                    let args = self.expressions(args);
+                    self.source_owner = owner;
                     Expr::MapBeforeUse {
                         name: callee,
-                        args,
+                        args: args?,
                         builtin_args: builtin_args
                             .map(|args| self.expressions(args))
                             .transpose()?,
                     }
                 } else {
-                    Expr::Call { name: callee, args }
+                    Expr::Call {
+                        name: callee,
+                        args: self.expressions(args)?,
+                    }
                 }
             }
             Expr::ParametricCall {
@@ -915,7 +1204,7 @@ impl<'a> Scope<'a> {
                 callback,
                 parametrics,
             } => Expr::NamedMap {
-                target: self.reference(target, self.builtin_at(target))?,
+                target: self.map_reference(target)?,
                 iterable: Box::new(self.iterable(iterable)?),
                 callback: self.map_callback(callback)?,
                 parametrics: self.expressions(parametrics)?,
@@ -966,7 +1255,7 @@ impl<'a> Scope<'a> {
 
     /// The map element is visible in the result annotation and body.
     fn map(&mut self, map: &MapExpr) -> Result<MapExpr, String> {
-        let target = self.reference(&map.target, self.builtin_at(&map.target))?;
+        let target = self.map_reference(&map.target)?;
         let iterable = self.iterable(&map.iterable)?;
         let parameter_type = self.optional_type(&map.parameter_type)?;
         let outer_hardware = self.hardware_callees.take();

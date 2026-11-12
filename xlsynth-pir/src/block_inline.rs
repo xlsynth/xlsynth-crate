@@ -1,9 +1,83 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::ir::{self, Block, MemberType, NodePayload, NodeRef, PackageMember, Register};
+use crate::ir::{
+    self, Block, InstantiationKind, MemberType, NodePayload, NodeRef, PackageMember, Register,
+};
 use crate::ir_utils::{get_topological, remap_payload_with};
+
+/// Blocks and functions occupy separate namespaces in a PIR package.
+fn member_key(member: &PackageMember) -> (&str, MemberType) {
+    match member {
+        PackageMember::Block(block) => (&block.name, MemberType::Block),
+        PackageMember::Function(function) => (&function.name, MemberType::Function),
+    }
+}
+
+/// Flattens one block hierarchy, retaining its transitively called functions.
+/// Registers from a child instance acquire an instance-prefixed name. External
+/// instances have no block body to inline and are rejected.
+pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::Package, String> {
+    if package.get_block(top).is_none() {
+        return Err(format!("block '{top}' not found"));
+    }
+    let members: HashMap<_, _> = package
+        .members
+        .iter()
+        .map(|member| (member_key(member), member))
+        .collect();
+    let mut reachable = HashSet::new();
+    let mut pending = vec![(top, MemberType::Block)];
+    while let Some(key) = pending.pop() {
+        if !reachable.insert(key.clone()) {
+            continue;
+        }
+        let member = members
+            .get(&key)
+            .ok_or_else(|| format!("missing block hierarchy dependency '{}'", key.0))?;
+        if let PackageMember::Block(block) = member {
+            for instance in &block.instantiations {
+                if instance.kind != InstantiationKind::Block {
+                    return Err(format!(
+                        "cannot inline external instance '{}'",
+                        instance.name
+                    ));
+                }
+                pending.push((&instance.block, MemberType::Block));
+            }
+        }
+        pending.extend(
+            member
+                .graph()
+                .nodes
+                .iter()
+                .filter_map(|node| match &node.payload {
+                    NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
+                        Some((to_apply.as_str(), MemberType::Function))
+                    }
+                    NodePayload::CountedFor { body, .. } => {
+                        Some((body.as_str(), MemberType::Function))
+                    }
+                    _ => None,
+                }),
+        );
+    }
+    let mut hierarchy = ir::Package {
+        name: package.name.clone(),
+        file_table: package.file_table.clone(),
+        members: package
+            .members
+            .iter()
+            .filter(|member| reachable.contains(&member_key(member)))
+            .cloned()
+            .collect(),
+        top: Some((top.to_owned(), MemberType::Block)),
+    };
+    crate::ir_verify::verify_package(&hierarchy).map_err(|e| e.to_string())?;
+    inline_all_blocks_in_package(&mut hierarchy)?;
+    Ok(hierarchy)
+}
 
 // Inlines all block instantiations in the package. All blocks are removed after
 // inlining except for the top block.
@@ -360,7 +434,7 @@ fn uniquify_register_name(base: &str, used: &mut HashMap<String, usize>) -> Stri
     }
 }
 
-fn uniquify_node_name(base: &str, used: &mut HashMap<String, usize>) -> String {
+pub(crate) fn uniquify_node_name(base: &str, used: &mut HashMap<String, usize>) -> String {
     if !used.contains_key(base) {
         used.insert(base.to_string(), 1);
         return base.to_string();

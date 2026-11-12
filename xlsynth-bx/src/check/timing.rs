@@ -12,8 +12,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{StructTable, output_ports};
-use crate::ast::{BinaryOp, OutputCycles, Type};
+use super::StructTable;
+use crate::ast::{BinaryOp, OutputCycles, Param, Type};
 use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 
 const BLOCK_SCOPE: usize = 0;
@@ -23,13 +23,26 @@ const BLOCK_SCOPE: usize = 0;
 pub(super) fn check_blocks(
     blocks: &mut [CheckedBlock],
     structs: &StructTable<'_>,
+    invariant_harnesses: &BTreeSet<&str>,
 ) -> Result<(), String> {
+    // An invariant harness bundles its predicate with generated lemma ports.
+    // The source annotation applies only to the first field, named 'out' in BX.
+    let predicate_port = [Param {
+        name: "out".into(),
+        ty: Type::Bool,
+    }];
     let mut children: BTreeMap<&str, &CheckedBlock> = BTreeMap::new();
     for block in blocks {
         let Some(expected) = &block.output_cycles else {
             continue;
         };
-        if let Err(error) = check_outputs(block, expected, structs, &children) {
+        let invariant = invariant_harnesses.contains(block.name.as_str());
+        let ports = if invariant {
+            &predicate_port[..]
+        } else {
+            &block.output_ports
+        };
+        if let Err(error) = check_outputs(block, expected, ports, structs, &children) {
             let deferred = block.statements.iter().any(|stmt| match stmt {
                 CheckedStmt::Wire { .. } => true,
                 CheckedStmt::Inst { block, .. } => children
@@ -41,6 +54,8 @@ pub(super) fn check_blocks(
                 // Let block IR diagnose feedback in this block or its child
                 // first.
                 block.timing_error = Some(error);
+            } else if invariant {
+                return Err(format!("invariant '{}': {error}", block.source_name));
             } else if block.name != block.source_name {
                 return Err(format!(
                     "block '{}' ({}): {error}",
@@ -59,6 +74,7 @@ pub(super) fn check_blocks(
 fn check_outputs(
     block: &CheckedBlock,
     expected: &OutputCycles,
+    ports: &[Param],
     structs: &StructTable<'_>,
     children: &BTreeMap<&str, &CheckedBlock>,
 ) -> Result<(), String> {
@@ -68,7 +84,6 @@ fn check_outputs(
     if !aggregate && let OutputCycles::Uniform(cycle) = expected {
         return check(&[], *cycle);
     }
-    let ports = output_ports(&block.result, &structs.definitions)?;
     if let OutputCycles::ByPort(expected) = expected {
         let port_names: BTreeSet<_> = ports.iter().map(|p| p.name.as_str()).collect();
         if let Some(port) = expected

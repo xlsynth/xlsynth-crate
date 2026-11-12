@@ -20,16 +20,14 @@ use super::{
     literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
-    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, Type,
+    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding,
+    StructLiteralArgs, Type,
 };
 use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, ConstantUse, TypedExpr};
 
 pub(super) fn dimension_type() -> Type {
-    Type::Bits {
-        signed: false,
-        width: 32,
-    }
+    Type::unsigned(32)
 }
 
 impl<'m> Declarations<'m> {
@@ -94,6 +92,26 @@ impl<'m> Declarations<'m> {
     }
 }
 
+/// Convert a bits or bool value to a host-sized dimension without truncating
+/// high bits or interpreting a negative signed value as a width.
+fn nonnegative_dimension(ty: &Type, value: &IrValue) -> Result<usize, String> {
+    let (signed, _) =
+        bits(ty).ok_or_else(|| format!("type dimension requires bits or bool, got {ty}"))?;
+    let bits = value.as_bits().map_err(|e| e.to_string())?;
+    if signed && bits.msb() {
+        return Err("type dimension cannot be negative".into());
+    }
+    ir_bits_to_usize(bits).ok_or_else(|| "dimension does not fit usize".to_owned())
+}
+
+/// A bit width or sign can adopt a struct formal's type. Array lengths and
+/// forwarded nominal bindings supply a value of a specific type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WitnessType {
+    BitDimension,
+    Exact,
+}
+
 /// Only a bare binding in a dimension provides an inference constraint. A
 /// computed dimension is checked after its operands have concrete values.
 pub(super) struct InferredBindings<'f> {
@@ -101,6 +119,9 @@ pub(super) struct InferredBindings<'f> {
     indices: BTreeMap<&'f str, usize>,
     pub(super) values: Vec<Option<BoundParametricValue>>,
     explicit_count: usize,
+    // Struct bit widths and signedness provide unsized integer witnesses.
+    // Array lengths and nested nominal arguments retain their source types.
+    struct_bit_dimensions: Option<BTreeSet<usize>>,
     // Gather all witnesses from one data argument before its bindings become
     // context for later arguments. Tuple fields must agree with one another.
     witnesses: BTreeMap<usize, BoundParametricValue>,
@@ -117,8 +138,60 @@ impl<'f> InferredBindings<'f> {
                 .collect(),
             values: vec![None; formals.len()],
             explicit_count,
+            struct_bit_dimensions: None,
             witnesses: BTreeMap::new(),
         }
+    }
+
+    pub(super) fn for_struct(formals: &'f [ParametricBinding], explicit_count: usize) -> Self {
+        let mut bindings = Self::new(formals, explicit_count);
+        bindings.struct_bit_dimensions = Some(BTreeSet::new());
+        bindings
+    }
+
+    /// Give a bit-width or signedness witness its resolved declaration type.
+    /// Other witnesses, including a forwarded nominal argument, must match
+    /// exactly.
+    pub(super) fn struct_value(
+        &self,
+        index: usize,
+        ty: &Type,
+    ) -> Result<Option<BoundParametricValue>, String> {
+        let Some(bound) = self.values[index].as_ref() else {
+            return Ok(None);
+        };
+        if !self
+            .struct_bit_dimensions
+            .as_ref()
+            .is_some_and(|dims| dims.contains(&index))
+        {
+            return Ok(Some(bound.clone()));
+        }
+        let (signed, width) = bits(ty).ok_or_else(|| {
+            format!(
+                "parametric '{}' cannot infer {ty} from a bit dimension",
+                self.formals[index].name
+            )
+        })?;
+        let n = nonnegative_dimension(&bound.ty, &bound.value)?;
+        let value = if signed {
+            IrValue::make_sbits(
+                width,
+                i64::try_from(n).map_err(|_| "dimension exceeds i64")?,
+            )
+        } else {
+            IrValue::make_ubits(width, n as u64)
+        }
+        .map_err(|_| {
+            format!(
+                "inferred dimension {n} does not fit {ty} for parametric '{}'",
+                self.formals[index].name
+            )
+        })?;
+        Ok(Some(BoundParametricValue {
+            ty: ty.clone(),
+            value,
+        }))
     }
 
     fn missing(&self, dimension: &Expr) -> Option<usize> {
@@ -138,9 +211,16 @@ impl<'f> InferredBindings<'f> {
                 self.missing(signed).is_some() || self.missing(width).is_some()
             }
             Type::ParametricArray { element, size } => {
-                self.missing(size)
-                    .is_some_and(|i| !self.witnesses.contains_key(&i))
-                    || self.needs_witness(element)
+                self.missing(size).is_some_and(|i| {
+                    self.witnesses.get(&i).is_none_or(|previous| {
+                        // An array length supplies an exact u32. A prior bit
+                        // dimension or a differently typed nominal argument
+                        // still needs to agree with that constraint.
+                        self.struct_bit_dimensions.as_ref().is_some_and(|dims| {
+                            dims.contains(&i) || previous.ty != dimension_type()
+                        })
+                    })
+                }) || self.needs_witness(element)
             }
             Type::Array { element, .. } => self.needs_witness(element),
             Type::Tuple(fields) | Type::TypeApplied { args: fields, .. } => {
@@ -153,26 +233,54 @@ impl<'f> InferredBindings<'f> {
         }
     }
 
-    fn bind_dimension(
+    /// Merge evidence from one field. A typed nominal argument can also
+    /// constrain a binding that supplies a numeric bit width in that field.
+    fn bind_witness(
         &mut self,
         dimension: &Expr,
         ty: &Type,
         value: IrValue,
+        witness_type: WitnessType,
     ) -> Result<(), String> {
-        if let Some(index) = self.missing(dimension) {
-            let witness = BoundParametricValue {
-                ty: ty.clone(),
-                value,
-            };
-            if let Some(previous) = self.witnesses.insert(index, witness.clone())
-                && previous != witness
-            {
+        let Some(index) = self.missing(dimension) else {
+            return Ok(());
+        };
+        let contextual =
+            self.struct_bit_dimensions.is_some() && witness_type == WitnessType::BitDimension;
+        let witness = BoundParametricValue {
+            ty: ty.clone(),
+            value,
+        };
+        if let Some(previous) = self.witnesses.get(&index) {
+            let previous_contextual = self
+                .struct_bit_dimensions
+                .as_ref()
+                .is_some_and(|dims| dims.contains(&index));
+            let equal = (compatible(&previous.ty, &witness.ty) && previous.value == witness.value)
+                || ((previous_contextual || contextual)
+                    && nonnegative_dimension(&previous.ty, &previous.value)
+                        .ok()
+                        .is_some_and(|n| {
+                            nonnegative_dimension(&witness.ty, &witness.value) == Ok(n)
+                        }));
+            if !equal {
                 return Err(format!(
                     "conflicting values inferred for parametric '{}': {} and {}",
                     self.formals[index].name, previous.value, witness.value
                 ));
             }
+            if contextual && !previous_contextual {
+                return Ok(());
+            }
         }
+        if let Some(dims) = &mut self.struct_bit_dimensions {
+            if contextual {
+                dims.insert(index);
+            } else {
+                dims.remove(&index);
+            }
+        }
+        self.witnesses.insert(index, witness);
         Ok(())
     }
 
@@ -182,10 +290,15 @@ impl<'f> InferredBindings<'f> {
         }
     }
 
-    fn bind_size(&mut self, dimension: &Expr, size: usize) -> Result<(), String> {
+    fn bind_size(
+        &mut self,
+        dimension: &Expr,
+        size: usize,
+        witness_type: WitnessType,
+    ) -> Result<(), String> {
         if self.missing(dimension).is_some() {
             let value = IrValue::make_ubits(32, size as u64).map_err(|e| e.to_string())?;
-            self.bind_dimension(dimension, &dimension_type(), value)?;
+            self.bind_witness(dimension, &dimension_type(), value, witness_type)?;
         }
         Ok(())
     }
@@ -200,8 +313,13 @@ impl<'f> InferredBindings<'f> {
         match (formal, actual) {
             (Type::ParametricBits { signed, width }, actual) => {
                 if let Some((sign, count)) = bits(actual) {
-                    self.bind_dimension(signed, &Type::Bool, IrValue::bool(sign))?;
-                    self.bind_size(width, count)?;
+                    self.bind_witness(
+                        signed,
+                        &Type::Bool,
+                        IrValue::bool(sign),
+                        WitnessType::BitDimension,
+                    )?;
+                    self.bind_size(width, count, WitnessType::BitDimension)?;
                 }
             }
             (
@@ -211,7 +329,7 @@ impl<'f> InferredBindings<'f> {
                     size: count,
                 },
             ) => {
-                self.bind_size(size, *count)?;
+                self.bind_size(size, *count, WitnessType::Exact)?;
                 self.infer(element, actual, structs, resolver)?;
             }
             (
@@ -226,14 +344,25 @@ impl<'f> InferredBindings<'f> {
                 }
             }
             (Type::ParametricStruct { name, args }, Type::Named(canonical)) => {
-                let values = if let Some(instance) = structs.instances.get(canonical) {
-                    (instance.template.name == *name).then_some(instance.values.as_slice())
-                } else {
-                    resolver.struct_parametric_values(name, canonical)?
-                };
-                if let Some(values) = values {
+                if let Some(instance) = structs.instances.get(canonical) {
+                    if instance.template.name == *name {
+                        for (arg, bound) in args.iter().zip(&instance.values) {
+                            self.bind_witness(
+                                arg,
+                                &bound.ty,
+                                bound.value.clone(),
+                                WitnessType::Exact,
+                            )?;
+                        }
+                    }
+                } else if let Some(values) = resolver.struct_parametric_values(name, canonical)? {
                     for (arg, &value) in args.iter().zip(values) {
-                        self.bind_dimension(arg, &dimension_type(), IrValue::u32(value))?;
+                        self.bind_witness(
+                            arg,
+                            &dimension_type(),
+                            IrValue::u32(value),
+                            WitnessType::Exact,
+                        )?;
                     }
                 }
             }
@@ -258,7 +387,7 @@ impl<'f> InferredBindings<'f> {
         match (pattern, expr) {
             (Type::ParametricArray { size, element }, Expr::Array(items)) => {
                 if let Some(first) = items.first() {
-                    self.bind_size(size, items.len())?;
+                    self.bind_size(size, items.len(), WitnessType::Exact)?;
                     self.literal_lengths(element, first)?;
                 }
             }
@@ -287,7 +416,7 @@ struct DataArgument<'e> {
 /// Earlier explicit formals stay in declaration scope while the caller
 /// evaluates each constexpr actual with the type of the next formal.
 #[derive(Default)]
-struct ExplicitScope {
+pub(super) struct ExplicitScope {
     types: Option<Bindings>,
     names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -299,7 +428,7 @@ struct ExplicitScope {
 impl ExplicitScope {
     /// Move the lexical maps between successive checks without copying the
     /// types or literals of every preceding formal at each step.
-    fn exchange(&mut self, checker: &mut BodyChecker<'_, '_>) {
+    pub(super) fn exchange(&mut self, checker: &mut BodyChecker<'_, '_>) {
         std::mem::swap(&mut self.types, &mut checker.function_type_bindings);
         std::mem::swap(&mut self.names, &mut checker.names);
         std::mem::swap(&mut self.values, &mut checker.values);
@@ -379,12 +508,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         result
     }
 
+    /// A directly named struct value parameter can supply a dimension at its
+    /// declared width. Computed dimensions use the usual bool or u32 context.
+    fn struct_dimension(&self, expr: &Expr) -> Result<Option<usize>, String> {
+        self.direct_struct_binding(expr)
+            .map(|(ty, value)| nonnegative_dimension(ty, value))
+            .transpose()
+    }
+
     pub(super) fn resolve_dimensions(
         &mut self,
         ty: &Type,
         remaining: usize,
     ) -> Result<Type, String> {
         let size = |checker: &mut Self, expr: &Expr| {
+            if let Some(n) = checker.struct_dimension(expr)? {
+                return Ok(n);
+            }
             let value = checker.parametric_value(expr, &dimension_type())?;
             ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
                 .ok_or_else(|| "dimension does not fit usize".to_owned())
@@ -413,26 +553,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .iter()
                     .map(|arg| self.resolve_dimensions(arg, budget))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ty = Type::TypeApplied {
-                    name: name.clone(),
-                    args,
-                };
-                let ty = match self.type_bindings() {
-                    Some(bindings) if bindings.has_unbound_variable(&ty) => return Ok(ty),
-                    Some(bindings) => bindings.concrete_type(&ty)?,
-                    None => ty,
-                };
-                self.materialize_type_applications(ty, remaining)
+                self.with_type_resolver(|types, dimensions, bindings| {
+                    types.resolve_struct_type_application(
+                        name, args, bindings, dimensions, remaining,
+                    )
+                })
             }
             Type::ParametricStruct { name, args } => {
-                let ty = self.struct_actual_type(name, args)?;
-                self.resolve_dimensions(&ty, remaining)
+                let args = self.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
+                self.struct_value_type(name, &args, remaining)
             }
             Type::ParametricBits { signed, width } => {
-                let signed = self
-                    .parametric_value(signed, &Type::Bool)?
-                    .to_bool()
-                    .map_err(|e| e.to_string())?;
+                let signed = match self.struct_dimension(signed)? {
+                    Some(0) => false,
+                    Some(1) => true,
+                    Some(n) => return Err(format!("bit signedness must be 0 or 1, got {n}")),
+                    None => self
+                        .parametric_value(signed, &Type::Bool)?
+                        .to_bool()
+                        .map_err(|e| e.to_string())?,
+                };
                 Ok(Type::Bits {
                     signed,
                     width: size(self, width)?,
@@ -441,14 +581,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Type::ParametricArray {
                 element,
                 size: expr,
-            } => Ok(Type::Array {
-                element: Box::new(self.resolve_dimensions(element, child_type_budget(remaining)?)?),
-                size: size(self, expr)?,
-            }),
-            Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.resolve_dimensions(element, child_type_budget(remaining)?)?),
-                size: *size,
-            }),
+            } => Ok(Type::array(
+                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                size(self, expr)?,
+            )),
+            Type::Array { element, size } => Ok(Type::array(
+                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                *size,
+            )),
             Type::Tuple(fields) => {
                 let depth = child_type_budget(remaining)?;
                 fields
@@ -493,6 +633,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         actuals: &[Expr],
         args: &[Expr],
     ) -> Result<(Type, K), String> {
+        for arg in args {
+            crate::infer_literal::check_argument_array_sizes(arg)?;
+        }
         let instantiate = |checker: &mut Self, args: &[&Expr]| {
             let args = args
                 .iter()
@@ -809,7 +952,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     self.infer_type_input(ty, item, types, inferred, /* tuple_member= */ true)
                 })
                 .collect::<Result<_, _>>()?;
-            return Ok(Input::Aggregate { expr, members });
+            return Ok(Input::Aggregate {
+                expr,
+                members,
+                charged_fill: 0,
+            });
         }
         let witness = self.dimension_witness(formal, expr, inferred, tuple_member)?;
         self.infer_input(formal, expr, types, InputPattern::Function(witness))

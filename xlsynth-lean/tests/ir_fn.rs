@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Write as _;
-use std::path::PathBuf;
-use std::sync::OnceLock;
+#[cfg(feature = "lean-tests")]
+use std::{fmt::Write as _, path::PathBuf, sync::OnceLock};
 
+#[cfg(feature = "lean-tests")]
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
-use xlsynth_lean::{
-    LeanError, LeanEvaluator, LeanFunctionInputs, LeanModuleName, export_ir_function,
-};
-use xlsynth_pir::IrValue;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_lean::{LeanError, LeanModuleName, export_ir_function};
+#[cfg(feature = "lean-tests")]
+use xlsynth_lean::{LeanEvaluator, LeanFunctionInputs};
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::random_inputs::{
-    BitValuePattern, generate_argument_sets_from_seed, generate_pattern_arguments,
+#[cfg(feature = "lean-tests")]
+use xlsynth_pir::{
+    IrValue,
+    ir_eval::{FnEvalResult, eval_fn_in_package},
+    random_inputs::{
+        BitValuePattern, generate_argument_sets_from_seed, generate_pattern_arguments,
+    },
 };
 
 const EMPTY_MAP: &str = r#"package empty_map
@@ -81,6 +84,7 @@ top fn checked(a: bits[1] id=3) -> bits[1] {
 }
 
 /// Shares the compiled Lean support modules across integration tests.
+#[cfg(feature = "lean-tests")]
 fn evaluator() -> &'static LeanEvaluator {
     static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
     EVALUATOR.get_or_init(|| {
@@ -90,6 +94,7 @@ fn evaluator() -> &'static LeanEvaluator {
 }
 
 /// Runs the real Lean module against the original, unmodified PIR function.
+#[cfg(feature = "lean-tests")]
 fn check_differential(ir: &str) {
     let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
     let top = pkg.get_top_fn().unwrap();
@@ -114,8 +119,8 @@ fn check_differential(ir: &str) {
     }
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_mixed_signatures_and_repeated_module_names_together() {
     let module = LeanModuleName::new("Generated.Function").unwrap();
     let packages = [
@@ -163,8 +168,8 @@ fn evaluates_mixed_signatures_and_repeated_module_names_together() {
     assert!(evaluator().eval_ir_functions(&[]).unwrap().is_empty());
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_word_operations_and_aggregate_interfaces() {
     check_differential(
         "package nullary\ntop fn empty() -> bits[0] { ret concat.1: bits[0] = concat(id=1) }",
@@ -181,8 +186,8 @@ fn evaluates_word_operations_and_aggregate_interfaces() {
     }
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn imported_bitvec_module_uses_xls_signed_division() {
     let ir = r#"package division
 top fn divide(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
@@ -206,8 +211,8 @@ top fn divide(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
     }
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_a_thousand_shared_additions() {
     let mut ir = String::from("package depth\ntop fn main(n1: bits[8] id=1) -> bits[8] {\n");
     for i in 2..=1025 {
@@ -218,8 +223,8 @@ fn evaluates_a_thousand_shared_additions() {
     check_differential(&ir);
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_wide_nary_operations_and_arrays() {
     let operands: Vec<_> = (0..2048)
         .map(|i| if i % 5 < 2 { "x" } else { "y" })
@@ -256,8 +261,8 @@ fn evaluates_wide_nary_operations_and_arrays() {
     ));
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_deep_tuple_input_and_output() {
     let input_ty = ["bits[8]"; 786].join(", ");
     let output_ty = ["bits[8]"; 201].join(", ");
@@ -275,8 +280,8 @@ top fn entry(t: ({input_ty}) id=1) -> ({output_ty}) {{
     ));
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_array_of_computed_tuple_field() {
     check_differential(
         r#"package computed_element

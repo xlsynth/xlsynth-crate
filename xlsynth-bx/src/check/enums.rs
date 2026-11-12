@@ -5,10 +5,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use petgraph::{algo::kosaraju_scc, graphmap::DiGraphMap};
 use xlsynth_pir::IrBits;
 
-use super::{BodyChecker, CheckedEnum, StructTable, bits, dependency_order, type_dependencies};
-use crate::ast::{EnumDef, Module, Type};
+use super::{
+    BodyChecker, CheckedEnum, Declarations, StructTable, bits, dependency_order, type_dependencies,
+};
+use crate::ast::{EnumDef, Expr, Module, SourceNode, Type};
 
 impl StructTable<'_> {
     /// Only BX declarations have unqualified keys. Imported enum references
@@ -18,6 +21,15 @@ impl StructTable<'_> {
             return None;
         }
         self.enums.get(name)
+    }
+
+    /// A BX alias can qualify a member of either a local or an imported enum.
+    fn enum_subject(&self, prefix: &str, decls: &Declarations<'_>) -> Option<&CheckedEnum> {
+        match decls.type_aliases.get(prefix).map(|alias| &alias.ty) {
+            Some(Type::Enum { name, .. }) => self.enums.get(name),
+            Some(_) => None,
+            None => self.local_enum(prefix),
+        }
     }
 
     /// Check that zero initialization yields a declared value for each enum.
@@ -63,10 +75,16 @@ impl StructTable<'_> {
         module: &Module,
         position: impl Fn(&str) -> usize,
     ) -> Result<Vec<(usize, usize)>, String> {
-        let enum_positions: BTreeMap<_, _> = module
+        let type_positions: BTreeMap<_, _> = module
             .enums
             .iter()
-            .map(|def| (def.name.as_str(), position(&def.name)))
+            .map(|def| (def.name.as_str(), (position(&def.name), "enum")))
+            .chain(
+                module
+                    .type_aliases
+                    .iter()
+                    .map(|def| (def.name.as_str(), (position(&def.name), "type alias"))),
+            )
             .collect();
         let constant_positions: BTreeMap<_, _> = module
             .constants
@@ -74,6 +92,7 @@ impl StructTable<'_> {
             .map(|c| (c.name.as_str(), position(&c.name)))
             .collect();
         let mut graph = Vec::new();
+        let mut preferences = Vec::new();
         let mut ready = Vec::new();
         let local_structs: BTreeMap<_, _> = module
             .structs
@@ -82,24 +101,105 @@ impl StructTable<'_> {
             .collect();
         for def in &module.structs {
             let mut deps = Vec::new();
+            let mut preferred = Vec::new();
             let mut dimensions = Vec::new();
             let mut has_symbolic_application = false;
-            for field in &def.fields {
+            let types = def
+                .value_parametrics
+                .iter()
+                .map(|formal| &formal.ty)
+                .chain(def.fields.iter().map(|field| &field.ty));
+            let mut pending = Vec::new();
+            for ty in types {
+                pending.push(SourceNode::Annotation(ty));
                 type_dependencies(
-                    &field.ty,
-                    |ty, name| {
-                        has_symbolic_application |=
-                            matches!(ty, Type::ParametricStruct { .. } | Type::TypeApplied { .. });
-                        if !def.type_params.iter().any(|param| param == name) {
-                            deps.push(name);
-                        }
+                    ty,
+                    |ty, _| {
+                        // A literal with a concrete annotation can be resolved
+                        // as soon as its template is available. uN[WIDTH]:8
+                        // needs its scope.
+                        has_symbolic_application |= match ty {
+                            Type::ParametricStruct { args, .. } => !args.iter().all(|arg| {
+                                matches!(
+                                    arg,
+                                    Expr::Bool(_)
+                                        | Expr::Literal {
+                                            ty: None | Some(Type::Bits { .. } | Type::Bool),
+                                            ..
+                                        }
+                                )
+                            }),
+                            Type::TypeApplied { .. } => true,
+                            _ => false,
+                        };
                     },
                     |expr| {
-                        if let crate::ast::Expr::Name(name) = expr {
+                        if let Expr::Name(name) = expr {
                             dimensions.push(name.as_str());
                         }
                     },
                 );
+            }
+            // Visit each selected default at most once for this declaration.
+            // A fully explicit application has no dependency on its defaults.
+            let mut default_prefixes = BTreeMap::new();
+            let mut defaults = Vec::new();
+            let mut in_declaration = true;
+            let mut optional = false;
+            while let Some(node) = pending.pop().or_else(|| {
+                // Defaults use their own value template's declaration scope.
+                in_declaration = false;
+                defaults.pop().map(|(node, preference)| {
+                    optional = preference;
+                    node
+                })
+            }) {
+                let constructor = matches!(node, SourceNode::Expression(_));
+                let application = match node {
+                    SourceNode::Annotation(Type::ParametricStruct { name, args })
+                    | SourceNode::Expression(Expr::ParametricStruct { name, args, .. }) => {
+                        Some((name, args.len()))
+                    }
+                    SourceNode::Annotation(Type::TypeApplied { name, args })
+                    | SourceNode::Expression(Expr::TypeAppliedStruct { name, args, .. }) => {
+                        Some((name, args.len()))
+                    }
+                    SourceNode::Annotation(Type::Named(name) | Type::Enum { name, .. })
+                    | SourceNode::Expression(Expr::Struct { name, .. }) => Some((name, 0)),
+                    SourceNode::Annotation(Type::Applied { name, args })
+                    | SourceNode::Expression(Expr::AppliedStruct { name, args, .. }) => {
+                        Some((name, args.len()))
+                    }
+                    _ => None,
+                };
+                node.push_children(&mut pending);
+                if let Some((name, supplied)) = application
+                    && (!in_declaration || !def.type_params.contains(name))
+                {
+                    if optional {
+                        preferred.push(name.as_str());
+                    } else {
+                        deps.push(name.as_str());
+                    }
+                    if let Some(template) = local_structs.get(name.as_str()) {
+                        let formals = &template.value_parametrics;
+                        // Constructor context or a splat can supply an
+                        // omitted argument. Its default is only a preference.
+                        let preference = optional || constructor;
+                        let first = default_prefixes
+                            .entry((name.as_str(), preference))
+                            .or_insert(formals.len());
+                        if supplied < *first {
+                            defaults.extend(
+                                formals[supplied..*first]
+                                    .iter()
+                                    .filter_map(|formal| formal.default.as_ref())
+                                    .map(|expr| (SourceNode::Expression(expr), preference)),
+                            );
+                            *first = supplied;
+                        }
+                    }
+                }
             }
             let parametric_names: BTreeSet<_> = def
                 .value_parametrics
@@ -136,30 +236,70 @@ impl StructTable<'_> {
                         def.name
                     ));
                 }
-                if let Some(&enum_at) = enum_positions.get(dep) {
-                    if enum_at > position(&def.name) {
+                if let Some(&(type_at, kind)) = type_positions.get(dep) {
+                    // An AST without a cross-kind declaration order can index
+                    // the struct as soon as its field types are available.
+                    if !module.declaration_order.is_empty() && type_at > position(&def.name) {
                         return Err(format!(
-                            "enum '{dep}' is declared after struct '{}'",
+                            "{kind} '{dep}' is declared after struct '{}'",
                             def.name
                         ));
                     }
-                    at = at.max(enum_at);
+                    at = at.max(type_at);
                 }
             }
             ready.push(at);
             deps.retain(|name| local_structs.contains_key(name));
+            preferred.retain(|name| local_structs.contains_key(name));
             graph.push((def.name.as_str(), deps));
+            preferences.push(preferred);
         }
         let mut ranks = BTreeMap::new();
         let mut scheduled = Vec::with_capacity(graph.len());
-        for index in dependency_order("struct", &graph)? {
+        for index in layout_order(&graph, &preferences)? {
             let (name, deps) = &graph[index];
             let at = deps.iter().fold(ready[index], |at, dep| at.max(ranks[dep]));
+            let at = preferences[index]
+                .iter()
+                .filter_map(|dep| ranks.get(dep))
+                .fold(at, |at, &rank| at.max(rank));
             ranks.insert(*name, at);
             scheduled.push((at, index));
         }
         Ok(scheduled)
     }
+}
+
+/// Honor constructor-default preferences between components. Within a cycle
+/// involving a preference, only required dependencies determine the order.
+fn layout_order(
+    graph: &[(&str, Vec<&str>)],
+    preferences: &[Vec<&str>],
+) -> Result<Vec<usize>, String> {
+    let required = dependency_order("struct", graph)?;
+    if preferences.iter().all(Vec::is_empty) {
+        return Ok(required);
+    }
+    let indices: BTreeMap<_, _> = graph
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _))| (*name, i))
+        .collect();
+    let mut edges = DiGraphMap::<usize, ()>::new();
+    let mut required_rank = vec![0; graph.len()];
+    for (rank, &index) in required.iter().enumerate() {
+        required_rank[index] = rank;
+        edges.add_node(index);
+        for dep in graph[index].1.iter().chain(&preferences[index]) {
+            edges.add_edge(index, indices[dep], ());
+        }
+    }
+    let mut order = Vec::with_capacity(graph.len());
+    for mut component in kosaraju_scc(&edges) {
+        component.sort_unstable_by_key(|&i| required_rank[i]);
+        order.extend(component);
+    }
+    Ok(order)
 }
 
 impl<'a, 'm> BodyChecker<'a, 'm> {
@@ -237,7 +377,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let Some((prefix, member)) = name.rsplit_once("::") else {
             return Ok(false);
         };
-        if let Some(def) = self.structs.local_enum(prefix) {
+        if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
             crate::parser::validate_dslx_value_path(name)?;
             self.decls.check_type_name_visibility(
                 prefix,
@@ -275,7 +415,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.decls
             .check_type_name_visibility(prefix, self.function_position.or(self.block_position))?;
         let canonical;
-        let def = if let Some(def) = self.structs.local_enum(prefix) {
+        let def = if let Some(def) = self.structs.enum_subject(prefix, self.decls) {
             def
         } else if let Some((subject, ty)) = self.resolver.lookup_enum_prefix(prefix)? {
             let Type::Enum { name, .. } = self.resolver.resolve_named(&subject, &ty)? else {

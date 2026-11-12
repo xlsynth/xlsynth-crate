@@ -68,8 +68,8 @@ def oneHot (lsbPriority : Bool) (x : BitVec w) : BitVec (w + 1) :=
 
 /-- Multi-hot input encodes the bitwise OR of every selected index. -/
 def encode (outWidth : Nat) (x : BitVec w) : BitVec outWidth :=
-  BitVec.ofNat _ ((List.range w).foldl (fun acc i =>
-    if x.getLsbD i then acc ||| i else acc) 0)
+  (List.range w).foldl (fun acc i =>
+    acc ||| (if x.getLsbD i then BitVec.ofNat outWidth i else 0)) 0
 
 /-- Case zero wins whenever selector bit zero is set. -/
 def prioritySel (s : BitVec w) (cases : Array α) (fallback : α) : α :=

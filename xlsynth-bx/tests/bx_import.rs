@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs, io, path::Path};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::ast::{Expr, Stmt};
 use xlsynth_bx::{
     ImportOptions, ResetBehavior, check_module_with_options, check_source_with_options,
-    compile_with_options, empty_package, lower_module, parse_module,
+    compile_with_options, empty_package, lower_module, parse_module, run_tests,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
@@ -22,13 +25,6 @@ fn write_module(root: &Path, name: &str, source: &str) -> io::Result<()> {
     fs::write(path, source)
 }
 
-fn search_paths<'a>(roots: &[&'a Path]) -> ImportOptions<'a> {
-    ImportOptions {
-        additional_search_paths: roots.to_vec(),
-        ..Default::default()
-    }
-}
-
 fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, String> {
     compile_with_options(
         source,
@@ -36,6 +32,37 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
         ResetBehavior::default(),
         options,
     )
+}
+
+#[test]
+fn test_register_defaults_are_independent_of_imported_zero_functions() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    write_module(dir.path(), "values.bx", "pub fn zero!() -> u8 { u8:7 }")?;
+    let options = search_paths(&[dir.path()]);
+    let source = r#"
+use values::zero!;
+#[test] block drivers() {
+    reg implicit: u8;
+    reg explicit: u8 = zero!<u8>();
+    assert_eq(implicit, u8:0);
+    assert_eq(explicit, u8:7);
+}
+#[test] fn explicit_call() { assert_eq(zero!<u8>(), u8:7); }
+"#;
+    let report = run_tests(
+        source,
+        Path::new("driver_tests.bx"),
+        empty_package("suite"),
+        ResetBehavior::default(),
+        &options,
+        true,
+    )?;
+    assert_eq!(report.tests.len(), 2);
+    for test in report.tests {
+        assert_eq!(test.failure, None, "{}", test.name);
+    }
+    Ok(())
 }
 
 #[test]
@@ -159,6 +186,31 @@ pub block circuit(clk, x:u8)->u8 {
 }
 
 #[test]
+fn imported_array_fill_resolves_its_dimension_and_last_value_in_the_library()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "lanes.bx",
+        r#"
+const COUNT = u32:4;
+fn step(x: u8) -> u8 { x + u8:1 }
+pub fn spread(x: u8) -> u8[COUNT] { u8[COUNT]:[0, step(x), ...] }
+"#,
+    )?;
+    let source = r#"
+use lanes;
+const COUNT = u32:2;
+fn step(x: u8) -> u8 { x - u8:1 }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 { lanes::spread(x)[3] }
+"#;
+    let package = compile_design(source, &search_paths(&[dir.path()]))?;
+    assert_eq!(run(package, 41)?, IrValue::make_ubits(8, 42)?);
+    Ok(())
+}
+
+#[test]
 fn library_struct_arguments_keep_their_defining_zero_binding() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(dir.path(), "widths.bx", "pub fn zero!() -> u32 { u32:7 }")?;
@@ -193,6 +245,103 @@ block stage_external(clk, x: Lane<7>) -> u7 {{ let y = external_stage(x); y }}
         assert_eq!(
             run(compile_design(source, &options)?, 228)?,
             IrValue::make_ubits(8, 100)?
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn public_bx_aliases_preserve_private_types_across_module_and_member_uses()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    write_module(
+        dir.path(),
+        "device.bx",
+        r#"
+const WIDTH = u32:7;
+type Payload = uN[WIDTH];
+enum State: u8 { Ready = 3, Busy = 5 }
+struct Frame<T> { data: T, state: State }
+pub type Packet = Frame<Payload>;
+pub type Status = State;
+"#,
+    )?;
+    write_module(
+        dir.path(),
+        "bus.bx",
+        r#"
+use device;
+pub type Data = device::Packet;
+pub type Phase = device::Status;
+"#,
+    )?;
+    let root = r#"
+use bus;
+use bus::Phase;
+type Payload = u16;
+enum State: u8 { Ready = 20 }
+#[allow(combinational_block)]
+block circuit(clk, x: u8) -> u8 {
+    let p: bus::Data = bus::Data { data: x as u7, state: Phase::Ready };
+    match p.state {
+        bus::Phase::Ready => (p.data as u8) + (p.state as u8),
+        _ => Phase::Busy as u8,
+    }
+}
+"#;
+    assert_eq!(
+        run(compile_design(root, &options)?, 250)?,
+        IrValue::make_ubits(8, 125)?
+    );
+    for source in [
+        "use device::Payload;",
+        "use device; fn bad(x:device::State) {}",
+        "use bus; fn bad(x:bus::Packet) {}",
+        "use bus::Phase; type Phase = u8;",
+        "use bus::Data; fn bad() -> u8 { Data::Ready as u8 }",
+    ] {
+        assert!(
+            check_source_with_options(source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn library_define_before_use_checks_alias_references_and_their_dimensions()
+-> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let path = dir.path().join("lib.bx");
+    let declarations = "pub block take(clk, x: Word) -> Word { x }\npub type Word = u8;";
+    fs::write(&path, declarations)?;
+    let source = "use lib; block top(clk, x: u8) -> u8 { let y = lib::take(x); y }";
+    check_source_with_options(source, &options)?;
+    for (declarations, owner, referenced) in [
+        (declarations, "take", "Word"),
+        (
+            "type Pair = (Word, Word); pub type Word = u8;",
+            "Pair",
+            "Word",
+        ),
+        (
+            "type Word = uN[WIDTH + u32:1]; const WIDTH = u32:7;",
+            "Word",
+            "WIDTH",
+        ),
+    ] {
+        fs::write(
+            &path,
+            format!("#![require_define_before_use]\n{declarations}"),
+        )?;
+        assert_eq!(
+            check_source_with_options("use lib;", &options).unwrap_err(),
+            format!(
+                "BX import 'lib' ({}): in '{owner}': '{referenced}' is declared later in the module",
+                path.display()
+            )
         );
     }
     Ok(())

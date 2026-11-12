@@ -15,8 +15,9 @@ use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::netlist::gv_eval::{GvEvalOptions, load_labeled_netlist_aig_with_liberty};
 use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_g8r_fuzz::external_yosys::{preflight_mapping, required_external_yosys_context};
-use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_outputs, flatten_value};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, flatten_value};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, OperationSet, RandomBlockOptions, RandomFnOptions,
@@ -160,7 +161,9 @@ fuzz_target!(init: {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
+    let evaluator = BlockEvaluator::prepare(&generated.package, &block.name).unwrap();
     let output_types = block_output_types(block);
+    let state = evaluator.initial_state(RegisterInit::AllZeros).unwrap();
     for sample_index in 0..INPUT_SAMPLE_COUNT {
         let inputs = generate_inputs(block, &mut rng);
         let input_bits = inputs
@@ -168,7 +171,7 @@ fuzz_target!(init: {
             .zip(block.input_ports())
             .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
-        let expected_output_bits = evaluate_block_outputs(block, &inputs, &block_ir)
+        let expected_output_bits = evaluator.step(&state, &inputs).unwrap().outputs
             .iter()
             .zip(&output_types)
             .map(|(value, ty)| flatten_value(value, ty))

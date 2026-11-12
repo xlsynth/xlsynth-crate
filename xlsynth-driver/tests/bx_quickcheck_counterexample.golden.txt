@@ -1,0 +1,6 @@
+replay.bx:10:5: test 'fails' at tick 1: assertion failed: quickcheck property returned false
+  seed 3, trial 1
+  inputs: [d=bits[16]:27457]
+  concrete initial registers: [bx_inst_0__q=bits[16]:25305]
+  stimulus trace: [tick!()]
+xlsynth-driver: bx-test: BX tests failed

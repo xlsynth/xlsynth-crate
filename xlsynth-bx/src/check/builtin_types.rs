@@ -71,13 +71,7 @@ impl BodyChecker<'_, '_> {
             _ => layout.bit_count(),
         };
         let value = IrValue::make_ubits(32, count as u64).map_err(|e| e.to_string())?;
-        Ok((
-            Type::Bits {
-                signed: false,
-                width: 32,
-            },
-            K::Literal(value),
-        ))
+        Ok((Type::unsigned(32), K::Literal(value)))
     }
 
     /// Enforce widening's representability guarantee before emitting a cast.
@@ -172,13 +166,7 @@ pub(super) fn byte_string(bytes: &[u8]) -> Result<(Type, K), String> {
         .map_err(|e| e.to_string())?;
     let value =
         IrValue::make_array_typed(ir::Type::Bits(8), &elements).map_err(|e| e.to_string())?;
-    let ty = Type::Array {
-        element: Box::new(Type::Bits {
-            signed: false,
-            width: 8,
-        }),
-        size: bytes.len(),
-    };
+    let ty = Type::array(Type::unsigned(8), bytes.len());
     Ok((ty, K::Literal(value)))
 }
 

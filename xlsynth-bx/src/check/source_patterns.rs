@@ -9,6 +9,12 @@ use crate::ast::{
 /// Bound match patterns throughout a supplied AST before any recursive clones.
 pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), String> {
     let mut pending = Vec::new();
+    pending.extend(
+        module
+            .type_aliases
+            .iter()
+            .map(|alias| Annotation(&alias.ty)),
+    );
     for def in &module.structs {
         pending.extend(def.fields.iter().map(|p| Annotation(&p.ty)));
         pending.extend(parametrics(&def.value_parametrics));

@@ -32,6 +32,8 @@ The expression subset includes arithmetic, comparisons, bitwise and logical oper
 
 Use `++` to concatenate arrays with the same element type. The result length is the sum of the operand lengths, and the left operand's elements come first. Each operand is typed independently. For example, `[u8:1, u8:2] ++ [u8:3]` produces a `u8[3]`.
 
+Give an array literal its type directly, as in `u8[4]:[1, 2, 3, 4]`. A trailing `...` fills the remaining slots with the last written value, which can be computed at runtime. For example, `u8[4]:[1, x, ...]` produces `[1, x, x, x]`. An enclosing annotation can supply the length too, as in `let lanes: u8[4] = [1, x, ...];`. When passing a filled literal directly to a pure function, put the size on the argument, as in `sum(u8[4]:[1, x, ...])`.
+
 Use `as` to unpack a bit value into a one-dimensional array of bits or to pack the array back into a bit value. The scalar width must equal the element width times the array length. Element zero holds the most significant bits. For example, `u16:0x12ab as u8[2]` gives `[u8:0x12, u8:0xab]`, and casting that array to `u16` gives `0x12ab`. Signed, unsigned, and `bool` elements preserve their bit patterns. The rule also applies to zero-width values and empty arrays.
 
 BX uses the declared signedness in both hardware and constant expressions. For example, `([u4:8, u4:3] as s8) as s16` sign-extends to `-125`. Compiled DSLX hardware agrees. The pinned DSLX bytecode evaluator can lose the signed tag on an array cast and evaluate the same constant as `131`. BX preserves empty-array types in its IR. The pinned XLS IR interpreter and constant-folding pass can fail when they need to materialize an empty array value.
@@ -175,10 +177,59 @@ use its name in the type. A public BX library constant can be qualified, as
 in `u8[packet::LANES]`. Width slices and value-parametric functions also
 accept dimension expressions.
 
+## Module-level type aliases
+
+Use `type` to give a concrete type another name. Mark an alias `pub` to export
+it from a `.bx` library.
+
+```text
+// bus.bx
+const LANES = u32:4;
+type Lane = u8;
+pub type Payload = Lane[LANES];
+```
+
+```text
+// consumer.bx
+use bus::Payload;
+fn last(x: Payload) -> u8 { x[3] }
+```
+
+`Payload` and `u8[4]` are interchangeable. An alias for a struct or enum
+preserves the original declaration's identity, including the arguments of a
+concrete struct specialization. Two different structs with identical fields
+remain distinct. The alias's dimensions and names resolve in the module that
+declares it, so callers can use a public alias whose definition mentions
+private declarations.
+
+The same import syntax works for a public concrete alias in a `.x` library.
+For example, a DSLX library can export `pub type Sample = (Hidden, bool);`
+and BX can pass a `Sample` between imported functions while `Hidden` stays
+private to the library.
+
+Declare an alias before another alias or function that uses it. Under BX's
+default declaration-order rules a block can use a later alias in a type
+annotation. Enum member expressions such as `Mode::Idle` require `Mode` to be
+in scope at the block declaration.
+
 ## Native parametric structs
 
-A BX struct can declare `u32` value parametrics that determine field widths,
-array lengths, and nested struct arguments.
+A BX struct can declare compile-time value parameters of any concrete BX
+value type, including booleans, signed or unsigned integers, enums, tuples,
+arrays, and records. For example, a boolean can select the signedness of a
+field. Constructing `Word` from an `s8` field infers `Word<true>`.
+
+```text
+struct Word<S: bool> { x: xN[S][8] }
+
+fn is_negative(x: s8) -> bool {
+    let word = Word { x };
+    word.x < s8:0
+}
+```
+
+Integer parameters can determine field widths, array lengths, and nested
+struct arguments.
 
 ```text
 struct Packet<N: u32, M: u32 = {N + u32:1}> {
@@ -196,8 +247,9 @@ fn make(data: u8, tags: u8[9]) -> Packet<8> {
 ```
 
 Supply an explicit prefix of arguments in a type annotation or constructor.
-Arguments can be literals, names, or braced compile-time expressions. Defaults
-can refer to earlier bindings. A constructor can infer omitted arguments
+Arguments can be literals, names, or braced compile-time expressions. An
+untyped literal takes the parameter's declared type. Parameter types and
+defaults can refer to earlier bindings. A constructor can infer omitted arguments
 from its expected type or from the types of its field values. Every binding
 contributes to the struct's type identity, including bindings that do not
 affect its layout. Declare a template before referring to it in another type.
@@ -273,7 +325,32 @@ With `let n = 1`, BX infers `u1`. The pinned DSLX typechecker can accept the
 wider call, but its interpreter can retain the narrower value and IR conversion
 can fail on the mismatched signature.
 
-Define a helper before the functions that call it, as in DSLX. A BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
+Define a helper before the functions that call it, as in DSLX. By default, a BX block can call a local function declared anywhere in the file. Calls in value expressions become XLS IR `invoke` nodes. Functions can also call imported DSLX functions and declared externs. Registers, register writes, and child instances belong in blocks. The checker rejects direct and indirect recursion.
+
+### Module declaration order
+
+Put `#![require_define_before_use]` before the first declaration to require
+module names to be defined before use throughout a `.bx` file. This includes
+block calls, explicit child instances, callback arguments, type annotations,
+and `use` bindings. Each BX library chooses its own policy. BX resolves names
+as usual, then checks the declaration order. For example, if a block's
+`rev(x)` resolves to a later function named `rev`, the verifier reports that
+function. A forward reference is an error even when warnings are allowed.
+
+```text
+#![require_define_before_use]
+
+fn increment(x: u8) -> u8 { x + u8:1 }
+
+pub block counter(clk, rst) -> u8 {
+    reg q: u8 = u8:0;
+    q := increment(q);
+    q
+}
+```
+
+Moving `increment` below `counter` makes the call an error. Inside a block,
+a declared wire can still be read before its driver is connected.
 
 For a register reset value or a loop range bound, use a constant expression that BX can evaluate during checking.
 
@@ -447,6 +524,233 @@ opt_main --passes=loop_unroll checksum.ir > checksum.unrolled.ir
 xlsynth-driver block2sv checksum.unrolled.ir > checksum.sv
 ```
 
+## Unit tests
+
+Put a `#[test] fn` beside the function it exercises. A test takes no
+arguments. Its body can bind values with `let`, iterate over a table with
+`for`, and check values with `assert_eq(actual, expected)` or
+`assert!(condition)`.
+
+```text
+fn twice(x: u8) -> u8 { x + x }
+
+#[test]
+fn twice_wraps() {
+    assert_eq(twice(u8:129), u8:2);
+    assert!(twice(u8:3) == u8:6);
+}
+```
+
+A `#[test] block` can drive data inputs, advance the clock, and check
+outputs. Declare stimulus registers and wire child blocks with `let` at the
+start of the body. These bindings form the persistent circuit. A `reg` in
+the test holds stimulus. Assign it with `:=` before the edge. A `let` call
+to the block under test creates one instance, so reading its output after
+`tick!()` sees the state captured on that edge. Once the first drive,
+tick, assertion, loop, or conditional executes, each subsequent `let`
+samples its value at that statement. For example, `let before = total;`
+at that point saves the current total for a comparison after another tick.
+`tick!()` advances one edge with reset deasserted. `tick!(rst: true)`
+asserts reset for that edge and releases it afterward. The optional `rst:`
+clause belongs to `tick!`, much like `target:` in Rust’s
+[`log::info!(target: "sim", "tick")`](https://docs.rs/log/latest/log/macro.info.html).
+
+A stimulus declaration without an initializer starts at the typed zero.
+DUT registers retain their usual power-up behavior. Sampling a value that
+contains unknown bits fails the test.
+
+This counter uses a table of `(Drive, u8)` pairs. The middle row disables
+the update and checks that the counter holds the previous total.
+
+```text
+struct Drive { increment: u8, enable: bool }
+
+block counter(clk, rst, drive: Drive) -> u8 {
+    reg total: u8 = u8:0;
+    if drive.enable { total := total + drive.increment; }
+    total
+}
+
+const CASES: (Drive, u8)[3] = [
+    (Drive { increment: u8:1, enable: true }, u8:1),
+    (Drive { increment: u8:4, enable: false }, u8:1),
+    (Drive { increment: u8:2, enable: true }, u8:3),
+];
+
+#[test]
+block counter_steps() {
+    reg drive: Drive;
+    let total = counter(drive);
+    tick!(rst: true);
+    assert_eq(total, u8:0);
+    for (to_drive, to_expect) in CASES {
+        drive := to_drive;
+        tick!();
+        assert_eq(total, to_expect);
+    }
+}
+```
+
+Run `xlsynth-driver bx-test counter.bx` to execute the tests declared in
+`counter.bx`. Each test runs independently. Changing the expected total in
+the second row to `6` makes `counter_steps` fail at that assertion. The
+diagnostic gives its source location, clock edge, and compared values.
+
+Clocked `#[test]` blocks use synchronous reset and the same SystemVerilog lowering as
+`block2sv`. The runner executes procedural `for` statements in a test on
+the host. Value-producing expressions in the DUT or test circuit must lower
+to supported Block IR. Raw `counted_for` and `map` IR nodes require expansion
+before SystemVerilog code generation.
+
+### Clocked QuickCheck properties
+
+A private `#[quickcheck] block` takes typed stimulus parameters and ends with a
+`bool`. Each trial draws its parameters once. Arrays of records can describe
+a sequence of inputs. Using the counter above, this property checks its
+load enable and accumulated value after each edge.
+
+```text
+#[quickcheck]
+block counter_matches(trace: Drive[4]) -> bool {
+    reg drive: Drive;
+    reg expected: u8;
+    let total = counter(drive);
+    tick!(rst: true);
+    for row in trace {
+        drive := row;
+        if row.enable { expected := expected + row.increment; }
+        tick!();
+        assert_eq(total, expected);
+    }
+    total == expected
+}
+```
+
+```shell
+xlsynth-driver bx-test counter.bx --seed 42 --quickcheck-trials 100 --cross-check-vastly
+```
+
+The PIR interpreter starts each trial with independently drawn bits in every
+DUT register, including registers with a synchronous reset value. A reset edge
+loads that value. Testbench stimulus registers use their declared initializers
+or typed zero. Enum parameters draw from their declared members. PIR checks
+linked hardware assertions on rising edges with the flattened block's reset
+deasserted. Procedural BX assertions sample at their source statement.
+A failed concrete trial reports its seed, trial number, parameters, initial
+register values, and stimulus trace. If a clock edge fails, the trace includes
+the attempted tick and its reset setting.
+
+`--cross-check-vastly` first compares every sampled PIR value with generated
+RTL running from the same concrete register values. It also runs the RTL from
+all-X DUT register state with the same stimulus parameters. This second run
+reports true, false, or indeterminate. An indeterminate trial identifies the
+first procedural sample containing X or Z, including a snapshot or a branch
+condition. The four-valued counts are reported separately from the concrete
+property result. A failed concrete property, backend error, or concrete
+mismatch makes `bx-test` exit unsuccessfully. For the optional RTL run,
+maps and counted loops are expanded with a limit of 65,536 additional IR
+nodes per property harness, including nested body copies. Use the PIR backend
+for linked hardware that emits SystemVerilog `assert property` statements.
+Vastly currently cannot parse this syntax.
+
+### Bounded proofs for clocked properties
+
+```shell
+xlsynth-driver bx-prove-quickcheck counter.bx
+```
+
+This proves `counter_matches` for every value of its four `Drive` records
+and every initial bit pattern in the DUT registers. The reset edge loads
+the counter's reset value. On each of the four subsequent edges the solver
+checks the assertion against the reference, including when the enable is
+false. It also checks the final boolean. Testbench registers start at their
+declared initializer or typed zero. Enum-valued stimulus ranges over the
+declared members, including inside aggregates.
+
+The proof checks the tick schedule syntactically. A tick can appear at the top
+level or in fixed-length loops. A loop over a stimulus array qualifies because
+its type fixes the number of iterations. A procedural `if` can choose values,
+update testbench registers, or guard an assertion. Place every tick outside
+such conditionals, including those with literal conditions. The reset argument
+in `tick!(rst: drive.reset)` can itself be symbolic.
+
+A property that exceeds the static expansion limit is reported as inconclusive.
+The command continues checking the other properties in the file.
+Reachable hardware assertions in linked IR, array operations marked
+`assumed_in_bounds=true`, and partial-product multiplies (`umulp` and `smulp`)
+are currently unsupported. A solver counterexample is replayed through the
+concrete BX runner to report the failing observation, clock edge, and stimulus
+trace. The proof covers the edges executed by the property.
+
+### Clocked invariants and helper lemmas
+
+A private `#[invariant]` block defines a Boolean predicate. Its trailing
+`bool` is the observation for the current cycle. Declaring it a **clocked
+invariant** claims that the predicate stays true forever, on every sampled
+cycle of every legal execution. One reachable cycle where the block returns
+`false` disproves the invariant.
+
+BX creates the block's registers and child instances once. The runner
+supplies the clock edges. On each cycle it drives fresh inputs, samples the
+predicate and any lemmas against the current register values, then clocks
+the `:=` updates together. A register read in the trailing expression sees
+the current value even if an update appears earlier in the source.
+
+All instances in the harness share one clock. To model different logical
+rates, give the slower machine a clock enable. A register updated with
+`if enable { q := next; }` holds its value on disabled edges. The invariant
+block still produces an observation every cycle. For a property that checks
+data only when valid, its trailing expression can be `!valid || data == expected`.
+
+Use an ordinary register update to model a reference implementation alongside
+the DUT. For example, these two parity machines have different state widths.
+
+```text
+#[invariant]
+block parity_equivalent(clk, rst, toggle: bool) -> bool {
+    reg lhs: u2 = u2:0;
+    reg rhs: bool = false;
+    #[lemma]
+    let lhs_is_live = lhs < u2:2;
+
+    if toggle {
+        if lhs_is_live { lhs := lhs ^ u2:1; }
+        rhs := !rhs;
+    }
+    (lhs == u2:1) == rhs
+}
+```
+
+For a block declaring `rst`, the first sample follows one asserted synchronous
+reset edge. The state before that edge is arbitrary. The checker executes the
+reset edge with legal data inputs, so a register without a reset value follows its ordinary update or
+retains its arbitrary value. Subsequent sampled edges may assert reset again.
+A clock-only invariant starts sampling directly from arbitrary register state.
+
+Mark a top-level Boolean binding with `#[lemma]` to give the prover a helper
+invariant. The binding remains an ordinary value in the circuit. Here a dead
+left state could appear to agree with the right machine for arbitrarily many
+idle cycles. Proving `lhs_is_live` excludes that state from the induction step.
+The engine checks that all helpers hold from reset and proves their conjunction
+is preserved before using it in the proof of the trailing Boolean.
+
+```shell
+xlsynth-driver bx-test parity.bx --seed 42 --invariant-cycles 16
+xlsynth-driver bx-prove-invariant parity.bx --mode=bmc --max-depth 16
+xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
+```
+
+Concrete trials and bounded proofs check the helpers and the trailing Boolean
+on every sampled cycle. A reachable failure identifies the failing predicate
+and the stimulus trace. An induction step that remains open at the depth limit
+is inconclusive. The word-level proof has the same linked-IR operation limits
+as bounded clocked QuickChecks.
+
+For runnable observational equivalence proofs, see the widened accumulator,
+binary versus one-hot detector, and parity machine with an unreachable state.
+Each harness imports the two DSLX step functions and compares their outputs
+on a shared input stream. [Observational equivalence case studies](../xlsynth-driver/examples/bx-observational-equivalence/README.md)
+
 ## Compile and link
 
 Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.
@@ -480,7 +784,7 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 
 ### BX warnings
 
-`compile`, `compile_with_options`, `bx2ir`, and `bx2gv` treat BX warnings as
+`compile`, `compile_with_options`, `bx-test`, `bx2ir`, and `bx2gv` treat BX warnings as
 errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
 register or a child instance already serves a hardware role. A helper that
@@ -502,7 +806,7 @@ This applies to blocks, functions, constants, enums, structs, and extern
 signatures, including expressions in parametric defaults and type dimensions.
 
 To inspect all warnings and still emit output, pass `--warnings-as-errors=false`
-to either driver command. Rust callers can use `check_source_with_options`
+to the driver command. Rust callers can use `check_source_with_options`
 and inspect `CheckedModule::warnings()` before calling `lower_module`. Each
 warning identifies its source declaration and location. Repeated calls,
 specializations, and imports share one diagnostic for the same warning site.
@@ -626,7 +930,7 @@ BX can read fields through a private struct nested inside a public one. To pass 
 
 BX accepts concrete instances of public DSLX struct templates with `u32` value
 parameters. Write the application directly in a type annotation or struct
-literal. Arguments accept the same `u32` forms as native struct arguments.
+literal.
 DSLX supplies defaults for omitted trailing parameters, including
 all parameters in a spelling such as `Packet<>` when each has a default.
 
@@ -736,7 +1040,8 @@ second instance of the same child can start at a different stage.
 
 A constant argument fits any stage. At least one argument with a known stage
 must set the offset, and the checker must be able to follow the other
-arguments. An unannotated child or an extern block supplies no output stage.
+arguments. A child without an output annotation supplies no stage to its
+caller, even if its inputs are annotated. An extern block also supplies no stage.
 Register feedback such as `q := q + x;` is legal BX. Following a timed
 output back through that feedback currently produces a diagnostic.
 
@@ -776,7 +1081,7 @@ block pair(clk, rst, x: u8, y: u8) -> (LaneOut, LaneOut) {
 }
 ```
 
-Use the same call syntax for a BX block defined anywhere in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
+Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 

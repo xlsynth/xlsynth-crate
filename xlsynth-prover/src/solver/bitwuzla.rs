@@ -802,7 +802,9 @@ impl Solver for Bitwuzla {
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<Self::Term> {
-        assert!(width > 0, "Width must be positive");
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
 
         // Clamp the value so that it fits in the requested bit-width.
         if width < 64 {

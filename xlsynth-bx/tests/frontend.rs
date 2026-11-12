@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
+#[path = "frontend/alias_expressions.rs"]
+mod alias_expressions;
 #[path = "frontend/array_concat.rs"]
 mod array_concat;
 #[path = "frontend/array_update.rs"]
@@ -28,8 +32,12 @@ mod local_functions;
 mod map_lambda;
 #[path = "frontend/module_constants.rs"]
 mod module_constants;
+#[path = "frontend/module_type_aliases.rs"]
+mod module_type_aliases;
 #[path = "frontend/named_map.rs"]
 mod named_map;
+#[path = "frontend/native_aggregate_aliases.rs"]
+mod native_aggregate_aliases;
 #[path = "frontend/native_structs.rs"]
 mod native_structs;
 #[path = "frontend/numeric_enums.rs"]
@@ -38,10 +46,13 @@ mod numeric_enums;
 mod scalar_match;
 #[path = "frontend/tuple_match.rs"]
 mod tuple_match;
+#[path = "frontend/typed_array_literals.rs"]
+mod typed_array_literals;
 #[path = "frontend/unroll_for.rs"]
 mod unroll_for;
 
 use std::path::Path;
+use support::search_paths;
 
 use directed_expr_eval::{
     assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx, compile_dslx_module,
@@ -832,10 +843,7 @@ fn identifiers_outside_the_bit_width_shorthand_range_match_dslx()
         "import s65;\n{declaration}\n{}",
         expr_eval::dslx_source(params, "u8", body)
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let evaluator = ExpressionEvaluator::compile_block(
         &bx,
         &options,

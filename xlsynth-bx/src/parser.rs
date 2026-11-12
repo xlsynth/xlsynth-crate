@@ -4,6 +4,7 @@
 
 pub mod outline;
 pub(crate) mod source_bytes;
+mod test_declarations;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
@@ -13,9 +14,10 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::BxWarningKind;
 use crate::ast::{
     BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
-    Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourceFile, SourcePosition,
-    SourceSpan, Stmt, StructDef, StructSplat, Type, UnaryOp, UnrollFor, UsePath, WidthSliceType,
+    Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, InvariantDecl, InvariantLemma,
+    LetBinding, MapExpr, MatchArm, MatchPattern, Module, OutputCycles, Param, ParametricBinding,
+    SourceFile, SourcePosition, SourceSpan, Stmt, StructDef, StructSplat, Type, TypeAlias, UnaryOp,
+    UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -178,8 +180,8 @@ fn lex(
     let bytes = &source.as_bytes()[..span.end];
     let mut i = span.start;
     let mut brace_depth = 0usize;
-    // A function or enum ends at its closing brace. A constant ends at its
-    // semicolon, even when its initializer contains braced expressions.
+    // Functions and enums end at a closing brace. Constants and type aliases
+    // end at a semicolon, including when they contain braced expressions.
     let mut dslx_item = None;
     let mut signature_depth = 0usize;
     let mut in_function_body = false;
@@ -200,6 +202,7 @@ fn lex(
                 let message = match dslx_item {
                     Some("const") => "use a // comment in a constant",
                     Some("enum") => "use a // comment in an enum",
+                    Some("type") => "use a // comment in a type alias",
                     _ => "use a // comment in a function",
                 };
                 return Err(diagnostic(source, start, message));
@@ -271,7 +274,7 @@ fn lex(
             // Separate closing angles in nested parametric type arguments.
             // Expressions in an outline retain their source spelling.
             i += 1;
-        } else if dialect == Dialect::Bx && rest.starts_with("..=") {
+        } else if dialect == Dialect::Bx && (rest.starts_with("..=") || rest.starts_with("...")) {
             i += 3;
         } else if rest.starts_with(":=")
             || rest.starts_with("+:")
@@ -293,9 +296,11 @@ fn lex(
         let item_start = brace_depth == 0
             && tokens
                 .last()
-                .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}"));
+                .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}" | "]"));
         match text {
-            "fn" | "const" | "enum" if item_start && dslx_item.is_none() => dslx_item = Some(text),
+            "fn" | "const" | "enum" | "type" if item_start && dslx_item.is_none() => {
+                dslx_item = Some(text);
+            }
             "(" | "[" if dslx_item == Some("fn") && !in_function_body => signature_depth += 1,
             ")" | "]" if dslx_item == Some("fn") && !in_function_body => {
                 signature_depth = signature_depth.saturating_sub(1);
@@ -318,7 +323,7 @@ fn lex(
         if brace_depth == 0
             && (matches!(
                 (dslx_item, text),
-                (Some("enum"), "}") | (Some("const"), ";")
+                (Some("enum"), "}") | (Some("const" | "type"), ";")
             ) || (in_function_body && text == "}"))
         {
             dslx_item = None;
@@ -344,6 +349,14 @@ fn lex(
 enum Dialect {
     Bx,
     Dslx,
+}
+
+/// Declaration attributes select a test body or configure ordinary warning
+/// handling.
+enum DeclarationAttributes {
+    Test { quickcheck: bool },
+    Invariant,
+    Warnings(BTreeSet<BxWarningKind>),
 }
 
 /// Decode one DSLX byte character and return its value and token length.
@@ -382,9 +395,6 @@ fn scan_byte_escape(bytes: &[u8]) -> Option<(u8, usize)> {
 /// Decode the UTF-8 bytes and escape sequences inside a DSLX string literal.
 fn decode_byte_string(text: &str) -> Result<Vec<u8>, &'static str> {
     let mut remaining = &text.as_bytes()[1..text.len() - 1];
-    if remaining.is_empty() {
-        return Err("zero-length DSLX strings are not supported");
-    }
     let mut value = Vec::new();
     // The concrete layout charges eight bits per byte plus the array node.
     let max_bytes = (crate::check::MAX_TYPE_SIZE - 1) / 8;
@@ -466,6 +476,8 @@ struct Parser<'s> {
     position_cursor: (usize, SourcePosition),
     dialect: Dialect,
     tokens: Vec<Token<'s>>,
+    /// Original angle tokens split during a speculative expression parse.
+    saved_angle_tokens: Option<Vec<(usize, Token<'s>)>>,
     pos: usize,
     depth: usize,
     dslx_type_display: bool,
@@ -488,6 +500,11 @@ struct Parser<'s> {
     callable_templates: BTreeMap<String, TemplateBinding>,
     /// Local and imported struct templates whose arguments are types.
     type_structs: BTreeSet<String>,
+    /// Module aliases and use bindings that can start a named literal
+    /// annotation.
+    literal_type_heads: BTreeSet<String>,
+    /// Module names in discarded literal types of the current item.
+    overwritten_literal_types: BTreeSet<String>,
     /// Entries hidden by currently active data or callable bindings.
     hidden_templates: Vec<(String, TemplateBinding)>,
     /// Names in source scope, including imports. An overwritten literal type
@@ -533,7 +550,7 @@ impl TemplateBinding {
 #[derive(Clone, Copy, PartialEq)]
 enum ValueContext {
     Block,
-    /// Functions, module constants, and enum initializers use DSLX value
+    /// Functions, module constants, enums and type aliases use DSLX value
     /// grammar.
     DslxItem,
     BlockLambda,
@@ -567,10 +584,11 @@ struct StructMembers {
     base: Option<Box<StructSplat>>,
 }
 
-/// Parsed value arguments and their token spans for struct-literal validation.
+/// Parsed value arguments and their starting tokens for struct-literal
+/// validation.
 struct ParsedAngleArguments {
     args: Vec<Expr>,
-    spans: Vec<std::ops::Range<usize>>,
+    starts: Vec<usize>,
     height: usize,
 }
 
@@ -705,8 +723,12 @@ impl<'s> Parser<'s> {
         let mut callable_templates = BTreeMap::new();
         let mut header = None;
         let mut type_structs = BTreeSet::new();
+        let mut literal_type_heads = BTreeSet::new();
         for (index, ts) in tokens.windows(3).enumerate() {
             match (ts[0].text, ts[1].text, ts[2].text) {
+                ("type", name, "=") if is_function_identifier(name) => {
+                    literal_type_heads.insert(name.to_owned());
+                }
                 ("fn" | "block", _, "<") => header = Some(ts[1]),
                 ("struct", name, "<")
                     if tokens.get(index + 3).is_some_and(|t| is_identifier(t.text))
@@ -732,6 +754,7 @@ impl<'s> Parser<'s> {
             position_cursor: (0, SOURCE_START),
             dialect: Dialect::Bx,
             tokens,
+            saved_angle_tokens: None,
             pos: 0,
             depth: 0,
             dslx_type_display,
@@ -743,6 +766,8 @@ impl<'s> Parser<'s> {
             dependent_types: false,
             callable_templates,
             type_structs,
+            literal_type_heads,
+            overwritten_literal_types: BTreeSet::new(),
             hidden_templates: Vec::new(),
             visible_names: HashSet::new(),
             visible_type_names: HashSet::new(),
@@ -787,6 +812,9 @@ impl<'s> Parser<'s> {
             // In a type argument list, consume just the closing angle. This
             // leaves the outer '>' of zero!<Packet<2>>() or the '=' of a let.
             let token = &mut self.tokens[self.pos];
+            if let Some(saved) = &mut self.saved_angle_tokens {
+                saved.push((self.pos, *token));
+            }
             token.text = &token.text[1..];
             token.start += 1;
             true
@@ -927,6 +955,16 @@ impl<'s> Parser<'s> {
             match token.text {
                 "{" => depth += 1,
                 "}" => depth = depth.saturating_sub(1),
+                "#" if depth == 0
+                    && self.peek(0) == "["
+                    && matches!(self.peek(1), "test" | "quickcheck" | "invariant")
+                    && self.peek(2) == "]"
+                    && matches!(self.peek(3), "fn" | "block") =>
+                {
+                    // Test names never bind call targets, including the map
+                    // builtin.
+                    self.pos += 4;
+                }
                 "fn" | "block" | "struct"
                     if depth == 0
                         && self.peek(0) == "map"
@@ -964,7 +1002,7 @@ impl<'s> Parser<'s> {
         if self
             .tokens
             .iter()
-            .any(|token| matches!(token.text, "<" | "map"))
+            .any(|token| matches!(token.text, "<" | "map" | "use"))
         {
             let mut imports = BTreeMap::new();
             self.scan_module_bindings(|mut path, start| {
@@ -984,6 +1022,7 @@ impl<'s> Parser<'s> {
                     members.insert(member.to_owned());
                 }
             }
+            self.literal_type_heads.extend(imports.keys().cloned());
             self.callable_templates.extend(imports);
         }
         self.module()
@@ -994,17 +1033,59 @@ impl<'s> Parser<'s> {
         let mut use_bindings = BTreeSet::new();
         while !self.peek(0).is_empty() {
             let first_declaration = module.declaration_order.len();
-            let mut allowed_warnings = self.attributes(&mut module)?;
+            let mut allowed_warnings = match self.attributes(&mut module)? {
+                DeclarationAttributes::Test { quickcheck } => {
+                    let test = self.with_name_scope(|p| p.test_declaration(quickcheck))?;
+                    module.declaration_order.push(test.name.clone());
+                    module.tests.push(test);
+                    continue;
+                }
+                DeclarationAttributes::Invariant => {
+                    if !self.eat("block") {
+                        return Err(self.error("expected private block after #[invariant]"));
+                    }
+                    let position = self.position_at(self.tokens[self.pos].start);
+                    let mut lemmas = Vec::new();
+                    let block = self.with_name_scope(|p| {
+                        p.block(false, position, BTreeSet::new(), Some(&mut lemmas))
+                    })?;
+                    let mut labels = HashSet::new();
+                    for lemma in &lemmas {
+                        if !labels.insert(&lemma.name) {
+                            return Err(format!(
+                                "{}:{}: duplicate lemma '{}'",
+                                lemma.position.line, lemma.position.column, lemma.name
+                            ));
+                        }
+                    }
+                    module.declaration_order.push(block.name.clone());
+                    module.invariants.push(InvariantDecl {
+                        block,
+                        position,
+                        lemmas,
+                        overwritten_literal_types: std::mem::take(
+                            &mut self.overwritten_literal_types,
+                        ),
+                    });
+                    continue;
+                }
+                DeclarationAttributes::Warnings(warnings) => warnings,
+            };
             if self.peek(0).is_empty() && allowed_warnings.is_empty() {
                 break;
             }
             let public = self.eat("pub");
-            let declares_type = matches!(self.peek(0), "enum" | "struct");
+            let declares_type = matches!(self.peek(0), "enum" | "struct" | "type");
             if self.eat("block") {
                 let name_offset = self.tokens[self.pos].start;
                 let position = self.position_at(name_offset);
                 let block = self.with_name_scope(|p| {
-                    p.block(public, position, std::mem::take(&mut allowed_warnings))
+                    p.block(
+                        public,
+                        position,
+                        std::mem::take(&mut allowed_warnings),
+                        None,
+                    )
                 })?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
@@ -1025,6 +1106,13 @@ impl<'s> Parser<'s> {
                 self.value_context = ValueContext::Block;
                 module.declaration_order.push(constant.name.clone());
                 module.constants.push(constant);
+            } else if self.eat("type") {
+                self.value_context = ValueContext::DslxItem;
+                let def = self.with_name_scope(|p| p.type_alias(public))?;
+                self.value_context = ValueContext::Block;
+                self.block_map_shadowed |= def.name == "map";
+                module.declaration_order.push(def.name.clone());
+                module.type_aliases.push(def);
             } else if self.eat("struct") {
                 let def = self.with_name_scope(|p| p.struct_def(public))?;
                 module.declaration_order.push(def.name.clone());
@@ -1037,7 +1125,9 @@ impl<'s> Parser<'s> {
                 module.declaration_order.push(def.name.clone());
                 module.enums.push(def);
             } else if public {
-                return Err(self.error("expected block, const, enum, fn, or struct after pub"));
+                return Err(
+                    self.error("expected block, const, enum, fn, struct, or type after pub")
+                );
             } else if self.peek(0) == "use" && !allowed_warnings.is_empty() {
                 return Err(self.error("a use declaration cannot have a warning allowance"));
             } else if self.eat("use") {
@@ -1074,7 +1164,7 @@ impl<'s> Parser<'s> {
                 }
             } else {
                 return Err(self.error(
-                    "expected a block, const, enum, fn, struct, extern, or use declaration",
+                    "expected a block, const, enum, fn, struct, type, extern, or use declaration",
                 ));
             }
             if !allowed_warnings.is_empty() {
@@ -1082,6 +1172,12 @@ impl<'s> Parser<'s> {
                 module
                     .declaration_allowances
                     .insert(name.clone(), allowed_warnings);
+            }
+            if !self.overwritten_literal_types.is_empty() {
+                module.overwritten_literal_types.insert(
+                    module.declaration_order[first_declaration].clone(),
+                    std::mem::take(&mut self.overwritten_literal_types),
+                );
             }
             let names = if declares_type {
                 &mut self.visible_type_names
@@ -1094,24 +1190,73 @@ impl<'s> Parser<'s> {
                     .cloned(),
             );
         }
+        if !module.tests.is_empty() || !module.invariants.is_empty() {
+            let test_positions: BTreeMap<_, _> = module
+                .tests
+                .iter()
+                .map(|t| (t.name.as_str(), ("test", t.position)))
+                .chain(
+                    module
+                        .invariants
+                        .iter()
+                        .map(|i| (i.block.name.as_str(), ("invariant", i.position))),
+                )
+                .collect();
+            let mut seen = HashSet::new();
+            for name in &module.declaration_order {
+                if let Some((kind, position)) = test_positions.get(name.as_str())
+                    && !seen.insert(name)
+                {
+                    return Err(format!(
+                        "{}:{}: duplicate declaration for BX {kind} '{name}'",
+                        position.line, position.column
+                    ));
+                }
+            }
+        }
         Ok(module)
     }
 
-    /// Record file-wide attributes and return warning allowances for the next
+    /// Record file-wide attributes and identify warning allowances or a test
     /// declaration.
-    fn attributes(&mut self, module: &mut Module) -> Result<BTreeSet<BxWarningKind>, String> {
+    fn attributes(&mut self, module: &mut Module) -> Result<DeclarationAttributes, String> {
         let mut allowed = BTreeSet::new();
         while self.eat("#") {
             let module_attribute = self.eat("!");
             self.expect("[")?;
+            let name = self.peek(0);
             if module_attribute {
-                self.expect("require_block_timing")?;
+                match name {
+                    "require_block_timing" => module.require_block_timing = true,
+                    "require_define_before_use" => {
+                        if !module.declaration_order.is_empty() {
+                            return Err(self.error(
+                                "place #![require_define_before_use] before the first declaration",
+                            ));
+                        }
+                        module.require_define_before_use = true;
+                    }
+                    _ => return Err(self.error("unknown BX module attribute")),
+                }
+                self.pos += 1;
                 self.expect("]")?;
-                module.require_block_timing = true;
                 continue;
             }
-            if self.peek(0) == "require_block_timing" {
-                return Err(self.error("use #![require_block_timing] at module scope"));
+            if matches!(name, "require_block_timing" | "require_define_before_use") {
+                return Err(self.error(&format!("use #![{name}] at module scope")));
+            }
+            if matches!(name, "test" | "quickcheck" | "invariant") {
+                self.pos += 1;
+                if !allowed.is_empty() {
+                    return Err(self.error("BX warning allowances apply to hardware declarations"));
+                }
+                self.expect("]")?;
+                if name == "invariant" {
+                    return Ok(DeclarationAttributes::Invariant);
+                }
+                return Ok(DeclarationAttributes::Test {
+                    quickcheck: name == "quickcheck",
+                });
             }
             self.expect("allow")?;
             self.expect("(")?;
@@ -1131,7 +1276,7 @@ impl<'s> Parser<'s> {
             self.expect(")")?;
             self.expect("]")?;
         }
-        Ok(allowed)
+        Ok(DeclarationAttributes::Warnings(allowed))
     }
 
     /// Flatten one DSLX use tree in source order. BX additionally bounds the
@@ -1371,6 +1516,17 @@ impl<'s> Parser<'s> {
             underlying,
             members,
         })
+    }
+
+    /// Parse a concrete type alias whose dimensions may use module constants.
+    fn type_alias(&mut self, public: bool) -> Result<TypeAlias, String> {
+        let name = self.ident()?;
+        self.expect("=")?;
+        self.dependent_types = true;
+        let ty = self.ty()?;
+        self.dependent_types = false;
+        self.expect(";")?;
+        Ok(TypeAlias { name, public, ty })
     }
 
     /// Parse pure local lets and a trailing value. A body ending in a
@@ -1669,7 +1825,14 @@ impl<'s> Parser<'s> {
                 Some(_) => {
                     let name = p.ident()?;
                     p.expect(":")?;
-                    if !p.eat("u32") {
+                    let ty = p.ty()?;
+                    if !matches!(
+                        ty,
+                        Type::Bits {
+                            signed: false,
+                            width: 32
+                        } | Type::Named(_)
+                    ) {
                         return Err(p.error("block value parameters require type 'u32'"));
                     }
                     if p.peek(0) == "=" {
@@ -1677,10 +1840,7 @@ impl<'s> Parser<'s> {
                     }
                     params.value_parametrics.push(ParametricBinding {
                         name,
-                        ty: Type::Bits {
-                            signed: false,
-                            width: 32,
-                        },
+                        ty,
                         default: None,
                         index: params.value_parametrics.len() + params.callback_params.len(),
                     });
@@ -1696,8 +1856,12 @@ impl<'s> Parser<'s> {
         public: bool,
         name_position: SourcePosition,
         allowed_warnings: BTreeSet<BxWarningKind>,
+        lemmas: Option<&mut Vec<InvariantLemma>>,
     ) -> Result<Block, String> {
         let name = self.ident()?;
+        if lemmas.is_some() && self.peek(0) == "<" {
+            return Err(self.error("BX invariants cannot have parametric bindings"));
+        }
         let params = self.block_parametrics()?;
         let mut input_cycles = BTreeMap::new();
         let signature = self.block_signature(name, |parser| {
@@ -1707,9 +1871,28 @@ impl<'s> Parser<'s> {
             }
             Ok(param)
         })?;
+        if lemmas.is_some()
+            && crate::typed::bits(&signature.result) != Some((false, 1))
+            && !matches!(
+                signature.result,
+                Type::Named(_) | Type::ParametricBits { .. }
+            )
+        {
+            return Err(diagnostic(
+                self.source,
+                self.tokens[self.pos - 1].start,
+                &format!(
+                    "BX invariant blocks must return bool, got {}",
+                    signature.result
+                ),
+            ));
+        }
         let output_cycles = self.output_cycles()?;
         self.expect("{")?;
-        self.bind_local_name(&signature.name);
+        if lemmas.is_none() {
+            // Only a design block introduces a callable hardware name.
+            self.bind_local_name(&signature.name);
+        }
         for name in &params.type_params {
             self.shadow_callable(name);
         }
@@ -1727,7 +1910,7 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         self.dependent_types = !params.value_parametrics.is_empty();
-        let body = self.body()?;
+        let body = self.with_name_scope(|p| p.block_body_contents(lemmas))?;
         self.dependent_types = false;
         self.type_params.clear();
         let (output, output_span) = body
@@ -1945,34 +2128,34 @@ impl<'s> Parser<'s> {
     /// Read explicit value arguments before their enclosing syntax is known.
     fn parsed_angle_arguments(&mut self) -> Result<ParsedAngleArguments, String> {
         self.expect("<")?;
-        let mut spans = Vec::new();
+        let mut starts = Vec::new();
         let mut height = 0;
         let args = self.list(">", |p| {
-            let start = p.pos;
+            starts.push(p.pos);
             let actual = p.parametric_argument()?;
-            spans.push(start..p.pos);
             height = height.max(actual.height);
             Ok(actual.value)
         })?;
         Ok(ParsedAngleArguments {
             args,
-            spans,
+            starts,
             height,
         })
     }
 
-    /// Retain the concrete representation for lists of direct u32 literals.
+    /// Compact unannotated decimal arguments. Keep the radix of bit-pattern
+    /// literals because a signed formal can accept `0xff` and reject `255`.
     fn classify_struct_arguments(
         &self,
         ParsedAngleArguments {
             args,
-            spans,
+            starts,
             height,
         }: ParsedAngleArguments,
     ) -> Result<StructArguments, String> {
         let mut concrete = Vec::new();
-        for (arg, span) in args.iter().zip(spans) {
-            let start = self.tokens[span.start];
+        for (arg, start) in args.iter().zip(starts) {
+            let start = self.tokens[start];
             if start.text == "{" {
                 continue;
             }
@@ -1981,25 +2164,11 @@ impl<'s> Parser<'s> {
                     .map_err(|e| diagnostic(self.source, start.start, &e))?;
                 continue;
             }
-            let spelling = match &self.tokens[span] {
-                [number] => Some(number.text),
-                [ty, colon, number] if ty.text == "u32" && colon.text == ":" => Some(number.text),
-                _ => None,
-            };
-            let value = spelling
-                .and_then(normalized_integer)
-                .and_then(|text| {
-                    let (digits, radix) = radix_digits(&text);
-                    u32::from_str_radix(digits, radix).ok()
-                })
-                .ok_or_else(|| {
-                    diagnostic(
-                        self.source,
-                        start.start,
-                        "expected a concrete nonnegative struct argument that fits u32",
-                    )
-                })?;
-            concrete.push(value);
+            if let Expr::Literal { ty: None, text } = arg
+                && let Ok(value) = text.parse::<u32>()
+            {
+                concrete.push(value);
+            }
         }
         Ok(if concrete.len() == args.len() {
             StructArguments::Concrete(concrete)
@@ -2072,11 +2241,27 @@ impl<'s> Parser<'s> {
         } else if self.dslx_type_display {
             return Err(self.error("unsupported DSLX result type (expected bits, tuple, or array)"));
         } else {
+            if spelling == "self"
+                && self.literal_type_heads.contains(spelling)
+                && !self.type_params.contains(spelling)
+            {
+                return Err(self.error("the keyword 'self' cannot refer to a type alias"));
+            }
+            if spelling == "_"
+                && self.literal_type_heads.contains(spelling)
+                && !self.type_params.contains(spelling)
+                && !self.visible_literal_type(spelling, false)
+            {
+                return Err(self.error("'_' does not name a type in this scope"));
+            }
             // A cast can be followed immediately by a less-than comparison.
             // Type parameters can name scalar cast targets, including
             // in a tuple of comparisons such as (x as T < 1, 2 > (y)).
             let after_as = self.pos > 0 && self.tokens[self.pos - 1].text == "as";
             let name = self.name_or_qualified_member()?;
+            if self.literal_type_context == LiteralTypeContext::Overwritten {
+                self.record_overwritten_type(&name)?;
+            }
             if self.eat_turbofish()
                 || (self.peek(0) == "<"
                     && (!after_as || self.struct_arguments_end(self.pos).is_some()))
@@ -2141,10 +2326,13 @@ impl<'s> Parser<'s> {
 
     /// Read declarations and updates followed by an optional trailing value.
     fn body(&mut self) -> Result<Body, String> {
-        self.with_name_scope(Self::block_body_contents)
+        self.with_name_scope(|p| p.block_body_contents(None))
     }
 
-    fn block_body_contents(&mut self) -> Result<Body, String> {
+    fn block_body_contents(
+        &mut self,
+        mut lemmas: Option<&mut Vec<InvariantLemma>>,
+    ) -> Result<Body, String> {
         let mut statements = Vec::new();
         let mut statement_spans = Vec::new();
         while !self.eat("}") {
@@ -2165,6 +2353,31 @@ impl<'s> Parser<'s> {
                     ty: param.ty,
                     reset,
                 });
+            } else if self.peek(0) == "#" && self.peek(1) == "[" && self.peek(2) == "lemma" {
+                self.pos += 3;
+                self.expect("]")?;
+                let lemmas = lemmas.as_deref_mut().ok_or_else(|| {
+                    self.error("#[lemma] requires the top level of an #[invariant] block")
+                })?;
+                self.expect("let")?;
+                let position = self.position_at(self.tokens[self.pos].start);
+                let (mut statement, _) = self.let_stmt(false)?;
+                let Stmt::Let { name, ty, .. } = &mut statement else {
+                    return Err(self.error("#[lemma] requires a single named let binding"));
+                };
+                ty.get_or_insert(Type::Bool);
+                let observation = Stmt::Let {
+                    name: InvariantLemma::observation_name(lemmas.len()),
+                    ty: Some(Type::Bool),
+                    value: Expr::Name(name.clone()),
+                };
+                lemmas.push(InvariantLemma {
+                    name: name.clone(),
+                    position,
+                });
+                statements.push(statement);
+                statement_spans.push(self.span_since(start));
+                statements.push(observation);
             } else if self.eat("let") {
                 statements.push(self.let_stmt(/* allow_wire= */ true)?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
@@ -2337,6 +2550,13 @@ impl<'s> Parser<'s> {
     fn let_initializer(&mut self, head: LetHead) -> Result<(LetBinding, usize), String> {
         self.expect("=")?;
         let value = self.expr()?;
+        // DSLX's single-name let hides a type named '_'. A wildcard inside a
+        // destructuring pattern discards the value without hiding the type.
+        if self.literal_type_heads.contains("_")
+            && matches!(&head.pattern, BindingPattern::Name(name) if name == "_")
+        {
+            self.shadow_callable("_");
+        }
         for name in head.names {
             self.shadow_callable(&name);
         }
@@ -2508,6 +2728,9 @@ impl<'s> Parser<'s> {
                 .extend(self.tokens[first..self.pos].iter().map(|token| token.text));
             return Ok(MatchPattern::Literal(value));
         }
+        if self.named_literal_type_at(0) && !self.type_params.contains(self.peek(0)) {
+            return Err(self.error("a match pattern cannot start with an alias-annotated literal"));
+        }
         let start = self.pattern_literal()?;
         append_literal_pattern_spelling(&mut spellings.current, &self.tokens[first..self.pos]);
         let separator = self.pos;
@@ -2539,12 +2762,11 @@ impl<'s> Parser<'s> {
             return Ok(Expr::Bool(false));
         }
         let literal = if self.starts_bit_literal()? {
-            let ty = self.ty()?;
+            let ty = self.parsed_ty(self.dslx_value_grammar())?;
             if !matches!(
-                ty,
-                Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. }
-            ) && !matches!(&ty, Type::Named(name) if self.type_params.contains(name.as_str()))
-            {
+                ty.value,
+                Type::Bool | Type::Bits { .. } | Type::ParametricBits { .. } | Type::Named(_)
+            ) {
                 return Err(self.error("match patterns require a scalar literal type"));
             }
             self.expect(":")?;
@@ -2554,6 +2776,9 @@ impl<'s> Parser<'s> {
         } else {
             return Err(self.error("expected a scalar match pattern (literal, range, or _)"));
         };
+        if !matches!(&literal.value, Expr::Literal { .. }) {
+            return Err(self.error("match patterns require a scalar literal"));
+        }
         Ok(literal.value)
     }
 
@@ -2575,7 +2800,7 @@ impl<'s> Parser<'s> {
                 }
                 let field = is_function_identifier(first)
                     || !self.dslx_value_grammar() && is_identifier(first);
-                if next == ":" && self.type_params.contains(first) {
+                if next == ":" && self.named_literal_type_at(1) {
                     // Both a field initializer and an annotated integer pattern
                     // can start with `T:0`. Only the latter continues to an arm
                     // arrow before a comma or brace.
@@ -2714,7 +2939,7 @@ impl<'s> Parser<'s> {
     /// Parse the range operator below all binary operators. Parentheses can
     /// enclose an entire range, one endpoint, or an array-producing expression.
     fn for_iterable(&mut self, braces: Braces) -> Result<ParsedIterable, String> {
-        let start = if self.eat("(") {
+        let start = if self.peek(0) == "(" && !self.starts_array_literal_type() && self.eat("(") {
             let grouped = self.nested(|p| {
                 p.parenthesized(
                     |p| p.for_iterable(Braces::Struct),
@@ -2905,6 +3130,13 @@ impl<'s> Parser<'s> {
         braces: Braces,
     ) -> Result<ParsedExpr, String> {
         loop {
+            if left.spelling == ExprSpelling::AnnotatedLiteral
+                && matches!(left.value, Expr::ArrayLiteral { .. })
+                && matches!(self.peek(0), "." | "[")
+            {
+                return Err(self
+                    .error("parenthesize a typed array literal before field access or indexing"));
+            }
             if self.dslx_value_grammar()
                 && left.spelling != ExprSpelling::Parenthesized
                 && matches!(left.value, Expr::If { .. })
@@ -3005,12 +3237,17 @@ impl<'s> Parser<'s> {
 
     fn atom(&mut self, braces: Braces) -> Result<ParsedExpr, String> {
         let text = self.peek(0);
-        if self.dslx_value_grammar() && text == "_" {
-            return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
-        }
         if self.eat("[") {
-            let items = self.list("]", Self::expr)?;
-            return self.aggregate(items, Expr::Array);
+            return self.array_literal(None);
+        }
+        if self.starts_bit_literal()? || self.starts_array_literal_type() {
+            return self.parse_annotated_literal();
+        }
+        if self.dslx_value_grammar()
+            && text == "_"
+            && !(self.peek(1) == "{" && self.visible_literal_type(text, false))
+        {
+            return Err(self.error("wildcard pattern '_' cannot be used as a reference"));
         }
         if self.eat("(") {
             let mut expr = self.parenthesized(Self::expr, |parser, fields| {
@@ -3062,17 +3299,19 @@ impl<'s> Parser<'s> {
                 },
             );
         }
-        if self.starts_bit_literal()? {
-            let ty = self.ty()?;
-            self.expect(":")?;
-            return self.annotated_literal(ty);
-        }
         if number_token(text) || self.tokens[self.pos].character.is_some() {
             return self.literal(None);
         }
         if text.starts_with('"') {
             let bytes = decode_byte_string(text)
                 .map_err(|error| diagnostic(self.source, self.tokens[self.pos].start, error))?;
+            if bytes.is_empty() {
+                return Err(diagnostic(
+                    self.source,
+                    self.tokens[self.pos].start,
+                    "zero-length DSLX strings are not supported",
+                ));
+            }
             self.pos += 1;
             return Ok(ParsedExpr::leaf(Expr::ByteString(bytes)));
         }
@@ -3131,6 +3370,9 @@ impl<'s> Parser<'s> {
             None
         };
         if self.peek(0) == "{" && self.struct_braces(braces) {
+            if name == "self" && self.literal_type_heads.contains("self") {
+                return Err(self.error("the keyword 'self' cannot introduce a struct literal"));
+            }
             self.pos += 1;
             let mut height = match &struct_args {
                 Some(
@@ -3297,10 +3539,8 @@ impl<'s> Parser<'s> {
         if number_token(text) {
             return self.literal(None);
         }
-        if self.starts_bit_literal()? {
-            let ty = self.ty()?;
-            self.expect(":")?;
-            return self.annotated_literal(ty);
+        if self.starts_bit_literal()? || self.starts_array_literal_type() {
+            return self.nested(Self::parse_annotated_literal);
         }
         let name = self.name_or_qualified_member()?;
         Ok(ParsedExpr::leaf(self.named_value(name)?))
@@ -3400,6 +3640,11 @@ impl<'s> Parser<'s> {
         };
         let close = self.tokens[end].text;
         let next = self.tokens[end + 1].text;
+        if next == "[" && self.dimensions_before_colon(end + 1) {
+            // An annotated array can start with a struct application whose
+            // arguments have their own commas, e.g. Pair<A, B>[2]:[p, ...].
+            return Some(end);
+        }
         let (before_name, bare_name) = match &self.tokens[..angle] {
             [before @ .., _, separator, _] if separator.text == "::" => (before, None),
             [before @ .., name] => (before, Some(name.text)),
@@ -3765,6 +4010,7 @@ impl<'s> Parser<'s> {
         let span = start..self.tokens[callback_end].start;
         let tokens = lex(self.source, Dialect::Bx, Some(span))?;
         let outer_tokens = std::mem::replace(&mut self.tokens, tokens);
+        let outer_angles = self.saved_angle_tokens.take();
         self.pos = 0;
         self.value_context = ValueContext::BlockLambda;
         let mapped = self.map_lambda(iterable).and_then(|value| {
@@ -3776,6 +4022,7 @@ impl<'s> Parser<'s> {
         });
         self.value_context = ValueContext::Block;
         self.tokens = outer_tokens;
+        self.saved_angle_tokens = outer_angles;
         self.pos = callback_end;
         mapped
     }
@@ -3841,13 +4088,76 @@ impl<'s> Parser<'s> {
         )
     }
 
+    /// Recognize a type formal, module alias or imported name before a literal
+    /// colon.
+    fn named_literal_type_at(&self, offset: usize) -> bool {
+        let head = self.peek(offset);
+        let bare = self.peek(offset + 1) == ":";
+        if bare && self.type_params.contains(head) {
+            return true;
+        }
+        let qualified = self.peek(offset + 1) == "::" && self.peek(offset + 3) == ":";
+        (bare || qualified) && self.visible_literal_type(head, qualified)
+    }
+
+    /// A lexical binding can hide a module alias or an imported type name.
+    fn visible_literal_type(&self, head: &str, qualified: bool) -> bool {
+        if !self.literal_type_heads.contains(head) {
+            return false;
+        }
+        let allow_forward = self.value_context != ValueContext::DslxItem;
+        if self.callable_templates.contains_key(head) {
+            // All use bindings have a template entry until a local shadows
+            // them.
+            allow_forward || self.visible_names.contains(head)
+        } else {
+            !qualified
+                && !self.visible_names.contains(head)
+                && (allow_forward || self.visible_type_names.contains(head))
+        }
+    }
+
+    /// Retain module references from each type atom, including the elements
+    /// of discarded arrays and tuples. Lexical binders are resolved here.
+    fn record_overwritten_type(&mut self, name: &str) -> Result<(), String> {
+        let (head, qualified) = name
+            .split_once("::")
+            .map_or((name, false), |(h, _)| (h, true));
+        if self.type_params.contains(head) || crate::check::is_dslx_builtin_type(head) {
+            return Ok(());
+        }
+        if !self.visible_literal_type(head, qualified) {
+            // A qualified reference only needs its head to be bound. A bare
+            // name must be a type and a local value can shadow a module type.
+            if qualified && crate::check::is_dslx_builtin_value(head) {
+                return Ok(());
+            }
+            if self.visible_names.contains(head) {
+                return if qualified {
+                    Ok(())
+                } else {
+                    Err(self.error(&format!(
+                        "'{head}' does not name a type in literal annotation"
+                    )))
+                };
+            }
+            if !self.visible_type_names.contains(head)
+                && self.value_context == ValueContext::DslxItem
+            {
+                return Err(self.error(&format!("unknown name '{head}' in literal annotation")));
+            }
+        }
+        self.overwritten_literal_types.insert(name.to_owned());
+        Ok(())
+    }
+
     /// Recognize a bit literal's annotation and suggest the DSLX spelling
     /// when a formerly accepted shorthand is followed by a colon.
     fn starts_bit_literal(&self) -> Result<bool, String> {
         let name = self.peek(0);
         if matches!(name, "bits" | "uN" | "sN" | "xN" | "bool")
             || fixed_width(name).is_some()
-            || (self.peek(1) == ":" && self.type_params.contains(name))
+            || self.named_literal_type_at(0)
         {
             return Ok(true);
         }
@@ -3859,15 +4169,131 @@ impl<'s> Parser<'s> {
         Ok(false)
     }
 
+    /// Skip a delimited type atom or dimension during literal lookahead.
+    fn after_group(&self, start: usize, open: &str, close: &str) -> Option<usize> {
+        let mut depth = 1;
+        for (index, token) in self.tokens.iter().enumerate().skip(start + 1) {
+            if token.text == open {
+                depth += 1;
+            } else if token.text == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+        }
+        None
+    }
+
+    /// The colon distinguishes an array type's dimensions from indexing.
+    fn dimensions_before_colon(&self, mut index: usize) -> bool {
+        while self.tokens[index].text == "[" {
+            let Some(after) = self.after_group(index, "[", "]") else {
+                return false;
+            };
+            index = after;
+        }
+        self.tokens[index].text == ":"
+    }
+
+    /// A tuple, nominal type or type parameter can start a typed array, but
+    /// the same opening tokens also occur in ordinary values and subscripts.
+    fn starts_array_literal_type(&self) -> bool {
+        let mut index = self.pos;
+        if self.peek(0) == "(" {
+            let Some(after) = self.after_group(index, "(", ")") else {
+                return false;
+            };
+            index = after;
+        } else if is_value_identifier(self.peek(0)) {
+            index += 1;
+            if self.tokens[index].text == "::" && self.tokens[index + 1].text != "<" {
+                index += 2;
+            }
+            if self.tokens.get(index).is_some_and(|t| t.text == "::")
+                && self.tokens[index + 1].text == "<"
+            {
+                index += 1;
+            }
+            if self.tokens.get(index).is_some_and(|t| t.text == "<") {
+                let Some(end) = self.struct_arguments_end(index) else {
+                    return false;
+                };
+                index = end + 1;
+            }
+        } else {
+            return false;
+        }
+        match self.tokens.get(index).map(|t| t.text) {
+            Some("[") => self.dimensions_before_colon(index),
+            // A type parameter can itself denote an array.
+            Some(":") => self.tokens[index + 1..]
+                .iter()
+                .find(|t| t.text != "(")
+                .is_some_and(|t| t.text == "["),
+            _ => false,
+        }
+    }
+
+    fn parse_annotated_literal(&mut self) -> Result<ParsedExpr, String> {
+        let ty = self.parsed_ty(self.dslx_value_grammar())?;
+        self.expect(":")?;
+        self.annotated_literal(ty)
+    }
+
+    /// Parse explicit array members once, retaining an optional trailing fill.
+    fn array_literal(&mut self, annotation: Option<ParsedType>) -> Result<ParsedExpr, String> {
+        let mut height = annotation.as_ref().map_or(0, |ty| ty.depth);
+        let mut members = Vec::new();
+        let mut has_ellipsis = false;
+        while !self.eat("]") {
+            if self.eat("...") {
+                if members.is_empty() {
+                    return Err(self.error("array ellipsis requires a preceding member"));
+                }
+                has_ellipsis = true;
+                self.eat(",");
+                self.expect("]")?;
+                break;
+            }
+            let member = self.expr()?;
+            height = height.max(member.height);
+            members.push(member.value);
+            if self.eat("]") {
+                break;
+            }
+            self.expect(",")?;
+        }
+        let annotated = annotation.is_some();
+        let value = if annotated || has_ellipsis {
+            Expr::ArrayLiteral {
+                annotation: annotation.map(|ty| ty.value),
+                members,
+                has_ellipsis,
+            }
+        } else {
+            Expr::Array(members)
+        };
+        let mut literal = self.compose(height, value)?;
+        if annotated {
+            literal.spelling = ExprSpelling::AnnotatedLiteral;
+        }
+        Ok(literal)
+    }
+
     /// Parse a literal term after a type annotation. Parentheses group the
     /// literal, and the outermost annotation supplies its final type.
-    fn annotated_literal(&mut self, ty: Type) -> Result<ParsedExpr, String> {
-        if self.eat("(") {
+    fn annotated_literal(&mut self, ty: ParsedType) -> Result<ParsedExpr, String> {
+        if self.eat("[") {
+            return self.array_literal(Some(ty));
+        }
+        let compound_type = self.starts_array_literal_type();
+        if !compound_type && self.eat("(") {
             let literal = self.nested(|parser| parser.annotated_literal(ty))?;
             self.expect(")")?;
             return Ok(literal);
         }
-        if self.starts_bit_literal()? {
+        if self.starts_bit_literal()? || compound_type {
             // DSLX resolves the head of each name as it parses this type.
             // The outer annotation subsequently replaces it, so its members,
             // signedness and widths never undergo type checking.
@@ -3881,7 +4307,7 @@ impl<'s> Parser<'s> {
             self.expect(":")?;
             return self.nested(|parser| parser.annotated_literal(ty));
         }
-        self.literal(Some(ty))
+        self.literal(Some(ty.value))
     }
 
     /// Preserve arbitrary-width numbers as text for checking against their
@@ -3892,18 +4318,12 @@ impl<'s> Parser<'s> {
         let (ty, text) =
             if self.tokens[self.pos].character.is_some() || matches!(spelling, "true" | "false") {
                 let ty = ty.unwrap_or(if self.tokens[self.pos].character.is_some() {
-                    Type::Bits {
-                        signed: false,
-                        width: 8,
-                    }
+                    Type::unsigned(8)
                 } else {
                     Type::Bool
                 });
-                let text = if matches!(&ty, Type::ParametricBits { .. })
-                    || matches!(&ty, Type::Named(name) if self.type_params.contains(name.as_str()))
-                {
-                    // Preserve the intrinsic width requirement until the call
-                    // binds this type.
+                let text = if matches!(&ty, Type::ParametricBits { .. } | Type::Named(_)) {
+                    // Check the intrinsic width once the annotation resolves.
                     spelling.to_owned()
                 } else {
                     character_or_bool_digits(spelling, &ty).map_err(|e| self.error(e))?
@@ -4332,6 +4752,69 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
     }
 
     #[test]
+    fn module_attributes_record_each_requirement_independently() -> Result<(), String> {
+        let default = parse_module("const X = u8:0;")?;
+        assert!(!default.require_define_before_use);
+        assert!(!default.require_block_timing);
+        let order = parse_module("#![require_define_before_use]")?;
+        assert!(order.require_define_before_use);
+        assert!(!order.require_block_timing);
+        let timing = parse_module("#![require_block_timing]")?;
+        assert!(!timing.require_define_before_use);
+        assert!(timing.require_block_timing);
+        for attrs in [
+            "#![require_define_before_use]\n#![require_block_timing]",
+            "#![require_block_timing]\n#![require_define_before_use]",
+        ] {
+            let module = parse_module(&format!("{attrs}\nuse lib;"))?;
+            assert!(module.require_define_before_use);
+            assert!(module.require_block_timing);
+            assert_eq!(module.declaration_order, ["lib"]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn define_before_use_attribute_requires_module_header() {
+        for (source, expected) in [
+            (
+                "const X = u8:0;\n#![require_define_before_use]",
+                "2:4: place #![require_define_before_use] before the first declaration, found 'require_define_before_use'",
+            ),
+            (
+                "use lib;\n#![require_define_before_use]",
+                "2:4: place #![require_define_before_use] before the first declaration, found 'require_define_before_use'",
+            ),
+            (
+                "#[require_define_before_use] const X = u8:0;",
+                "1:3: use #![require_define_before_use] at module scope, found 'require_define_before_use'",
+            ),
+            (
+                "block b(clk) -> u8 { #![require_define_before_use] u8:0 }",
+                "1:22: write #![...] at the top level of the BX file",
+            ),
+        ] {
+            assert_eq!(parse_module(source).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    fn define_before_use_attribute_preserves_call_syntax() -> Result<(), String> {
+        let source = r#"
+block before(clk) -> (u32, u8, u8) {
+    (bit_count<1>(), zero!<2>(), map(u8:1, u8:2))
+}
+fn bit_count<N: u32>() -> u32 { N }
+fn zero!<N: u32>() -> u8 { N as u8 }
+fn map(x: u8, y: u8) -> u8 { x + y }
+"#;
+        let plain = parse_module(source)?;
+        let ordered = parse_module(&format!("#![require_define_before_use]\n{source}"))?;
+        assert_eq!(ordered.blocks[0].output, plain.blocks[0].output);
+        Ok(())
+    }
+
+    #[test]
     fn warning_attributes_reject_unknown_names_and_misplaced_allowances() {
         for (source, diagnostic) in [
             (
@@ -4379,6 +4862,49 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
             crate::parse_dslx_outline(dslx).unwrap_err(),
             "1:5: expected a DSLX module declaration, found '#'"
         );
+    }
+
+    #[test]
+    fn type_aliases_retain_visibility_order_and_rhs_syntax() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+const WIDTH = u32:4;
+type Word!=uN[WIDTH + u32:1];
+pub type Pair' = (Word!, lib::Lane)[2];
+"#,
+        )?;
+        assert_eq!(module.declaration_order, ["WIDTH", "Word!", "Pair'"]);
+        let word = &module.type_aliases[0];
+        assert_eq!(word.name, "Word!");
+        assert!(!word.public);
+        assert!(matches!(&word.ty, Type::ParametricBits { width, .. }
+            if matches!(width.as_ref(), Expr::Binary { op: BinaryOp::Add, .. })));
+        assert_eq!(
+            module.type_aliases[1],
+            TypeAlias {
+                name: "Pair'".into(),
+                public: true,
+                ty: Type::Array {
+                    element: Box::new(Type::Tuple(vec![
+                        Type::Named("Word!".into()),
+                        Type::Named("lib::Lane".into()),
+                    ])),
+                    size: 2,
+                },
+            }
+        );
+        for malformed in [
+            "type Word u8;",
+            "type Word = ;",
+            "type Word = u8",
+            "pub type Word<T> = T;",
+            "type Word<N:u32> = uN[N];",
+            "type u8 = bool;",
+            "fn local() { type Word = u8; }",
+        ] {
+            assert!(parse_module(malformed).is_err(), "{malformed}");
+        }
+        Ok(())
     }
 
     #[test]
@@ -4791,8 +5317,8 @@ fn g(x:u8)->u8 {
         let module = parse_module(
             r#"
 use packets::Packet;
-fn build(x: u8) -> packets::Packet<u32:0x_f_f, 0b1_0> {
-    packets::Packet<255, u32:2> { x }
+fn build(x: u8) -> packets::Packet<0x_f_f, 0b1_0> {
+    packets::Packet<255, 2> { x }
 }
 block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> {
     let empty:Packet<2>=zero!<Packet<2>>();
@@ -4800,9 +5326,18 @@ block stage<F: fn(u8) -> Packet<2>>(clk, xs: (Packet<2>, bool)[3]) -> Packet<2> 
 }
 "#,
         )?;
-        let qualified = Type::Applied {
+        let qualified = Type::ParametricStruct {
             name: "packets::Packet".into(),
-            args: vec![255, 2],
+            args: vec![
+                Expr::Literal {
+                    ty: None,
+                    text: "0xff".into(),
+                },
+                Expr::Literal {
+                    ty: None,
+                    text: "0b10".into(),
+                },
+            ],
         };
         let packet = Type::Applied {
             name: "Packet".into(),
@@ -5229,21 +5764,68 @@ block sample(clk) -> u8[2] {{ map({zero}.data, |x| x) }}
     }
 
     #[test]
-    fn unbraced_struct_arguments_require_names_or_concrete_u32_literals() {
-        for arguments in [
-            "u8:2",
-            "-1",
-            "u32:-1",
-            "4294967296",
-            "0x1_0000_0000",
-            "0b2",
-            "00",
-            "1+2",
-            "N+2",
-            "_",
-            "u32",
-            "2,,3",
-        ] {
+    fn struct_arguments_preserve_literal_types_and_arbitrary_widths() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+enum Mode: u8 { FIRST = 0, SECOND = 1 }
+struct Tagged<S: bool, W: u8, I: s8, D: u32, X: uN[96], M: Mode> { data: xN[S][W] }
+fn tag(data: s5) -> Tagged<true, u8:5, -1, u32:5, 4294967296, Mode::SECOND> {
+    Tagged<true, u8:5, -1, u32:5, 4294967296, Mode::SECOND> { data }
+}
+struct Aggregates<T: (u8, bool), A: u8[2], R: Tagged<false, 5, 0, 5, 0, Mode::FIRST>> { v: u8 }
+"#,
+        )?;
+        let value_types: Vec<_> = module.structs[0]
+            .value_parametrics
+            .iter()
+            .map(|formal| &formal.ty)
+            .collect();
+        assert!(matches!(&value_types[..], [
+            Type::Bool,
+            Type::Bits { signed: false, width: 8 },
+            Type::Bits { signed: true, width: 8 },
+            Type::Bits { signed: false, width: 32 },
+            Type::Bits { signed: false, width: 96 },
+            Type::Named(name),
+        ] if name == "Mode"));
+        let function = &module.functions[0];
+        let Type::ParametricStruct { args, .. } = &function.result else {
+            panic!("expected value arguments in the result type");
+        };
+        assert!(matches!(&args[..], [
+            Expr::Bool(true),
+            Expr::Literal { ty: Some(Type::Bits { signed: false, width: 8 }), text: width },
+            Expr::Literal { ty: None, text: negative },
+            Expr::Literal { ty: Some(Type::Bits { signed: false, width: 32 }), text: dimension },
+            Expr::Literal { ty: None, text: wide },
+            Expr::Name(member),
+        ] if width == "5" && negative == "-1" && dimension == "5" && wide == "4294967296" && member == "Mode::SECOND"));
+        assert!(
+            matches!(&function.body, Expr::ParametricStruct { args: actual, .. } if actual == args)
+        );
+        assert!(matches!(
+            &module.structs[1].value_parametrics[..],
+            [
+                ParametricBinding {
+                    ty: Type::Tuple(_),
+                    ..
+                },
+                ParametricBinding {
+                    ty: Type::Array { .. },
+                    ..
+                },
+                ParametricBinding {
+                    ty: Type::ParametricStruct { .. },
+                    ..
+                },
+            ]
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn unbraced_struct_arguments_require_names_or_literals() {
+        for arguments in ["0b2", "00", "1+2", "N+2", "_", "u32", "2,,3"] {
             for source in [
                 format!("fn f(x: Packet<{arguments}>) {{ }}"),
                 format!("fn f() {{ Packet<{arguments}> {{ x: u8:0 }} }}"),
@@ -5755,7 +6337,7 @@ fn f(x: ((bool,), (), u8)) -> bool {
             ("use std", "expected ';'"),
             (
                 "pub use std;",
-                "expected block, const, enum, fn, or struct after pub",
+                "expected block, const, enum, fn, struct, or type after pub",
             ),
             ("import a.b;", "replace `import` with `use`"),
         ] {
@@ -6286,6 +6868,121 @@ block top(clk, x: u8) -> u8 {
         assert!(
             matches!(&values[..], [Expr::Index { value, .. }] if matches!(value.as_ref(), Expr::Index { .. }))
         );
+    }
+
+    #[test]
+    fn typed_array_literals_retain_the_annotation_and_explicit_members() -> Result<(), String> {
+        let module = parse_module(
+            r#"
+            fn grid<T, N: u32>(x: T) -> T[N][2] { T[N][2]:[[x, ...], ...] }
+            fn repeated(x: u8) -> u8[4] { u8[4]:(u8[3]:[1, x, ...,]) }
+            block pair(clk, p: (bool, u8)) -> (bool, u8)[2] {
+                (bool, u8)[2]:[p, p,]
+            }
+            "#,
+        )?;
+        let grid = &module.functions[0];
+        assert_eq!(
+            grid.body,
+            Expr::ArrayLiteral {
+                annotation: Some(grid.result.clone()),
+                members: vec![Expr::ArrayLiteral {
+                    annotation: None,
+                    members: names(["x"]).into(),
+                    has_ellipsis: true,
+                }],
+                has_ellipsis: true,
+            }
+        );
+        let repeated = &module.functions[1];
+        assert_eq!(
+            repeated.body,
+            Expr::ArrayLiteral {
+                annotation: Some(repeated.result.clone()),
+                members: vec![
+                    Expr::Literal {
+                        ty: None,
+                        text: "1".into()
+                    },
+                    Expr::Name("x".into())
+                ],
+                has_ellipsis: true,
+            }
+        );
+        let pair = &module.blocks[0];
+        assert_eq!(
+            pair.output,
+            Expr::ArrayLiteral {
+                annotation: Some(pair.result.clone()),
+                members: names(["p", "p"]).into(),
+                has_ellipsis: false,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_map_operands_handle_tuple_and_struct_type_delimiters() -> Result<(), String> {
+        for ty in [
+            "(u8, bool)",
+            "Pair<u8, bool>",
+            "Pair::<u8, bool>",
+            "lib::Packet<1,2>",
+        ] {
+            let source = format!(
+                r#"
+                struct Pair<A,B> {{ first: A, second: B }}
+                block b(clk, x: {ty}) -> {ty}[2] {{ map({ty}[2]:[x, ...], |e| e) }}
+            "#
+            );
+            let module = parse_module(&source)?;
+            let block = &module.blocks[0];
+            let Expr::Map(map) = &block.output else {
+                panic!("expected map over {ty}")
+            };
+            assert_eq!(
+                map.iterable,
+                ForIterable::Array(Expr::ArrayLiteral {
+                    annotation: Some(block.result.clone()),
+                    members: names(["x"]).into(),
+                    has_ellipsis: true,
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn array_ellipses_require_a_preceding_member_and_terminate_the_literal() {
+        for expr in [
+            "[...]",
+            "u8[0]:[...,]",
+            "[x ...]",
+            "[x, .. .]",
+            "[x, ..., x]",
+            "[x, ..., ...]",
+            "u8[4]:[x, ...][0]",
+            "library::",
+            "library::Packet::<",
+            "library::Packet<1>[",
+        ] {
+            let source = format!("fn f(x:u8) -> u8 {{ {expr} }}");
+            assert!(parse_module(&source).is_err(), "{expr}");
+        }
+        assert!(parse_module("fn f(x:u8)->u8 { (u8[4]:[x,...])[0] }").is_ok());
+        assert!(parse_module("fn f() -> u8 { library::").is_err());
+    }
+
+    #[test]
+    fn array_annotation_lookahead_keeps_sibling_comparisons_separate() -> Result<(), String> {
+        let comparisons = "x < y,".repeat(4096);
+        let source = format!("fn f(x:u8,y:u8)->() {{ let _ = ({comparisons}); () }}");
+        let module = parse_module(&source)?;
+        let Expr::Scope { bindings, .. } = &module.functions[0].body else {
+            panic!("expected a tuple binding")
+        };
+        assert!(matches!(&bindings[0].value, Expr::Tuple(fields) if fields.len() == 4096));
+        Ok(())
     }
 
     #[test]

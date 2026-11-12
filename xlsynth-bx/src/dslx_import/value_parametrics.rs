@@ -16,7 +16,10 @@ pub(crate) enum NativeDataArg {
     Inferred(String),
     BoundLiteral(String),
     Tuple(Vec<Self>),
-    Array(Vec<Self>),
+    Array {
+        members: Vec<Self>,
+        has_ellipsis: bool,
+    },
     Branches(Vec<Self>),
 }
 
@@ -26,9 +29,11 @@ impl NativeDataArg {
         match self {
             Self::Typed(ty) => crate::check::source_type_nodes(ty),
             Self::Inferred(literal) | Self::BoundLiteral(literal) => literal.len().max(1),
-            Self::Array(items) | Self::Tuple(items) | Self::Branches(items) => items
-                .iter()
-                .fold(1usize, |sum, item| sum.saturating_add(item.storage_work())),
+            Self::Array { members: items, .. } | Self::Tuple(items) | Self::Branches(items) => {
+                items
+                    .iter()
+                    .fold(1usize, |sum, item| sum.saturating_add(item.storage_work()))
+            }
         }
     }
 }
@@ -51,7 +56,9 @@ impl ProbeImports {
         ty: &Type,
         value: &IrValue,
         structs: &ImportedStructs,
+        aggregate_value: bool,
     ) -> Result<String, String> {
+        let aggregate_value = aggregate_value || structs.aggregate_spelling(ty).is_some();
         match (ty, value) {
             (Type::Bits { signed, width }, IrValue::Bits(bits))
                 if *width == bits.get_bit_count() =>
@@ -71,8 +78,8 @@ impl ProbeImports {
                 };
                 Ok(format!(
                     "({} as {})",
-                    self.render_value(&backing, value, structs)?,
-                    self.render_type(ty, structs)?
+                    self.render_value(&backing, value, structs, aggregate_value)?,
+                    self.render_probe_type(ty, structs, aggregate_value)?
                 ))
             }
             (Type::Named(name), IrValue::Tuple(values)) => {
@@ -88,13 +95,13 @@ impl ProbeImports {
                         Ok(format!(
                             "{}: {}",
                             field.name,
-                            self.render_value(&field.ty, value, structs)?
+                            self.render_value(&field.ty, value, structs, aggregate_value)?
                         ))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(format!(
                     "{} {{ {} }}",
-                    self.render_type(ty, structs)?,
+                    self.render_probe_type(ty, structs, aggregate_value)?,
                     fields.join(", ")
                 ))
             }
@@ -104,11 +111,11 @@ impl ProbeImports {
                 let items = array
                     .elements()
                     .iter()
-                    .map(|v| self.render_value(element, v, structs))
+                    .map(|v| self.render_value(element, v, structs, aggregate_value))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(format!(
                     "{}:[{}]",
-                    self.render_type(ty, structs)?,
+                    self.render_probe_type(ty, structs, aggregate_value)?,
                     items.join(", ")
                 ))
             }
@@ -116,7 +123,7 @@ impl ProbeImports {
                 let fields = types
                     .iter()
                     .zip(values.iter())
-                    .map(|(t, v)| self.render_value(t, v, structs))
+                    .map(|(t, v)| self.render_value(t, v, structs, aggregate_value))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(tuple(&fields))
             }
@@ -140,7 +147,7 @@ impl ProbeImports {
             let values = parametrics
                 .iter()
                 .map(|p| {
-                    self.render_value(&p.ty, &p.value, structs)
+                    self.render_value(&p.ty, &p.value, structs, false)
                         .map(|v| format!("{{{v}}}"))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -157,11 +164,25 @@ impl ProbeImports {
         structs: &ImportedStructs,
         params: &mut Vec<String>,
         lets: &mut Vec<String>,
+        in_aggregate: bool,
     ) -> Result<String, String> {
         match arg {
             NativeDataArg::Typed(ty) => {
                 let name = format!("arg_{}", params.len());
-                params.push(format!("{name}: {}", self.render_type(ty, structs)?));
+                if in_aggregate
+                    && structs.aggregate_spelling(ty).is_none()
+                    && let Some((alias, suffix)) = structs.aggregate_projection(ty)
+                {
+                    let (subject, member) = alias.split_once("::").expect("qualified public alias");
+                    params.push(format!("{name}: {}", self.qualify(subject, member)));
+                    return Ok(format!("{name}{suffix}"));
+                }
+                // A private field can arrive from a public record before the
+                // aggregate alias in the callee's formal has been reflected.
+                params.push(format!(
+                    "{name}: {}",
+                    self.render_probe_type(ty, structs, in_aggregate)?
+                ));
                 Ok(name)
             }
             NativeDataArg::Inferred(literal) => Ok(literal.clone()),
@@ -173,12 +194,22 @@ impl ProbeImports {
                 Ok(name)
             }
             NativeDataArg::Tuple(items)
-            | NativeDataArg::Array(items)
+            | NativeDataArg::Array { members: items, .. }
             | NativeDataArg::Branches(items) => {
-                let values = items
+                let in_aggregate = in_aggregate || !matches!(arg, NativeDataArg::Branches(_));
+                let mut values = items
                     .iter()
-                    .map(|a| self.render_argument(a, structs, params, lets))
+                    .map(|a| self.render_argument(a, structs, params, lets, in_aggregate))
                     .collect::<Result<Vec<_>, _>>()?;
+                if matches!(
+                    arg,
+                    NativeDataArg::Array {
+                        has_ellipsis: true,
+                        ..
+                    }
+                ) {
+                    values.push("...".to_owned());
+                }
                 Ok(match arg {
                     NativeDataArg::Tuple(_) => tuple(&values),
                     NativeDataArg::Branches(_) => format!("[{}][u32:0]", values.join(", ")),
@@ -249,7 +280,7 @@ impl ImportResolver {
         let mut lets = Vec::new();
         let values = args
             .iter()
-            .map(|arg| imports.render_argument(arg, &self.structs, &mut params, &mut lets))
+            .map(|arg| imports.render_argument(arg, &self.structs, &mut params, &mut lets, false))
             .collect::<Result<Vec<_>, _>>()?;
         let target_name = imports.qualify(subject, function);
         let specialization = target
@@ -299,7 +330,14 @@ impl ImportResolver {
                     // Use the concrete formal for numeric dimensions and the
                     // checked caller's identity for typed nominal leaves.
                     let display = ty.to_string().map_err(|e| e.to_string())?;
-                    match contextual_shape(arg, &display) {
+                    // A formal can include several aggregate aliases. Bind
+                    // matching candidates before rendering the final signature.
+                    let mut aggregates = Vec::new();
+                    let shape = contextual_shape(arg, &display, &mut aggregates);
+                    for aggregate in aggregates {
+                        structs.bind_aggregate_display(aggregate, data)?;
+                    }
+                    match shape {
                         Some(ty) => Ok(ty),
                         None => structs.contextual_argument_type(
                             subject,
@@ -328,11 +366,19 @@ impl ImportResolver {
 
 /// Combine DSLX's concrete dimensions with known BX source types. Only the
 /// delimiters of a displayed nominal type are inspected, never its identifier.
-fn contextual_shape(arg: &NativeDataArg, display: &str) -> Option<Type> {
+fn contextual_shape<'d>(
+    arg: &NativeDataArg,
+    display: &'d str,
+    aggregates: &mut Vec<&'d str>,
+) -> Option<Type> {
     let display = display.trim();
-    match arg {
+    let ty = match arg {
         NativeDataArg::Typed(ty) => Some(ty.clone()),
-        NativeDataArg::Branches(arms) => arms.iter().find_map(|arm| contextual_shape(arm, display)),
+        NativeDataArg::Branches(arms) => {
+            return arms
+                .iter()
+                .find_map(|arm| contextual_shape(arm, display, aggregates));
+        }
         NativeDataArg::Inferred(_) | NativeDataArg::BoundLiteral(_) => {
             parse_value_type(display).ok()
         }
@@ -355,23 +401,24 @@ fn contextual_shape(arg: &NativeDataArg, display: &str) -> Option<Type> {
                 .filter(|s| !s.trim().is_empty());
             let mut types = Vec::with_capacity(fields.len());
             for (i, member) in members.enumerate() {
-                types.push(contextual_shape(fields.get(i)?, member)?);
+                types.push(contextual_shape(fields.get(i)?, member, aggregates)?);
             }
             (types.len() == fields.len()).then_some(Type::Tuple(types))
         }
-        NativeDataArg::Array(items) => {
+        NativeDataArg::Array { members: items, .. } => {
             let (element, size) = display.strip_suffix(']')?.rsplit_once('[')?;
             let size = size.parse().ok()?;
             let element = items
                 .iter()
-                .find_map(|a| contextual_shape(a, element))
+                .find_map(|a| contextual_shape(a, element, aggregates))
                 .or_else(|| parse_value_type(element).ok())?;
-            Some(Type::Array {
-                element: Box::new(element),
-                size,
-            })
+            Some(Type::array(element, size))
         }
+    }?;
+    if matches!(ty, Type::Tuple(_) | Type::Array { .. }) {
+        aggregates.push(display);
     }
+    Some(ty)
 }
 
 #[cfg(test)]
@@ -408,8 +455,14 @@ pub fn f<N:u32>(_:Operand)->u32 { N }
         }];
         let operand = NativeDataArg::Tuple(vec![
             NativeDataArg::Inferred("3".into()),
-            NativeDataArg::Array(vec![]),
-            NativeDataArg::Array(vec![]),
+            NativeDataArg::Array {
+                members: vec![],
+                has_ellipsis: false,
+            },
+            NativeDataArg::Array {
+                members: vec![],
+                has_ellipsis: false,
+            },
         ]);
         let types = resolver.contextual_data_types("wire", "f", &values, &[operand])?;
         let expected = Type::Tuple(vec![

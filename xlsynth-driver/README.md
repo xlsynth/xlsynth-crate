@@ -479,6 +479,118 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
   block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
 
+### `bx-test` runs BX unit tests, clocked QuickChecks and invariants
+
+Runs the `#[test] fn`, `#[test] block`, `#[quickcheck] block`, and
+`#[invariant] block` declarations in the input file.
+Results are reported in declaration order and each test starts with fresh state.
+Imported modules provide functions, blocks, types, and constants. Run
+`bx-test` on a library's own file to execute its tests.
+
+```shell
+xlsynth-driver bx-test counter.bx
+xlsynth-driver bx-test design.bx --dslx-path='lib;models' --link-ir=externs.ir
+```
+
+The command writes each test's result and the pass/fail counts to stdout.
+An assertion failure produces a source diagnostic on stderr. The remaining
+tests still run, and the command exits with a nonzero status if any test fails.
+
+- `--dslx-path 'dir1;dir2'` sets the BX and DSLX import directories, overriding
+  the toolchain search path. The input file's directory is also searched.
+- `--dslx-stdlib-path <DIR>` overrides the configured or bundled DSLX standard
+  library directory.
+- `--link-ir <PACKAGE>` supplies the IR implementations of BX externs. The
+  default is an empty package.
+- `--warnings-as-errors[=true|false]` defaults to `true`. Set it to `false`
+  to print source warnings and run the tests.
+- `--reset-active-low[=true|false]` configures reset polarity for the
+  block hierarchy. The default is active-high. Tests use synchronous reset
+  and `tick!(rst: true)` asserts reset at an edge with either polarity.
+- `--quickcheck-trials <COUNT>` sets the positive number of concrete trials per
+  QuickCheck or invariant block. The default is 100. A concrete failure stops that property.
+- `--invariant-cycles <COUNT>` sets the positive number of sampled cycles per
+  invariant trial. The default is 16.
+- `--seed <U64>` seeds parameter and DUT register generation for each property.
+  The default is 0. Rerun with the same seed and trial count to reproduce a failure.
+- `--cross-check-vastly` compares each QuickCheck or invariant sample against generated RTL
+  from identical concrete state and reports an additional four-valued run from
+  unknown DUT register state. By default both run in the PIR interpreter.
+
+See the [BX unit test examples](../xlsynth-bx/README.md#unit-tests) for
+combinational assertions and a clocked test with a table of drive/expect pairs.
+The [clocked QuickCheck example](../xlsynth-bx/README.md#clocked-quickcheck-properties)
+checks a counter against a reference using a randomly generated sequence of drives.
+
+### `bx-prove-quickcheck` proves bounded clocked properties
+
+Proves the `#[quickcheck] block` declarations in a BX file. The command unrolls
+each property's ticks into word-level IR and asks an SMT solver whether any
+legal stimulus and initial DUT register state can fail an assertion or return
+`false`. A property can tick inside a loop over a fixed-size array. Stimulus
+can control reset, load enables, and the values sampled at each edge.
+
+```shell
+xlsynth-driver bx-prove-quickcheck counter.bx
+xlsynth-driver bx-prove-quickcheck design.bx --solver=bitwuzla --time-limit-ms=30000
+```
+
+- `--solver <SOLVER>` selects an SMT backend and defaults to in-process
+  Bitwuzla. Build with `with-bitwuzla-system` or `with-bitwuzla-built` to use
+  that backend. Run the command with `--help` for the choices in your build.
+- `--time-limit-ms <MS>` sets a positive per-check time limit for in-process
+  Bitwuzla. The default is unlimited.
+- `--dslx-path 'dir1;dir2'` sets the BX and DSLX import directories. The
+  default uses the toolchain search path and the input file's directory.
+- `--dslx-stdlib-path <DIR>` overrides the configured or bundled DSLX standard
+  library directory.
+- `--link-ir <PACKAGE>` supplies IR definitions for BX externs. The default
+  is an empty package.
+- `--warnings-as-errors[=true|false]` defaults to `true`. Set it to `false`
+  to print source warnings and continue.
+- `--reset-active-low[=true|false]` configures synchronous reset polarity for
+  the block hierarchy. The default is active-high.
+
+A disproof prints a concrete BX replay with the stimulus and initial register
+state. A solver that returns unknown, an unsupported property, or a property
+that exceeds the expansion limit yields an inconclusive result. The command
+checks the remaining properties and exits successfully when it finds at least one and proves
+every property for the number of edges specified in its body. A clocked
+counter example and the current proof limits are in the
+[BX guide](../xlsynth-bx/README.md#bounded-proofs-for-clocked-properties).
+
+### `bx-prove-invariant` checks per-cycle properties and their helper lemmas
+
+Checks each private `#[invariant]` block in the input file with fresh symbolic
+data inputs each cycle. The block's trailing Boolean defines the predicate
+for the current cycle. An induction proof establishes that it stays true on
+every legal execution from the specified initialization, for arbitrarily many
+cycles. In BMC mode, a successful result covers the sampled prefix. Both
+modes also check every named `#[lemma]`.
+
+```shell
+xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
+xlsynth-driver bx-prove-invariant fifo.bx --mode=bmc --max-depth 32
+```
+
+- `--engine bitwuzla` uses the in-process Bitwuzla engine (default). Build the
+  driver with `with-bitwuzla-system` or `with-bitwuzla-built` to enable it.
+- `--mode induction|bmc` selects k-induction (default) or bounded model checking.
+- `--max-depth <K>` sets the maximum induction depth or the number of BMC
+  samples. The default is 16. When the block declares reset, its initial reset
+  edge precedes the first sample.
+- `--time-limit-ms <MS>` sets a positive time limit per solver query.
+- `--dslx-path`, `--dslx-stdlib-path`, `--link-ir`, `--warnings-as-errors`, and
+  `--reset-active-low` have the same behavior as in `bx-test`.
+
+An initialized counterexample produces a replayed trace. An open induction
+step at the depth limit, an unsupported operation, or a solver timeout yields
+an inconclusive result. Each property is reported separately. The command exits
+successfully when every property passes the selected mode and at least one was
+checked. Three runnable examples compare DSLX state machines using the same
+input stream and show the effect of induction depth and a checked helper lemma.
+[Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
+
 ### `bx2gv`: BX to mapped gate-level netlist
 
 Maps a `.bx` design to Liberty cells. The command compiles the selected BX
@@ -3118,6 +3230,52 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `ir-block-eval`
+
+Evaluates a block from an IR package with the PIR interpreter. Each input
+record represents one cycle. It supplies the external input ports in block
+header order, including any reset or load-enable inputs. Omit the clock port.
+Each output line shows the values observed **before** that cycle's register
+updates. A single output is printed directly, multiple outputs form a tuple in
+port order, and a block with no outputs prints `()`.
+
+- `<BLOCK_IR>` — package-form IR file.
+- `--top <BLOCK>` — choose the block. Defaults to the declared block top, or
+  to the only block if the package has no block top.
+- Provide exactly one input source: a positional `<ARG_TUPLE>` for one cycle,
+  or `--input-irvals <PATH>` for a file of positional tuples or named port
+  records. Named records must supply every input exactly once. Values retain
+  their IR types, including tuples and arrays.
+- For a block with registers, select exactly one startup policy:
+  - `--initial-state-all-zeros` — start every register at its type's zero.
+  - `--initial-state-random-seed <U64>` — select reproducible register values.
+  - `--initial-state-file <PATH>` — use one positional register tuple in
+    register declaration order (top first, then child instances in preorder)
+    or one named record containing every register. Child register names
+    include the instance path, for example `stage.r`. In a path segment a
+    literal `$` is escaped as `$$` and a literal `.` as `$d`.
+- `--final-state-irvals <PATH>` — save the registers **after** the last
+  cycle as a named record for a later `--initial-state-file` run.
+  Omit all register state flags for combinational blocks.
+
+Trace messages and runtime failures go to stderr with the one-based cycle
+number. The evaluator supports synchronous register resets and child block
+instances. Asynchronous resets and external instances produce an error.
+The block interface supplies the element type for empty arrays written as
+`[]` in input tuples and register checkpoints.
+
+A declared register reset value takes effect when the reset input is driven
+active during a cycle. For a register `r` with reset value 7 whose Q drives the
+output, a first reset cycle starting from zero prints the old value 0. The
+register then holds 7 for the next cycle.
+
+```shell
+xlsynth-driver ir-block-eval design.ir '(bits[1]:1, bits[8]:0)' \
+  --top pipeline --initial-state-all-zeros --final-state-irvals regs.irvals
+xlsynth-driver ir-block-eval design.ir --top pipeline \
+  --input-irvals samples.irvals --initial-state-file regs.irvals
+```
+
 ### `g8r-eval`
 
 Evaluates a native combinational or sequential G8R design (`.g8r` or
@@ -3441,6 +3599,42 @@ LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean
 
 See the [word-level exporter](../xlsynth-lean/README.md#word-level-ir-functions)
 for type mappings, supported operations, and evaluation.
+
+### `ir-fn-lean-prepare`
+
+Exports two pure XLS IR functions, their reachable callees and their typed,
+pointwise Lean equivalence proposition. The sides must have identical positional
+argument and return types. Each side uses the package top or sole function by default.
+
+```bash
+xlsynth-driver ir-fn-lean-prepare --lhs lhs.ir --rhs rhs.ir --output-dir target-lean
+```
+
+- `--lhs <IR>`, `--rhs <IR>` select the package files.
+- `--lhs-top <FUNCTION>`, `--rhs-top <FUNCTION>` override each side's default entrypoint.
+- `--output-dir <DIR>` receives both generated modules, `Target.lean`, the Lean support files, and the toolchain pin.
+
+### `ir-fn-lean-check`
+
+Checks a named theorem in a Lean module against a bundle from `ir-fn-lean-prepare`.
+The driver generates a wrapper that imports the proof module and assigns the
+selected theorem to `UserProof.equivalent : Target.Equivalent`. The independent
+verifier checks the compiled proof against the original target, rejects unproved
+assumptions, and replays native Boolean checks used by tactics.
+
+```bash
+xlsynth-driver ir-fn-lean-check --target-dir target-lean --lean /path/to/lean \
+  --proof proofs/AdderProof.lean --proof-theorem AdderProof.equivalent
+```
+
+- `--target-dir <DIR>` and `--lean <PATH>` select the prepared target and Lean executable. Both are required.
+- `--proof <PATH>` is the required Lean module defining the theorem.
+- `--proof-theorem <NAME>` is the required Lean declaration name, including its namespace, such as `AdderProof.equivalent`.
+- `--reject-native-checks` requires the theorem and its dependencies to use only `propext`, `Classical.choice`, and `Quot.sound`. By default the verifier also accepts closed Boolean checks that it successfully replays with compiled Lean.
+- `--proof-root <DIR>` resolves Lean module paths and defaults to the directory containing `--proof`.
+- `--proof-source <PATH>` supplies an additional module imported by the proof or its dependencies. Repeat for each additional module.
+- `--work-dir <DIR>` keeps the staged proof and compiled modules in an empty directory. The default is temporary.
+- `--output-json <PATH>` records the result, diagnostics and audit status. A successful IR audit includes `native_checks_replayed`, the number of distinct native Boolean checks replayed across the theorem and its dependencies. A successful strict check reports zero. Failed checks omit this field.
 
 ### `g8r-lean-prepare`
 

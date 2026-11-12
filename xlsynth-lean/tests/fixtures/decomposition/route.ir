@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: Apache-2.0
+package route
+
+fn exchange(p: bits[1] id=1, pair: (bits[7], bits[7]) id=2) -> (bits[7], bits[7]) {
+  x: bits[7] = tuple_index(pair, index=0, id=3)
+  y: bits[7] = tuple_index(pair, index=1, id=4)
+  a: bits[7] = sel(p, cases=[x, y], id=5)
+  b: bits[7] = sel(p, cases=[y, x], id=6)
+  ret result: (bits[7], bits[7]) = tuple(a, b, id=7)
+}
+
+top fn twice(p: bits[1] id=8, x: bits[7] id=9, y: bits[7] id=10) -> (bits[7], bits[7]) {
+  pair: (bits[7], bits[7]) = tuple(x, y, id=11)
+  first: (bits[7], bits[7]) = invoke(p, pair, to_apply=exchange, id=12)
+  first_x: bits[7] = tuple_index(first, index=0, id=22)
+  first_y: bits[7] = tuple_index(first, index=1, id=23)
+  wired: (bits[7], bits[7]) = tuple(first_x, first_y, id=24)
+  unused: (bits[7], bits[7]) = invoke(p, pair, to_apply=exchange, id=25)
+  ret second: (bits[7], bits[7]) = invoke(p, wired, to_apply=exchange, id=13)
+}
+
+fn pack(x: bits[7] id=19, y: bits[7] id=20) -> (bits[7], bits[7]) {
+  ret pair: (bits[7], bits[7]) = tuple(x, y, id=21)
+}
+
+fn reference(p: bits[1] id=14, x: bits[7] id=15, y: bits[7] id=16) -> (bits[7], bits[7]) {
+  ret original: (bits[7], bits[7]) = invoke(x, y, to_apply=pack, id=17)
+}

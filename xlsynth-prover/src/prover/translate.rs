@@ -14,7 +14,7 @@ use crate::solver::{BitVec, Solver};
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
     ir_utils::get_topological,
-    ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type,
+    ir_value_utils::{flatten_ir_value_to_lsb0_bits_for_type, ir_bits_to_usize_in_range},
 };
 
 pub fn ir_value_to_bv<'a, S: Solver>(
@@ -628,6 +628,11 @@ fn translate_nodes<'ir, S: Solver>(
                 let rep = match op {
                     Unop::Not => solver.not(&a.bitvec),
                     Unop::Neg => solver.neg(&a.bitvec),
+                    // A reduction over no bits yields its boolean identity.
+                    Unop::AndReduce if a.bitvec.get_width() == 0 => solver.true_bv(),
+                    Unop::OrReduce | Unop::XorReduce if a.bitvec.get_width() == 0 => {
+                        solver.false_bv()
+                    }
                     Unop::OrReduce => solver.or_reduce(&a.bitvec),
                     Unop::AndReduce => solver.and_reduce(&a.bitvec),
                     Unop::XorReduce => solver.xor_reduce(&a.bitvec),
@@ -688,6 +693,11 @@ fn translate_nodes<'ir, S: Solver>(
                     // Precompute index comparison helpers.
                     let index_bv = indices[0];
                     let index_width = index_bv.bitvec.get_width();
+                    if elem_cnt == 0 {
+                        // Every index is out of bounds. An update leaves the
+                        // array unchanged.
+                        return array_val.clone();
+                    }
                     let max_selectable = get_num_indexable_elements::<S>(index_bv, elem_cnt);
 
                     // Iterate over elements, build updated slice.
@@ -741,72 +751,42 @@ fn translate_nodes<'ir, S: Solver>(
                 array_update_recursive(solver, base_array, &index_bvs, new_val)
             }
             NodePayload::ArrayIndex { array, indices, .. } => {
-                /// Build a value that corresponds to
-                /// `array_val[indices...]`.
-                fn array_index_recursive<'a, S: Solver>(
-                    solver: &mut S,
-                    array_val: &IrTypedBitVec<'a, S::Term>,
-                    indices: &[&IrTypedBitVec<'a, S::Term>],
-                ) -> IrTypedBitVec<'a, S::Term> {
-                    // Base-case: no further indices → return the current value.
-                    if indices.is_empty() {
-                        return array_val.clone();
-                    }
-
-                    // The value must be an array; retrieve element type /
-                    // count.
-                    let (elem_ty, elem_cnt) = match array_val.ir_type {
-                        ir::Type::Array(arr) => (&arr.element_type, arr.element_count),
-                        _ => panic!(
-                            "ArrayIndex: expected array type, found {:?}",
-                            array_val.ir_type
-                        ),
+                let mut value = env[array].clone();
+                for index in indices {
+                    let ir::Type::Array(array_ty) = value.ir_type else {
+                        unreachable!("verified array_index operand must be an array");
                     };
-
-                    // Recursively compute each element after applying the
-                    // *tail* indices.
-                    let elem_bit_width = elem_ty.bit_count() as i32;
-                    let children: Vec<IrTypedBitVec<'a, S::Term>> = (0..elem_cnt as i32)
-                        .map(|i| {
-                            let high = (i + 1) * elem_bit_width - 1;
-                            let low = i * elem_bit_width;
-                            let slice = solver.extract(&array_val.bitvec, high, low);
-                            array_index_recursive(
-                                solver,
-                                &IrTypedBitVec {
-                                    ir_type: elem_ty,
-                                    bitvec: slice,
-                                },
-                                &indices[1..],
-                            )
-                        })
-                        .collect();
-
-                    // Build a chain of `ite` expressions that selects the
-                    // requested element, falling back to
-                    // the last element for OOB indices (XLS
-                    // semantics).
-                    let index_bv = indices[0];
-                    let max_selectable = get_num_indexable_elements::<S>(index_bv, children.len());
-                    let index_width = index_bv.bitvec.get_width();
-
-                    let mut result = children[max_selectable - 1].clone();
-                    for i in (0..max_selectable - 1).rev() {
-                        let idx_val = solver.numerical(index_width, i as u64);
-                        let cond = solver.eq(&index_bv.bitvec, &idx_val);
-                        result.bitvec = solver.ite(&cond, &children[i].bitvec, &result.bitvec);
-                    }
-                    result
+                    let count = array_ty.element_count;
+                    let width = array_ty.element_type.bit_count();
+                    // Element zero occupies the low bits in the packed array.
+                    let element =
+                        |solver: &mut S, i: usize| solver.slice(&value.bitvec, i * width, width);
+                    let bitvec = match &inputs.prover_fn.fn_ref.get_node(*index).payload {
+                        NodePayload::Literal(IrValue::Bits(bits)) => {
+                            let i = ir_bits_to_usize_in_range(bits, count).unwrap_or(count - 1);
+                            element(solver, i)
+                        }
+                        _ => {
+                            let index_bv = &env[index];
+                            let last = get_num_indexable_elements::<S>(index_bv, count) - 1;
+                            // An out-of-bounds index selects the last element.
+                            let mut result = element(solver, last);
+                            for i in (0..last).rev() {
+                                let ordinal =
+                                    solver.numerical(index_bv.bitvec.get_width(), i as u64);
+                                let selected = solver.eq(&index_bv.bitvec, &ordinal);
+                                let candidate = element(solver, i);
+                                result = solver.ite(&selected, &candidate, &result);
+                            }
+                            result
+                        }
+                    };
+                    value = IrTypedBitVec {
+                        ir_type: &array_ty.element_type,
+                        bitvec,
+                    };
                 }
-
-                // Gather the index bit-vectors in evaluation order.
-                let base_array = env.get(array).expect("Array BV must be present");
-                let index_bvs: Vec<&IrTypedBitVec<'_, S::Term>> = indices
-                    .iter()
-                    .map(|i| env.get(i).expect("Index BV must be present"))
-                    .collect();
-
-                array_index_recursive(solver, base_array, &index_bvs)
+                value
             }
             NodePayload::ArraySlice {
                 array,
@@ -890,19 +870,13 @@ fn translate_nodes<'ir, S: Solver>(
                 let start_bv = env
                     .get(start)
                     .expect("DynamicBitSlice start must be present");
-                assert!(*width > 0, "DynamicBitSlice: width must be > 0");
                 assert!(
                     *width <= arg_bv.bitvec.get_width(),
                     "DynamicBitSlice: width must be <= arg width"
                 );
 
                 let shifted = solver.xls_shrl(&arg_bv.bitvec, &start_bv.bitvec);
-                let shifted_ext = if *width > shifted.get_width() {
-                    solver.extend_to(&shifted, *width, false)
-                } else {
-                    shifted
-                };
-                let extracted = solver.slice(&shifted_ext, 0, *width);
+                let extracted = solver.slice(&shifted, 0, *width);
                 IrTypedBitVec {
                     ir_type: &node.ty,
                     bitvec: extracted,
@@ -1102,7 +1076,6 @@ fn translate_nodes<'ir, S: Solver>(
 
                 // ---------------- Validation
                 // -------------------------------------------------
-                assert!(!cases.is_empty(), "Sel: must have at least one case");
                 let case_count = cases.len();
                 assert!(
                     case_count <= addr_space,
@@ -1135,11 +1108,7 @@ fn translate_nodes<'ir, S: Solver>(
                 let mut result_bv = if let Some(def_ref) = default {
                     env.get(def_ref).unwrap().bitvec.clone()
                 } else {
-                    assert!(
-                        case_bvs.len() >= 2,
-                        "Sel without default must have ≥2 cases"
-                    );
-                    case_bvs.pop().unwrap() // O(1) pop from back
+                    case_bvs.pop().expect("complete sel has at least one case")
                 };
 
                 // Iterate remaining cases from highest to 0, building the ITE

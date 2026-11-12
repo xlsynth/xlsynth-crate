@@ -174,6 +174,12 @@ Compares array concatenation in BX blocks, local functions, and module constants
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_concat`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_array_literals.rs
+
+Compares BX and DSLX array literal acceptance and element values, including a trailing ellipsis that repeats a runtime expression. It varies prefix lengths, trailing commas, scalar and aggregate element types, module-constant and parametric dimensions, and the type supplied by a return or annotated let. Both frontends must reject missing seeds, misplaced ellipses, mismatched element types and incorrect sizes. Accepted programs run against DSLX's interpreter and lowered IR, except that empty literals use the interpreter because the pinned converter rejects them.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_array_literals`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_bits_array_casts.rs
 
 The target compares BX bits-to-array and array-to-bits casts with pinned DSLX. It varies signed, unsigned and Boolean types, zero-width and wide elements, empty arrays, and asymmetric bit patterns to expose reversed elements or slices. It checks module constants and runtime values against DSLX IR and also checks unsigned casts against DSLX constexpr evaluation. Signed cases use compiled DSLX because the pinned bytecode interpreter cannot flatten signed elements and assigns unsigned tags to cast results. Unequal packed widths and casts involving nested arrays, tuples, structs or enums must fail typechecking.
@@ -291,6 +297,32 @@ and compares flattened BX Block IR with both compiled and constexpr DSLX.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_value_parametrics --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_clocked_test.rs
+
+Compares a BX `#[test] block` with a DSLX `#[test_proc]` on the same sequence of
+inputs. Each proc activation computes one register transition and traces the
+result. The BX test drives a struct-valued input, ticks the DUT, and checks
+every register against that row of the DSLX trace. The first edge resets the
+DUT. Later rows exercise reset priority, load enables, and dependencies on
+other registers' previous values. The target also changes one expected value
+and requires BX to report the selected tick, exposing skipped assertions. A
+mismatch reports both generated programs.
+
+Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_clocked_test`.
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_pure_test.rs
+
+Runs identical `#[test] fn` source through the BX test runner and the pinned
+DSLX bytecode interpreter. Each suite includes passing checks, a deliberate
+assertion failure, and a subsequent test whose outcome varies with the input.
+Inputs vary signed and unsigned word widths, helper calls, array and range
+folds, tuple destructuring, and branch-local bindings. The target compares the
+outcome of every named test and the source line of its first failing assertion.
+This catches skipped tests, assertions executed in an untaken branch, and
+runners that stop the suite after its first failure.
+
+Run from `xlsynth-bx` with `XLSYNTH_TOOLS=/path/to/pinned/tools cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_pure_test`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_block_let_patterns.rs
 
 Compares destructuring lets in BX blocks with the same patterns in DSLX functions. Generated programs vary nested tuple shapes, wildcards, rest spans, type annotations, inferred integer fields, lexical shadowing, and direct or child-block initializers. Invalid patterns exercise duplicate binders, extra rest markers, and shape or type mismatches. Accepted programs return selected fields or compare inferred operands, including decimal and radix-prefixed values of different widths and signs inside structural unrolls. The target compares BX block IR with compiled DSLX IR and native DSLX evaluation on shared inputs. For implicit conversions that can abort the pinned converter, it first checks the original source with both frontends, then uses explicit casts or native array-element unification to give the DSLX execution probe the common operand type.
@@ -302,6 +334,12 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_let_patte
 Generates module constants with dependent scalar expressions, nested aggregates, and calls to earlier pure functions. BX blocks and local functions read them in expressions, named match patterns, map callbacks, loop bounds, and slice widths. Constants also set element signedness, bit widths, and array lengths in annotations. Counted traversals use the same length constant as the array they index. The target compares BX and pinned DSLX acceptance, including shadowing, forward references, duplicate definitions, builtin name collisions, and invalid dimension types. It checks every constant's name, declaration order, concrete type, and computed value against DSLX metadata, including signedness and width inside tuples and arrays. It compares block results on shared inputs against both compiled DSLX IR and concrete DSLX calls.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_constants --sanitizer none`.
+
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_type_aliases.rs
+
+Compares concrete module type aliases in BX and pinned DSLX. Generated chains refer to booleans, signed and unsigned bits from zero to 129 bits wide, nested arrays and tuples, enums, and structs including specializations with identical fields. The target checks source acceptance, constant values, and runtime outputs in BX block IR, compiled DSLX IR, and concrete DSLX calls. Paired library and consumer modules exercise qualified and directly imported public aliases, re-exported aggregates of private types, and same-named types in different scopes. Rejected programs expose lost nominal identity, invalid alias targets, declaration-order mistakes, and access to private types.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_type_aliases -- -max_len=13 -len_control=0`.
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_graph.rs
 
@@ -324,7 +362,9 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_imported_struct
 
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_struct_parametrics.rs
 
-Generates native BX and DSLX packet templates with signed or unsigned payloads and fixed-size arrays. Cases vary explicit and inferred arguments, derived defaults, nested symbolic applications, and widths inferred from unsized struct fields. Some BX cases use turbofish for the same applications spelled with plain angle brackets in DSLX. Rejected programs exercise incompatible specializations, same-shaped distinct declarations, conflicting field types, and extra arguments. The target compares source acceptance and checks projected data and inferred bindings against both compiled DSLX IR and concrete DSLX calls.
+Generates native BX and DSLX struct templates with scalar and array fields. Cases vary explicit and inferred arguments, derived defaults, nested symbolic applications, widths inferred from unsized fields, and `xN[S][N]` signedness with signed or unsigned width parameters. Signed arguments vary decimal, hexadecimal, and binary spellings at the sign bit and beyond the declared width. Phantom parameters distinguish instances with identical fields using enum members or bit patterns that can differ only above bit 63. Nested records forward values between signed, unsigned, and boolean formals and check whether each value fits the destination. Some BX cases use turbofish for the same applications spelled with plain angle brackets in DSLX. Rejected programs exercise incompatible specializations, wrong nominal values, conflicting field types, and extra arguments. The target compares source acceptance and checks projected data and inferred bindings against both compiled DSLX IR and concrete DSLX calls.
+
+DSLX v0.62.0 forwards nonnegative values from sources wider than 64 bits as hexadecimal literals, allowing the destination's sign bit to turn a positive value negative. For that overflow case the reference requires a constexpr `checked_cast` to check BX's value-preserving rule. For tuple-, array-, and struct-valued parameters, which the pinned DSLX typechecker cannot specialize on structs, the target compares BX results to DSLX functions that take those same constants as ordinary arguments.
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_struct_parametrics --sanitizer none`.
 
@@ -744,6 +784,16 @@ Primarily tests:
 - Autocov-selected boundary-ish inputs expose the same interpreter semantics as direct xlsynth interpretation
 - Generated IR text remains parseable and executable across the C++ and PIR interpreters
 - Arbitrary generated ops and value shapes behave identically in both interpreters across mixed random and autocov-selected inputs
+
+### xlsynth-codegen/fuzz/fuzz_targets/fuzz_codegen_vastly_sequential_equiv.rs
+
+Generates flat, synchronous blocks, emits SystemVerilog with `xlsynth-codegen`,
+and simulates the emitted text with Vastly. PIR and Vastly start with the same
+concrete register values and receive the same inputs. The target checks every
+emitted output before each edge and every emitted register after it. This
+catches differences in feedback, load enables, reset behavior, and output
+timing, including updates to registers that never reach an output.
+[Run the Vastly differential target](xlsynth-codegen/fuzz/FUZZ.md#fuzz_codegen_vastly_sequential_equiv).
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ext_nary_add_gatify_equiv.rs
 

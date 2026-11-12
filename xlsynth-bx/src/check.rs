@@ -13,8 +13,8 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef, StructSplat,
-    Type, UnaryOp, WidthSliceType,
+    InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan,
+    Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -42,6 +42,8 @@ mod module_constants;
 mod scope;
 mod source_patterns;
 mod struct_parametrics;
+use struct_parametrics::StructApplication;
+mod test_program;
 mod timing;
 mod tuple_match;
 mod unroll;
@@ -196,10 +198,16 @@ pub(crate) fn output_ports(result: &Type, structs: &[StructDef]) -> Result<Vec<P
 
 /// Aggregate constructors share member types with the other operand or branch.
 fn has_aggregate_literal(expr: &Expr) -> bool {
+    if let Some(seed) = expr.unannotated_loop_seed() {
+        return has_aggregate_literal(seed);
+    }
     match expr {
-        Expr::For(fold) if fold.annotation.is_none() => has_aggregate_literal(&fold.seed),
         Expr::Scope { result, .. } => has_aggregate_literal(result),
-        Expr::Array(_) | Expr::Tuple(_) => true,
+        Expr::Array(_)
+        | Expr::Tuple(_)
+        | Expr::ArrayLiteral {
+            annotation: None, ..
+        } => true,
         Expr::If {
             then_value,
             else_value,
@@ -349,6 +357,14 @@ struct BlockSpecialization<'m> {
     parametric_values: Rc<[BoundParametricValue]>,
     callbacks: Vec<Rc<BoundCallback<'m>>>,
     path: Vec<&'m str>,
+}
+
+/// A concrete block can have a private verification-only interface. A
+/// specialization also supplies type, value, and callback bindings.
+enum BlockDefinition<'a, 'm> {
+    Concrete(&'m Block, &'a BlockInterface),
+    Invariant(&'m InvariantDecl, &'a BlockInterface),
+    Specialized(&'a BlockSpecialization<'m>),
 }
 
 /// Required dimensions and reset constants retain their own counted-loop
@@ -533,6 +549,7 @@ impl<'m> BlockSpecializations<'m> {
             params,
             result,
             types.structs,
+            None,
         )?;
         if charge_signature {
             self.expansion_work = self
@@ -629,9 +646,16 @@ fn bits_copy_work(bits: &IrBits) -> usize {
 #[derive(Default)]
 struct Declarations<'a> {
     warnings: RefCell<WarningCollector<'a>>,
+    /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
+    evaluate_discarded_tuple_fields: bool,
+    has_test_discards: Cell<bool>,
     block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
+    /// Canonical types evaluated in each alias's declaration scope.
+    type_aliases: BTreeMap<&'a str, CheckedTypeAlias>,
+    /// Aggregate type nodes copied when substituting transparent aliases.
+    alias_copy_work: Cell<usize>,
     constants: BTreeMap<&'a str, CheckedConstant>,
     functions: BTreeMap<&'a str, FunctionInterface>,
     function_templates: BTreeMap<&'a str, &'a Function>,
@@ -641,6 +665,12 @@ struct Declarations<'a> {
     has_block_value_parametrics: bool,
     blocks: BTreeMap<&'a str, BlockInterface>,
     templates: BTreeMap<&'a str, BlockTemplate<'a>>,
+}
+
+/// A transparent alias and the cost of copying its expanded type at a use site.
+struct CheckedTypeAlias {
+    ty: Type,
+    copy_work: usize,
 }
 
 impl Declarations<'_> {
@@ -727,8 +757,13 @@ struct StructTable<'m> {
     definitions: Vec<StructDef>,
     indices: BTreeMap<String, (usize, TypeShape)>,
     imported_count: usize,
+    /// Ordinary BX declarations, including records whose layout is still
+    /// pending.
+    declared_records: BTreeSet<&'m str>,
     templates: BTreeMap<&'m str, &'m StructDef>,
     instances: BTreeMap<String, struct_parametrics::StructInstance<'m>>,
+    /// Explicit prefixes whose trailing defaults have already been evaluated.
+    default_instances: BTreeMap<String, usize>,
     instance_layout_nodes: usize,
     active_templates: BTreeSet<&'m str>,
 }
@@ -779,26 +814,14 @@ fn resolve_type<'m>(
                 .iter()
                 .map(|arg| resolve_type(arg, is_local, bindings, dimensions, types, budget))
                 .collect::<Result<Vec<_>, _>>()?;
-            let ty = Type::TypeApplied {
-                name: name.clone(),
-                args,
-            };
-            let ty = if let Some(bindings) = bindings {
-                if bindings.has_unbound_variable(&ty) {
-                    return Ok(ty);
-                }
-                bindings.concrete_type(&ty)?
-            } else {
-                ty
-            };
-            types.materialize_type_applications(ty, dimensions, remaining)
+            types.resolve_struct_type_application(name, args, bindings, dimensions, remaining)
         }
         Type::ParametricStruct { name, args } => {
             let mut checker = types.struct_scope(dimensions);
             checker.enclosing_type_locals = Some(is_local);
             checker.function_type_bindings = bindings.cloned();
-            let ty = checker.struct_actual_type(name, args)?;
-            resolve_type(&ty, is_local, bindings, dimensions, types, remaining)
+            let args = checker.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
+            checker.struct_value_type(name, &args, remaining)
         }
         Type::Named(name) | Type::Applied { name, .. } => {
             if is_local(name) {
@@ -812,6 +835,25 @@ fn resolve_type<'m>(
                     return Ok(ty.clone());
                 }
                 bindings.reject_value(name)?;
+            }
+            if let Some(alias) = dimensions.decls.type_aliases.get(name.as_str()) {
+                if !matches!(ty, Type::Named(_)) {
+                    return Err(format!("type alias '{name}' takes no arguments"));
+                }
+                // A short chain of tuple aliases can describe exponentially
+                // many source nodes. Budget the expansion before cloning it.
+                let work = dimensions
+                    .decls
+                    .alias_copy_work
+                    .get()
+                    .saturating_add(alias.copy_work);
+                if work > MAX_TYPE_SIZE {
+                    return Err(format!(
+                        "type alias '{name}' exceeds the type expansion limit of {MAX_TYPE_SIZE}"
+                    ));
+                }
+                dimensions.decls.alias_copy_work.set(work);
+                return Ok(alias.ty.clone());
             }
             if let Some((subject, member)) = lookup_use(name, types.resolver, is_local)? {
                 if let Type::Applied { args, .. } = ty {
@@ -830,11 +872,12 @@ fn resolve_type<'m>(
                     _ => &[],
                 };
                 let mut checker = types.struct_scope(dimensions);
+                let args = checker.struct_value_prefix(name, StructLiteralArgs::Integers(args))?;
                 checker.specialize_struct(
                     template,
                     struct_parametrics::StructArguments::Values {
-                        explicit: args,
-                        inferred: &[],
+                        explicit: &args,
+                        inferred: None,
                     },
                     remaining,
                 )
@@ -850,17 +893,17 @@ fn resolve_type<'m>(
                     .map_or_else(|| ty.clone(), CheckedEnum::ty))
             }
         }
-        Type::Array { element, size } => Ok(Type::Array {
-            element: Box::new(resolve_type(
+        Type::Array { element, size } => Ok(Type::array(
+            resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?),
-            size: *size,
-        }),
+            )?,
+            *size,
+        )),
         Type::Tuple(items) => {
             let child_budget = child_type_budget(remaining)?;
             items
@@ -893,17 +936,17 @@ fn resolve_type<'m>(
             signed: dimensions.signed(signed, is_local, bindings)?,
             width: dimensions.size(width, is_local, bindings)?,
         }),
-        Type::ParametricArray { element, size } => Ok(Type::Array {
-            element: Box::new(resolve_type(
+        Type::ParametricArray { element, size } => Ok(Type::array(
+            resolve_type(
                 element,
                 is_local,
                 bindings,
                 dimensions,
                 types,
                 child_type_budget(remaining)?,
-            )?),
-            size: dimensions.size(size, is_local, bindings)?,
-        }),
+            )?,
+            dimensions.size(size, is_local, bindings)?,
+        )),
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
 }
@@ -916,6 +959,30 @@ struct TypeResolver<'a, 'm> {
 }
 
 impl<'m> TypeResolver<'_, 'm> {
+    /// Keep a struct application symbolic until its type arguments are bound,
+    /// then substitute the caller's bindings and resolve the struct's fields.
+    fn resolve_struct_type_application(
+        &mut self,
+        name: &str,
+        args: Vec<Type>,
+        bindings: Option<&Bindings>,
+        dimensions: ModuleDimensions<'_, 'm>,
+        remaining: usize,
+    ) -> Result<Type, String> {
+        let application = Type::TypeApplied {
+            name: name.to_owned(),
+            args,
+        };
+        let ty = match bindings {
+            Some(bindings) if bindings.has_unbound_variable(&application) => {
+                return Ok(application);
+            }
+            Some(bindings) => bindings.concrete_type(&application)?,
+            None => application,
+        };
+        self.materialize_type_applications(ty, dimensions, remaining)
+    }
+
     /// Resolve struct applications whose arguments have already been resolved
     /// and substituted. Their fields are evaluated in the declaration scope.
     fn materialize_type_applications(
@@ -950,14 +1017,14 @@ impl<'m> TypeResolver<'_, 'm> {
                     .collect::<Result<_, _>>()
                     .map(Type::Tuple)
             }
-            Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.materialize_type_applications(
+            Type::Array { element, size } => Ok(Type::array(
+                self.materialize_type_applications(
                     *element,
                     dimensions,
                     child_type_budget(remaining)?,
-                )?),
+                )?,
                 size,
-            }),
+            )),
             _ => Ok(ty),
         }
     }
@@ -1278,7 +1345,7 @@ impl<'a> Declarations<'a> {
         result: Type,
         structs: &StructTable,
     ) -> Result<(), String> {
-        let interface = BlockInterface::new(clock, reset, params, result, structs)?;
+        let interface = BlockInterface::new(clock, reset, params, result, structs, None)?;
         self.blocks.insert(name, interface);
         Ok(())
     }
@@ -1292,8 +1359,17 @@ impl BlockInterface {
         params: Vec<Param>,
         result: Type,
         structs: &StructTable,
+        private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<Self, String> {
-        let layout = Self::check_ports(clock, reset, &params, &result, structs, None)?;
+        let layout = Self::check_ports(
+            clock,
+            reset,
+            &params,
+            &result,
+            structs,
+            None,
+            private_outputs,
+        )?;
         Ok(Self {
             params,
             result,
@@ -1312,6 +1388,7 @@ impl BlockInterface {
         result: &Type,
         structs: &StructTable,
         parameters: Option<&Bindings>,
+        private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<BlockPortLayout, String> {
         let mut ports = BTreeSet::new();
         declare(&mut ports, clock)?;
@@ -1336,7 +1413,7 @@ impl BlockInterface {
                 type_nodes,
             });
         }
-        let outputs = if let Type::TypeApplied { name, .. } = result {
+        let mut outputs = if let Type::TypeApplied { name, .. } = result {
             structs
                 .template(name)
                 .ok_or_else(|| unknown_declaration("struct", name))?
@@ -1345,7 +1422,12 @@ impl BlockInterface {
         } else {
             output_ports(result, &structs.definitions)?
         };
-        for output in &outputs {
+        for output in &mut outputs {
+            if let Some(reserved) = private_outputs {
+                while reserved.contains(&output.name) {
+                    output.name.push('_');
+                }
+            }
             if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
                 return Err(format!(
                     "output port '{}' is not a valid XLS IR identifier",
@@ -1366,14 +1448,19 @@ impl StructTable<'_> {
     /// selection.
     fn index(&mut self, index: usize) -> Result<TypeShape, String> {
         let def = &self.definitions[index];
-        let shape = TypeShape::aggregate(
+        let shape = self.definition_shape(def)?;
+        self.indices.insert(def.name.clone(), (index, shape));
+        Ok(shape)
+    }
+
+    /// Check the complete field layout before registering the nominal type.
+    fn definition_shape(&self, def: &StructDef) -> Result<TypeShape, String> {
+        TypeShape::aggregate(
             def.fields.iter().map(|p| &p.ty),
             MAX_ELABORATION_DEPTH,
             &|name| self.named_shape(name),
         )
-        .map_err(|e| format!("struct '{}': {e}", def.name))?;
-        self.indices.insert(def.name.clone(), (index, shape));
-        Ok(shape)
+        .map_err(|e| format!("struct '{}': {e}", def.name))
     }
 
     /// Import newly reflected definitions in dependency order. A call can
@@ -1665,6 +1752,17 @@ pub(crate) fn check_sources(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
+    check_sources_with_tests(root, imports, options, None)
+}
+
+/// Elaborate test-only harnesses before draining the shared specialization
+/// queues.
+pub(crate) fn check_sources_with_tests(
+    root: &Module,
+    imports: crate::bx_import::SourceImports<'_>,
+    options: &ImportOptions<'_>,
+    mut tests: Option<&mut crate::test_runner::TestSuite>,
+) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
     let module = linked.map_or(root, |l| &l.module);
     let mut names = BTreeSet::new();
@@ -1704,7 +1802,18 @@ pub(crate) fn check_sources(
         linked.map(|l| l.dslx_bindings.as_slice()),
         imports.native,
     )?;
+    for order in imports.declaration_orders {
+        order.verify(&resolver)?;
+    }
     let mut structs = StructTable::default();
+    for alias in &module.type_aliases {
+        let name =
+            crate::bx_import::library_item(&alias.name).map_or(alias.name.as_str(), |(_, n)| n);
+        if !(crate::parser::is_use_identifier(name) || name == "self") {
+            return Err(format!("invalid type alias name '{name}'"));
+        }
+        declare(&mut names, &alias.name)?;
+    }
     for def in &module.enums {
         let name = crate::bx_import::library_item(&def.name).map_or(def.name.as_str(), |(_, n)| n);
         if !(crate::parser::is_use_identifier(name) || name == "self") {
@@ -1725,6 +1834,9 @@ pub(crate) fn check_sources(
             declare(&mut fields, &field.name).map_err(|e| format!("struct '{}': {e}", def.name))?;
         }
         structs.register_template(def)?;
+        if !def.is_parametric() {
+            structs.declared_records.insert(&def.name);
+        }
         structs.definitions.push(StructDef {
             name: def.name.clone(),
             public: def.public,
@@ -1735,6 +1847,11 @@ pub(crate) fn check_sources(
         });
     }
     let mut declarations = Declarations {
+        evaluate_discarded_tuple_fields: tests.is_some()
+            && module
+                .tests
+                .iter()
+                .any(|t| t.kind == crate::ast::TestKind::Function),
         block_names: module
             .blocks
             .iter()
@@ -1761,6 +1878,7 @@ pub(crate) fn check_sources(
                 .chain(module.externs.iter().map(|f| f.name.as_str()))
                 .chain(module.constants.iter().map(|c| c.name.as_str()))
                 .chain(module.structs.iter().map(|s| s.name.as_str()))
+                .chain(module.type_aliases.iter().map(|a| a.name.as_str()))
                 .chain(module.functions.iter().map(|f| f.name.as_str()))
                 .enumerate()
                 .map(|(i, name)| (name, i + 1)),
@@ -1786,9 +1904,50 @@ pub(crate) fn check_sources(
     {
         declare(&mut names, name)?;
     }
+    let mut harness_names = Vec::new();
+    let mut invariant_harnesses = Vec::new();
+    if let Some(suite) = &mut tests {
+        suite.reserve_names(&names);
+        for test in &module.tests {
+            let harness = suite.harness_name(&test.name);
+            names.insert(harness.clone());
+            harness_names.push(harness);
+        }
+        for property in &module.invariants {
+            let harness = suite.harness_name(&property.block.name);
+            names.insert(harness.clone());
+            invariant_harnesses.push(harness);
+        }
+    }
     let mut function_registry = FunctionSpecializations::new(names.clone());
     let function_bodies =
         function_registry.check_sources(module, &mut declarations, &mut resolver, &mut structs)?;
+    for (owner, types) in &module.overwritten_literal_types {
+        for name in types {
+            if let Some((head, _)) = name.split_once("::") {
+                // An unlinked module retains its qualified source spelling.
+                // Only the qualifier's scope matters after the outer type wins.
+                if !names.contains(head) {
+                    return Err(format!("unknown name '{head}' in literal annotation"));
+                }
+                continue;
+            }
+            let is_type = match resolver.lookup(name)? {
+                Some((subject, member)) => resolver.has_public_type(&subject, &member),
+                None => {
+                    declarations.type_aliases.contains_key(name.as_str())
+                        || structs.enums.contains_key(name)
+                        || structs.declared_records.contains(name.as_str())
+                        || structs.template(name).is_some()
+                }
+            };
+            if !is_type {
+                return Err(format!(
+                    "in '{owner}': '{name}' does not name a type in literal annotation"
+                ));
+            }
+        }
+    }
     let externs = module
         .externs
         .iter()
@@ -1888,11 +2047,10 @@ pub(crate) fn check_sources(
     for block in module.blocks.iter().filter(|b| !b.is_parametric()) {
         let body = BodyChecker::check_block(
             &declarations,
-            block,
+            BlockDefinition::Concrete(block, &declarations.blocks[block.name.as_str()]),
             &mut resolver,
             &mut structs,
             &mut specializations,
-            None,
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}': {e}", block.name))?;
@@ -1902,15 +2060,89 @@ pub(crate) fn check_sources(
             .record_block(&block.name, body.requires_hardware);
         checked.push(body.block);
     }
+    let mut test_functions = Vec::new();
+    if let Some(suite) = tests.as_deref_mut() {
+        for (test, harness) in module.tests.iter().zip(harness_names) {
+            let mut checker = BodyChecker::new(
+                &declarations,
+                &mut resolver,
+                &mut structs,
+                match test.kind {
+                    crate::ast::TestKind::Function => BodyKind::Function,
+                    crate::ast::TestKind::Block => BodyKind::Block { has_reset: true },
+                },
+            );
+            checker.specializations = Some(&mut specializations);
+            checker.function_registry = Some(&mut function_registry);
+            checker.warning_owner = Some(&test.name);
+            checker.zero_binding = declarations.zero_binding(&test.name);
+            let position = declarations.positions.get(test.name.as_str()).copied();
+            match test.kind {
+                crate::ast::TestKind::Function => checker.function_position = position,
+                crate::ast::TestKind::Block => checker.block_position = position,
+            }
+            checker.check_test(test, harness, suite, &mut test_functions, &mut checked)?;
+        }
+        for (property, harness) in module.invariants.iter().zip(invariant_harnesses) {
+            let block = &property.block;
+            let (params, result) = resolve_signature(
+                &block.params,
+                &block.result,
+                std::iter::once(&block.clock).chain(&block.reset),
+                None,
+                declarations.module_dimensions(&block.name),
+                &mut TypeResolver {
+                    resolver: &mut resolver,
+                    structs: &mut structs,
+                    functions: Some(&mut function_registry),
+                },
+            )?;
+            if bits(&result) != Some((false, 1)) {
+                return Err(format!(
+                    "invariant '{}' must return bool, got {result}",
+                    block.name
+                ));
+            }
+            let mut fields = vec![result];
+            fields.resize(property.lemmas.len() + 1, Type::Bool);
+            structs.update_imports(&resolver)?;
+            let interface = BlockInterface::new(
+                &block.clock,
+                block.reset.as_deref(),
+                params,
+                Type::Tuple(fields),
+                &structs,
+                Some(&block_binding_names(block)),
+            )?;
+            let mut body = BodyChecker::check_block(
+                &declarations,
+                BlockDefinition::Invariant(property, &interface),
+                &mut resolver,
+                &mut structs,
+                &mut specializations,
+                &mut function_registry,
+            )
+            .map_err(|e| format!("invariant '{}': {e}", block.name))?
+            .block;
+            body.name.clone_from(&harness);
+            suite.invariants.push(crate::test_runner::InvariantProgram {
+                name: block.name.clone(),
+                position: property.position,
+                harness,
+                params: body.params.clone(),
+                lemmas: property.lemmas.clone(),
+            });
+            checked.push(body);
+        }
+    }
     let mut specialized_blocks = BTreeSet::new();
     while let Some(spec) = specializations.pending.pop_front() {
         let block = BodyChecker::check_block(
             &declarations,
-            spec.block,
+            BlockDefinition::Specialized(&spec),
             &mut resolver,
             &mut structs,
             &mut specializations,
-            Some(&spec),
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
@@ -1921,7 +2153,8 @@ pub(crate) fn check_sources(
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
-    let functions = function_registry.finish(function_bodies)?;
+    let mut functions = function_registry.finish(function_bodies)?;
+    functions.extend(test_functions);
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -1941,7 +2174,13 @@ pub(crate) fn check_sources(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
-    timing::check_blocks(&mut blocks, &structs)?;
+    let invariant_harnesses = tests
+        .as_deref()
+        .into_iter()
+        .flat_map(|suite| &suite.invariants)
+        .map(|property| property.harness.as_str())
+        .collect();
+    timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
     let warnings =
         declarations
             .warnings
@@ -1951,6 +2190,7 @@ pub(crate) fn check_sources(
             });
     let mut checked = CheckedModule {
         warnings,
+        functions_with_test_discards: BTreeSet::new(),
         structs: structs
             .definitions
             .into_iter()
@@ -1977,6 +2217,17 @@ pub(crate) fn check_sources(
         blocks,
         specialized_blocks,
     };
+    if declarations.has_test_discards.get()
+        && let Some(suite) = tests
+    {
+        let harnesses = suite
+            .programs
+            .iter()
+            .filter(|p| p.kind == crate::ast::TestKind::Function)
+            .map(|p| p.harness.clone())
+            .collect();
+        checked.resolve_pure_test_dependencies(harnesses);
+    }
     checked.imports = if linked.is_some() {
         let calls = checked.retain_library_dependencies();
         checked.restore_extern_names();
@@ -1985,6 +2236,35 @@ pub(crate) fn check_sources(
         resolver.finish()?
     };
     Ok(checked)
+}
+
+/// Reserve source bindings before allocating instance or observation port
+/// names.
+fn block_binding_names(block: &Block) -> BTreeSet<String> {
+    let mut names: BTreeSet<_> = std::iter::once(&block.clock)
+        .chain(&block.reset)
+        .chain(block.params.iter().map(|p| &p.name))
+        .cloned()
+        .collect();
+    let mut pending: Vec<_> = block.statements.iter().collect();
+    while let Some(statement) = pending.pop() {
+        match statement {
+            Stmt::Reg { name, .. }
+            | Stmt::Let { name, .. }
+            | Stmt::Wire { name, .. }
+            | Stmt::Inst { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::LetPattern(binding) => {
+                binding.pattern.visit_names(&mut |name| {
+                    names.insert(name.to_owned());
+                });
+            }
+            Stmt::If { body, .. } => pending.extend(body),
+            _ => { /* Drivers introduce no local bindings. */ }
+        }
+    }
+    names
 }
 
 /// Controls which declarations and bindings are available in a BX body.
@@ -2056,6 +2336,9 @@ struct BodyChecker<'a, 'm> {
     /// Visible function value parametrics, which can appear as named match
     /// patterns.
     value_parametric_names: BTreeSet<String>,
+    /// Bare dimension bindings in a struct declaration can have any integer
+    /// type.
+    in_struct_definition: bool,
     outputs: BTreeSet<String>,
     reserved_hardware_names: BTreeSet<String>,
     values: BTreeMap<String, Type>,
@@ -2306,6 +2589,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             local_callees: BTreeSet::new(),
             names: BTreeSet::new(),
             value_parametric_names: BTreeSet::new(),
+            in_struct_definition: false,
             outputs: BTreeSet::new(),
             reserved_hardware_names: BTreeSet::new(),
             values: BTreeMap::new(),
@@ -2403,44 +2687,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// expressions.
     fn check_block(
         decls: &'a Declarations<'m>,
-        block: &'m Block,
+        definition: BlockDefinition<'a, 'm>,
         resolver: &'a mut ImportResolver,
         structs: &'a mut StructTable<'m>,
         specializations: &'a mut BlockSpecializations<'m>,
-        specialization: Option<&'a BlockSpecialization<'m>>,
         function_registry: &'a mut FunctionSpecializations<'m>,
     ) -> Result<BlockBody, String> {
-        let interface = match specialization {
-            Some(spec) => &spec.interface,
-            None => &decls.blocks[block.name.as_str()],
+        let (block, interface, specialization, invariant) = match definition {
+            BlockDefinition::Concrete(block, interface) => (block, interface, None, None),
+            BlockDefinition::Invariant(property, interface) => {
+                (&property.block, interface, None, Some(property))
+            }
+            BlockDefinition::Specialized(spec) => (spec.block, &spec.interface, Some(spec), None),
         };
         let outputs = interface
             .outputs
             .iter()
             .map(|p| p.name.clone())
             .collect::<BTreeSet<_>>();
-        // Generated names must avoid future declarations as well as visible
-        // ones.
-        let mut reserved_hardware_names = outputs.clone();
-        reserved_hardware_names.insert(block.clock.clone());
-        reserved_hardware_names.extend(block.reset.iter().cloned());
-        reserved_hardware_names.extend(block.params.iter().map(|p| p.name.clone()));
-        for statement in &block.statements {
-            match statement {
-                Stmt::Reg { name, .. }
-                | Stmt::Let { name, .. }
-                | Stmt::Wire { name, .. }
-                | Stmt::Inst { name, .. } => {
-                    reserved_hardware_names.insert(name.clone());
-                }
-                Stmt::LetPattern(binding) => {
-                    binding.pattern.visit_names(&mut |name| {
-                        reserved_hardware_names.insert(name.to_owned());
-                    });
-                }
-                _ => { /* Drivers and guards introduce no top-level names. */ }
-            }
-        }
+        let mut reserved_hardware_names = block_binding_names(block);
+        reserved_hardware_names.extend(outputs.iter().cloned());
         let mut c = Self::new(
             decls,
             resolver,
@@ -2536,9 +2802,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         c.statement_span = block.source.as_ref().map(|source| source.output);
-        let output = c
-            .scoped_result(&block.output, Some(&interface.result), true)
+        // The source predicate is a structural block result, even though the
+        // verification harness subsequently bundles it with the lemmas.
+        let result = if invariant.is_some() {
+            &interface.outputs[0].ty
+        } else {
+            &interface.result
+        };
+        let main = c
+            .scoped_result(&block.output, Some(result), true)
             .map_err(|e| format!("result: {e}"))?;
+        let output = if let Some(property) = invariant {
+            let mut observations = vec![main];
+            for index in 0..property.lemmas.len() {
+                let value = Expr::Name(InvariantLemma::observation_name(index));
+                observations.push(c.expr(&value, Some(&Type::Bool))?);
+            }
+            TypedExpr {
+                ty: interface.result.clone(),
+                kind: K::Tuple(observations),
+            }
+        } else {
+            main
+        };
         let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
         let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
@@ -2550,6 +2836,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             params: interface.params.clone(),
             input_cycles: block.input_cycles.clone(),
             result: interface.result.clone(),
+            output_ports: interface.outputs.clone(),
             output_cycles: block.output_cycles.clone(),
             timing_error: None,
             statements: c.statements,
@@ -2584,25 +2871,37 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Instantiate a type from a resolved block signature at a call site.
     fn bound_block_type(&mut self, ty: &Type, bindings: &Bindings) -> Result<Type, String> {
-        self.materialize_type_applications(bindings.concrete_type(ty)?, MAX_ELABORATION_DEPTH)
+        let ty = bindings.concrete_type(ty)?;
+        self.with_type_resolver(|types, dimensions, _| {
+            types.materialize_type_applications(ty, dimensions, MAX_ELABORATION_DEPTH)
+        })
     }
 
-    fn materialize_type_applications(
+    /// Borrow the module type resolver alongside this body's lexical scope and
+    /// bindings.
+    fn with_type_resolver(
         &mut self,
-        ty: Type,
-        remaining: usize,
+        resolve: impl FnOnce(
+            &mut TypeResolver<'_, 'm>,
+            ModuleDimensions<'_, 'm>,
+            Option<&Bindings>,
+        ) -> Result<Type, String>,
     ) -> Result<Type, String> {
         let dimensions = self.decls.dimensions_at(
             self.function_position.or(self.block_position),
             &self.zero_binding,
             self.warning_owner,
         );
-        TypeResolver {
+        let bindings = self
+            .function_type_bindings
+            .as_ref()
+            .or_else(|| self.specialization.map(|s| &s.bindings));
+        let mut types = TypeResolver {
             resolver: self.resolver,
             structs: self.structs,
             functions: self.function_registry.as_deref_mut(),
-        }
-        .materialize_type_applications(ty, dimensions, remaining)
+        };
+        resolve(&mut types, dimensions, bindings)
     }
 
     fn hardware_name(&mut self, name: &str) -> Result<(), String> {
@@ -2669,16 +2968,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             for (formal, actual) in template.block.parametric_bindings().zip(parametrics) {
                 match formal {
                     FunctionParametricRef::Value(formal) => {
-                        let value = self.parametric_value(actual, &formal.ty).map_err(|e| {
+                        // Block template validation resolves each value formal
+                        // to u32.
+                        let ty = value_parametrics::dimension_type();
+                        let value = self.parametric_value(actual, &ty).map_err(|e| {
                             format!(
                                 "value parametric '{}' of block '{target}': {e}",
                                 formal.name
                             )
                         })?;
-                        values.push(BoundParametricValue {
-                            ty: formal.ty.clone(),
-                            value,
-                        });
+                        values.push(BoundParametricValue { ty, value });
                     }
                     FunctionParametricRef::Callback(_) => {
                         callbacks.push(generic_blocks::callback_argument_name(actual)?.to_owned());
@@ -3123,6 +3422,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// type. The enclosing group checks its complete prefix of unsized
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
+        // Guard checking can already occupy much of the caller's stack when
+        // the expression starts. Check available space on each descent.
+        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+            self.check_group_member(expr, expected)
+        })
+    }
+
+    /// Dispatch an expression once its recursive frame has sufficient stack
+    /// space.
+    fn check_group_member(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+    ) -> Result<TypedExpr, String> {
         // Keep the recursive dispatch frame small for expressions at the depth
         // limit.
         let (ty, kind) = match expr {
@@ -3153,53 +3466,44 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Zero(ty) => self.zero_value(ty),
             Expr::Literal { ty, text } => self.bit_literal(ty.as_ref(), text, expected),
             Expr::Tuple(items) => self.tuple_literal(items, expected),
-            Expr::Array(items) => self.array_literal(items, expected),
+            Expr::Array(items) => self.array_literal(items, expected, false),
+            Expr::ArrayLiteral {
+                annotation,
+                members,
+                has_ellipsis,
+            } => {
+                let ty = annotation
+                    .as_ref()
+                    .map(|ty| self.source_type(ty))
+                    .transpose()?;
+                let (inferred, kind) =
+                    self.array_literal(members, ty.as_ref().or(expected), *has_ellipsis)?;
+                Ok((ty.unwrap_or(inferred), kind))
+            }
             Expr::Index { value, index } => self.array_index(value, index),
             Expr::WidthSlice {
                 value,
                 start,
                 width,
             } => self.width_slice(value, start, width),
-            Expr::Struct { name, fields, base } => {
-                self.struct_literal(Type::Named(name.clone()), fields, base.as_deref(), expected)
+            Expr::Struct { .. }
+            | Expr::AppliedStruct { .. }
+            | Expr::ParametricStruct { .. }
+            | Expr::TypeAppliedStruct { .. } => {
+                let literal = expr.struct_literal().expect("struct literal");
+                let values;
+                let application = match literal.args {
+                    StructLiteralArgs::Omitted => StructApplication::Named(literal.name),
+                    StructLiteralArgs::Types(types) => {
+                        StructApplication::Types(literal.name, types)
+                    }
+                    _ => {
+                        values = self.struct_value_prefix(literal.name, literal.args)?;
+                        StructApplication::Values(literal.name, &values)
+                    }
+                };
+                self.struct_literal(application, literal.fields, literal.base, expected)
             }
-            Expr::AppliedStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => self.struct_literal(
-                Type::Applied {
-                    name: name.clone(),
-                    args: args.clone(),
-                },
-                fields,
-                base.as_deref(),
-                expected,
-            ),
-            Expr::ParametricStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => {
-                let ty = self.struct_actual_type(name, args)?;
-                self.struct_literal(ty, fields, base.as_deref(), expected)
-            }
-            Expr::TypeAppliedStruct {
-                name,
-                args,
-                fields,
-                base,
-            } => self.struct_literal(
-                Type::TypeApplied {
-                    name: name.clone(),
-                    args: args.clone(),
-                },
-                fields,
-                base.as_deref(),
-                expected,
-            ),
             Expr::Field { value, name } => self.project_field(value, name),
             Expr::Call { name, args } => self.function_call(name, args),
             Expr::MapBeforeUse {
@@ -3344,12 +3648,19 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if self.zero_calls_function()? {
             self.function_call(&self.zero_binding.clone(), &[])
         } else {
-            self.structs.check_zero_members(&ty)?;
-            let layout = crate::layout::Layouts::new(&self.structs.definitions)
-                .lower(&ty)
-                .map_err(|e| e.to_string())?;
-            Ok((ty, K::Literal(zero_ir_value_for_type(&layout))))
+            let zero = self.intrinsic_zero(&ty)?;
+            Ok((ty, zero))
         }
+    }
+
+    /// Construct a zero of a concrete BX type, including enum membership
+    /// checks.
+    fn intrinsic_zero(&self, ty: &Type) -> Result<K, String> {
+        self.structs.check_zero_members(ty)?;
+        let layout = crate::layout::Layouts::new(&self.structs.definitions)
+            .lower(ty)
+            .map_err(|e| e.to_string())?;
+        Ok(K::Literal(zero_ir_value_for_type(&layout)))
     }
 
     /// Check a bit literal at its annotated or inferred width.
@@ -3441,22 +3752,45 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ))
     }
 
+    /// Validate the explicit prefix and budget the implicit IR operands.
+    fn check_array_length(
+        &mut self,
+        written: usize,
+        length: usize,
+        fill: bool,
+        charged_fill: usize,
+    ) -> Result<(), String> {
+        if written > length || (!fill && written != length) {
+            return Err(format!("expected array length {length}, got {written}"));
+        }
+        if fill {
+            if written == 0 {
+                return Err("array ellipsis requires an element to repeat".into());
+            }
+            self.charge_expansion(
+                "array ellipsis",
+                (length - written).saturating_sub(charged_fill),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Infer a common element type and preserve the type of an empty array.
     fn array_literal(
         &mut self,
         items: &[Expr],
         expected: Option<&Type>,
+        has_ellipsis: bool,
     ) -> Result<(Type, K), String> {
-        let hint = match expected {
-            Some(Type::Array { element, size }) => {
-                if *size != items.len() {
-                    return Err(format!("expected array length {size}, got {}", items.len()));
-                }
-                Some(element.as_ref())
-            }
+        let (hint, length) = match expected {
+            Some(Type::Array { element, size }) => (Some(element.as_ref()), *size),
             Some(other) => return Err(format!("expected {other}, got an array")),
-            None => None,
+            None if has_ellipsis => {
+                return Err("array ellipsis requires a known array length".into());
+            }
+            None => (None, items.len()),
         };
+        self.check_array_length(items.len(), length, has_ellipsis, 0)?;
         Ok(if !items.is_empty() {
             let values = match hint {
                 Some(element) => items
@@ -3465,26 +3799,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .collect::<Result<Vec<_>, _>>()?,
                 None => self.unify_values(&items.iter().collect::<Vec<_>>())?,
             };
-            (
-                Type::Array {
-                    element: Box::new(values[0].ty.clone()),
-                    size: items.len(),
-                },
-                K::Array(values),
-            )
+            (Type::array(values[0].ty.clone(), length), K::Array(values))
         } else {
             let element =
                 hint.ok_or_else(|| "empty array literal requires an array type".to_owned())?;
             let mut layouts = crate::layout::Layouts::new(&self.structs.definitions);
             let element_ir = layouts.lower(element).map_err(|e| e.to_string())?;
             let empty = IrValue::make_array_typed(element_ir, &[]).map_err(|e| e.to_string())?;
-            (
-                Type::Array {
-                    element: Box::new(element.clone()),
-                    size: 0,
-                },
-                K::Literal(empty),
-            )
+            (Type::array(element.clone(), 0), K::Literal(empty))
         })
     }
 
@@ -3563,18 +3885,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// Resolve the struct and check its fields in declaration order.
     fn struct_literal(
         &mut self,
-        source: Type,
+        source: StructApplication<'_>,
         fields: &[(String, Expr)],
         base: Option<&StructSplat>,
         expected: Option<&Type>,
     ) -> Result<(Type, K), String> {
         let base = base
             .map(|splat| {
-                self.struct_splat_base(&source, &splat.value, expected)
+                self.struct_splat_base(source, &splat.value, expected)
                     .map(|value| (splat, value))
             })
             .transpose()?;
-        self.check_struct_literal(&source, fields, base, expected)
+        self.check_struct_literal(source, fields, base, expected)
             .map_err(struct_parametrics::StructLiteralError::into_message)
     }
 
@@ -3582,7 +3904,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// from invalid fields or types.
     fn check_struct_literal(
         &mut self,
-        source: &Type,
+        source: StructApplication<'_>,
         fields: &[(String, Expr)],
         base: Option<(&StructSplat, TypedExpr)>,
         expected: Option<&Type>,
@@ -3910,7 +4232,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             return Err(format!("expected {expected}, got {ty}"));
         }
-        if matches!(expr, Expr::Tuple(_) | Expr::Array(_)) {
+        if matches!(
+            expr,
+            Expr::Tuple(_) | Expr::Array(_) | Expr::ArrayLiteral { .. }
+        ) {
             self.structs.validate_type(&ty)?;
         }
         let value = TypedExpr { ty, kind };
@@ -3991,6 +4316,9 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Tuple(items) | Expr::Array(items) => items
                 .iter()
                 .any(|item| self.contains_inferred_aggregate(item)),
+            Expr::ArrayLiteral {
+                annotation: None, ..
+            } => true,
             Expr::Scope { result, .. } => self.contains_inferred_aggregate(result),
             Expr::If {
                 then_value,
@@ -4074,14 +4402,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     }
                     Ok(Some(Type::Tuple(types)))
                 }
-                Expr::Array(items) => {
-                    Ok(
-                        merged_operands(checker, items.iter())?.map(|element| Type::Array {
-                            element: Box::new(element),
-                            size: items.len(),
-                        }),
-                    )
-                }
+                Expr::Array(items) => Ok(merged_operands(checker, items.iter())?
+                    .map(|element| Type::array(element, items.len()))),
                 Expr::If {
                     then_value,
                     else_value,
@@ -4144,7 +4466,10 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// members of nested aggregate literals. Keep the resulting values in
     /// source order and reuse the expression that supplied a concrete type.
     fn unify_values(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        if items.iter().any(|e| matches!(e, Expr::For(fold) if fold.annotation.is_none() && has_aggregate_literal(&fold.seed))) {
+        if items.iter().any(|expr| {
+            expr.unannotated_loop_seed()
+                .is_some_and(has_aggregate_literal)
+        }) {
             return self.with_dslx_value_context(|checker| checker.unify_loop_seeds(items));
         }
         if self.dslx_widths().is_none()
@@ -4161,6 +4486,45 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             return self.with_aggregate_operands(items, Self::unify_prepared_values);
         }
         self.unify_prepared_values(items)
+    }
+
+    /// Use a complete sibling row for the length and any written element for
+    /// type inference, e.g. `[[x, ...], [1, 2]]` with `x: u8`.
+    fn check_array_rows(
+        &mut self,
+        items: &[&Expr],
+        rows: Vec<(&[Expr], bool)>,
+        check_elements: impl FnOnce(&mut Self, &[&Expr]) -> Result<Option<Vec<TypedExpr>>, String>,
+    ) -> Result<Option<Vec<TypedExpr>>, String> {
+        let Some(length) = rows
+            .iter()
+            .find_map(|(row, fill)| (!fill).then_some(row.len()))
+        else {
+            // A caller may still obtain the complete array type from another
+            // argument.
+            return Ok(None);
+        };
+        let fields: Vec<_> = rows.iter().flat_map(|(row, _)| row.iter()).collect();
+        let Some(fields) = check_elements(self, &fields)? else {
+            return Ok(None);
+        };
+        let ty = Type::array(fields[0].ty.clone(), length);
+        self.structs.validate_type(&ty)?;
+        let mut fields = fields.into_iter();
+        items
+            .iter()
+            .zip(rows)
+            .map(|(expr, (row, fill))| {
+                self.check_array_length(row.len(), length, fill, 0)?;
+                self.finish_expr(
+                    expr,
+                    None,
+                    ty.clone(),
+                    K::Array(fields.by_ref().take(row.len()).collect()),
+                )
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
     }
 
     /// Elaborate operands while any concrete anchors and lexical scope aliases
@@ -4195,32 +4559,18 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .check_tuple_results(&tuples, |checker, _, fields| checker.unify_values(fields));
         }
         if !first_has_type
-            && let Expr::Array(first) = items[0]
-            && let Some(arrays) = items
+            && let Some(rows) = items
                 .iter()
-                .map(|item| match item {
-                    Expr::Array(elements) if elements.len() == first.len() => Some(elements),
-                    _ => None,
-                })
+                .map(|item| item.unannotated_array())
                 .collect::<Option<Vec<_>>>()
+            && let Some(arrays) = self.check_array_rows(items, rows, |checker, fields| {
+                if fields.is_empty() {
+                    return Err("empty array literal requires an array type".into());
+                }
+                checker.unify_values(fields).map(Some)
+            })?
         {
-            let fields: Vec<_> = arrays.into_iter().flatten().collect();
-            if fields.is_empty() {
-                return Err("empty array literal requires an array type".into());
-            }
-            let fields = self.unify_values(&fields)?;
-            let ty = Type::Array {
-                element: Box::new(fields[0].ty.clone()),
-                size: first.len(),
-            };
-            let mut fields = fields.into_iter();
-            return Ok(items
-                .iter()
-                .map(|_| TypedExpr {
-                    ty: ty.clone(),
-                    kind: K::Array(fields.by_ref().take(first.len()).collect()),
-                })
-                .collect());
+            return Ok(arrays);
         }
         let hint = if first_has_type {
             CommonTypeHint::FromExpr(0)
@@ -4346,30 +4696,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// An aggregate carry may obtain different field types from different
     /// siblings. Unify its seed once and use the resulting value for the loop.
     fn unify_loop_seeds(&mut self, items: &[&Expr]) -> Result<Vec<TypedExpr>, String> {
-        let folds: Vec<_> = items
+        let (seeds, loops): (Vec<_>, Vec<_>) = items
             .iter()
-            .map(|item| match item {
-                Expr::For(fold)
-                    if fold.annotation.is_none() && has_aggregate_literal(&fold.seed) =>
-                {
-                    Some(fold)
-                }
-                _ => None,
+            .map(|expr| match expr.unannotated_loop_seed() {
+                Some(seed) if has_aggregate_literal(seed) => (seed, Some(*expr)),
+                _ => (*expr, None),
             })
-            .collect();
-        let seeds: Vec<_> = items
-            .iter()
-            .zip(&folds)
-            .map(|(item, fold)| fold.map_or(*item, |f| &f.seed))
-            .collect();
+            .unzip();
         let values = self.unify_values(&seeds)?;
-        folds
+        loops
             .into_iter()
             .zip(values)
-            .map(|(fold, value)| match fold {
-                Some(f) => self.with_dslx_value_context(|checker| {
-                    checker.counted_for(f, CarryContext::Prepared(value))
-                }),
+            .map(|(expr, value)| match expr {
+                Some(Expr::For(fold)) => self.counted_for(fold, CarryContext::Prepared(value)),
+                Some(Expr::UnrollFor(fold)) => {
+                    self.unroll(fold, CarryContext::Prepared(value), false)
+                }
+                Some(_) => unreachable!("only loop expressions have accumulator seeds"),
                 None => Ok(value),
             })
             .collect()
@@ -4413,16 +4756,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             _ if self.callback_index("zero!").is_some() => {
                 Err("callable parameter 'zero!' requires a direct call".into())
             }
-            _ if self.decls.visible(
-                &self.zero_binding,
-                self.function_position.or(self.block_position),
-            ) && (self.structs.enums.contains_key(&self.zero_binding)
+            _ if self.structs.enums.contains_key(&self.zero_binding)
+                || self
+                    .decls
+                    .type_aliases
+                    .contains_key(self.zero_binding.as_str())
                 || self
                     .resolver
                     .lookup_enum_prefix(&self.zero_binding)?
-                    .is_some_and(|(module, name)| self.resolver.is_enum_type(&module, &name))) =>
+                    .is_some_and(|(module, name)| {
+                        self.resolver.is_enum_or_alias(&module, &name)
+                    }) =>
             {
-                Err("enum 'zero!' cannot be called as a function".into())
+                if self.decls.visible(
+                    &self.zero_binding,
+                    self.function_position.or(self.block_position),
+                ) {
+                    Err("type 'zero!' cannot be called as a function".into())
+                } else {
+                    Ok(false)
+                }
             }
             BodyKind::Function => Ok(self
                 .decls
@@ -4647,6 +5000,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if visible_value && self.structs.enums.contains_key(name) {
             return Err(format!("enum '{name}' cannot be called as a function"));
         }
+        if visible_value && self.decls.type_aliases.contains_key(name) {
+            return Err(format!(
+                "type alias '{spelling}' cannot be called as a function"
+            ));
+        }
         if visible_value
             && is_call_builtin(spelling)
             && (self.structs.indices.contains_key(name) || self.structs.template(name).is_some())
@@ -4786,10 +5144,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             _ => {
                 let operands = context_operands(expr, &self.inferred_bindings, context_width)?;
-                let context = Type::Bits {
-                    signed: false,
-                    width: context_width,
-                };
+                let context = Type::unsigned(context_width);
                 self.expr(
                     expr,
                     (operands != ContextOperands::Bound).then_some(&context),
@@ -4882,10 +5237,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         let hint = match standard_width {
             Some(width) => {
                 let operands = context_operands(expr, &self.inferred_bindings, width)?;
-                (operands == ContextOperands::Inline).then_some(Type::Bits {
-                    signed: false,
-                    width,
-                })
+                (operands == ContextOperands::Inline).then_some(Type::unsigned(width))
             }
             None => minimum_type(expr)?,
         };
@@ -5097,6 +5449,63 @@ block tap(clk, x: u8) -> Ports {annotation} {{
             error.contains("array cast exceeds the function expansion limit"),
             "{error}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn implicit_array_elements_share_the_function_expansion_budget() -> Result<(), String> {
+        let fill = "bool[600000]:[x, ...]";
+        check_bx(&format!("fn fill(x: bool) -> bool[600000] {{ {fill} }}"))?;
+        let error = check_bx(&format!(
+            "fn compare(x: bool) -> bool {{ {fill} == {fill} }}"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "fn 'compare': result: array ellipsis exceeds the function expansion limit of 1048576"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inferred_generic_array_inputs_charge_each_fill_once() -> Result<(), String> {
+        let declarations = r#"
+fn first<T>(a: T[550000]) -> T { a[0] }
+fn id<T>(a: T) -> T { a }
+"#;
+        for body in [
+            "first(if c { [x, ...] } else { y })",
+            "id(if c { [x, ...] } else { y })[0]",
+            "id(if c { ([x, ...],) } else { (y,) }).0[0]",
+            "id(if c { for (_, a) in u32:0..u32:1 { a }([x, ...]) } else { y })[0]",
+        ] {
+            check_bx(&format!(
+                "{declarations}\nfn f(x: bool, c: bool, y: bool[550000]) -> bool {{ {body} }}"
+            ))?;
+        }
+        // Two distinct prefixes each still contribute 549999 implicit operands.
+        let error = check_bx(&format!(
+            "{declarations}\nfn f(x: bool, c: bool, y: bool[550000]) -> bool {{
+                first(if c {{ [x, ...] }} else {{ y }}) == first(if c {{ [x, ...] }} else {{ y }})
+            }}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("array ellipsis exceeds the function expansion limit"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typed_array_literals_supply_generic_arguments() -> Result<(), String> {
+        check_bx(
+            r#"
+fn first<T, N: u32>(xs: T[N]) -> T { xs[0] }
+fn repeat<T, N: u32>(x: T) -> T[N] { T[N]:[x, ...] }
+fn sample(x: u8) -> (u8, u8[4]) { (first(u8[3]:[x, ...]), repeat<4>(x)) }
+"#,
+        )?;
         Ok(())
     }
 
@@ -5614,6 +6023,7 @@ block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
         for (child, argument) in [
             ("extern block child(clk, x: u8, r: u8) -> u8;", "x"),
             ("block child(clk, x: u8, r: u8) -> u8 { x + r }", "x"),
+            ("block child(clk, x: u8 @0, r: u8 @0) -> u8 { x + r }", "x"),
             (
                 "block child(clk, x: u8, r: u8) -> u8 @0 { x + r }",
                 "arr[u1:0]",

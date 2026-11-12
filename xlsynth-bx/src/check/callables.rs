@@ -569,7 +569,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
             let visible_type = (self.structs.indices.contains_key(name)
                 || self.structs.template(name).is_some()
-                || self.structs.enums.contains_key(name))
+                || self.structs.enums.contains_key(name)
+                || self.decls.type_aliases.contains_key(name))
                 && visible;
             if spelling == name
                 && (!self.decls.visible(name, self.function_position)
@@ -711,7 +712,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .enumerate()
             .map(|(i, (arg, (label, ty)))| {
                 let value = if dslx {
-                    self.dslx_argument(arg, ty)
+                    crate::infer_literal::check_argument_array_sizes(arg)
+                        .and_then(|()| self.dslx_argument(arg, ty))
                 } else {
                     self.expr(arg, Some(ty))
                 };

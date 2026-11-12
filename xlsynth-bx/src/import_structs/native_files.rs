@@ -116,6 +116,13 @@ impl NativeSourceFiles {
                 .map_or(source.source.as_slice(), |s| &s.bytes);
             let mut relocated =
                 relocate_dslx_imports(bytes, &namespace, &short_components, &subjects);
+            if let Some(aliases) = graph.value_aliases.get(&source.subject) {
+                for (original, alias) in aliases {
+                    relocated.bytes.extend_from_slice(
+                        format!("\npub type {alias} = {original};\n").as_bytes(),
+                    );
+                }
+            }
             if let Some(rewritten) = rewritten {
                 relocated.columns = relocated.columns.with_original(rewritten.columns);
             }

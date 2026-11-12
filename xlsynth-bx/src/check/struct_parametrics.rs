@@ -5,16 +5,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write};
 
-use xlsynth_pir::IrValue;
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
+use xlsynth_pir::{IrFormatPreference, IrValue};
 
-use crate::ast::{Expr, Param, StructDef, Type};
-use crate::typed::{BoundParametricValue, TypedExpr};
+use crate::ast::{Expr, Param, StructDef, StructLiteralArgs, Type};
+use crate::builtin::BuiltinOp;
+use crate::typed::{BoundParametricValue, TypedExpr, bits};
 
 use super::counted_for::CarryContext;
 use super::generic_blocks::Bindings;
 use super::generic_inputs::Input;
-use super::value_parametrics::{InferredBindings, dimension_type};
+use super::value_parametrics::{ExplicitScope, InferredBindings, dimension_type};
 use super::{
     BodyChecker, BodyKind, FunctionSpecializations, ImportResolver, MAX_ELABORATION_DEPTH,
     MAX_SPECIALIZATIONS, MAX_TYPE_SIZE, ModuleDimensions, StructTable, child_type_budget, declare,
@@ -23,17 +24,56 @@ use super::{
 /// The source identity and bindings of an interned nominal type.
 pub(super) struct StructInstance<'m> {
     pub(super) template: &'m StructDef,
-    pub(super) values: Vec<u32>,
+    pub(super) values: Vec<BoundParametricValue>,
     pub(super) types: Vec<Type>,
 }
 
 /// Bind a native struct's compile-time parameters in declaration order.
 pub(super) enum StructArguments<'a> {
     Values {
-        explicit: &'a [u32],
-        inferred: &'a [Option<BoundParametricValue>],
+        explicit: &'a [BoundParametricValue],
+        inferred: Option<&'a InferredBindings<'a>>,
     },
     Types(&'a [Type]),
+}
+
+/// A constructor's evaluated prefix, before its fields or base supply the
+/// remaining arguments.
+#[derive(Clone, Copy)]
+pub(super) enum StructApplication<'a> {
+    Named(&'a str),
+    Values(&'a str, &'a [BoundParametricValue]),
+    Types(&'a str, &'a [Type]),
+}
+
+impl fmt::Display for StructApplication<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Named(name) => f.write_str(name),
+            Self::Types(name, args) => write!(
+                f,
+                "{}",
+                Type::TypeApplied {
+                    name: (*name).to_owned(),
+                    args: args.to_vec(),
+                }
+            ),
+            Self::Values(name, args) => {
+                let mut bindings = StructName::default();
+                for (index, arg) in args.iter().enumerate() {
+                    if (index != 0 && bindings.append(format_args!(", ")).is_err())
+                        || bindings.append_binding(arg).is_err()
+                    {
+                        // A diagnostic can describe an application whose name
+                        // exceeds the interning limit. Only output errors may
+                        // escape Display.
+                        return write!(f, "{name}<…>");
+                    }
+                }
+                write!(f, "{name}<{}>", bindings.0)
+            }
+        }
+    }
 }
 
 /// A constructor can need type evidence from its surrounding expression.
@@ -84,9 +124,72 @@ impl Write for StructName {
 }
 
 impl StructName {
+    /// Name a partial value application when defaults determine its entire
+    /// suffix.
+    fn default_prefix(
+        template: &StructDef,
+        args: &StructArguments<'_>,
+    ) -> Result<Option<String>, String> {
+        let StructArguments::Values { explicit, .. } = args else {
+            return Ok(None);
+        };
+        let suffix = &template.value_parametrics[explicit.len()..];
+        if suffix.is_empty() || suffix.iter().any(|p| p.default.is_none()) {
+            return Ok(None);
+        }
+        let mut prefix = Self::default();
+        prefix.append(format_args!("{}<", template.name))?;
+        for (index, bound) in explicit.iter().enumerate() {
+            if index > 0 {
+                prefix.append(format_args!(", "))?;
+            }
+            prefix.append_binding(bound)?;
+        }
+        prefix.append(format_args!(">"))?;
+        Ok(Some(prefix.0))
+    }
+
     fn append(&mut self, args: fmt::Arguments<'_>) -> Result<(), String> {
         self.write_fmt(args)
             .map_err(|_| format!("struct specialization name exceeds {MAX_TYPE_SIZE} bytes"))
+    }
+
+    /// Keep legacy u32 names and include the nominal type of other values.
+    fn append_binding(&mut self, bound: &BoundParametricValue) -> Result<(), String> {
+        if bound.ty == Type::Bool {
+            return self.append(format_args!(
+                "{}",
+                bound.value.to_bool().map_err(|e| e.to_string())?
+            ));
+        }
+        if bound.ty != dimension_type() {
+            self.append(format_args!("{}:", bound.ty))?;
+        }
+        self.append_value(&bound.value)
+    }
+
+    /// Stream aggregate elements so the specialization-name limit applies
+    /// before allocating the entire text of a potentially large array.
+    fn append_value(&mut self, value: &IrValue) -> Result<(), String> {
+        let (open, elements, close) = match value {
+            IrValue::Bits(bits) => {
+                return self.append(format_args!(
+                    "{}",
+                    bits.to_string_fmt(IrFormatPreference::Default, false)
+                ));
+            }
+            IrValue::Tuple(elements) => ("(", elements.as_ref(), ")"),
+            IrValue::Array(array) => ("[", array.elements(), "]"),
+            IrValue::Token => return Err("a struct value parametric cannot be a token".into()),
+        };
+        self.append(format_args!("{open}"))?;
+        for (index, element) in elements.iter().enumerate() {
+            if index > 0 {
+                self.append(format_args!(", "))?;
+            }
+            self.append_value(element)?;
+        }
+        self.append(format_args!("{close}"))
     }
 }
 
@@ -112,10 +215,10 @@ impl<'m> StructTable<'m> {
         for (index, parametric) in def.value_parametrics.iter().enumerate() {
             declare(&mut names, &parametric.name)
                 .map_err(|e| format!("struct '{}': {e}", def.name))?;
-            if parametric.index != index || parametric.ty != dimension_type() {
+            if parametric.index != index {
                 return Err(format!(
-                    "struct '{}' value parametric '{}' must be declared as u32",
-                    def.name, parametric.name
+                    "struct '{}' value parametric '{}' has index {}, expected {index}",
+                    def.name, parametric.name, parametric.index
                 ));
             }
         }
@@ -137,20 +240,143 @@ fn binding_value(value: &IrValue) -> Result<u32, String> {
 }
 
 impl<'m> BodyChecker<'_, 'm> {
-    /// Evaluate an application in its use-site scope before resolving its
-    /// layout.
-    pub(super) fn struct_actual_type(&mut self, name: &str, args: &[Expr]) -> Result<Type, String> {
-        Ok(Type::Applied {
-            name: name.to_owned(),
-            args: self.struct_argument_values(args)?,
-        })
+    /// Find the value substituted for a bare formal in a struct declaration.
+    pub(super) fn direct_struct_binding(&self, expr: &Expr) -> Option<(&Type, &IrValue)> {
+        let Expr::Name(name) = expr else { return None };
+        if !self.in_struct_definition || !self.value_parametric_names.contains(name) {
+            return None;
+        }
+        let TypedExpr {
+            ty,
+            kind: super::K::Literal(value),
+        } = self.function_values.get(name)?
+        else {
+            return None;
+        };
+        Some((ty, value))
     }
 
-    /// Evaluate explicit struct bindings in the current expression scope.
-    fn struct_argument_values(&mut self, args: &[Expr]) -> Result<Vec<u32>, String> {
-        args.iter()
-            .map(|arg| binding_value(&self.parametric_value(arg, &dimension_type())?))
-            .collect()
+    /// Check a directly forwarded scalar against the receiving struct
+    /// formal's numeric range, independent of the value's printed radix.
+    fn struct_argument_value(&mut self, expr: &Expr, target: &Type) -> Result<IrValue, String> {
+        if let Some((source, value)) = self.direct_struct_binding(expr)
+            && source != target
+            && let Some((source_signed, _)) = bits(source)
+            && let Some((target_signed, width)) = bits(target)
+        {
+            return BuiltinOp::CheckedCast {
+                source_signed,
+                target_signed,
+                width,
+            }
+            .evaluate(std::slice::from_ref(value))
+            .ok_or_else(|| format!("forwarded {source} value does not fit {target}"));
+        }
+        self.parametric_value(expr, target)
+    }
+
+    /// Evaluate the written value prefix using local formal types or the
+    /// imported u32 ABI.
+    pub(super) fn struct_value_prefix(
+        &mut self,
+        name: &str,
+        args: StructLiteralArgs<'_>,
+    ) -> Result<Vec<BoundParametricValue>, String> {
+        match (args, self.structs.template(name)) {
+            (StructLiteralArgs::Omitted, _) => Ok(Vec::new()),
+            (StructLiteralArgs::Types(_), _) => Err(format!(
+                "struct '{name}' has type arguments where value arguments are required"
+            )),
+            (StructLiteralArgs::Expressions(args), Some(template)) => {
+                self.explicit_struct_values(template, args.len(), |caller, index, ty| {
+                    caller.struct_argument_value(&args[index], ty)
+                })
+            }
+            (StructLiteralArgs::Integers(args), Some(template)) => {
+                self.explicit_struct_values(template, args.len(), |caller, index, ty| {
+                    // The compact AST stores these as unsized literals.
+                    caller.parametric_value(
+                        &Expr::Literal {
+                            ty: None,
+                            text: args[index].to_string(),
+                        },
+                        ty,
+                    )
+                })
+            }
+            (StructLiteralArgs::Expressions(args), None) => {
+                let ty = dimension_type();
+                args.iter()
+                    .map(|arg| {
+                        Ok(BoundParametricValue {
+                            value: self.struct_argument_value(arg, &ty)?,
+                            ty: ty.clone(),
+                        })
+                    })
+                    .collect()
+            }
+            (StructLiteralArgs::Integers(args), None) => Ok(args
+                .iter()
+                .map(|&value| BoundParametricValue {
+                    ty: dimension_type(),
+                    value: IrValue::u32(value),
+                })
+                .collect()),
+        }
+    }
+
+    /// Resolve an explicit value application after evaluating its prefix.
+    pub(super) fn struct_value_type(
+        &mut self,
+        name: &str,
+        args: &[BoundParametricValue],
+        remaining: usize,
+    ) -> Result<Type, String> {
+        self.check_constructor_name(name)?;
+        self.reject_type_parameter_value(name)?;
+        if let Some(template) = self.structs.template(name) {
+            self.decls
+                .check_type_name_visibility(name, self.function_position.or(self.block_position))?;
+            self.specialize_struct(
+                template,
+                StructArguments::Values {
+                    explicit: args,
+                    inferred: None,
+                },
+                remaining,
+            )
+        } else {
+            let args = args
+                .iter()
+                .map(|arg| binding_value(&arg.value))
+                .collect::<Result<Vec<_>, _>>()?;
+            let ty = self.resolve_dimensions(
+                &Type::Applied {
+                    name: name.to_owned(),
+                    args,
+                },
+                remaining,
+            )?;
+            // A constructor can introduce a DSLX specialization with no prior
+            // type annotation. Register its reflected layout before checking
+            // fields.
+            self.structs.update_imports(self.resolver)?;
+            Ok(ty)
+        }
+    }
+
+    /// Resolve a fully determined constructor in the surrounding type scope.
+    fn struct_application_type(&mut self, source: StructApplication<'_>) -> Result<Type, String> {
+        match source {
+            StructApplication::Named(name) => self.source_type(&Type::Named(name.to_owned())),
+            StructApplication::Types(name, args) => self.source_type(&Type::TypeApplied {
+                name: name.to_owned(),
+                args: args.to_vec(),
+            }),
+            StructApplication::Values(name, args) => {
+                self.struct_value_type(name, args, MAX_ELABORATION_DEPTH)
+            }
+        }
     }
 
     /// Check the written arity before asking whether a splat's base needs
@@ -159,18 +385,16 @@ impl<'m> BodyChecker<'_, 'm> {
         &self,
         expr: &Expr,
     ) -> Option<ContextualStruct<'m>> {
-        let (name, supplied, base) = match expr {
-            Expr::Struct { name, base, .. } => (name, 0, base),
-            Expr::AppliedStruct {
-                name, args, base, ..
-            } => (name, args.len(), base),
-            Expr::ParametricStruct {
-                name, args, base, ..
-            } => (name, args.len(), base),
-            _ => return None,
+        let literal = expr.struct_literal()?;
+        let name = literal.name;
+        let supplied = match literal.args {
+            StructLiteralArgs::Omitted => 0,
+            StructLiteralArgs::Integers(args) => args.len(),
+            StructLiteralArgs::Expressions(args) => args.len(),
+            StructLiteralArgs::Types(_) => return None,
         };
         let template = if let Some(def) = self.structs.template(name) {
-            let bare_type_struct = matches!(expr, Expr::Struct { .. })
+            let bare_type_struct = matches!(literal.args, StructLiteralArgs::Omitted)
                 && !def.type_params.is_empty()
                 && !self.type_bindings().is_some_and(|b| b.declares(name));
             (bare_type_struct || supplied < def.value_parametrics.len())
@@ -182,7 +406,8 @@ impl<'m> BodyChecker<'_, 'm> {
         };
         // An update on an already concrete base supplies that base's nominal
         // type. An inferred base can receive the missing arguments from a peer.
-        base.as_ref()
+        literal
+            .base
             .is_none_or(|splat| self.contains_inferred_aggregate(&splat.value))
             .then_some(template)
     }
@@ -204,7 +429,13 @@ impl<'m> BodyChecker<'_, 'm> {
             Expr::UnrollFor(fold) if fold.annotation.is_none() => {
                 self.contains_type_struct_constructor(&fold.seed)
             }
-            Expr::Tuple(items) | Expr::Array(items) => items
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members: items,
+                ..
+            } => items
                 .iter()
                 .any(|item| self.contains_type_struct_constructor(item)),
             Expr::If {
@@ -231,7 +462,7 @@ impl<'m> BodyChecker<'_, 'm> {
     pub(super) fn infer_struct_siblings(
         &mut self,
         items: &[&Expr],
-        prefix: Option<(&str, &[u32])>,
+        prefix: Option<(&str, &[BoundParametricValue])>,
     ) -> Result<Option<Vec<TypedExpr>>, String> {
         let Some((last, siblings)) = items.split_last().filter(|(_, rest)| !rest.is_empty()) else {
             return Ok(None);
@@ -259,16 +490,10 @@ impl<'m> BodyChecker<'_, 'm> {
             .map_or_else(Vec::new, |(_, args)| args.to_vec());
         let mut members = Vec::with_capacity(items.len());
         for item in items {
-            let (args, fields, base) = match item {
-                Expr::Struct { fields, base, .. } => (Vec::new(), fields, base),
-                Expr::AppliedStruct {
-                    args, fields, base, ..
-                } => (args.clone(), fields, base),
-                Expr::ParametricStruct {
-                    args, fields, base, ..
-                } => (self.struct_argument_values(args)?, fields, base),
-                _ => unreachable!("sibling is a native struct constructor"),
-            };
+            let literal = item
+                .struct_literal()
+                .expect("sibling is a native struct constructor");
+            let args = self.struct_value_prefix(name, literal.args)?;
             if let Some(index) = explicit.iter().zip(&args).position(|(a, b)| a != b) {
                 return Err(format!(
                     "conflicting values for argument {} of struct '{name}'",
@@ -278,23 +503,20 @@ impl<'m> BodyChecker<'_, 'm> {
             if args.len() > explicit.len() {
                 explicit = args;
             }
-            members.push((fields, base.as_deref()));
+            members.push((literal.fields, literal.base));
         }
         let source = if explicit.is_empty() {
-            Type::Named(name.to_owned())
+            StructApplication::Named(name)
         } else {
-            Type::Applied {
-                name: name.to_owned(),
-                args: explicit,
-            }
+            StructApplication::Values(name, &explicit)
         };
         let (fields, base) = members.pop().expect("final constructor fields");
-        let (ty, kind) = self.struct_literal(source.clone(), fields, base, None)?;
+        let (ty, kind) = self.struct_literal(source, fields, base, None)?;
         let anchor = self.finish_expr(last, None, ty, kind)?;
         let mut values = Vec::with_capacity(items.len());
         for (item, (fields, base)) in siblings.iter().zip(members) {
             let expected = Some(&anchor.ty);
-            let (ty, kind) = self.struct_literal(source.clone(), fields, base, expected)?;
+            let (ty, kind) = self.struct_literal(source, fields, base, expected)?;
             values.push(self.finish_expr(item, expected, ty, kind)?);
         }
         values.push(anchor);
@@ -350,7 +572,7 @@ impl<'m> BodyChecker<'_, 'm> {
         } else {
             None
         };
-        match self.check_struct_literal(&Type::Named(name.clone()), fields, base, None) {
+        match self.check_struct_literal(StructApplication::Named(name), fields, base, None) {
             Ok((ty, kind)) => self
                 .finish_expr(expr, None, ty, kind)
                 .map(StructWitness::Checked),
@@ -366,7 +588,7 @@ impl<'m> BodyChecker<'_, 'm> {
     /// expression.
     pub(super) fn struct_splat_base(
         &mut self,
-        source: &Type,
+        source: StructApplication<'_>,
         base: &Expr,
         expected: Option<&Type>,
     ) -> Result<TypedExpr, String> {
@@ -374,7 +596,7 @@ impl<'m> BodyChecker<'_, 'm> {
             return self.expr(base, Some(ty));
         }
         match source {
-            Type::Applied { name, args }
+            StructApplication::Values(name, args)
                 if self
                     .structs
                     .template(name)
@@ -382,7 +604,7 @@ impl<'m> BodyChecker<'_, 'm> {
             {
                 self.splat_base_with_prefix(base, name, args)
             }
-            Type::Named(name)
+            StructApplication::Named(name)
                 if !self
                     .type_bindings()
                     .is_some_and(|bindings| bindings.declares(name))
@@ -396,7 +618,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 self.expr(base, None)
             }
             _ => {
-                let ty = self.source_type(source)?;
+                let ty = self.struct_application_type(source)?;
                 self.expr(base, Some(&ty))
             }
         }
@@ -408,9 +630,9 @@ impl<'m> BodyChecker<'_, 'm> {
         &mut self,
         value: &Expr,
         name: &str,
-        prefix: &[u32],
+        prefix: &[BoundParametricValue],
     ) -> Result<TypedExpr, String> {
-        let (inner, args, fields, base) = match value {
+        let literal = match value {
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
                     checker.counted_for(fold, CarryContext::StructPrefix { name, args: prefix })
@@ -433,27 +655,17 @@ impl<'m> BodyChecker<'_, 'm> {
                 let result = results.pop().expect("one checked splat base");
                 return self.finish_expr(value, None, result.ty, result.kind);
             }
-            Expr::Struct {
-                name: inner,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => (inner, Vec::new(), fields, base),
-            Expr::AppliedStruct {
-                name: inner,
-                args,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => (inner, args.clone(), fields, base),
-            Expr::ParametricStruct {
-                name: inner,
-                args,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => {
-                (inner, self.struct_argument_values(args)?, fields, base)
-            }
-            _ => return self.expr(value, None),
+            _ => match value.struct_literal() {
+                Some(literal)
+                    if !matches!(literal.args, StructLiteralArgs::Types(_))
+                        && self.same_struct_template(name, literal.name)? =>
+                {
+                    literal
+                }
+                _ => return self.expr(value, None),
+            },
         };
+        let args = self.struct_value_prefix(literal.name, literal.args)?;
         let args = if prefix.starts_with(&args) {
             prefix.to_vec()
         } else if args.starts_with(prefix) {
@@ -463,11 +675,8 @@ impl<'m> BodyChecker<'_, 'm> {
                 "conflicting values for arguments of struct '{name}'"
             ));
         };
-        let source = Type::Applied {
-            name: inner.clone(),
-            args,
-        };
-        let (ty, kind) = self.struct_literal(source, fields, base.as_deref(), None)?;
+        let source = StructApplication::Values(literal.name, &args);
+        let (ty, kind) = self.struct_literal(source, literal.fields, literal.base, None)?;
         self.finish_expr(value, None, ty, kind)
     }
 
@@ -477,7 +686,7 @@ impl<'m> BodyChecker<'_, 'm> {
         &mut self,
         items: &[&Expr],
         name: &str,
-        prefix: &[u32],
+        prefix: &[BoundParametricValue],
     ) -> Result<Vec<TypedExpr>, String> {
         if items.iter().any(|item| matches!(item, Expr::Scope { .. })) {
             return self.with_scoped_results(items, |checker, items| {
@@ -519,15 +728,15 @@ impl<'m> BodyChecker<'_, 'm> {
     /// base's concrete specialization.
     pub(super) fn check_struct_splat_type(
         &mut self,
-        source: &Type,
+        source: StructApplication<'_>,
         base: &Type,
     ) -> Result<(), String> {
         let Type::Named(canonical) = base else {
             return Err(format!("struct splat base must be a struct, got {base}"));
         };
         let prefix = match source {
-            Type::Named(name) => Some((name, &[][..])),
-            Type::Applied { name, args } => Some((name, args.as_slice())),
+            StructApplication::Named(name) => Some((name, &[][..])),
+            StructApplication::Values(name, args) => Some((name, args)),
             _ => None,
         };
         let matched = match prefix {
@@ -536,7 +745,7 @@ impl<'m> BodyChecker<'_, 'm> {
         };
         let matches = match matched {
             Some(matches) => matches,
-            None => self.source_type(source)? == *base,
+            None => self.struct_application_type(source)? == *base,
         };
         if !matches {
             return Err(format!(
@@ -551,7 +760,7 @@ impl<'m> BodyChecker<'_, 'm> {
     fn struct_instance_matches(
         &self,
         name: &str,
-        prefix: &[u32],
+        prefix: &[BoundParametricValue],
         canonical: &str,
     ) -> Result<Option<bool>, String> {
         if self
@@ -560,15 +769,20 @@ impl<'m> BodyChecker<'_, 'm> {
         {
             return Ok(None);
         }
-        let values = match self.structs.instances.get(canonical) {
-            Some(instance) if instance.template.name == name => Some(instance.values.as_slice()),
-            _ => self.resolver.struct_parametric_values(name, canonical)?,
-        };
-        let Some(values) = values else {
+        let matches = if let Some(instance) = self.structs.instances.get(canonical)
+            && instance.template.name == name
+        {
+            instance.values.starts_with(prefix)
+        } else if let Some(values) = self.resolver.struct_parametric_values(name, canonical)? {
+            prefix.len() <= values.len()
+                && prefix.iter().zip(values).all(|(bound, &value)| {
+                    bound.ty == dimension_type() && bound.value == IrValue::u32(value)
+                })
+        } else {
             return Ok(None);
         };
         self.check_constructor_name(name)?;
-        Ok(Some(values.starts_with(prefix)))
+        Ok(Some(matches))
     }
 
     /// Resolve the constructor name in the current declaration and lexical
@@ -587,15 +801,16 @@ impl<'m> BodyChecker<'_, 'm> {
     /// types.
     pub(super) fn struct_literal_type<'e>(
         &mut self,
-        source: &Type,
+        source: StructApplication<'_>,
         supplied: &BTreeMap<&str, &'e Expr>,
         expected: Option<&Type>,
     ) -> Result<(Type, BTreeMap<String, Input<'e>>), StructLiteralError> {
         let (name, explicit) = match source {
-            Type::Named(name) => (name, &[][..]),
-            Type::Applied { name, args } => (name, args.as_slice()),
-            Type::TypeApplied { .. } => return Ok((self.source_type(source)?, BTreeMap::new())),
-            _ => return Err(format!("'{source}' is not a struct").into()),
+            StructApplication::Named(name) => (name, &[][..]),
+            StructApplication::Values(name, args) => (name, args),
+            StructApplication::Types(..) => {
+                return Ok((self.struct_application_type(source)?, BTreeMap::new()));
+            }
         };
         let Some(template) = self.structs.template(name).filter(|_| {
             !self
@@ -607,7 +822,7 @@ impl<'m> BodyChecker<'_, 'm> {
             {
                 return Ok((ty.clone(), BTreeMap::new()));
             }
-            return Ok((self.source_type(source)?, BTreeMap::new()));
+            return Ok((self.struct_application_type(source)?, BTreeMap::new()));
         };
         self.check_constructor_name(name)?;
         let context = match expected {
@@ -629,7 +844,8 @@ impl<'m> BodyChecker<'_, 'm> {
             })
             .map(|instance| instance.values.clone());
         let explicit = contextual.as_deref().unwrap_or(explicit);
-        let mut inferred = InferredBindings::new(&template.value_parametrics, explicit.len());
+        let mut inferred =
+            InferredBindings::for_struct(&template.value_parametrics, explicit.len());
         let mut inputs = Vec::with_capacity(template.fields.len());
         let mut types = Bindings::new(&template.type_params);
         for field in &template.fields {
@@ -651,7 +867,7 @@ impl<'m> BodyChecker<'_, 'm> {
         let args = if template.type_params.is_empty() {
             StructArguments::Values {
                 explicit,
-                inferred: &inferred.values,
+                inferred: Some(&inferred),
             }
         } else {
             self.infer_input_groups(
@@ -679,10 +895,46 @@ impl<'m> BodyChecker<'_, 'm> {
             .fields
             .iter()
             .zip(inputs)
-            .filter(|(_, input)| !matches!(input, Input::Contextual(_)))
+            .filter(|(_, input)| !matches!(input, Input::Contextual { .. }))
             .map(|(field, input)| (field.name.clone(), input))
             .collect();
         Ok((ty, inputs))
+    }
+
+    /// Resolve each explicit formal's type in declaration scope, then
+    /// evaluate its actual in caller scope. Carry preceding bindings between
+    /// formal checks so dependent types see precisely their declaration prefix.
+    pub(super) fn explicit_struct_values(
+        &mut self,
+        template: &'m StructDef,
+        count: usize,
+        mut evaluate: impl FnMut(&mut Self, usize, &Type) -> Result<IrValue, String>,
+    ) -> Result<Vec<BoundParametricValue>, String> {
+        check_value_arity(template, count)?;
+        let mut scope = ExplicitScope::default();
+        let mut values = Vec::with_capacity(count);
+        for (index, formal) in template.value_parametrics.iter().take(count).enumerate() {
+            let ty = self.in_struct_definition(template, |definition| {
+                scope.exchange(definition);
+                if let Some(previous) = values.last() {
+                    definition.bind_parametric_value(
+                        &template.value_parametrics[index - 1].name,
+                        previous,
+                    );
+                }
+                let result = definition.source_type(&formal.ty);
+                scope.exchange(definition);
+                result
+            })?;
+            let value = evaluate(self, index, &ty).map_err(|e| {
+                format!(
+                    "struct '{}' parametric '{}': {e}",
+                    template.name, formal.name
+                )
+            })?;
+            values.push(BoundParametricValue { ty, value });
+        }
+        Ok(values)
     }
 
     /// Bind defaults and resolve fields in the template's declaration scope.
@@ -694,24 +946,23 @@ impl<'m> BodyChecker<'_, 'm> {
     ) -> Result<Type, String> {
         match &args {
             StructArguments::Values { explicit, .. } => {
-                if !template.type_params.is_empty() {
-                    return Err(format!(
-                        "struct '{}' requires type arguments",
-                        template.name
-                    ));
-                }
-                if explicit.len() > template.value_parametrics.len() {
-                    return Err(format!(
-                        "struct '{}' expects at most {} value parametrics, got {}",
-                        template.name,
-                        template.value_parametrics.len(),
-                        explicit.len()
-                    ));
-                }
+                check_value_arity(template, explicit.len())?
             }
             StructArguments::Types(args) => check_type_arity(template, args.len())?,
         }
         let field_budget = child_type_budget(remaining)?;
+        self.in_struct_definition(template, |checker| {
+            checker.intern_struct(template, args, field_budget)
+        })
+    }
+
+    /// Check types, defaults, or fields under the template's own module
+    /// bindings. Recursive references through any of these share one guard.
+    fn in_struct_definition<T>(
+        &mut self,
+        template: &'m StructDef,
+        evaluate: impl FnOnce(&mut BodyChecker<'_, 'm>) -> Result<T, String>,
+    ) -> Result<T, String> {
         if self.structs.active_templates.len() >= MAX_ELABORATION_DEPTH {
             return Err(format!(
                 "expanded struct nesting exceeds {MAX_ELABORATION_DEPTH} levels"
@@ -731,9 +982,8 @@ impl<'m> BodyChecker<'_, 'm> {
                 self.structs,
                 self.function_registry.as_deref_mut(),
             );
-            stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || {
-                checker.intern_struct(template, args, field_budget)
-            })
+            checker.in_struct_definition = true;
+            stacker::maybe_grow(1024 * 1024, 2 * 1024 * 1024, || evaluate(&mut checker))
         };
         self.structs.active_templates.remove(template.name.as_str());
         result
@@ -745,6 +995,17 @@ impl<'m> BodyChecker<'_, 'm> {
         args: StructArguments<'_>,
         field_budget: usize,
     ) -> Result<Type, String> {
+        // A record-valued default can refer to the same specialization in its
+        // annotation and its expression. Reuse it before evaluating either.
+        let prefix = StructName::default_prefix(template, &args)?;
+        if let Some(index) = prefix
+            .as_ref()
+            .and_then(|key| self.structs.default_instances.get(key))
+        {
+            let ty = Type::Named(self.structs.definitions[*index].name.clone());
+            self.structs.type_shape(&ty, field_budget + 1)?;
+            return Ok(ty);
+        }
         let mut name = StructName::default();
         name.append(format_args!("{}<", template.name))?;
         let (values, types) = match args {
@@ -792,27 +1053,36 @@ impl<'m> BodyChecker<'_, 'm> {
                 })
                 .collect::<Result<_, String>>()?;
             self.structs.update_imports(self.resolver)?;
-            let index = self.structs.definitions.len();
-            self.structs.definitions.push(StructDef {
+            let def = StructDef {
                 name: name.clone(),
                 public: template.public,
                 fields,
                 value_parametrics: Vec::new(),
                 type_params: Vec::new(),
-            });
-            let shape = self.structs.index(index)?;
-            let nodes = self
+            };
+            let shape = self.structs.definition_shape(&def)?;
+            // Phantom parameters still retain their value storage and nominal
+            // spelling even when the materialized struct has only a tiny field.
+            let mut nodes = self
                 .structs
                 .instance_layout_nodes
-                .saturating_add(shape.ir_nodes)
-                .saturating_add(values.len())
-                .saturating_add(if types.is_empty() { 0 } else { name.len() })
-                .saturating_add(types.iter().map(super::source_type_nodes).sum::<usize>());
+                .saturating_add(shape.ir_nodes);
+            for bound in &values {
+                let layout = self.structs.type_shape(&bound.ty, MAX_ELABORATION_DEPTH)?;
+                nodes = nodes.saturating_add(layout.ir_nodes.max(layout.size.div_ceil(64)));
+            }
+            if !types.is_empty() || values.iter().any(|bound| bound.ty != dimension_type()) {
+                nodes = nodes.saturating_add(name.len());
+            }
+            nodes = nodes.saturating_add(types.iter().map(super::source_type_nodes).sum::<usize>());
             if nodes > MAX_TYPE_SIZE {
                 return Err(format!(
                     "struct specializations exceed the limit of {MAX_TYPE_SIZE} type nodes and bindings"
                 ));
             }
+            let index = self.structs.definitions.len();
+            self.structs.definitions.push(def);
+            self.structs.indices.insert(name.clone(), (index, shape));
             self.structs.instance_layout_nodes = nodes;
             self.structs.instances.insert(
                 name.clone(),
@@ -823,8 +1093,22 @@ impl<'m> BodyChecker<'_, 'm> {
                 },
             );
         }
-        let ty = Type::Named(name);
+        let ty = Type::Named(name.clone());
         self.structs.type_shape(&ty, field_budget + 1)?;
+        if let Some(prefix) = prefix {
+            let nodes = self
+                .structs
+                .instance_layout_nodes
+                .saturating_add(prefix.len());
+            if nodes > MAX_TYPE_SIZE {
+                return Err(format!(
+                    "struct specializations exceed the limit of {MAX_TYPE_SIZE} type nodes and bindings"
+                ));
+            }
+            let index = self.structs.indices[&name].0;
+            self.structs.default_instances.insert(prefix, index);
+            self.structs.instance_layout_nodes = nodes;
+        }
         Ok(ty)
     }
 
@@ -832,47 +1116,69 @@ impl<'m> BodyChecker<'_, 'm> {
     fn bind_struct_values(
         &mut self,
         template: &StructDef,
-        explicit: &[u32],
-        inferred: &[Option<BoundParametricValue>],
+        explicit: &[BoundParametricValue],
+        inferred: Option<&InferredBindings<'_>>,
         name: &mut StructName,
-    ) -> Result<Vec<u32>, String> {
+    ) -> Result<Vec<BoundParametricValue>, String> {
         let mut values = Vec::with_capacity(template.value_parametrics.len());
         for (index, parametric) in template.value_parametrics.iter().enumerate() {
-            let value = if let Some(&value) = explicit.get(index) {
-                IrValue::u32(value)
-            } else if let Some(default) = &parametric.default {
-                self.names.insert(parametric.name.clone());
-                self.parametric_value(default, &parametric.ty)?
-            } else if let Some(Some(bound)) = inferred.get(index) {
-                if bound.ty != parametric.ty {
-                    return Err(format!(
-                        "inferred parametric '{}' expects {}",
-                        parametric.name, parametric.ty
-                    ));
-                }
-                bound.value.clone()
+            let bound = if let Some(supplied) = explicit.get(index) {
+                // Explicit arguments and contextual prefixes already carry
+                // this template's resolved formal type.
+                supplied.clone()
             } else {
-                return Err(format!(
-                    "cannot infer value parametric '{}' of struct '{}'",
-                    parametric.name, template.name
-                ));
+                let ty = self.source_type(&parametric.ty)?;
+                let value = if let Some(default) = &parametric.default {
+                    self.names.insert(parametric.name.clone());
+                    self.parametric_value(default, &ty)?
+                } else {
+                    let bound = inferred
+                        .map(|b| b.struct_value(index, &ty))
+                        .transpose()?
+                        .flatten()
+                        .ok_or_else(|| {
+                            format!(
+                                "cannot infer value parametric '{}' of struct '{}'",
+                                parametric.name, template.name
+                            )
+                        })?;
+                    if !super::compatible(&bound.ty, &ty) {
+                        return Err(format!(
+                            "parametric '{}' of struct '{}' expects {ty}, got {}",
+                            parametric.name, template.name, bound.ty
+                        ));
+                    }
+                    bound.value
+                };
+                BoundParametricValue { ty, value }
             };
-            let argument = binding_value(&value)?;
             if index != 0 {
                 name.append(format_args!(", "))?;
             }
-            name.append(format_args!("{argument}"))?;
-            values.push(argument);
-            self.bind_parametric_value(
-                &parametric.name,
-                &BoundParametricValue {
-                    ty: parametric.ty.clone(),
-                    value,
-                },
-            );
+            name.append_binding(&bound)?;
+            self.bind_parametric_value(&parametric.name, &bound);
+            values.push(bound);
         }
         Ok(values)
     }
+}
+
+/// An application supplies a prefix of the template's declared value arguments.
+fn check_value_arity(template: &StructDef, count: usize) -> Result<(), String> {
+    if !template.type_params.is_empty() {
+        return Err(format!(
+            "struct '{}' requires type arguments",
+            template.name
+        ));
+    }
+    if count > template.value_parametrics.len() {
+        return Err(format!(
+            "struct '{}' expects at most {} value parametrics, got {count}",
+            template.name,
+            template.value_parametrics.len(),
+        ));
+    }
+    Ok(())
 }
 
 /// Check an explicit struct type argument list before deferring any layout.
@@ -902,5 +1208,22 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         checker.function_registry = functions;
         checker.enable_constant_functions();
         checker
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_oversized_struct_argument_can_be_printed_in_a_diagnostic() {
+        let value = BoundParametricValue {
+            ty: Type::Named("A".repeat(MAX_TYPE_SIZE)),
+            value: IrValue::make_tuple(&[]),
+        };
+        assert_eq!(
+            StructApplication::Values("Record", &[value]).to_string(),
+            "Record<…>"
+        );
     }
 }

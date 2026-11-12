@@ -2,13 +2,15 @@
 
 mod common;
 
+#[cfg(feature = "lean-tests")]
 use std::path::{Path, PathBuf};
 
 use xlsynth_g8r::aig::{AigBitVector, GateFn};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_lean::{InterfaceDirection, LeanError, prepare_equivalence_target};
+#[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
-    InterfaceDirection, LeanError, LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof,
-    prepare_equivalence_target, run_equivalence_proof,
+    LeanProofSources, TESTED_LEAN_VERSION, check_equivalence_proof, run_equivalence_proof,
 };
 
 /// Creates `a && (b && c)` with the same interface as `common::and3`.
@@ -24,11 +26,13 @@ fn right_associated_and3() -> GateFn {
 }
 
 /// Returns the explicitly configured Lean executable for external tests.
+#[cfg(feature = "lean-tests")]
 fn lean_executable() -> Option<PathBuf> {
     std::env::var_os("XLSYNTH_LEAN").map(PathBuf::from)
 }
 
 /// Returns the checked-in proof source for the two three-input AND graphs.
+#[cfg(feature = "lean-tests")]
 fn proof_fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/and3_equivalent.lean")
 }
@@ -58,8 +62,8 @@ fn prepared_target_uses_aag_files_and_the_fixed_root_contract() {
     assert!(!target_root.join("XlsynthLean/IR.lean").exists());
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn prepared_target_accepts_helpers_and_bv_decide() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -87,8 +91,8 @@ fn prepared_target_accepts_helpers_and_bv_decide() {
     .unwrap();
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn equivalent_graphs_succeed_and_return_lean_diagnostics() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -120,8 +124,8 @@ fn equivalent_graphs_succeed_and_return_lean_diagnostics() {
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn changed_rhs_rejects_the_same_proof() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let mut rhs = right_associated_and3();
@@ -142,8 +146,8 @@ fn changed_rhs_rejects_the_same_proof() {
     );
 }
 
+#[cfg(feature = "lean-tests")]
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn empty_or_wrong_type_proof_body_is_rejected() {
     let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
     let directory = tempfile::tempdir().unwrap();
@@ -163,6 +167,44 @@ fn empty_or_wrong_type_proof_body_is_rejected() {
             "{name}: unexpected error: {error:?}"
         );
     }
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn rejects_a_helper_that_reinterprets_gate_equivalence() {
+    let lean = lean_executable().expect("set XLSYNTH_LEAN to the actual Lean executable path");
+    let dir = tempfile::tempdir().unwrap();
+    let lhs = common::and3();
+    let mut rhs = right_associated_and3();
+    let inverted = rhs.outputs[0].bit_vector.get_lsb(0).negate();
+    rhs.outputs[0].bit_vector = AigBitVector::from_bit(inverted);
+    let target = dir.path().join("target");
+    prepare_equivalence_target(&lhs, &rhs)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+
+    let helper = dir.path().join("Helper.lean");
+    std::fs::write(&helper, include_str!("fixtures/reinterpret_target.lean")).unwrap();
+    let sources = LeanProofSources {
+        root: dir.path().into(),
+        body: dir.path().join("Body.lean"),
+        modules: vec![helper],
+    };
+    std::fs::write(&sources.body, "True.intro").unwrap();
+    let failure =
+        run_equivalence_proof(&lean, &target, &sources, &dir.path().join("work")).unwrap_err();
+    assert!(
+        matches!(
+            failure.error.as_ref(),
+            LeanError::ProcessFailed {
+                operation: "equivalence check",
+                stderr,
+                ..
+            } if stderr.contains("UserProof.equivalent has the wrong type; expected Target.Equivalent")
+        ),
+        "unexpected error: {failure}"
+    );
 }
 
 #[test]

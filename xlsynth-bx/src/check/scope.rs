@@ -7,6 +7,7 @@ use crate::infer_literal::{
     BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type,
     has_concrete_element_type,
 };
+use crate::typed::TEST_DISCARD_PREFIX;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -314,12 +315,21 @@ impl BodyChecker<'_, '_> {
                     }
                 }
             }
-            Expr::Tuple(items) | Expr::Array(items) => {
+            Expr::Tuple(items)
+            | Expr::Array(items)
+            | Expr::ArrayLiteral {
+                annotation: None,
+                members: items,
+                ..
+            } => {
                 for (i, item) in items.iter().enumerate() {
                     if let Cow::Owned(item) =
                         self.prepare_scopes(item, capture_anchors, before_scope)?
                     {
-                        let (Expr::Tuple(items) | Expr::Array(items)) = prepared.to_mut() else {
+                        let (Expr::Tuple(items)
+                        | Expr::Array(items)
+                        | Expr::ArrayLiteral { members: items, .. }) = prepared.to_mut()
+                        else {
                             unreachable!()
                         };
                         items[i] = item;
@@ -518,10 +528,7 @@ impl BodyChecker<'_, '_> {
                 K::Name(_) => K::Index {
                     value: Box::new(input.clone()),
                     index: Box::new(TypedExpr {
-                        ty: Type::Bits {
-                            signed: false,
-                            width: 32,
-                        },
+                        ty: Type::unsigned(32),
                         kind: K::Literal(
                             IrValue::make_ubits(32, index as u64).map_err(|e| e.to_string())?,
                         ),
@@ -612,6 +619,12 @@ impl BodyChecker<'_, '_> {
                     K::Literal(IrValue::Tuple(fields)) => Some(Arc::clone(fields)),
                     _ => None,
                 };
+                // A constructor owns the field computations. A named tuple has
+                // already evaluated them and a literal has no runtime
+                // contracts.
+                let evaluate_discards = self.decls.evaluate_discarded_tuple_fields
+                    && self.source_kind == super::BodyKind::Function
+                    && matches!(&value.kind, K::Tuple(_));
                 let mut fields: Box<dyn Iterator<Item = TypedExpr>> = match value.kind {
                     K::Tuple(fields) => Box::new(fields.into_iter()),
                     K::Literal(IrValue::Tuple(fields)) => {
@@ -636,6 +649,28 @@ impl BodyChecker<'_, '_> {
                     if matches!(pattern, BindingPattern::Rest)
                         || matches!(pattern, BindingPattern::Name(n) if n == "_")
                     {
+                        if evaluate_discards {
+                            let skipped = if matches!(pattern, BindingPattern::Rest) {
+                                count - required
+                            } else {
+                                1
+                            };
+                            for field in fields.by_ref().take(skipped) {
+                                // Names were already evaluated and literals
+                                // have no contracts.
+                                if !matches!(field.kind, K::Name(_) | K::Literal(_)) {
+                                    self.decls.has_test_discards.set(true);
+                                    self.statements.push(CheckedStmt::Let {
+                                        name: format!(
+                                            "{TEST_DISCARD_PREFIX}{}",
+                                            self.statements.len()
+                                        ),
+                                        value: field,
+                                    });
+                                }
+                            }
+                            cursor += skipped;
+                        }
                         continue;
                     }
                     let index = if rest.is_some_and(|r| i > r) {
@@ -778,6 +813,18 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
         }
         Expr::Tuple(fields) | Expr::Array(fields) => {
             fields.iter_mut().for_each(|f| capture_names(f, aliases))
+        }
+        Expr::ArrayLiteral {
+            annotation,
+            members,
+            ..
+        } => {
+            if let Some(ty) = annotation {
+                rename_type(ty, aliases);
+            }
+            for member in members {
+                capture_names(member, aliases);
+            }
         }
         Expr::Struct { name, fields, base }
         | Expr::AppliedStruct {

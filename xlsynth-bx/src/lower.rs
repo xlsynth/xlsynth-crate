@@ -17,7 +17,7 @@ use xlsynth_pir::{
     RegisterWriteOptions, ResetBehavior,
 };
 
-use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
+use crate::ast::{BinaryOp, Param, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
@@ -27,7 +27,7 @@ use crate::cycle_diagnostic::{CycleSources, WireDriver};
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
 use crate::typed::{
-    CheckedBinding, TypedFor, TypedIterable, TypedMap, TypedMatchPattern, repr_bits,
+    CaptureUse, CheckedBinding, TypedFor, TypedIterable, TypedMap, TypedMatchPattern, repr_bits,
 };
 
 /// Destination package indices for named BX functions, externs, and inferred
@@ -41,8 +41,20 @@ struct LinkedFunctions {
 impl LinkedFunctions {
     /// Recognize a map body that passes its element directly to one linked
     /// function. The IR map can use that function's cached signature.
-    fn forwarded_map_target(&self, map: &TypedMap) -> Option<&InvokeSignature> {
-        if !map.bindings.is_empty() || !map.captures.is_empty() {
+    fn forwarded_map_target(
+        &self,
+        map: &TypedMap,
+        evaluate_test_discards: bool,
+    ) -> Option<&InvokeSignature> {
+        if map
+            .bindings
+            .iter()
+            .any(|b| evaluate_test_discards || !b.is_test_discard())
+            || map
+                .captures
+                .values()
+                .any(|usage| evaluate_test_discards || *usage == CaptureUse::Value)
+        {
             return None;
         }
         let (index, args) = match &map.output.kind {
@@ -162,10 +174,13 @@ fn lower_checked_module(
         batch: FunctionBatch::new(&mut package).map_err(|error| error.to_string())?,
         occupied,
         next_body: 0,
+        evaluate_test_discards: false,
     };
     let mut function_specializations =
         EmptyArrayBudget::new("function specialization", empty_array_limit);
     for (function, symbol) in module.functions.iter().zip(function_symbols) {
+        destination.evaluate_test_discards =
+            module.functions_with_test_discards.contains(&function.name);
         let budget = if module.specialized_functions.contains(&function.name) {
             &mut function_specializations
         } else {
@@ -187,6 +202,7 @@ fn lower_checked_module(
     }
     let mut block_specializations =
         EmptyArrayBudget::new("generic block specialization", empty_array_limit);
+    destination.evaluate_test_discards = false;
     for block in &module.blocks {
         let ir_block = block_symbols.get(&block.name);
         let budget = if module.specialized_blocks.contains(&block.name) {
@@ -202,7 +218,7 @@ fn lower_checked_module(
             budget,
         );
         let (builder, sources) = body
-            .build_block(block, &block_symbols, &module.structs, reset)
+            .build_block(block, &block_symbols, reset)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
         destination.batch.append_block(builder).map_err(|error| {
             sources.render(&error, block, ir_block).map_or_else(
@@ -577,6 +593,7 @@ struct Destination<'p> {
     batch: FunctionBatch<'p>,
     occupied: BTreeSet<String>,
     next_body: usize,
+    evaluate_test_discards: bool,
 }
 
 impl Destination<'_> {
@@ -795,7 +812,6 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         mut self,
         block: &CheckedBlock,
         symbols: &BlockSymbols,
-        structs: &[StructDef],
         reset_behavior: ResetBehavior,
     ) -> Result<(BlockBuilder, CycleSources), BuilderError> {
         let mut resources = BlockResources::default();
@@ -830,7 +846,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
             }
         }
         self.wire_statements(&block.statements, &mut resources, reset, None)?;
-        let ports = output_ports(&block.result, structs).map_err(BuilderError::InvalidOperation)?;
+        let ports = &block.output_ports;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
             for (port, field) in ports.iter().zip(fields) {
@@ -1243,6 +1259,9 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         output: &TypedExpr,
     ) -> Result<BValue, BuilderError> {
         for binding in bindings {
+            if !self.destination.evaluate_test_discards && binding.is_test_discard() {
+                continue;
+            }
             let value = self.expr(&binding.value)?;
             self.values.insert(binding.name.clone(), value);
         }
@@ -1253,7 +1272,10 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     /// the result array when the lambda reads enclosing wires.
     fn map(&mut self, map: &TypedMap) -> Result<BValue, BuilderError> {
         let array = self.expr(&map.array)?;
-        if let Some(target) = self.functions.forwarded_map_target(map) {
+        if let Some(target) = self
+            .functions
+            .forwarded_map_target(map, self.destination.evaluate_test_discards)
+        {
             return self.builder.map_with_signature(array, target);
         }
         let symbol = self.destination.body_symbol("map");
@@ -1356,13 +1378,19 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     fn capture_params(
         &self,
         builder: &mut FnBuilder,
-        captures: &BTreeSet<String>,
+        captures: &BTreeMap<String, CaptureUse>,
         invariants: &mut Vec<BValue>,
     ) -> Result<BTreeMap<String, BValue>, BuilderError> {
         let start = invariants.len();
-        invariants.extend(captures.iter().map(|name| self.values[name]));
+        let names = captures
+            .iter()
+            .filter(|(_, usage)| {
+                self.destination.evaluate_test_discards || **usage == CaptureUse::Value
+            })
+            .map(|(name, _)| name);
+        invariants.extend(names.clone().map(|name| self.values[name]));
         let params = self.wire_params(builder, &invariants[start..])?;
-        Ok(captures.iter().cloned().zip(params).collect())
+        Ok(names.cloned().zip(params).collect())
     }
 
     /// Build one pure iteration function. Captures become invariant
@@ -1433,15 +1461,21 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
             TypedExprKind::For(fold) => self.counted_for(fold),
             TypedExprKind::Map(map) => self.map(map),
             TypedExprKind::Array(items) => {
-                let Type::Array { element, .. } = &expr.ty else {
+                let Type::Array { element, size } = &expr.ty else {
                     return Err(BuilderError::InvalidOperation(
                         "array expression requires an array type".into(),
                     ));
                 };
-                let values = items
+                let mut values = items
                     .iter()
                     .map(|item| self.expr(item))
                     .collect::<Result<Vec<_>, _>>()?;
+                if values.len() < *size {
+                    let last = values.last().ok_or_else(|| {
+                        BuilderError::InvalidOperation("array fill requires a value".into())
+                    })?;
+                    values.resize(*size, *last);
+                }
                 self.builder.array(self.layouts.lower(element)?, &values)
             }
             TypedExprKind::Index { value, index } => {

@@ -12,9 +12,11 @@ mod effect_diagnostic;
 mod import_link;
 mod import_structs;
 mod infer_literal;
+pub mod invariant_prover;
 mod layout;
 pub mod lower;
 pub mod parser;
+mod test_runner;
 mod typed;
 mod warnings;
 
@@ -26,6 +28,15 @@ pub use parser::outline::{
     parse_dslx_outline,
 };
 pub use parser::parse_module;
+pub(crate) use test_runner::invariant::BxInvariantObligation;
+pub use test_runner::invariant::{
+    BxInvariantCase, BxInvariantProof, BxInvariantSuite, prepare_invariant_proofs,
+};
+pub use test_runner::{
+    BxProofCase, BxProofSuite, BxQuickCheckProof, BxTestOptions, BxTestReport, BxTestResult,
+    BxTestRun, FourValuedReport, QuickCheckOptions, QuickCheckReport, prepare_quickcheck_proofs,
+    run_tests, run_tests_with_options, run_tests_with_quickcheck,
+};
 pub use typed::BoundParametricValue;
 pub use warnings::{BxWarning, BxWarningKind};
 pub use xlsynth_pir::ir_builder::ResetBehavior;

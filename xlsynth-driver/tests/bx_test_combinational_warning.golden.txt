@@ -1,0 +1,1 @@
+warning.bx:1:7: warning[combinational_block]: block 'identity' has no registers or child instances. Consider defining it as a function.

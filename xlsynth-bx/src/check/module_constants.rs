@@ -105,10 +105,7 @@ impl ModuleDimensions<'_, '_> {
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
     ) -> Result<usize, String> {
-        let expected = Type::Bits {
-            signed: false,
-            width: 32,
-        };
+        let expected = Type::unsigned(32);
         if let Expr::Literal { ty, text } = expr
             && ty.as_ref().is_none_or(|ty| compatible(ty, &expected))
         {

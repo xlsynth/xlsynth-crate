@@ -10,8 +10,9 @@ use rand::{Rng, SeedableRng};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r_fuzz::random_block::{block_output_types, evaluate_block_cycle, flatten_value};
+use xlsynth_g8r_fuzz::random_block::{block_output_types, flatten_value};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::ir::Block;
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
@@ -102,8 +103,13 @@ fuzz_target!(|data: &[u8]| {
     let mut seed = [0_u8; 32];
     seed.copy_from_slice(blake3::hash(block_ir.as_bytes()).as_bytes());
     let mut rng = StdRng::from_seed(seed);
-    let mut block_state = generate_initial_state(block, &mut rng);
+    let evaluator = BlockEvaluator::prepare(&generated.package, &block.name).unwrap();
+    let initial_values = generate_initial_state(block, &mut rng);
+    let mut block_state = evaluator
+        .initial_state(RegisterInit::Supplied(initial_values))
+        .unwrap();
     let initial_g8r_state = block_state
+        .values()
         .iter()
         .zip(&block.registers)
         .map(|(value, register)| flatten_value(value, &register.ty))
@@ -119,9 +125,9 @@ fuzz_target!(|data: &[u8]| {
             .zip(block.input_ports())
             .map(|(value, param)| flatten_value(value, block.port_type(param)))
             .collect::<Vec<_>>();
-        let (expected_outputs, next_block_state) =
-            evaluate_block_cycle(block, &inputs, &block_state, &block_ir);
-        let expected_output_bits = expected_outputs
+        let cycle_result = evaluator.step(&block_state, &inputs).unwrap();
+        let expected_output_bits = cycle_result
+            .outputs
             .iter()
             .zip(&output_types)
             .map(|(value, ty)| flatten_value(value, ty))
@@ -135,7 +141,9 @@ fuzz_target!(|data: &[u8]| {
             expected_output_bits,
             "random block output mismatch at cycle {cycle}:\n{block_ir}"
         );
-        let expected_state_bits = next_block_state
+        let expected_state_bits = cycle_result
+            .next_state
+            .values()
             .iter()
             .zip(&block.registers)
             .map(|(value, register)| flatten_value(value, &register.ty))
@@ -145,7 +153,7 @@ fuzz_target!(|data: &[u8]| {
             expected_state_bits,
             "random block register-state mismatch at cycle {cycle}:\n{block_ir}"
         );
-        block_state = next_block_state;
+        block_state = cycle_result.next_state;
         g8r_state = trace.final_state().clone();
     }
 });
