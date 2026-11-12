@@ -875,10 +875,12 @@ pub struct BlockSource {
     pub(crate) output: SourceSpan,
 }
 
-/// Declared cycle offsets for a block's output ports.
+/// Output stages declared in this block's local stage numbering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OutputCycles {
+    /// `-> Ports @1` places every output port at stage 1.
     Uniform(u64),
+    /// `-> Ports @(live: 0, saved: 1)` gives each physical port its own stage.
     ByPort(BTreeMap<String, u64>),
 }
 

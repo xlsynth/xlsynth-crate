@@ -2185,12 +2185,17 @@ pub(crate) fn check_sources_with_tests(
         .into_iter()
         .filter_map(|i| checked.get_mut(i)?.take())
         .collect();
+    // Harnesses are now mixed in with ordinary blocks. Their generated
+    // names let timing find the ones whose source result is just a predicate.
     let invariant_harnesses = tests
         .iter()
         .flat_map(|suite| &suite.invariants)
         .map(|invariant| invariant.harness.as_str())
         .collect();
     infer_block_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
+    // A parent may call a generic child defined later in the file. At this
+    // point its concrete specialization appears before the parent in `blocks`.
+    timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
     let warnings =
         declarations
             .warnings
@@ -2841,8 +2846,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         c.statement_span = block.source.as_ref().map(|source| source.output);
-        // The source predicate is a structural block result, even though the
-        // verification harness subsequently bundles it with the lemmas.
+        // An invariant returns one Boolean. Check the trailing expression
+        // against that type before building the tuple the prover reads.
         let result = if invariant.is_some() {
             &interface.outputs[0].ty
         } else {
@@ -2852,6 +2857,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .scoped_result(&block.output, Some(result), true)
             .map_err(|e| format!("result: {e}"))?;
         let output = if let Some(property) = invariant {
+            // Field 0 is the returned predicate. Each #[lemma] gets the next
+            // field in declaration order so the prover can sample it by index.
             let mut observations = vec![main];
             for index in 0..property.lemmas.len() {
                 let value = Expr::Name(InvariantLemma::observation_name(index));
@@ -2865,7 +2872,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             main
         };
         let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
-        let mut block = CheckedBlock {
+        let block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
             source_name: block.name.clone(),
             source: block.source.as_ref().map(|source| source.file.clone()),
@@ -2881,26 +2888,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             statements: c.statements,
             output,
         };
-        let timing = if invariant.is_some() {
-            // Only the source 'out' port has a user-specified timing contract.
-            timing::check_outputs(
-                &block,
-                &[Param {
-                    name: "out".to_owned(),
-                    ty: Type::Bool,
-                }],
-                c.structs,
-            )
-        } else {
-            timing::check_outputs(&block, &interface.outputs, c.structs)
-        };
-        if c.wires.is_empty() {
-            timing?;
-        } else {
-            // Timing inference can stop at feedback. Give the block IR cycle
-            // checker a chance to report the driver and child connections.
-            block.timing_error = timing.err();
-        }
         Ok(BlockBody {
             block,
             requires_hardware,
@@ -5918,6 +5905,136 @@ block capture(clk, en: bool @1, x: u8 @2) -> u8 @3 {
             check_bx(timed).unwrap_err(),
             "block 'b': cannot infer output cycle for this expression"
         );
+    }
+
+    #[test]
+    fn two_instances_of_a_three_stage_tail_translate_independently() -> Result<(), String> {
+        let source = r#"
+block tail(clk, data: u8) -> u8 @3 {
+    reg a: u8; reg b: u8; reg c: u8;
+    a := data; b := a; c := b; c
+}
+block top(clk, x: u8 @4) -> (u8, u8) @(out_0: 7, out_1: 10) {
+    let first = tail(x);
+    let second = tail(first);
+    (first, second)
+}
+block outer(clk, x: u8) -> u8 @6 {
+    let pair = top(x);
+    pair.1
+}
+"#;
+        check_bx(source)?;
+        assert_eq!(
+            check_bx(&source.replace("out_0: 7", "out_0: 6")).unwrap_err(),
+            "block 'top': output 'out_0': expected cycle 6, got cycle 7"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn all_child_inputs_must_agree_on_one_instance_offset() -> Result<(), String> {
+        let source = r#"
+block child(clk, x: u8 @0, r: u8 @1) -> u8 @1 {
+    reg q: u8; q := x; q + r
+}
+block top(clk, x: u8 @4, r: u8 @5) -> u8 @5 {
+    let joined = child(x, r);
+    joined
+}
+"#;
+        check_bx(source)?;
+        assert_eq!(
+            check_bx(&source.replace("r: u8 @5", "r: u8 @4")).unwrap_err(),
+            "block 'top': instance 'joined' input 'r': expected parent cycle 5, got 4"
+        );
+        check_bx(&source.replace("child(x, r)", "child(u8:7, r)"))?;
+        assert_eq!(
+            check_bx(&source.replace("child(x, r)", "child(u8:7, u8:7)")).unwrap_err(),
+            "block 'top': cannot infer output cycle for this expression"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_instance_translates_each_output_port_with_a_signed_offset() -> Result<(), String> {
+        let source = r#"
+struct Ports { live: u8, saved: u8 }
+block tap(clk, x: u8 @3) -> Ports @(live: 3, saved: 4) {
+    reg q: u8; q := x; Ports { live: x, saved: q }
+}
+block top(clk, x: u8) -> Ports @(live: 0, saved: 1) {
+    lane.x := x;
+    inst lane: tap;
+    // Reading lane.live must leave x on the adder's operand stack.
+    Ports { live: x + lane.live, saved: lane.saved }
+}
+"#;
+        check_bx(source)?;
+        assert_eq!(
+            check_bx(&source.replace("live: 0, saved: 1", "live: 0, saved: 0")).unwrap_err(),
+            "block 'top': output 'saved': expected cycle 0, got cycle 1"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_child_timing_or_an_unknown_connection_stays_unknown() {
+        for (child, argument) in [
+            ("extern block child(clk, x: u8, r: u8) -> u8;", "x"),
+            ("block child(clk, x: u8, r: u8) -> u8 { x + r }", "x"),
+            ("block child(clk, x: u8 @0, r: u8 @0) -> u8 { x + r }", "x"),
+            (
+                "block child(clk, x: u8, r: u8) -> u8 @0 { x + r }",
+                "arr[u1:0]",
+            ),
+        ] {
+            let source = format!(
+                "{child}\nblock top(clk, x: u8, arr: u8[2]) -> u8 @0 {{ let y = child({argument}, x); y }}"
+            );
+            assert_eq!(
+                check_bx(&source).unwrap_err(),
+                "block 'top': cannot infer output cycle for this expression"
+            );
+        }
+    }
+
+    #[test]
+    fn child_translation_checks_stage_range_and_feedback() {
+        let source = r#"
+block delay(clk, x: u8) -> u8 @1 { reg q: u8; q := x; q }
+block top(clk, x: u8 @18446744073709551615) -> u8 @0 {
+    inst lane: delay; lane.x := x; lane.out
+}
+"#;
+        assert_eq!(
+            check_bx(source).unwrap_err(),
+            "block 'top': instance 'lane.out': translated cycle 18446744073709551616 is out of range"
+        );
+        assert_eq!(
+            check_bx(&source.replace("lane.x := x", "lane.x := lane.out")).unwrap_err(),
+            "block 'top': timing feedback through instance 'lane' is unsupported"
+        );
+    }
+
+    #[test]
+    fn a_deferred_child_timing_error_cannot_supply_a_parent_stage() -> Result<(), String> {
+        let checked = check_bx(
+            r#"
+block child(clk, x: u8) -> u8 @1 { let w: u8; w = x; w }
+block top(clk, x: u8) -> u8 @1 { let y = child(x); y }
+"#,
+        )?;
+        let blocks = checked.blocks();
+        assert_eq!(
+            blocks[0].timing_error.as_deref(),
+            Some("expected cycle 1, got cycle 0")
+        );
+        assert_eq!(
+            blocks[1].timing_error.as_deref(),
+            Some("cannot infer output cycle for this expression")
+        );
+        Ok(())
     }
 
     #[test]
