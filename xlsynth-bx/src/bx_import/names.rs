@@ -939,7 +939,9 @@ impl<'a> Scope<'a> {
             ));
         }
         self.expression_depth += 1;
-        let result = self.expr_kind(expr);
+        // A full-height expression can start inside an already deeply nested
+        // guard.
+        let result = stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || self.expr_kind(expr));
         self.expression_depth -= 1;
         result
     }
