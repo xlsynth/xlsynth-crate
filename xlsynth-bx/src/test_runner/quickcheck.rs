@@ -24,8 +24,8 @@ use super::{
 use crate::ast::{Param, Type};
 use crate::typed::CheckedModule;
 
-/// Random stimulus uses declared enum members, including inside aggregates.
-enum Stimulus {
+/// Legal QuickCheck stimulus values, including enum members inside aggregates.
+pub(super) enum Stimulus {
     Uniform(IrType),
     Enum(Vec<IrBits>),
     Tuple(Vec<Stimulus>),
@@ -37,6 +37,29 @@ enum Stimulus {
 }
 
 impl Stimulus {
+    /// Resolve BX stimulus domains against the flattened harness input layout.
+    pub(super) fn for_params(
+        params: &[Param],
+        transition: &BlockTransition,
+        checked: &CheckedModule,
+    ) -> Result<Vec<Self>, String> {
+        let inputs: HashMap<_, _> = transition
+            .inputs
+            .iter()
+            .map(|p| (p.name.as_str(), &p.ty))
+            .collect();
+        params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| {
+                let ty = inputs
+                    .get(input_name(i).as_str())
+                    .ok_or_else(|| format!("missing input for parameter '{}'", param.name))?;
+                Self::new(&param.ty, ty, checked)
+            })
+            .collect()
+    }
+
     fn new(ty: &Type, ir: &IrType, module: &CheckedModule) -> Result<Self, String> {
         let tuple = |types: Vec<&Type>| -> Result<Self, String> {
             let IrType::Tuple(fields) = ir else {
@@ -324,8 +347,6 @@ struct Trial<'a> {
     args: Vec<IrValue>,
     registers: BTreeMap<String, IrValue>,
     active_low: bool,
-    seed: u64,
-    number: usize,
 }
 
 impl Trial<'_> {
@@ -378,12 +399,29 @@ impl Trial<'_> {
     fn witness(
         &self,
         path: &Path,
+        origin: (u64, usize),
         failure: &Failure,
         from_x: bool,
         replay: impl FnOnce(&mut TrialTrace) -> Result<(), Failure>,
     ) -> String {
         let mut trace = TrialTrace::default();
         let replayed = replay(&mut trace);
+        let mut message = format!(
+            "{}\n  seed {}, trial {}\n{}",
+            failure.diagnostic(path, self.program),
+            origin.0,
+            origin.1,
+            self.describe_stimulus(from_x, &trace)
+        );
+        if replayed.as_ref().err() != Some(failure) {
+            message.push_str("\n  failure changed during trace replay");
+        }
+        message
+    }
+
+    /// Format the driven values and edges shared by random and solver
+    /// witnesses.
+    fn describe_stimulus(&self, from_x: bool, trace: &TrialTrace) -> String {
         let inputs = self
             .params
             .iter()
@@ -402,17 +440,10 @@ impl Trial<'_> {
                 .join(", ");
             format!("concrete initial registers: [{registers}]")
         };
-        let mut message = format!(
-            "{}\n  seed {}, trial {}\n  inputs: [{inputs}]\n  {initial}\n  stimulus trace: [{}]",
-            failure.diagnostic(path, self.program),
-            self.seed,
-            self.number,
+        format!(
+            "  inputs: [{inputs}]\n  {initial}\n  stimulus trace: [{}]",
             trace.describe(&self.program.stimulus_names)
-        );
-        if replayed.as_ref().err() != Some(failure) {
-            message.push_str("\n  failure changed during trace replay");
-        }
-        message
+        )
     }
 
     /// Accumulate the all-X outcomes independently of the concrete property.
@@ -420,6 +451,7 @@ impl Trial<'_> {
         &self,
         sim: &mut Simulation,
         path: &Path,
+        origin: (u64, usize),
         report: &mut FourValuedReport,
     ) -> Option<String> {
         let Err(failure) = self.execute_from_x(sim, None) else {
@@ -436,17 +468,94 @@ impl Trial<'_> {
                 &mut report.first_indeterminate
             }
             ExecutionError::Runtime(_) => {
-                return Some(self.witness(path, &failure, true, |trace| {
+                return Some(self.witness(path, origin, &failure, true, |trace| {
                     self.execute_from_x(sim, Some(trace))
                 }));
             }
         };
         first.get_or_insert_with(|| {
-            self.witness(path, &failure, true, |trace| {
+            self.witness(path, origin, &failure, true, |trace| {
                 self.execute_from_x(sim, Some(trace))
             })
         });
         None
+    }
+}
+
+/// Replay a model with the same transitions and source actions as a concrete
+/// trial.
+pub(super) fn replay_counterexample(
+    program: &TestProgram,
+    domains: &[Stimulus],
+    package: &Package,
+    path: &Path,
+    active_low: bool,
+    inputs: &[IrValue],
+) -> Result<String, String> {
+    let params = program
+        .quickcheck_params
+        .as_deref()
+        .ok_or("expected a block QuickCheck")?;
+    let mut pir = PirCircuit::new(package, &program.harness)?;
+    if inputs.len() != params.len() + pir.transition.registers.len() {
+        return Err(format!(
+            "invalid counterexample arity for '{}'",
+            program.name
+        ));
+    }
+    let (args, state) = inputs.split_at(params.len());
+    for (i, arg) in args.iter().enumerate() {
+        let port = pir
+            .inputs
+            .get(&input_name(i))
+            .ok_or("missing QuickCheck parameter port")?;
+        if arg.type_() != pir.transition.inputs[*port].ty {
+            return Err(format!(
+                "invalid counterexample type for parameter '{}'",
+                params[i].name
+            ));
+        }
+        if !domains[i].admits(arg) {
+            return Err(format!(
+                "counterexample is outside the declared stimulus domain for '{}'",
+                params[i].name
+            ));
+        }
+    }
+    let registers = pir
+        .transition
+        .registers
+        .iter()
+        .zip(state)
+        .map(|(reg, value)| {
+            if value.type_() != reg.ty {
+                return Err(format!(
+                    "invalid counterexample type for register '{}'",
+                    reg.name
+                ));
+            }
+            Ok((reg.name.clone(), value.clone()))
+        })
+        .collect::<Result<_, _>>()?;
+    let trial = Trial {
+        program,
+        params,
+        args: args.to_vec(),
+        registers,
+        active_low,
+    };
+    let mut trace = TrialTrace::default();
+    match trial.execute_concrete(&mut pir, None, Some(&mut trace)) {
+        Err(failure) if matches!(failure.error, ExecutionError::Assertion(_)) => Ok(format!(
+            "{}\n{}",
+            failure.diagnostic(path, program),
+            trial.describe_stimulus(false, &trace)
+        )),
+        Err(failure) => Err(failure.diagnostic(path, program)),
+        Ok(()) => Err(format!(
+            "solver counterexample passed concrete replay of '{}'",
+            program.name
+        )),
     }
 }
 
@@ -472,17 +581,7 @@ pub(super) fn run(
             .cross_check_vastly
             .then(|| Simulation::from_flattened(&package, &program.harness))
             .transpose()?;
-        let stimuli = params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let index = pir
-                    .inputs
-                    .get(&input_name(i))
-                    .ok_or_else(|| format!("missing input for parameter '{}'", p.name))?;
-                Stimulus::new(&p.ty, &pir.transition.inputs[*index].ty, checked)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let stimuli = Stimulus::for_params(params, &pir.transition, checked)?;
         let mut rng = Pcg64Mcg::seed_from_u64(options.seed);
         for number in 1..=options.trials.get() {
             let args = stimuli
@@ -506,19 +605,20 @@ pub(super) fn run(
                 args,
                 registers,
                 active_low,
-                seed: options.seed,
-                number,
             };
             report.trials = number;
             let concrete = trial.execute_concrete(&mut pir, rtl.as_mut(), None);
             let x_error = match (&mut rtl, &mut report.four_valued) {
-                (Some(sim), Some(four)) => trial.observe_from_x(sim, path, four),
+                (Some(sim), Some(four)) => {
+                    trial.observe_from_x(sim, path, (options.seed, number), four)
+                }
                 _ => None,
             };
             if let Err(failure) = concrete {
-                let mut message = trial.witness(path, &failure, false, |trace| {
-                    trial.execute_concrete(&mut pir, rtl.as_mut(), Some(trace))
-                });
+                let mut message =
+                    trial.witness(path, (options.seed, number), &failure, false, |trace| {
+                        trial.execute_concrete(&mut pir, rtl.as_mut(), Some(trace))
+                    });
                 if let Some(error) = x_error {
                     message.push_str(&format!("\n  four-valued execution error: {error}"));
                 }

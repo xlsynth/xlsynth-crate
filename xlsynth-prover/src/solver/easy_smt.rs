@@ -412,7 +412,9 @@ impl Solver for EasySmtSolver {
     }
 
     fn numerical(&mut self, width: usize, mut value: u64) -> BitVec<SExpr> {
-        assert!(width > 0, "Width must be positive");
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
         if width < 64 {
@@ -660,36 +662,34 @@ impl Solver for EasySmtSolver {
         extend_width: usize,
         signed: bool,
     ) -> BitVec<SExpr> {
+        let BitVec::BitVec { width, rep } = bit_vec else {
+            return self.zero(extend_width);
+        };
+        if extend_width == 0 {
+            return bit_vec.clone();
+        }
         let shared = Arc::clone(&self.context);
         let mut context = shared.lock().unwrap();
-        match bit_vec {
-            BitVec::BitVec { width, rep } => {
-                if extend_width == 0 {
-                    return bit_vec.clone();
-                }
-                let extend_operator = if signed {
-                    context.atom("sign_extend")
-                } else {
-                    context.atom("zero_extend")
-                };
-                let extend_rep = context.list(vec![
-                    context.list(vec![
-                        context.atoms().und,
-                        extend_operator,
-                        context.numeral(extend_width),
-                    ]),
-                    rep.clone(),
-                ]);
-                self.cache_term(
-                    BitVec::BitVec {
-                        width: width + extend_width,
-                        rep: extend_rep,
-                    },
-                    &mut context,
-                )
-            }
-            BitVec::ZeroWidth => panic!("Cannot extend zero-width bitvector"),
-        }
+        let extend_operator = if signed {
+            context.atom("sign_extend")
+        } else {
+            context.atom("zero_extend")
+        };
+        let extend_rep = context.list(vec![
+            context.list(vec![
+                context.atoms().und,
+                extend_operator,
+                context.numeral(extend_width),
+            ]),
+            rep.clone(),
+        ]);
+        self.cache_term(
+            BitVec::BitVec {
+                width: width + extend_width,
+                rep: extend_rep,
+            },
+            &mut context,
+        )
     }
 
     fn ite(

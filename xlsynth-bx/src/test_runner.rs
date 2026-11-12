@@ -4,8 +4,13 @@
 
 #[cfg(test)]
 mod mixed_suite_tests;
+mod proof;
+mod proof_domain;
+mod prove;
 mod quickcheck;
 mod simulation;
+
+pub use prove::{BxProofCase, BxProofSuite, BxQuickCheckProof, prepare_quickcheck_proofs};
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -21,7 +26,9 @@ use xlsynth_pir::ir_value_utils::zero_ir_value_for_type;
 use xlsynth_pir::{IrBits, IrValue};
 
 use crate::ast::{SourcePosition, TestKind};
-use crate::{BxWarning, ImportOptions, ResetBehavior, bx_import, check, lower_module};
+use crate::{
+    BxWarning, CheckedModule, ImportOptions, ResetBehavior, bx_import, check, lower_module,
+};
 use simulation::{Observed, Simulation};
 
 /// Concrete trials per clocked property, reproducible from the same seed.
@@ -223,6 +230,62 @@ pub fn run_tests_with_quickcheck(
     warnings_as_errors: bool,
     quickcheck_options: QuickCheckOptions,
 ) -> Result<BxTestReport, String> {
+    let CompiledTests {
+        suite,
+        checked,
+        package,
+        clocked_package,
+        warnings,
+    } = compile_tests(source, path, package, reset, options, warnings_as_errors)?;
+    let tests = suite
+        .programs
+        .into_iter()
+        .map(|program| {
+            let package = match program.kind {
+                TestKind::Function => &package,
+                TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
+            };
+            if let Some(params) = &program.quickcheck_params {
+                return quickcheck::run(
+                    &program,
+                    params,
+                    package,
+                    &checked,
+                    path,
+                    reset.active_low,
+                    quickcheck_options,
+                );
+            }
+            let result = run_program(&program, package, reset.active_low)
+                .err()
+                .map(|f| f.diagnostic(path, &program));
+            BxTestResult {
+                name: program.name,
+                failure: result,
+                quickcheck: None,
+            }
+        })
+        .collect();
+    Ok(BxTestReport { tests, warnings })
+}
+
+/// Checked testbench actions and their combinational and clocked harnesses.
+struct CompiledTests {
+    suite: TestSuite,
+    checked: CheckedModule,
+    package: Package,
+    clocked_package: Option<Package>,
+    warnings: Vec<BxWarning>,
+}
+
+fn compile_tests(
+    source: &str,
+    path: &Path,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+    warnings_as_errors: bool,
+) -> Result<CompiledTests, String> {
     let mut suite = TestSuite {
         reserved: package
             .members
@@ -274,36 +337,13 @@ pub fn run_tests_with_quickcheck(
     } else {
         None
     };
-    let tests = suite
-        .programs
-        .into_iter()
-        .map(|program| {
-            let package = match program.kind {
-                TestKind::Function => &package,
-                TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
-            };
-            if let Some(params) = &program.quickcheck_params {
-                return quickcheck::run(
-                    &program,
-                    params,
-                    package,
-                    &checked,
-                    path,
-                    reset.active_low,
-                    quickcheck_options,
-                );
-            }
-            let result = run_program(&program, package, reset.active_low)
-                .err()
-                .map(|f| f.diagnostic(path, &program));
-            BxTestResult {
-                name: program.name,
-                failure: result,
-                quickcheck: None,
-            }
-        })
-        .collect();
-    Ok(BxTestReport { tests, warnings })
+    Ok(CompiledTests {
+        suite,
+        checked,
+        package,
+        clocked_package,
+        warnings,
+    })
 }
 
 /// Pure calls check assertions when evaluated. Clocked hardware checks them on
