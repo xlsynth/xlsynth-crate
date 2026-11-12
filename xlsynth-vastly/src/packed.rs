@@ -63,6 +63,9 @@ where
     let mut acc: Option<T> = None;
     for (dim_index, index) in indices.iter().cloned().enumerate() {
         let stride = stride_after(packed_dims, dim_index)?;
+        if indices.len() == 1 && stride == 1 {
+            return Ok(index);
+        }
         let term = mul(index, stride);
         acc = Some(match acc {
             Some(prev) => add(prev, term),
@@ -131,7 +134,10 @@ fn literal_u32_spanned(value: u32, span: Span) -> SpannedExpr {
     }
 }
 
-fn mul_expr(lhs: Expr, factor: u32) -> Expr {
+/// Evaluate the original subscript at its own width before the synthetic
+/// stride multiplication or offset addition can widen its operands.
+fn mul_expr(index: Expr, factor: u32) -> Expr {
+    let lhs = Expr::Concat(vec![index]);
     if factor == 1 {
         lhs
     } else {
@@ -143,7 +149,11 @@ fn mul_expr(lhs: Expr, factor: u32) -> Expr {
     }
 }
 
-fn mul_expr_spanned(lhs: SpannedExpr, factor: u32, span: Span) -> SpannedExpr {
+fn mul_expr_spanned(index: SpannedExpr, factor: u32, span: Span) -> SpannedExpr {
+    let lhs = SpannedExpr {
+        span: index.span,
+        kind: SpannedExprKind::Concat(vec![index]),
+    };
     if factor == 1 {
         lhs
     } else {

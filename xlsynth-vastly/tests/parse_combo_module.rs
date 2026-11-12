@@ -1250,6 +1250,54 @@ endmodule
 }
 
 #[test]
+fn packed_array_subscripts_preserve_shift_width_before_stride_arithmetic() {
+    let rtl = r#"module picks(
+  input wire [1:0][7:0] words,
+  input wire shift,
+  output wire [7:0] word_out,
+  output wire bit_out
+);
+  assign word_out = words[1'b1 << shift];
+  assign bit_out = words[1'b1][1'b1 << shift];
+endmodule"#;
+    let module = compile_combo_module(rtl).unwrap();
+    let plan = plan_combo_eval(&module).unwrap();
+    let source = SourceText::new(rtl.to_string());
+    // Shifting a one-bit 1 by one produces a one-bit 0. Both the word
+    // selection (stride eight) and the bit selection (stride one) use it.
+    for (shift, word, bit) in [(0, 0xA6, 1), (1, 0xBC, 0)] {
+        let inputs = BTreeMap::from([
+            (
+                "words".to_string(),
+                Value4::from_u64(16, Signedness::Unsigned, 0xA6BC),
+            ),
+            (
+                "shift".to_string(),
+                Value4::from_u64(1, Signedness::Unsigned, shift),
+            ),
+        ]);
+        let plain = eval_combo(&module, &plan, &inputs).unwrap();
+        let mut seed = xlsynth_vastly::Env::new();
+        for (name, value) in inputs {
+            seed.insert(name, value);
+        }
+        let covered = eval_combo_seeded_with_coverage(
+            &module,
+            &plan,
+            &seed,
+            &source,
+            &mut CoverageCounters::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        for result in [plain, covered] {
+            assert_eq!(result["word_out"].to_u64_if_known(), Some(word));
+            assert_eq!(result["bit_out"].to_u64_if_known(), Some(bit));
+        }
+    }
+}
+
+#[test]
 fn oob_rhs_index_read_returns_x_for_packed_array() {
     let dut = r#"
 module oob_rhs_packed(
