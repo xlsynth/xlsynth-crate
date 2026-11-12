@@ -130,9 +130,10 @@ fn dslx_function_links_into_a_two_stage_pipeline() {
 fn hierarchy_accepts_registered_feedback_and_checks_combinational_feedback() {
     let source = r#"
 pub block accumulator(clk, step: u8) -> u8 {
-    inst cell: delay;
-    cell.d := cell.out + step;
-    cell.out
+    let d: u8;
+    let cell = delay(d);
+    d = cell + step;
+    cell
 }
 block delay(clk, d: u8) -> u8 {
     reg q: u8 = u8:0;
@@ -158,8 +159,9 @@ fn hierarchy_tracks_feedthrough_per_result_port() {
     let source = r#"
 struct Ports { saved: u8, live: u8 }
 pub block parent(clk, delta: u8) -> u8 {
-    inst lane: mixed;
-    lane.x := lane.saved + delta;
+    let x: u8;
+    let lane = mixed(x);
+    x = lane.saved + delta;
     lane.live
 }
 
@@ -179,8 +181,9 @@ fn match_tracks_feedthrough_per_reachable_result_field() {
     let source = r#"
 struct Ports { saved: u8, live: u8 }
 pub block parent(clk, delta: u8) -> u8 {
-    inst lane: mixed;
-    lane.x := lane.saved + delta;
+    let x: u8;
+    let lane = mixed(x);
+    x = lane.saved + delta;
     lane.live
 }
 block mixed(clk, x: u8) -> Ports {
@@ -856,7 +859,7 @@ fn register_struct_and_extern_bit_widths_match_dslx_annotations() {
             "fn echo(x: WIDTH) -> sN[65] { x } fn sample(x: sN[65]) -> sN[65] { echo(x) }",
         ),
         (
-            "extern block echo(clk, x: sN[65]) -> WIDTH; block sample(clk, x: sN[65]) -> sN[65] { inst e: echo; e.x := x; e.out }",
+            "extern block echo(clk, x: sN[65]) -> WIDTH; block sample(clk, x: sN[65]) -> sN[65] { let e = echo(x); e }",
             "fn echo(x: sN[65]) -> WIDTH { x } fn sample(x: sN[65]) -> sN[65] { echo(x) }",
         ),
     ] {

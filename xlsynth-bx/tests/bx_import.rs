@@ -533,11 +533,10 @@ use device::lanes;
 use device::lanes::{Sample, pack, BIAS};
 block circuit(clk, x: u8) -> (u8, u8, u8) {
     let first = lanes::stage(x);
-    inst second: lanes::stage;
-    second.x := first;
+    let second = lanes::stage(first);
     let p: Sample = pack(x);
     let q: lanes::Sample = Sample { value: BIAS + lanes::BIAS };
-    (second.out, p.value, q.value)
+    (second, p.value, q.value)
 }
 "#;
     let options = search_paths(&[root.path()]);
@@ -1379,11 +1378,6 @@ fn rebinding_a_block_formal_keeps_module_callees_hidden() -> Result<(), Box<dyn 
                 "child::op(x)",
                 "result: ",
                 "callable parameter 'child' may only be used as a callee",
-            ),
-            (
-                "inst i: child; i.x := x; i.out",
-                "",
-                "callable parameter 'child' requires a direct call",
             ),
         ] {
             let declarations = format!(

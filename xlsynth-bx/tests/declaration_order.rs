@@ -51,7 +51,6 @@ fn strict_modules_require_earlier_block_dependencies() -> Result<(), String> {
     let external_stage = "extern block step(clk, x: u8) -> u8;";
     let call = "block top(clk, x: u8) -> u8 { step(x) }";
     let child = "block top(clk, x: u8) -> u8 { let q = step(x); q }";
-    let instance = "block top(clk, x: u8) -> u8 { inst q: step; q.x := x; q.out }";
     let map = "block top(clk, x: u8[2]) -> u8[2] { map(x, step) }";
     let unused = "block generic<T>(clk, x: T, y: u8) -> T { let q = step(y); x }";
     let record = "struct Packet { data: u8 }";
@@ -60,8 +59,6 @@ fn strict_modules_require_earlier_block_dependencies() -> Result<(), String> {
         (external, call, "top", "step"),
         (stage, child, "top", "step"),
         (external_stage, child, "top", "step"),
-        (stage, instance, "top", "step"),
-        (external_stage, instance, "top", "step"),
         (helper, map, "top", "step"),
         (stage, unused, "generic", "step"),
         (

@@ -289,8 +289,8 @@ enum Local {
     Formal,
 }
 
-/// A direct call may be inspected in a skipped loop. Explicit instances
-/// and callback lists require a callable target during name checking.
+/// A direct call may be inspected in a skipped loop. Parametric and structural
+/// calls use their own callable-name resolution.
 #[derive(Clone, Copy, PartialEq)]
 enum CallSite {
     Direct,
@@ -730,8 +730,7 @@ impl<'a> Scope<'a> {
             .collect()
     }
 
-    /// Resolve a block body with explicit instances visible before their
-    /// statements.
+    /// Resolve each block binding in source order.
     fn block(&mut self, def: &Block) -> Result<Block, String> {
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
@@ -765,11 +764,6 @@ impl<'a> Scope<'a> {
         let params = self.params(&def.params, Local::Hardware)?;
         let result = self.ty(&def.result)?;
         self.region = DeclarationRegion::BlockBody;
-        for stmt in &def.statements {
-            if let Stmt::Inst { name, .. } = stmt {
-                self.bind_as(name, Local::Hardware);
-            }
-        }
         let statements = def
             .statements
             .iter()
@@ -837,15 +831,6 @@ impl<'a> Scope<'a> {
                 name: name.clone(),
                 value: self.expr(value)?,
             },
-            Stmt::Connect {
-                instance,
-                port,
-                value,
-            } => Stmt::Connect {
-                instance: instance.clone(),
-                port: port.clone(),
-                value: self.expr(value)?,
-            },
             Stmt::If { condition, body } => {
                 if self.guard_depth >= MAX_SYNTAX_DEPTH {
                     return Err(format!("BX import guard exceeds {MAX_SYNTAX_DEPTH} levels"));
@@ -860,10 +845,6 @@ impl<'a> Scope<'a> {
                 self.guard_depth -= 1;
                 Stmt::If { condition, body }
             }
-            Stmt::Inst { name, block } => Stmt::Inst {
-                name: name.clone(),
-                block: self.callee(block, CallSite::Structural)?,
-            },
         })
     }
 

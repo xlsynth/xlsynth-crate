@@ -283,19 +283,20 @@ fn a_projected_constant_can_initialize_a_register() -> Result<(), Box<dyn Error>
 }
 
 #[test]
-fn explicit_child_targets_resolve_before_subsequent_tuple_bindings() -> Result<(), String> {
+fn child_calls_resolve_before_subsequent_tuple_bindings() -> Result<(), String> {
     let source = r#"
         block child(clk) -> bool { true }
         block sample(clk, x:bool) -> bool {
-            inst cell: child;
+            let cell = child();
             let (child, _) = (x, x);
-            cell.out
+            cell
         }
     "#;
     check_module(&parse_module(source)?)?;
-    let later = source
-        .replace("inst cell: child;", "")
-        .replace("cell.out", "inst cell: child; cell.out");
+    let later = source.replace("let cell = child();", "").replace(
+        "            cell\n",
+        "            let cell = child(); cell\n",
+    );
     let error = check_module(&parse_module(&later)?).unwrap_err();
     assert!(
         error.contains("'child' names a local value here"),

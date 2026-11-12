@@ -83,42 +83,20 @@ pub block pipeline(clk, en: bool, x: u8) -> (bool, u16) {
 }
 
 #[test]
-fn two_call_bindings_create_the_same_hardware_as_two_explicit_instances() {
-    let child = r#"
+fn two_call_bindings_create_two_named_instances() {
+    let source = r#"
+pub block lanes(clk, x: u8, en: bool) -> (u8, u8) {
+    let a = delay(x, en);
+    let b = delay(x + u8:1, !en);
+    (a, b)
+}
 block delay(clk, x: u8, en: bool) -> u8 {
     reg q: u8 = 0;
     if en { q := x; }
     q
 }"#;
-    let signature = "pub block lanes(clk, x: u8, en: bool) -> (u8, u8)";
-    let calls = r#"{
-    let a = delay(x, en);
-    let b = delay(x + u8:1, !en);
-    (a, b)
-}"#;
-    let explicit = r#"{
-    inst a: delay;
-    inst b: delay;
-    a.x := x;
-    a.en := en;
-    b.x := x + u8:1;
-    b.en := !en;
-    (a.out, b.out)
-}"#;
-    let actual = compile(
-        &format!("{signature} {calls}\n{child}"),
-        empty_package("design"),
-        ResetBehavior::default(),
-    )
-    .unwrap();
-    let expected = compile(
-        &format!("{signature} {explicit}\n{child}"),
-        empty_package("design"),
-        ResetBehavior::default(),
-    )
-    .unwrap();
-    assert_eq!(actual.to_string(), expected.to_string());
-    let parent = actual.get_block("lanes").unwrap();
+    let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
+    let parent = package.get_block("lanes").unwrap();
     assert_eq!(
         parent
             .instantiations
@@ -127,8 +105,8 @@ block delay(clk, x: u8, en: bool) -> u8 {
             .collect::<Vec<_>>(),
         [("a", "delay"), ("b", "delay")]
     );
-    xlsynth::IrPackage::parse_ir(&actual.to_string(), None).unwrap();
-    emit_system_verilog(&actual, &BlockCodegenOptions::default()).unwrap();
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).unwrap();
+    emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
 }
 
 #[test]
@@ -142,15 +120,11 @@ pub block delay_array(clk, data: u8[4], enable: bool[4]) -> u8[4] {
 }
 
 block explicit_array(clk, data: u8[4], enable: bool[4]) -> u8[4] {
-    inst a: delay;
-    inst b: delay;
-    inst c: delay;
-    inst d: delay;
-    a.data := data[0]; a.enable := enable[0];
-    b.data := data[1]; b.enable := enable[1];
-    c.data := data[2]; c.enable := enable[2];
-    d.data := data[3]; d.enable := enable[3];
-    [a.out, b.out, c.out, d.out]
+    let a = delay(data[0], enable[0]);
+    let b = delay(data[1], enable[1]);
+    let c = delay(data[2], enable[2]);
+    let d = delay(data[3], enable[3]);
+    [a, b, c, d]
 }
 block delay(clk, data: u8, enable: bool) -> u8 {
     reg saved: u8 = 0;
@@ -273,12 +247,13 @@ fn unrolled_block_calls_reject_conditional_hardware_and_cycles() {
             "recursive block dependency",
         ),
         (
-            r#"inst loopback: echo;
+            r#"let next_value: u8;
+        let loopback = echo(next_value);
         let result = unroll_for! (_, a) in u32:0..u32:1 {
             let element = echo(a);
             element
-        }(loopback.out);
-        loopback.x := result;
+        }(loopback);
+        next_value = result;
         result"#,
             "combinational cycle",
         ),
@@ -503,7 +478,6 @@ fn block_calls_require_an_unconditional_binding_and_an_acyclic_hierarchy() {
         "block top(clk, x: u8) -> u8 { let q = delay(x, x); q }",
         "block top(clk, x: u8) -> u8 { let q: u16 = delay(x); x }",
         "block top(clk, x: u8) -> u8 { let q = top(x); q }",
-        "block top(clk, x: u8) -> u8 { let q = delay(x); q.d := x; q }",
     ] {
         let parsed = parse_module(&format!("{parent}\n{delay}")).unwrap();
         assert!(check_module(&parsed).is_err(), "{parent}");
