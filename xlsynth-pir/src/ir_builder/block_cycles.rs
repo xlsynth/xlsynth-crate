@@ -21,8 +21,8 @@ struct Hierarchy {
 ///
 /// Each distinct child block is checked once and summarized by the input ports
 /// reaching each output. Registers cut dependencies, so sequential feedback is
-/// permitted. Extern outputs conservatively depend on every wired input: the
-/// foreign function's IR body may be a stub, not the instantiated RTL's logic.
+/// permitted. Traversal stops at extern boundaries because the foreign
+/// function body can be a placeholder for separately supplied RTL.
 pub(super) fn verify_block_combinational_cycles(
     block: &Block,
     package: &Package,
@@ -131,11 +131,7 @@ impl Hierarchy {
                             edges.push(*connection);
                         }
                     }
-                    InstantiationKind::Extern => {
-                        if let Some(connected) = connected {
-                            edges.extend(connected.values().copied());
-                        }
-                    }
+                    InstantiationKind::Extern => {}
                 }
             }
             dependencies.push(edges);
@@ -493,10 +489,10 @@ top block parent(clk: clock, out: bits[8]) {
     }
 
     #[test]
-    fn extern_feedback_does_not_trust_a_constant_stub_body() {
+    fn extern_feedback_stops_at_boundary_even_with_passthrough_body() {
         let source = r#"package foreign_cycle
 fn foreign(x: bits[8] id=1) -> bits[8] {
-  ret stub: bits[8] = literal(value=0, id=2)
+  ret x: bits[8] = param(name=x, id=1)
 }
 top block parent(out: bits[8]) {
   instantiation external(foreign_function=foreign, kind=extern)
@@ -505,9 +501,6 @@ top block parent(out: bits[8]) {
   out: () = output_port(value, name=out, id=5)
 }
 "#;
-        assert!(matches!(
-            check(source),
-            Err(BuilderError::CombinationalCycle { .. })
-        ));
+        check(source).unwrap();
     }
 }

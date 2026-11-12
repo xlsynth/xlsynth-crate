@@ -122,9 +122,9 @@ declaration syntax, so extern builder tests use PIR verification and roundtrips,
 not upstream parsing. Other supported block forms are cross-checked with libxls.
 
 Package finalization checks combinational cycles through block instances, with
-registers as state boundaries. External bodies are opaque, so each external
-output conservatively depends on all connected inputs. A clocked child requires
-a parent clock, but their clock names need not match.
+registers as state boundaries. Traversal stops at extern boundaries because
+the implementing RTL is supplied separately. A clocked child requires a
+parent clock, but their clock names need not match.
 
 `build()` verifies a standalone block. `build_package(package_name)` additionally
 marks it as top in a one-block package. Calls and instances require
