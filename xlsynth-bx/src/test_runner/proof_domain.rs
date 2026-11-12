@@ -7,19 +7,18 @@ use xlsynth_pir::ir_builder::{BValue, BuilderError, FnBuilder};
 
 use super::quickcheck::Stimulus;
 use crate::ast::Param;
-use crate::check::MAX_TYPE_SIZE;
 
 pub(super) fn legal_stimulus(
     builder: &mut FnBuilder,
     params: &[Param],
     values: &[BValue],
     domains: &[Stimulus],
+    budget: &mut usize,
 ) -> Result<BValue, String> {
     let mut predicates = Vec::new();
-    let mut budget = MAX_TYPE_SIZE;
     for ((param, &value), domain) in params.iter().zip(values).zip(domains) {
         domain
-            .emit_membership(builder, &[value], &mut predicates, &mut budget)
+            .emit_membership(builder, &[value], &mut predicates, budget)
             .map_err(|e| format!("QuickCheck parameter '{}': {e}", param.name))?;
     }
     match predicates.as_slice() {

@@ -17,7 +17,7 @@ use xlsynth_pir::{
     RegisterWriteOptions, ResetBehavior,
 };
 
-use crate::ast::{BinaryOp, Param, StructDef, Type, UnaryOp};
+use crate::ast::{BinaryOp, Param, Type, UnaryOp};
 use crate::bx_import::library_item;
 use crate::check::{
     CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr, TypedExprKind,
@@ -218,7 +218,7 @@ fn lower_checked_module(
             budget,
         );
         let (builder, sources) = body
-            .build_block(block, &block_symbols, &module.structs, reset)
+            .build_block(block, &block_symbols, reset)
             .map_err(|error| format!("block '{}': {error}", block.name))?;
         destination.batch.append_block(builder).map_err(|error| {
             sources.render(&error, block, ir_block).map_or_else(
@@ -812,7 +812,6 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
         mut self,
         block: &CheckedBlock,
         symbols: &BlockSymbols,
-        structs: &[StructDef],
         reset_behavior: ResetBehavior,
     ) -> Result<(BlockBuilder, CycleSources), BuilderError> {
         let mut resources = BlockResources::default();
@@ -847,7 +846,7 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
             }
         }
         self.wire_statements(&block.statements, &mut resources, reset, None)?;
-        let ports = output_ports(&block.result, structs).map_err(BuilderError::InvalidOperation)?;
+        let ports = &block.output_ports;
         if let TypedExprKind::Tuple(fields) = &block.output.kind {
             // Drive fields separately to preserve their feedback dependencies.
             for (port, field) in ports.iter().zip(fields) {

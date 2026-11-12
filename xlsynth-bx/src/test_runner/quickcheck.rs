@@ -60,7 +60,7 @@ impl Stimulus {
             .collect()
     }
 
-    fn new(ty: &Type, ir: &IrType, module: &CheckedModule) -> Result<Self, String> {
+    pub(super) fn new(ty: &Type, ir: &IrType, module: &CheckedModule) -> Result<Self, String> {
         let tuple = |types: Vec<&Type>| -> Result<Self, String> {
             let IrType::Tuple(fields) = ir else {
                 return Err(format!("expected tuple layout for {ty}"));
@@ -113,7 +113,7 @@ impl Stimulus {
         }
     }
 
-    fn draw(&self, rng: &mut Pcg64Mcg) -> Result<IrValue, String> {
+    pub(super) fn draw(&self, rng: &mut Pcg64Mcg) -> Result<IrValue, String> {
         match self {
             Self::Uniform(ty) => Ok(generate_uniform_value_with_rng(rng, ty)),
             Self::Enum(values) => Ok(IrValue::Bits(
@@ -141,7 +141,7 @@ impl Stimulus {
 
 /// A prepared PIR transition evaluated with persistent drives and simultaneous
 /// register updates.
-struct PirCircuit<'a> {
+pub(super) struct PirCircuit<'a> {
     package: &'a Package,
     transition: BlockTransition,
     inputs: BTreeMap<String, usize>,
@@ -153,6 +153,10 @@ struct PirCircuit<'a> {
 impl<'a> PirCircuit<'a> {
     fn new(package: &'a Package, top: &str) -> Result<Self, String> {
         let transition = lower_block_transition(package, top)?;
+        Ok(Self::from_transition(package, transition))
+    }
+
+    pub(super) fn from_transition(package: &'a Package, transition: BlockTransition) -> Self {
         let inputs = transition
             .inputs
             .iter()
@@ -164,17 +168,17 @@ impl<'a> PirCircuit<'a> {
             .iter()
             .map(|p| zero_ir_value_for_type(&p.ty))
             .collect();
-        Ok(Self {
+        Self {
             package,
             transition,
             inputs,
             args,
             settled: None,
             expressions: HashMap::new(),
-        })
+        }
     }
 
-    fn reset_trial(&mut self, state: &BTreeMap<String, IrValue>) {
+    pub(super) fn reset_trial(&mut self, state: &BTreeMap<String, IrValue>) {
         self.args.clear();
         self.args.extend(
             self.transition
@@ -270,9 +274,9 @@ impl<'a> PirCircuit<'a> {
 
 /// Drive the two concrete engines in lockstep and compare each sampled
 /// expression.
-struct Concrete<'a, 'p> {
-    pir: &'a mut PirCircuit<'p>,
-    rtl: Option<&'a mut Simulation>,
+pub(super) struct Concrete<'a, 'p> {
+    pub(super) pir: &'a mut PirCircuit<'p>,
+    pub(super) rtl: Option<&'a mut Simulation>,
 }
 
 impl ClockedHarness for Concrete<'_, '_> {
@@ -458,27 +462,11 @@ impl Trial<'_> {
             report.passed += 1;
             return None;
         };
-        let first = match &failure.error {
-            ExecutionError::Assertion(_) => {
-                report.failed += 1;
-                &mut report.first_false
-            }
-            ExecutionError::Unknown(_) => {
-                report.indeterminate += 1;
-                &mut report.first_indeterminate
-            }
-            ExecutionError::Runtime(_) => {
-                return Some(self.witness(path, origin, &failure, true, |trace| {
-                    self.execute_from_x(sim, Some(trace))
-                }));
-            }
-        };
-        first.get_or_insert_with(|| {
+        report.record_failure(&failure.error, || {
             self.witness(path, origin, &failure, true, |trace| {
                 self.execute_from_x(sim, Some(trace))
             })
-        });
-        None
+        })
     }
 }
 

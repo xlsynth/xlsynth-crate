@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{BUILTIN_MAP, Binding, Names, ParametricKind, ReferenceKind, ZeroBinding};
 use crate::ast::{
     BindingPattern, Block, CallbackParam, ConstDef, EnumDef, EnumMember, Expr, ExternBlock,
-    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature, Stmt, StructDef,
-    StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
+    ExternFn, ForIterable, ForLoop, Function, FunctionParametricRef, InvariantDecl, LetBinding,
+    MapExpr, MatchArm, MatchPattern, Module, Param, ParametricBinding, QuickCheckSignature, Stmt,
+    StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
     WidthSliceType,
 };
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
@@ -217,6 +217,26 @@ pub(super) fn qualify_tests(module: &Module, names: &Names) -> Result<Vec<TestDe
                 quickcheck,
                 statements: scope.test_body(&test.statements, 0)?,
                 overwritten_literal_types: test.overwritten_literal_types.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Resolve root property circuits without introducing their names as callees.
+pub(super) fn qualify_invariants(
+    module: &Module,
+    names: &Names,
+) -> Result<Vec<InvariantDecl>, String> {
+    let hardware = hardware_callees(module);
+    module
+        .invariants
+        .iter()
+        .map(|i| {
+            Ok(InvariantDecl {
+                block: qualify_block(&i.block, names, &hardware)?,
+                position: i.position,
+                lemmas: i.lemmas.clone(),
+                overwritten_literal_types: i.overwritten_literal_types.clone(),
             })
         })
         .collect()

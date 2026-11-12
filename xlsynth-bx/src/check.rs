@@ -13,8 +13,8 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::ImportOptions;
 use crate::ast::{
     BinaryOp, Block, CallbackParam, Expr, ExternBlock, ExternFn, Function, FunctionParametricRef,
-    LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan, Stmt, StructDef,
-    StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
+    InvariantDecl, InvariantLemma, LetBinding, MatchArm, MatchPattern, Module, Param, SourceSpan,
+    Stmt, StructDef, StructLiteralArgs, StructSplat, Type, UnaryOp, WidthSliceType,
 };
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::{
@@ -359,6 +359,14 @@ struct BlockSpecialization<'m> {
     path: Vec<&'m str>,
 }
 
+/// A concrete block can have a private verification-only interface. A
+/// specialization also supplies type, value, and callback bindings.
+enum BlockDefinition<'a, 'm> {
+    Concrete(&'m Block, &'a BlockInterface),
+    Invariant(&'m InvariantDecl, &'a BlockInterface),
+    Specialized(&'a BlockSpecialization<'m>),
+}
+
 /// Required dimensions and reset constants retain their own counted-loop
 /// evaluation allowance when speculative propagation exhausts its allowance.
 struct ConstantBudgets {
@@ -541,6 +549,7 @@ impl<'m> BlockSpecializations<'m> {
             params,
             result,
             types.structs,
+            None,
         )?;
         if charge_signature {
             self.expansion_work = self
@@ -1336,7 +1345,7 @@ impl<'a> Declarations<'a> {
         result: Type,
         structs: &StructTable,
     ) -> Result<(), String> {
-        let interface = BlockInterface::new(clock, reset, params, result, structs)?;
+        let interface = BlockInterface::new(clock, reset, params, result, structs, None)?;
         self.blocks.insert(name, interface);
         Ok(())
     }
@@ -1350,8 +1359,17 @@ impl BlockInterface {
         params: Vec<Param>,
         result: Type,
         structs: &StructTable,
+        private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<Self, String> {
-        let layout = Self::check_ports(clock, reset, &params, &result, structs, None)?;
+        let layout = Self::check_ports(
+            clock,
+            reset,
+            &params,
+            &result,
+            structs,
+            None,
+            private_outputs,
+        )?;
         Ok(Self {
             params,
             result,
@@ -1370,6 +1388,7 @@ impl BlockInterface {
         result: &Type,
         structs: &StructTable,
         parameters: Option<&Bindings>,
+        private_outputs: Option<&BTreeSet<String>>,
     ) -> Result<BlockPortLayout, String> {
         let mut ports = BTreeSet::new();
         declare(&mut ports, clock)?;
@@ -1394,7 +1413,7 @@ impl BlockInterface {
                 type_nodes,
             });
         }
-        let outputs = if let Type::TypeApplied { name, .. } = result {
+        let mut outputs = if let Type::TypeApplied { name, .. } = result {
             structs
                 .template(name)
                 .ok_or_else(|| unknown_declaration("struct", name))?
@@ -1403,7 +1422,12 @@ impl BlockInterface {
         } else {
             output_ports(result, &structs.definitions)?
         };
-        for output in &outputs {
+        for output in &mut outputs {
+            if let Some(reserved) = private_outputs {
+                while reserved.contains(&output.name) {
+                    output.name.push('_');
+                }
+            }
             if !xlsynth_pir::ir_builder::is_valid_identifier(&output.name) {
                 return Err(format!(
                     "output port '{}' is not a valid XLS IR identifier",
@@ -1881,12 +1905,18 @@ pub(crate) fn check_sources_with_tests(
         declare(&mut names, name)?;
     }
     let mut harness_names = Vec::new();
+    let mut invariant_harnesses = Vec::new();
     if let Some(suite) = &mut tests {
         suite.reserve_names(&names);
         for test in &module.tests {
             let harness = suite.harness_name(&test.name);
             names.insert(harness.clone());
             harness_names.push(harness);
+        }
+        for property in &module.invariants {
+            let harness = suite.harness_name(&property.block.name);
+            names.insert(harness.clone());
+            invariant_harnesses.push(harness);
         }
     }
     let mut function_registry = FunctionSpecializations::new(names.clone());
@@ -2017,11 +2047,10 @@ pub(crate) fn check_sources_with_tests(
     for block in module.blocks.iter().filter(|b| !b.is_parametric()) {
         let body = BodyChecker::check_block(
             &declarations,
-            block,
+            BlockDefinition::Concrete(block, &declarations.blocks[block.name.as_str()]),
             &mut resolver,
             &mut structs,
             &mut specializations,
-            None,
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}': {e}", block.name))?;
@@ -2054,16 +2083,66 @@ pub(crate) fn check_sources_with_tests(
             }
             checker.check_test(test, harness, suite, &mut test_functions, &mut checked)?;
         }
+        for (property, harness) in module.invariants.iter().zip(invariant_harnesses) {
+            let block = &property.block;
+            let (params, result) = resolve_signature(
+                &block.params,
+                &block.result,
+                std::iter::once(&block.clock).chain(&block.reset),
+                None,
+                declarations.module_dimensions(&block.name),
+                &mut TypeResolver {
+                    resolver: &mut resolver,
+                    structs: &mut structs,
+                    functions: Some(&mut function_registry),
+                },
+            )?;
+            if bits(&result) != Some((false, 1)) {
+                return Err(format!(
+                    "invariant '{}' must return bool, got {result}",
+                    block.name
+                ));
+            }
+            let mut fields = vec![result];
+            fields.resize(property.lemmas.len() + 1, Type::Bool);
+            structs.update_imports(&resolver)?;
+            let interface = BlockInterface::new(
+                &block.clock,
+                block.reset.as_deref(),
+                params,
+                Type::Tuple(fields),
+                &structs,
+                Some(&block_binding_names(block)),
+            )?;
+            let mut body = BodyChecker::check_block(
+                &declarations,
+                BlockDefinition::Invariant(property, &interface),
+                &mut resolver,
+                &mut structs,
+                &mut specializations,
+                &mut function_registry,
+            )
+            .map_err(|e| format!("invariant '{}': {e}", block.name))?
+            .block;
+            body.name.clone_from(&harness);
+            suite.invariants.push(crate::test_runner::InvariantProgram {
+                name: block.name.clone(),
+                position: property.position,
+                harness,
+                params: body.params.clone(),
+                lemmas: property.lemmas.clone(),
+            });
+            checked.push(body);
+        }
     }
     let mut specialized_blocks = BTreeSet::new();
     while let Some(spec) = specializations.pending.pop_front() {
         let block = BodyChecker::check_block(
             &declarations,
-            spec.block,
+            BlockDefinition::Specialized(&spec),
             &mut resolver,
             &mut structs,
             &mut specializations,
-            Some(&spec),
             &mut function_registry,
         )
         .map_err(|e| format!("block '{}' ({}): {e}", spec.block.name, spec.name))?;
@@ -2150,6 +2229,35 @@ pub(crate) fn check_sources_with_tests(
         resolver.finish()?
     };
     Ok(checked)
+}
+
+/// Reserve source bindings before allocating instance or observation port
+/// names.
+fn block_binding_names(block: &Block) -> BTreeSet<String> {
+    let mut names: BTreeSet<_> = std::iter::once(&block.clock)
+        .chain(&block.reset)
+        .chain(block.params.iter().map(|p| &p.name))
+        .cloned()
+        .collect();
+    let mut pending: Vec<_> = block.statements.iter().collect();
+    while let Some(statement) = pending.pop() {
+        match statement {
+            Stmt::Reg { name, .. }
+            | Stmt::Let { name, .. }
+            | Stmt::Wire { name, .. }
+            | Stmt::Inst { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::LetPattern(binding) => {
+                binding.pattern.visit_names(&mut |name| {
+                    names.insert(name.to_owned());
+                });
+            }
+            Stmt::If { body, .. } => pending.extend(body),
+            _ => { /* Drivers introduce no local bindings. */ }
+        }
+    }
+    names
 }
 
 /// Controls which declarations and bindings are available in a BX body.
@@ -2572,44 +2680,26 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// expressions.
     fn check_block(
         decls: &'a Declarations<'m>,
-        block: &'m Block,
+        definition: BlockDefinition<'a, 'm>,
         resolver: &'a mut ImportResolver,
         structs: &'a mut StructTable<'m>,
         specializations: &'a mut BlockSpecializations<'m>,
-        specialization: Option<&'a BlockSpecialization<'m>>,
         function_registry: &'a mut FunctionSpecializations<'m>,
     ) -> Result<BlockBody, String> {
-        let interface = match specialization {
-            Some(spec) => &spec.interface,
-            None => &decls.blocks[block.name.as_str()],
+        let (block, interface, specialization, invariant) = match definition {
+            BlockDefinition::Concrete(block, interface) => (block, interface, None, None),
+            BlockDefinition::Invariant(property, interface) => {
+                (&property.block, interface, None, Some(property))
+            }
+            BlockDefinition::Specialized(spec) => (spec.block, &spec.interface, Some(spec), None),
         };
         let outputs = interface
             .outputs
             .iter()
             .map(|p| p.name.clone())
             .collect::<BTreeSet<_>>();
-        // Generated names must avoid future declarations as well as visible
-        // ones.
-        let mut reserved_hardware_names = outputs.clone();
-        reserved_hardware_names.insert(block.clock.clone());
-        reserved_hardware_names.extend(block.reset.iter().cloned());
-        reserved_hardware_names.extend(block.params.iter().map(|p| p.name.clone()));
-        for statement in &block.statements {
-            match statement {
-                Stmt::Reg { name, .. }
-                | Stmt::Let { name, .. }
-                | Stmt::Wire { name, .. }
-                | Stmt::Inst { name, .. } => {
-                    reserved_hardware_names.insert(name.clone());
-                }
-                Stmt::LetPattern(binding) => {
-                    binding.pattern.visit_names(&mut |name| {
-                        reserved_hardware_names.insert(name.to_owned());
-                    });
-                }
-                _ => { /* Drivers and guards introduce no top-level names. */ }
-            }
-        }
+        let mut reserved_hardware_names = block_binding_names(block);
+        reserved_hardware_names.extend(outputs.iter().cloned());
         let mut c = Self::new(
             decls,
             resolver,
@@ -2705,9 +2795,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             }
         }
         c.statement_span = block.source.as_ref().map(|source| source.output);
-        let output = c
-            .scoped_result(&block.output, Some(&interface.result), true)
+        // The source predicate is a structural block result, even though the
+        // verification harness subsequently bundles it with the lemmas.
+        let result = if invariant.is_some() {
+            &interface.outputs[0].ty
+        } else {
+            &interface.result
+        };
+        let main = c
+            .scoped_result(&block.output, Some(result), true)
             .map_err(|e| format!("result: {e}"))?;
+        let output = if let Some(property) = invariant {
+            let mut observations = vec![main];
+            for index in 0..property.lemmas.len() {
+                let value = Expr::Name(InvariantLemma::observation_name(index));
+                observations.push(c.expr(&value, Some(&Type::Bool))?);
+            }
+            TypedExpr {
+                ty: interface.result.clone(),
+                kind: K::Tuple(observations),
+            }
+        } else {
+            main
+        };
         let requires_hardware = !c.regs.is_empty() || c.uses_child.get();
         let mut block = CheckedBlock {
             name: specialization.map_or(&block.name, |s| &s.name).clone(),
@@ -2719,12 +2829,25 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             params: interface.params.clone(),
             input_cycles: block.input_cycles.clone(),
             result: interface.result.clone(),
+            output_ports: interface.outputs.clone(),
             output_cycles: block.output_cycles.clone(),
             timing_error: None,
             statements: c.statements,
             output,
         };
-        let timing = timing::check_outputs(&block, &interface.outputs, &c.outputs, c.structs);
+        let timing = if invariant.is_some() {
+            // Only the source 'out' port has a user-specified timing contract.
+            timing::check_outputs(
+                &block,
+                &[Param {
+                    name: "out".to_owned(),
+                    ty: Type::Bool,
+                }],
+                c.structs,
+            )
+        } else {
+            timing::check_outputs(&block, &interface.outputs, c.structs)
+        };
         if c.wires.is_empty() {
             timing?;
         } else {

@@ -14,10 +14,10 @@ use xlsynth_pir::{IrBits, IrValue};
 use crate::BxWarningKind;
 use crate::ast::{
     BinaryOp, BindingPattern, Block, BlockSource, CallbackParam, ConstDef, EnumDef, EnumMember,
-    Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, LetBinding, MapExpr, MatchArm,
-    MatchPattern, Module, OutputCycles, Param, ParametricBinding, SourceFile, SourcePosition,
-    SourceSpan, Stmt, StructDef, StructSplat, Type, TypeAlias, UnaryOp, UnrollFor, UsePath,
-    WidthSliceType,
+    Expr, ExternBlock, ExternFn, ForIterable, ForLoop, Function, InvariantDecl, InvariantLemma,
+    LetBinding, MapExpr, MatchArm, MatchPattern, Module, OutputCycles, Param, ParametricBinding,
+    SourceFile, SourcePosition, SourceSpan, Stmt, StructDef, StructSplat, Type, TypeAlias, UnaryOp,
+    UnrollFor, UsePath, WidthSliceType,
 };
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
@@ -355,6 +355,7 @@ enum Dialect {
 /// handling.
 enum DeclarationAttributes {
     Test { quickcheck: bool },
+    Invariant,
     Warnings(BTreeSet<BxWarningKind>),
 }
 
@@ -956,7 +957,7 @@ impl<'s> Parser<'s> {
                 "}" => depth = depth.saturating_sub(1),
                 "#" if depth == 0
                     && self.peek(0) == "["
-                    && matches!(self.peek(1), "test" | "quickcheck")
+                    && matches!(self.peek(1), "test" | "quickcheck" | "invariant")
                     && self.peek(2) == "]"
                     && matches!(self.peek(3), "fn" | "block") =>
                 {
@@ -1039,6 +1040,35 @@ impl<'s> Parser<'s> {
                     module.tests.push(test);
                     continue;
                 }
+                DeclarationAttributes::Invariant => {
+                    if !self.eat("block") {
+                        return Err(self.error("expected private block after #[invariant]"));
+                    }
+                    let position = self.position_at(self.tokens[self.pos].start);
+                    let mut lemmas = Vec::new();
+                    let block = self.with_name_scope(|p| {
+                        p.block(false, position, BTreeSet::new(), Some(&mut lemmas))
+                    })?;
+                    let mut labels = HashSet::new();
+                    for lemma in &lemmas {
+                        if !labels.insert(&lemma.name) {
+                            return Err(format!(
+                                "{}:{}: duplicate lemma '{}'",
+                                lemma.position.line, lemma.position.column, lemma.name
+                            ));
+                        }
+                    }
+                    module.declaration_order.push(block.name.clone());
+                    module.invariants.push(InvariantDecl {
+                        block,
+                        position,
+                        lemmas,
+                        overwritten_literal_types: std::mem::take(
+                            &mut self.overwritten_literal_types,
+                        ),
+                    });
+                    continue;
+                }
                 DeclarationAttributes::Warnings(warnings) => warnings,
             };
             if self.peek(0).is_empty() && allowed_warnings.is_empty() {
@@ -1050,7 +1080,12 @@ impl<'s> Parser<'s> {
                 let name_offset = self.tokens[self.pos].start;
                 let position = self.position_at(name_offset);
                 let block = self.with_name_scope(|p| {
-                    p.block(public, position, std::mem::take(&mut allowed_warnings))
+                    p.block(
+                        public,
+                        position,
+                        std::mem::take(&mut allowed_warnings),
+                        None,
+                    )
                 })?;
                 module.declaration_order.push(block.name.clone());
                 module.blocks.push(block);
@@ -1155,19 +1190,25 @@ impl<'s> Parser<'s> {
                     .cloned(),
             );
         }
-        if !module.tests.is_empty() {
+        if !module.tests.is_empty() || !module.invariants.is_empty() {
             let test_positions: BTreeMap<_, _> = module
                 .tests
                 .iter()
-                .map(|t| (t.name.as_str(), t.position))
+                .map(|t| (t.name.as_str(), ("test", t.position)))
+                .chain(
+                    module
+                        .invariants
+                        .iter()
+                        .map(|i| (i.block.name.as_str(), ("invariant", i.position))),
+                )
                 .collect();
             let mut seen = HashSet::new();
             for name in &module.declaration_order {
-                if let Some(position) = test_positions.get(name.as_str())
+                if let Some((kind, position)) = test_positions.get(name.as_str())
                     && !seen.insert(name)
                 {
                     return Err(format!(
-                        "{}:{}: duplicate declaration for BX test '{name}'",
+                        "{}:{}: duplicate declaration for BX {kind} '{name}'",
                         position.line, position.column
                     ));
                 }
@@ -1204,12 +1245,15 @@ impl<'s> Parser<'s> {
             if matches!(name, "require_block_timing" | "require_define_before_use") {
                 return Err(self.error(&format!("use #![{name}] at module scope")));
             }
-            if matches!(name, "test" | "quickcheck") {
+            if matches!(name, "test" | "quickcheck" | "invariant") {
                 self.pos += 1;
                 if !allowed.is_empty() {
                     return Err(self.error("BX warning allowances apply to hardware declarations"));
                 }
                 self.expect("]")?;
+                if name == "invariant" {
+                    return Ok(DeclarationAttributes::Invariant);
+                }
                 return Ok(DeclarationAttributes::Test {
                     quickcheck: name == "quickcheck",
                 });
@@ -1812,8 +1856,12 @@ impl<'s> Parser<'s> {
         public: bool,
         name_position: SourcePosition,
         allowed_warnings: BTreeSet<BxWarningKind>,
+        lemmas: Option<&mut Vec<InvariantLemma>>,
     ) -> Result<Block, String> {
         let name = self.ident()?;
+        if lemmas.is_some() && self.peek(0) == "<" {
+            return Err(self.error("BX invariants cannot have parametric bindings"));
+        }
         let params = self.block_parametrics()?;
         let mut input_cycles = BTreeMap::new();
         let signature = self.block_signature(name, |parser| {
@@ -1823,9 +1871,28 @@ impl<'s> Parser<'s> {
             }
             Ok(param)
         })?;
+        if lemmas.is_some()
+            && crate::typed::bits(&signature.result) != Some((false, 1))
+            && !matches!(
+                signature.result,
+                Type::Named(_) | Type::ParametricBits { .. }
+            )
+        {
+            return Err(diagnostic(
+                self.source,
+                self.tokens[self.pos - 1].start,
+                &format!(
+                    "BX invariant blocks must return bool, got {}",
+                    signature.result
+                ),
+            ));
+        }
         let output_cycles = self.output_cycles()?;
         self.expect("{")?;
-        self.bind_local_name(&signature.name);
+        if lemmas.is_none() {
+            // Only a design block introduces a callable hardware name.
+            self.bind_local_name(&signature.name);
+        }
         for name in &params.type_params {
             self.shadow_callable(name);
         }
@@ -1843,7 +1910,7 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         self.dependent_types = !params.value_parametrics.is_empty();
-        let body = self.body()?;
+        let body = self.with_name_scope(|p| p.block_body_contents(lemmas))?;
         self.dependent_types = false;
         self.type_params.clear();
         let (output, output_span) = body
@@ -2259,10 +2326,13 @@ impl<'s> Parser<'s> {
 
     /// Read declarations and updates followed by an optional trailing value.
     fn body(&mut self) -> Result<Body, String> {
-        self.with_name_scope(Self::block_body_contents)
+        self.with_name_scope(|p| p.block_body_contents(None))
     }
 
-    fn block_body_contents(&mut self) -> Result<Body, String> {
+    fn block_body_contents(
+        &mut self,
+        mut lemmas: Option<&mut Vec<InvariantLemma>>,
+    ) -> Result<Body, String> {
         let mut statements = Vec::new();
         let mut statement_spans = Vec::new();
         while !self.eat("}") {
@@ -2283,6 +2353,31 @@ impl<'s> Parser<'s> {
                     ty: param.ty,
                     reset,
                 });
+            } else if self.peek(0) == "#" && self.peek(1) == "[" && self.peek(2) == "lemma" {
+                self.pos += 3;
+                self.expect("]")?;
+                let lemmas = lemmas.as_deref_mut().ok_or_else(|| {
+                    self.error("#[lemma] requires the top level of an #[invariant] block")
+                })?;
+                self.expect("let")?;
+                let position = self.position_at(self.tokens[self.pos].start);
+                let (mut statement, _) = self.let_stmt(false)?;
+                let Stmt::Let { name, ty, .. } = &mut statement else {
+                    return Err(self.error("#[lemma] requires a single named let binding"));
+                };
+                ty.get_or_insert(Type::Bool);
+                let observation = Stmt::Let {
+                    name: InvariantLemma::observation_name(lemmas.len()),
+                    ty: Some(Type::Bool),
+                    value: Expr::Name(name.clone()),
+                };
+                lemmas.push(InvariantLemma {
+                    name: name.clone(),
+                    position,
+                });
+                statements.push(statement);
+                statement_spans.push(self.span_since(start));
+                statements.push(observation);
             } else if self.eat("let") {
                 statements.push(self.let_stmt(/* allow_wire= */ true)?.0);
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {

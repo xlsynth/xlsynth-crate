@@ -682,6 +682,75 @@ are currently unsupported. A solver counterexample is replayed through the
 concrete BX runner to report the failing observation, clock edge, and stimulus
 trace. The proof covers the edges executed by the property.
 
+### Clocked invariants and helper lemmas
+
+A private `#[invariant]` block defines a Boolean predicate. Its trailing
+`bool` is the observation for the current cycle. Declaring it a **clocked
+invariant** claims that the predicate stays true forever, on every sampled
+cycle of every legal execution. One reachable cycle where the block returns
+`false` disproves the invariant.
+
+BX creates the block's registers and child instances once. The runner
+supplies the clock edges. On each cycle it drives fresh inputs, samples the
+predicate and any lemmas against the current register values, then clocks
+the `:=` updates together. A register read in the trailing expression sees
+the current value even if an update appears earlier in the source.
+
+All instances in the harness share one clock. To model different logical
+rates, give the slower machine a clock enable. A register updated with
+`if enable { q := next; }` holds its value on disabled edges. The invariant
+block still produces an observation every cycle. For a property that checks
+data only when valid, its trailing expression can be `!valid || data == expected`.
+
+Use an ordinary register update to model a reference implementation alongside
+the DUT. For example, these two parity machines have different state widths.
+
+```text
+#[invariant]
+block parity_equivalent(clk, rst, toggle: bool) -> bool {
+    reg lhs: u2 = u2:0;
+    reg rhs: bool = false;
+    #[lemma]
+    let lhs_is_live = lhs < u2:2;
+
+    if toggle {
+        if lhs_is_live { lhs := lhs ^ u2:1; }
+        rhs := !rhs;
+    }
+    (lhs == u2:1) == rhs
+}
+```
+
+For a block declaring `rst`, the first sample follows one asserted synchronous
+reset edge. The state before that edge is arbitrary. The checker executes the
+reset edge with legal data inputs, so a register without a reset value follows its ordinary update or
+retains its arbitrary value. Subsequent sampled edges may assert reset again.
+A clock-only invariant starts sampling directly from arbitrary register state.
+
+Mark a top-level Boolean binding with `#[lemma]` to give the prover a helper
+invariant. The binding remains an ordinary value in the circuit. Here a dead
+left state could appear to agree with the right machine for arbitrarily many
+idle cycles. Proving `lhs_is_live` excludes that state from the induction step.
+The engine checks that all helpers hold from reset and proves their conjunction
+is preserved before using it in the proof of the trailing Boolean.
+
+```shell
+xlsynth-driver bx-test parity.bx --seed 42 --invariant-cycles 16
+xlsynth-driver bx-prove-invariant parity.bx --mode=bmc --max-depth 16
+xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
+```
+
+Concrete trials and bounded proofs check the helpers and the trailing Boolean
+on every sampled cycle. A reachable failure identifies the failing predicate
+and the stimulus trace. An induction step that remains open at the depth limit
+is inconclusive. The word-level proof has the same linked-IR operation limits
+as bounded clocked QuickChecks.
+
+For runnable observational equivalence proofs, see the widened accumulator,
+binary versus one-hot detector, and parity machine with an unreachable state.
+Each harness imports the two DSLX step functions and compares their outputs
+on a shared input stream. [Observational equivalence case studies](../xlsynth-driver/examples/bx-observational-equivalence/README.md)
+
 ## Compile and link
 
 Use `parse_module` to inspect BX syntax without reading imports. For a source file with library imports, `parse_module_with_options` uses the exported signatures to distinguish multi-callback template calls from comma-separated comparisons. Pass the parsed module and the same search paths to `check_module_with_options` to inspect its checked declarations. The checker resolves BX and DSLX module imports and accepts signatures for prelinked externs. Pass the checked result to `lower_module`, or use `compile` for all three stages. Supply a PIR package containing your externs, or `empty_package("design")` when all calls use local definitions or imports.

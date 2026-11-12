@@ -649,6 +649,13 @@ impl<'a> Graph<'a> {
                 .chain(source.blocks.iter().map(|d| (&d.name, true)))
                 .chain(
                     source
+                        .invariants
+                        .iter()
+                        .filter(|_| names.subject.is_none())
+                        .map(|i| (&i.block.name, true)),
+                )
+                .chain(
+                    source
                         .tests
                         .iter()
                         .filter(|_| names.subject.is_none())
@@ -777,8 +784,10 @@ impl<'a> Graph<'a> {
             }
             if include_tests {
                 let tests = names::qualify_tests(root, &names)?;
+                let invariants = names::qualify_invariants(root, &names)?;
                 if linked {
                     self.linked.module.tests = tests;
+                    self.linked.module.invariants = invariants;
                 }
             }
             self.declaration_orders.extend(names.order);
@@ -850,11 +859,21 @@ fn read_root<'a>(
     let mut graph = Graph::new(options);
     let (mut module, bindings) = graph.parse_root(source)?;
     if include_tests {
-        for test in &module.tests {
-            if !test.overwritten_literal_types.is_empty() {
+        for (name, types) in module
+            .tests
+            .iter()
+            .map(|t| (&t.name, &t.overwritten_literal_types))
+            .chain(
+                module
+                    .invariants
+                    .iter()
+                    .map(|i| (&i.block.name, &i.overwritten_literal_types)),
+            )
+        {
+            if !types.is_empty() {
                 module
                     .overwritten_literal_types
-                    .insert(test.name.clone(), test.overwritten_literal_types.clone());
+                    .insert(name.clone(), types.clone());
             }
         }
     }

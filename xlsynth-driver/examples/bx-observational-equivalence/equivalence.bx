@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use add_vs_widening;
+use binary_vs_one_hot_latched_detector;
+use unreachable_state_elimination;
+
+#[invariant]
+block widened_accumulator(clk, rst, i: u8) -> bool {
+    reg narrow: u8 = u8:0;
+    reg wide: u16 = u16:0;
+    let (a, next_narrow) = add_vs_widening::f(i, narrow);
+    let (b, next_wide) = add_vs_widening::g(i, wide);
+    narrow := next_narrow;
+    wide := next_wide;
+    a == b
+}
+
+#[invariant]
+block latched_detector(clk, rst, i: u1) -> bool {
+    reg binary: u2 = u2:0;
+    reg one_hot: u4 = u4:0b0001;
+    let (a, next_binary) = binary_vs_one_hot_latched_detector::f(i, binary);
+    let (b, next_one_hot) = binary_vs_one_hot_latched_detector::g(i, one_hot);
+    binary := next_binary;
+    one_hot := next_one_hot;
+    a == b
+}
+
+#[invariant]
+block parity(clk, rst, i: u1) -> bool {
+    reg lhs: u2 = u2:0;
+    reg rhs: u1 = u1:0;
+    #[lemma]
+    let lhs_is_live = lhs < u2:2;
+    let (a, next_lhs) = unreachable_state_elimination::f(i, lhs);
+    let (b, next_rhs) = unreachable_state_elimination::g(i, rhs);
+    lhs := next_lhs;
+    rhs := next_rhs;
+    a == b
+}
