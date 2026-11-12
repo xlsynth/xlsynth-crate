@@ -5,6 +5,7 @@ use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 use crate::ast::{Block, BlockStages, ConstDef, Expr, Type};
 use crate::dslx_import::ImportResolver;
 use crate::infer_literal::has_implicit_constant_type;
+use crate::typed::bits;
 
 use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
 
@@ -64,7 +65,7 @@ impl ModuleDimensions<'_, '_> {
                 self.decls.constants.get(name).ok_or_else(|| {
                     format!("unknown module constant '{name}' in stage annotation")
                 })?;
-            if !matches!(constant.ty, Type::Bits { signed: false, .. }) {
+            if !matches!(bits(&constant.ty), Some((false, _))) {
                 return Err(format!(
                     "stage constant '{name}' must be an unsigned integer, got {}",
                     constant.ty

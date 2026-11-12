@@ -1078,8 +1078,9 @@ block delay(clk, x: u8 @INPUT) -> u8 @SAVED {
 ```
 
 The same names work in per-port annotations such as `@(live: INPUT, saved: SAVED)`.
-The constant must be an unsigned integer whose value fits in `u64`. Put
-arithmetic or calls to pure BX helpers in the constant initializer.
+The constant must be an unsigned integer whose value fits in `u64`. BX treats
+`bool` and `u1` alike here, so `false` gives stage 0 and `true` gives stage 1.
+Put arithmetic or calls to pure BX helpers in the constant initializer.
 
 Put `#![require_block_timing]` at the top of a `.bx` file to require an output
 stage on every block defined there. A missing annotation emits

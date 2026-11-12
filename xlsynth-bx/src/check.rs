@@ -5959,6 +5959,21 @@ block top(clk, x: u8 @4) -> u8 @5 {
     }
 
     #[test]
+    fn bool_and_u1_constants_name_the_same_stage() -> Result<(), String> {
+        for (declaration, expected) in [
+            ("const W: u1 = true;", 1),
+            ("const W: bool = u1:1;", 1),
+            ("const W: u1 = false;", 0),
+            ("const W: bool = u1:0;", 0),
+        ] {
+            check_bx(&format!(
+                "{declaration} block b(clk, x: u8 @W) -> u8 @{expected} {{ x }}"
+            ))?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn stage_constant_must_be_visible_unsigned_and_fit_u64() -> Result<(), String> {
         let block = "block b(clk, x: u8 @W) -> u8 @W { x }";
         check_bx(&format!("const W = uN[80]:0xffff_ffff_ffff_ffff; {block}"))?;
@@ -5969,8 +5984,8 @@ block top(clk, x: u8 @4) -> u8 @5 {
                 "stage constant 'W' must be an unsigned integer, got s32",
             ),
             (
-                "const W = true;",
-                "stage constant 'W' must be an unsigned integer, got bool",
+                "const W = [u8:1];",
+                "stage constant 'W' must be an unsigned integer, got u8[1]",
             ),
             (
                 "const W = uN[80]:0x1_0000_0000_0000_0000;",
