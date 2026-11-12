@@ -511,10 +511,7 @@ impl Bindings {
             Type::Tuple(fields) => {
                 Type::Tuple(fields.iter().map(|field| self.substitute(field)).collect())
             }
-            Type::Array { element, size } => Type::Array {
-                element: Box::new(self.substitute(element)),
-                size: *size,
-            },
+            Type::Array { element, size } => Type::array(self.substitute(element), *size),
             Type::TypeApplied { name, args } => Type::TypeApplied {
                 name: name.clone(),
                 args: args.iter().map(|arg| self.substitute(arg)).collect(),
@@ -568,15 +565,9 @@ impl Bindings {
 /// Use one specialization for bool and u1, including inside aggregate inputs.
 fn canonical_argument(ty: &Type) -> Type {
     match ty {
-        Type::Bool => Type::Bits {
-            signed: false,
-            width: 1,
-        },
+        Type::Bool => Type::unsigned(1),
         Type::Tuple(fields) => Type::Tuple(fields.iter().map(canonical_argument).collect()),
-        Type::Array { element, size } => Type::Array {
-            element: Box::new(canonical_argument(element)),
-            size: *size,
-        },
+        Type::Array { element, size } => Type::array(canonical_argument(element), *size),
         Type::Bits { .. }
         | Type::Enum { .. }
         | Type::Named(_)

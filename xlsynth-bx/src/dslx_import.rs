@@ -582,12 +582,7 @@ fn normalize_import_type(
     enums: &[CheckedEnum],
 ) -> Result<(), String> {
     match ty {
-        Type::Bool => {
-            *ty = Type::Bits {
-                signed: false,
-                width: 1,
-            }
-        }
+        Type::Bool => *ty = Type::unsigned(1),
         Type::Tuple(items) => items
             .iter_mut()
             .try_for_each(|item| normalize_import_type(item, structs, enums))?,

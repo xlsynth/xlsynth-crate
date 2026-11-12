@@ -1,14 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::error::Error;
 use std::fmt::Write;
 use std::fs;
+use support::search_paths;
 
 use tempfile::tempdir;
-use xlsynth_bx::{ImportOptions, ResetBehavior, compile, compile_with_options, empty_package};
+use xlsynth_bx::{ResetBehavior, compile, compile_with_options, empty_package};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
+
+#[test]
+fn struct_type_inference_distinguishes_omitted_and_empty_arguments() -> Result<(), String> {
+    let source = r#"
+struct Wrap<T> { value: T }
+#[allow(combinational_block)]
+block sample(clk, value: u8) -> u8 { (Wrap { value }).value }
+"#;
+    compile(source, empty_package("sample"), ResetBehavior::default())?;
+    let explicit = source.replace("Wrap { value }", "Wrap<> { value }");
+    assert_eq!(
+        compile(&explicit, empty_package("sample"), ResetBehavior::default()).unwrap_err(),
+        "block 'sample': result: struct 'Wrap' expects 1 type arguments, got 0"
+    );
+    Ok(())
+}
 
 #[test]
 fn contextual_struct_fields_can_use_later_type_witnesses() -> Result<(), Box<dyn Error>> {
@@ -205,10 +224,7 @@ pub block pipeline(clk, valid: bool, words: u16[2]) -> flow::FlowOut<Packet<u16[
         source,
         empty_package("flows"),
         ResetBehavior::default(),
-        &ImportOptions {
-            additional_search_paths: vec![directory.path()],
-            ..Default::default()
-        },
+        &search_paths(&[directory.path()]),
     )?;
     let top = package.get_top_block().expect("pipeline is the top");
     let ports: Vec<_> = top

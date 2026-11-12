@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 #[path = "frontend/alias_expressions.rs"]
 mod alias_expressions;
 #[path = "frontend/array_concat.rs"]
@@ -50,6 +52,7 @@ mod typed_array_literals;
 mod unroll_for;
 
 use std::path::Path;
+use support::search_paths;
 
 use directed_expr_eval::{
     assert_expr_matches_dslx, assert_expr_rejected_by_both, compile_dslx, compile_dslx_module,
@@ -840,10 +843,7 @@ fn identifiers_outside_the_bit_width_shorthand_range_match_dslx()
         "import s65;\n{declaration}\n{}",
         expr_eval::dslx_source(params, "u8", body)
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let evaluator = ExpressionEvaluator::compile_block(
         &bx,
         &options,

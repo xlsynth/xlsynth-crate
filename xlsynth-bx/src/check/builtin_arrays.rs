@@ -35,13 +35,7 @@ impl BodyChecker<'_, '_> {
                 let array = self.expr(array, None)?;
                 let (_, size) = array_type(&array.ty, name)?;
                 let size = u32::try_from(size).map_err(|_| "array size does not fit in u32")?;
-                Ok((
-                    Type::Bits {
-                        signed: false,
-                        width: 32,
-                    },
-                    K::Literal(IrValue::u32(size)),
-                ))
+                Ok((Type::unsigned(32), K::Literal(IrValue::u32(size))))
             }
             ("array_slice", [array, start, witness]) => {
                 self.builtin_array_slice(array, start, witness)
@@ -86,10 +80,7 @@ impl BodyChecker<'_, '_> {
         if size == 0 && width > 0 {
             return Err("'array_slice' cannot fill a nonempty result from an empty array".into());
         }
-        let ty = Type::Array {
-            element: Box::new(element.clone()),
-            size: width,
-        };
+        let ty = Type::array(element.clone(), width);
         self.structs.validate_type(&ty)?;
         Ok((
             ty,
@@ -134,19 +125,13 @@ impl BodyChecker<'_, '_> {
             (Expr::Array(items), _) => {
                 let witness = self.expr(witness, None)?;
                 let (element, _) = array_type(&witness.ty, "array_slice")?;
-                let ty = Type::Array {
-                    element: Box::new(element.clone()),
-                    size: items.len(),
-                };
+                let ty = Type::array(element.clone(), items.len());
                 Ok((self.expr(array, Some(&ty))?, witness))
             }
             (_, Expr::Array(items)) => {
                 let array = self.expr(array, None)?;
                 let (element, _) = array_type(&array.ty, "array_slice")?;
-                let ty = Type::Array {
-                    element: Box::new(element.clone()),
-                    size: items.len(),
-                };
+                let ty = Type::array(element.clone(), items.len());
                 Ok((array, self.expr(witness, Some(&ty))?))
             }
             _ => Ok((self.expr(array, None)?, self.expr(witness, None)?)),
@@ -164,13 +149,10 @@ impl BodyChecker<'_, '_> {
                 "'zip' expects arrays of equal lengths, got {size} and {right_size}"
             ));
         }
-        let ty = Type::Array {
-            element: Box::new(Type::Tuple(vec![
-                left_element.clone(),
-                right_element.clone(),
-            ])),
+        let ty = Type::array(
+            Type::Tuple(vec![left_element.clone(), right_element.clone()]),
             size,
-        };
+        );
         self.structs.validate_type(&ty)?;
         self.charge_expansion("zip", size.saturating_mul(4).saturating_add(1))?;
         Ok((

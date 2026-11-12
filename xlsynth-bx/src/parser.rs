@@ -4223,10 +4223,7 @@ impl<'s> Parser<'s> {
         let (ty, text) =
             if self.tokens[self.pos].character.is_some() || matches!(spelling, "true" | "false") {
                 let ty = ty.unwrap_or(if self.tokens[self.pos].character.is_some() {
-                    Type::Bits {
-                        signed: false,
-                        width: 8,
-                    }
+                    Type::unsigned(8)
                 } else {
                     Type::Bool
                 });

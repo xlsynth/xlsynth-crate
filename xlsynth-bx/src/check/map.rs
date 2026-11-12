@@ -113,10 +113,7 @@ impl BodyChecker<'_, '_> {
                 )
             }
         };
-        let ty = Type::Array {
-            element: Box::new(output.ty.clone()),
-            size: *size,
-        };
+        let ty = Type::array(output.ty.clone(), *size);
         let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
         if self.replaying_body() {
             self.charge_expansion(budget, shape.ir_nodes)?;
@@ -184,10 +181,7 @@ impl BodyChecker<'_, '_> {
         if range.count == 0 {
             return Err("map requires a nonempty array".into());
         }
-        let ty = Type::Array {
-            element: Box::new(range.ty),
-            size: range.count,
-        };
+        let ty = Type::array(range.ty, range.count);
         let shape = self.structs.type_shape(&ty, MAX_ELABORATION_DEPTH)?;
         self.charge_expansion(
             "map range",

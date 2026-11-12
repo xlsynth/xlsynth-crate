@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs};
+use support::search_paths;
 
 use tempfile::tempdir;
-use xlsynth_bx::{ImportOptions, ResetBehavior, compile, compile_with_options, empty_package};
+use xlsynth_bx::{ResetBehavior, compile, compile_with_options, empty_package};
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
@@ -13,10 +16,7 @@ use xlsynth_pir::ir_parser::Parser;
 fn local_functions_resolve_qualified_types_in_source_order() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(dir.path().join("wire.x"), "pub struct T { x: u8 }")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..ImportOptions::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for function in [
         "fn probe(x: (wire::T,)) -> u8 { x.0.x }",
         "fn probe(x: u8) -> u8 { let t = wire::T { x }; t.x }",
@@ -54,10 +54,7 @@ fn offset(x: u8) -> u8 { x + u8:2 }
 pub fn transform(x: u8) -> u8 { offset(x) * u8:3 }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..ImportOptions::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let linked = Parser::new(
         r#"package design
 fn invert(x: bits[8] id=1) -> bits[8] { ret not.2: bits[8] = not(x, id=2) }
@@ -136,10 +133,7 @@ fn block_typed_zero_preserves_the_intrinsic_with_a_same_named_import() -> Result
 {
     let dir = tempdir()?;
     fs::write(dir.path().join("wire.x"), "pub fn zero!() -> u8 { u8:7 }")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..ImportOptions::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (source, expected) in [
         (
             "use wire::zero!; #[allow(combinational_block)] block probe(clk) -> u8 { zero!<u8>() }",

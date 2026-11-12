@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 #[path = "generic_blocks/callbacks.rs"]
 mod callbacks;
 
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::thread;
+use support::search_paths;
 
 use xlsynth_bx::{ResetBehavior, check_module, compile, empty_package, parse_module};
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
@@ -551,10 +554,7 @@ block capture(clk, rst, wire: Packet, local: Local) -> (u8, s8) {
     (saved_wire.value, saved_local.value)
 }
 "#;
-    let options = xlsynth_bx::ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let package = xlsynth_bx::compile_with_options(
         source,
         empty_package("generic_import"),

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs, io, path::Path};
 
 use tempfile::{TempDir, tempdir};
@@ -57,10 +58,7 @@ fn enum_value_paths_follow_dslx_identifier_rules() -> Result<(), Box<dyn Error>>
     let declarations =
         "pub enum self:u2 { A=0 } pub enum _:u2 { A=1 } pub enum E:u2 { self=1, _=2 }";
     fs::write(dir.path().join("protocol.bx"), declarations)?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (uses, path, valid) in [
         ("", "_::A", false),
         ("", "E::self", false),
@@ -86,10 +84,7 @@ fn reflected_enum_names_require_a_visible_use_binding() -> Result<(), Box<dyn Er
         dir.path().join("protocol.x"),
         "pub enum Mode:u2 { Idle=0, Busy=1 } pub fn get()->Mode { Mode::Busy }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for body in [
         "get() == protocol::Mode::Busy",
         "protocol::Mode::Busy == get()",
@@ -132,10 +127,7 @@ pub fn read(p: Packet) -> Mode { p.modes[u32:0] }
         dir.path().join("aliases.x"),
         "import first; pub type Alias = first::Mode;",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let bx = r#"
 use aliases::Alias;
 use first;
@@ -204,10 +196,7 @@ pub fn hidden() -> (bool, bool, bool) {
 block sample(clk, x: first::Mode, y: second::Alias) -> (bool, bool, bool, bool, (bool,bool,bool)) {
     (ops::classify(x), ops::classify(y), first::classified(x), second::classified(y), outer::hidden())
 }"#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for width in [2, 3] {
         fs::write(
             dir.path().join("second.x"),
@@ -266,10 +255,7 @@ pub fn shift(x:Mode)->u2 { let _ = '\x00'; (x as u2) >> u1:1 }
 pub fn sibling(x:Mode)->bool { copy<u32:2>(x as u2) >= u2:1 }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let bx = "use ops; block sample(clk,x:ops::Mode)->(bool,u2,bool) { (ops::safe(x), ops::shift(x), ops::sibling(x)) }";
     let checked = check_module_with_options(&parse_module(bx)?, &options)?;
     assert_eq!(
@@ -289,10 +275,7 @@ fn imported_enum_order_diagnostic_uses_the_original_byte_columns() -> Result<(),
     source.extend_from_slice(line);
     fs::write(&path, source)?;
     let bx = parse_module("use ops; block sample(clk,x:ops::Mode)->bool { ops::f(x) }")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let error = check_module_with_options(&bx, &options).unwrap_err();
     let column = line.iter().position(|b| *b == b'<').unwrap() + 1;
     assert_eq!(
@@ -326,10 +309,7 @@ const_assert!(ORDERED);
 pub fn wide(x:ops::Mode)->sN[96] { if ops::before(x, ops::Mode::B) { WIDE } else { sN[96]:0 } }
 "#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let bx = "use ops; use constants; block sample(clk,x:ops::Mode)->sN[96] { constants::wide(x) }";
     let native =
         "import ops; import constants; fn sample(x:ops::Mode)->sN[96] { constants::wide(x) }";
@@ -354,10 +334,7 @@ fn independent_imports_and_inert_generic_syntax_preserve_value_parametric_dispat
 pub enum Other : u2 { A=0 }
 pub fn identity<T: type>(x:T)->T { x }"#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (header, helpers) in [
         (
             "",
@@ -435,10 +412,7 @@ pub fn high_byte<T:type>(x:T)->bool {
     b == u8:255
 }"#,
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for body in [
         "(ops::eq((x,(u8:0,u8:1),u8:2)),ops::eq((x,(u8:0,u8:1,u8:2))))",
         "ops::hidden(x)",
@@ -483,10 +457,7 @@ fn invalid_enum_ordering_is_diagnosed_when_the_dslx_module_is_imported()
 -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let path = dir.path().join("ops.x");
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     // Importing a valid sibling still typechecks the invalid comparison.
     let bx = parse_module("use ops; block sample(clk,x:ops::Mode)->bool { ops::equal(x,x) }")?;
     for operator in ["<", "<=", ">", ">="] {
@@ -564,10 +535,7 @@ fn struct_expression(
 ) -> Result<ExpressionEvaluator, String> {
     let reference = format!("{dslx_declarations}\n{}", dslx_source(params, result, body));
     let source = format!("{bx_declarations}\n{}", bx_source(params, result, body));
-    let options = ImportOptions {
-        additional_search_paths: vec![root],
-        ..Default::default()
-    };
+    let options = search_paths(&[root]);
     ExpressionEvaluator::compile_block(&source, &options, compile_dslx_module(&reference, &[root]))
 }
 
@@ -633,10 +601,7 @@ fn sample(x: u8) -> u8 {
     facade::echo(f).headers[u32:1].first
 }"#;
     let paths = [root.path()];
-    let options = ImportOptions {
-        additional_search_paths: paths.to_vec(),
-        ..Default::default()
-    };
+    let options = search_paths(&paths);
     let expr = ExpressionEvaluator::compile_block(
         source,
         &options,
@@ -653,10 +618,7 @@ fn sample(x: u8) -> u8 {
 fn local_values_shadow_use_bindings_in_declaration_order() -> Result<(), Box<dyn Error>> {
     let root = struct_modules()?;
     let paths = [root.path()];
-    let options = ImportOptions {
-        additional_search_paths: paths.to_vec(),
-        ..Default::default()
-    };
+    let options = search_paths(&paths);
     let used_wire = ("use fabric::wire;", "import fabric.wire;");
     // Both frontends call the same DSLX function. The reference gives it a
     // callable local name so a value binding can shadow it.
@@ -749,10 +711,7 @@ fn grouped_struct_type_bindings_match_native_dslx_use() -> Result<(), Box<dyn Er
         dslx_source("frame: Frame", "u8", body)
     );
     let paths = [root.path()];
-    let options = ImportOptions {
-        additional_search_paths: paths.to_vec(),
-        ..Default::default()
-    };
+    let options = search_paths(&paths);
     // The pinned frontend resolves nominal use bindings in type annotations.
     // The checkout's v2 converter reports this annotation as unimplemented.
     let expr = ExpressionEvaluator::compile_block(
@@ -794,10 +753,7 @@ fn a_dslx_field_can_use_a_bx_keyword() -> Result<(), Box<dyn Error>> {
         "use fabric::wire;\n{}",
         bx_source("h: wire::Holder", "wire::Holder", "h")
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     assert_eq!(
         check_module_with_options(&parse_module(&bx)?, &options).unwrap_err(),
         "block 'sample': output port 'reg' is not a valid XLS IR identifier"
@@ -830,10 +786,7 @@ pub fn read(item: Alias) -> u8 { item.data + BIAS }"#,
     let reference = format!("import factory;\n{}", dslx_source("x: u8", "u8", body));
     let source = format!("use factory;\n{}", bx_source("x: u8", "u8", body));
     let paths = [root.path()];
-    let options = ImportOptions {
-        additional_search_paths: paths.to_vec(),
-        ..Default::default()
-    };
+    let options = search_paths(&paths);
     // The pinned frontend supports nominal use bindings with type inference
     // v1. The v2-only converter reports this annotation as unimplemented.
     let dslx = compile_bundled_module(&reference, &paths);
@@ -897,13 +850,8 @@ block capture(clk, rst, input: wire::Header) -> facade::Header {{
 }}
 "#
     );
-    let checked = check_module_with_options(
-        &parse_module(&source)?,
-        &ImportOptions {
-            additional_search_paths: vec![root.path()],
-            ..Default::default()
-        },
-    )?;
+    let checked =
+        check_module_with_options(&parse_module(&source)?, &search_paths(&[root.path()]))?;
     let reference = format!("import fabric.wire; fn sample() -> wire::Header {{ {init} }}");
     let expected = compile_dslx_module(&reference, &[root.path()])?.interpret(&[])?;
     root.close()?;
@@ -957,10 +905,7 @@ pub fn read(value: Internal) -> u8 { value.pair.0.x }
         )?;
         assert_eq!(expr.compare(std::slice::from_ref(&outer))?, expected);
     }
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let private = parse_module("use wire; block b(clk, s: wire::Internal) -> u8 { s.pair.0.x }")?;
     assert!(check_module_with_options(&private, &options).is_err());
     let call =
@@ -996,10 +941,7 @@ pub fn read(value: Internal) -> u8 { value.pair.0.x }
 fn both_frontends_reject_private_names_and_layout_compatible_impostors()
 -> Result<(), Box<dyn Error>> {
     let root = struct_modules()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let local = (
         "use facade; struct Header { first: u8, second: u8, bias: s4 }",
         "import facade; struct Header { first: u8, second: u8, bias: s4 }",
@@ -1061,10 +1003,7 @@ pub fn declared(x: u8) -> right::Tag<2> { right::Tag<2> { value: x } }
     )?;
     let source = "use left; use right; use factory; \
         block sample(clk, x: u8) -> u32 { right::tag(factory::make(x)) }";
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let declared = source.replace("factory::make", "factory::declared");
     let checked = check_module_with_options(&parse_module(&declared)?, &options)?;
     let block = BlockEvaluator::lower(&checked, &declared)?;
@@ -1172,10 +1111,7 @@ pub fn pair(a: First, b: Second) -> (First[1], Second) { ([a], b) }
         root.path().join("facade.x"),
         "import tags; pub type Again = tags::First;",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let source = r#"
 use tags;
 use tags::Tagged;
@@ -1226,10 +1162,7 @@ block sample(clk, a: Again, b: Tagged<u32:8, 10>) -> (u32, u32, u32, u32, u32, u
 fn generic_block_register_resolves_a_direct_struct_type_and_zero_reset()
 -> Result<(), Box<dyn Error>> {
     let root = struct_modules()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![root.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[root.path()]);
     let source = r#"
 use fabric::wire;
 use fabric::wire::Sized;

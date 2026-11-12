@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::{error::Error, fs, path::Path};
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::ast::SourcePosition;
@@ -41,10 +44,7 @@ block exempt(clk, x: u8) -> u8 { reg q: u8; q := x; q }
 fn required_block_timing_stays_in_its_source_file() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let lib = dir.path().join("device.bx");
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let required = "#![require_block_timing]";
     let library = "pub block stage(clk, x: u8) -> u8 { reg q: u8; q := x; q }";
     let caller = r#"use device::stage;
@@ -236,10 +236,7 @@ extern fn adjust(x: Word<{Size { n: u32:4, ..BASE }.n}>) -> u4;
 #[allow(useless_struct_splat)]
 extern block stage(clk, x: Word<{Size { n: u32:5, ..BASE }.n}>) -> u5;
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let path = dir.path().join("decls.bx");
     fs::write(
         &path,
@@ -281,10 +278,7 @@ pub fn replace<T>(x: Record<T>, data: T) -> Record<T> {
 fn byte(x: records::Record<u8>) -> records::Record<u8> { records::replace(x, u8:1) }
 fn word(x: records::Record<u32>) -> records::Record<u32> { records::replace(x, u32:2) }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let checked = check_source_with_options(source, &options)?;
     let [warning] = checked.warnings() else {
         panic!("unexpected warnings: {:?}", checked.warnings());
@@ -305,10 +299,7 @@ fn word(x: records::Record<u32>) -> records::Record<u32> { records::replace(x, u
 #[test]
 fn a_wire_shadowing_a_callback_keeps_its_template_combinational() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let declarations = r#"
 block child(clk, x: u8) -> u8 { reg q: u8; q := x; q }
 pub block stage<child: fn(u8) -> u8>(clk, x: u8) -> u8 {
@@ -361,10 +352,7 @@ pub block circuit(clk, x: u8) -> u8 {
     b
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let checked = check_source_with_options(root, &options)?;
     let [warning] = checked.warnings() else {
         panic!("unexpected warnings: {:?}", checked.warnings());

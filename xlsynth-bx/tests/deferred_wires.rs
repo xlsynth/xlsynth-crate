@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod support;
+
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use support::search_paths;
 
 use tempfile::tempdir;
 use xlsynth_bx::{
@@ -252,10 +255,7 @@ pub block wrapper(clk, input: u8) -> u8 {
     result
 }
 "#;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let checked = check_source_file_with_options(source, &dir.path().join("design.bx"), &options)?;
     let error =
         lower_module(&checked, empty_package("design"), ResetBehavior::default()).unwrap_err();

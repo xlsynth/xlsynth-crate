@@ -20,16 +20,14 @@ use super::{
     literal_copy_work, minimum_type, resolve_type, source_type_nodes,
 };
 use crate::ast::{
-    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding, Type,
+    CallbackParam, Expr, Function, FunctionParametricRef, Param, ParametricBinding,
+    StructLiteralArgs, Type,
 };
 use crate::dslx_import::ImportResolver;
 use crate::typed::{BoundParametricValue, ConstantUse, TypedExpr};
 
 pub(super) fn dimension_type() -> Type {
-    Type::Bits {
-        signed: false,
-        width: 32,
-    }
+    Type::unsigned(32)
 }
 
 impl<'m> Declarations<'m> {
@@ -562,7 +560,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 })
             }
             Type::ParametricStruct { name, args } => {
-                let args = self.struct_argument_values(name, args)?;
+                let args = self.struct_value_prefix(name, StructLiteralArgs::Expressions(args))?;
                 self.struct_value_type(name, &args, remaining)
             }
             Type::ParametricBits { signed, width } => {
@@ -583,14 +581,14 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Type::ParametricArray {
                 element,
                 size: expr,
-            } => Ok(Type::Array {
-                element: Box::new(self.resolve_dimensions(element, child_type_budget(remaining)?)?),
-                size: size(self, expr)?,
-            }),
-            Type::Array { element, size } => Ok(Type::Array {
-                element: Box::new(self.resolve_dimensions(element, child_type_budget(remaining)?)?),
-                size: *size,
-            }),
+            } => Ok(Type::array(
+                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                size(self, expr)?,
+            )),
+            Type::Array { element, size } => Ok(Type::array(
+                self.resolve_dimensions(element, child_type_budget(remaining)?)?,
+                *size,
+            )),
             Type::Tuple(fields) => {
                 let depth = child_type_budget(remaining)?;
                 fields

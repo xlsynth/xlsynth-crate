@@ -8,7 +8,7 @@ use std::fmt::{self, Write};
 use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
-use crate::ast::{Expr, Param, StructDef, Type};
+use crate::ast::{Expr, Param, StructDef, StructLiteralArgs, Type};
 use crate::builtin::BuiltinOp;
 use crate::typed::{BoundParametricValue, TypedExpr, bits};
 
@@ -275,56 +275,53 @@ impl<'m> BodyChecker<'_, 'm> {
         self.parametric_value(expr, target)
     }
 
-    /// Evaluate each actual at its use site with the formal type from the
-    /// template's declaration scope.
-    pub(super) fn struct_argument_values(
+    /// Evaluate the written value prefix using local formal types or the
+    /// imported u32 ABI.
+    pub(super) fn struct_value_prefix(
         &mut self,
         name: &str,
-        args: &[Expr],
+        args: StructLiteralArgs<'_>,
     ) -> Result<Vec<BoundParametricValue>, String> {
-        if let Some(template) = self.structs.template(name) {
-            self.explicit_struct_values(template, args.len(), |caller, index, ty| {
-                caller.struct_argument_value(&args[index], ty)
-            })
-        } else {
-            // The DSLX import interface reflects u32 struct bindings.
-            let ty = dimension_type();
-            args.iter()
-                .map(|arg| {
-                    Ok(BoundParametricValue {
-                        value: self.struct_argument_value(arg, &ty)?,
-                        ty: ty.clone(),
-                    })
+        match (args, self.structs.template(name)) {
+            (StructLiteralArgs::Omitted, _) => Ok(Vec::new()),
+            (StructLiteralArgs::Types(_), _) => Err(format!(
+                "struct '{name}' has type arguments where value arguments are required"
+            )),
+            (StructLiteralArgs::Expressions(args), Some(template)) => {
+                self.explicit_struct_values(template, args.len(), |caller, index, ty| {
+                    caller.struct_argument_value(&args[index], ty)
                 })
-                .collect()
-        }
-    }
-
-    /// The compact AST representation holds unsized nonnegative literals.
-    /// Give each its formal type just as for other literal expressions.
-    pub(super) fn struct_literal_arguments(
-        &mut self,
-        name: &str,
-        args: &[u32],
-    ) -> Result<Vec<BoundParametricValue>, String> {
-        if let Some(template) = self.structs.template(name) {
-            self.explicit_struct_values(template, args.len(), |caller, index, ty| {
-                caller.parametric_value(
-                    &Expr::Literal {
-                        ty: None,
-                        text: args[index].to_string(),
-                    },
-                    ty,
-                )
-            })
-        } else {
-            Ok(args
+            }
+            (StructLiteralArgs::Integers(args), Some(template)) => {
+                self.explicit_struct_values(template, args.len(), |caller, index, ty| {
+                    // The compact AST stores these as unsized literals.
+                    caller.parametric_value(
+                        &Expr::Literal {
+                            ty: None,
+                            text: args[index].to_string(),
+                        },
+                        ty,
+                    )
+                })
+            }
+            (StructLiteralArgs::Expressions(args), None) => {
+                let ty = dimension_type();
+                args.iter()
+                    .map(|arg| {
+                        Ok(BoundParametricValue {
+                            value: self.struct_argument_value(arg, &ty)?,
+                            ty: ty.clone(),
+                        })
+                    })
+                    .collect()
+            }
+            (StructLiteralArgs::Integers(args), None) => Ok(args
                 .iter()
                 .map(|&value| BoundParametricValue {
                     ty: dimension_type(),
                     value: IrValue::u32(value),
                 })
-                .collect())
+                .collect()),
         }
     }
 
@@ -388,18 +385,16 @@ impl<'m> BodyChecker<'_, 'm> {
         &self,
         expr: &Expr,
     ) -> Option<ContextualStruct<'m>> {
-        let (name, supplied, base) = match expr {
-            Expr::Struct { name, base, .. } => (name, 0, base),
-            Expr::AppliedStruct {
-                name, args, base, ..
-            } => (name, args.len(), base),
-            Expr::ParametricStruct {
-                name, args, base, ..
-            } => (name, args.len(), base),
-            _ => return None,
+        let literal = expr.struct_literal()?;
+        let name = literal.name;
+        let supplied = match literal.args {
+            StructLiteralArgs::Omitted => 0,
+            StructLiteralArgs::Integers(args) => args.len(),
+            StructLiteralArgs::Expressions(args) => args.len(),
+            StructLiteralArgs::Types(_) => return None,
         };
         let template = if let Some(def) = self.structs.template(name) {
-            let bare_type_struct = matches!(expr, Expr::Struct { .. })
+            let bare_type_struct = matches!(literal.args, StructLiteralArgs::Omitted)
                 && !def.type_params.is_empty()
                 && !self.type_bindings().is_some_and(|b| b.declares(name));
             (bare_type_struct || supplied < def.value_parametrics.len())
@@ -411,7 +406,8 @@ impl<'m> BodyChecker<'_, 'm> {
         };
         // An update on an already concrete base supplies that base's nominal
         // type. An inferred base can receive the missing arguments from a peer.
-        base.as_ref()
+        literal
+            .base
             .is_none_or(|splat| self.contains_inferred_aggregate(&splat.value))
             .then_some(template)
     }
@@ -494,16 +490,10 @@ impl<'m> BodyChecker<'_, 'm> {
             .map_or_else(Vec::new, |(_, args)| args.to_vec());
         let mut members = Vec::with_capacity(items.len());
         for item in items {
-            let (args, fields, base) = match item {
-                Expr::Struct { fields, base, .. } => (Vec::new(), fields, base),
-                Expr::AppliedStruct {
-                    args, fields, base, ..
-                } => (self.struct_literal_arguments(name, args)?, fields, base),
-                Expr::ParametricStruct {
-                    args, fields, base, ..
-                } => (self.struct_argument_values(name, args)?, fields, base),
-                _ => unreachable!("sibling is a native struct constructor"),
-            };
+            let literal = item
+                .struct_literal()
+                .expect("sibling is a native struct constructor");
+            let args = self.struct_value_prefix(name, literal.args)?;
             if let Some(index) = explicit.iter().zip(&args).position(|(a, b)| a != b) {
                 return Err(format!(
                     "conflicting values for argument {} of struct '{name}'",
@@ -513,7 +503,7 @@ impl<'m> BodyChecker<'_, 'm> {
             if args.len() > explicit.len() {
                 explicit = args;
             }
-            members.push((fields, base.as_deref()));
+            members.push((literal.fields, literal.base));
         }
         let source = if explicit.is_empty() {
             StructApplication::Named(name)
@@ -642,7 +632,7 @@ impl<'m> BodyChecker<'_, 'm> {
         name: &str,
         prefix: &[BoundParametricValue],
     ) -> Result<TypedExpr, String> {
-        let (inner, args, fields, base) = match value {
+        let literal = match value {
             Expr::For(fold) => {
                 return self.with_dslx_value_context(|checker| {
                     checker.counted_for(fold, CarryContext::StructPrefix { name, args: prefix })
@@ -665,35 +655,17 @@ impl<'m> BodyChecker<'_, 'm> {
                 let result = results.pop().expect("one checked splat base");
                 return self.finish_expr(value, None, result.ty, result.kind);
             }
-            Expr::Struct {
-                name: inner,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => (inner, Vec::new(), fields, base),
-            Expr::AppliedStruct {
-                name: inner,
-                args,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => (
-                inner,
-                self.struct_literal_arguments(inner, args)?,
-                fields,
-                base,
-            ),
-            Expr::ParametricStruct {
-                name: inner,
-                args,
-                fields,
-                base,
-            } if self.same_struct_template(name, inner)? => (
-                inner,
-                self.struct_argument_values(inner, args)?,
-                fields,
-                base,
-            ),
-            _ => return self.expr(value, None),
+            _ => match value.struct_literal() {
+                Some(literal)
+                    if !matches!(literal.args, StructLiteralArgs::Types(_))
+                        && self.same_struct_template(name, literal.name)? =>
+                {
+                    literal
+                }
+                _ => return self.expr(value, None),
+            },
         };
+        let args = self.struct_value_prefix(literal.name, literal.args)?;
         let args = if prefix.starts_with(&args) {
             prefix.to_vec()
         } else if args.starts_with(prefix) {
@@ -703,8 +675,8 @@ impl<'m> BodyChecker<'_, 'm> {
                 "conflicting values for arguments of struct '{name}'"
             ));
         };
-        let source = StructApplication::Values(inner, &args);
-        let (ty, kind) = self.struct_literal(source, fields, base.as_deref(), None)?;
+        let source = StructApplication::Values(literal.name, &args);
+        let (ty, kind) = self.struct_literal(source, literal.fields, literal.base, None)?;
         self.finish_expr(value, None, ty, kind)
     }
 

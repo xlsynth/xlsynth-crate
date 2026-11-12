@@ -3,12 +3,12 @@
 use super::directed_expr_eval::compile_dslx_module;
 use super::expr_eval::{BlockEvaluator, bx_source, dslx_source};
 use super::function_parametrics::invoke_targets;
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_source_with_options, lower_module,
-    parse_module,
+    ResetBehavior, check_module, check_source_with_options, lower_module, parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -46,10 +46,7 @@ fn adjust(x: Reading, b: Bias) -> Adjusted {
             "(arrays::zip_with<adjust>(xs,ys), zip_with<adjust,3>(xs,ys))"
         )
     );
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let checked = check_source_with_options(&bx, &options)?;
     let evaluator = BlockEvaluator::lower(&checked, &bx)?;
     let targets = invoke_targets(&evaluator);
@@ -274,10 +271,7 @@ fn extern_and_imported_callback_results_bind_successive_types() -> Result<(), Bo
         dir.path().join("words.x"),
         "pub fn describe<N:u32>(x:uN[N])->(uN[N],u32) { (!x,N) }",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     let bx = r#"
 use words;
 struct Packet { valid:bool, payload:u8 }

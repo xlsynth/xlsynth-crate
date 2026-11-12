@@ -528,10 +528,7 @@ impl BodyChecker<'_, '_> {
                 K::Name(_) => K::Index {
                     value: Box::new(input.clone()),
                     index: Box::new(TypedExpr {
-                        ty: Type::Bits {
-                            signed: false,
-                            width: 32,
-                        },
+                        ty: Type::unsigned(32),
                         kind: K::Literal(
                             IrValue::make_ubits(32, index as u64).map_err(|e| e.to_string())?,
                         ),

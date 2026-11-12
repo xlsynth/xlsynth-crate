@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs};
 use tempfile::tempdir;
 use xlsynth_bx::{
@@ -70,10 +71,7 @@ fn alias_to_imported_enum_preserves_members_and_identity() -> Result<(), Box<dyn
     let body = "let busy:status::Code = Alias::Busy; match busy { Alias::Busy => true, Alias::Idle => false }";
     let bx = format!("use status; {alias} {}", bx_source("", "bool", body));
     let native = format!("import status; {alias} {}", dslx_source("", "bool", body));
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let evaluator = ExpressionEvaluator::compile_block(
         &bx,
         &options,
@@ -134,10 +132,7 @@ fn overwritten_literal_annotations_require_a_type_for_bare_imports() -> Result<(
         "pub type Word = u8; type Hidden = u8; pub const N = u32:8; pub fn id(x:u8)->u8{x}";
     fs::write(dir.path().join("wire.x"), library)?;
     fs::write(dir.path().join("bus.bx"), library)?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (annotation, accepted) in [
         ("wire", false),
         ("wire::Hidden", true),
@@ -301,10 +296,7 @@ fn wildcard_and_self_alias_spellings_match_dslx() -> Result<(), Box<dyn Error>> 
     }
     let directory = tempdir()?;
     fs::write(directory.path().join("names.bx"), "pub type self=u8;")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     assert!(
         check_source_with_options("use names; fn sample(x:names::self)->u8{x}", &options).is_err()
     );
@@ -318,10 +310,7 @@ fn native_map_and_zero_aliases_shadow_builtins_after_the_use() -> Result<(), Box
         directory.path().join("aliases.x"),
         "pub type map=u8; pub type zero! = u8;",
     )?;
-    let options = ImportOptions {
-        additional_search_paths: vec![directory.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[directory.path()]);
     let helper = "fn id(x:u8)->u8{x}";
     for (name, result, expression) in [
         ("map", "u8[1]", "map([x], id)"),

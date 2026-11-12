@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use super::support::search_paths;
 use std::{error::Error, fs};
 
 use tempfile::tempdir;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module, check_source_with_options, compile, empty_package,
-    parse_module,
+    ResetBehavior, check_module, check_source_with_options, compile, empty_package, parse_module,
 };
 
 use super::directed_expr_eval::compile_dslx_module;
@@ -54,10 +54,7 @@ type Output = Payload;
 fn value_formals_shadow_type_aliases_in_their_own_annotations() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(dir.path().join("wire.x"), "pub type Byte = u8;")?;
-    let options = ImportOptions {
-        additional_search_paths: vec![dir.path()],
-        ..Default::default()
-    };
+    let options = search_paths(&[dir.path()]);
     for (formal, accepted) in [
         ("Word: Word", false),
         ("Word: Word[2]", false),
