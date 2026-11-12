@@ -3,6 +3,7 @@
 use xlsynth_pir::{IrValue, ir_value_utils::ir_bits_to_usize};
 
 use crate::ast::{ConstDef, Expr, Type};
+use crate::dslx_import::ImportResolver;
 use crate::infer_literal::has_implicit_constant_type;
 
 use super::{Bindings, BodyChecker, CheckedConstant, Declarations, compatible};
@@ -65,7 +66,8 @@ impl ModuleDimensions<'_, '_> {
         expected: &Type,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
-    ) -> Result<&IrValue, String> {
+        resolver: &mut ImportResolver,
+    ) -> Result<IrValue, String> {
         let Expr::Name(name) = expr else {
             return Err("a concrete type dimension requires a literal or a module constant".into());
         };
@@ -85,18 +87,22 @@ impl ModuleDimensions<'_, '_> {
                 "module constant '{name}' is declared after this type dimension"
             ));
         }
-        let constant = self
-            .decls
-            .constants
-            .get(name.as_str())
-            .ok_or_else(|| format!("unknown module constant '{name}' in type dimension"))?;
+        let imported;
+        let constant = if let Some(constant) = self.decls.constants.get(name.as_str()) {
+            constant
+        } else {
+            imported = resolver
+                .resolve_constant(name)?
+                .ok_or_else(|| format!("unknown module constant '{name}' in type dimension"))?;
+            &imported
+        };
         if !compatible(&constant.ty, expected) {
             return Err(format!(
                 "type dimension '{name}' expects {expected}, got {}",
                 constant.ty
             ));
         }
-        Ok(&constant.value)
+        Ok(constant.value.clone())
     }
 
     pub(super) fn size(
@@ -104,6 +110,7 @@ impl ModuleDimensions<'_, '_> {
         expr: &Expr,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
+        resolver: &mut ImportResolver,
     ) -> Result<usize, String> {
         let expected = Type::unsigned(32);
         if let Expr::Literal { ty, text } = expr
@@ -114,7 +121,7 @@ impl ModuleDimensions<'_, '_> {
                 .map(|width| width as usize)
                 .map_err(|_| format!("invalid u32 type dimension '{text}'"));
         }
-        let value = self.constant(expr, &expected, is_local, bindings)?;
+        let value = self.constant(expr, &expected, is_local, bindings, resolver)?;
         ir_bits_to_usize(value.as_bits().map_err(|e| e.to_string())?)
             .ok_or_else(|| "type dimension does not fit usize".into())
     }
@@ -124,11 +131,12 @@ impl ModuleDimensions<'_, '_> {
         expr: &Expr,
         is_local: &dyn Fn(&str) -> bool,
         bindings: Option<&Bindings>,
+        resolver: &mut ImportResolver,
     ) -> Result<bool, String> {
         if let Expr::Bool(value) = expr {
             return Ok(*value);
         }
-        self.constant(expr, &Type::Bool, is_local, bindings)?
+        self.constant(expr, &Type::Bool, is_local, bindings, resolver)?
             .to_bool()
             .map_err(|e| e.to_string())
     }

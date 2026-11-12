@@ -131,7 +131,8 @@ impl ImportedStructs {
                     params: params.clone(),
                     expr: format!("value_{i}"),
                 };
-                let ty = registry.reflect_at(&ty, &mut isolated, &witness, Some(&shape), 0)?;
+                let ty =
+                    registry.reflect_at(&ty, &mut isolated, &witness, Some(&shape), false, 0)?;
                 types[i] = Some(self.import_binding_type(&registry, ty, data)?);
             }
         }
@@ -179,6 +180,7 @@ impl ImportedStructs {
             &mut isolated,
             &witness,
             Some(&shape),
+            false,
             0,
         )?;
         self.import_binding_type(&registry, ty, data)

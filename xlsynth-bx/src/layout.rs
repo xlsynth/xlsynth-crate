@@ -22,6 +22,19 @@ impl<'a> Layouts<'a> {
     }
 
     pub(crate) fn lower(&mut self, ty: &Type) -> Result<ir::Type, BuilderError> {
+        Self::lower_with(
+            ty,
+            &|name| self.definitions.get(name).copied(),
+            &mut self.expanded,
+        )
+    }
+
+    /// Lower using a caller's existing declaration index and memoized layouts.
+    pub(crate) fn lower_with(
+        ty: &Type,
+        definition: &impl Fn(&str) -> Option<&'a StructDef>,
+        expanded: &mut BTreeMap<String, ir::Type>,
+    ) -> Result<ir::Type, BuilderError> {
         Ok(match ty {
             Type::Bits { width, .. } | Type::Enum { width, .. } => ir::Type::Bits(*width),
             Type::Bool => ir::Type::Bits(1),
@@ -35,31 +48,29 @@ impl<'a> Layouts<'a> {
                     "cannot lower unresolved dimensions in type '{ty}'"
                 )));
             }
-            Type::Array { element, size } => ir::Type::new_array(self.lower(element)?, *size),
+            Type::Array { element, size } => {
+                ir::Type::new_array(Self::lower_with(element, definition, expanded)?, *size)
+            }
             Type::Tuple(items) => ir::Type::Tuple(
                 items
                     .iter()
-                    .map(|ty| self.lower(ty).map(Box::new))
+                    .map(|ty| Self::lower_with(ty, definition, expanded).map(Box::new))
                     .collect::<Result<_, _>>()?,
             ),
             Type::Named(name) => {
-                if let Some(layout) = self.expanded.get(name) {
+                if let Some(layout) = expanded.get(name) {
                     return Ok(layout.clone());
                 }
-                let def = self
-                    .definitions
-                    .get(name.as_str())
-                    .copied()
-                    .ok_or_else(|| {
-                        BuilderError::InvalidOperation(format!("unknown struct '{name}'"))
-                    })?;
+                let def = definition(name).ok_or_else(|| {
+                    BuilderError::InvalidOperation(format!("unknown struct '{name}'"))
+                })?;
                 let fields = def
                     .fields
                     .iter()
-                    .map(|field| self.lower(&field.ty).map(Box::new))
+                    .map(|field| Self::lower_with(&field.ty, definition, expanded).map(Box::new))
                     .collect::<Result<_, _>>()?;
                 let layout = ir::Type::Tuple(fields);
-                self.expanded.insert(name.clone(), layout.clone());
+                expanded.insert(name.clone(), layout.clone());
                 layout
             }
         })

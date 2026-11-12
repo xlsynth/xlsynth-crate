@@ -3,6 +3,7 @@
 //! Bridge Rust's DSLX declaration identities to concrete types in libxls.
 
 mod binding_types;
+mod constants;
 mod effect_source;
 mod enum_conversion;
 mod enums;
@@ -79,6 +80,7 @@ pub(crate) struct ImportedStructs {
     type_witnesses: usize,
     definitions: Vec<StructDef>,
     enums: enums::ImportedEnums,
+    constants: constants::ImportedConstants,
     enum_conversion_snapshot: std::cell::OnceCell<Result<Option<NativeSourceFiles>, String>>,
     probe_index: usize,
 }
@@ -149,6 +151,7 @@ impl ImportedStructs {
             type_witnesses: 0,
             definitions: Vec::new(),
             enums: Default::default(),
+            constants: Default::default(),
             enum_conversion_snapshot: Default::default(),
             probe_index: 0,
         }
@@ -669,7 +672,7 @@ impl ImportedStructs {
             ty
         };
         let written = self.graph.named(subject, member);
-        let reflected = self.reflect_at(&ty, data, &witness, written.as_ref(), 0)?;
+        let reflected = self.reflect_at(&ty, data, &witness, written.as_ref(), false, 0)?;
         if let Type::Named(canonical) = &reflected {
             let index = self.named_layouts[canonical];
             self.named_layouts.insert(path, index);
@@ -700,7 +703,7 @@ impl ImportedStructs {
         witness: &TypeWitness,
     ) -> Result<Type, String> {
         let written = self.graph.return_type(subject, function);
-        self.reflect_at(ty, data, witness, written.as_ref(), 0)
+        self.reflect_at(ty, data, witness, written.as_ref(), false, 0)
     }
 
     /// Walk the checked value type together with its written nominal leaves.
@@ -710,6 +713,7 @@ impl ImportedStructs {
         data: &mut ImportData,
         witness: &TypeWitness,
         written: Option<&ResolvedShape>,
+        constant: bool,
         depth: usize,
     ) -> Result<Type, String> {
         if depth > MAX_ELABORATION_DEPTH {
@@ -731,7 +735,7 @@ impl ImportedStructs {
                     _ => None,
                 };
                 (
-                    Type::Named(self.reflect_struct(ty, data, witness, id, depth)?),
+                    Type::Named(self.reflect_struct(ty, data, witness, id, constant, depth)?),
                     id,
                 )
             };
@@ -769,6 +773,7 @@ impl ImportedStructs {
                     data,
                     &witness.project(index),
                     element,
+                    constant,
                     depth + 1,
                 )?,
                 size,
@@ -794,6 +799,7 @@ impl ImportedStructs {
                         data,
                         &witness.project(&format!(".{index}")),
                         field,
+                        constant,
                         depth + 1,
                     )?);
                 }
@@ -841,6 +847,7 @@ impl ImportedStructs {
         data: &mut ImportData,
         witness: &TypeWitness,
         written: Option<&DeclId>,
+        constant: bool,
         depth: usize,
     ) -> Result<String, String> {
         self.bind_exports(data)?;
@@ -848,6 +855,9 @@ impl ImportedStructs {
         let identifier = def.get_identifier();
         self.bindings.entry(def.clone()).or_default();
         let (template, actuals) = if def.is_parametric() {
+            if constant && written.is_none() && self.bindings[&def].declaration.is_none() {
+                self.index_template_owners(&def, data)?;
+            }
             let id = written.or(self.bindings[&def].declaration.as_ref())
                 .filter(|id| self.public_struct_template_arity(&id.subject, &id.name).is_some())
                 .cloned().ok_or_else(|| format!(
@@ -914,6 +924,7 @@ impl ImportedStructs {
                     data,
                     &witness.project(&format!(".{name}")),
                     Some(&shape),
+                    constant,
                     depth + 1,
                 )
                 .map_err(|e| format!("DSLX struct field '{label}.{name}': {e}"))?;
@@ -982,12 +993,62 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+    use xlsynth_pir::{IrValue, ir};
 
     fn load(uses: &str, paths: &[&Path]) -> Result<(ImportedStructs, ImportData), String> {
         let module = crate::parse_module(uses)?;
         let (registry, data) =
             ImportedStructs::load(&module.uses, xlsynth::default_dslx_stdlib_path(), paths)?;
         Ok((registry, data.ok_or("expected imported modules")?))
+    }
+
+    #[test]
+    fn constant_values_share_the_snapshot_and_preserve_typed_empty_arrays()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let file = dir.path().join("config.x");
+        fs::write(
+            &file,
+            r#"
+pub struct Item { empty: sN[129][0], flag: bool }
+const ON = Item { empty: [], flag: true };
+const OFF = Item { empty: [], flag: false };
+pub const VALUES = ([ON, OFF], sN[129]:-2);
+pub const EMPTY: u16[0] = [];
+"#,
+        )?;
+        let (mut registry, mut data) = load("use config;", &[dir.path()])?;
+        fs::remove_file(file)?;
+        let values = registry.resolve_constant("config", "VALUES", &mut data)?;
+        assert!(Rc::ptr_eq(
+            &values,
+            &registry.resolve_constant("config", "VALUES", &mut data)?
+        ));
+        let empty = IrValue::make_array_typed(ir::Type::Bits(129), &[])?;
+        let records =
+            [true, false].map(|flag| IrValue::make_tuple(&[empty.clone(), IrValue::bool(flag)]));
+        let expected = IrValue::make_tuple(&[
+            IrValue::make_array(&records)?,
+            IrValue::make_sbits(129, -2)?,
+        ]);
+        assert_eq!(values.value, expected);
+        assert_eq!(
+            values.ty,
+            Type::Tuple(vec![
+                Type::array(Type::Named("config::Item".into()), 2),
+                Type::Bits {
+                    signed: true,
+                    width: 129
+                },
+            ])
+        );
+        assert_eq!(
+            registry
+                .resolve_constant("config", "EMPTY", &mut data)?
+                .value,
+            IrValue::make_array_typed(ir::Type::Bits(16), &[])?
+        );
+        Ok(())
     }
 
     #[test]
