@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
-use crate::{IrValue, ValueError};
+use crate::{IrValue, Type, ValueError};
 
 /// One name/value entry in a named evaluator input record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +158,30 @@ impl IrValuesFile {
 
 /// Parses an `.irvals` sequence from text.
 pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, ValueError> {
+    parse_records(text, None, &BTreeMap::new())
+}
+
+/// Parses records for an ordered interface. Names and tuple positions supply
+/// type hints for empty arrays, whose printed values contain no element type.
+pub fn parse_ir_values_with_fields<'a>(
+    text: &str,
+    fields: impl IntoIterator<Item = (&'a str, &'a Type)>,
+) -> Result<IrValuesFile, ValueError> {
+    let mut positional = Vec::new();
+    let mut named = BTreeMap::new();
+    for (name, ty) in fields {
+        positional.push(Box::new(ty.clone()));
+        named.insert(name, ty);
+    }
+    parse_records(text, Some(&Type::Tuple(positional)), &named)
+}
+
+/// Parses an IR-values file with optional positional and named type hints.
+fn parse_records(
+    text: &str,
+    positional: Option<&Type>,
+    named: &BTreeMap<&str, &Type>,
+) -> Result<IrValuesFile, ValueError> {
     enum FileForm {
         Values,
         NamedValues,
@@ -203,14 +227,16 @@ pub fn parse_ir_values(text: &str) -> Result<IrValuesFile, ValueError> {
         }
 
         if line_is_named {
-            named_values.push(parse_named_value_set(line, line_number)?);
+            named_values.push(parse_named_value_set(line, line_number, named)?);
         } else {
-            values.push(IrValue::parse_typed(line).map_err(|e| {
-                ValueError(format!(
-                    "failed to parse typed IR value at line {}: {}",
-                    line_number, e
-                ))
-            })?);
+            values.push(
+                IrValue::parse_typed_with_hint(line, positional).map_err(|e| {
+                    ValueError(format!(
+                        "failed to parse typed IR value at line {}: {}",
+                        line_number, e
+                    ))
+                })?,
+            );
         }
     }
 
@@ -233,7 +259,11 @@ pub fn parse_ir_values_file(path: &Path) -> Result<IrValuesFile, ValueError> {
 }
 
 /// Parses one `{name: value, ...}` record.
-fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueSet, ValueError> {
+fn parse_named_value_set(
+    line: &str,
+    line_number: usize,
+    hints: &BTreeMap<&str, &Type>,
+) -> Result<NamedIrValueSet, ValueError> {
     let Some(inner) = line
         .strip_prefix('{')
         .and_then(|contents| contents.strip_suffix('}'))
@@ -262,12 +292,13 @@ fn parse_named_value_set(line: &str, line_number: usize) -> Result<NamedIrValueS
             )));
         }
         let name = parse_value_name(raw_name, line_number)?;
-        let value = IrValue::parse_typed(raw_value).map_err(|e| {
-            ValueError(format!(
-                "failed to parse value for '{}' at line {}: {}",
-                name, line_number, e
-            ))
-        })?;
+        let value = IrValue::parse_typed_with_hint(raw_value, hints.get(name.as_str()).copied())
+            .map_err(|e| {
+                ValueError(format!(
+                    "failed to parse value for '{}' at line {}: {}",
+                    name, line_number, e
+                ))
+            })?;
         entries.push(NamedIrValue { name, value });
     }
     NamedIrValueSet::new(entries).map_err(|e| {
@@ -486,6 +517,29 @@ mod tests {
             .unwrap();
         assert_eq!(values[0].to_string(), "(bits[8]:1, bits[1]:0)");
         assert_eq!(values[1].to_string(), "(bits[8]:2, bits[1]:1)");
+    }
+
+    #[test]
+    fn field_hints_resolve_empty_arrays_and_preserve_actual_widths_and_lengths() {
+        let empty = Type::new_array(Type::Bits(137), 0);
+        let array_hint = Type::new_array(empty.clone(), 4);
+        let bits_hint = Type::Bits(32);
+        let fields = [("array", &array_hint), ("bits", &bits_hint)];
+        let actual = Type::Tuple(vec![
+            Box::new(Type::new_array(empty, 2)),
+            Box::new(Type::Bits(8)),
+        ]);
+        for text in [
+            "([[], []], bits[8]:3)",
+            "{bits: bits[8]:3, array: [[], []]}",
+        ] {
+            assert!(parse_ir_values(text).is_err());
+            let values = parse_ir_values_with_fields(text, fields)
+                .unwrap()
+                .into_positional_values(&["array".to_owned(), "bits".to_owned()])
+                .unwrap();
+            assert_eq!(values[0].type_(), actual);
+        }
     }
 
     #[test]

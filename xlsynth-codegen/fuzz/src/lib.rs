@@ -9,6 +9,7 @@ pub mod preflight;
 pub mod references;
 pub mod semantics;
 pub mod tool_failure;
+pub mod vastly;
 #[cfg(feature = "external-yosys")]
 pub mod yosys;
 

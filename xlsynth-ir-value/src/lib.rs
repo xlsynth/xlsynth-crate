@@ -13,6 +13,6 @@ pub mod value;
 pub use ir_type::{ArrayTypeData, StartAndLimit, Type};
 pub use ir_values::{
     IrValuesFile, IrValuesFileKind, NamedIrValue, NamedIrValueSet, parse_ir_values,
-    parse_ir_values_file,
+    parse_ir_values_file, parse_ir_values_with_fields,
 };
 pub use value::{IrArray, IrBits, IrFormatPreference, IrValue, ValueError};

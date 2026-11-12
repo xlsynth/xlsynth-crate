@@ -98,6 +98,7 @@ mod ir2opt;
 mod ir2pipeline;
 mod ir_aig_sharing;
 mod ir_annotate_ranges;
+mod ir_block_eval;
 mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
@@ -3462,6 +3463,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .action(clap::ArgAction::Append),
                 ),
         )
+        .subcommand(ir_block_eval::command())
         .subcommand(
             clap::Command::new("ir-fn-eval")
                 .about("Interprets an IR function with the provided argument tuple")
@@ -4422,6 +4424,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-fn-generate-inputs", subm)) => {
             ir_fn_generate_inputs::handle_ir_fn_generate_inputs(subm, &config);
+        }
+        Some(("ir-block-eval", subm)) => {
+            if let Err(error) = ir_block_eval::run(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("ir-block-eval"), vec![]);
+            }
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);

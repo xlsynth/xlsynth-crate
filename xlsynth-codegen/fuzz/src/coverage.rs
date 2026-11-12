@@ -368,6 +368,7 @@ impl CoverageReport {
 mod tests {
     use std::collections::BTreeMap;
     use xlsynth_g8r_fuzz::random_block::evaluate_block_cycle_observed;
+    use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
     use xlsynth_pir::{IrBits, IrValue};
 
     use super::{CoverageReport, Outcome, live_nodes, record_behaviors};
@@ -450,6 +451,8 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
         // Coverage accounting needs explicit boundary stimuli, not a guarantee
         // that a small random sample will contain every event.
         let block = top_block(&package);
+        let evaluator = BlockEvaluator::prepare(&package, &block.name).unwrap();
+        let state = evaluator.initial_state(RegisterInit::AllZeros).unwrap();
         let live = live_nodes(block);
         let mut observed = BTreeMap::new();
         let array = IrValue::make_array(&vec![IrValue::from_bits(&IrBits::zero(8)); 3]).unwrap();
@@ -459,7 +462,7 @@ top block behaviors(values: bits[8][3], index: bits[128], data: bits[65], read: 
                 IrValue::make_ubits(128, index).unwrap(),
                 IrValue::from_bits(&data),
             ];
-            let evaluated = evaluate_block_cycle_observed(block, &inputs, &[]);
+            let evaluated = evaluate_block_cycle_observed(&evaluator, block, &inputs, &state);
             record_behaviors(block, &evaluated.node_values, &live, &mut observed);
         }
         for event in [

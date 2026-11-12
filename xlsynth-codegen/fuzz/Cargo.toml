@@ -21,6 +21,7 @@ xlsynth-g8r = { path = "../../xlsynth-g8r", version = "0.82.0" }
 xlsynth-g8r-fuzz = { path = "../../xlsynth-g8r/fuzz" }
 xlsynth-pir = { path = "../../xlsynth-pir", version = "0.82.0" }
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers", version = "0.82.0" }
+xlsynth-vastly = { path = "../../xlsynth-vastly", version = "0.82.0" }
 
 [lib]
 name = "xlsynth_codegen_fuzz"
@@ -63,6 +64,12 @@ doc = false
 [[bin]]
 name = "fuzz_codegen_sequential_semantics"
 path = "fuzz_targets/fuzz_codegen_sequential_semantics.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codegen_vastly_sequential_equiv"
+path = "fuzz_targets/fuzz_codegen_vastly_sequential_equiv.rs"
 test = false
 doc = false
 

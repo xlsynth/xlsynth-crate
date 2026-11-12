@@ -5,6 +5,7 @@
 use libfuzzer_sys::fuzz_target;
 use rand::{SeedableRng, rngs::StdRng};
 use xlsynth_g8r_fuzz::random_block::evaluate_block_cycle_observed;
+use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
 use xlsynth_pir::ir_random::{
     BlockTopology, DepletableBytes, EntropySource, RandomBlockOptions, RandomFnOptions, StopPolicy,
     generate_block_package,
@@ -53,20 +54,41 @@ fuzz_target!(|data: &[u8]| {
     let known_bits = known_bits::analyze_block(block).unwrap_or_else(|error| {
         panic!("generated block must have known-bit facts: {error}\n{block}")
     });
+    // The property samples arbitrary current Q and evaluates one edge. Model
+    // reset only at that edge, including for blocks declaring asynchronous
+    // reset. Analyze the original timing metadata above.
+    let mut sampled_package;
+    let cycle_package = if block.reset.as_ref().is_some_and(|reset| reset.asynchronous) {
+        sampled_package = generated.package.clone();
+        sampled_package
+            .get_top_block_mut()
+            .unwrap()
+            .reset
+            .as_mut()
+            .unwrap()
+            .asynchronous = false;
+        &sampled_package
+    } else {
+        &generated.package
+    };
+    let evaluator = BlockEvaluator::prepare(cycle_package, &block.name).unwrap();
     let mut rng = StdRng::seed_from_u64(input_seed);
     for trial in 0..8 {
         // Q values are arbitrary each trial, not reset values or only states
         // reachable from reset. Reset/enable input ports are sampled normally.
-        let mut state = generate_mixed_values_with_rng(
+        let initial_values = generate_mixed_values_with_rng(
             &mut rng,
             block.registers.iter().map(|register| &register.ty),
         );
+        let mut state = evaluator
+            .initial_state(RegisterInit::Supplied(initial_values))
+            .unwrap();
         for cycle in 0..2 {
             let inputs = generate_mixed_values_with_rng(
                 &mut rng,
                 block.input_ports().map(|port| block.port_type(port)),
             );
-            let observed = evaluate_block_cycle_observed(block, &inputs, &state);
+            let observed = evaluate_block_cycle_observed(&evaluator, block, &inputs, &state);
             for (node, range) in facts.iter() {
                 let value = observed.node_values[node.index].as_ref().expect(
                     "every analyzed node, including sources and dead nodes, must be observed",
