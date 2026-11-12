@@ -176,7 +176,8 @@ a generated axiom to the proof.
 
 The prepared directory contains the companion support sources, `Lhs.aag`,
 `Rhs.aag`, `Target.lean`, and `Check.lean`. It can be retained
-as a build artifact or inspected while developing the proof.
+as a build artifact or inspected while developing the proof. `Check.lean`
+shows the expected root declaration for manual use.
 
 The runner requires an empty work directory. It copies the fixed prepared
 artifacts and generates `UserProof.lean` at the work root. Helper modules keep
@@ -184,8 +185,14 @@ their paths relative to `LeanProofSources.root`; every supplied file
 must be under that root. The generated wrapper imports helpers in the supplied
 order, and Lean's `--src-deps` mode determines their compilation order. The
 selected installation must include its Lean sources.
-Generated module roots and colliding paths are rejected. A final generated
-module checks `UserProof.equivalent` at `Target.Equivalent`.
+Generated module roots and colliding paths are rejected. Before processing
+the proof, the driver saves the compiled target and its generated dependencies.
+A separate verifier loads those originals alongside the compiled proof modules,
+replays the proof declarations through Lean's kernel, and looks up
+`UserProof.equivalent` and `Target.Equivalent` by their internal names.
+It checks that the theorem's type is definitionally equal to the generated
+proposition. User syntax can therefore help write a proof without changing the
+verifier's interpretation of the goal.
 
 The runner invokes Lean directly and does not manage Lake projects. Lean's
 default solver lookup finds the bundled CaDiCaL beside the Lean executable.
@@ -265,34 +272,112 @@ one typed `IrValue` per case. `LeanEvaluator::eval_ir_functions` accepts a slice
 Lean invocation. Each function has its own namespace and may have a different
 signature. Results follow function order, then input order.
 
+## Word-level equivalence proofs
+
+`prepare_ir_function_equivalence_target` takes two PIR packages and their optional entrypoint
+names. Its bundle contains independently generated `Generated.Lhs.eval` and
+`Generated.Rhs.eval` definitions. `Target.Equivalent` quantifies over their
+positional XLS arguments and equates the complete return values. Both parameter
+and result types must match, including array lengths, tuple nesting and bit widths.
+Parameter names may differ. For nullary functions the target is equality of the results.
+
+Each proof export gives every SSA node its own declaration under the generated
+function's namespace. Its name is the XLS node ID prefixed with `n`. A proof
+can unfold one operation, use `congrArg` on an operand equality, or use a
+callee's previously proved contract. The ordinary executable exporter uses
+local lets to share intermediates during evaluation. Both layouts use the same
+operation translations.
+
+Supply a Lean module and its theorem name using `LeanIrProofSources`, then call
+`run_ir_function_equivalence_proof`. For example, when the left graph computes
+a four-bit sum through a callee and the right graph adds its operands in reverse
+order, `Adder.lean` can prove the target directly:
+
+```lean
+import Target
+
+theorem Adder.equivalent : Target.Equivalent := by
+  intro a b
+  change a + b = b + a
+  exact BitVec.add_comm a b
+```
+
+Select `Adder.equivalent` with `--proof-theorem` in the driver or `proof_theorem`
+in the Bazel rule. Supply any modules imported by `Adder.lean` as additional
+sources. The driver generates a wrapper that imports `Adder` and references the
+selected theorem by its qualified name. The final verifier uses the original
+compiled target to check the theorem, its defining module, and the wrapper's
+reference to it.
+
+Import `XlsynthLean.IRProof` for selector and shift lemmas and the
+`ir_bv_normalize` tactic. For bit-vector obligations,
+`ir_bv_normalize <;> bv_decide` introduces hypotheses, rewrites common XLS
+operations, and submits remaining goals to Lean's bit-vector solver.
+
+### Factoring a proof at helper calls
+
+Import `XlsynthLean.IRDecompose` to prove a contract for a helper once and
+use it throughout an exported function. In this example the left implementation
+calls a conditional tuple swap twice.
+
+```lean
+xls_cut (Generated.Lhs.eval p x y) at exchange using exchange_spec as routed expect 2
+```
+
+The tactic introduces `routed0` and `routed1` for the two tuple results.
+`routed0_spec` specializes the theorem at the first call's actual arguments.
+`routed1_spec` describes the second call with `routed0` as its incoming pair.
+All uses of a shared result refer to the same variable. A premise in the
+original theorem remains a premise in the specialized fact. The caller can
+finish the resulting goal with ordinary Lean tactics or cut the other side
+using a different helper and contract.
+
+The stage must be fully applied. The contract takes the helper's operands in
+order and states a proposition about its result, which can be a bit vector,
+tuple, or array. The optional `expect` checks the number of reachable direct
+calls. Without `as`, result names start with `cut`. To compose multiple levels
+of the call graph, prove a stage contract
+and use it in its caller. `xls_unfold helper` expands the helper's own
+reachable SSA nodes while preserving calls to other functions.
+
+Lean metaprograms can use `XlsynthLean.IR.sliceCalls` to inspect the actual
+typed call applications, shared result nodes, and downstream definitions.
+The routing example applies distinct contracts on the two sides of an
+equivalence. [Routing proof](tests/fixtures/decomposition/RouteProof.lean)
+
+The checker inspects the theorem's transitive axiom dependencies. By default it permits
+Lean's `propext`, `Classical.choice` and `Quot.sound`, and replays closed Boolean
+checks from native tactics with Lean's compiler, including the LRAT checks
+used by `bv_decide`. A successful IR audit returns the number of distinct checks
+replayed in `LeanProofOutput.native_checks_replayed`. Use
+`run_ir_function_equivalence_proof_with_policy` with `LeanIrAxiomPolicy::RejectNativeChecks`
+to allow only those three axioms. The verifier reports the first disallowed dependency
+even if it comes from an imported helper theorem. SAT search can still supply evidence
+for a kernel-checked proof term. Unproved assumptions and `sorry` fail either policy. This
+uses the same independent root-type check as the AIG proof runner. Proof
+elaboration and native computation run with the caller's OS permissions.
+Running untrusted code requires a separate sandbox that protects the toolchain
+and the verification process. The supplied IR, translator, and Lean toolchain
+are trusted inputs.
+
 ## Validation
 
-Rust export tests run normally:
+Run the Rust-only tests with
 
 ```sh
 cargo test -p xlsynth-lean
 ```
 
-Lean integration tests are explicitly enabled with a toolchain path:
+To also run the AIG and XLS IR evaluation and proof tests, enable `lean-tests`
+and set `XLSYNTH_LEAN` to the executable from the [pinned toolchain](lean/lean-toolchain).
 
 ```sh
 XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test lean_eval -- --ignored
+  cargo test -p xlsynth-lean --features lean-tests
 ```
 
-Run the real Lean word-level evaluation tests with the same toolchain:
-
-```sh
-XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test ir_fn -- --include-ignored
-```
-
-Proof integration tests use the same explicit toolchain configuration:
-
-```sh
-XLSYNTH_LEAN=/path/to/lean/bin/lean \
-  cargo test -p xlsynth-lean --test proof -- --ignored
-```
+Ubuntu 24.04 CI runs this suite with the official Linux x86-64 Lean release.
+When updating `lean/lean-toolchain`, update the [release checksum](../scripts/lean_linux_x64.sha256) to match.
 
 The differential fuzz target generates bounded graphs, permutes their node
 storage, and compares Lean output batches with `PreparedGateSim`:

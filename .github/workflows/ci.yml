@@ -414,12 +414,27 @@ jobs:
           echo "LD_LIBRARY_PATH=/usr/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
           echo "LIBRARY_PATH=/usr/lib:$LIBRARY_PATH" >> $GITHUB_ENV
 
+      - name: Install pinned Lean release
+        if: matrix.os == 'ubuntu-24.04'
+        working-directory: ${{ runner.temp }}
+        run: |
+          lean_toolchain=$(cat "$GITHUB_WORKSPACE/xlsynth-lean/lean/lean-toolchain")
+          lean_tag=${lean_toolchain#leanprover/lean4:}
+          lean_dir="lean-${lean_tag#v}-linux"
+          curl --fail --location --retry 3 --output "$lean_dir.tar.zst" \
+            "https://github.com/leanprover/lean4/releases/download/$lean_tag/$lean_dir.tar.zst"
+          sha256sum --check "$GITHUB_WORKSPACE/scripts/lean_linux_x64.sha256"
+          tar --zstd -xf "$lean_dir.tar.zst"
+          rm "$lean_dir.tar.zst"
+          "$RUNNER_TEMP/$lean_dir/bin/lean" --version
+          echo "XLSYNTH_LEAN=$RUNNER_TEMP/$lean_dir/bin/lean" >> "$GITHUB_ENV"
+
       - name: Install pinned Yosys and select external-tool tests
         if: matrix.os == 'ubuntu-24.04'
         run: |
           python3 scripts/install_ci_yosys.py "$RUNNER_TEMP/codegen-eda"
           echo "XLSYNTH_YOSYS_PATH=$RUNNER_TEMP/codegen-eda/oss-cad-suite/bin/yosys" >> "$GITHUB_ENV"
-          echo "EXTERNAL_TEST_FEATURES=iverilog-tests,yosys-tests" >> "$GITHUB_ENV"
+          echo "EXTERNAL_TEST_FEATURES=iverilog-tests,yosys-tests,xlsynth-lean/lean-tests" >> "$GITHUB_ENV"
           "$RUNNER_TEMP/codegen-eda/oss-cad-suite/bin/yosys" -V
           iverilog -V
           vvp -V

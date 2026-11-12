@@ -26,7 +26,6 @@ fn evaluator() -> &'static LeanEvaluator {
 }
 
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_wide_and_non_topological_graph_like_g8r() {
     let graph = common::interface_graph();
     let widths = graph
@@ -72,7 +71,6 @@ fn evaluates_wide_and_non_topological_graph_like_g8r() {
 }
 
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn evaluates_empty_interfaces_and_batches() {
     let graph = GateFn {
         name: "empty".to_string(),
@@ -107,7 +105,6 @@ fn evaluates_empty_interfaces_and_batches() {
 }
 
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn rejects_input_shape_mismatches() {
     let graph = common::and3();
     assert!(matches!(
@@ -130,7 +127,6 @@ fn rejects_input_shape_mismatches() {
 }
 
 #[test]
-#[ignore = "requires XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn exported_module_and_lean_regressions_compile() {
     let options = LeanExportOptions {
         module_name: LeanModuleName::new("Generated.And3").unwrap(),

@@ -4,13 +4,15 @@
 //! Lean.
 //!
 //! The word-level exporter preserves the XLS function signature and is checked
-//! against the PIR evaluator. The gate exporter supports user-supplied proofs
-//! and uses an evaluator proved equivalent to Lean's stock AIG semantics.
+//! against the PIR evaluator. Word-level proof targets expose each IR node and
+//! check pointwise equivalence over the full signature. Gate proofs use an
+//! evaluator proved equivalent to Lean's stock AIG semantics.
 
 mod error;
 mod evaluate;
 mod gate_fn;
 mod ir_fn;
+mod ir_proof;
 mod process;
 mod proof;
 mod support;
@@ -22,9 +24,12 @@ pub use gate_fn::{
     WrittenLeanCircuit, export_gate_fn,
 };
 pub use ir_fn::{LeanFunction, export_ir_function};
+pub use ir_proof::{LeanIrFunctionEquivalenceTarget, prepare_ir_function_equivalence_target};
 pub use proof::{
-    LeanEquivalenceTarget, LeanProofFailure, LeanProofOutput, LeanProofSources,
-    check_equivalence_proof, prepare_equivalence_target, run_equivalence_proof,
+    LeanEquivalenceTarget, LeanIrAxiomPolicy, LeanIrProofSources, LeanProofFailure,
+    LeanProofOutput, LeanProofSources, LeanTheoremName, check_equivalence_proof,
+    prepare_equivalence_target, run_equivalence_proof, run_ir_function_equivalence_proof,
+    run_ir_function_equivalence_proof_with_policy,
 };
 pub use support::write_lean_support;
 

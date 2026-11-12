@@ -3600,6 +3600,42 @@ LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean
 See the [word-level exporter](../xlsynth-lean/README.md#word-level-ir-functions)
 for type mappings, supported operations, and evaluation.
 
+### `ir-fn-lean-prepare`
+
+Exports two pure XLS IR functions, their reachable callees and their typed,
+pointwise Lean equivalence proposition. The sides must have identical positional
+argument and return types. Each side uses the package top or sole function by default.
+
+```bash
+xlsynth-driver ir-fn-lean-prepare --lhs lhs.ir --rhs rhs.ir --output-dir target-lean
+```
+
+- `--lhs <IR>`, `--rhs <IR>` select the package files.
+- `--lhs-top <FUNCTION>`, `--rhs-top <FUNCTION>` override each side's default entrypoint.
+- `--output-dir <DIR>` receives both generated modules, `Target.lean`, the Lean support files, and the toolchain pin.
+
+### `ir-fn-lean-check`
+
+Checks a named theorem in a Lean module against a bundle from `ir-fn-lean-prepare`.
+The driver generates a wrapper that imports the proof module and assigns the
+selected theorem to `UserProof.equivalent : Target.Equivalent`. The independent
+verifier checks the compiled proof against the original target, rejects unproved
+assumptions, and replays native Boolean checks used by tactics.
+
+```bash
+xlsynth-driver ir-fn-lean-check --target-dir target-lean --lean /path/to/lean \
+  --proof proofs/AdderProof.lean --proof-theorem AdderProof.equivalent
+```
+
+- `--target-dir <DIR>` and `--lean <PATH>` select the prepared target and Lean executable. Both are required.
+- `--proof <PATH>` is the required Lean module defining the theorem.
+- `--proof-theorem <NAME>` is the required Lean declaration name, including its namespace, such as `AdderProof.equivalent`.
+- `--reject-native-checks` requires the theorem and its dependencies to use only `propext`, `Classical.choice`, and `Quot.sound`. By default the verifier also accepts closed Boolean checks that it successfully replays with compiled Lean.
+- `--proof-root <DIR>` resolves Lean module paths and defaults to the directory containing `--proof`.
+- `--proof-source <PATH>` supplies an additional module imported by the proof or its dependencies. Repeat for each additional module.
+- `--work-dir <DIR>` keeps the staged proof and compiled modules in an empty directory. The default is temporary.
+- `--output-json <PATH>` records the result, diagnostics and audit status. A successful IR audit includes `native_checks_replayed`, the number of distinct native Boolean checks replayed across the theorem and its dependencies. A successful strict check reports zero. Failed checks omit this field.
+
 ### `g8r-lean-prepare`
 
 Emits canonical ASCII AIGER files for two combinational `.g8r` or `.g8rbin`

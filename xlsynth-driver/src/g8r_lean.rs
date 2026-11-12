@@ -6,7 +6,11 @@ use std::time::Instant;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
-use xlsynth_lean::{LeanProofSources, prepare_equivalence_target, run_equivalence_proof};
+use xlsynth_lean::{
+    LeanIrAxiomPolicy, LeanIrProofSources, LeanProofSources, LeanTheoremName,
+    prepare_equivalence_target, run_equivalence_proof,
+    run_ir_function_equivalence_proof_with_policy,
+};
 
 use crate::common::write_stdout;
 
@@ -38,16 +42,76 @@ pub fn prepare_command() -> Command {
 }
 
 /// Defines the command that runs a user proof against a prepared target.
-pub fn check_command() -> Command {
-    Command::new("g8r-lean-check")
-        .about("Runs a supplied Lean proof against a prepared g8r equivalence target; no proof audit is performed")
-        .arg(Arg::new("target-dir").long("target-dir").required(true).value_name("DIR").help("Target bundle written by g8r-lean-prepare"))
-        .arg(Arg::new("proof").long("proof").required(true).value_name("PATH").help("File containing a complete Lean proof term for Target.Equivalent, such as by ..."))
-        .arg(Arg::new("proof-root").long("proof-root").value_name("DIR").help("Root used for helper paths; defaults to the proof body's directory"))
-        .arg(Arg::new("proof-source").long("proof-source").value_name("PATH").action(ArgAction::Append).help("Lean helper module imported by the generated proof wrapper; repeat for multiple modules"))
-        .arg(Arg::new("lean").long("lean").required(true).value_name("PATH").help("Explicit Lean executable path"))
-        .arg(Arg::new("work-dir").long("work-dir").value_name("DIR").help("Empty proof work directory; defaults to a temporary directory"))
-        .arg(Arg::new("output-json").long("output-json").value_name("PATH").help("Write a machine-readable result and captured diagnostics"))
+pub fn check_command(name: &'static str) -> Command {
+    let command = Command::new(name)
+        .about("Runs a supplied Lean proof against a prepared equivalence target")
+        .arg(
+            Arg::new("target-dir")
+                .long("target-dir")
+                .required(true)
+                .value_name("DIR")
+                .help("Target bundle written by the corresponding prepare command"),
+        )
+        .arg(
+            Arg::new("proof-root")
+                .long("proof-root")
+                .value_name("DIR")
+                .help(
+                    "Root used for Lean module paths; defaults to the directory containing --proof",
+                ),
+        )
+        .arg(
+            Arg::new("proof-source")
+                .long("proof-source")
+                .value_name("PATH")
+                .action(ArgAction::Append)
+                .help("Additional Lean module under the proof root; repeat for multiple modules"),
+        )
+        .arg(
+            Arg::new("lean")
+                .long("lean")
+                .required(true)
+                .value_name("PATH")
+                .help("Explicit Lean executable path"),
+        )
+        .arg(
+            Arg::new("work-dir")
+                .long("work-dir")
+                .value_name("DIR")
+                .help("Empty proof work directory; defaults to a temporary directory"),
+        )
+        .arg(
+            Arg::new("output-json")
+                .long("output-json")
+                .value_name("PATH")
+                .help("Write a machine-readable result and captured diagnostics"),
+        );
+    let proof = Arg::new("proof")
+        .long("proof")
+        .required(true)
+        .value_name("PATH");
+    if name == "ir-fn-lean-check" {
+        command
+            .arg(proof.help("Lean module defining the equivalence theorem"))
+            .arg(
+                Arg::new("proof-theorem")
+                    .long("proof-theorem")
+                    .required(true)
+                    .value_name("NAME")
+                    .value_parser(LeanTheoremName::new)
+                    .help("Qualified name of the theorem proving Target.Equivalent"),
+            )
+            .arg(
+                Arg::new("reject-native-checks")
+                    .long("reject-native-checks")
+                    .action(ArgAction::SetTrue)
+                    .help("Require the theorem to depend only on propext, Classical.choice and Quot.sound"),
+            )
+    } else {
+        command.arg(proof.help(
+            "File containing a complete Lean proof term for Target.Equivalent, such as by ...",
+        ))
+    }
 }
 
 /// Checks graph interfaces and writes AAG files with one shared-loader target.
@@ -65,6 +129,8 @@ pub fn handle_prepare(matches: &ArgMatches) -> Result<(), String> {
 struct CheckReport {
     status: &'static str,
     audit_performed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_checks_replayed: Option<usize>,
     lean_version: Option<String>,
     elapsed_ms: u128,
     stdout: String,
@@ -74,7 +140,7 @@ struct CheckReport {
 
 /// Stages proof inputs, invokes Lean, and emits optional JSON on either
 /// outcome.
-pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
+pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String> {
     let proof = PathBuf::from(matches.get_one::<String>("proof").unwrap());
     let proof_root = matches
         .get_one::<String>("proof-root")
@@ -82,19 +148,16 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
         .unwrap_or_else(|| {
             proof
                 .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf()
         });
-    let sources = LeanProofSources {
-        root: proof_root,
-        body: proof,
-        modules: matches
-            .get_many::<String>("proof-source")
-            .into_iter()
-            .flatten()
-            .map(PathBuf::from)
-            .collect(),
-    };
+    let modules = matches
+        .get_many::<String>("proof-source")
+        .into_iter()
+        .flatten()
+        .map(PathBuf::from)
+        .collect();
     let temporary = if matches.get_one::<String>("work-dir").is_none() {
         Some(
             tempfile::Builder::new()
@@ -110,16 +173,37 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| temporary.as_ref().unwrap().path().to_path_buf());
     let started = Instant::now();
-    let outcome = run_equivalence_proof(
-        Path::new(matches.get_one::<String>("lean").unwrap()),
-        Path::new(matches.get_one::<String>("target-dir").unwrap()),
-        &sources,
-        &work_root,
-    );
+    let lean = Path::new(matches.get_one::<String>("lean").unwrap());
+    let target = Path::new(matches.get_one::<String>("target-dir").unwrap());
+    let outcome = if word_level {
+        let sources = LeanIrProofSources {
+            root: proof_root,
+            module: proof,
+            theorem: matches
+                .get_one::<LeanTheoremName>("proof-theorem")
+                .unwrap()
+                .clone(),
+            modules,
+        };
+        let policy = if matches.get_flag("reject-native-checks") {
+            LeanIrAxiomPolicy::RejectNativeChecks
+        } else {
+            LeanIrAxiomPolicy::ReplayNativeChecks
+        };
+        run_ir_function_equivalence_proof_with_policy(lean, target, &sources, &work_root, policy)
+    } else {
+        let sources = LeanProofSources {
+            root: proof_root,
+            body: proof,
+            modules,
+        };
+        run_equivalence_proof(lean, target, &sources, &work_root)
+    };
     let report = match outcome {
         Ok(output) => CheckReport {
             status: "accepted_by_lean",
-            audit_performed: false,
+            audit_performed: output.native_checks_replayed.is_some(),
+            native_checks_replayed: output.native_checks_replayed,
             lean_version: Some(output.lean_version),
             elapsed_ms: started.elapsed().as_millis(),
             stdout: output.stdout,
@@ -129,6 +213,7 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
         Err(failure) => CheckReport {
             status: "failed",
             audit_performed: false,
+            native_checks_replayed: None,
             lean_version: failure.lean_version,
             elapsed_ms: started.elapsed().as_millis(),
             stdout: failure.stdout,
@@ -149,4 +234,59 @@ pub fn handle_check(matches: &ArgMatches) -> Result<(), String> {
         eprint!("{}", report.stderr);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::error::ErrorKind;
+
+    use super::check_command;
+
+    #[test]
+    fn theorem_selection_and_native_check_policy_are_ir_only() {
+        let inputs = [
+            "--target-dir",
+            "target",
+            "--proof",
+            "Proof.lean",
+            "--lean",
+            "lean",
+        ];
+        let ir_args = ["ir-fn-lean-check"].into_iter().chain(inputs);
+        let gate_args = ["g8r-lean-check"].into_iter().chain(inputs);
+        let theorem = ["--proof-theorem", "Proof.equivalent"];
+        assert_eq!(
+            check_command("ir-fn-lean-check")
+                .try_get_matches_from(ir_args.clone())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::MissingRequiredArgument
+        );
+        let ir_args = ir_args.chain(theorem);
+        let default = check_command("ir-fn-lean-check")
+            .try_get_matches_from(ir_args.clone())
+            .unwrap();
+        assert!(!default.get_flag("reject-native-checks"));
+        let strict = check_command("ir-fn-lean-check")
+            .try_get_matches_from(ir_args.chain(["--reject-native-checks"]))
+            .unwrap();
+        assert!(strict.get_flag("reject-native-checks"));
+        check_command("g8r-lean-check")
+            .try_get_matches_from(gate_args.clone())
+            .unwrap();
+        assert_eq!(
+            check_command("g8r-lean-check")
+                .try_get_matches_from(gate_args.clone().chain(theorem))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
+        assert_eq!(
+            check_command("g8r-lean-check")
+                .try_get_matches_from(gate_args.chain(["--reject-native-checks"]))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
+    }
 }
