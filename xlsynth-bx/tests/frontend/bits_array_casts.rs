@@ -143,7 +143,7 @@ block sample(clk) -> (u4[0], (u4[0], u3)[2]) { (EMPTY, NESTED) }
 fn empty_array_cast_as_register_reset_lowers_to_valid_ir() -> Result<(), Box<dyn Error>> {
     let source = r#"
 const E = bits[0]:0 as u8[0];
-block test(clk, rst, data_in: u8[0]) -> u8[0] {
+block test(clk, data_in: u8[0]) -> u8[0] {
     reg r: u8[0] = E;
     r := data_in;
     r
@@ -162,7 +162,7 @@ block test(clk, rst, data_in: u8[0]) -> u8[0] {
 fn mixed_empty_array_reset_preserves_registered_payload_and_enable() -> Result<(), Box<dyn Error>> {
     let source = r#"
 const E = bits[0]:0 as u8[0];
-block mixed(clk, rst, en: bool, x: u8, tag: u2) -> u10 {
+block mixed(clk, en: bool, x: u8, tag: u2) -> u10 {
     reg q: (u2, (u8[0], u4)[2]) = (u2:1, [(E, u4:10), (E, u4:11)]);
     if en { q := (tag, [(E, (x >> u32:4) as u4), (E, x as u4)]); }
     q.0 ++ q.1[u32:0].1 ++ q.1[u32:1].1

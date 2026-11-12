@@ -421,7 +421,7 @@ fn large_counted_ranges_emit_a_single_loop_node() -> Result<(), Box<dyn Error>> 
 #[test]
 fn register_reset_evaluates_a_constant_counted_loop() -> Result<(), Box<dyn Error>> {
     let source = r#"
-block reset_fold(clk, rst, x: u8) -> u8 {
+block reset_fold(clk, x: u8) -> u8 {
     reg q: u8 = for (v, a) in [u8:2, u8:5, u8:7] { a * u8:3 + v }(u8:1);
     q := x;
     q
@@ -482,7 +482,7 @@ fn nested_counted_bodies_compile_on_a_small_stack() -> Result<(), String> {
     let runtime =
         format!("#[allow(combinational_block)] block folded(clk, x: u8) -> u8 {{ {body} }}");
     let reset = format!(
-        "block folded(clk, rst, x: u8) -> u8 {{ reg q: u8 = {}; q := x; q }}",
+        "block folded(clk, x: u8) -> u8 {{ reg q: u8 = {}; q := x; q }}",
         body.replace('x', "u8:7"),
     );
     std::thread::Builder::new()

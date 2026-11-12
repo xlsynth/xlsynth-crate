@@ -333,8 +333,9 @@ mod tests {
     use crate::{ImportOptions, ResetBehavior, compile, empty_package, run_tests};
 
     const SOURCE: &str = r#"
+#![allow(block_reset_signal)]
 type Payload = (uN[80], u4[2], ());
-block delay(clk, rst, data: Payload) -> Payload {
+block delay(clk, data: Payload) -> Payload {
     reg q: Payload = zero!<Payload>();
     q := data;
     q

@@ -123,7 +123,7 @@ fn generic_block_specializations_keep_named_output_ports() -> Result<(), Box<dyn
 struct FlowOut<T> { pop_valid: bool, pop_data: T }
 struct Packet { tag: u8, word: u16 }
 
-block flow_result<T>(clk, rst, valid: bool, data: T) -> FlowOut<T> {
+block flow_result<T>(clk, valid: bool, data: T) -> FlowOut<T> {
     reg valid_q: bool = false;
     reg data_q: T = zero!<T>();
     valid_q := valid;
@@ -131,7 +131,7 @@ block flow_result<T>(clk, rst, valid: bool, data: T) -> FlowOut<T> {
     FlowOut { pop_data: data_q, pop_valid: valid_q }
 }
 
-pub block pipeline(clk, rst, a_valid: bool, a: u8, b_valid: bool, tag: u8, word: u16)
+pub block pipeline(clk, a_valid: bool, a: u8, b_valid: bool, tag: u8, word: u16)
     -> (bool, u8, bool, u8, u16) {
     let scalar = flow_result(a_valid, a);
     let packet = flow_result(b_valid, Packet { tag, word });

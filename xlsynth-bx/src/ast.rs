@@ -954,6 +954,9 @@ impl UsePath {
 /// All declarations in one source file, retaining order within each kind.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Module {
+    /// `#![allow(block_reset_signal)]` permits ordinary blocks in this file
+    /// to declare an explicit reset signal.
+    pub allow_block_reset_signal: bool,
     /// `#![require_block_timing]` requires output timing on this file's block
     /// definitions.
     pub require_block_timing: bool,

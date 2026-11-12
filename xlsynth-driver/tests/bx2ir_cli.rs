@@ -76,7 +76,7 @@ const CASES: (Drive, Expect)[3] = [
     (Drive { increment: u8:3, enable: true }, Expect { total: u8:5 }),
 ];
 
-block counter(clk, rst, drive: Drive) -> Expect {
+block counter(clk, drive: Drive) -> Expect {
     reg total_q: u8 = u8:0;
     if drive.enable {
         total_q := total_q + drive.increment;
@@ -119,7 +119,7 @@ fn bx_quickcheck_compares_each_sample_and_reports_four_valued_outcomes() -> Resu
         r#"
 enum Op : u3 { Hold = 1, Load = 5 }
 struct Drive { op: Op, data: uN[71] }
-block capture(clk, rst, d: Drive) -> uN[71] {
+block capture(clk, d: Drive) -> uN[71] {
     reg q: uN[71] = uN[71]:7;
     if d.op == Op::Load { q := d.data; }
     q
@@ -225,7 +225,7 @@ fn bx_test_reports_the_failed_edge_and_continues_with_the_next_test() -> Result<
     let directory = tempfile::tempdir()?;
     fs::write(
         directory.path().join("failing.bx"),
-        r#"block capture(clk, rst, d: u8) -> u8 {
+        r#"block capture(clk, d: u8) -> u8 {
     reg q: u8 = u8:0;
     q := d;
     q
@@ -942,7 +942,7 @@ fn top_override_and_reset_flags_apply_to_a_standalone_module() -> Result<()> {
         root.join("blocks.bx"),
         r#"#[allow(combinational_block)]
 pub block passthrough(clk, x: u8) -> u8 { x }
-block delay(clk, rst, x: u8) -> u8 {
+block delay(clk, x: u8) -> u8 {
     reg q: u8 = 0;
     q := x;
     q
@@ -1013,7 +1013,7 @@ fn mapped_protobuf_matches_the_staged_pipeline_with_synchronous_reset_and_enable
     fs::write(
         root.join("pipeline.bx"),
         r#"use math;
-block pipeline(clk, rst, x: u2, en: bool) -> u2 {
+block pipeline(clk, x: u2, en: bool) -> u2 {
     reg q: u2 = 0;
     if en { q := math::invert(x); }
     q

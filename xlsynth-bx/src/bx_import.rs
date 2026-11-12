@@ -367,9 +367,11 @@ impl Names {
     }
 }
 
-/// Source location and warning policy of one BX library in the linked graph.
+/// Source location and file-wide attributes of one BX library in the linked
+/// graph.
 pub(crate) struct LibraryModuleInfo {
     pub path: PathBuf,
+    pub allow_block_reset_signal: bool,
     pub require_block_timing: bool,
 }
 
@@ -620,6 +622,7 @@ impl<'a> Graph<'a> {
             source.target.subject.clone(),
             LibraryModuleInfo {
                 path: source.target.path.clone(),
+                allow_block_reset_signal: module.allow_block_reset_signal,
                 require_block_timing: module.require_block_timing,
             },
         );

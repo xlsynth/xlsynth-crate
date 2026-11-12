@@ -18,12 +18,12 @@ const WIDTH = u32:8;
 type Lane = uN[WIDTH];
 struct Packet { valid: bool, data: Lane }
 type Payload = Packet;
-block hold<T>(clk, rst, x: T) -> T {
+block hold<T>(clk, x: T) -> T {
     reg q: T = zero!<T>();
     q := x;
     q
 }
-pub block packet_pipe(clk, rst, a: Payload, b: Packet) -> Output {
+pub block packet_pipe(clk, a: Payload, b: Packet) -> Output {
     let a_q = hold(a);
     let b_q = hold(b);
     Output { valid: a_q.valid, data: b_q.data }

@@ -15,7 +15,7 @@ struct ResultPorts {
     valid: bool,
 }
 
-pub block transform_pipe(clk, rst, valid_in: bool, x: u8) -> ResultPorts {
+pub block transform_pipe(clk, valid_in: bool, x: u8) -> ResultPorts {
     reg data_q: u16;
     reg valid_q: bool = false;
     if valid_in {
@@ -72,7 +72,7 @@ Declare each member's encoding and refer to it by name in functions and blocks.
 ```text
 pub enum State : u3 { Idle = 0, Busy = 5 }
 
-block controller(clk, rst, start: bool) -> State {
+block controller(clk, start: bool) -> State {
     reg state: State = State::Idle;
     state := match state {
         State::Idle => if start { State::Busy } else { State::Idle },
@@ -141,7 +141,7 @@ const STEP: u8 = 3;
 fn advance(x: u8) -> u8 { x + STEP }
 const START = advance(u8:4);
 
-pub block counter(clk, rst) -> u8 {
+pub block counter(clk) -> u8 {
     reg q: u8 = START;
     q := advance(q);
     q
@@ -270,7 +270,7 @@ parametrics belong to separate struct declarations.
 struct FlowOut<T> { pop_valid: bool, pop_data: T }
 struct Packet { tag: u8, words: u32[2] }
 
-block flow_result<T>(clk, rst, valid: bool, data: T) -> FlowOut<T> {
+block flow_result<T>(clk, valid: bool, data: T) -> FlowOut<T> {
     reg valid_q: bool = false;
     reg data_q: T = zero!<T>();
     valid_q := valid;
@@ -278,7 +278,7 @@ block flow_result<T>(clk, rst, valid: bool, data: T) -> FlowOut<T> {
     FlowOut { pop_valid: valid_q, pop_data: data_q }
 }
 
-pub block packet_stage(clk, rst, valid: bool, packet: Packet) -> FlowOut<Packet> {
+pub block packet_stage(clk, valid: bool, packet: Packet) -> FlowOut<Packet> {
     let stage = flow_result(valid, packet);
     stage
 }
@@ -342,7 +342,7 @@ function. A forward reference is an error even when warnings are allowed.
 
 fn increment(x: u8) -> u8 { x + u8:1 }
 
-pub block counter(clk, rst) -> u8 {
+pub block counter(clk) -> u8 {
     reg q: u8 = u8:0;
     q := increment(q);
     q
@@ -565,7 +565,7 @@ the update and checks that the counter holds the previous total.
 ```text
 struct Drive { increment: u8, enable: bool }
 
-block counter(clk, rst, drive: Drive) -> u8 {
+block counter(clk, drive: Drive) -> u8 {
     reg total: u8 = u8:0;
     if drive.enable { total := total + drive.increment; }
     total
@@ -726,6 +726,7 @@ reset edge. The state before that edge is arbitrary. The checker executes the
 reset edge with legal data inputs, so a register without a reset value follows its ordinary update or
 retains its arbitrary value. Subsequent sampled edges may assert reset again.
 A clock-only invariant starts sampling directly from arbitrary register state.
+Declare `rst` on the invariant itself when it has an initialized register or instantiates a child that needs reset.
 
 Mark a top-level Boolean binding with `#[lemma]` to give the prover a helper
 invariant. The binding remains an ordinary value in the circuit. Here a dead
@@ -795,7 +796,7 @@ The linker checks argument order, widths, aggregate shapes, and result type befo
 errors by default. The `combinational_block` warning points to a block that
 only computes a value. Prefer a `fn` for this kind of helper. A block with a
 register or a child instance already serves a hardware role. A helper that
-only reads its implicit reset can take the normalized reset as an explicit
+only reads the `rst` declared in its signature can take the normalized reset as an explicit
 `bool` function argument. Type-generic blocks can express signatures
 unavailable on BX functions.
 
@@ -824,7 +825,7 @@ Place reusable declarations in a `.bx` file and mark the library interface with
 `pub`. This `stages.bx` library defines a register for any payload type.
 
 ```text
-pub block pipe_reg<T>(clk, rst, valid: bool, data: T) -> (bool, T) {
+pub block pipe_reg<T>(clk, valid: bool, data: T) -> (bool, T) {
     reg valid_q: bool = false;
     reg data_q: T;
     valid_q := valid;
@@ -833,13 +834,13 @@ pub block pipe_reg<T>(clk, rst, valid: bool, data: T) -> (bool, T) {
 }
 ```
 
-A sibling file can import the module and call its block. The call inherits
-the caller's clock and reset, and BX infers `T` from `data`.
+A sibling file can import the module and call its block. BX infers `T` from
+`data` and wires reset through `delay` to the child's `valid_q` register.
 
 ```text
 use stages;
 
-pub block delay(clk, rst, valid: bool, data: u16) -> (bool, u16) {
+pub block delay(clk, valid: bool, data: u16) -> (bool, u16) {
     let delayed = stages::pipe_reg(valid, data);
     delayed
 }
@@ -984,10 +985,31 @@ Lowering emits an ordinary IR `invoke` and includes the specialized function and
 
 ## Clocked blocks
 
-- The first port is `clk`, followed by optional `rst` and typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields as output ports in declaration order, so those field names must be valid XLS IR port names. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
+- The first port is `clk`, followed by typed data inputs. Pipelines conventionally put `valid_in` first among the data inputs. The final expression drives the outputs continuously. A struct result exposes its fields as output ports in declaration order, so those field names must be valid XLS IR port names. A tuple exposes `out_0`, `out_1`, and so on. Unit exposes zero outputs, and a scalar or array exposes one port named `out`. Nest a tuple or struct inside a named field to expose it as one aggregate port.
 - A `reg` name in an expression reads its current value. Each register has exactly one `:=` update site. A surrounding `if` supplies the load enable. An ordinary value expression such as `q := if en { x } else { q };` supplies a mux on the data input. All registers update together at the active edge.
-- A register initializer is a constant reset value and requires `rst`. Reset takes priority over load enable for that register. Registers declared without an initializer have unspecified power-up values. In a value expression, `rst` means reset is asserted. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
+- A register initializer gives its constant reset value. For example, `reg valid: bool = false;` clears on reset even when its load enable is false. A register without an initializer has an unspecified power-up value and follows its ordinary update on a reset edge.
+- BX infers a physical reset port when a register has an initializer or an instantiated child needs reset. `ResetBehavior` configures polarity and timing for the hierarchy, defaulting to active-high synchronous reset.
 - A module with one concrete block declaration selects it as top. With multiple concrete declarations, a single concrete `pub block` selects the top. For other configurations, select the desired block on the returned package.
+
+To expose the reset signal to ordinary blocks, put `#![allow(block_reset_signal)]`
+before the first declaration in their defining file. Each block that declares
+`rst` then has a physical reset port and can read the logical asserted level
+under either polarity. Without the attribute, an explicit `rst` in an ordinary
+block signature is an error even if its body never reads the signal.
+
+```text
+#![allow(block_reset_signal)]
+
+block reset_seen(clk, rst) -> bool {
+    reg seen: bool;
+    seen := rst;
+    seen
+}
+```
+
+Extern declarations describe the reset role of linked hardware. Invariants
+declare `rst` to select their reset-start semantics. Both use their existing
+signatures independently of this attribute.
 
 ### Pipeline stage annotations
 
@@ -1071,7 +1093,7 @@ stages 1 and 0, and BX reports the mismatch at the adder.
 
 ### Calling a block
 
-An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. The child inherits its parent's clock and, if it declares `rst`, the parent's reset. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
+An unconditional `let` in a block body creates one persistent child instance. Pass the data inputs in declaration order. BX connects the child's clock and any required reset automatically. Each call binding has its own registers. Reading the binding multiple times reads the same child's outputs.
 
 Block lets accept DSLX tuple patterns. For example, `let (valid, (first, .., last)) = packet;` binds the valid bit and the first and last members of the nested tuple. Use `_` to discard one member and `..` to skip zero or more members at that tuple level. An optional annotation after the pattern gives the type of the entire initializer. Each nested pattern must match a tuple of the corresponding shape. A pattern may rebind a data value. In `let (x, previous) = (x + u8:1, x);`, both uses on the right read the previous `x`.
 
@@ -1081,14 +1103,14 @@ A pattern can also bind a child's tuple result directly, as in `let (valid_out, 
 struct LaneOut { data: u8, valid: bool }
 extern block lane(clk, rst, x: u8) -> LaneOut;
 
-block pair(clk, rst, x: u8, y: u8) -> (LaneOut, LaneOut) {
+block pair(clk, x: u8, y: u8) -> (LaneOut, LaneOut) {
     let left = lane(x);
     let right = lane(y);
     (left, right)
 }
 ```
 
-Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
+Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. Include `rst` in that declaration if the linked block has a reset port. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
 For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
 
@@ -1100,13 +1122,13 @@ generic child block's type parameters. Supply exactly one unconditional
 driver with `name = value;`. The driver may be an `if` expression.
 
 ```text
-block delay<T>(clk, rst, data: T) -> T {
+block delay<T>(clk, data: T) -> T {
     reg q: T = zero!<T>();
     q := data;
     q
 }
 
-pub block accumulate(clk, rst, step: u8) -> u8 {
+pub block accumulate(clk, step: u8) -> u8 {
     let next: u8;
     let current = delay(next);
     next = current + step;
@@ -1123,7 +1145,7 @@ reports combinational cycles at their participating source connections.
 Declare a type parameter after the block name and use it for ports, registers, and local type annotations. At each call, BX infers the type parameter from the data arguments.
 
 ```text
-block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
+block pipe_reg<T>(clk, valid_in: bool, data_in: T) -> (bool, T) {
     reg valid_q: bool = false;
     reg data_q: T;
     valid_q := valid_in;
@@ -1133,7 +1155,7 @@ block pipe_reg<T>(clk, rst, valid_in: bool, data_in: T) -> (bool, T) {
 
 struct Packet { tag: u8, words: u32[2] }
 
-block packet_stage(clk, rst, valid: bool, packet: Packet) -> (bool, Packet) {
+block packet_stage(clk, valid: bool, packet: Packet) -> (bool, Packet) {
     let stage = pipe_reg(valid, packet);
     stage
 }
@@ -1152,20 +1174,20 @@ in its body. Supply each value explicitly in angle brackets at the call site.
 BX infers type parameters from the data inputs.
 
 ```text
-block stage<T>(clk, rst, data: T) -> T {
+block stage<T>(clk, data: T) -> T {
     reg q: T = zero!<T>();
     q := data;
     q
 }
 
-block delay<T, N: u32>(clk, rst, data: T) -> T {
+block delay<T, N: u32>(clk, data: T) -> T {
     unroll_for! (_, prev): (u32, T) in u32:0..N {
         let next = stage(prev);
         next
     }(data)
 }
 
-pub block pipeline(clk, rst, data: u8) -> u8 {
+pub block pipeline(clk, data: u8) -> u8 {
     let delayed = delay<3>(data);
     delayed
 }
@@ -1183,12 +1205,12 @@ A block can declare type and callable parameters together. Supply the callback n
 ```text
 use math;
 
-block advance<In, Out, F: fn(In) -> Out>(clk, rst, prev: (bool, In)) -> (bool, Out) {
+block advance<In, Out, F: fn(In) -> Out>(clk, prev: (bool, In)) -> (bool, Out) {
     let next = pipe_reg(prev.0, F(prev.1));
     next
 }
 
-block pipeline(clk, rst, packet: (bool, u8)) -> (bool, u32) {
+block pipeline(clk, packet: (bool, u8)) -> (bool, u32) {
     let widened = advance<math::widen>(packet);
     let squared = advance<math::square>(widened);
     squared
@@ -1210,13 +1232,13 @@ lets, and its built-in value operations. The accumulator and the other values
 used in the body can depend on input ports.
 
 ```text
-block delay(clk, rst, enable: bool, x: u8) -> u8 {
+block delay(clk, enable: bool, x: u8) -> u8 {
     reg q: u8 = u8:0;
     if enable { q := x; }
     q
 }
 
-pub block delay_array(clk, rst, enables: bool[4], xs: u8[4]) -> u8[4] {
+pub block delay_array(clk, enables: bool[4], xs: u8[4]) -> u8[4] {
     let outputs = unroll_for! (i, acc): (u32, u8[4]) in u32:0..u32:4 {
         let element = delay(enables[i], xs[i]);
         update(acc, i, element)

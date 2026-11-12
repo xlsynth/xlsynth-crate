@@ -479,6 +479,11 @@ xlsynth-driver block2sv mul_inc.ir > mul_inc.sv
 - `--reset-asynchronous[=true|false]` selects asynchronous reset for the
   block hierarchy. Defaults to `false` (synchronous). The bare flag enables it.
 
+`bx2ir` infers a reset port for an ordinary BX block that initializes a
+register or instantiates a child that needs reset. Explicit `clk, rst`
+signatures require `#![allow(block_reset_signal)]` in their defining BX file.
+Both reset flags apply to inferred and explicit ports.
+
 ### `bx-test` runs BX unit tests, clocked QuickChecks and invariants
 
 Runs the `#[test] fn`, `#[test] block`, `#[quickcheck] block`, and

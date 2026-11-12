@@ -1227,18 +1227,34 @@ impl<'s> Parser<'s> {
             let name = self.peek(0);
             if module_attribute {
                 match name {
-                    "require_block_timing" => module.require_block_timing = true,
+                    "allow" => {
+                        if !module.declaration_order.is_empty() {
+                            return Err(self.error(
+                                "place #![allow(block_reset_signal)] before the first declaration",
+                            ));
+                        }
+                        self.pos += 1;
+                        self.expect("(")?;
+                        self.expect("block_reset_signal")?;
+                        self.eat(",");
+                        self.expect(")")?;
+                        module.allow_block_reset_signal = true;
+                    }
+                    "require_block_timing" => {
+                        self.pos += 1;
+                        module.require_block_timing = true;
+                    }
                     "require_define_before_use" => {
                         if !module.declaration_order.is_empty() {
                             return Err(self.error(
                                 "place #![require_define_before_use] before the first declaration",
                             ));
                         }
+                        self.pos += 1;
                         module.require_define_before_use = true;
                     }
                     _ => return Err(self.error("unknown BX module attribute")),
                 }
-                self.pos += 1;
                 self.expect("]")?;
                 continue;
             }
@@ -1265,6 +1281,9 @@ impl<'s> Parser<'s> {
             }
             loop {
                 let name = self.peek(0);
+                if name == "block_reset_signal" {
+                    return Err(self.error("use #![allow(block_reset_signal)] at module scope"));
+                }
                 let warning = BxWarningKind::from_name(name)
                     .ok_or_else(|| self.error("unknown BX warning in #[allow(...)]"))?;
                 self.pos += 1;
@@ -4756,6 +4775,7 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
         let default = parse_module("const X = u8:0;")?;
         assert!(!default.require_define_before_use);
         assert!(!default.require_block_timing);
+        assert!(!default.allow_block_reset_signal);
         let order = parse_module("#![require_define_before_use]")?;
         assert!(order.require_define_before_use);
         assert!(!order.require_block_timing);
@@ -4763,15 +4783,36 @@ fn from_library(x: lib::Phase') -> lib::Phase' {
         assert!(!timing.require_define_before_use);
         assert!(timing.require_block_timing);
         for attrs in [
-            "#![require_define_before_use]\n#![require_block_timing]",
-            "#![require_block_timing]\n#![require_define_before_use]",
+            "#![allow(block_reset_signal)]\n#![require_define_before_use]\n#![require_block_timing]",
+            "#![require_block_timing]\n#![require_define_before_use]\n#![allow(block_reset_signal,)]",
         ] {
             let module = parse_module(&format!("{attrs}\nuse lib;"))?;
             assert!(module.require_define_before_use);
             assert!(module.require_block_timing);
+            assert!(module.allow_block_reset_signal);
             assert_eq!(module.declaration_order, ["lib"]);
         }
         Ok(())
+    }
+
+    #[test]
+    fn block_reset_signal_allowance_requires_a_module_header() {
+        for (source, diagnostic) in [
+            (
+                "use lib;\n#![allow(block_reset_signal)]",
+                "2:4: place #![allow(block_reset_signal)] before the first declaration, found 'allow'",
+            ),
+            (
+                "#[allow(block_reset_signal)] block b(clk, rst) -> bool { rst }",
+                "1:9: use #![allow(block_reset_signal)] at module scope, found 'block_reset_signal'",
+            ),
+            (
+                "#![allow(other_signal)]",
+                "1:10: expected 'block_reset_signal', found 'other_signal'",
+            ),
+        ] {
+            assert_eq!(parse_module(source).unwrap_err(), diagnostic);
+        }
     }
 
     #[test]

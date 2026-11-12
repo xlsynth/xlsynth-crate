@@ -203,7 +203,7 @@ mod tests {
     fn ordinary_block_caches_a_two_limb_result_of_large_array_updates() -> Result<(), String> {
         let source = format!(
             r#"
-block b(clk, rst) -> uN[65] {{
+block b(clk) -> uN[65] {{
     let A = zero!<u1[65536]>();
     let k = {}[u32:0] as uN[65];
     reg q: uN[65] = k;

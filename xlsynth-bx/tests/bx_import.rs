@@ -35,6 +35,28 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn explicit_reset_permission_belongs_to_the_defining_file() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    let options = search_paths(&[dir.path()]);
+    let permission = "#![allow(block_reset_signal)]";
+    let child = "pub block hold<T>(clk, rst, x: T) -> T { reg q: T; if !rst { q := x; } q }";
+    let parent = "use stages; block pipeline(clk, x: u8) -> u8 { let q = stages::hold(x); q }";
+    write_module(dir.path(), "stages.bx", &format!("{permission}\n{child}"))?;
+    let package = compile_design(parent, &options)?;
+    assert!(package.get_block("pipeline").unwrap().reset.is_some());
+
+    let explicit_parent = parent.replace("pipeline(clk,", "pipeline(clk, rst,");
+    let diagnostic = "declaring an explicit reset signal requires #![allow(block_reset_signal)] in the defining module; omit `rst` to infer reset";
+    let error = compile_design(&explicit_parent, &options).unwrap_err();
+    assert_eq!(error, format!("block 'pipeline': {diagnostic}"));
+
+    write_module(dir.path(), "stages.bx", child)?;
+    let error = compile_design(&format!("{permission}\n{explicit_parent}"), &options).unwrap_err();
+    assert_eq!(error, format!("block 'stages::hold': {diagnostic}"));
+    Ok(())
+}
+
+#[test]
 fn test_register_defaults_are_independent_of_imported_zero_functions() -> Result<(), Box<dyn Error>>
 {
     let dir = tempdir()?;

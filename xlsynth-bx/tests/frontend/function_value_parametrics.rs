@@ -353,7 +353,7 @@ fn parametric_matches_require_constant_inputs_in_every_arm() -> Result<(), Box<d
 
     // Ordinary BX folding can still supply a reset from the selected match arm.
     let bx = format!(
-        "{declaration} block b(clk,rst,x:u32)->u32 {{ let k=match true {{ true=>u32:2, _=>x }}; reg q:u32=k; q:=x; q }}"
+        "{declaration} block b(clk,x:u32)->u32 {{ let k=match true {{ true=>u32:2, _=>x }}; reg q:u32=k; q:=x; q }}"
     );
     let checked = check_module(&parse_module(&bx)?)?;
     let expected = IrValue::make_ubits(32, 2)?;

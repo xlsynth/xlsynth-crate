@@ -156,7 +156,7 @@ mod tests {
     -> Result<(), String> {
         let source = r#"
 enum Op : u2 { Hold = 1, Load = 2 }
-block store(clk, rst, input: Op) -> Op {
+block store(clk, input: Op) -> Op {
     reg q: Op;
     q := input;
     q
@@ -205,7 +205,7 @@ block store(clk, rst, input: Op) -> Op {
     #[test]
     fn predicate_and_concrete_replay_agree_for_every_initial_state() -> Result<(), String> {
         let source = r#"
-block store(clk, rst, write: bool, data: bool) -> bool {
+block store(clk, write: bool, data: bool) -> bool {
     reg value: bool;
     if write { value := data; }
     value
