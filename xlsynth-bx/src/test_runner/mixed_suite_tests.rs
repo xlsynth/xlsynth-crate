@@ -56,6 +56,7 @@ fn clocked_lowering_depends_on_reachable_functions_with_discards() -> Result<(),
         let mut suite = TestSuite {
             reserved: Default::default(),
             programs: Vec::new(),
+            invariants: Vec::new(),
         };
         let checked = check::check_sources_with_tests(&root, imports, &options, Some(&mut suite))?;
         assert!(checked.functions_with_test_discards.contains("keep"));

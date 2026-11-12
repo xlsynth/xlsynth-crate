@@ -792,6 +792,30 @@ pub struct TestDecl {
     pub overwritten_literal_types: BTreeSet<String>,
 }
 
+/// A named Boolean fact checked on each observation of an invariant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvariantLemma {
+    pub name: String,
+    pub position: SourcePosition,
+}
+
+impl InvariantLemma {
+    /// Capture the marked binding before later lets can shadow its spelling.
+    /// A dot cannot occur in a source BX binding identifier.
+    pub(crate) fn observation_name(index: usize) -> String {
+        format!("bx.lemma.{index}")
+    }
+}
+
+/// A private clocked property with named lemmas sampled in the same cycle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvariantDecl {
+    pub block: Block,
+    pub position: SourcePosition,
+    pub lemmas: Vec<InvariantLemma>,
+    pub overwritten_literal_types: BTreeSet<String>,
+}
+
 /// One test action and the location used to report its outcome.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TestStmt {
@@ -956,4 +980,6 @@ pub struct Module {
     pub blocks: Vec<Block>,
     /// Tests declared in this source file, in execution order.
     pub tests: Vec<TestDecl>,
+    /// Private property circuits compiled by the verification commands.
+    pub invariants: Vec<InvariantDecl>,
 }

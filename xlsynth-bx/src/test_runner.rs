@@ -2,6 +2,8 @@
 
 //! Execute test control flow over typed BX expressions and clocked hardware.
 
+pub(crate) mod invariant;
+mod invariant_trials;
 #[cfg(test)]
 mod mixed_suite_tests;
 mod proof;
@@ -49,6 +51,23 @@ impl Default for QuickCheckOptions {
     }
 }
 
+/// Concrete test settings, including how many cycles to sample in each
+/// invariant trial.
+#[derive(Clone, Copy, Debug)]
+pub struct BxTestOptions {
+    pub quickcheck: QuickCheckOptions,
+    pub invariant_cycles: NonZeroUsize,
+}
+
+impl Default for BxTestOptions {
+    fn default() -> Self {
+        Self {
+            quickcheck: QuickCheckOptions::default(),
+            invariant_cycles: NonZeroUsize::new(16).unwrap(),
+        }
+    }
+}
+
 /// Outcomes from starting the RTL at X, independent of the concrete trials.
 #[derive(Clone, Debug, Default)]
 pub struct FourValuedReport {
@@ -57,6 +76,30 @@ pub struct FourValuedReport {
     pub indeterminate: usize,
     pub first_false: Option<String>,
     pub first_indeterminate: Option<String>,
+}
+
+impl FourValuedReport {
+    /// Retain the first witness for each four-state outcome. A simulator error
+    /// prevents classification and must be reported by the enclosing test.
+    fn record_failure(
+        &mut self,
+        error: &ExecutionError,
+        witness: impl FnOnce() -> String,
+    ) -> Option<String> {
+        let first = match error {
+            ExecutionError::Assertion(_) => {
+                self.failed += 1;
+                &mut self.first_false
+            }
+            ExecutionError::Unknown(_) => {
+                self.indeterminate += 1;
+                &mut self.first_indeterminate
+            }
+            ExecutionError::Runtime(_) => return Some(witness()),
+        };
+        first.get_or_insert_with(witness);
+        None
+    }
 }
 
 /// Trial count and seed for one property, with optional four-valued outcomes.
@@ -82,10 +125,31 @@ pub struct BxTestReport {
     pub warnings: Vec<BxWarning>,
 }
 
+/// Concrete test results and the names of persistent clocked invariants in this
+/// run.
+#[derive(Clone, Debug)]
+pub struct BxTestRun {
+    pub tests: Vec<BxTestResult>,
+    pub warnings: Vec<BxWarning>,
+    pub invariant_names: BTreeSet<String>,
+}
+
 /// Test-only IR names, source locations and sequenced instructions.
 pub(crate) struct TestSuite {
     reserved: BTreeSet<String>,
     pub(crate) programs: Vec<TestProgram>,
+    pub(crate) invariants: Vec<InvariantProgram>,
+}
+
+/// Checked input domains and named observations of a persistent invariant
+/// harness.
+#[derive(Clone)]
+pub(crate) struct InvariantProgram {
+    pub(crate) name: String,
+    pub(crate) position: SourcePosition,
+    pub(crate) harness: String,
+    pub(crate) params: Vec<crate::ast::Param>,
+    pub(crate) lemmas: Vec<crate::ast::InvariantLemma>,
 }
 
 impl TestSuite {
@@ -100,6 +164,8 @@ impl TestSuite {
             .programs
             .iter()
             .filter(|p| p.kind == TestKind::Block)
+            .map(|p| p.harness.clone())
+            .chain(self.invariants.iter().map(|p| p.harness.clone()))
             .peekable();
         if checked.functions_with_test_discards.is_empty() || clocked.peek().is_none() {
             return None;
@@ -118,7 +184,7 @@ impl TestSuite {
             return None;
         }
         checked
-            .blocks_reach_test_discards(clocked.map(|p| p.harness.clone()))
+            .blocks_reach_test_discards(clocked)
             .then_some(pure_harnesses)
     }
 
@@ -230,6 +296,35 @@ pub fn run_tests_with_quickcheck(
     warnings_as_errors: bool,
     quickcheck_options: QuickCheckOptions,
 ) -> Result<BxTestReport, String> {
+    let run = run_tests_with_options(
+        source,
+        path,
+        package,
+        reset,
+        options,
+        warnings_as_errors,
+        BxTestOptions {
+            quickcheck: quickcheck_options,
+            ..Default::default()
+        },
+    )?;
+    Ok(BxTestReport {
+        tests: run.tests,
+        warnings: run.warnings,
+    })
+}
+
+/// Execute the root file's unit tests, procedural QuickChecks, and invariant
+/// properties.
+pub fn run_tests_with_options(
+    source: &str,
+    path: &Path,
+    package: Package,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+    warnings_as_errors: bool,
+    test_options: BxTestOptions,
+) -> Result<BxTestRun, String> {
     let CompiledTests {
         suite,
         checked,
@@ -237,36 +332,58 @@ pub fn run_tests_with_quickcheck(
         clocked_package,
         warnings,
     } = compile_tests(source, path, package, reset, options, warnings_as_errors)?;
-    let tests = suite
+    let clocked = clocked_package.as_ref().unwrap_or(&package);
+    let mut tests: Vec<_> = suite
         .programs
         .into_iter()
         .map(|program| {
             let package = match program.kind {
                 TestKind::Function => &package,
-                TestKind::Block => clocked_package.as_ref().unwrap_or(&package),
+                TestKind::Block => clocked,
             };
             if let Some(params) = &program.quickcheck_params {
-                return quickcheck::run(
-                    &program,
-                    params,
-                    package,
-                    &checked,
-                    path,
-                    reset.active_low,
-                    quickcheck_options,
+                return (
+                    program.position,
+                    quickcheck::run(
+                        &program,
+                        params,
+                        package,
+                        &checked,
+                        path,
+                        reset.active_low,
+                        test_options.quickcheck,
+                    ),
                 );
             }
             let result = run_program(&program, package, reset.active_low)
                 .err()
                 .map(|f| f.diagnostic(path, &program));
-            BxTestResult {
-                name: program.name,
-                failure: result,
-                quickcheck: None,
-            }
+            (
+                program.position,
+                BxTestResult {
+                    name: program.name,
+                    failure: result,
+                    quickcheck: None,
+                },
+            )
         })
         .collect();
-    Ok(BxTestReport { tests, warnings })
+    tests.extend(suite.invariants.iter().map(|program| {
+        (
+            program.position,
+            invariant_trials::run(program, &checked, clocked, path, test_options),
+        )
+    }));
+    tests.sort_by_key(|(position, _)| *position);
+    Ok(BxTestRun {
+        invariant_names: suite
+            .invariants
+            .into_iter()
+            .map(|program| program.name)
+            .collect(),
+        tests: tests.into_iter().map(|(_, result)| result).collect(),
+        warnings,
+    })
 }
 
 /// Checked testbench actions and their combinational and clocked harnesses.
@@ -293,6 +410,7 @@ fn compile_tests(
             .map(|m| m.graph().name.clone())
             .collect(),
         programs: Vec::new(),
+        invariants: Vec::new(),
     };
     let at_file = |message: String| {
         // Parser and test-statement errors already begin with a line and

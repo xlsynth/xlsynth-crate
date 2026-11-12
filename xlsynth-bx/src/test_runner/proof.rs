@@ -18,7 +18,7 @@ use crate::ast::SourcePosition;
 
 // Bound hierarchy flattening, then charge every unrolled step and iteration
 // plus the interface and transitively expanded body of each transition call.
-const MAX_PROOF_WORK: usize = 1 << 20;
+pub(super) const MAX_PROOF_WORK: usize = 1 << 20;
 
 /// Check the nodes and registers that the selected hierarchy would copy before
 /// the transition builder flattens any block instances.
@@ -132,7 +132,14 @@ pub(super) fn lower_property(
         .map(|(i, reg)| builder.param(&format!("bx_qc_state_{i}"), reg.ty.clone()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let legal = super::proof_domain::legal_stimulus(&mut builder, params, &formal_values, domains)?;
+    let mut domain_budget = crate::check::MAX_TYPE_SIZE;
+    let legal = super::proof_domain::legal_stimulus(
+        &mut builder,
+        params,
+        &formal_values,
+        domains,
+        &mut domain_budget,
+    )?;
     let inactive_reset = builder
         .literal(IrValue::bool(reset.active_low))
         .map_err(|e| e.to_string())?;
@@ -182,7 +189,7 @@ pub(super) fn lower_property(
 /// Count solver visits to each function once, including repeated visits through
 /// invokes, maps, and counted loops. The package contains the transition and
 /// its reachable callees, in arbitrary declaration order.
-fn expanded_node_visits(package: &Package, entry: &str) -> Result<usize, String> {
+pub(super) fn expanded_node_visits(package: &Package, entry: &str) -> Result<usize, String> {
     let mut costs = ExpansionCosts::default();
     for member in &package.members {
         let PackageMember::Function(f) = member else {

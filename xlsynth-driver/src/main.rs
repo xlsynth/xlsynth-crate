@@ -953,6 +953,7 @@ fn main() {
         .subcommand(bx::bx2gv_command())
         .subcommand(bx::bx_test_command())
         .subcommand(bx::bx_prove_quickcheck_command())
+        .subcommand(bx::bx_prove_invariant_command())
         // dslx2sv-types converts all the definitions in the .x file to SV types
         .subcommand(
             clap::Command::new("dslx-show")
@@ -4115,6 +4116,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx-test", subm)) => {
             if let Err(error) = bx::bx_test(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx-test"), vec![]);
+            }
+        }
+        Some(("bx-prove-invariant", subm)) => {
+            if let Err(error) = bx::bx_prove_invariant(subm, &config) {
+                report_cli_error_and_exit(
+                    &format!("{error:#}"),
+                    Some("bx-prove-invariant"),
+                    vec![],
+                );
             }
         }
         Some(("bx-prove-quickcheck", subm)) => {

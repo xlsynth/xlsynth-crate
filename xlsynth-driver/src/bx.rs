@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use xlsynth_bx::invariant_prover::{
+    InvariantMode, InvariantQueryResult, InvariantResult, check_invariant,
+};
 use xlsynth_bx::{
-    ImportOptions, QuickCheckOptions, ResetBehavior, check_source_file_with_options, empty_package,
-    lower_module, prepare_quickcheck_proofs, run_tests_with_quickcheck,
+    BxTestOptions, ImportOptions, QuickCheckOptions, ResetBehavior, check_source_file_with_options,
+    empty_package, lower_module, prepare_invariant_proofs, prepare_quickcheck_proofs,
+    run_tests_with_options,
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
@@ -92,14 +96,21 @@ fn add_bx_args(command: Command) -> Command {
 
 pub fn bx_test_command() -> Command {
     let command = Command::new("bx-test")
-        .about("Runs unit tests and clocked QuickCheck properties in a BX file");
+        .about("Runs unit tests, clocked QuickChecks and invariants in a BX file");
     add_bx_source_args(command)
         .arg(
             Arg::new("quickcheck-trials")
                 .long("quickcheck-trials")
                 .value_name("COUNT")
                 .value_parser(value_parser!(NonZeroUsize))
-                .help("Random trials per QuickCheck block (default 100)"),
+                .help("Random trials per QuickCheck or invariant block (default 100)"),
+        )
+        .arg(
+            Arg::new("invariant-cycles")
+                .long("invariant-cycles")
+                .value_name("COUNT")
+                .value_parser(value_parser!(NonZeroUsize))
+                .help("Sampled cycles per invariant trial (default 16)"),
         )
         .arg(
             Arg::new("seed")
@@ -112,7 +123,7 @@ pub fn bx_test_command() -> Command {
             Arg::new("cross-check-vastly")
                 .long("cross-check-vastly")
                 .action(ArgAction::SetTrue)
-                .help("Compare each QuickCheck sample to RTL and report a separate run from unknown register state"),
+                .help("Compare each QuickCheck or invariant sample to RTL and report a separate run from unknown register state"),
         )
 }
 
@@ -124,14 +135,49 @@ pub fn bx_prove_quickcheck_command() -> Command {
     let command = Command::new("bx-prove-quickcheck")
         .about("Proves clocked QuickCheck properties over their bounded tick schedules");
     add_bx_source_args(command)
-        .arg(crate::solver_arg_with_toolchain("SMT solver for the bounded proof", false))
-        .arg(
-            Arg::new("time-limit-ms")
-                .long("time-limit-ms")
-                .value_name("MS")
-                .value_parser(value_parser!(u64).range(1..))
-                .help("Positive time limit per solver check in milliseconds (in-process Bitwuzla only)"),
-        )
+        .arg(crate::solver_arg_with_toolchain(
+            "SMT solver for the bounded proof",
+            false,
+        ))
+        .arg(time_limit_arg())
+}
+
+fn time_limit_arg() -> Arg {
+    Arg::new("time-limit-ms")
+        .long("time-limit-ms")
+        .value_name("MS")
+        .value_parser(value_parser!(u64).range(1..))
+        .help("Positive time limit per solver check in milliseconds (in-process Bitwuzla only)")
+}
+
+pub fn bx_prove_invariant_command() -> Command {
+    add_bx_source_args(
+        Command::new("bx-prove-invariant")
+            .about("Checks clocked BX invariants by k-induction or bounded model checking"),
+    )
+    .arg(
+        Arg::new("engine")
+            .long("engine")
+            .value_parser(["bitwuzla"])
+            .default_value("bitwuzla")
+            .help("Proof engine"),
+    )
+    .arg(
+        Arg::new("mode")
+            .long("mode")
+            .value_parser(["induction", "bmc"])
+            .default_value("induction")
+            .help("Prove an unbounded invariant or check a bounded prefix"),
+    )
+    .arg(
+        Arg::new("max-depth")
+            .long("max-depth")
+            .value_name("K")
+            .default_value("16")
+            .value_parser(value_parser!(NonZeroUsize))
+            .help("Maximum induction depth or number of sampled cycles in BMC mode"),
+    )
+    .arg(time_limit_arg())
 }
 
 pub fn bx2gv_command() -> Command {
@@ -272,24 +318,31 @@ pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
             active_low: input.active_low,
             asynchronous: false,
         };
-        let defaults = QuickCheckOptions::default();
-        let report = run_tests_with_quickcheck(
+        let defaults = BxTestOptions::default();
+        let invariant_cycles = matches
+            .get_one::<NonZeroUsize>("invariant-cycles")
+            .copied()
+            .unwrap_or(defaults.invariant_cycles);
+        let report = run_tests_with_options(
             &input.source,
             input.path,
             input.package,
             reset,
             &input.imports,
             input.warnings_as_errors,
-            QuickCheckOptions {
-                trials: matches
-                    .get_one::<NonZeroUsize>("quickcheck-trials")
-                    .copied()
-                    .unwrap_or(defaults.trials),
-                seed: matches
-                    .get_one::<u64>("seed")
-                    .copied()
-                    .unwrap_or(defaults.seed),
-                cross_check_vastly: matches.get_flag("cross-check-vastly"),
+            BxTestOptions {
+                quickcheck: QuickCheckOptions {
+                    trials: matches
+                        .get_one::<NonZeroUsize>("quickcheck-trials")
+                        .copied()
+                        .unwrap_or(defaults.quickcheck.trials),
+                    seed: matches
+                        .get_one::<u64>("seed")
+                        .copied()
+                        .unwrap_or(defaults.quickcheck.seed),
+                    cross_check_vastly: matches.get_flag("cross-check-vastly"),
+                },
+                invariant_cycles,
             },
         )
         .map_err(anyhow::Error::msg)?;
@@ -300,10 +353,17 @@ pub fn bx_test(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result
         let mut failed = 0;
         for test in report.tests {
             if let Some(qc) = test.quickcheck {
-                write_stdout_line(&format!(
-                    "quickcheck {}: {} concrete trials (seed {})",
-                    test.name, qc.trials, qc.seed
-                ));
+                if report.invariant_names.contains(&test.name) {
+                    write_stdout_line(&format!(
+                        "invariant {}: {} concrete trials of {invariant_cycles} cycles (seed {})",
+                        test.name, qc.trials, qc.seed
+                    ));
+                } else {
+                    write_stdout_line(&format!(
+                        "quickcheck {}: {} concrete trials (seed {})",
+                        test.name, qc.trials, qc.seed
+                    ));
+                }
                 if let Some(four) = qc.four_valued {
                     write_stdout_line(&format!(
                         "  Vastly from X: {} true, {} false, {} indeterminate",
@@ -432,6 +492,110 @@ pub fn bx_prove_quickcheck(matches: &ArgMatches, config: &Option<ToolchainConfig
         ));
         if disproved + inconclusive + errors != 0 {
             bail!("BX QuickCheck proof suite did not pass");
+        }
+        Ok(())
+    })
+}
+
+/// Checks named clocked invariants and reports reachable witnesses separately
+/// from induction steps that remain open.
+pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+    let mode = match matches.get_one::<String>("mode").map(String::as_str) {
+        Some("bmc") => InvariantMode::Bmc,
+        Some("induction") => InvariantMode::Induction,
+        _ => unreachable!("clap validates the proof mode"),
+    };
+    let depth = *matches
+        .get_one::<NonZeroUsize>("max-depth")
+        .expect("clap supplies a default depth");
+    let choice = matches
+        .get_one::<String>("engine")
+        .expect("clap supplies a default engine")
+        .parse::<SolverChoice>()
+        .map_err(anyhow::Error::msg)?;
+    let prover = prover_for_choice_with_limits(
+        choice,
+        None,
+        SolverLimits {
+            time_limit_per_ms: matches.get_one::<u64>("time-limit-ms").copied(),
+            ..Default::default()
+        },
+    );
+    with_bx_input(matches, config, |input| {
+        let suite = prepare_invariant_proofs(
+            &input.source,
+            input.path,
+            input.package,
+            ResetBehavior {
+                active_low: input.active_low,
+                asynchronous: false,
+            },
+            &input.imports,
+            input.warnings_as_errors,
+        )
+        .map_err(anyhow::Error::msg)?;
+        for warning in suite.warnings {
+            eprintln!("{}", warning.display_with_root(input.path));
+        }
+        if suite.properties.is_empty() {
+            bail!("no #[invariant] blocks in {}", input.path.display());
+        }
+        let (mut proved, mut bounded, mut disproved, mut inconclusive, mut errors) =
+            (0, 0, 0, 0, 0);
+        for case in suite.properties {
+            let result = match case.proof {
+                Err(reason) => Ok(InvariantResult::Inconclusive { reason }),
+                Ok(property) => check_invariant(&property, mode, depth, |package| {
+                    let top = package
+                        .get_top_fn()
+                        .ok_or("invariant query has no top function")?;
+                    match prover.prove_ir_fn_quickcheck(&ProverFn::new(top, Some(package))) {
+                        BoolPropertyResult::Proved => Ok(InvariantQueryResult::Proved),
+                        BoolPropertyResult::Disproved { inputs, .. } => {
+                            Ok(InvariantQueryResult::Counterexample(
+                                inputs.into_iter().map(|input| input.value).collect(),
+                            ))
+                        }
+                        BoolPropertyResult::Inconclusive(reason) => {
+                            Ok(InvariantQueryResult::Inconclusive(reason))
+                        }
+                        BoolPropertyResult::Error(error)
+                        | BoolPropertyResult::ToolchainDisproved(error) => Err(error),
+                    }
+                }),
+            };
+            let (status, diagnostic) = match result {
+                Ok(InvariantResult::Proved { depth }) => {
+                    proved += 1;
+                    (format!("proved at k={depth}"), None)
+                }
+                Ok(InvariantResult::Bounded { cycles }) => {
+                    bounded += 1;
+                    (format!("passed {cycles} bounded cycles"), None)
+                }
+                Ok(InvariantResult::Disproved { trace }) => {
+                    disproved += 1;
+                    ("DISPROVED".into(), Some(trace))
+                }
+                Ok(InvariantResult::Inconclusive { reason }) => {
+                    inconclusive += 1;
+                    ("INCONCLUSIVE".into(), Some(reason))
+                }
+                Err(error) => {
+                    errors += 1;
+                    ("ERROR".into(), Some(error))
+                }
+            };
+            write_stdout_line(&format!("invariant {} ... {status}", case.name));
+            if let Some(message) = diagnostic {
+                eprintln!("{message}");
+            }
+        }
+        write_stdout_line(&format!(
+            "{proved} proved; {bounded} bounded; {disproved} disproved; {inconclusive} inconclusive; {errors} errors"
+        ));
+        if disproved + inconclusive + errors != 0 {
+            bail!("BX invariant suite did not pass");
         }
         Ok(())
     })

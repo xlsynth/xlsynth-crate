@@ -19,21 +19,26 @@ use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
 const BLOCK_SCOPE: usize = 0;
 
 /// `ports` lists the block's physical outputs in declaration order.
-/// `port_names` contains those same names for validating a per-port annotation.
 pub(super) fn check_outputs(
     block: &CheckedBlock,
     ports: &[Param],
-    port_names: &BTreeSet<String>,
     structs: &StructTable<'_>,
 ) -> Result<(), String> {
     let Some(expected) = &block.output_cycles else {
         return Ok(());
     };
     if let OutputCycles::ByPort(expected) = expected {
-        if let Some(port) = expected.keys().find(|port| !port_names.contains(*port)) {
+        let port_names: BTreeSet<_> = ports.iter().map(|p| p.name.as_str()).collect();
+        if let Some(port) = expected
+            .keys()
+            .find(|port| !port_names.contains(port.as_str()))
+        {
             return Err(format!("unknown output port '{port}' in cycle annotation"));
         }
-        if let Some(port) = port_names.iter().find(|port| !expected.contains_key(*port)) {
+        if let Some(port) = port_names
+            .iter()
+            .find(|port| !expected.contains_key(**port))
+        {
             return Err(format!("missing cycle annotation for output port '{port}'"));
         }
     }

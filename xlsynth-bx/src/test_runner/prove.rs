@@ -116,7 +116,7 @@ pub fn prepare_quickcheck_proofs(
 
 /// The transition's returned values do not encode clock-edge assertion events
 /// or array bounds promises. Refuse those until they are part of the predicate.
-fn check_transition_contracts(package: &Package) -> Result<(), String> {
+pub(super) fn check_transition_contracts(package: &Package) -> Result<(), String> {
     for member in &package.members {
         let graph = member.graph();
         for node in &graph.nodes {

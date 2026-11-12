@@ -227,6 +227,7 @@ impl<'m> BlockTemplate<'m> {
             &result,
             structs,
             Some(bindings),
+            None,
         )?;
         Ok(Self {
             block,

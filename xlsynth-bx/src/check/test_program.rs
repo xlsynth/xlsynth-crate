@@ -168,6 +168,7 @@ impl<'m> BodyChecker<'_, 'm> {
                 reset: Some("rst".into()),
                 params: ports.inputs,
                 input_cycles: BTreeMap::new(),
+                output_ports: super::output_ports(&result, &self.structs.definitions)?,
                 result,
                 output_cycles: None,
                 timing_error: None,

@@ -236,6 +236,8 @@ pub struct CheckedBlock {
     /// Explicit cycle offsets by data input name.
     pub input_cycles: BTreeMap<String, u64>,
     pub result: Type,
+    /// Checked physical outputs in projection order.
+    pub output_ports: Vec<Param>,
     /// Declared output timing, if the block opts into checking it.
     pub output_cycles: Option<OutputCycles>,
     /// Timing error to report after verifying a block with deferred wires.
