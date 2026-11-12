@@ -362,8 +362,7 @@ block sample(clk,x:u8)->u16 {{ let child=wrapper<widen>(x); child }}
 fn widen(x:u8)->u16 { x as u16 }
 block H(clk,x:u8)->u8 { x }
 block wrapper<I,O,H:fn(I)->O>(clk,x:I)->O {
-    inst h: H;
-    h.x := u8:0;
+    let h: u8 = H(x);
     H(x)
 }
 block sample(clk,x:u8)->u16 { let child=wrapper<widen>(x); child }

@@ -144,7 +144,6 @@ pub(crate) fn is_identifier(text: &str) -> bool {
             | "fn"
             | "reg"
             | "let"
-            | "inst"
             | "if"
             | "else"
             | "as"
@@ -545,8 +544,8 @@ impl TemplateBinding {
     }
 }
 
-/// Lambdas use DSLX function grammar. Inside a BX block they can also name
-/// the block's instance output ports, including in capture diagnostics.
+/// Lambdas use DSLX function grammar. Inside a BX block they can also
+/// project a BX struct field named `out`.
 #[derive(Clone, Copy, PartialEq)]
 enum ValueContext {
     Block,
@@ -2356,8 +2355,8 @@ impl<'s> Parser<'s> {
         let mut statement_spans = Vec::new();
         while !self.eat("}") {
             let start = self.tokens[self.pos].start;
-            // A DSLX use leaf can be named reg or inst. A following name
-            // distinguishes a hardware declaration from a call or constructor.
+            // A DSLX use leaf can be named reg. A following name distinguishes
+            // a register declaration from a call or constructor.
             if self.peek(0) == "reg" && is_identifier(self.peek(1)) {
                 self.pos += 1;
                 let param = self.param()?;
@@ -2399,19 +2398,8 @@ impl<'s> Parser<'s> {
                 statements.push(observation);
             } else if self.eat("let") {
                 statements.push(self.let_stmt(/* allow_wire= */ true)?.0);
-            } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) {
-                self.pos += 1;
-                let name = self.ident()?;
-                self.expect(":")?;
-                self.shadow_callable(&name);
-                statements.push(Stmt::Inst {
-                    name,
-                    block: if self.peek(1) == "::" {
-                        self.name_or_qualified_member()?
-                    } else {
-                        self.ident()?
-                    },
-                });
+            } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) && self.peek(2) == ":" {
+                return Err(self.error("use `let name = child(args);` to instantiate a block"));
             } else if self.peek(1) == ":=" {
                 let name = self.ident()?;
                 self.expect(":=")?;
@@ -2427,15 +2415,9 @@ impl<'s> Parser<'s> {
                     value: self.expr()?.value,
                 });
             } else if self.peek(1) == "." && self.peek(3) == ":=" {
-                let instance = self.ident()?;
-                self.expect(".")?;
-                let port = self.ident()?;
-                self.expect(":=")?;
-                statements.push(Stmt::Connect {
-                    instance,
-                    port,
-                    value: self.expr()?.value,
-                });
+                return Err(self.error(
+                    "pass child inputs as call arguments; use a deferred let for feedback",
+                ));
             } else if self.eat("if") {
                 let condition = self.condition()?;
                 if self.arm_has_else() {
@@ -6408,8 +6390,8 @@ block i(clk, x: u8) -> u8 { inst(x) }
         );
         assert!(matches!(&module.blocks[1].output, Expr::Struct { name, .. } if name == "Header'"));
         assert!(matches!(&module.blocks[2].output, Expr::Call { name, .. } if name == "inst"));
-        // The removed declaration keyword is still available as a BX name.
         assert!(parse_module("block import(clk, import: u8) -> u8 { import }").is_ok());
+        assert!(parse_module("block inst(clk, x: u8) -> u8 { let inst = x; inst }").is_ok());
     }
 
     #[test]
@@ -6754,14 +6736,13 @@ block stage<T, N: u32, F: fn(T) -> T, M: u32>(clk, x: T) -> T {
     }
 
     #[test]
-    fn keeps_aggregate_types_and_named_instance_connections() {
+    fn keeps_aggregate_types_and_child_call_arguments() {
         let module = parse_module(
             r#"
             struct Result { value: s8, spare: (), }
             extern fn invert(value: s8) -> s8 = "__logic__invert";
             block wrapper(clk, value: s8) -> (Result,) {
-                inst lane: child;
-                lane.input := invert(value);
+                let lane = child(invert(value));
                 (Result { value: lane.value, spare: () },)
             }
         "#,
@@ -6773,9 +6754,39 @@ block stage<T, N: u32, F: fn(T) -> T, M: u32>(clk, x: T) -> T {
             block.result,
             Type::Tuple(vec![Type::Named("Result".to_owned())])
         );
-        assert!(
-            matches!(&block.statements[..], [Stmt::Inst { .. }, Stmt::Connect { instance, port, .. }] if instance == "lane" && port == "input")
-        );
+        let [
+            Stmt::Let {
+                name,
+                value: Expr::Call { name: callee, args },
+                ..
+            },
+        ] = &block.statements[..]
+        else {
+            panic!("expected a child call binding");
+        };
+        assert_eq!(name, "lane");
+        assert_eq!(callee, "child");
+        assert!(matches!(&args[..], [Expr::Call { name, .. }] if name == "invert"));
+    }
+
+    #[test]
+    fn removed_instance_forms_direct_callers_to_child_calls_and_deferred_lets() {
+        for (stmt, diagnostic) in [
+            (
+                "inst lane: child;",
+                "use `let name = child(args);` to instantiate a block, found 'inst'",
+            ),
+            (
+                "lane.input := x;",
+                "pass child inputs as call arguments; use a deferred let for feedback, found 'lane'",
+            ),
+        ] {
+            let source = format!("block wrapper(clk, x: u8) -> u8 {{\n    {stmt}\n    x\n}}");
+            assert_eq!(
+                parse_module(&source).unwrap_err(),
+                format!("2:5: {diagnostic}")
+            );
+        }
     }
 
     #[test]
@@ -6854,18 +6865,20 @@ block wrap(clk, rst, x: u8) -> (u8, bool) {
         let module = parse_module(
             r#"use library;
 block top(clk, x: u8) -> u8 {
-    inst child: library::pipe;
-    child.x := library::OFFSET;
-    match x { library::OFFSET | library::LIMIT => child.out, _ => u8:0 }
+    let child = library::pipe(library::OFFSET);
+    match x { library::OFFSET | library::LIMIT => child, _ => u8:0 }
 }"#,
         )?;
         let block = &module.blocks[0];
-        assert!(
-            matches!(&block.statements[0], Stmt::Inst { block, .. } if block == "library::pipe")
-        );
-        assert!(
-            matches!(&block.statements[1], Stmt::Connect { value: Expr::Name(name), .. } if name == "library::OFFSET")
-        );
+        let Stmt::Let {
+            value: Expr::Call { name, args },
+            ..
+        } = &block.statements[0]
+        else {
+            panic!("expected a child call");
+        };
+        assert_eq!(name, "library::pipe");
+        assert_eq!(args, &[Expr::Name("library::OFFSET".into())]);
         let Expr::Match { arms, .. } = &block.output else {
             panic!("expected a match on the input");
         };
@@ -7261,7 +7274,6 @@ block before(clk, xs:u8[2])->u8[2] { map(xs, f<8>) }
             "map(xs, |_| _)",
             "map(xs, |x| -> u8 x)",
             "map(xs, |x| { reg state: u8; x })",
-            "map(xs, |x| { inst child: Child; x })",
             "map(xs, |x| { state := x; x })",
             "map(xs, |x| x, xs)",
             "other(xs, |x| x)",
@@ -7274,6 +7286,9 @@ block before(clk, xs:u8[2])->u8[2] { map(xs, f<8>) }
             );
         }
         assert!(parse_module("fn f(xs: u8[2]) -> u8[2] { map(xs, |c| c.out) }").is_err());
+        assert!(parse_module(
+            "struct Sample { out: u8 } block b(clk, xs: Sample[2]) -> u8[2] { map(xs, |c| c.out) }"
+        ).is_ok());
     }
 
     #[test]

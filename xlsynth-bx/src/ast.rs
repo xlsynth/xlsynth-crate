@@ -747,15 +747,6 @@ pub enum Stmt {
         condition: Expr,
         body: Vec<Stmt>,
     },
-    Inst {
-        name: String,
-        block: String,
-    },
-    Connect {
-        instance: String,
-        port: String,
-        value: Expr,
-    },
 }
 
 /// A one-based source line and character column within a BX file.

@@ -449,11 +449,6 @@ block same<T>(clk, x: T, y: T) -> T { x }
             "let bad = missing();",
             "block 'missing': cannot infer type parameter 'T': it does not appear in any data input",
         ),
-        (
-            same,
-            "inst bad: same; bad.x := u8:0; bad.y := u8:0;",
-            "block 'wrapper': generic block 'same' needs data arguments to infer its type parameters; use 'let bad = same(...)'",
-        ),
     ] {
         let source = format!("{template} block wrapper(clk) -> () {{ {statement} () }}");
         let parsed = parse_module(&source).unwrap();
@@ -706,17 +701,16 @@ block sample(clk, x: Tree14) -> u8 {{ let result = many<collapse>({arguments}); 
 }
 
 #[test]
-fn both_child_instance_forms_charge_wiring_in_each_callback_specialization() -> Result<(), String> {
+fn child_calls_charge_wiring_in_each_callback_specialization() -> Result<(), String> {
     let types = tree_payload_declarations(17);
-    for instance in ["inst child: wide;", "let child = wide();"] {
-        let source = format!(
-            r#"
+    let source = format!(
+        r#"
 {types}
 extern block wide(clk) -> Tree17;
 extern fn a(x:u8) -> u8;
 extern fn b(x:u8) -> u8;
 extern fn c(x:u8) -> u8;
-block keep<T,F:fn(T)->T>(clk, x:T) -> T {{ {instance} F(x) }}
+block keep<T,F:fn(T)->T>(clk, x:T) -> T {{ let child = wide(); F(x) }}
 block sample(clk, x:u8) -> u8 {{
     let first = keep<a>(x);
     let second = keep<b>(first);
@@ -724,16 +718,15 @@ block sample(clk, x:u8) -> u8 {{
     third
 }}
 "#,
-        );
-        check_module(&parse_module(&source)?)?;
-        let distinct = source.replace("keep<a>(second)", "keep<c>(second)");
-        let error = check_module(&parse_module(&distinct)?).unwrap_err();
-        assert!(
-            error.contains(
-                "child block wiring exceeds the generic block specialization expansion limit"
-            ),
-            "{instance}: {error}"
-        );
-    }
+    );
+    check_module(&parse_module(&source)?)?;
+    let distinct = source.replace("keep<a>(second)", "keep<c>(second)");
+    let error = check_module(&parse_module(&distinct)?).unwrap_err();
+    assert!(
+        error.contains(
+            "child block wiring exceeds the generic block specialization expansion limit"
+        ),
+        "{error}"
+    );
     Ok(())
 }

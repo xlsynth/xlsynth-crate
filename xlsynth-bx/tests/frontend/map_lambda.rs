@@ -498,9 +498,8 @@ block child(clk, d: u8) -> u8 { d + u8:1 }
 pub block sample(clk, en: bool, d: u8) -> (u8, u8) {
     reg q: u8 = u8:0;
     if en { q := d; }
-    inst c: child;
-    c.d := d;
-    let ys = map(u8:0..u8:2, |i| i + q + c.out);
+    let c = child(d);
+    let ys = map(u8:0..u8:2, |i| i + q + c);
     (ys[u32:0], ys[u32:1])
 }
 "#;

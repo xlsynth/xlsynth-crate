@@ -2346,10 +2346,7 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
     let mut pending: Vec<_> = block.statements.iter().collect();
     while let Some(statement) = pending.pop() {
         match statement {
-            Stmt::Reg { name, .. }
-            | Stmt::Let { name, .. }
-            | Stmt::Wire { name, .. }
-            | Stmt::Inst { name, .. } => {
+            Stmt::Reg { name, .. } | Stmt::Let { name, .. } | Stmt::Wire { name, .. } => {
                 names.insert(name.clone());
             }
             Stmt::LetPattern(binding) => {
@@ -2452,8 +2449,6 @@ struct BodyChecker<'a, 'm> {
     wires: BTreeMap<String, bool>,
     /// Location of the enclosing block statement during elaboration.
     statement_span: Option<SourceSpan>,
-    instances: BTreeMap<String, &'a BlockInterface>,
-    connections: BTreeSet<(String, String)>,
     statements: Vec<CheckedStmt>,
     /// Source names bound by currently active loop iterations.
     loop_values: BTreeMap<String, TypedExpr>,
@@ -2698,8 +2693,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             writes: BTreeSet::new(),
             wires: BTreeMap::new(),
             statement_span: None,
-            instances: BTreeMap::new(),
-            connections: BTreeSet::new(),
             statements: Vec::new(),
             loop_values: BTreeMap::new(),
             function_values: BTreeMap::new(),
@@ -2836,41 +2829,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             c.hardware_name(&p.name)?;
             c.values.insert(p.name.clone(), p.ty.clone());
         }
-        for stmt in &block.statements {
-            if let Stmt::Inst { name, block: child } = stmt {
-                c.hardware_name(name)?;
-                if c.callback_index(child).is_some() {
-                    return Err(format!(
-                        "callable parameter '{child}' requires a direct call"
-                    ));
-                }
-                c.reject_type_parameter_value(child)?;
-                if let Some(template) = decls.templates.get(child.as_str()) {
-                    if !template.block.value_parametrics.is_empty() {
-                        return Err(format!(
-                            "block '{child}' requires a let call with explicit value parametrics"
-                        ));
-                    }
-                    if !template.callback_params.is_empty() {
-                        return Err(format!(
-                            "block '{child}' requires a let call with explicit named callbacks"
-                        ));
-                    }
-                    return Err(format!(
-                        "generic block '{child}' needs data arguments to infer its type parameters; use 'let {name} = {child}(...)'"
-                    ));
-                }
-                let child_block = decls
-                    .blocks
-                    .get(child.as_str())
-                    .ok_or_else(|| format!("unknown child block '{child}'"))?;
-                c.account_for_child_instance(
-                    child_block,
-                    /* has_explicit_parametrics= */ false,
-                )?;
-                c.instances.insert(name.clone(), child_block);
-            }
-        }
         c.body(block, &block.statements, false)?;
         for (name, driven) in &c.wires {
             if !driven {
@@ -2880,13 +2838,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         for reg in c.regs.keys() {
             if !c.writes.contains(reg) {
                 return Err(format!("register '{reg}' has no update"));
-            }
-        }
-        for (name, child) in &c.instances {
-            for p in &child.params {
-                if !c.connections.contains(&(name.clone(), p.name.clone())) {
-                    return Err(format!("instance input '{name}.{}' has no driver", p.name));
-                }
             }
         }
         c.statement_span = block.source.as_ref().map(|source| source.output);
@@ -3019,21 +2970,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         declare(&mut self.names, name)
     }
 
-    /// Account for the data ports wired for this instance.
-    fn account_for_child_instance(
-        &mut self,
-        child: &BlockInterface,
-        has_explicit_parametrics: bool,
-    ) -> Result<(), String> {
-        // Every instance materializes its own ports, even when its definition
-        // is shared and its outputs are unused.
-        if self.replaying_body() || has_explicit_parametrics {
-            self.charge_expansion("child block wiring", child.port_type_nodes)?;
-        }
-        self.uses_child.set(true);
-        Ok(())
-    }
-
     /// Keep the source binding as the generated instance name when available
     /// in IR. An output port or an IR keyword such as `next` needs a suffix.
     fn call_instance_name(&mut self, binding: &str) -> String {
@@ -3112,7 +3048,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         } else {
             (target, &self.decls.blocks[target])
         };
-        self.account_for_child_instance(child, !parametrics.is_empty())?;
+        // Charge for each instance's ports, even when the definition is shared.
+        if self.replaying_body() || !parametrics.is_empty() {
+            self.charge_expansion("child block wiring", child.port_type_nodes)?;
+        }
+        self.uses_child.set(true);
         if let Some(ty) = expected
             && !compatible(ty, &child.result)
         {
@@ -3253,48 +3193,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                         reset,
                     }
                 }
-                Stmt::Inst { name, block } => {
-                    if conditional {
-                        return Err(format!("conditional declaration of instance '{name}'"));
-                    }
-                    if self.function_values.contains_key(block) {
-                        return Err(format!("'{block}' names a local value here"));
-                    }
-                    CheckedStmt::Inst {
-                        name: name.clone(),
-                        block: block.clone(),
-                    }
-                }
-                Stmt::Connect {
-                    instance,
-                    port,
-                    value,
-                } => {
-                    if conditional {
-                        return Err(format!("conditional connection of '{instance}.{port}'"));
-                    }
-                    let child = self
-                        .instances
-                        .get(instance)
-                        .ok_or_else(|| format!("unknown instance '{instance}'"))?;
-                    let param = child
-                        .params
-                        .iter()
-                        .find(|p| p.name == *port)
-                        .ok_or_else(|| format!("'{instance}.{port}' is not a data input"))?;
-                    let value = self
-                        .expr(value, Some(&param.ty))
-                        .map_err(|e| format!("input '{instance}.{port}': {e}"))?;
-                    if !self.connections.insert((instance.clone(), port.clone())) {
-                        return Err(format!("multiple drivers for input '{instance}.{port}'"));
-                    }
-                    CheckedStmt::Connect {
-                        instance: instance.clone(),
-                        port: port.clone(),
-                        value,
-                        span: self.statement_span,
-                    }
-                }
                 Stmt::Wire { name, ty } => {
                     if conditional {
                         return Err(format!("conditional declaration of wire '{name}'"));
@@ -3363,7 +3261,6 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                             || block.reset.as_deref() == Some(name)
                             || self.regs.contains_key(name)
                             || self.wires.contains_key(name)
-                            || self.instances.contains_key(name)
                         {
                             collision = Some(name.to_owned());
                         }
@@ -4076,61 +3973,40 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         Ok((ty, K::Tuple(values)))
     }
 
-    /// Resolve an instance output, tuple element, or named struct field.
+    /// Project a tuple element or named struct field from a value.
     fn project_field(&mut self, value: &Expr, name: &str) -> Result<(Type, K), String> {
-        Ok(
-            if let Expr::Name(instance) = value
-                && !self.loop_values.contains_key(instance)
-                && !self.function_values.contains_key(instance)
-                && let Some(child) = self.instances.get(instance)
-            {
-                let p = child
-                    .outputs
+        let v = self.expr(value, None)?;
+        let (index, ty) = match &v.ty {
+            Type::Tuple(items) => {
+                let index: usize = name
+                    .parse()
+                    .map_err(|_| format!("invalid tuple field '{name}'"))?;
+                (
+                    index,
+                    items
+                        .get(index)
+                        .ok_or_else(|| format!("tuple field {index} out of bounds"))?
+                        .clone(),
+                )
+            }
+            Type::Named(s) => {
+                let fields = &self.structs.definition(s)?.fields;
+                let (i, p) = fields
                     .iter()
-                    .find(|p| p.name == name)
-                    .ok_or_else(|| format!("'{instance}.{name}' is not an output"))?;
-                (
-                    p.ty.clone(),
-                    K::InstanceOutput {
-                        instance: instance.clone(),
-                        port: name.to_owned(),
-                    },
-                )
-            } else {
-                let v = self.expr(value, None)?;
-                let (index, ty) = match &v.ty {
-                    Type::Tuple(items) => {
-                        let index: usize = name
-                            .parse()
-                            .map_err(|_| format!("invalid tuple field '{name}'"))?;
-                        (
-                            index,
-                            items
-                                .get(index)
-                                .ok_or_else(|| format!("tuple field {index} out of bounds"))?
-                                .clone(),
-                        )
-                    }
-                    Type::Named(s) => {
-                        let fields = &self.structs.definition(s)?.fields;
-                        let (i, p) = fields
-                            .iter()
-                            .enumerate()
-                            .find(|(_, p)| p.name == name)
-                            .ok_or_else(|| format!("unknown field '{s}.{name}'"))?;
-                        (i, p.ty.clone())
-                    }
-                    other => return Err(format!("cannot project field '{name}' from {other}")),
-                };
-                (
-                    ty,
-                    K::TupleIndex {
-                        value: Box::new(v),
-                        index,
-                    },
-                )
+                    .enumerate()
+                    .find(|(_, p)| p.name == name)
+                    .ok_or_else(|| format!("unknown field '{s}.{name}'"))?;
+                (i, p.ty.clone())
+            }
+            other => return Err(format!("cannot project field '{name}' from {other}")),
+        };
+        Ok((
+            ty,
+            K::TupleIndex {
+                value: Box::new(v),
+                index,
             },
-        )
+        ))
     }
 
     /// Check scalar casts and equal-width casts between bits and a flat array.
@@ -6229,24 +6105,6 @@ block nominal(clk, x: B) -> A {{ {expression} }}"#
     }
 
     #[test]
-    fn hierarchy_requires_exactly_one_unconditional_data_driver() {
-        for connections in [
-            "",
-            "d.x := 0; d.x := 1;",
-            "if en { d.x := 0; }",
-            "d.out := 0;",
-        ] {
-            let source = format!(
-                r#"
-block parent(clk, en: bool) -> u8 {{ inst d: child; {connections} d.out }}
-block child(clk, x: u8) -> u8 {{ x }}"#
-            );
-            let module = parse_module(&source).unwrap();
-            assert!(check_module(&module).is_err(), "{connections}");
-        }
-    }
-
-    #[test]
     fn call_instance_names_avoid_parent_output_and_future_register_names() {
         let source = r#"
 extern block leaf(clk) -> u8;
@@ -6265,18 +6123,19 @@ block wrap(clk) -> u8 {
     }
 
     #[test]
-    fn only_explicit_instances_expose_ports_before_the_declaration() {
+    fn a_forward_reference_to_a_child_result_requires_a_deferred_binding() {
         let source = r#"
 extern block leaf(clk, d: u8) -> u8;
 block wrap(clk, x: u8) -> u8 {
-    let before = lane.out;
-    inst lane: leaf;
-    lane.d := x;
+    let pending: u8;
+    let before = pending;
+    let lane = leaf(x);
+    pending = lane;
     before
 }"#;
         check_module(&parse_module(source).unwrap()).unwrap();
-        let lexical = source.replace("inst lane: leaf;\n    lane.d := x;", "let lane = leaf(x);");
-        assert!(check_module(&parse_module(&lexical).unwrap()).is_err());
+        let undeclared = source.replace("let before = pending;", "let before = lane;");
+        assert!(check_module(&parse_module(&undeclared).unwrap()).is_err());
     }
 
     #[test]
@@ -6331,7 +6190,7 @@ block stage(clk, rst, x: u8) -> u8 {
             let mut structs = vec!["struct S0 { f: u1 }".to_owned()];
             for i in 1..levels {
                 blocks.push(format!(
-                    "block b{i}(clk) -> () {{ inst child: b{}; () }}",
+                    "block b{i}(clk) -> () {{ let child = b{}(); child }}",
                     i - 1
                 ));
                 structs.push(format!("struct S{i} {{ f: S{} }}", i - 1));

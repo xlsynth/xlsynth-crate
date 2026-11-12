@@ -1590,7 +1590,7 @@ block sample(clk) -> u8 {{
 
         for statements in [
             "let public_api = x; reg packet: public_api::Missing;",
-            "reg packet: public_api::Missing; inst public_api: child;",
+            "let public_api = child(); reg packet: public_api::Missing;",
         ] {
             let bx = format!(
                 r#"use public_api;

@@ -331,7 +331,7 @@ Define a helper before the functions that call it, as in DSLX. By default, a BX 
 
 Put `#![require_define_before_use]` before the first declaration to require
 module names to be defined before use throughout a `.bx` file. This includes
-block calls, explicit child instances, callback arguments, type annotations,
+block calls, callback arguments, type annotations,
 and `use` bindings. Each BX library chooses its own policy. BX resolves names
 as usual, then checks the declaration order. For example, if a block's
 `rev(x)` resolves to a later function named `rev`, the verifier reports that
@@ -1096,14 +1096,19 @@ block pair(clk, x: u8, y: u8) -> (LaneOut, LaneOut) {
 
 Use the same call syntax for a BX block. By default, the child may be declared later in the module. An `extern block` declaration supplies the signature of an existing block in the linked IR package. Include `rst` in that declaration if the linked block has a reset port. BX checks data-port names, directions and types. It identifies the physical clock and reset by their roles and checks that the reset policy matches. Inside the parent, the result has the child's declared type, so `left.valid` selects one output.
 
-For feedback wiring, `inst cell: delay;` gives the child a name before its inputs are connected. For example, `cell.d := cell.out + step;` is valid when `cell.out` reads a register. Connect each data input once. Both forms lower to Block IR instantiations, and a same-cycle combinational loop is a lowering error.
-
 ### Deferred wire bindings
 
 Declare a wire directly in a block body with `let name: Type;`. You can read
 it after the declaration, including before its driver and when inferring a
 generic child block's type parameters. Supply exactly one unconditional
-driver with `name = value;`. The driver may be an `if` expression.
+driver with `name = value;`. The driver may be an `if` expression. For
+feedback, pass the wire to the child call, then drive it from the call's
+result. A scalar result is the bound value itself. Use `.0` for a tuple
+member or `.field` for a struct member.
+
+The wire's type must be nameable in the module that declares it. If a
+library's feedback path carries a private type, expose a public type alias
+or encapsulate the feedback in a library block.
 
 ```text
 block delay<T>(clk, data: T) -> T {
