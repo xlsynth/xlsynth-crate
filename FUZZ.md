@@ -785,6 +785,17 @@ Primarily tests:
 - Generated IR text remains parseable and executable across the C++ and PIR interpreters
 - Arbitrary generated ops and value shapes behave identically in both interpreters across mixed random and autocov-selected inputs
 
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_block_eval_interp_equiv.rs
+
+Generates flat, synchronous PIR blocks and runs each one through the PIR block
+interpreter and the upstream XLS C++ block interpreter. Both receive the same
+typed initial register values and input sequence. On every cycle the target
+compares all named output ports before the edge and all named registers after
+the edge, including registers that never reach an output. This catches errors
+in output timing, reset polarity, load enables, and simultaneous writes to
+different registers. See the [PIR fuzz guide](xlsynth-pir/fuzz/FUZZ.md#block-interpreter-differential)
+for the upstream oracle build and run instructions.
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ext_nary_add_gatify_equiv.rs
 
 Generates a one-function PIR package whose return value is an `ext_nary_add`

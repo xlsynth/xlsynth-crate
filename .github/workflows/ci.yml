@@ -1120,7 +1120,33 @@ jobs:
         id: resolve-xls-tag-smoke
         run: |
           TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=$ImageOS" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the XLS block interpreter oracle
+        id: block-oracle-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/xls_block_oracle
+          key: block-oracle-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-xls-tag-smoke.outputs.image }}-${{ steps.resolve-xls-tag-smoke.outputs.tag }}-${{ hashFiles('xlsynth-pir/fuzz/xls_block_oracle/**') }}
+
+      - name: Build the pinned XLS block interpreter oracle
+        if: steps.block-oracle-cache.outputs.cache-hit != 'true'
+        env:
+          BAZEL: bazelisk
+          XLS_TAG: ${{ steps.resolve-xls-tag-smoke.outputs.tag }}
+        run: |
+          work=$(mktemp -d "$RUNNER_TEMP/block-oracle.XXXXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          export XDG_CACHE_HOME="$work/cache"
+          bash xlsynth-pir/fuzz/xls_block_oracle/build.sh "$work" -c opt --dynamic_mode=off
+          install -m 755 "$work/xls_block_oracle" "$RUNNER_TEMP/xls_block_oracle"
+          (cd "$work/xlsynth-$XLS_TAG" && bazelisk shutdown)
+
+      - name: Configure the block interpreter oracle for fuzzing
+        run: |
+          test -x "$RUNNER_TEMP/xls_block_oracle"
+          echo "XLSYNTH_BLOCK_INTERPRETER_ORACLE=$RUNNER_TEMP/xls_block_oracle" >> "$GITHUB_ENV"
 
       - name: Set up Rust
         uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1

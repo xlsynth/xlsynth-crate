@@ -19,8 +19,10 @@ Usage:
 
 import argparse
 import concurrent.futures
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -254,6 +256,17 @@ def main() -> int:
             if name in DEFAULT_SKIPPED_FUZZ_TARGETS:
                 print(
                     f"Skipping default-excluded fuzz target {name} in {fuzz_dir}",
+                    file=sys.stderr,
+                )
+                continue
+            if (
+                name == "fuzz_block_eval_interp_equiv"
+                and "XLSYNTH_BLOCK_INTERPRETER_ORACLE" not in os.environ
+                and shutil.which("xls_block_oracle") is None
+            ):
+                print(
+                    f"Skipping {name}: set XLSYNTH_BLOCK_INTERPRETER_ORACLE "
+                    "or install xls_block_oracle on PATH to run it",
                     file=sys.stderr,
                 )
                 continue

@@ -57,6 +57,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_block_eval_interp_equiv"
+path = "fuzz_targets/fuzz_block_eval_interp_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_ir_fn_to_dslx_roundtrip_equiv"
 path = "fuzz_targets/fuzz_ir_fn_to_dslx_roundtrip_equiv.rs"
 test = false

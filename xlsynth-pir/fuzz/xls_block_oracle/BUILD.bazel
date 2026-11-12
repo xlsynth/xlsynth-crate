@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+
+cc_binary(
+    name = "xls_block_oracle",
+    srcs = ["block_oracle.cc"],
+    deps = [
+        "//xls/common/file:filesystem",
+        "//xls/common/status:status_macros",
+        "//xls/interpreter:block_evaluator",
+        "//xls/interpreter:ir_interpreter",
+        "//xls/ir",
+        "//xls/ir:ir_parser",
+        "//xls/ir:value",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
