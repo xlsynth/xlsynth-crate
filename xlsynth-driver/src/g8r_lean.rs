@@ -7,8 +7,9 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde::Serialize;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_lean::{
-    LeanIrProofSources, LeanProofSources, LeanTheoremName, prepare_equivalence_target,
-    run_equivalence_proof, run_ir_function_equivalence_proof,
+    LeanIrAxiomPolicy, LeanIrProofSources, LeanProofSources, LeanTheoremName,
+    prepare_equivalence_target, run_equivalence_proof,
+    run_ir_function_equivalence_proof_with_policy,
 };
 
 use crate::common::write_stdout;
@@ -100,6 +101,12 @@ pub fn check_command(name: &'static str) -> Command {
                     .value_parser(LeanTheoremName::new)
                     .help("Qualified name of the theorem proving Target.Equivalent"),
             )
+            .arg(
+                Arg::new("reject-native-checks")
+                    .long("reject-native-checks")
+                    .action(ArgAction::SetTrue)
+                    .help("Require the theorem to depend only on propext, Classical.choice and Quot.sound"),
+            )
     } else {
         command.arg(proof.help(
             "File containing a complete Lean proof term for Target.Equivalent, such as by ...",
@@ -122,6 +129,8 @@ pub fn handle_prepare(matches: &ArgMatches) -> Result<(), String> {
 struct CheckReport {
     status: &'static str,
     audit_performed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_checks_replayed: Option<usize>,
     lean_version: Option<String>,
     elapsed_ms: u128,
     stdout: String,
@@ -176,7 +185,12 @@ pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String
                 .clone(),
             modules,
         };
-        run_ir_function_equivalence_proof(lean, target, &sources, &work_root)
+        let policy = if matches.get_flag("reject-native-checks") {
+            LeanIrAxiomPolicy::RejectNativeChecks
+        } else {
+            LeanIrAxiomPolicy::ReplayNativeChecks
+        };
+        run_ir_function_equivalence_proof_with_policy(lean, target, &sources, &work_root, policy)
     } else {
         let sources = LeanProofSources {
             root: proof_root,
@@ -188,7 +202,8 @@ pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String
     let report = match outcome {
         Ok(output) => CheckReport {
             status: "accepted_by_lean",
-            audit_performed: word_level,
+            audit_performed: output.native_checks_replayed.is_some(),
+            native_checks_replayed: output.native_checks_replayed,
             lean_version: Some(output.lean_version),
             elapsed_ms: started.elapsed().as_millis(),
             stdout: output.stdout,
@@ -198,6 +213,7 @@ pub fn handle_check(matches: &ArgMatches, word_level: bool) -> Result<(), String
         Err(failure) => CheckReport {
             status: "failed",
             audit_performed: false,
+            native_checks_replayed: None,
             lean_version: failure.lean_version,
             elapsed_ms: started.elapsed().as_millis(),
             stdout: failure.stdout,
@@ -227,7 +243,7 @@ mod tests {
     use super::check_command;
 
     #[test]
-    fn theorem_selector_is_required_only_for_ir_proofs() {
+    fn theorem_selection_and_native_check_policy_are_ir_only() {
         let inputs = [
             "--target-dir",
             "target",
@@ -246,15 +262,28 @@ mod tests {
                 .kind(),
             ErrorKind::MissingRequiredArgument
         );
-        check_command("ir-fn-lean-check")
-            .try_get_matches_from(ir_args.chain(theorem))
+        let ir_args = ir_args.chain(theorem);
+        let default = check_command("ir-fn-lean-check")
+            .try_get_matches_from(ir_args.clone())
             .unwrap();
+        assert!(!default.get_flag("reject-native-checks"));
+        let strict = check_command("ir-fn-lean-check")
+            .try_get_matches_from(ir_args.chain(["--reject-native-checks"]))
+            .unwrap();
+        assert!(strict.get_flag("reject-native-checks"));
         check_command("g8r-lean-check")
             .try_get_matches_from(gate_args.clone())
             .unwrap();
         assert_eq!(
             check_command("g8r-lean-check")
-                .try_get_matches_from(gate_args.chain(theorem))
+                .try_get_matches_from(gate_args.clone().chain(theorem))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::UnknownArgument
+        );
+        assert_eq!(
+            check_command("g8r-lean-check")
+                .try_get_matches_from(gate_args.chain(["--reject-native-checks"]))
                 .unwrap_err()
                 .kind(),
             ErrorKind::UnknownArgument

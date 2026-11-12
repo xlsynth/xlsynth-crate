@@ -7,8 +7,9 @@ use std::path::PathBuf;
 use xlsynth_lean::prepare_ir_function_equivalence_target;
 #[cfg(feature = "lean-tests")]
 use xlsynth_lean::{
-    LeanError, LeanIrProofSources, LeanModuleName, LeanTheoremName, export_ir_function,
-    run_ir_function_equivalence_proof,
+    LeanError, LeanIrAxiomPolicy, LeanIrProofSources, LeanModuleName, LeanTheoremName,
+    export_ir_function, run_ir_function_equivalence_proof,
+    run_ir_function_equivalence_proof_with_policy,
 };
 use xlsynth_pir::ir_parser::Parser;
 
@@ -97,6 +98,81 @@ theorem identity_proof : Target.Equivalent := by cases falseCheck
             .contains("native Boolean check failed"),
         "{false_check}"
     );
+}
+
+#[cfg(feature = "lean-tests")]
+#[test]
+fn audits_only_the_axioms_reachable_from_the_selected_theorem() {
+    let lean = PathBuf::from(std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN"));
+    let ir = "package p\ntop fn c() -> bits[8] { ret z: bits[8] = literal(value=3, id=1) }";
+    let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    prepare_ir_function_equivalence_target(&pkg, None, &pkg, None)
+        .unwrap()
+        .write_to(&target)
+        .unwrap();
+    let helper = dir.path().join("Helper.lean");
+    fs::write(
+        &helper,
+        r#"import Target
+theorem Helper.left : Generated.Lhs.eval = (3 : BitVec 8) := by native_decide
+theorem Helper.right : Generated.Rhs.eval = (3 : BitVec 8) := by native_decide
+theorem Helper.unused : (1 : Nat) + 1 = 2 := by native_decide
+theorem Helper.unfinished : Target.Equivalent := by sorry
+"#,
+    )
+    .unwrap();
+    let mut sources = LeanIrProofSources {
+        root: dir.path().into(),
+        module: dir.path().join("Proof.lean"),
+        theorem: LeanTheoremName::new("Proof.viaHelper").unwrap(),
+        modules: vec![helper],
+    };
+    fs::write(
+        &sources.module,
+        r#"import Helper
+theorem Proof.viaHelper : Target.Equivalent := Helper.left.trans Helper.right.symm
+theorem Proof.direct : Target.Equivalent := by rfl
+theorem Proof.unfinished : Target.Equivalent := Helper.unfinished
+"#,
+    )
+    .unwrap();
+
+    let replayed =
+        run_ir_function_equivalence_proof(&lean, &target, &sources, &dir.path().join("default"))
+            .unwrap();
+    assert_eq!(replayed.native_checks_replayed, Some(2));
+
+    let run = |sources: &LeanIrProofSources, policy, work_dir| {
+        run_ir_function_equivalence_proof_with_policy(
+            &lean,
+            &target,
+            sources,
+            &dir.path().join(work_dir),
+            policy,
+        )
+    };
+    let strict = LeanIrAxiomPolicy::RejectNativeChecks;
+    let failure = run(&sources, strict, "strict-native").unwrap_err();
+    assert!(
+        failure.stderr.contains("Helper.left._native")
+            || failure.stderr.contains("Helper.right._native"),
+        "{failure}"
+    );
+
+    sources.theorem = LeanTheoremName::new("Proof.direct").unwrap();
+    let checked = run(&sources, strict, "strict-direct").unwrap();
+    assert_eq!(checked.native_checks_replayed, Some(0));
+
+    sources.theorem = LeanTheoremName::new("Proof.unfinished").unwrap();
+    for (policy, work_dir) in [
+        (LeanIrAxiomPolicy::ReplayNativeChecks, "default-sorry"),
+        (strict, "strict-sorry"),
+    ] {
+        let failure = run(&sources, policy, work_dir).unwrap_err();
+        assert!(failure.stderr.contains("sorryAx"), "{failure}");
+    }
 }
 
 #[cfg(feature = "lean-tests")]

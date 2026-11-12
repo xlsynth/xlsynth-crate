@@ -26,9 +26,10 @@ pub use gate_fn::{
 pub use ir_fn::{LeanFunction, export_ir_function};
 pub use ir_proof::{LeanIrFunctionEquivalenceTarget, prepare_ir_function_equivalence_target};
 pub use proof::{
-    LeanEquivalenceTarget, LeanIrProofSources, LeanProofFailure, LeanProofOutput, LeanProofSources,
-    LeanTheoremName, check_equivalence_proof, prepare_equivalence_target, run_equivalence_proof,
-    run_ir_function_equivalence_proof,
+    LeanEquivalenceTarget, LeanIrAxiomPolicy, LeanIrProofSources, LeanProofFailure,
+    LeanProofOutput, LeanProofSources, LeanTheoremName, check_equivalence_proof,
+    prepare_equivalence_target, run_equivalence_proof, run_ir_function_equivalence_proof,
+    run_ir_function_equivalence_proof_with_policy,
 };
 pub use support::write_lean_support;
 

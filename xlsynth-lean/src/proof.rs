@@ -9,7 +9,7 @@ use xlsynth_g8r::aig::GateFn;
 
 use crate::gate_fn::export_gate_fn_aag;
 use crate::ir_proof::FIXED_IR_PROOF_FILES;
-use crate::process::{ProcessOutput, resolve_lean_executable, run_lean_process};
+use crate::process::{resolve_lean_executable, run_lean_process};
 use crate::support::{AIG_PROOF_SUPPORT, IR_FUNCTION_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
@@ -132,11 +132,24 @@ pub struct LeanIrProofSources {
     pub modules: Vec<PathBuf>,
 }
 
+/// Axiom policy applied to the selected IR theorem and its dependencies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LeanIrAxiomPolicy {
+    /// Allow the three standard axioms and replay closed Boolean checks.
+    #[default]
+    ReplayNativeChecks,
+    /// Allow only `propext`, `Classical.choice`, and `Quot.sound`.
+    RejectNativeChecks,
+}
+
 /// Captured diagnostics from a successful equivalence proof check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeanProofOutput {
     /// Version string reported by the selected Lean executable.
     pub lean_version: String,
+    /// Number of distinct native Boolean axioms replayed by the IR audit.
+    /// AIG proof checks omit the audit and return `None`.
+    pub native_checks_replayed: Option<usize>,
     /// Combined standard output from the compilation steps.
     pub stdout: String,
     /// Combined standard error from the compilation steps.
@@ -241,13 +254,30 @@ pub fn run_equivalence_proof(
     )
 }
 
-/// Checks the named theorem from the proof module against the generated IR
-/// equality.
+/// Checks the named theorem against the generated IR equality, replaying
+/// native Boolean checks in its transitive axiom dependencies.
 pub fn run_ir_function_equivalence_proof(
     lean_executable: &Path,
     target_root: &Path,
     proof_sources: &LeanIrProofSources,
     work_root: &Path,
+) -> Result<LeanProofOutput, LeanProofFailure> {
+    run_ir_function_equivalence_proof_with_policy(
+        lean_executable,
+        target_root,
+        proof_sources,
+        work_root,
+        LeanIrAxiomPolicy::ReplayNativeChecks,
+    )
+}
+
+/// Checks the named IR equivalence theorem and enforces the given axiom policy.
+pub fn run_ir_function_equivalence_proof_with_policy(
+    lean_executable: &Path,
+    target_root: &Path,
+    proof_sources: &LeanIrProofSources,
+    work_root: &Path,
+    policy: LeanIrAxiomPolicy,
 ) -> Result<LeanProofOutput, LeanProofFailure> {
     let proof_modules = [
         "XlsynthLean/IRProof.lean",
@@ -267,7 +297,7 @@ pub fn run_ir_function_equivalence_proof(
     run_prepared_proof(
         lean_executable,
         target_root,
-        ProofInputs::Ir(proof_sources),
+        ProofInputs::Ir(proof_sources, policy),
         work_root,
         &artifacts,
         &modules,
@@ -278,7 +308,7 @@ pub fn run_ir_function_equivalence_proof(
 #[derive(Clone, Copy)]
 enum ProofInputs<'a> {
     Aig(&'a LeanProofSources),
-    Ir(&'a LeanIrProofSources),
+    Ir(&'a LeanIrProofSources, LeanIrAxiomPolicy),
 }
 
 /// Stages the fixed target before any user modules and checks the generated
@@ -294,9 +324,9 @@ fn run_prepared_proof(
     let lean_executable = resolve_lean_executable(lean_executable)?;
     let work_root = absolute_path(work_root)?;
     prepare_empty_work_directory(&work_root)?;
-    let (theorem, fixed_files) = match proof_sources {
+    let (ir_audit, fixed_files) = match proof_sources {
         ProofInputs::Aig(_) => (None, &[][..]),
-        ProofInputs::Ir(ir) => (Some(&ir.theorem), FIXED_IR_PROOF_FILES),
+        ProofInputs::Ir(ir, policy) => (Some((&ir.theorem, policy)), FIXED_IR_PROOF_FILES),
     };
     copy_prepared_target(target_root, &work_root, artifacts, fixed_files)?;
     let module_roots = [work_root.as_path()];
@@ -309,6 +339,7 @@ fn run_prepared_proof(
     )?;
     let mut result = LeanProofOutput {
         lean_version: version_output.stdout.trim().to_string(),
+        native_checks_replayed: None,
         stdout: String::new(),
         stderr: String::new(),
     };
@@ -347,16 +378,15 @@ fn run_prepared_proof(
         )
         .map_err(|error| LeanProofFailure::with_output(error, &result))?;
     }
-    let verified = verify_compiled_proof(
+    verify_compiled_proof(
         &lean_executable,
         &work_root,
         target_objects,
         &proof_modules,
-        theorem,
+        ir_audit,
+        &mut result,
     )
     .map_err(|error| LeanProofFailure::with_output(error, &result))?;
-    result.stdout.push_str(&verified.stdout);
-    result.stderr.push_str(&verified.stderr);
     Ok(result)
 }
 
@@ -399,8 +429,9 @@ fn verify_compiled_proof(
     work_root: &Path,
     target_objects: BTreeMap<PathBuf, Vec<u8>>,
     proof_modules: &[PathBuf],
-    theorem: Option<&LeanTheoremName>,
-) -> Result<ProcessOutput, LeanError> {
+    ir_audit: Option<(&LeanTheoremName, LeanIrAxiomPolicy)>,
+    result: &mut LeanProofOutput,
+) -> Result<(), LeanError> {
     let verification = tempfile::Builder::new()
         .prefix("xlsynth-lean-verify-")
         .tempdir()
@@ -428,8 +459,12 @@ fn verify_compiled_proof(
         root.join(verifier).into_os_string(),
         objects.into_os_string(),
     ];
-    if let Some(theorem) = theorem {
-        args.push("ir".into());
+    if let Some((theorem, policy)) = ir_audit {
+        let mode = match policy {
+            LeanIrAxiomPolicy::ReplayNativeChecks => "ir",
+            LeanIrAxiomPolicy::RejectNativeChecks => "ir-strict",
+        };
+        args.push(mode.into());
         args.push(theorem.as_str().into());
     } else {
         args.push("aig".into());
@@ -437,19 +472,32 @@ fn verify_compiled_proof(
     for module in proof_modules {
         if module != Path::new("UserProof.lean") {
             args.push(
-                proof_module_name(module, theorem.is_none())?
+                proof_module_name(module, ir_audit.is_none())?
                     .as_str()
                     .into(),
             );
         }
     }
     let output = run_lean_process(lean, root, &[], "equivalence check", &args)?;
+    result.stdout.push_str(&output.stdout);
+    result.stderr.push_str(&output.stderr);
     if output.stdout.lines().last() != Some("xlsynth: verified UserProof.equivalent") {
         return Err(LeanError::Protocol(
             "equivalence verifier exited without confirming the root theorem".into(),
         ));
     }
-    Ok(output)
+    if ir_audit.is_some() {
+        // Read only the verifier's private output, independently of diagnostics
+        // produced while compiling source modules.
+        let path = root.join("native-checks-replayed.json");
+        let bytes = fs::read(&path).map_err(|source| LeanError::Io {
+            operation: "reading IR axiom audit result",
+            path,
+            source,
+        })?;
+        result.native_checks_replayed = Some(serde_json::from_slice(&bytes)?);
+    }
+    Ok(())
 }
 
 /// Prepares and checks a proof body in a temporary directory.
@@ -545,7 +593,7 @@ fn stage_proof_sources(
 ) -> Result<Vec<PathBuf>, LeanError> {
     let (root, entry, helpers, theorem) = match sources {
         ProofInputs::Aig(s) => (&s.root, &s.body, &s.modules, None),
-        ProofInputs::Ir(s) => (&s.root, &s.module, &s.modules, Some(&s.theorem)),
+        ProofInputs::Ir(s, _) => (&s.root, &s.module, &s.modules, Some(&s.theorem)),
     };
     let root = absolute_path(root)?;
     let entry = absolute_path(entry)?;
@@ -888,6 +936,7 @@ mod tests {
         let root = dir.path();
         let mut output = LeanProofOutput {
             lean_version: String::new(),
+            native_checks_replayed: None,
             stdout: String::new(),
             stderr: String::new(),
         };
@@ -916,9 +965,14 @@ mod tests {
 
         // Its declared type has the correct name, but its proof body only
         // typechecks against the second definition of Target.Equivalent.
-        let Err(failure) =
-            verify_compiled_proof(&lean, root, original, &["UserProof.lean".into()], None)
-        else {
+        let Err(failure) = verify_compiled_proof(
+            &lean,
+            root,
+            original,
+            &["UserProof.lean".into()],
+            None,
+            &mut output,
+        ) else {
             panic!("accepted a proof compiled against a different target");
         };
         assert!(

@@ -74,6 +74,7 @@ exit 0
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
     assert_eq!(report["status"], "failed");
+    assert!(report.get("native_checks_replayed").is_none());
     assert_eq!(report["lean_version"], "Lean test version");
     assert_eq!(report["stdout"], "target stdout\nproof stdout\n");
     assert_eq!(report["stderr"], "target stderr\nproof stderr\n");

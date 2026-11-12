@@ -345,10 +345,15 @@ typed call applications, shared result nodes, and downstream definitions.
 The routing example applies distinct contracts on the two sides of an
 equivalence. [Routing proof](tests/fixtures/decomposition/RouteProof.lean)
 
-The checker inspects the theorem's transitive axiom dependencies. It permits
+The checker inspects the theorem's transitive axiom dependencies. By default it permits
 Lean's `propext`, `Classical.choice` and `Quot.sound`, and replays closed Boolean
 checks from native tactics with Lean's compiler, including the LRAT checks
-used by `bv_decide`. Unproved assumptions and `sorry` fail the audit. This
+used by `bv_decide`. A successful IR audit returns the number of distinct checks
+replayed in `LeanProofOutput.native_checks_replayed`. Use
+`run_ir_function_equivalence_proof_with_policy` with `LeanIrAxiomPolicy::RejectNativeChecks`
+to allow only those three axioms. The verifier reports the first disallowed dependency
+even if it comes from an imported helper theorem. SAT search can still supply evidence
+for a kernel-checked proof term. Unproved assumptions and `sorry` fail either policy. This
 uses the same independent root-type check as the AIG proof runner. Proof
 elaboration and native computation run with the caller's OS permissions.
 Running untrusted code requires a separate sandbox that protects the toolchain

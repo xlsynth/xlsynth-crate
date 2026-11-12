@@ -3503,10 +3503,11 @@ xlsynth-driver ir-fn-lean-check --target-dir target-lean --lean /path/to/lean \
 - `--target-dir <DIR>` and `--lean <PATH>` select the prepared target and Lean executable. Both are required.
 - `--proof <PATH>` is the required Lean module defining the theorem.
 - `--proof-theorem <NAME>` is the required Lean declaration name, including its namespace, such as `AdderProof.equivalent`.
+- `--reject-native-checks` requires the theorem and its dependencies to use only `propext`, `Classical.choice`, and `Quot.sound`. By default the verifier also accepts closed Boolean checks that it successfully replays with compiled Lean.
 - `--proof-root <DIR>` resolves Lean module paths and defaults to the directory containing `--proof`.
 - `--proof-source <PATH>` supplies an additional module imported by the proof or its dependencies. Repeat for each additional module.
 - `--work-dir <DIR>` keeps the staged proof and compiled modules in an empty directory. The default is temporary.
-- `--output-json <PATH>` records the result, diagnostics and audit status.
+- `--output-json <PATH>` records the result, diagnostics and audit status. A successful IR audit includes `native_checks_replayed`, the number of distinct native Boolean checks replayed across the theorem and its dependencies. A successful strict check reports zero. Failed checks omit this field.
 
 ### `g8r-lean-prepare`
 

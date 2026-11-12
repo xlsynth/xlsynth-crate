@@ -39,7 +39,7 @@ private def replayProof (env : Environment) (proofModules : List Name) : IO Envi
   return Environment.ofKernelEnv checked
 
 /-- Apply the IR checker's axiom policy to the exact, kernel-checked declaration. -/
-private def auditIr (checked : Environment) (name : Name) : MetaM Nat := do
+private def auditIr (checked : Environment) (name : Name) (rejectNativeChecks : Bool) : MetaM Nat := do
   let mut verified := 0
   -- Read dependencies and axiom types from the replayed kernel declarations.
   -- The original environment is used only to execute native Boolean checks.
@@ -52,6 +52,8 @@ private def auditIr (checked : Environment) (name : Name) : MetaM Nat := do
       | throwError "unverified axiom in {name}: {ax}"
     unless ty.isConstOf ``Bool && value.isConstOf ``Bool.true do
       throwError "unverified axiom in {name}: {ax}"
+    if rejectNativeChecks then
+      throwError "native Boolean check rejected in {name}: {ax}"
     match ← Meta.nativeEqTrue `xlsynth_ir_check computation with
     | .success _ => verified := verified + 1
     | .notTrue => throwError "native Boolean check failed for {ax}"
@@ -60,10 +62,14 @@ private def auditIr (checked : Environment) (name : Name) : MetaM Nat := do
 def main (args : List String) : IO Unit := do
   let root :: args := args | throw <| IO.userError "expected a compiled module directory"
   let (selected, modules) ← match args with
-    | "ir" :: theoremName :: mainModule :: helpers =>
-      pure (some (theoremName.toName, mainModule.toName), mainModule :: helpers)
     | "aig" :: helpers => pure (none, helpers)
-    | _ => throw <| IO.userError "expected aig or ir with a theorem and its defining module"
+    | mode :: theoremName :: mainModule :: helpers => do
+      let rejectNativeChecks ← match mode with
+        | "ir" => pure false
+        | "ir-strict" => pure true
+        | _ => throw <| IO.userError s!"unknown IR verification mode {mode}"
+      pure (some (theoremName.toName, mainModule.toName, rejectNativeChecks), mainModule :: helpers)
+    | _ => throw <| IO.userError "expected aig, or an IR mode followed by a theorem and its defining module"
   let builtin ← getBuiltinSearchPath (← getBuildDir)
   searchPathRef.set (builtin ++ [System.FilePath.mk root])
   let env ← importModules #[{ module := `Target }, { module := `UserProof }] {} (loadExts := false)
@@ -77,7 +83,7 @@ def main (args : List String) : IO Unit := do
     | throw <| IO.userError s!"expected a theorem named {theoremName}"
   unless Kernel.isDefEqGuarded checked {} thm.type (mkConst targetName) do
     throw <| IO.userError s!"{theoremName} has the wrong type; expected {targetName}"
-  if let some (entry, moduleName) := selected then
+  if let some (entry, moduleName, rejectNativeChecks) := selected then
     requireOrigin env entry moduleName
     let some (.thmInfo decl) := checked.toKernelEnv.find? entry
       | throw <| IO.userError s!"expected a theorem named {entry}"
@@ -85,7 +91,8 @@ def main (args : List String) : IO Unit := do
       throw <| IO.userError s!"{entry} has the wrong type; expected {targetName}"
     unless thm.value.consumeMData.isConstOf entry do
       throw <| IO.userError s!"{theoremName} must reference the selected theorem {entry}"
-    let verified ← (auditIr checked entry).run' |>.toIO'
+    let verified ← (auditIr checked entry rejectNativeChecks).run' |>.toIO'
       { fileName := "<proof audit>", fileMap := default } { env }
+    IO.FS.writeFile "native-checks-replayed.json" (toJson verified).compress
     IO.println s!"{entry}: checked axiom dependencies and replayed {verified} native Boolean checks"
   IO.println "xlsynth: verified UserProof.equivalent"
