@@ -9,6 +9,7 @@ use std::fmt::Write;
 pub struct ClockedTestSample {
     width: usize,
     active_low: bool,
+    explicit_reset: bool,
     registers: Vec<Register>,
     rows: Vec<Row>,
 }
@@ -142,6 +143,7 @@ impl ClockedTestSample {
         Self {
             width,
             active_low,
+            explicit_reset: dimensions & 0x40 != 0,
             registers,
             rows,
         }
@@ -229,9 +231,15 @@ proc clocked_oracle {{
         assert_eq!(observations.len(), self.row_count());
         let mut source = self.declarations();
         let register_count = self.register_count();
+        let reset = if self.explicit_reset {
+            source.insert_str(0, "#![allow(block_reset_signal)]\n");
+            ", rst"
+        } else {
+            ""
+        };
         writeln!(
             source,
-            "block machine(clk, rst, drive: Drive) -> Word[{register_count}] {{"
+            "block machine(clk{reset}, drive: Drive) -> Word[{register_count}] {{"
         )
         .unwrap();
         for (i, reg) in self.registers.iter().enumerate() {

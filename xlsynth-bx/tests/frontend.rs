@@ -129,12 +129,12 @@ fn dslx_function_links_into_a_two_stage_pipeline() {
 #[test]
 fn hierarchy_accepts_registered_feedback_and_checks_combinational_feedback() {
     let source = r#"
-pub block accumulator(clk, rst, step: u8) -> u8 {
+pub block accumulator(clk, step: u8) -> u8 {
     inst cell: delay;
     cell.d := cell.out + step;
     cell.out
 }
-block delay(clk, rst, d: u8) -> u8 {
+block delay(clk, d: u8) -> u8 {
     reg q: u8 = u8:0;
     q := d;
     q
@@ -209,7 +209,7 @@ fn echo(x: (bits[4][2], bits[100]) id=1) -> (bits[4][2], bits[100]) {
     let source = r#"
 struct Payload { samples: u4[2], tag: uN[100] }
 extern fn echo(x: Payload) -> Payload;
-block capture(clk, rst, x: Payload) -> (u4, Payload) {
+block capture(clk, x: Payload) -> (u4, Payload) {
     reg saved: Payload = Payload { samples: [0, 1], tag: uN[100]:0x10000000000000000 };
     saved := echo(x);
     (saved.samples[1], saved)
@@ -231,8 +231,27 @@ block capture(clk, rst, x: Payload) -> (u4, Payload) {
 }
 
 #[test]
+fn declaring_rst_requires_module_opt_in_even_when_unused() -> Result<(), String> {
+    for source in [
+        "block hold(clk, rst, x: u8) -> u8 { reg q: u8; q := x; q }",
+        "block hold<T>(clk, rst, x: T) -> T { reg q: T; q := x; q }",
+    ] {
+        let error = check_module(&parse_module(source)?).unwrap_err();
+        assert_eq!(
+            error,
+            "block 'hold': declaring an explicit reset signal requires #![allow(block_reset_signal)] in the defining module; omit `rst` to infer reset"
+        );
+        check_module(&parse_module(&format!(
+            "#![allow(block_reset_signal)]\n{source}"
+        ))?)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn reading_rst_means_asserted_even_when_the_physical_reset_is_active_low() {
-    let source = "#[allow(combinational_block)] block reset_probe(clk, rst) -> bool { rst }";
+    let source = r#"#![allow(block_reset_signal)]
+#[allow(combinational_block)] block reset_probe(clk, rst) -> bool { rst }"#;
     for active_low in [false, true] {
         let policy = ResetBehavior {
             active_low,
@@ -255,13 +274,41 @@ fn reading_rst_means_asserted_even_when_the_physical_reset_is_active_low() {
         }
     }
 }
+
+#[test]
+fn inferring_a_reset_port_preserves_value_name_resolution() -> Result<(), String> {
+    let source = r#"
+block sample(clk, x: u8) -> u8 {
+    reg q: u8 = 0;
+    let rst = x;
+    q := rst;
+    q
+}"#;
+    let package = compile(source, empty_package("design"), ResetBehavior::default())?;
+    let block = package.get_block("sample").unwrap();
+    let reset = block.reset.as_ref().unwrap();
+    let writes: Vec<_> = block
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            NodePayload::RegisterWrite { arg, reset, .. } => Some((block.port_name(*arg), *reset)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(writes, [("x", Some(reset.port))]);
+    let unbound = parse_module(&source.replace("let rst = x;", ""))?;
+    let error = check_module(&unbound).unwrap_err();
+    assert!(error.contains("unknown value 'rst'"), "{error}");
+    Ok(())
+}
+
 #[test]
 fn invalid_register_writes_are_rejected_before_linking() {
     for body in [
         "reg q: u8; if en { q := x; } if !en { q := x; } q",
         "reg q: u8; q",
         "reg q: u8; q := en; q",
-        "reg q: u8 = u8:0; q := x; q",
+        "reg q: u8 = x; q := x; q",
         "reg q: u8; q := x; if x { let t = en; } q",
     ] {
         let source = format!("block stage(clk, x: u8, en: bool) -> u8 {{ {body} }}");

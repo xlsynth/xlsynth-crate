@@ -133,7 +133,7 @@ type Predicate = bool;
 #[test]
 fn invariant_result_unrolls_clocked_children_in_structural_context() -> Result<(), String> {
     let source = r#"
-block delay(clk, rst, value: bool) -> bool {
+block delay(clk, value: bool) -> bool {
     reg q: bool = true;
     q := value;
     q
@@ -164,6 +164,36 @@ block delay(clk, rst, value: bool) -> bool {
         assert_eq!(test.failure, None);
     }
     Ok(())
+}
+
+#[test]
+fn invariant_must_declare_reset_for_initializers_and_resetful_children() {
+    for (body, diagnostic) in [
+        (
+            "reg q: bool = true; q := true; q",
+            "initializer on register 'q' requires a reset",
+        ),
+        (
+            "let q = child(); q",
+            "instance 'q' of 'child' requires a parent reset",
+        ),
+    ] {
+        let source = format!(
+            r#"block child(clk) -> bool {{ reg q: bool = true; q := true; q }}
+#[invariant] block prop(clk) -> bool {{ {body} }}"#
+        );
+        let error = run_tests_with_quickcheck(
+            &source,
+            Path::new("reset.bx"),
+            empty_package("reset"),
+            ResetBehavior::default(),
+            &ImportOptions::default(),
+            true,
+            QuickCheckOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error, format!("reset.bx: invariant 'prop': {diagnostic}"));
+    }
 }
 
 #[test]

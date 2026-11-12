@@ -843,7 +843,7 @@ fn struct_registers_keep_the_checked_dslx_layout_after_sources_are_removed()
         r#"
 use fabric::wire;
 use facade;
-block capture(clk, rst, input: wire::Header) -> facade::Header {{
+block capture(clk, input: wire::Header) -> facade::Header {{
     reg saved: facade::Header = {init};
     saved := facade::swap(input);
     saved
@@ -1166,12 +1166,12 @@ fn generic_block_register_resolves_a_direct_struct_type_and_zero_reset()
     let source = r#"
 use fabric::wire;
 use fabric::wire::Sized;
-block store<T>(clk, rst, x: T) -> T {
+block store<T>(clk, x: T) -> T {
     reg q: Sized<8> = zero!<wire::Sized<u32:8>>();
     q := x;
     q
 }
-pub block sample(clk, rst, x: u8) -> u8 {
+pub block sample(clk, x: u8) -> u8 {
     let saved = store(wire::sized(x));
     saved.data
 }

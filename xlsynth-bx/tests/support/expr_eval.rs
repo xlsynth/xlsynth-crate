@@ -225,7 +225,7 @@ impl ExpressionEvaluator {
             .collect::<Vec<_>>()
             .join("\n");
         let source = format!(
-            "block check_reset(clk, rst) -> {result_type} {{\n{inputs}\n{bindings}\nreg captured: {result_type} = {expression};\ncaptured := captured;\ncaptured\n}}"
+            "block check_reset(clk) -> {result_type} {{\n{inputs}\n{bindings}\nreg captured: {result_type} = {expression};\ncaptured := captured;\ncaptured\n}}"
         );
         let package = compile(
             &source,

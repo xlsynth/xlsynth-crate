@@ -441,7 +441,7 @@ block count_bound(clk, rst, enable: bool) -> bool {
     fn named_lemmas_sample_fresh_legal_inputs_and_persist_child_state() -> Result<(), String> {
         let source = r#"
 enum Mode : u2 { Low = 1, High = 3 }
-block delay(clk, rst, b: bool) -> bool {
+block delay(clk, b: bool) -> bool {
     reg last: bool = false;
     last := b;
     last

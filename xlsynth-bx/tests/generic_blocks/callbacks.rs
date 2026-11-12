@@ -22,7 +22,7 @@ block transform<In, Out, F: fn(In) -> Out>(clk, x: In) -> Out { F(x) }
 "#;
 
 const ADVANCE: &str = r#"
-block advance<In, Out, F: fn(In) -> Out>(clk, rst, prev: (bool, In)) -> (bool, Out) {
+block advance<In, Out, F: fn(In) -> Out>(clk, prev: (bool, In)) -> (bool, Out) {
     let next = pipe_reg(prev.0, F(prev.1));
     next
 }
@@ -81,24 +81,24 @@ pub fn square(x:u16) -> u32 { let wide = x as u32; wide * wide }
     )?;
     let options = search_paths(&[dir.path()]);
     let generic = r#"
-pub block chain(clk, rst, valid: bool, data: u8) -> (bool, u32) {
+pub block chain(clk, valid: bool, data: u8) -> (bool, u32) {
     let widened = advance<math::widen>((valid, data));
     let squared = advance<math::square>(widened);
     squared
 }
 "#;
     let concrete = r#"
-block widen_stage(clk, rst, prev: (bool, u8)) -> (bool, u16) {
+block widen_stage(clk, prev: (bool, u8)) -> (bool, u16) {
     let wide = math::widen(prev.1);
     let pipe_stage = pipe_reg(prev.0, wide);
     pipe_stage
 }
-block square_stage(clk, rst, prev: (bool, u16)) -> (bool, u32) {
+block square_stage(clk, prev: (bool, u16)) -> (bool, u32) {
     let square = math::square(prev.1);
     let pipe_stage = pipe_reg(prev.0, square);
     pipe_stage
 }
-pub block chain(clk, rst, valid: bool, data: u8) -> (bool, u32) {
+pub block chain(clk, valid: bool, data: u8) -> (bool, u32) {
     let widened = widen_stage((valid, data));
     let squared = square_stage(widened);
     squared
@@ -148,7 +148,7 @@ pub block chain(clk, rst, valid: bool, data: u8) -> (bool, u32) {
 fn identical_callback_stages_keep_independent_registers() -> Result<(), Box<dyn Error>> {
     let chain = r#"
 fn inc(x:u8)->u8 { x + u8:1 }
-pub block chain(clk, rst, valid:bool, data:u8)->(bool,u8) {
+pub block chain(clk, valid:bool, data:u8)->(bool,u8) {
     let left = advance<inc>((valid,data));
     let right = advance<inc>(left);
     right

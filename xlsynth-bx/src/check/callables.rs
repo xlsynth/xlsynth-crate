@@ -765,12 +765,7 @@ mod tests {
         // S8 has 767 IR nodes. The remaining budget covers both sides of
         // one signature and the inputs of a second, even with metadata.
         registry.expansion_work = MAX_TYPE_SIZE - 2400;
-        let mut checker = BodyChecker::new(
-            &decls,
-            &mut resolver,
-            &mut structs,
-            BodyKind::Block { has_reset: false },
-        );
+        let mut checker = BodyChecker::new(&decls, &mut resolver, &mut structs, BodyKind::Block);
         checker.specializations = Some(&mut registry);
         let mut bindings = Bindings::new(&[]);
         let formal = |width| {

@@ -7,7 +7,7 @@ struct MulAddOut {
     valid: bool,
 }
 
-pub block mul_add(clk, rst, valid_in: bool, a: u8, b: u8, bias: u8) -> MulAddOut {
+pub block mul_add(clk, valid_in: bool, a: u8, b: u8, bias: u8) -> MulAddOut {
     reg product: u16;
     reg bias_d1: u8;
     reg valid_d1: bool = false;

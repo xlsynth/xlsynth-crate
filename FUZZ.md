@@ -302,9 +302,11 @@ Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_value_par
 Compares a BX `#[test] block` with a DSLX `#[test_proc]` on the same sequence of
 inputs. Each proc activation computes one register transition and traces the
 result. The BX test drives a struct-valued input, ticks the DUT, and checks
-every register against that row of the DSLX trace. The first edge resets the
-DUT. Later rows exercise reset priority, load enables, and dependencies on
-other registers' previous values. The target also changes one expected value
+every register against that row of the DSLX trace. BX uses either an inferred
+reset port or an explicit `clk, rst` signature enabled by
+`#![allow(block_reset_signal)]`, under either polarity. The first
+edge resets the DUT. Later rows exercise reset priority, load enables, and
+dependencies on other registers' previous values. The target also changes one expected value
 and requires BX to report the selected tick, exposing skipped assertions. A
 mismatch reports both generated programs.
 

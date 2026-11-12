@@ -157,6 +157,12 @@ block reset_can_recur(clk, rst) -> bool {
     sampled := true;
     !(rst && sampled)
 }
+#[invariant]
+block before_first_clock(clk) -> bool {
+    reg sampled: bool;
+    sampled := false;
+    !sampled
+}
 "#;
     let (status, _) = run(
         dir.path(),
@@ -167,7 +173,7 @@ block reset_can_recur(clk, rst) -> bool {
     )?;
     assert_eq!(
         status,
-        "invariant arbitrary_power_up ... DISPROVED\ninvariant reset_can_recur ... DISPROVED\n0 proved; 0 bounded; 2 disproved; 0 inconclusive; 0 errors\n"
+        "invariant arbitrary_power_up ... DISPROVED\ninvariant reset_can_recur ... DISPROVED\ninvariant before_first_clock ... DISPROVED\n0 proved; 0 bounded; 3 disproved; 0 inconclusive; 0 errors\n"
     );
     Ok(())
 }

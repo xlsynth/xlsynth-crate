@@ -66,7 +66,7 @@ impl BodyChecker<'_, '_> {
             (_, _, Some(registry), spec, _) if spec.is_some() || registry.checking_definition() => {
                 (&mut registry.expansion_work, "function specialization")
             }
-            (_, _, _, _, BodyKind::Block { .. }) => (&mut self.expansion_work, "block"),
+            (_, _, _, _, BodyKind::Block) => (&mut self.expansion_work, "block"),
             (_, _, _, _, BodyKind::Function) => (&mut self.expansion_work, "function"),
         };
         *total = total.saturating_add(work);

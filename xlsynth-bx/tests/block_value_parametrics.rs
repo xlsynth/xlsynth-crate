@@ -29,13 +29,13 @@ fn imported_delay_specializes_by_depth_and_matches_dslx_cycles() -> Result<(), B
 const FIRST = u32:1;
 fn end_of_delay(n: u32) -> u32 { FIRST + n }
 
-block stage<T>(clk, rst, data: T) -> T {
+block stage<T>(clk, data: T) -> T {
     reg q: T = zero!<T>();
     q := data;
     q
 }
 
-pub block delay<T, N: u32>(clk, rst, data: T) -> T {
+pub block delay<T, N: u32>(clk, data: T) -> T {
     unroll_for! (_, prev): (u32, T) in FIRST..end_of_delay(N) {
         let next = stage(prev);
         next
@@ -47,7 +47,7 @@ pub block delay<T, N: u32>(clk, rst, data: T) -> T {
 use stages::delay;
 const DEPTH = u32:3;
 
-pub block pipeline(clk, rst, x: u8, y: u8) -> (u8, u8, u8, u8) {
+pub block pipeline(clk, x: u8, y: u8) -> (u8, u8, u8, u8) {
     let bypass = delay<0>(x);
     let short = delay<1>(x);
     let deep = delay<DEPTH>(x);
@@ -70,6 +70,7 @@ pub block pipeline(clk, rst, x: u8, y: u8) -> (u8, u8, u8, u8) {
             .get_block(&instance.block)
             .expect("specialized delay");
         assert_eq!(delay.instantiations.len(), depth);
+        assert_eq!(delay.reset.is_some(), depth > 0);
     }
     assert_eq!(deep.block, other.block);
 

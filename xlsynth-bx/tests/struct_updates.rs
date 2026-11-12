@@ -195,7 +195,7 @@ fn struct_update_preserves_unmodified_register_fields() -> Result<(), Box<dyn Er
 struct Snapshot { held: u8, updated: u8, valid: bool }
 const START = Snapshot { held: u8:90, updated: u8:0, valid: false };
 
-pub block capture(clk, rst, take: bool, next_value: u8) -> Snapshot {
+pub block capture(clk, take: bool, next_value: u8) -> Snapshot {
     reg saved: Snapshot = Snapshot { updated: u8:1, ..START };
     if take {
         saved := Snapshot { valid: true, updated: next_value, ..saved };
