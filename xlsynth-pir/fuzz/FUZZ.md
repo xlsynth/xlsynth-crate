@@ -223,33 +223,6 @@ Main failure modes surfaced:
 
 ______________________________________________________________________
 
-# Block interpreter differential
-
-`fuzz_block_eval_interp_equiv` generates flat synchronous blocks in the XLS-compatible
-operation subset. It supplies the same initial register values and 16 input cycles
-to PIR and to a C++ helper that calls XLS's `kInterpreterBlockEvaluator`.
-Each interpreter carries its own state between cycles. The target compares the
-complete named output map sampled before each edge and the complete named register
-map committed on that edge. A mismatch reports the cycle, field, generated IR,
-initial state, and input trace. Generated cases include feedback, load enables,
-synchronous resets, and aggregate values.
-
-From the repository root, build the helper once with Bazelisk (or the Bazel
-version required by the XLS checkout). The build script selects the same XLS
-release as the crate. Set the executable path for the fuzz run.
-
-```shell
-oracle_dir="$(mktemp -d)"
-bash xlsynth-pir/fuzz/xls_block_oracle/build.sh "$oracle_dir"
-export XLSYNTH_BLOCK_INTERPRETER_ORACLE="$oracle_dir/xls_block_oracle"
-cd xlsynth-pir
-cargo +nightly fuzz run --sanitizer none fuzz_block_eval_interp_equiv
-```
-
-The target also accepts `xls_block_oracle` on `PATH`. A missing executable fails
-fuzzer startup. To replay a saved libFuzzer input, append its path to the same
-`cargo fuzz run` command with the oracle available.
-
 # Same-Signature Pair Fuzz Target
 
 This fuzz target builds two direct random PIR functions across the full

@@ -350,6 +350,23 @@ It compares cycle-by-cycle output and committed register values against an
 independent PIR block evaluator. Failures expose changed register state,
 feedback, reset priority or polarity, and load-enable behavior.
 
+## `fuzz_codegen_vastly_sequential_equiv`
+
+Emits SystemVerilog from a generated synchronous block and runs it in Vastly
+for 24 cycles. Ports and registers have nonzero packed widths. The generator
+covers scalars up to 129 bits and aggregates with up to eight scalar leaves.
+PIR and Vastly start from the same explicit register values and advance
+independently. The target compares the
+named outputs before each edge and the named register values committed on that
+edge. Initializing Vastly's state directly also exercises registers without a
+reset value. Failures can expose incorrect output timing, wiring, reset
+priority or polarity, load enables, or register feedback.
+
+```sh
+cd xlsynth-codegen
+cargo +nightly fuzz run --sanitizer none fuzz_codegen_vastly_sequential_equiv
+```
+
 ## `fuzz_codegen_aggregate_semantics`
 
 Generates register-free blocks with tuples, arrays, nested aggregates, and

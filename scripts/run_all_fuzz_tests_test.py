@@ -7,7 +7,6 @@ Like the runner, these tests require Python 3.11+. CI runs them in the fuzz job.
 
 import io
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -202,29 +201,6 @@ class FuzzRunnerTest(unittest.TestCase):
         )
         self.assertEqual(len(self.commands), 2)
         self.assertEqual(self.commands[1][self.commands[1].index("--") - 1], "first")
-
-    def test_block_oracle_discovery_and_explicit_configuration(self):
-        target = "fuzz_block_eval_interp_equiv"
-        self.project("alpha", [target])
-        with mock.patch.dict(os.environ, {"PATH": str(self.root)}, clear=True):
-            self.assertEqual(self.run_suite(), 0)
-            self.assertEqual(self.commands, [])
-
-            oracle = self.root / "xls_block_oracle"
-            oracle.touch(mode=0o755)
-            self.assertEqual(self.run_suite(), 0)
-            self.assertEqual(
-                self.commands[-1][self.commands[-1].index("--") - 1], target
-            )
-
-            self.commands.clear()
-            oracle.unlink()
-            os.environ["XLSYNTH_BLOCK_INTERPRETER_ORACLE"] = str(oracle)
-            self.failed_target = target
-            self.assertEqual(self.run_suite(), 1)
-            self.assertEqual(
-                self.commands[-1][self.commands[-1].index("--") - 1], target
-            )
 
     def test_excluded_target_collisions_are_also_rejected(self):
         excluded = sorted(runner.DEFAULT_SKIPPED_FUZZ_TARGETS)[0]

@@ -785,16 +785,15 @@ Primarily tests:
 - Generated IR text remains parseable and executable across the C++ and PIR interpreters
 - Arbitrary generated ops and value shapes behave identically in both interpreters across mixed random and autocov-selected inputs
 
-### xlsynth-pir/fuzz/fuzz_targets/fuzz_block_eval_interp_equiv.rs
+### xlsynth-codegen/fuzz/fuzz_targets/fuzz_codegen_vastly_sequential_equiv.rs
 
-Generates flat, synchronous PIR blocks and runs each one through the PIR block
-interpreter and the upstream XLS C++ block interpreter. Both receive the same
-typed initial register values and input sequence. On every cycle the target
-compares all named output ports before the edge and all named registers after
-the edge, including registers that never reach an output. This catches errors
-in output timing, reset polarity, load enables, and simultaneous writes to
-different registers. See the [PIR fuzz guide](xlsynth-pir/fuzz/FUZZ.md#block-interpreter-differential)
-for the upstream oracle build and run instructions.
+Generates flat, synchronous blocks, emits SystemVerilog with `xlsynth-codegen`,
+and simulates the emitted text with Vastly. PIR and Vastly start with the same
+concrete register values and receive the same inputs. The target checks every
+emitted output before each edge and every emitted register after it. This
+catches differences in feedback, load enables, reset behavior, and output
+timing, including updates to registers that never reach an output.
+[Run the Vastly differential target](xlsynth-codegen/fuzz/FUZZ.md#fuzz_codegen_vastly_sequential_equiv).
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ext_nary_add_gatify_equiv.rs
 

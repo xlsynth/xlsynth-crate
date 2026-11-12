@@ -13,7 +13,6 @@ use xlsynth_prover::prover::SolverLimits;
 use xlsynth_prover::solver::bitwuzla::BitwuzlaOptions;
 
 pub mod equiv;
-pub mod upstream_block;
 
 pub const FUZZ_SOLVER_TIME_LIMIT_PER_MS: u64 = 10_000;
 pub const FUZZ_SOLVER_MEMORY_LIMIT_MB: u64 = 512;
@@ -50,8 +49,7 @@ fn operations_without_product_pairs_or_extensions() -> OperationSet {
     }))
 }
 
-/// Common operation subset for upstream interpretation and formal equivalence.
-pub fn upstream_compatible_fn_options(max_nodes: usize) -> RandomFnOptions {
+fn upstream_formal_random_pir_options(max_nodes: usize) -> RandomFnOptions {
     RandomFnOptions {
         max_nodes,
         max_bit_width: 8,
@@ -76,7 +74,7 @@ pub fn generate_standard_random_pir_package(data: &[u8], package_name: &str) -> 
 
 /// Generates standard upstream-compatible PIR for libxls and formal checks.
 pub fn generate_upstream_formal_random_pir_package(data: &[u8], package_name: &str) -> Package {
-    let options = upstream_compatible_fn_options(32);
+    let options = upstream_formal_random_pir_options(32);
     let mut entropy = DepletableBytes::new(data);
     generate_fn(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
         .expect("fixed standard PIR fuzz options should construct a valid function")
@@ -87,7 +85,7 @@ pub fn generate_upstream_formal_random_pir_package(data: &[u8], package_name: &s
 pub fn generate_upstream_eval_random_pir_package(data: &[u8], package_name: &str) -> Package {
     let options = RandomFnOptions {
         allow_map: true,
-        ..upstream_compatible_fn_options(32)
+        ..upstream_formal_random_pir_options(32)
     };
     let mut entropy = DepletableBytes::new(data);
     let mut generated = generate_package(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
@@ -99,7 +97,7 @@ pub fn generate_upstream_eval_random_pir_package(data: &[u8], package_name: &str
 /// Generates two upstream-compatible functions with matching signatures for
 /// toolchain-backed equivalence properties.
 pub fn generate_upstream_formal_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
-    let options = upstream_compatible_fn_options(64);
+    let options = upstream_formal_random_pir_options(64);
     let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);
     let (first, second) = generate_same_signature_pair(
         &mut first_entropy,

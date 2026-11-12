@@ -26,7 +26,6 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         || filename.ends_with(".py")
         || filename.ends_with(".sh")
         || filename.ends_with(".textproto")
-        || filename.ends_with(".bazel")
         || filename == "requirements.txt"
     {
         "#"
