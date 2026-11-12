@@ -3435,6 +3435,20 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
     /// type. The enclosing group checks its complete prefix of unsized
     /// literals.
     fn expr_in_group(&mut self, expr: &Expr, expected: Option<&Type>) -> Result<TypedExpr, String> {
+        // Guard checking can already occupy much of the caller's stack when
+        // the expression starts. Check available space on each descent.
+        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+            self.check_group_member(expr, expected)
+        })
+    }
+
+    /// Dispatch an expression once its recursive frame has sufficient stack
+    /// space.
+    fn check_group_member(
+        &mut self,
+        expr: &Expr,
+        expected: Option<&Type>,
+    ) -> Result<TypedExpr, String> {
         // Keep the recursive dispatch frame small for expressions at the depth
         // limit.
         let (ty, kind) = match expr {
