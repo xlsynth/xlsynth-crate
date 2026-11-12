@@ -131,7 +131,10 @@ impl Hierarchy {
                             edges.push(*connection);
                         }
                     }
-                    InstantiationKind::Extern => {}
+                    InstantiationKind::Extern => {
+                        // The extern interface doesn't tell us which inputs can affect this
+                        // output combinationally, so traversal stops here.
+                    }
                 }
             }
             dependencies.push(edges);
