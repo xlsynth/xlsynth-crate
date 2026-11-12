@@ -256,3 +256,55 @@ block parity_from_library(clk, rst, drive: Drive) -> bool {
     );
     Ok(())
 }
+
+#[test]
+fn proves_observational_equivalence_examples_and_distinguishes_failures() -> Result<()> {
+    let examples =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/bx-observational-equivalence");
+    let dir = tempfile::tempdir()?;
+    for module in [
+        "add_vs_widening.x",
+        "binary_vs_one_hot_latched_detector.x",
+        "unreachable_state_elimination.x",
+    ] {
+        fs::copy(examples.join(module), dir.path().join(module))?;
+    }
+    let harness = fs::read_to_string(examples.join("equivalence.bx"))?;
+    let flags = ["--engine=bitwuzla", "--max-depth=3"];
+    let (proved, _) = run(dir.path(), &harness, "bx-prove-invariant", &flags, true)?;
+    assert_eq!(
+        proved,
+        r#"invariant widened_accumulator ... proved at k=1
+invariant latched_detector ... proved at k=3
+invariant parity ... proved at k=1
+3 proved; 0 bounded; 0 disproved; 0 inconclusive; 0 errors
+"#
+    );
+
+    // The adder disagrees at cycle 0. Without its lemma, parity can start an
+    // induction step in a dead state.
+    let adder = dir.path().join("add_vs_widening.x");
+    let wrong_sum = fs::read_to_string(&adder)?.replace("i_wide + s", "i_wide + s + u16:1");
+    fs::write(adder, wrong_sum)?;
+    let no_parity_lemma = harness.replace("#[lemma]", "");
+    let (status, diagnostic) = run(
+        dir.path(),
+        &no_parity_lemma,
+        "bx-prove-invariant",
+        &flags,
+        false,
+    )?;
+    assert_eq!(
+        status,
+        r#"invariant widened_accumulator ... DISPROVED
+invariant latched_detector ... proved at k=3
+invariant parity ... INCONCLUSIVE
+1 proved; 0 bounded; 1 disproved; 1 inconclusive; 0 errors
+"#
+    );
+    assert!(
+        diagnostic.contains("invariant 'widened_accumulator' at cycle 0:"),
+        "{diagnostic}"
+    );
+    Ok(())
+}

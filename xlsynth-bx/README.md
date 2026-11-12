@@ -684,8 +684,24 @@ trace. The proof covers the edges executed by the property.
 
 ### Clocked invariants and helper lemmas
 
-A private `#[invariant]` block describes a persistent circuit. Its trailing
-Boolean is a property of every sampled cycle. Inputs can change at each cycle.
+A private `#[invariant]` block defines a Boolean predicate. Its trailing
+`bool` is the observation for the current cycle. Declaring it a **clocked
+invariant** claims that the predicate stays true forever, on every sampled
+cycle of every legal execution. One reachable cycle where the block returns
+`false` disproves the invariant.
+
+BX creates the block's registers and child instances once. The runner
+supplies the clock edges. On each cycle it drives fresh inputs, samples the
+predicate and any lemmas against the current register values, then clocks
+the `:=` updates together. A register read in the trailing expression sees
+the current value even if an update appears earlier in the source.
+
+All instances in the harness share one clock. To model different logical
+rates, give the slower machine a clock enable. A register updated with
+`if enable { q := next; }` holds its value on disabled edges. The invariant
+block still produces an observation every cycle. For a property that checks
+data only when valid, its trailing expression can be `!valid || data == expected`.
+
 Use an ordinary register update to model a reference implementation alongside
 the DUT. For example, these two parity machines have different state widths.
 
@@ -729,6 +745,11 @@ on every sampled cycle. A reachable failure identifies the failing predicate
 and the stimulus trace. An induction step that remains open at the depth limit
 is inconclusive. The word-level proof has the same linked-IR operation limits
 as bounded clocked QuickChecks.
+
+For runnable observational equivalence proofs, see the widened accumulator,
+binary versus one-hot detector, and parity machine with an unreachable state.
+Each harness imports the two DSLX step functions and compares their outputs
+on a shared input stream. [Observational equivalence case studies](../xlsynth-driver/examples/bx-observational-equivalence/README.md)
 
 ## Compile and link
 

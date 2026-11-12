@@ -562,9 +562,11 @@ counter example and the current proof limits are in the
 ### `bx-prove-invariant` checks per-cycle properties and their helper lemmas
 
 Checks each private `#[invariant]` block in the input file with fresh symbolic
-data inputs each cycle. An induction proof covers every cycle from the
-specified initialization. In BMC mode, a successful result covers the sampled
-prefix. Both modes check every named `#[lemma]` and the block's Boolean result.
+data inputs each cycle. The block's trailing Boolean defines the predicate
+for the current cycle. An induction proof establishes that it stays true on
+every legal execution from the specified initialization, for arbitrarily many
+cycles. In BMC mode, a successful result covers the sampled prefix. Both
+modes also check every named `#[lemma]`.
 
 ```shell
 xlsynth-driver bx-prove-invariant parity.bx --engine=bitwuzla --max-depth 8
@@ -585,7 +587,9 @@ An initialized counterexample produces a replayed trace. An open induction
 step at the depth limit, an unsupported operation, or a solver timeout yields
 an inconclusive result. Each property is reported separately. The command exits
 successfully when every property passes the selected mode and at least one was
-checked. See the [BX parity example](../xlsynth-bx/README.md#clocked-invariants-and-helper-lemmas).
+checked. Three runnable examples compare DSLX state machines using the same
+input stream and show the effect of induction depth and a checked helper lemma.
+[Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
 
 ### `bx2gv`: BX to mapped gate-level netlist
 
