@@ -35,6 +35,28 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn imported_issue_latency_uses_the_library_helper() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "delays.bx",
+        r#"
+fn latency(op: bool) -> u32 { u32:1 }
+pub block delay(clk, op: bool, data: u8) -> u8 @latency(op) {
+    reg q: u8; q := data; q
+}
+"#,
+    )?;
+    let source = r#"
+use delays;
+fn latency(op: bool) -> u32 { u32:2 }
+block pipeline(clk, op: bool, data: u8) -> u8 { let q = delays::delay(op, data); q }
+"#;
+    compile_design(source, &search_paths(&[dir.path()]))?;
+    Ok(())
+}
+
+#[test]
 fn imported_block_uses_stage_constants_from_its_defining_module() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     write_module(

@@ -750,11 +750,14 @@ impl<'a> Scope<'a> {
     fn block(&mut self, def: &Block) -> Result<Block, String> {
         // A library's `@LATENCY` belongs to the library even if its caller
         // defines a constant with the same spelling.
-        let stages = def.map_stages(|name| {
-            self.names
-                .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
-                .map(StageAnnotation::Constant)
-        })?;
+        let stages = def.map_stages(
+            |name| {
+                self.names
+                    .resolve(name, self.value_at, self.source_owner, ReferenceKind::Value)
+                    .map(StageAnnotation::Constant)
+            },
+            |name| self.callee(name, CallSite::Direct),
+        )?;
         for name in &def.type_params {
             self.bind_as(name, Local::Formal);
         }

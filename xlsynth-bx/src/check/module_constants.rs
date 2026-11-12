@@ -55,27 +55,36 @@ impl ModuleDimensions<'_, '_> {
     /// Module constants already hold evaluated values. Stage inference needs
     /// only the unsigned stage number that the name denotes.
     pub(super) fn block_stages(&self, block: &Block) -> Result<BlockStages<u64>, String> {
-        block.map_stages(|name| {
-            if !self.decls.visible(name, self.position) {
-                return Err(format!(
-                    "stage constant '{name}' is declared later in the module"
-                ));
-            }
-            let constant =
-                self.decls.constants.get(name).ok_or_else(|| {
+        block.map_stages(
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "stage constant '{name}' is declared later in the module"
+                    ));
+                }
+                let constant = self.decls.constants.get(name).ok_or_else(|| {
                     format!("unknown module constant '{name}' in stage annotation")
                 })?;
-            if !matches!(bits(&constant.ty), Some((false, _))) {
-                return Err(format!(
-                    "stage constant '{name}' must be an unsigned integer, got {}",
-                    constant.ty
-                ));
-            }
-            constant
-                .value
-                .to_u64()
-                .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
-        })
+                if !matches!(bits(&constant.ty), Some((false, _))) {
+                    return Err(format!(
+                        "stage constant '{name}' must be an unsigned integer, got {}",
+                        constant.ty
+                    ));
+                }
+                constant
+                    .value
+                    .to_u64()
+                    .map_err(|_| format!("stage constant '{name}' does not fit in u64"))
+            },
+            |name| {
+                if !self.decls.visible(name, self.position) {
+                    return Err(format!(
+                        "latency helper '{name}' is declared later in the module"
+                    ));
+                }
+                Ok(name.to_owned())
+            },
+        )
     }
 
     pub(super) fn zero_binding(&self) -> String {
