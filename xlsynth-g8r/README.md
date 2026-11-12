@@ -444,7 +444,7 @@ input instances (including FFs), defaults are:
 
 - `max(64, ceil(N / 512))` candidate sites per timing round.
 - `max(50_000, 4 * N)` instance evaluation visits across all timing rounds.
-- `max(100_000, 8 * N)` instance evaluation visits across all recovery rounds.
+- `max(100_000, 8 * N)` visits for combinational recovery, or per automatic recovery window on registered stages.
 - Four timing rounds, two recovery rounds, and eight alternatives per site.
 
 One substitution trial can evaluate many instances as timing changes propagate.
@@ -453,7 +453,12 @@ unused work from each other. There is no separate trial-count limit or combined
 phase-work limit, and recovery has no candidate-site cap. Optional candidate and
 evaluation overrides use these formulas when `None`; an explicit zero evaluation
 budget permits no evaluation work. `ResizeOptions::work_limits(N)` resolves the
-effective limits, which are also included in `ResizeReport`.
+initial allowances. For a registered stage, a productive scalar recovery sweep
+can renew its automatic allowance up to `1 + floor(log2(max(1, N)))` windows
+in total. Renewal locks in all four measured boundary delays and retries the
+interrupted cell strength. An interval with no accepted area reduction ends
+the search. Explicit budgets never renew. The report includes the resolved
+upper limit and number of renewals.
 
 The default area allowance is 2% of the original input area and never compounds
 across moves. `ResizeReport` records initial, upsized, and final area and boundary
