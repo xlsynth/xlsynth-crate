@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+package duplicates
+
+fn helper(x: bits[8] id=1) -> bits[8] {
+  ret v: bits[8] = not(x, id=2)
+}
+
+top fn both(x: bits[8] id=3) -> bits[8] {
+  first: bits[8] = invoke(x, to_apply=helper, id=4)
+  second: bits[8] = invoke(x, to_apply=helper, id=5)
+  doubled: bits[8] = add(first, first, id=6)
+  ret result: bits[8] = xor(doubled, second, id=7)
+}

@@ -7,34 +7,24 @@ import Lean.Meta.Native
 namespace XlsynthLean.IR
 
 open Lean in
-/-- Reachable definitions in one IR export, in dependency order. Calls to other
-    exported functions remain boundaries. -/
-partial def exportedNodes (decl : Name) : CoreM (Array Name) := do
-  -- The entrypoint `Generated.Lhs.eval` and user abbreviations can name an export.
-  let mut root := decl
-  let mut aliases := #[]
-  repeat
-    let .defnInfo info ← getConstInfo root | break
-    unless info.hints.isAbbrev do break
-    let .const target _ := info.value.consumeMData | break
-    aliases := aliases.push root
-    root := target
-  let rec visit (name : Name) : StateT (NameSet × Array Name) CoreM Unit := do
-    if (← get).1.contains name then return
-    modify fun (seen, nodes) => (seen.insert name, nodes)
-    let some body := (← getConstInfo name).value?
-      | throwError "expected a transparent definition at {name}"
-    for dep in body.getUsedConstants.qsort Name.quickLt do
-      if dep.getPrefix == root && (← getConstInfo dep).isDefinition then visit dep
-    modify fun (seen, nodes) => (seen, nodes.push name)
-  let (_, _, nodes) ← (visit root).run ({}, #[])
-  return nodes ++ aliases.reverse
+/-- Resolve the bare constant abbreviations used for XLS entrypoints and user
+    aliases. Return the function with the names needed to unfold its aliases. -/
+partial def resolveXlsAliases (env : Environment) (name : Name) : Name × List Name :=
+  match env.find? name with
+  | some (.defnInfo info) =>
+    if info.hints.isAbbrev then
+      if let .const target _ := info.value.consumeMData then
+        let (decl, aliases) := resolveXlsAliases env target
+        (decl, name :: aliases)
+      else (name, [])
+    else (name, [])
+  | _ => (name, [])
 
 open Lean Elab Tactic in
-/-- Unfold a named-node XLS function without unfolding the functions it calls. -/
+/-- Unfold an XLS function and its local bindings while keeping callees folded. -/
 elab "xls_unfold " fn:ident : tactic => do
-  let nodes ← exportedNodes (← resolveGlobalConstNoOverload fn)
-  let names := nodes.map mkIdent
+  let (decl, aliases) := resolveXlsAliases (← getEnv) (← resolveGlobalConstNoOverload fn)
+  let names := ((decl :: aliases).map mkIdent).toArray
   evalTactic (← `(tactic| simp only [$[$names:ident],*]))
 
 /-- Expose a one-bit XLS selector to bit-vector reasoning. -/
