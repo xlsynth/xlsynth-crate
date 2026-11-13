@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::unroll::Shadowed;
-use super::{BodyChecker, CheckedStmt, K, Type, TypedExpr};
-use crate::ast::{BinaryOp, BindingPattern, Expr, ForIterable, LetBinding, Stmt, WidthSliceType};
+use super::{AssertionCache, BodyChecker, CheckedStmt, K, Type, TypedExpr};
+use crate::ast::{
+    BinaryOp, BindingPattern, ConstAssert, Expr, ForIterable, LetBinding, ScopeStatement, Stmt,
+    WidthSliceType,
+};
 use crate::infer_literal::{
     BindingWidths, WidthLookup, binding_widths_using, has_common_bit_type,
     has_concrete_element_type,
 };
 use crate::typed::TEST_DISCARD_PREFIX;
+use crate::typed::{CONSTEXPR_PREFIX, ConstantBinding, ConstantUse};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -20,7 +24,189 @@ pub(super) struct BindingInitializer {
     pub widths: Option<BindingWidths>,
 }
 
+/// Bindings restored on scope exit and expression statements required by
+/// constexpr evaluation.
+struct EnteredScope {
+    saved: Vec<Shadowed>,
+    operands: Vec<TypedExpr>,
+}
+
+/// The runtime aggregate to project and its shared DSLX constexpr operands.
+pub(super) struct ProjectionInput {
+    pub(super) value: TypedExpr,
+    pub(super) operands: Vec<TypedExpr>,
+}
+
+impl ProjectionInput {
+    /// Keep each lexical check in its original evaluation mode while exposing
+    /// the runtime value for projection.
+    pub(super) fn from_shared(mut value: TypedExpr) -> Self {
+        let mut operands = Vec::new();
+        while let K::Sequence {
+            operands: checks,
+            result,
+            bytecode_only,
+        } = value.kind
+        {
+            if bytecode_only {
+                // Keep the conditional check at the use site even when a
+                // projection has other, unconditional constexpr operands.
+                operands.push(TypedExpr {
+                    ty: Type::Tuple(Vec::new()),
+                    kind: K::Sequence {
+                        operands: checks,
+                        result: Box::new(unit()),
+                        bytecode_only: true,
+                    },
+                });
+            } else {
+                operands.extend(checks);
+            }
+            value = *result;
+        }
+        Self { value, operands }
+    }
+}
+
+fn unit() -> TypedExpr {
+    TypedExpr {
+        ty: Type::Tuple(Vec::new()),
+        kind: K::Literal(IrValue::Tuple(Vec::new().into())),
+    }
+}
+
+/// Attach the DSLX constexpr dependencies of a result without adding runtime
+/// operations.
+pub(super) fn sequence(operands: Vec<TypedExpr>, result: TypedExpr) -> TypedExpr {
+    checked_sequence(operands, result, false)
+}
+
+fn checked_sequence(operands: Vec<TypedExpr>, result: TypedExpr, bytecode_only: bool) -> TypedExpr {
+    if operands.is_empty() {
+        return result;
+    }
+    TypedExpr {
+        ty: result.ty.clone(),
+        kind: K::Sequence {
+            operands,
+            result: Box::new(result),
+            bytecode_only,
+        },
+    }
+}
+
 impl BodyChecker<'_, '_> {
+    /// Keep erased type and specialization operands with their own value so
+    /// that assertion replay follows the same branch as the original operand.
+    pub(super) fn with_assert_operands(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<TypedExpr, String>,
+    ) -> Result<TypedExpr, String> {
+        if !self.preserve_assert_inputs {
+            return check(self);
+        }
+        let outer = self.assert_operands.replace(Vec::new());
+        let value = check(self);
+        let operands = std::mem::replace(&mut self.assert_operands, outer)
+            .expect("collecting expression operands");
+        value.map(|value| sequence(operands, value))
+    }
+
+    pub(super) fn record_assert_operand(&mut self, value: TypedExpr) {
+        if let Some(operands) = &mut self.assert_operands
+            && !matches!(value.kind, K::Literal(_))
+        {
+            operands.push(value);
+        }
+    }
+
+    /// Keep a match's bytecode-only initializers on their checked lexical path.
+    pub(super) fn with_match_bytecode<T>(
+        &mut self,
+        check: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let outer = std::mem::replace(&mut self.in_match_bytecode, true);
+        let result = check(self);
+        self.in_match_bytecode = outer;
+        result
+    }
+
+    /// Count concrete callees that may lose their only call when an assertion
+    /// is erased.
+    fn callee_specialization_count(&self) -> usize {
+        self.resolver.call_count()
+            + self
+                .function_registry
+                .as_ref()
+                .map_or(0, |registry| registry.generated_count())
+    }
+
+    /// Evaluate a declaration in its lexical scope and erase its predicate's
+    /// temporary lets.
+    pub(super) fn check_const_assert(&mut self, assertion: &ConstAssert) -> Result<(), String> {
+        let result = if self.source_template.is_some() && self.function_spec.is_none() {
+            // Callback-only templates have a checked abstract body. Its
+            // callback has no concrete target until specialization, so only
+            // names can be required here.
+            self.check_deferred_predicate_names(&assertion.predicate)
+        } else {
+            let prior_callees = self.callee_specialization_count();
+            let start = self.statements.len();
+            let had_functions = self.constant_functions.is_some();
+            let preserve_inputs = std::mem::replace(&mut self.preserve_assert_inputs, true);
+            let outer_use = std::mem::replace(&mut self.dslx_constant_use, ConstantUse::Assertion);
+            let outer_match = std::mem::replace(&mut self.in_match_bytecode, false);
+            let outer_cache = self.assertion_cache.replace(AssertionCache {
+                first_local: start,
+                saved: Vec::new(),
+            });
+            let ids = (
+                self.next_map,
+                self.next_counted_loop,
+                self.unroll_binding_count,
+            );
+            self.enable_constant_functions();
+            let result = self.with_dslx_value_context(|checker| {
+                let expr = checker.dslx_argument(&assertion.predicate, &Type::Bool)?;
+                let value = checker
+                    .checked_constant_for(&expr, ConstantUse::Assertion)?
+                    .ok_or("predicate must evaluate to a compile-time constant")?;
+                if value.to_bool().map_err(|e| e.to_string())? {
+                    Ok(())
+                } else {
+                    Err("predicate is false".to_owned())
+                }
+            });
+            self.take_pure_bindings(start);
+            (
+                self.next_map,
+                self.next_counted_loop,
+                self.unroll_binding_count,
+            ) = ids;
+            self.preserve_assert_inputs = preserve_inputs;
+            self.dslx_constant_use = outer_use;
+            self.in_match_bytecode = outer_match;
+            let cache = std::mem::replace(&mut self.assertion_cache, outer_cache)
+                .expect("active assertion cache");
+            for (name, binding) in cache.saved.into_iter().rev() {
+                self.constants.insert(name, binding);
+            }
+            if self.callee_specialization_count() > prior_callees {
+                self.decls.assertion_instantiated_callee.set(true);
+            }
+            if !had_functions {
+                self.constant_functions = None;
+            }
+            result
+        };
+        result.map_err(|e| {
+            format!(
+                "{}:{}: const_assert!: {e}",
+                assertion.position.line, assertion.position.column
+            )
+        })
+    }
+
     /// Check each source pattern on the first visit to its enclosing folds.
     /// An empty fold visits the same patterns during lexical name checking.
     pub(super) fn validate_source_pattern(&self, pattern: &BindingPattern) -> Result<(), String> {
@@ -54,44 +240,85 @@ impl BodyChecker<'_, '_> {
         Ok(())
     }
 
-    /// Elaborate the pure lets of one lexical scope and restore all shadowed
+    /// Elaborate the declarations of one lexical scope and restore all shadowed
     /// bindings after checking its trailing expression.
     pub(super) fn value_scope(
         &mut self,
-        bindings: &[LetBinding],
+        statements: &[ScopeStatement],
         result: &Expr,
         expected: Option<&Type>,
     ) -> Result<TypedExpr, String> {
-        let saved = self.enter_scope(bindings)?;
-        let value = self.scoped_result(result, expected, false);
-        self.leave_scope(saved);
-        value
+        self.with_scope_result(statements, |checker| {
+            checker.scoped_result(result, expected, false)
+        })
+    }
+
+    /// Check a trailing value with its contextual type or struct arguments and
+    /// lexical operands.
+    pub(super) fn with_scope_result(
+        &mut self,
+        statements: &[ScopeStatement],
+        check: impl FnOnce(&mut Self) -> Result<TypedExpr, String>,
+    ) -> Result<TypedExpr, String> {
+        let scope = self.enter_scope(statements)?;
+        let value = check(self);
+        self.leave_scope(scope.saved);
+        value.map(|value| sequence(scope.operands, value))
     }
 
     /// Enter each binding only after its initializer has been checked.
-    fn enter_scope(&mut self, bindings: &[LetBinding]) -> Result<Vec<Shadowed>, String> {
+    fn enter_scope(&mut self, statements: &[ScopeStatement]) -> Result<EnteredScope, String> {
         if !self.iteration_path.is_empty() {
-            self.charge_expansion("unroll_for!", bindings.len())?;
+            self.charge_expansion("unroll_for!", statements.len())?;
         }
         let mut saved = Vec::new();
-        let result = bindings.iter().try_for_each(|binding| {
+        let mut operands = Vec::new();
+        let result = statements.iter().try_for_each(|statement| {
+            let binding = match statement {
+                ScopeStatement::Let(binding) => binding,
+                ScopeStatement::ConstAssert(assertion) => {
+                    return self.check_const_assert(assertion);
+                }
+                ScopeStatement::Expression(expr) => {
+                    let init = self.binding_initializer(expr, None, |checker, expr| {
+                        checker.elaborate_result(expr, None, false)
+                    })?;
+                    let value = self.share_scoped_value(init.value);
+                    if self.preserve_assert_inputs && !matches!(value.kind, K::Literal(_)) {
+                        operands.push(value);
+                    }
+                    return Ok(());
+                }
+            };
             self.validate_source_pattern(&binding.pattern)?;
-            let annotation = binding
-                .ty
-                .as_ref()
-                .map(|t| self.source_type(t))
-                .transpose()?;
-            let init =
-                self.binding_initializer(&binding.value, annotation.as_ref(), |checker, expr| {
-                    checker.elaborate_result(expr, annotation.as_ref(), false)
-                })?;
-            self.bind_pattern(&binding.pattern, init.value, init.widths, &mut saved)
+            let mut widths = None;
+            let value = self.with_assert_operands(|checker| {
+                let annotation = binding
+                    .ty
+                    .as_ref()
+                    .map(|ty| checker.source_type(ty))
+                    .transpose()?;
+                let init = checker.binding_initializer(
+                    &binding.value,
+                    annotation.as_ref(),
+                    |checker, expr| checker.elaborate_result(expr, annotation.as_ref(), false),
+                )?;
+                widths = init.widths;
+                Ok(init.value)
+            })?;
+            self.bind_pattern_initializer(
+                &binding.pattern,
+                value,
+                widths,
+                &mut saved,
+                Some(&mut operands),
+            )
         });
         if let Err(error) = result {
             self.leave_scope(saved);
             return Err(error);
         }
-        Ok(saved)
+        Ok(EnteredScope { saved, operands })
     }
 
     /// Capture inferred widths while the bindings that produced the result
@@ -282,6 +509,16 @@ impl BodyChecker<'_, '_> {
                     fold.seed = seed.into_owned();
                 }
             }
+            Expr::Scope { statements, result } if !expr.needs_scope_preparation() => {
+                if let Cow::Owned(result) =
+                    self.prepare_scopes(result, capture_anchors, before_scope)?
+                {
+                    prepared = Cow::Owned(Expr::Scope {
+                        statements: statements.clone(),
+                        result: Box::new(result),
+                    });
+                }
+            }
             Expr::Scope { .. } => {
                 before_scope(self)?;
                 let mut result = self
@@ -305,9 +542,9 @@ impl BodyChecker<'_, '_> {
             }
             Expr::Match { arms, .. } => {
                 for (index, arm) in arms.iter().enumerate() {
-                    if let Cow::Owned(value) =
-                        self.prepare_scopes(&arm.value, capture_anchors, before_scope)?
-                    {
+                    if let Cow::Owned(value) = self.with_match_bytecode(|checker| {
+                        checker.prepare_scopes(&arm.value, capture_anchors, before_scope)
+                    })? {
                         let Expr::Match { arms, .. } = prepared.to_mut() else {
                             unreachable!()
                         };
@@ -392,13 +629,17 @@ impl BodyChecker<'_, '_> {
     ) -> Result<Vec<Cow<'e, Expr>>, String> {
         let mut prepared = Vec::with_capacity(items.len());
         for &expr in items {
-            let Expr::Scope { bindings, result } = expr else {
+            let Expr::Scope { statements, result } = expr else {
                 prepared.push(Cow::Borrowed(expr));
                 continue;
             };
-            let saved = self.enter_scope(bindings)?;
+            let scope = self.enter_scope(statements)?;
             let mut aliases = BTreeMap::new();
-            for binding in bindings {
+            for statement in statements {
+                let ScopeStatement::Let(binding) = statement else {
+                    // An assertion introduces no names to capture.
+                    continue;
+                };
                 binding.pattern.visit_names(&mut |name| {
                     if aliases.contains_key(name) {
                         return;
@@ -418,7 +659,21 @@ impl BodyChecker<'_, '_> {
             }
             let mut result = result.as_ref().clone();
             capture_names(&mut result, &mut aliases);
-            self.leave_scope(saved);
+            self.leave_scope(scope.saved);
+            if !scope.operands.is_empty() {
+                let statements = scope
+                    .operands
+                    .into_iter()
+                    .map(|value| {
+                        let alias = self.capture_value_alias(None, value, None);
+                        ScopeStatement::Expression(Expr::Name(alias))
+                    })
+                    .collect();
+                result = Expr::Scope {
+                    statements,
+                    result: Box::new(result),
+                };
+            }
             prepared.push(Cow::Owned(result));
         }
         Ok(prepared)
@@ -451,11 +706,69 @@ impl BodyChecker<'_, '_> {
     /// Materialize an initializer once under a name that survives lexical
     /// shadowing and cannot collide with source or loop-generated names.
     pub(super) fn share_scoped_value(&mut self, value: TypedExpr) -> TypedExpr {
-        if matches!(&value.kind, K::Literal(_) | K::Name(_)) {
+        let result = value.runtime_result();
+        if matches!(&result.kind, K::Literal(_) | K::Name(_)) {
+            if let K::Sequence {
+                operands,
+                result: immediate,
+                ..
+            } = &value.kind
+                && (!matches!(
+                    operands.as_slice(),
+                    [TypedExpr {
+                        kind: K::Name(_),
+                        ..
+                    }]
+                ) || matches!(immediate.kind, K::Sequence { .. }))
+            {
+                let captures = if self.in_match_bytecode {
+                    value.match_capture_operands()
+                } else {
+                    Vec::new()
+                };
+                if let K::Sequence {
+                    operands,
+                    result,
+                    bytecode_only: true,
+                } = value.kind
+                {
+                    // Share long carry lists by name and keep the bytecode
+                    // check on the reference at the use site.
+                    let prerequisite = self.retain_constexpr_operand(sequence(operands, unit()));
+                    let value = TypedExpr {
+                        ty: value.ty,
+                        kind: K::Sequence {
+                            operands: vec![prerequisite],
+                            result,
+                            bytecode_only: true,
+                        },
+                    };
+                    return checked_sequence(captures, value, true);
+                }
+                // Keep lexical aliases of a leaf cheap even when a scope
+                // depends on that leaf in both a let initializer and its final
+                // result.
+                let result = result.clone();
+                let prerequisite = self.retain_constexpr_operand(value);
+                return checked_sequence(captures, sequence(vec![prerequisite], result), true);
+            }
             return value;
         }
-        let name = format!("$let_{}", self.statements.len());
+        let match_local = self.in_match_bytecode && self.preserve_assert_inputs;
+        let prefix = if self.in_erased_operand {
+            CONSTEXPR_PREFIX
+        } else if match_local {
+            crate::typed::MATCH_LET_PREFIX
+        } else {
+            "$let_"
+        };
+        let name = format!("{prefix}{}", self.statements.len());
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
+        let capture_operands = if match_local {
+            value.match_capture_operands()
+        } else {
+            Vec::new()
+        };
         // Guarded statements move into their own body, so a later scoped
         // binding can reuse the same temporary name in the enclosing block.
         if constexpr {
@@ -463,7 +776,7 @@ impl BodyChecker<'_, '_> {
         } else {
             self.constexpr_names.remove(&name);
         }
-        if let Some(constant) = self.fold_constant(&value) {
+        if let Some(constant) = self.fold_constant(&value, constexpr) {
             self.constants.insert(name.clone(), constant);
         } else {
             self.constants.remove(&name);
@@ -473,8 +786,30 @@ impl BodyChecker<'_, '_> {
             name: name.clone(),
             value,
         });
-        TypedExpr {
+        let result = TypedExpr {
             ty,
+            kind: K::Name(name),
+        };
+        // A constexpr match captures every free name in its arms. A separate
+        // assertion that reads this let inside an arm evaluates just the
+        // initializer's selected path.
+        checked_sequence(capture_operands, result, true)
+    }
+
+    /// Share the compile-time work of an initializer without emitting its
+    /// value. The unit reference avoids copying a tuple's type for every
+    /// projected field.
+    pub(super) fn retain_constexpr_operand(&mut self, value: TypedExpr) -> TypedExpr {
+        let index = self.statements.len();
+        let name = format!("{CONSTEXPR_PREFIX}{index}");
+        self.constants
+            .insert(name.clone(), ConstantBinding::Deferred(index));
+        self.statements.push(CheckedStmt::Let {
+            name: name.clone(),
+            value: sequence(vec![value], unit()),
+        });
+        TypedExpr {
+            ty: Type::Tuple(Vec::new()),
             kind: K::Name(name),
         }
     }
@@ -504,7 +839,10 @@ impl BodyChecker<'_, '_> {
                 kind,
             });
         }
-        let input = self.share_scoped_value(value);
+        let ProjectionInput {
+            value: input,
+            operands,
+        } = ProjectionInput::from_shared(self.share_scoped_value(value));
         let mut field = |index: usize, source: &Type, destination: &Type| {
             // Aggregate conversions generate one IR projection per member.
             let work = self
@@ -568,10 +906,13 @@ impl BodyChecker<'_, '_> {
             ),
             _ => unreachable!("projection compatibility checked"),
         };
-        Ok(TypedExpr {
-            ty: target.clone(),
-            kind,
-        })
+        Ok(sequence(
+            operands,
+            TypedExpr {
+                ty: target.clone(),
+                kind,
+            },
+        ))
     }
 
     /// Project the members selected by a tuple pattern from its initializer.
@@ -582,8 +923,76 @@ impl BodyChecker<'_, '_> {
         widths: Option<BindingWidths>,
         saved: &mut Vec<Shadowed>,
     ) -> Result<(), String> {
+        self.bind_pattern_initializer(pattern, value, widths, saved, None)
+    }
+
+    /// Preserve the source initializer when a constexpr call executes this let.
+    fn bind_pattern_initializer(
+        &mut self,
+        pattern: &BindingPattern,
+        value: TypedExpr,
+        widths: Option<BindingWidths>,
+        saved: &mut Vec<Shadowed>,
+        operands: Option<&mut Vec<TypedExpr>>,
+    ) -> Result<(), String> {
+        let value = if self.preserve_assert_inputs
+            && operands.is_some()
+            && !matches!(value.kind, K::Tuple(_))
+        {
+            self.share_scoped_value(value)
+        } else {
+            value
+        };
+        // A tuple constructor is normally split directly into its field
+        // computations. DSLX determines whether any projected binder is
+        // constexpr from the whole initializer. Keep one deferred definition
+        // shared by all of the leaves.
+        let prerequisite = if self.preserve_assert_inputs
+            && matches!(pattern, BindingPattern::Tuple(_))
+            && matches!(&value.kind, K::Tuple(fields) if fields.iter().any(|field| !matches!(field.kind, K::Literal(_))))
+        {
+            Some(self.retain_constexpr_operand(value.clone()))
+        } else {
+            None
+        };
+        if self.preserve_assert_inputs
+            && let Some(operands) = operands
+        {
+            let value = prerequisite.as_ref().unwrap_or(&value);
+            if !matches!(value.kind, K::Literal(_)) {
+                let unit = unit();
+                operands.push(TypedExpr {
+                    ty: unit.ty.clone(),
+                    kind: K::Sequence {
+                        operands: vec![value.clone()],
+                        result: Box::new(unit),
+                        bytecode_only: true,
+                    },
+                });
+            }
+        }
+        self.bind_pattern_with_prerequisite(pattern, value, widths, saved, prerequisite.as_ref())
+    }
+
+    /// Project the source pattern while retaining its shared tuple prerequisite
+    /// at named leaves.
+    fn bind_pattern_with_prerequisite(
+        &mut self,
+        pattern: &BindingPattern,
+        value: TypedExpr,
+        widths: Option<BindingWidths>,
+        saved: &mut Vec<Shadowed>,
+        prerequisite: Option<&TypedExpr>,
+    ) -> Result<(), String> {
         match pattern {
             BindingPattern::Name(name) => {
+                let value = if name != "_"
+                    && let Some(prerequisite) = prerequisite
+                {
+                    sequence(vec![prerequisite.clone()], value)
+                } else {
+                    value
+                };
                 let value = self.share_scoped_value(value);
                 self.bind_scoped_value(name, value, widths, saved)
             }
@@ -596,6 +1005,7 @@ impl BodyChecker<'_, '_> {
                 } else {
                     self.share_scoped_value(value)
                 };
+                let ProjectionInput { value, operands } = ProjectionInput::from_shared(value);
                 let Type::Tuple(types) = value.ty else {
                     return Err(format!("tuple pattern requires a tuple, got {}", value.ty));
                 };
@@ -700,7 +1110,13 @@ impl BodyChecker<'_, '_> {
                         self.charge_expansion("tuple pattern projection", work)?;
                     }
                     let widths = widths.as_mut().and_then(|w| w[index].take());
-                    self.bind_pattern(pattern, field, widths, saved)?;
+                    self.bind_pattern_with_prerequisite(
+                        pattern,
+                        sequence(operands.clone(), field),
+                        widths,
+                        saved,
+                        prerequisite,
+                    )?;
                 }
             }
         }
@@ -929,10 +1345,16 @@ fn capture_names(expr: &mut Expr, aliases: &mut BTreeMap<String, String>) {
             capture_names(then_value, aliases);
             capture_names(else_value, aliases);
         }
-        Expr::Scope { bindings, result } => {
+        Expr::Scope { statements, result } => {
             let mut hidden = Vec::new();
-            for binding in bindings {
-                capture_binding(binding, aliases, &mut hidden);
+            for statement in statements {
+                match statement {
+                    ScopeStatement::Let(binding) => capture_binding(binding, aliases, &mut hidden),
+                    ScopeStatement::ConstAssert(assertion) => {
+                        capture_names(&mut assertion.predicate, aliases)
+                    }
+                    ScopeStatement::Expression(expr) => capture_names(expr, aliases),
+                }
             }
             capture_names(result, aliases);
             aliases.extend(hidden);

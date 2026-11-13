@@ -14,6 +14,7 @@ use crate::ast::{
     BindingPattern, Param, QuickCheckSignature, TestDecl, TestKind, TestStmt, TestStmtKind, Type,
 };
 use crate::test_runner::{TestAction, TestIterable, TestProgram, TestStep, TestSuite, input_name};
+use crate::typed::is_constexpr_only_name;
 
 /// The synthetic harness interface and the source registers that can be driven.
 struct TestPorts {
@@ -63,9 +64,10 @@ impl TestPorts {
                 let CheckedStmt::Let { name, value } = binding else {
                     unreachable!("pure test expressions cannot elaborate hardware");
                 };
-                if operands
-                    .iter()
-                    .any(|e| matches!(&e.kind, K::Name(n) if n == name))
+                if is_constexpr_only_name(name)
+                    || operands
+                        .iter()
+                        .any(|e| matches!(&e.kind, K::Name(n) if n == name))
                 {
                     return None;
                 }

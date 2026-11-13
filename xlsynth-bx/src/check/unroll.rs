@@ -2,7 +2,9 @@
 
 use super::generic_blocks::callback_argument_name;
 use super::*;
-use crate::ast::{BindingPattern, ForIterable, FunctionParametricRef, MapExpr, UnrollFor};
+use crate::ast::{
+    BindingPattern, ForIterable, FunctionParametricRef, MapExpr, ScopeStatement, UnrollFor,
+};
 use crate::infer_literal::BindingWidths;
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -15,6 +17,7 @@ pub(super) struct StaticRange {
     pub first: IrBits,
     pub count: usize,
     pub widths: Option<BindingWidths>,
+    pub operands: Vec<TypedExpr>,
 }
 
 /// State hidden by a loop-local name. Restore it when leaving the iteration.
@@ -185,20 +188,47 @@ impl BodyChecker<'_, '_> {
     /// expression tree into the next iteration. Constant carries need no
     /// hardware binding.
     fn share_loop_value(&mut self, value: TypedExpr) -> TypedExpr {
-        if matches!(value.kind, K::Name(_) | K::Literal(_)) {
-            return value;
+        if matches!(value.runtime_result().kind, K::Name(_) | K::Literal(_)) {
+            return self.share_scoped_value(value);
         }
         let ty = value.ty.clone();
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
-        let constant = self.fold_constant(&value);
-        if constexpr && let Some(super::ConstantBinding::Known(v)) = constant {
-            return TypedExpr {
-                ty,
-                kind: K::Literal(v),
-            };
+        let constant = self.fold_constant(&value, constexpr);
+        if constexpr {
+            match constant {
+                Some(ConstantBinding::Known(v)) => {
+                    return TypedExpr {
+                        ty,
+                        kind: K::Literal(v),
+                    };
+                }
+                Some(ConstantBinding::Selected { value: folded, .. }) => {
+                    // The ordinary BX carry folded to a literal. Keep the
+                    // original expression for stricter constexpr evaluation
+                    // without lowering its arithmetic into the runtime loop.
+                    let result = TypedExpr {
+                        ty,
+                        kind: K::Literal(folded),
+                    };
+                    if self.preserve_assert_inputs {
+                        let operand = self.retain_constexpr_operand(value);
+                        return scope::sequence(vec![operand], result);
+                    }
+                    return result;
+                }
+                _ => { /* A runtime or deferred carry still needs a shared binding. */ }
+            }
         }
         // This name is internal to the checked block and cannot occur in BX.
-        let name = format!("$unroll_{}", self.unroll_binding_count);
+        let name = if self.in_erased_operand {
+            format!(
+                "{}{}",
+                crate::typed::CONSTEXPR_PREFIX,
+                self.statements.len()
+            )
+        } else {
+            format!("$unroll_{}", self.unroll_binding_count)
+        };
         self.unroll_binding_count += 1;
         if constexpr {
             self.constexpr_names.insert(name.clone());
@@ -316,11 +346,21 @@ impl BodyChecker<'_, '_> {
         let count = ir_bits_to_usize(&last.sub(&first))
             .and_then(|n| n.checked_add(usize::from(inclusive)))
             .ok_or_else(|| format!("{keyword} range too large"))?;
+        let ty = lo.ty.clone();
+        let operands = if self.preserve_assert_inputs {
+            [lo, hi]
+                .into_iter()
+                .filter(|v| !matches!(v.kind, K::Literal(_)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(StaticRange {
-            ty: lo.ty,
+            ty,
             first,
             count,
             widths: inferred.then(|| BindingWidths::scalar(signed, width)),
+            operands,
         })
     }
 
@@ -369,9 +409,10 @@ impl BodyChecker<'_, '_> {
         let mut carry = self.share_loop_value(seed);
         if count == 0 {
             self.check_empty_loop_names(fold)?;
-            return Ok(carry);
+            return Ok(scope::sequence(range.operands, carry));
         }
         let one = IrBits::from_lsb_fn(width, |i| i == 0);
+        let mut previous_carries = Vec::new();
         for ordinal in 0..count {
             self.iteration_path.push(ordinal);
             let mut saved = Vec::new();
@@ -381,6 +422,12 @@ impl BodyChecker<'_, '_> {
             };
             let acc_type = carry.ty.clone();
             self.bind_scoped_value(&fold.index, item, range.widths.clone(), &mut saved);
+            // A constexpr helper executes the seed and each iteration even
+            // when the next iteration ignores its accumulator. Nonliteral
+            // carries are already shared, so each reference is stored once.
+            if self.preserve_assert_inputs && !matches!(carry.kind, K::Literal(_)) {
+                previous_carries.push(carry.clone());
+            }
             self.bind_scoped_value(&fold.accumulator, carry, None, &mut saved);
             for stmt in &fold.body {
                 if let Stmt::LetPattern(binding) = stmt {
@@ -421,7 +468,19 @@ impl BodyChecker<'_, '_> {
             self.iteration_path.pop();
             index = index.add(&one);
         }
-        Ok(carry)
+        let result = if previous_carries.is_empty() {
+            carry
+        } else {
+            TypedExpr {
+                ty: carry.ty.clone(),
+                kind: K::Sequence {
+                    operands: previous_carries,
+                    result: Box::new(carry),
+                    bytecode_only: true,
+                },
+            }
+        };
+        Ok(scope::sequence(range.operands, result))
     }
 }
 
@@ -693,6 +752,13 @@ impl BodyChecker<'_, '_> {
         Ok(())
     }
 
+    /// Resolve a deferred assertion in an abstract callback template's current
+    /// scope.
+    pub(super) fn check_deferred_predicate_names(&self, predicate: &Expr) -> Result<(), String> {
+        let visited = Cell::new(0);
+        self.check_expr_names(predicate, &LexicalScope::root(&self.names, &visited))
+    }
+
     fn check_body_names(
         &self,
         fold: &UnrollFor,
@@ -933,15 +999,23 @@ impl BodyChecker<'_, '_> {
     ) -> Result<(), String> {
         locals.visited.set(locals.visited.get().saturating_add(1));
         match expr {
-            Expr::Scope { bindings, result } => {
+            Expr::Scope { statements, result } => {
                 let mut names = locals.nested();
-                for binding in bindings {
-                    self.validate_source_pattern(&binding.pattern)?;
-                    if let Some(ty) = &binding.ty {
-                        self.check_type_names(ty, &names)?;
+                for statement in statements {
+                    match statement {
+                        ScopeStatement::Let(binding) => {
+                            self.validate_source_pattern(&binding.pattern)?;
+                            if let Some(ty) = &binding.ty {
+                                self.check_type_names(ty, &names)?;
+                            }
+                            self.check_expr_names(&binding.value, &names)?;
+                            names.bind_pattern(&binding.pattern);
+                        }
+                        ScopeStatement::ConstAssert(assertion) => {
+                            self.check_expr_names(&assertion.predicate, &names)?;
+                        }
+                        ScopeStatement::Expression(expr) => self.check_expr_names(expr, &names)?,
                     }
-                    self.check_expr_names(&binding.value, &names)?;
-                    names.bind_pattern(&binding.pattern);
                 }
                 self.check_expr_names(result, &names)?;
             }

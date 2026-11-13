@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{Expr, ForIterable, LetBinding, Stmt, Type, WidthSliceType};
-use SourceNode::{Annotation, Expression, Iterable, Statement};
+use super::{
+    Expr, ForIterable, LetBinding, ScopeStatement, Stmt, TestStmt, TestStmtKind, Type,
+    WidthSliceType,
+};
+use SourceNode::{Annotation, Expression, Iterable, Statement, TestStatement};
 
 /// A source node whose children can contain value expressions.
 pub(crate) enum SourceNode<'a> {
     Statement(&'a Stmt),
+    TestStatement(&'a TestStmt),
     Expression(&'a Expr),
     Iterable(&'a ForIterable),
     Annotation(&'a Type),
@@ -15,6 +19,37 @@ impl<'a> SourceNode<'a> {
     /// Queue a node's children for an iterative walk over source expressions.
     pub(crate) fn push_children(self, pending: &mut Vec<Self>) {
         match self {
+            TestStatement(stmt) => match &stmt.kind {
+                TestStmtKind::Reg { ty, init, .. } => {
+                    pending.push(Annotation(ty));
+                    pending.extend(init.iter().map(Expression));
+                }
+                TestStmtKind::Let(binding) => {
+                    pending.push(Expression(&binding.value));
+                    pending.extend(binding.ty.iter().map(Annotation));
+                }
+                TestStmtKind::Property(expr)
+                | TestStmtKind::Assign { value: expr, .. }
+                | TestStmtKind::Assert {
+                    predicate: expr, ..
+                } => pending.push(Expression(expr)),
+                TestStmtKind::Tick { reset } => pending.extend(reset.iter().map(Expression)),
+                TestStmtKind::AssertEq { actual, expected } => {
+                    pending.extend([Expression(actual), Expression(expected)]);
+                }
+                TestStmtKind::For { iterable, body, .. } => {
+                    pending.push(Iterable(iterable));
+                    pending.extend(body.iter().map(TestStatement));
+                }
+                TestStmtKind::If {
+                    condition,
+                    then_body,
+                    else_body,
+                } => {
+                    pending.push(Expression(condition));
+                    pending.extend(then_body.iter().chain(else_body).map(TestStatement));
+                }
+            },
             Statement(stmt) => match stmt {
                 Stmt::Reg { ty, reset, .. } => {
                     pending.push(Annotation(ty));
@@ -117,11 +152,19 @@ impl<'a> SourceNode<'a> {
                     pending.push(Iterable(iterable));
                     pending.extend(parametrics.iter().map(Expression));
                 }
-                Expr::Scope { bindings, result } => {
+                Expr::Scope { statements, result } => {
                     pending.push(Expression(result));
-                    for binding in bindings {
-                        pending.push(Expression(&binding.value));
-                        pending.extend(binding.ty.iter().map(Annotation));
+                    for statement in statements {
+                        match statement {
+                            ScopeStatement::Let(binding) => {
+                                pending.push(Expression(&binding.value));
+                                pending.extend(binding.ty.iter().map(Annotation));
+                            }
+                            ScopeStatement::ConstAssert(assertion) => {
+                                pending.push(Expression(&assertion.predicate));
+                            }
+                            ScopeStatement::Expression(expr) => pending.push(Expression(expr)),
+                        }
                     }
                 }
                 Expr::If {

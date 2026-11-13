@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Block, Expr, Module, SourceNode, SourcePosition, Stmt};
+use crate::ast::{Block, Expr, Module, ScopeStatement, SourceNode, SourcePosition, Stmt};
 use crate::bx_import::{LibraryModuleInfo, LinkedSources, UnlinkedBlockScope, library_item};
 
 /// A BX warning category, also used in source-level `#[allow(...)]` attributes.
@@ -307,11 +307,13 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
             SourceNode::Expression(Expr::Map(map)) => {
                 binders.insert(map.parameter.clone());
             }
-            SourceNode::Expression(Expr::Scope { bindings, .. }) => {
-                for binding in bindings {
-                    binding.pattern.visit_names(&mut |name| {
-                        binders.insert(name.to_owned());
-                    });
+            SourceNode::Expression(Expr::Scope { statements, .. }) => {
+                for statement in statements {
+                    if let ScopeStatement::Let(binding) = statement {
+                        binding.pattern.visit_names(&mut |name| {
+                            binders.insert(name.to_owned());
+                        });
+                    }
                 }
             }
             _ => { /* These nodes do not declare binders or name a potential child. */ }

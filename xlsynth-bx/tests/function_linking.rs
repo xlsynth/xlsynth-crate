@@ -13,6 +13,103 @@ use xlsynth_pir::ir_eval::eval_fn_in_package_value;
 use xlsynth_pir::ir_parser::Parser;
 
 #[test]
+fn compile_time_assertions_in_a_library_leave_block_ir_unchanged() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    fs::write(dir.path().join("limits.x"), "pub const MIN_WIDTH = u32:4;")?;
+    let library = r#"
+use limits::MIN_WIDTH;
+fn valid_width(n: u32) -> bool { n >= MIN_WIDTH }
+const_assert!(valid_width(u32:8));
+pub fn bump<N: u32>(x: uN[N]) -> uN[N] {
+    const_assert!({ let width = N; valid_width(width) });
+    x + uN[N]:1
+}
+"#;
+    let root = r#"
+use math::bump;
+block increment(clk, x: u8) -> u8 {
+    reg q: u8;
+    q := bump(x);
+    q
+}
+"#;
+    let options = search_paths(&[dir.path()]);
+    let compile_root = || {
+        compile_with_options(
+            root,
+            empty_package("design"),
+            ResetBehavior::default(),
+            &options,
+        )
+    };
+    fs::write(dir.path().join("math.bx"), library)?;
+    let with_assertions = compile_root()?;
+    let without_assertions = library
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("const_assert!"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.path().join("math.bx"), without_assertions)?;
+    assert_eq!(with_assertions.to_string(), compile_root()?.to_string());
+    Ok(())
+}
+
+#[test]
+fn an_assertion_can_typecheck_an_unused_dslx_call_without_linking_it() -> Result<(), Box<dyn Error>>
+{
+    let dir = tempdir()?;
+    fs::write(
+        dir.path().join("math.x"),
+        "pub fn nonzero(x: u8) -> bool { x != u8:0 }",
+    )?;
+    let options = search_paths(&[dir.path()]);
+    let source = r#"
+use math;
+fn identity(x: u8) -> u8 {
+    const_assert!(if true { true } else { math::nonzero(x) });
+    x
+}
+"#;
+    let compiled = compile_with_options(
+        source,
+        empty_package("design"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    let reference = compile(
+        "fn identity(x: u8) -> u8 { x }",
+        empty_package("design"),
+        ResetBehavior::default(),
+    )?;
+    assert_eq!(compiled.to_string(), reference.to_string());
+    Ok(())
+}
+
+#[test]
+fn constexpr_dependencies_preserve_ir_for_maps_and_tuple_patterns() -> Result<(), String> {
+    let compile_ir =
+        |source: &str| compile(source, empty_package("design"), ResetBehavior::default());
+    for source in [
+        r#"
+fn inc(x: u8) -> u8 { x + u8:1 }
+fn apply(xs: u8[2], other: u8) -> u8[2] {
+    const_assert!(true);
+    map(xs, |e| { other; inc(e) })
+}
+"#,
+        "fn f(x: u8) -> u8 { const_assert!(true); let (a, _) = (u8:1, x); u8:2 }",
+    ] {
+        let reference = source.replace("const_assert!(true);", "");
+        assert_eq!(
+            compile_ir(source)?.to_string(),
+            compile_ir(&reference)?.to_string(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn local_functions_resolve_qualified_types_in_source_order() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     fs::write(dir.path().join("wire.x"), "pub struct T { x: u8 }")?;

@@ -14,7 +14,7 @@ use super::{
     FunctionInterface, ImportResolver, MAX_ELABORATION_DEPTH, MAX_SPECIALIZATIONS, MAX_TYPE_SIZE,
     StructTable, TypeResolver, dependency_order, source_type_nodes,
 };
-use crate::ast::{ConstDef, EnumDef, ExternFn, Module, Type, TypeAlias};
+use crate::ast::{ConstAssert, ConstDef, EnumDef, ExternFn, Module, Type, TypeAlias};
 use crate::typed::BoundParametricValue;
 use crate::typed::{AvailableFunctions, constant_work};
 
@@ -301,6 +301,7 @@ impl<'m> FunctionSpecializations<'m> {
             Enum(&'m EnumDef),
             Alias(&'m TypeAlias),
             Constant(&'m ConstDef),
+            ConstAssert(&'m str, &'m ConstAssert),
             Function(&'m Function),
         }
         let position = |name: &str| decls.positions.get(name).copied().unwrap_or(usize::MAX);
@@ -325,6 +326,12 @@ impl<'m> FunctionSpecializations<'m> {
                     .constants
                     .iter()
                     .map(|c| (position(&c.name), Definition::Constant(c))),
+            )
+            .chain(
+                module
+                    .const_asserts
+                    .iter()
+                    .map(|(label, a)| (position(label), Definition::ConstAssert(label, a))),
             )
             .chain(
                 module
@@ -441,6 +448,23 @@ impl<'m> FunctionSpecializations<'m> {
                     decls.constants.insert(&c.name, value);
                     continue;
                 }
+                Definition::ConstAssert(label, assertion) => {
+                    let mut checker =
+                        BodyChecker::new(decls, resolver, structs, BodyKind::Function);
+                    checker.function_registry = Some(self);
+                    checker.function_position = decls.positions.get(label).copied();
+                    checker.warning_owner = Some(label);
+                    checker.zero_binding = decls.zero_binding(label);
+                    checker.enable_constant_functions();
+                    checker.check_const_assert(assertion).map_err(|error| {
+                        if let Some((subject, _)) = crate::bx_import::library_item(label) {
+                            format!("BX import '{subject}': {error}")
+                        } else {
+                            error
+                        }
+                    })?;
+                    continue;
+                }
                 Definition::Enum(e) => {
                     let mut checker =
                         BodyChecker::new(decls, resolver, structs, BodyKind::Function);
@@ -521,6 +545,10 @@ impl<'m> FunctionSpecializations<'m> {
             .into_iter()
             .map(|i| functions[i].take().expect("unique function order"))
             .collect())
+    }
+
+    pub(super) fn generated_count(&self) -> usize {
+        self.generated.len()
     }
 
     pub(super) fn generated_names(self) -> BTreeSet<String> {

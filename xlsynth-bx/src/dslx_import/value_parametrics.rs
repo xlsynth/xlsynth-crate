@@ -570,7 +570,6 @@ pub fn inspect<N: u32, K: Word, C: Config<8>, M: Mode>(x: Operand) -> (uN[N], Wo
             ..Default::default()
         };
         let mut resolver = ImportResolver::new(&parse_module("use wire;")?.uses, &options)?;
-        assert!(resolver.has_imports());
         let bindings = resolver.explicit_parametric_types("wire", "inspect", 4)?;
         let values = [
             "bits[32]:8",

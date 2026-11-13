@@ -14,6 +14,7 @@ pub(super) struct Iteration {
     pub(super) widths: Option<BindingWidths>,
     pub(super) iterable: TypedIterable,
     pub(super) count: usize,
+    pub(super) operands: Vec<TypedExpr>,
 }
 
 /// Carry type evidence from an expected type, a struct update's partial
@@ -99,18 +100,21 @@ impl BodyChecker<'_, '_> {
         };
         let (bindings, output) =
             self.counted_body(fold, &element, iteration.widths, &accumulator)?;
-        Ok(TypedExpr {
-            ty: seed.ty.clone(),
-            kind: K::For(Box::new(TypedFor::new(
-                element,
-                accumulator,
-                iteration.iterable,
-                iteration.count,
-                seed,
-                bindings,
-                output,
-            ))),
-        })
+        Ok(super::scope::sequence(
+            iteration.operands,
+            TypedExpr {
+                ty: seed.ty.clone(),
+                kind: K::For(Box::new(TypedFor::new(
+                    element,
+                    accumulator,
+                    iteration.iterable,
+                    iteration.count,
+                    seed,
+                    bindings,
+                    output,
+                ))),
+            },
+        ))
     }
 
     /// Check an iterable once, including when a scoped seed has already made
@@ -172,6 +176,7 @@ impl BodyChecker<'_, '_> {
                 widths: range.widths,
                 iterable: TypedIterable::Range { start: range.first },
                 count: range.count,
+                operands: range.operands,
             })
         })
     }
@@ -206,6 +211,7 @@ impl BodyChecker<'_, '_> {
                 ty: element.as_ref().clone(),
                 widths,
                 count: *size,
+                operands: Vec::new(),
                 iterable: TypedIterable::Array(value),
             })
         })

@@ -12,6 +12,7 @@ use crate::ast::{
     StructDef, StructSplat, TestDecl, TestKind, TestStmt, TestStmtKind, Type, TypeAlias, UnrollFor,
     WidthSliceType,
 };
+use crate::ast::{ConstAssert, ScopeStatement};
 use crate::check::{BUILTIN_PREFIX, is_call_builtin};
 use crate::parser::MAX_SYNTAX_DEPTH;
 
@@ -111,6 +112,13 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
             ty: scope.optional_type(&def.ty)?,
             value: scope.expr(&def.value)?,
         });
+    }
+    for (label, assertion) in &module.const_asserts {
+        let mut scope = Scope::new(names, position(label), label);
+        let assertion = scope
+            .const_assert(assertion)
+            .map_err(|e| format!("{label}: {e}"))?;
+        out.const_asserts.insert(names.declared(label), assertion);
     }
     for def in &module.externs {
         let mut scope = Scope::new(names, None, &def.name);
@@ -659,6 +667,14 @@ impl<'a> Scope<'a> {
         Ok(result)
     }
 
+    /// Qualify the predicate in the assertion's declaring scope.
+    fn const_assert(&mut self, assertion: &ConstAssert) -> Result<ConstAssert, String> {
+        Ok(ConstAssert {
+            predicate: self.expr(&assertion.predicate)?,
+            position: assertion.position,
+        })
+    }
+
     /// Qualify statement operands before bringing their result binders into
     /// scope.
     fn test_body(&mut self, body: &[TestStmt], depth: usize) -> Result<Vec<TestStmt>, String> {
@@ -929,11 +945,21 @@ impl<'a> Scope<'a> {
 
     fn expr_kind(&mut self, expr: &Expr) -> Result<Expr, String> {
         Ok(match expr {
-            Expr::Scope { bindings, result } => self.nested(|scope| {
+            Expr::Scope { statements, result } => self.nested(|scope| {
                 Ok(Expr::Scope {
-                    bindings: bindings
+                    statements: statements
                         .iter()
-                        .map(|b| scope.binding(b))
+                        .map(|statement| match statement {
+                            ScopeStatement::Let(binding) => {
+                                scope.binding(binding).map(ScopeStatement::Let)
+                            }
+                            ScopeStatement::ConstAssert(assertion) => scope
+                                .const_assert(assertion)
+                                .map(ScopeStatement::ConstAssert),
+                            ScopeStatement::Expression(expr) => {
+                                scope.expr(expr).map(ScopeStatement::Expression)
+                            }
+                        })
                         .collect::<Result<_, _>>()?,
                     result: Box::new(scope.expr(result)?),
                 })

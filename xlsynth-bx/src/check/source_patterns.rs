@@ -1,13 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
-use crate::ast::SourceNode::{Annotation, Expression, Statement};
+use crate::ast::SourceNode::{Annotation, Expression, Statement, TestStatement};
 use crate::ast::{
-    CallbackParam, Expr, MatchArm, MatchPattern, Module, Param, ParametricBinding, SourceNode, Type,
+    CallbackParam, Expr, MatchArm, MatchPattern, Module, Param, ParametricBinding, ScopeStatement,
+    SourceNode, Type,
 };
 
 /// Bound match patterns throughout a supplied AST before any recursive clones.
 pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), String> {
+    let mut pending = module_nodes(module, false);
+    while let Some(node) = pending.pop() {
+        if let Expression(Expr::Match { arms, .. }) = node {
+            validate_match_pattern_size(arms)?;
+        }
+        node.push_children(&mut pending);
+    }
+    Ok(())
+}
+
+/// A helper used transitively by an assertion also needs its constexpr inputs.
+pub(super) fn has_const_assert(module: &Module, include_tests: bool) -> bool {
+    if !module.const_asserts.is_empty() {
+        return true;
+    }
+    let mut pending = module_nodes(module, include_tests);
+    while let Some(node) = pending.pop() {
+        if let Expression(Expr::Scope { statements, .. }) = node
+            && statements
+                .iter()
+                .any(|s| matches!(s, ScopeStatement::ConstAssert(_)))
+        {
+            return true;
+        }
+        node.push_children(&mut pending);
+    }
+    false
+}
+
+/// Source roots for checking an AST, including the procedural harnesses when
+/// enabled.
+fn module_nodes(module: &Module, include_tests: bool) -> Vec<SourceNode<'_>> {
     let mut pending = Vec::new();
     pending.extend(
         module
@@ -27,6 +60,12 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
         pending.extend(def.ty.iter().map(Annotation));
         pending.push(Expression(&def.value));
     }
+    pending.extend(
+        module
+            .const_asserts
+            .values()
+            .map(|a| Expression(&a.predicate)),
+    );
     for f in &module.externs {
         pending.extend(signature(&f.params, &f.result));
     }
@@ -39,20 +78,28 @@ pub(super) fn validate_source_match_patterns(module: &Module) -> Result<(), Stri
     for b in &module.extern_blocks {
         pending.extend(signature(&b.params, &b.result));
     }
-    for b in &module.blocks {
+    if include_tests {
+        for test in &module.tests {
+            pending.extend(test.statements.iter().map(TestStatement));
+            if let Some(q) = &test.quickcheck {
+                pending.extend(signature(&q.params, &q.result));
+            }
+        }
+    }
+    for b in module.blocks.iter().chain(
+        module
+            .invariants
+            .iter()
+            .filter(|_| include_tests)
+            .map(|i| &i.block),
+    ) {
         pending.extend(signature(&b.params, &b.result));
         pending.extend(callbacks(&b.callback_params));
         pending.extend(parametrics(&b.value_parametrics));
         pending.extend(b.statements.iter().map(Statement));
         pending.push(Expression(&b.output));
     }
-    while let Some(node) = pending.pop() {
-        if let Expression(Expr::Match { arms, .. }) = node {
-            validate_match_pattern_size(arms)?;
-        }
-        node.push_children(&mut pending);
-    }
-    Ok(())
+    pending
 }
 
 fn signature<'a>(params: &'a [Param], result: &'a Type) -> impl Iterator<Item = SourceNode<'a>> {

@@ -24,7 +24,7 @@ use crate::ast::{
     StructLiteralArgs, Type,
 };
 use crate::dslx_import::ImportResolver;
-use crate::typed::{BoundParametricValue, ConstantUse, TypedExpr};
+use crate::typed::{BoundParametricValue, TypedExpr};
 
 pub(super) fn dimension_type() -> Type {
     Type::unsigned(32)
@@ -488,19 +488,39 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
 
     /// Evaluate in the active lexical scope with the binding's declared type.
     pub(super) fn parametric_value(&mut self, expr: &Expr, ty: &Type) -> Result<IrValue, String> {
+        let retain = self.assert_operands.is_some();
+        let (constant, operand) = self.parametric_value_and_operand(expr, ty, retain)?;
+        self.record_assert_operand(operand);
+        Ok(constant)
+    }
+
+    /// Fold an actual while optionally keeping its typed expression and
+    /// constexpr-only lexical lets for an operand erased during lowering.
+    pub(super) fn parametric_value_and_operand(
+        &mut self,
+        expr: &Expr,
+        ty: &Type,
+        retain_operand: bool,
+    ) -> Result<(IrValue, TypedExpr), String> {
         let had_functions = self.constant_functions.is_some();
         let first = self.statements.len();
         let callees = std::mem::take(&mut self.local_callees);
+        let outer_erased = self.in_erased_operand;
+        self.in_erased_operand |= retain_operand;
         self.enable_constant_functions();
         let result = self.with_parametric_context(|checker| {
             let value = checker.dslx_argument(expr, ty)?;
-            checker
-                .checked_constant_for(&value, ConstantUse::ValueParametric)?
-                .ok_or_else(|| "value parametric requires a compile-time constant".to_owned())
+            let constant = checker
+                .checked_constant_for(&value, checker.dslx_constant_use)?
+                .ok_or_else(|| "value parametric requires a compile-time constant".to_owned())?;
+            Ok((constant, value))
         });
         // Scope elaboration may materialize lets while computing an actual
         // or dimension. Their values have been consumed at compile time.
-        self.discard_temporary_statements(first);
+        if !retain_operand || result.is_err() {
+            self.discard_temporary_statements(first);
+        }
+        self.in_erased_operand = outer_erased;
         self.local_callees = callees;
         if !had_functions {
             self.constant_functions = None;

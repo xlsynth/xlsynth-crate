@@ -228,6 +228,38 @@ pub struct LetBinding {
     pub value: Expr,
 }
 
+/// A declaration requiring a Boolean expression to evaluate to true at compile
+/// time.
+#[derive(Clone, Debug, Eq)]
+pub struct ConstAssert {
+    pub predicate: Expr,
+    pub position: SourcePosition,
+}
+
+// Diagnostic locations do not affect equality of expressions in type
+// dimensions.
+impl PartialEq for ConstAssert {
+    fn eq(&self, other: &Self) -> bool {
+        self.predicate == other.predicate
+    }
+}
+
+impl Hash for ConstAssert {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.predicate.hash(state);
+    }
+}
+
+/// An ordered declaration in a pure value scope.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ScopeStatement {
+    Let(LetBinding),
+    ConstAssert(ConstAssert),
+    /// A value expression followed by a semicolon. DSLX requires its value
+    /// when evaluating the enclosing scope as a constant expression.
+    Expression(Expr),
+}
+
 /// A DSLX let pattern. A rest marker consumes any remaining tuple members.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum BindingPattern {
@@ -447,7 +479,7 @@ impl Hash for StructSplat {
 pub enum Expr {
     /// A lexical value scope, evaluated in source order.
     Scope {
-        bindings: Vec<LetBinding>,
+        statements: Vec<ScopeStatement>,
         result: Box<Expr>,
     },
     Name(String),
@@ -594,6 +626,13 @@ pub(crate) struct StructLiteral<'a> {
 }
 
 impl Expr {
+    /// Prepared scopes have already replaced their discarded expressions with
+    /// lexical aliases. Only the trailing result still needs contextual typing.
+    pub(crate) fn needs_scope_preparation(&self) -> bool {
+        matches!(self, Self::Scope { statements, .. } if statements.is_empty() || !statements.iter().all(|s|
+            matches!(s, ScopeStatement::Expression(Expr::Name(name)) if name.starts_with("$scope_"))))
+    }
+
     /// Borrow the common parts of a struct literal, preserving its argument
     /// syntax.
     pub(crate) fn struct_literal(&self) -> Option<StructLiteral<'_>> {
@@ -954,7 +993,8 @@ pub struct Module {
     /// `#![require_define_before_use]` requires this file's declarations to
     /// precede their uses.
     pub require_define_before_use: bool,
-    /// Bound names in declaration order, including each leaf of a use tree.
+    /// Declaration labels in source order, including each leaf of a use tree
+    /// and the source location label of each module assertion.
     /// AST callers opting into `require_define_before_use` must list every
     /// module declaration and use binding exactly once.
     pub declaration_order: Vec<String>,
@@ -970,6 +1010,10 @@ pub struct Module {
     pub type_aliases: Vec<TypeAlias>,
     pub enums: Vec<EnumDef>,
     pub constants: Vec<ConstDef>,
+    /// Compile-time assertions keyed by source location label. These labels
+    /// identify declarations for diagnostics and ordering without binding
+    /// names.
+    pub const_asserts: BTreeMap<String, ConstAssert>,
     pub externs: Vec<ExternFn>,
     pub functions: Vec<Function>,
     pub extern_blocks: Vec<ExternBlock>,

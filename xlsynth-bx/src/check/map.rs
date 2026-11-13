@@ -105,7 +105,8 @@ impl BodyChecker<'_, '_> {
             MapCallback::Named(name, parametrics) => {
                 let callee = self.map_callee(name, |head| self.names.contains(head))?;
                 if matches!(callee, MapCallee::Builtin("ceillog2")) && parametrics.is_empty() {
-                    return self.map_ceillog2(&array, element, *size);
+                    let size = *size;
+                    return self.map_ceillog2(array, &parameter.ty, size);
                 }
                 (
                     Vec::new(),
@@ -196,9 +197,12 @@ impl BodyChecker<'_, '_> {
             index = next;
         }
         let value = IrValue::make_array(&elements).map_err(|e| e.to_string())?;
-        Ok(TypedExpr {
-            ty,
-            kind: K::Literal(value),
-        })
+        Ok(super::scope::sequence(
+            range.operands,
+            TypedExpr {
+                ty,
+                kind: K::Literal(value),
+            },
+        ))
     }
 }

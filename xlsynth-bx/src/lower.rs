@@ -27,7 +27,8 @@ use crate::cycle_diagnostic::{CycleSources, WireDriver};
 use crate::import_link::link_imported_functions;
 use crate::layout::Layouts;
 use crate::typed::{
-    CaptureUse, CheckedBinding, TypedFor, TypedIterable, TypedMap, TypedMatchPattern, repr_bits,
+    CaptureUse, CheckedBinding, TypedFor, TypedIterable, TypedMap, TypedMatchPattern,
+    is_constexpr_only_name, repr_bits,
 };
 
 /// Destination package indices for named BX functions, externs, and inferred
@@ -49,21 +50,21 @@ impl LinkedFunctions {
         if map
             .bindings
             .iter()
-            .any(|b| evaluate_test_discards || !b.is_test_discard())
+            .any(|b| b.usage().runtime(evaluate_test_discards))
             || map
                 .captures
                 .values()
-                .any(|usage| evaluate_test_discards || *usage == CaptureUse::Value)
+                .any(|usage| usage.runtime(evaluate_test_discards))
         {
             return None;
         }
-        let (index, args) = match &map.output.kind {
+        let (index, args) = match &map.output.runtime_result().kind {
             TypedExprKind::Call { name, args } => (self.named[name], args),
             TypedExprKind::ImportedCall { id, args } => (self.imported[id], args),
             _ => return None,
         };
         match args.as_slice() {
-            [arg] if matches!(&arg.kind, TypedExprKind::Name(name) if *name == map.element.name) => {
+            [arg] if matches!(&arg.runtime_result().kind, TypedExprKind::Name(name) if *name == map.element.name) => {
                 Some(&self.signatures[&index])
             }
             _ => None,
@@ -936,6 +937,9 @@ impl<'a, 'defs, 'p> LowerBody<'a, 'defs, 'p, BlockState> {
                     );
                 }
                 CheckedStmt::Let { name, value } => {
+                    if is_constexpr_only_name(name) {
+                        continue;
+                    }
                     let value = self.expr(value)?;
                     self.values.insert(name.clone(), value);
                 }
@@ -1259,7 +1263,10 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         output: &TypedExpr,
     ) -> Result<BValue, BuilderError> {
         for binding in bindings {
-            if !self.destination.evaluate_test_discards && binding.is_test_discard() {
+            if !binding
+                .usage()
+                .runtime(self.destination.evaluate_test_discards)
+            {
                 continue;
             }
             let value = self.expr(&binding.value)?;
@@ -1384,9 +1391,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
         let start = invariants.len();
         let names = captures
             .iter()
-            .filter(|(_, usage)| {
-                self.destination.evaluate_test_discards || **usage == CaptureUse::Value
-            })
+            .filter(|(_, usage)| usage.runtime(self.destination.evaluate_test_discards))
             .map(|(name, _)| name);
         invariants.extend(names.clone().map(|name| self.values[name]));
         let params = self.wire_params(builder, &invariants[start..])?;
@@ -1457,6 +1462,7 @@ impl<'a, 'defs, 'p, S: BuilderState> LowerBody<'a, 'defs, 'p, S> {
     fn expr(&mut self, expr: &TypedExpr) -> Result<BValue, BuilderError> {
         match &expr.kind {
             TypedExprKind::Name(name) => Ok(self.values[name]),
+            TypedExprKind::Sequence { result, .. } => self.expr(result),
             TypedExprKind::Literal(value) => self.literal(value),
             TypedExprKind::For(fold) => self.counted_for(fold),
             TypedExprKind::Map(map) => self.map(map),

@@ -19,6 +19,7 @@ use crate::ast::{
     SourceFile, SourcePosition, SourceSpan, Stmt, StructDef, StructSplat, Type, TypeAlias, UnaryOp,
     UnrollFor, UsePath, WidthSliceType,
 };
+use crate::ast::{ConstAssert, ScopeStatement};
 
 /// Bound recursive syntax, including DSLX use trees generated from a BX AST.
 pub(crate) const MAX_SYNTAX_DEPTH: usize = 64;
@@ -76,6 +77,7 @@ pub(crate) fn is_use_identifier(text: &str) -> bool {
         && !matches!(
             text,
             "as" | "const"
+                | "const_assert!"
                 | "else"
                 | "enum"
                 | "false"
@@ -179,8 +181,8 @@ fn lex(
     let bytes = &source.as_bytes()[..span.end];
     let mut i = span.start;
     let mut brace_depth = 0usize;
-    // Functions and enums end at a closing brace. Constants and type aliases
-    // end at a semicolon, including when they contain braced expressions.
+    // Functions and enums end at a closing brace. Constants, assertions and
+    // type aliases end at a semicolon outside braced expressions.
     let mut dslx_item = None;
     let mut signature_depth = 0usize;
     let mut in_function_body = false;
@@ -200,6 +202,7 @@ fn lex(
             if dialect == Dialect::Bx && (dslx_item.is_some() || callback) {
                 let message = match dslx_item {
                     Some("const") => "use a // comment in a constant",
+                    Some("const_assert!") => "use a // comment in a constant assertion",
                     Some("enum") => "use a // comment in an enum",
                     Some("type") => "use a // comment in a type alias",
                     _ => "use a // comment in a function",
@@ -297,7 +300,9 @@ fn lex(
                 .last()
                 .is_none_or(|t: &Token| matches!(t.text, "pub" | ";" | "}" | "]"));
         match text {
-            "fn" | "const" | "enum" | "type" if item_start && dslx_item.is_none() => {
+            "fn" | "const" | "const_assert!" | "enum" | "type"
+                if item_start && dslx_item.is_none() =>
+            {
                 dslx_item = Some(text);
             }
             "(" | "[" if dslx_item == Some("fn") && !in_function_body => signature_depth += 1,
@@ -322,7 +327,7 @@ fn lex(
         if brace_depth == 0
             && (matches!(
                 (dslx_item, text),
-                (Some("enum"), "}") | (Some("const" | "type"), ";")
+                (Some("enum"), "}") | (Some("const" | "const_assert!" | "type"), ";")
             ) || (in_function_body && text == "}"))
         {
             dslx_item = None;
@@ -1075,6 +1080,7 @@ impl<'s> Parser<'s> {
             }
             let public = self.eat("pub");
             let declares_type = matches!(self.peek(0), "enum" | "struct" | "type");
+            let is_const_assert = self.peek(0) == "const_assert!";
             if self.eat("block") {
                 let name_offset = self.tokens[self.pos].start;
                 let position = self.position_at(name_offset);
@@ -1127,6 +1133,18 @@ impl<'s> Parser<'s> {
                 return Err(
                     self.error("expected block, const, enum, fn, struct, or type after pub")
                 );
+            } else if is_const_assert {
+                if !allowed_warnings.is_empty() {
+                    return Err(self.error("a const_assert! declaration cannot have an attribute"));
+                }
+                self.pos += 1;
+                self.value_context = ValueContext::DslxItem;
+                let (assertion, _) = self.with_name_scope(|p| p.const_assert_predicate())?;
+                self.value_context = ValueContext::Block;
+                let position = assertion.position;
+                let label = format!("const_assert! at {}:{}", position.line, position.column);
+                module.declaration_order.push(label.clone());
+                module.const_asserts.insert(label, assertion);
             } else if self.peek(0) == "use" && !allowed_warnings.is_empty() {
                 return Err(self.error("a use declaration cannot have a warning allowance"));
             } else if self.eat("use") {
@@ -1163,7 +1181,7 @@ impl<'s> Parser<'s> {
                 }
             } else {
                 return Err(self.error(
-                    "expected a block, const, enum, fn, struct, type, extern, or use declaration",
+                    "expected a block, const, const_assert!, enum, fn, struct, type, extern, or use declaration",
                 ));
             }
             if !allowed_warnings.is_empty() {
@@ -1177,6 +1195,9 @@ impl<'s> Parser<'s> {
                     module.declaration_order[first_declaration].clone(),
                     std::mem::take(&mut self.overwritten_literal_types),
                 );
+            }
+            if is_const_assert {
+                continue;
             }
             let names = if declares_type {
                 &mut self.visible_type_names
@@ -1665,7 +1686,7 @@ impl<'s> Parser<'s> {
     }
 
     fn value_scope_contents(&mut self, dslx_tuple_patterns: bool) -> Result<ParsedExpr, String> {
-        let mut bindings = Vec::new();
+        let mut statements = Vec::new();
         let mut height = 0;
         let output = loop {
             if self.eat("}") {
@@ -1674,8 +1695,12 @@ impl<'s> Parser<'s> {
             if self.eat("let") {
                 let (binding, initializer_height) = self.let_binding(dslx_tuple_patterns)?;
                 height = height.max(initializer_height);
-                bindings.push(binding);
+                statements.push(ScopeStatement::Let(binding));
                 self.expect(";")?;
+            } else if self.eat("const_assert!") {
+                let (assertion, predicate_height) = self.const_assert_predicate()?;
+                height = height.max(predicate_height);
+                statements.push(ScopeStatement::ConstAssert(assertion));
             } else {
                 let value = self.expr()?;
                 if self.eat("}") {
@@ -1683,23 +1708,36 @@ impl<'s> Parser<'s> {
                 }
                 self.expect(";")?;
                 height = height.max(value.height);
-                bindings.push(LetBinding {
-                    pattern: BindingPattern::Name("_".into()),
-                    ty: None,
-                    value: value.value,
-                });
+                statements.push(ScopeStatement::Expression(value.value));
             }
         };
-        if bindings.is_empty() {
+        if statements.is_empty() {
             return Ok(output);
         }
         self.compose(
             height.max(output.height),
             Expr::Scope {
-                bindings,
+                statements,
                 result: Box::new(output.value),
             },
         )
+    }
+
+    /// Parse the single predicate and terminating semicolon after
+    /// `const_assert!`.
+    fn const_assert_predicate(&mut self) -> Result<(ConstAssert, usize), String> {
+        let position = self.position_at(self.tokens[self.pos - 1].start);
+        self.expect("(")?;
+        let predicate = self.expr()?;
+        self.expect(")")?;
+        self.expect(";")?;
+        Ok((
+            ConstAssert {
+                predicate: predicate.value,
+                position,
+            },
+            predicate.height,
+        ))
     }
 
     /// Parse nested tuple binders, with at most one rest marker per tuple.
@@ -4962,7 +5000,7 @@ block top(clk, x:u8) -> bool { /* BX */ x!=Pair'.0 }
         assert_eq!(pair.name, "Pair'");
         assert!(pair.public);
         assert_eq!(pair.ty, Some(Type::Tuple(vec![byte, Type::Bool])));
-        assert!(matches!(&pair.value, Expr::Scope { bindings, .. } if bindings.len() == 1));
+        assert!(matches!(&pair.value, Expr::Scope { statements, .. } if statements.len() == 1));
         assert_eq!(module.functions[0].body, Expr::Name("base!".into()));
         assert!(matches!(
             &module.blocks[0].output,
@@ -5149,10 +5187,13 @@ fn compare(x:u8, y:u8)->(bool,bool) { (plain < x, y > (x)) }
                 text: "0".into()
             })
         );
-        let Expr::Scope { bindings, result } = &f.body else {
+        let Expr::Scope { statements, result } = &f.body else {
             panic!("expected local let");
         };
-        assert_eq!(bindings[0].ty.as_ref(), Some(&r));
+        let ScopeStatement::Let(binding) = &statements[0] else {
+            panic!("expected local let");
+        };
+        assert_eq!(binding.ty.as_ref(), Some(&r));
         let Expr::Match { arms, .. } = result.as_ref() else {
             panic!("expected match on the result");
         };
@@ -5225,11 +5266,14 @@ fn concrete(x:uN[8][4])->sN[8] { x[u32:0] as s8 }
         assert!(matches!(element.as_ref(), Type::Tuple(fields) if fields[1] == f.result));
         assert!(matches!(&f.result, Type::ParametricBits { signed, width }
             if signed.as_ref() == &Expr::Name("S".into()) && width.as_ref() == &Expr::Name("M".into())));
-        let Expr::Scope { bindings, result } = &f.body else {
+        let Expr::Scope { statements, result } = &f.body else {
             panic!("expected a binding for the dependent literal");
         };
+        let ScopeStatement::Let(binding) = &statements[0] else {
+            panic!("expected local let");
+        };
         assert!(
-            matches!(&bindings[0].value, Expr::Literal { ty, text } if ty == &bindings[0].ty && text == "-1")
+            matches!(&binding.value, Expr::Literal { ty, text } if ty == &binding.ty && text == "-1")
         );
         assert!(matches!(result.as_ref(), Expr::Cast { ty, .. } if *ty == f.result));
         assert!(matches!(
@@ -5927,11 +5971,14 @@ block wrapped(clk, xs:u8[2])->u8[2] {
                 }
             ]
         ));
-        let Expr::Scope { bindings, result } = &module.functions[3].body else {
+        let Expr::Scope { statements, result } = &module.functions[3].body else {
             panic!("expected nested binding");
         };
+        let ScopeStatement::Let(binding) = &statements[0] else {
+            panic!("expected local let");
+        };
         assert!(
-            matches!(&bindings[0].value, Expr::Scope { result, .. } if matches!(result.as_ref(), Expr::Tuple(pair) if pair.len() == 2))
+            matches!(&binding.value, Expr::Scope { result, .. } if matches!(result.as_ref(), Expr::Tuple(pair) if pair.len() == 2))
         );
         assert!(
             matches!(result.as_ref(), Expr::ParametricCall { parametrics, .. } if parametrics == &names(["id", "id"]))
@@ -7032,10 +7079,13 @@ block top(clk, x: u8) -> u8 {
         let comparisons = "x < y,".repeat(4096);
         let source = format!("fn f(x:u8,y:u8)->() {{ let _ = ({comparisons}); () }}");
         let module = parse_module(&source)?;
-        let Expr::Scope { bindings, .. } = &module.functions[0].body else {
+        let Expr::Scope { statements, .. } = &module.functions[0].body else {
             panic!("expected a tuple binding")
         };
-        assert!(matches!(&bindings[0].value, Expr::Tuple(fields) if fields.len() == 4096));
+        let ScopeStatement::Let(binding) = &statements[0] else {
+            panic!("expected local let");
+        };
+        assert!(matches!(&binding.value, Expr::Tuple(fields) if fields.len() == 4096));
         Ok(())
     }
 

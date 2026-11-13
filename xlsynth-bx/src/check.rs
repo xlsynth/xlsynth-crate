@@ -386,26 +386,37 @@ impl Default for ConstantBudgets {
 struct ConstantContext<'a> {
     enums: &'a BTreeMap<String, CheckedEnum>,
     names: &'a mut BTreeMap<String, ConstantBinding>,
-    constexpr_names: Option<&'a BTreeSet<String>>,
+    constexpr_names: &'a BTreeSet<String>,
+    /// Modules with value-parametric callees replay selected ordinary inputs
+    /// before using a folded let as a parametric actual.
+    check_parametric_inputs: bool,
     statements: &'a [CheckedStmt],
     budgets: &'a mut ConstantBudgets,
     /// Module initializers and specialized functions charge intermediate
     /// values outside loops as well as in their bodies.
     charge_values: bool,
     functions: Option<&'a mut ConstantFunctions>,
+    assertion_cache: Option<&'a mut AssertionCache>,
+}
+
+/// Save changes to outer bindings while an assertion temporarily enables
+/// helper execution. Ordinary BX expressions keep their original cache state.
+struct AssertionCache {
+    first_local: usize,
+    saved: Vec<(String, ConstantBinding)>,
 }
 
 impl ConstantContext<'_> {
-    /// Keep the defining statement when a folded let read only a selected
-    /// path and could later supply a DSLX value parametric.
-    fn folded(&self, expr: &TypedExpr, value: IrValue, definition: usize) -> ConstantBinding {
-        if self
-            .constexpr_names
-            .is_some_and(|names| !expr.has_constant_inputs(names))
+    fn cache_replay(&mut self, name: &str, definition: usize, binding: Option<ConstantBinding>) {
+        let previous = match binding {
+            Some(binding) => self.names.insert(name.to_owned(), binding),
+            None => self.names.remove(name),
+        };
+        if let Some(cache) = &mut self.assertion_cache
+            && definition < cache.first_local
+            && let Some(previous) = previous
         {
-            ConstantBinding::Selected { value, definition }
-        } else {
-            ConstantBinding::Known(value)
+            cache.saved.push((name.to_owned(), previous));
         }
     }
 }
@@ -647,6 +658,12 @@ struct Declarations<'a> {
     /// Pure tests observe IR contracts in evaluated but discarded tuple fields.
     evaluate_discarded_tuple_fields: bool,
     has_test_discards: Cell<bool>,
+    /// A module with assertions may execute any visible pure helper at compile
+    /// time.
+    has_const_assert: bool,
+    /// At least one callee was instantiated while evaluating an erased
+    /// assertion.
+    assertion_instantiated_callee: Cell<bool>,
     block_names: BTreeSet<&'a str>,
     zero_uses: Option<&'a BTreeMap<String, String>>,
     positions: BTreeMap<&'a str, usize>,
@@ -1876,6 +1893,7 @@ pub(crate) fn check_sources_with_tests(
         });
     }
     let mut declarations = Declarations {
+        has_const_assert: source_patterns::has_const_assert(module, tests.is_some()),
         evaluate_discarded_tuple_fields: tests.is_some()
             && module
                 .tests
@@ -1909,6 +1927,7 @@ pub(crate) fn check_sources_with_tests(
                 .chain(module.structs.iter().map(|s| s.name.as_str()))
                 .chain(module.type_aliases.iter().map(|a| a.name.as_str()))
                 .chain(module.functions.iter().map(|f| f.name.as_str()))
+                .chain(module.const_asserts.keys().map(String::as_str))
                 .enumerate()
                 .map(|(i, name)| (name, i + 1)),
         );
@@ -2275,9 +2294,11 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() {
-        let calls = checked.retain_library_dependencies();
-        checked.restore_extern_names();
+    checked.imports = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
+        let calls = checked.retain_reachable_dependencies();
+        if linked.is_some() {
+            checked.restore_extern_names();
+        }
         resolver.finish_with_calls(Some(&calls))?
     } else {
         resolver.finish()?
@@ -2447,6 +2468,20 @@ struct BodyChecker<'a, 'm> {
     template_name_depth: Option<Cell<usize>>,
     /// Use DSLX literal inference inside a local call argument or scalar match.
     dslx_value_context: bool,
+    /// Keep the source operands that DSLX may demand from a lexical assertion.
+    preserve_assert_inputs: bool,
+    /// Evaluate constexpr builtins and parametric actuals under the current
+    /// predicate's rules when they occur inside an assertion.
+    dslx_constant_use: ConstantUse,
+    assertion_cache: Option<AssertionCache>,
+    /// Type and specialization operands erased from the current expression.
+    assert_operands: Option<Vec<TypedExpr>>,
+    /// Materialize only constexpr bindings while checking an erased
+    /// operand that an assertion can later replay.
+    in_erased_operand: bool,
+    /// Let initializers inside a match execute as DSLX bytecode even when
+    /// their definitions are shared and replayed outside its evaluator.
+    in_match_bytecode: bool,
     /// A selected function parametric can supply a wider type at a reference
     /// to a let whose scalar initializer contained only unsized literals.
     parametric_argument_context: bool,
@@ -2543,20 +2578,29 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         ConstantContext {
             enums: &self.structs.enums,
             names: &mut self.constants,
-            constexpr_names: (self.resolver.has_imports()
+            constexpr_names: &self.constexpr_names,
+            check_parametric_inputs: self.resolver.has_imports()
                 || !self.decls.value_template_callbacks.is_empty()
-                || self.decls.has_block_value_parametrics)
-                .then_some(&self.constexpr_names),
+                || self.decls.has_block_value_parametrics,
             statements: &self.statements,
             budgets,
             charge_values: self.constant_functions.is_some() || self.function_spec.is_some(),
             functions: self.constant_functions.as_mut(),
+            assertion_cache: self.assertion_cache.as_mut(),
         }
     }
 
     /// Record a constant if speculative folding has work remaining.
-    fn fold_constant(&mut self, value: &TypedExpr) -> Option<ConstantBinding> {
+    fn fold_constant(
+        &mut self,
+        value: &TypedExpr,
+        constexpr_inputs: bool,
+    ) -> Option<ConstantBinding> {
+        let assertion_inputs = constexpr_inputs
+            && (!self.preserve_assert_inputs || !value.needs_dslx_inputs(&self.constants));
+        let preserve_assert_inputs = self.preserve_assert_inputs;
         let mut ctx = self.constant_context();
+        let parametric_ready = constexpr_inputs || !ctx.check_parametric_inputs;
         let deferred = ConstantBinding::Deferred(ctx.statements.len());
         // A projected wide scalar owns its limbs in the speculative cache.
         // Avoid materializing it once the remaining allowance cannot retain it.
@@ -2567,7 +2611,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             return Some(deferred);
         }
-        match value.constant(
+        match value.fold(
             ctx.names,
             &mut ctx.budgets.speculative,
             ctx.charge_values,
@@ -2581,17 +2625,30 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 if let Some(remaining) = ctx
                     .budgets
                     .speculative
-                    .checked_sub(literal_copy_work(&result))
+                    .checked_sub(literal_copy_work(&result.value))
                 {
                     ctx.budgets.speculative = remaining;
-                    Some(ctx.folded(value, result, ctx.statements.len()))
+                    Some(ConstantBinding::folded(
+                        result.value,
+                        ctx.statements.len(),
+                        parametric_ready,
+                        assertion_inputs && !result.needs_dslx_replay,
+                    ))
                 } else {
                     Some(deferred)
                 }
             }
-            Ok(result) => result.map(|v| ctx.folded(value, v, ctx.statements.len())),
-            Err(ConstantFailure::NeedsFunctions) => {
-                ctx.constexpr_names.is_some().then_some(deferred)
+            Ok(result) => result.map(|v| {
+                ConstantBinding::folded(
+                    v.value,
+                    ctx.statements.len(),
+                    parametric_ready,
+                    assertion_inputs && !v.needs_dslx_replay,
+                )
+            }),
+            Err(ConstantFailure::NeedsFunctions) if !ctx.check_parametric_inputs => {
+                preserve_assert_inputs
+                    .then_some(ConstantBinding::AssertionDeferred(ctx.statements.len()))
             }
             Err(_) => Some(deferred),
         }
@@ -2602,8 +2659,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         self.checked_constant_for(value, ConstantUse::Bx)
     }
 
-    /// Replay required lets on an explicit stack. A successful parametric
-    /// replay establishes that the folded value satisfies both uses.
+    /// Replay required lets on an explicit stack and cache which uses the
+    /// evaluated definition satisfies.
     fn checked_constant_for(
         &mut self,
         value: &TypedExpr,
@@ -2631,7 +2688,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             } else {
                 (value, None)
             };
-            match expr.constant(
+            match expr.fold(
                 ctx.names,
                 &mut ctx.budgets.required,
                 charge_values,
@@ -2640,25 +2697,39 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 ctx.enums,
             ) {
                 Ok(result) => {
-                    let Some(name) = name else { return Ok(result) };
+                    let Some(name) = name else {
+                        return Ok(result.map(|r| r.value));
+                    };
                     if let Some(result) = result {
-                        let binding = if usage == ConstantUse::ValueParametric {
-                            ConstantBinding::Known(result)
-                        } else {
-                            ctx.folded(expr, result, definition.expect("replayed let"))
+                        let definition = definition.expect("replayed let");
+                        let binding = match usage {
+                            ConstantUse::Assertion => ConstantBinding::Known(result.value),
+                            ConstantUse::Dslx => ConstantBinding::folded(
+                                result.value,
+                                definition,
+                                true,
+                                !result.needs_dslx_replay && !expr.needs_dslx_inputs(ctx.names),
+                            ),
+                            ConstantUse::Bx => ConstantBinding::folded(
+                                result.value,
+                                definition,
+                                !ctx.check_parametric_inputs || ctx.constexpr_names.contains(name),
+                                !result.needs_dslx_replay
+                                    && ctx.constexpr_names.contains(name)
+                                    && !expr.needs_dslx_inputs(ctx.names),
+                            ),
                         };
-                        ctx.names.insert(name.clone(), binding);
-                    } else if usage == ConstantUse::ValueParametric {
+                        ctx.cache_replay(name, definition, Some(binding));
+                    } else if usage != ConstantUse::Bx {
                         // The ordinary BX constant may still have a value.
                         return Ok(None);
                     } else {
-                        ctx.names.remove(name);
+                        ctx.cache_replay(name, definition.expect("replayed let"), None);
                     }
                     pending.pop();
                 }
-                Err(ConstantFailure::Deferred(index)) => {
+                Err(ConstantFailure::Deferred(mut earlier)) => {
                     charge_values = true;
-                    let mut earlier = BTreeSet::from([index]);
                     expr.deferred_inputs(ctx.names, &mut earlier, usage);
                     debug_assert!(
                         earlier
@@ -2709,6 +2780,12 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             template_callbacks: None,
             template_name_depth: None,
             dslx_value_context: false,
+            preserve_assert_inputs: decls.has_const_assert,
+            dslx_constant_use: ConstantUse::Dslx,
+            assertion_cache: None,
+            assert_operands: None,
+            in_erased_operand: false,
+            in_match_bytecode: false,
             parametric_argument_context: false,
             checking_callback_inputs: false,
             function_position: None,
@@ -3358,7 +3435,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             .block_initializer(Some(name), annotation, initializer, structural)
             .map_err(|e| format!("let '{name}': {e}"))?;
         let constexpr = value.has_constant_inputs(&self.constexpr_names);
-        let constant = self.fold_constant(&value);
+        let constant = self.fold_constant(&value, constexpr);
         declare(&mut self.names, name)?;
         self.values.insert(name.to_owned(), value.ty.clone());
         if constexpr {
@@ -3437,7 +3514,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         // Guard checking can already occupy much of the caller's stack when
         // the expression starts. Check available space on each descent.
         stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
-            self.check_group_member(expr, expected)
+            self.with_assert_operands(|checker| checker.check_group_member(expr, expected))
         })
     }
 
@@ -3451,8 +3528,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         // Keep the recursive dispatch frame small for expressions at the depth
         // limit.
         let (ty, kind) = match expr {
-            Expr::Scope { bindings, result } => {
-                return self.value_scope(bindings, result, expected);
+            Expr::Scope { statements, result } => {
+                return self.value_scope(statements, result, expected);
             }
             Expr::UnrollFor(fold) => {
                 return self.unroll(fold, CarryContext::Expected(expected), false);
@@ -3550,7 +3627,8 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             Expr::Match { subject, arms } => self.with_dslx_value_context(|checker| {
                 let selector = checker.match_selector(subject, arms)?;
                 let results: Vec<_> = arms.iter().map(|arm| &arm.value).collect();
-                let values = checker.check_results(&results, expected)?;
+                let values = checker
+                    .with_match_bytecode(|checker| checker.check_results(&results, expected))?;
                 let value = selector.with_values(&mut values.into_iter());
                 Ok((value.ty, value.kind))
             }),
@@ -3974,7 +4052,13 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 .type_shape(&ty, MAX_ELABORATION_DEPTH)?
                 .ir_nodes;
             self.charge_expansion("struct splat", work)?;
-            (ty, BTreeMap::new(), Some(self.share_scoped_value(base)))
+            (
+                ty,
+                BTreeMap::new(),
+                Some(scope::ProjectionInput::from_shared(
+                    self.share_scoped_value(base),
+                )),
+            )
         } else {
             let (ty, inputs) = self.struct_literal_type(source, &supplied, expected)?;
             (ty, inputs, None)
@@ -3993,7 +4077,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 };
                 values.push(value.map_err(|e| format!("field '{source}.{}': {e}", p.name))?);
             } else if let Some(base) = &base {
-                let kind = match &base.kind {
+                let kind = match &base.value.kind {
                     K::Name(name) => K::BindingTupleIndex {
                         name: name.clone(),
                         index,
@@ -4016,7 +4100,23 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if let Some(field) = supplied.keys().next() {
             return Err(format!("unknown field '{source}.{field}'").into());
         }
-        Ok((ty, K::Tuple(values)))
+        let mut result = TypedExpr {
+            ty,
+            kind: K::Tuple(values),
+        };
+        if let Some(base) = base {
+            let mut operands = base.operands;
+            if self.preserve_assert_inputs
+                && fields.len() == members.len()
+                && !matches!(base.value.kind, K::Literal(_))
+            {
+                // A fully overridden splat still requires its base for DSLX
+                // constexpr evaluation.
+                operands.push(base.value);
+            }
+            result = scope::sequence(operands, result);
+        }
+        Ok((result.ty, result.kind))
     }
 
     /// Project a tuple element or named struct field from a value.
@@ -4495,7 +4595,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         {
             return self.with_dslx_value_context(|checker| checker.unify_values(items));
         }
-        if items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
+        if items.iter().any(|e| e.needs_scope_preparation()) {
             return self.with_scoped_results(items, Self::unify_values);
         }
         if items.iter().any(|e| self.contains_inferred_aggregate(e))
@@ -4820,39 +4920,41 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         subject: &Expr,
         arms: &[MatchArm],
     ) -> Result<MatchSelector, String> {
-        self.with_prepared_value(subject, |checker, subject| {
-            let operands = match_operands(subject, arms, |name| {
-                let head = name.split_once("::").map_or(name, |(head, _)| head);
-                Ok(checker.value_parametric_names.contains(name)
-                    || (!checker.names.contains(head)
-                        && checker.callback_index(head).is_none()
-                        && checker.is_constant_pattern(name)?))
-            })?;
-            if arms
-                .iter()
-                .flat_map(|arm| &arm.patterns)
-                .any(|p| matches!(p, MatchPattern::Tuple(_)))
-            {
-                return checker.tuple_match_selector(subject, arms);
-            }
-            let mut values = checker.check_results(&operands, None)?.into_iter();
-            let subject = values.next().expect("subject is the first operand");
-            check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
-                checker.zero_calls_function()
-            })?;
-            let patterns = match &subject.ty {
-                Type::Enum { name, .. } => {
-                    let def = checker
-                        .structs
-                        .enums
-                        .get(name)
-                        .ok_or_else(|| format!("unknown enum '{name}'"))?;
-                    match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
+        self.with_match_bytecode(|checker| {
+            checker.with_prepared_value(subject, |checker, subject| {
+                let operands = match_operands(subject, arms, |name| {
+                    let head = name.split_once("::").map_or(name, |(head, _)| head);
+                    Ok(checker.value_parametric_names.contains(name)
+                        || (!checker.names.contains(head)
+                            && checker.callback_index(head).is_none()
+                            && checker.is_constant_pattern(name)?))
+                })?;
+                if arms
+                    .iter()
+                    .flat_map(|arm| &arm.patterns)
+                    .any(|p| matches!(p, MatchPattern::Tuple(_)))
+                {
+                    return checker.tuple_match_selector(subject, arms);
                 }
-                Type::Tuple(_) => return checker.finish_tuple_match(subject, arms),
-                _ => match_patterns::check_patterns(&subject.ty, arms, values)?,
-            };
-            Ok(MatchSelector { subject, patterns })
+                let mut values = checker.check_results(&operands, None)?.into_iter();
+                let subject = values.next().expect("subject is the first operand");
+                check_match_operand_width(&operands, &subject.ty, checker.dslx_widths(), &|| {
+                    checker.zero_calls_function()
+                })?;
+                let patterns = match &subject.ty {
+                    Type::Enum { name, .. } => {
+                        let def = checker
+                            .structs
+                            .enums
+                            .get(name)
+                            .ok_or_else(|| format!("unknown enum '{name}'"))?;
+                        match_patterns::check_enum_patterns(def, &subject.ty, arms, values)?
+                    }
+                    Type::Tuple(_) => return checker.finish_tuple_match(subject, arms),
+                    _ => match_patterns::check_patterns(&subject.ty, arms, values)?,
+                };
+                Ok(MatchSelector { subject, patterns })
+            })
         })
     }
 
@@ -4865,7 +4967,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         items: &[&Expr],
         expected: Option<&Type>,
     ) -> Result<Vec<TypedExpr>, String> {
-        if expected.is_none() && items.iter().any(|e| matches!(e, Expr::Scope { .. })) {
+        if expected.is_none() && items.iter().any(|e| e.needs_scope_preparation()) {
             return self.with_scoped_results(items, |checker, items| {
                 checker.check_results(items, expected)
             });
@@ -5399,7 +5501,7 @@ mod tests {
         BodyChecker, BodyKind, CheckedModule, CheckedStmt, ConstantBinding, Declarations,
         ImportOptions, ImportResolver, MAX_ELABORATION_DEPTH, StructTable, check_module,
     };
-    use crate::ast::{BindingPattern, Expr, Type};
+    use crate::ast::{BindingPattern, Expr, ScopeStatement, Type};
     use crate::parser::parse_module;
     use crate::{ResetBehavior, compile, empty_package};
     use xlsynth_pir::IrValue;
@@ -5539,7 +5641,7 @@ fn wide()->Mode { for (_, state) in u32:0..u32:1 { state }(Mode::Idle) }
         let mut checker = BodyChecker::new(&decls, &mut resolver, &mut structs, BodyKind::Function);
         checker.constant_budgets.speculative = 1;
         assert!(matches!(
-            checker.fold_constant(&module.functions()[0].output),
+            checker.fold_constant(&module.functions()[0].output, true),
             Some(ConstantBinding::Deferred(0))
         ));
         assert_eq!(checker.constant_budgets.speculative, 1);
@@ -6178,10 +6280,13 @@ block top(clk, x: u8) -> u8 @1 { let y = child(x); y }
             ),
             (BindingPattern::Rest, "rest marker requires a tuple pattern"),
         ] {
-            let Expr::Scope { bindings, .. } = &mut module.functions[0].body else {
+            let Expr::Scope { statements, .. } = &mut module.functions[0].body else {
                 panic!("expected the parsed function's let scope");
             };
-            bindings[0].pattern = pattern;
+            let ScopeStatement::Let(binding) = &mut statements[0] else {
+                panic!("expected the parsed let");
+            };
+            binding.pattern = pattern;
             assert_eq!(
                 check_module(&module).unwrap_err(),
                 format!("fn 'probe': result: {error}")
@@ -6204,10 +6309,13 @@ block top(clk, x: u8) -> u8 @1 { let y = child(x); y }
             let Expr::UnrollFor(fold) = &mut module.functions[0].body else {
                 panic!("expected the parsed fold");
             };
-            let Expr::Scope { bindings, .. } = &mut fold.result else {
+            let Expr::Scope { statements, .. } = &mut fold.result else {
                 panic!("expected the fold's let scope");
             };
-            bindings[0].pattern =
+            let ScopeStatement::Let(binding) = &mut statements[0] else {
+                panic!("expected the parsed let");
+            };
+            binding.pattern =
                 BindingPattern::Tuple(vec![BindingPattern::Rest, BindingPattern::Rest]);
             let iteration = if count == 0 {
                 ""

@@ -6,8 +6,8 @@ use std::collections::BTreeSet;
 
 use super::library_item;
 use crate::typed::{
-    CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt, TypedExpr,
-    TypedExprKind as K, TypedIterable, TypedMatchPattern,
+    CaptureUse, CheckedBinding, CheckedBlock, CheckedFunction, CheckedModule, CheckedStmt,
+    TypedExpr, TypedExprKind as K, TypedIterable, TypedMatchPattern, is_constexpr_only_name,
 };
 
 impl CheckedModule {
@@ -49,9 +49,9 @@ impl CheckedModule {
         }
     }
 
-    /// Retain the root's definitions and the library bodies and externs they
-    /// call. Return the DSLX specialization IDs needed by those bodies.
-    pub(crate) fn retain_library_dependencies(&mut self) -> BTreeSet<usize> {
+    /// Retain root definitions and the library bodies, specializations, and
+    /// externs reached by emitted code. Return their DSLX call IDs.
+    pub(crate) fn retain_reachable_dependencies(&mut self) -> BTreeSet<usize> {
         let roots = self
             .blocks
             .iter()
@@ -125,12 +125,11 @@ impl Dependencies {
         pending: &mut Vec<&'a TypedExpr>,
     ) {
         for binding in bindings {
-            if binding.is_test_discard() {
-                if !evaluate_discards {
-                    continue;
-                }
-                self.has_test_discards = true;
+            let usage = binding.usage();
+            if !usage.runtime(evaluate_discards) {
+                continue;
             }
+            self.has_test_discards |= usage == CaptureUse::TEST_DISCARD;
             pending.push(&binding.value);
         }
     }
@@ -146,6 +145,7 @@ impl Dependencies {
                     CheckedStmt::Inst { block, .. } => {
                         self.named.insert(block.clone());
                     }
+                    CheckedStmt::Let { name, .. } if is_constexpr_only_name(name) => continue,
                     CheckedStmt::Let { value, .. }
                     | CheckedStmt::DriveWire { value, .. }
                     | CheckedStmt::Write { value, .. }
@@ -188,7 +188,10 @@ impl Dependencies {
                 } => {
                     pending.extend([value.as_ref(), index.as_ref()]);
                 }
-                K::TupleIndex { value, .. } | K::Unary { value, .. } | K::Cast { value } => {
+                K::TupleIndex { value, .. }
+                | K::Unary { value, .. }
+                | K::Cast { value }
+                | K::Sequence { result: value, .. } => {
                     pending.push(value);
                 }
                 K::ArrayUpdate {

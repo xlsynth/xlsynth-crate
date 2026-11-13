@@ -23,6 +23,17 @@ use TypedExprKind as K;
 /// contracts.
 pub(crate) const TEST_DISCARD_PREFIX: &str = "$test_discard_";
 
+/// Internal bindings shared only by DSLX constexpr evaluation.
+pub(crate) const CONSTEXPR_PREFIX: &str = "$constexpr_";
+
+/// A shared match-arm let supplies an IR value on its selected path. The
+/// enclosing sequence separately retains its free names for DSLX bytecode.
+pub(super) const MATCH_LET_PREFIX: &str = "$match_let_";
+
+pub(crate) fn is_constexpr_only_name(name: &str) -> bool {
+    name.starts_with(CONSTEXPR_PREFIX)
+}
+
 /// A module with concrete signatures, single drivers, and an acyclic instance
 /// hierarchy.
 #[derive(Clone, Debug)]
@@ -215,8 +226,15 @@ pub struct CheckedBinding {
 }
 
 impl CheckedBinding {
-    pub(super) fn is_test_discard(&self) -> bool {
-        self.name.starts_with(TEST_DISCARD_PREFIX)
+    /// Identify which evaluation modes consume this binding's initializer.
+    pub(super) fn usage(&self) -> CaptureUse {
+        if is_constexpr_only_name(&self.name) {
+            CaptureUse::CONSTEXPR
+        } else if self.name.starts_with(TEST_DISCARD_PREFIX) {
+            CaptureUse::TEST_DISCARD
+        } else {
+            CaptureUse::VALUE
+        }
     }
 }
 
@@ -430,17 +448,40 @@ pub struct TypedMap {
     pub(super) captures: BTreeMap<String, CaptureUse>,
 }
 
-/// Whether an enclosing value is needed for the source expression or only to
-/// observe a discarded tuple field when interpreting a pure test.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CaptureUse {
-    Value,
-    TestDiscard,
+/// The evaluation modes in which a captured lexical value is required.
+/// Nested expressions intersect their modes, and independent uses combine them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CaptureUse(u8);
+
+impl CaptureUse {
+    const CONSTEXPR: Self = Self(1);
+    pub(super) const TEST_DISCARD: Self = Self(2);
+    const SYNTHESIS: Self = Self(4);
+    const VALUE: Self = Self(Self::CONSTEXPR.0 | Self::TEST_DISCARD.0 | Self::SYNTHESIS.0);
+
+    fn constexpr(self) -> bool {
+        self.0 & Self::CONSTEXPR.0 != 0
+    }
+
+    pub(super) fn runtime(self, evaluate_test_discards: bool) -> bool {
+        self.0 & Self::SYNTHESIS.0 != 0
+            || evaluate_test_discards && self.0 & Self::TEST_DISCARD.0 != 0
+    }
 }
 
 /// Resolved operations, including field projections in declaration order.
 #[derive(Clone, Debug)]
 pub enum TypedExprKind {
+    /// DSLX constexpr evaluation requires every operand. Runtime lowering
+    /// uses the result after the scope's ordinary bindings have been emitted.
+    Sequence {
+        operands: Vec<TypedExpr>,
+        result: Box<TypedExpr>,
+        /// DSLX bytecode executes let initializers on the selected path of
+        /// a concrete call or loop. An unreferenced let in a predicate's
+        /// immediate scope need not itself be constexpr.
+        bytecode_only: bool,
+    },
     For(Box<TypedFor>),
     Map(Box<TypedMap>),
     Name(String),
@@ -537,11 +578,22 @@ pub(crate) fn repr_bits(ty: &Type) -> Option<(bool, usize)> {
     }
 }
 
-/// A value parametric follows DSLX's constexpr rules for lexical inputs.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A constant's consumer determines which lexical inputs it must evaluate.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ConstantUse {
     Bx,
-    ValueParametric,
+    Dslx,
+    Assertion,
+}
+
+impl ConstantUse {
+    fn requires_capture(self, capture: CaptureUse) -> bool {
+        match self {
+            Self::Assertion => capture.constexpr(),
+            Self::Dslx => capture.runtime(false),
+            Self::Bx => false,
+        }
+    }
 }
 
 /// A known lexical constant, or the checked let to replay if a required
@@ -553,8 +605,13 @@ pub(super) enum ConstantBinding {
     Selected {
         value: IrValue,
         definition: usize,
+        /// A value-parametric replay may still have skipped assertion operands.
+        parametric_ready: bool,
     },
     Deferred(usize),
+    /// Without a value-parametric callee in scope, an ordinary body does not
+    /// retain speculative helper calls. Assertions can still replay them.
+    AssertionDeferred(usize),
 }
 
 /// A checked expression could not finish evaluating in the current context.
@@ -562,7 +619,7 @@ pub(super) enum ConstantBinding {
 pub(super) enum ConstantFailure {
     InvalidEnumCast(String),
     WorkLimit,
-    Deferred(usize),
+    Deferred(BTreeSet<usize>),
     /// An ordinary speculative fold reached a call. A value-parametric use
     /// can replay the let with the module's concrete functions available.
     NeedsFunctions,
@@ -572,7 +629,14 @@ pub(super) enum ConstantFailure {
 /// a value-parametric binding in its lexical scope.
 pub(super) struct ConstantFunctions {
     available: AvailableFunctions,
-    values: HashMap<ConstantCall, IrValue>,
+    values: HashMap<ConstantCall, FoldedConstant>,
+}
+
+/// An evaluated value and whether a BX fold omitted DSLX constexpr work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct FoldedConstant {
+    pub(super) value: IrValue,
+    pub(super) needs_dslx_replay: bool,
 }
 
 /// Concrete checked functions available to constexpr evaluation, including
@@ -584,6 +648,7 @@ pub(super) type AvailableFunctions = Rc<RefCell<BTreeMap<String, Rc<CheckedFunct
 struct ConstantCall {
     name: String,
     arguments: Vec<IrValue>,
+    usage: ConstantUse,
 }
 
 impl ConstantFunctions {
@@ -596,10 +661,37 @@ impl ConstantFunctions {
 }
 
 impl ConstantBinding {
+    /// Preserve the defining let when a BX fold selected only constant paths.
+    /// A later DSLX assertion or value parametric can replay it under DSLX
+    /// rules.
+    pub(super) fn folded(
+        value: IrValue,
+        definition: usize,
+        parametric_ready: bool,
+        assertion_ready: bool,
+    ) -> Self {
+        if assertion_ready {
+            Self::Known(value)
+        } else {
+            Self::Selected {
+                value,
+                definition,
+                parametric_ready,
+            }
+        }
+    }
+
     pub(super) fn deferred_definition(&self, usage: ConstantUse) -> Option<usize> {
         match self {
             Self::Deferred(index) => Some(*index),
-            Self::Selected { definition, .. } if usage == ConstantUse::ValueParametric => {
+            Self::AssertionDeferred(index) if usage == ConstantUse::Assertion => Some(*index),
+            Self::Selected {
+                definition,
+                parametric_ready,
+                ..
+            } if usage == ConstantUse::Assertion
+                || usage == ConstantUse::Dslx && !parametric_ready =>
+            {
                 Some(*definition)
             }
             _ => None,
@@ -608,11 +700,23 @@ impl ConstantBinding {
 
     fn read(&self, work: &mut CountedWork<'_>) -> Option<&IrValue> {
         if let Some(index) = self.deferred_definition(work.usage) {
-            work.failure = Some(ConstantFailure::Deferred(index));
+            work.failure = Some(ConstantFailure::Deferred(BTreeSet::from([index])));
             return None;
         }
         match self {
-            Self::Known(value) | Self::Selected { value, .. } => Some(value),
+            Self::Known(value) => Some(value),
+            Self::Selected { value, .. } => {
+                work.needs_dslx_replay = true;
+                Some(value)
+            }
+            Self::AssertionDeferred(_) => {
+                // A speculative BX fold that depends on this helper must also
+                // retain its own definition for a later assertion replay.
+                if work.usage == ConstantUse::Bx {
+                    work.failure = Some(ConstantFailure::NeedsFunctions);
+                }
+                None
+            }
             Self::Deferred(_) => unreachable!("deferred definition handled above"),
         }
     }
@@ -657,7 +761,7 @@ impl ConstantScope<'_> {
                             if let Some(value) = locals.get(name) {
                                 return Some(value);
                             }
-                            work.missing_local = Some((*depth, index));
+                            work.missing_local = Some((*depth, BTreeSet::from([index])));
                             return None;
                         }
                         None if let Some(value) = locals.get(name) => return Some(value),
@@ -676,9 +780,12 @@ struct CountedWork<'a> {
     enums: &'a BTreeMap<String, CheckedEnum>,
     remaining: &'a mut usize,
     inside_loop: bool,
+    /// A DSLX constexpr match executes its selected arm as bytecode.
+    inside_match: bool,
+    needs_dslx_replay: bool,
     usage: ConstantUse,
     failure: Option<ConstantFailure>,
-    missing_local: Option<(usize, usize)>,
+    missing_local: Option<(usize, BTreeSet<usize>)>,
     functions: Option<&'a mut ConstantFunctions>,
 }
 
@@ -692,6 +799,54 @@ fn on_constant_stack<T>(evaluate: impl FnOnce() -> T) -> T {
 }
 
 impl CountedWork<'_> {
+    /// Queue the remaining unconditional lets of a selected assertion scope
+    /// together. Retrying the scope once per let would rescan its whole prefix.
+    fn queue_sequence_inputs(&mut self, names: &ConstantScope<'_>, operands: &[TypedExpr]) {
+        let bytecode = names.depth() != 0 || self.inside_match;
+        match (names, &mut self.missing_local, &mut self.failure) {
+            (
+                ConstantScope::Iteration {
+                    locals,
+                    definitions,
+                    before,
+                    depth,
+                    ..
+                },
+                Some((owner, pending)),
+                _,
+            ) if owner == depth => {
+                for operand in operands {
+                    operand.unconditional_sequence_inputs(bytecode, &mut |name, _| {
+                        if let Some(&index) = definitions.get(name)
+                            && index < *before
+                            && !locals.contains_key(name)
+                        {
+                            pending.insert(index);
+                        }
+                        true
+                    });
+                }
+            }
+            (ConstantScope::Outer(bindings), _, Some(ConstantFailure::Deferred(pending))) => {
+                for operand in operands {
+                    operand.unconditional_sequence_inputs(bytecode, &mut |name, _| {
+                        if let Some(index) = bindings
+                            .get(name)
+                            .and_then(|b| b.deferred_definition(self.usage))
+                        {
+                            pending.insert(index);
+                        }
+                        true
+                    });
+                }
+            }
+            _ => {
+                // Another lexical scope owns this replay, or evaluation
+                // failed without a deferred binding.
+            }
+        }
+    }
+
     fn charge(&mut self, work: usize) -> Option<()> {
         if let Some(rest) = self.remaining.checked_sub(work) {
             *self.remaining = rest;
@@ -772,12 +927,24 @@ impl CountedWork<'_> {
         let call = ConstantCall {
             name: name.to_owned(),
             arguments: args,
+            usage: self.usage,
         };
-        if let Some(value) = self.functions.as_ref()?.values.get(&call) {
-            return Some(value.clone());
+        if let Some(cached) = self.functions.as_ref()?.values.get(&call) {
+            self.needs_dslx_replay |= cached.needs_dslx_replay;
+            return Some(cached.value.clone());
         }
-        let value = on_constant_stack(|| self.function_body(&function, &call.arguments))?;
-        self.functions.as_mut()?.values.insert(call, value.clone());
+        let argument_replay = std::mem::take(&mut self.needs_dslx_replay);
+        let result = on_constant_stack(|| self.function_body(&function, &call.arguments));
+        let needs_dslx_replay = self.needs_dslx_replay;
+        self.needs_dslx_replay |= argument_replay;
+        let value = result?;
+        self.functions.as_mut()?.values.insert(
+            call,
+            FoldedConstant {
+                value: value.clone(),
+                needs_dslx_replay,
+            },
+        );
         Some(value)
     }
 
@@ -816,25 +983,25 @@ impl CountedWork<'_> {
 fn body_inputs(bindings: &[CheckedBinding], output: &TypedExpr) -> BTreeMap<String, CaptureUse> {
     let mut bound = BTreeSet::new();
     let mut inputs = BTreeMap::new();
-    let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>, is_test_discard: bool| {
+    let mut record = |expr: &TypedExpr, bound: &BTreeSet<&str>, binding_use: CaptureUse| {
         expr.all_inputs(true, &mut |name, usage| {
             if !bound.contains(name) {
-                if is_test_discard || usage == CaptureUse::TestDiscard {
+                let modes = binding_use.0 & usage.0;
+                if modes != 0 {
                     inputs
                         .entry(name.to_owned())
-                        .or_insert(CaptureUse::TestDiscard);
-                } else {
-                    inputs.insert(name.to_owned(), CaptureUse::Value);
+                        .or_insert_with(CaptureUse::default)
+                        .0 |= modes;
                 }
             }
             true
         });
     };
     for binding in bindings {
-        record(&binding.value, &bound, binding.is_test_discard());
+        record(&binding.value, &bound, binding.usage());
         bound.insert(binding.name.as_str());
     }
-    record(output, &bound, false);
+    record(output, &bound, CaptureUse::VALUE);
     inputs
 }
 
@@ -851,7 +1018,9 @@ impl TypedFor {
         output: TypedExpr,
     ) -> Self {
         let mut captures = body_inputs(&bindings, &output);
-        let uses_element = captures.remove(&element.name) == Some(CaptureUse::Value);
+        let uses_element = captures
+            .remove(&element.name)
+            .is_some_and(CaptureUse::constexpr);
         captures.remove(&accumulator.name);
         Self {
             element,
@@ -1010,11 +1179,12 @@ fn constant_iteration<'a>(
                 return Some(value);
             };
             locals.insert(bindings[index].name.as_str(), value);
-        } else if let Some((owner, missing)) = work.missing_local
-            && owner == depth
+        } else if work
+            .missing_local
+            .as_ref()
+            .is_some_and(|(owner, _)| *owner == depth)
         {
-            work.missing_local = None;
-            let mut required = BTreeSet::from([missing]);
+            let (_, mut required) = work.missing_local.take().expect("checked owner");
             expr.all_inputs(false, &mut |name, _| {
                 if let Some(&i) = definitions.get(name)
                     && i < index
@@ -1088,14 +1258,65 @@ fn constant_match_arm<'a>(
 }
 
 impl TypedExpr {
+    /// Visit an executed sequence operand, including prerequisites retained
+    /// only for bytecode. Other expressions expose their unconditional inputs.
+    fn unconditional_sequence_inputs(
+        &self,
+        bytecode: bool,
+        visit: &mut dyn FnMut(&str, CaptureUse) -> bool,
+    ) {
+        if let K::Sequence {
+            operands,
+            result,
+            bytecode_only,
+        } = &self.kind
+        {
+            if !bytecode_only || bytecode {
+                for operand in operands {
+                    operand.unconditional_sequence_inputs(bytecode, visit);
+                }
+            }
+            result.unconditional_sequence_inputs(bytecode, visit);
+        } else {
+            self.all_inputs(false, visit);
+        }
+    }
+
+    /// The runtime value after skipping compile-time operand checks.
+    pub(super) fn runtime_result(&self) -> &Self {
+        let mut result = self;
+        while let K::Sequence { result: inner, .. } = &result.kind {
+            result = inner;
+        }
+        result
+    }
+
     /// Visit the value dependencies of an expression, with lexical binders
     /// removed from nested loop and map bodies.
     fn all_inputs(&self, branches: bool, accept: &mut dyn FnMut(&str, CaptureUse) -> bool) -> bool {
         match &self.kind {
-            K::Name(name) | K::BindingTupleIndex { name, .. } => accept(name, CaptureUse::Value),
+            K::Sequence {
+                operands, result, ..
+            } => {
+                (!branches
+                    || operands.iter().all(|operand| {
+                        operand.all_inputs(true, &mut |name, usage| {
+                            !usage.constexpr() || accept(name, CaptureUse::CONSTEXPR)
+                        })
+                    }))
+                    && result.all_inputs(branches, accept)
+            }
+            K::Name(name) | K::BindingTupleIndex { name, .. } => {
+                let usage = if name.starts_with(MATCH_LET_PREFIX) {
+                    CaptureUse(CaptureUse::SYNTHESIS.0 | CaptureUse::TEST_DISCARD.0)
+                } else {
+                    CaptureUse::VALUE
+                };
+                accept(name, usage)
+            }
             K::Literal(_) => true,
             K::InstanceOutput { instance, port } => {
-                accept(&format!("{instance}.{port}"), CaptureUse::Value)
+                accept(&format!("{instance}.{port}"), CaptureUse::VALUE)
             }
             K::For(fold) if !branches && fold.trip_count == 0 => {
                 fold.seed.all_inputs(branches, accept)
@@ -1187,16 +1408,51 @@ impl TypedExpr {
         });
     }
 
-    /// A DSLX type dimension requires constant inputs on every branch.
+    /// Ordinary BX bounds and dimensions require their value inputs on every
+    /// branch. Additional operands retained for an assertion do not change
+    /// these checks.
     pub(super) fn has_constant_inputs(&self, names: &BTreeSet<String>) -> bool {
         self.all_inputs(true, &mut |name, usage| {
-            usage == CaptureUse::TestDiscard || names.contains(name)
+            !usage.runtime(false) || names.contains(name)
         })
+    }
+
+    /// BX folding can skip a scope's expression statements and tuple
+    /// prerequisites.
+    pub(super) fn needs_dslx_inputs(&self, names: &BTreeMap<String, ConstantBinding>) -> bool {
+        !self.all_inputs(true, &mut |name, usage| {
+            !usage.constexpr()
+                || usage.runtime(false)
+                    && names
+                        .get(name)
+                        .and_then(|value| value.deferred_definition(ConstantUse::Assertion))
+                        .is_none()
+        })
+    }
+
+    /// A let lifted from a match arm must still expose its free names to the
+    /// match's constexpr capture check, including names in untaken branches.
+    pub(super) fn match_capture_operands(&self) -> Vec<TypedExpr> {
+        let mut names = BTreeSet::new();
+        self.all_inputs(true, &mut |name, usage| {
+            if usage.constexpr() {
+                names.insert(name.to_owned());
+            }
+            true
+        });
+        names
+            .into_iter()
+            .map(|name| TypedExpr {
+                // Only availability is observed. No hardware value is emitted.
+                ty: Type::Tuple(Vec::new()),
+                kind: K::Name(name),
+            })
+            .collect()
     }
 
     /// Evaluate a lexical constant. Module initializers may additionally
     /// invoke the checked local functions visible at their declaration.
-    pub(super) fn constant(
+    pub(super) fn fold(
         &self,
         names: &BTreeMap<String, ConstantBinding>,
         remaining: &mut usize,
@@ -1204,12 +1460,14 @@ impl TypedExpr {
         usage: ConstantUse,
         functions: Option<&mut ConstantFunctions>,
         enums: &BTreeMap<String, CheckedEnum>,
-    ) -> Result<Option<IrValue>, ConstantFailure> {
+    ) -> Result<Option<FoldedConstant>, ConstantFailure> {
         let may_call = functions.is_some();
         let mut work = CountedWork {
             enums,
             remaining,
             inside_loop: replaying,
+            inside_match: false,
+            needs_dslx_replay: false,
             usage,
             failure: None,
             missing_local: None,
@@ -1227,7 +1485,10 @@ impl TypedExpr {
         if let Some(failure) = work.failure {
             Err(failure)
         } else {
-            Ok(value)
+            Ok(value.map(|value| FoldedConstant {
+                value,
+                needs_dslx_replay: work.needs_dslx_replay,
+            }))
         }
     }
 
@@ -1239,17 +1500,37 @@ impl TypedExpr {
         // DSLX emits bytecode for a constexpr match or loop with bindings for
         // all its free names, including unselected arms. A helper's parameters
         // and iteration locals already have concrete values when executed.
-        if remaining.usage == ConstantUse::ValueParametric
+        if remaining.usage != ConstantUse::Bx
             && names.depth() == 0
             && matches!(self.kind, K::Match { .. } | K::For(_) | K::Map(_))
             && !self.all_inputs(true, &mut |name, usage| {
-                usage == CaptureUse::TestDiscard
+                !remaining.usage.requires_capture(usage)
                     || remaining.charge(1).is_some() && names.read(name, remaining).is_some()
             })
         {
             return None;
         }
         let value = match &self.kind {
+            K::Sequence {
+                operands,
+                result,
+                bytecode_only,
+            } => {
+                if remaining.usage != ConstantUse::Assertion {
+                    remaining.needs_dslx_replay = true;
+                }
+                if remaining.usage == ConstantUse::Assertion
+                    && (!bytecode_only || names.depth() != 0 || remaining.inside_match)
+                {
+                    for (index, operand) in operands.iter().enumerate() {
+                        if operand.constant_with_budget(names, remaining).is_none() {
+                            remaining.queue_sequence_inputs(names, &operands[index..]);
+                            return None;
+                        }
+                    }
+                }
+                result.constant_with_budget(names, remaining)
+            }
             K::Map(map) => {
                 let outer = std::mem::replace(&mut remaining.inside_loop, true);
                 let value = map.constant(names, remaining);
@@ -1291,13 +1572,15 @@ impl TypedExpr {
                 let size = array.get_element_count().ok()?;
                 let index = index.constant_with_budget(names, remaining)?;
                 let bits = index.as_bits().ok()?;
-                let i = if names.depth() > 0 || remaining.usage == ConstantUse::ValueParametric {
+                let i = if names.depth() > 0 || remaining.usage != ConstantUse::Bx {
                     // An iteration or constexpr actual can make an index
                     // constant for the first time. Check its array bounds.
                     ir_bits_to_usize_in_range(bits, size)?
                 } else {
                     let last = size.checked_sub(1)?;
-                    ir_bits_to_usize(bits).unwrap_or(last).min(last)
+                    let index = ir_bits_to_usize(bits);
+                    remaining.needs_dslx_replay |= index.is_none_or(|i| i > last);
+                    index.unwrap_or(last).min(last)
                 };
                 array.get_element(i).ok()
             }
@@ -1355,9 +1638,14 @@ impl TypedExpr {
             K::Call { name, args } => remaining.call(name, args, names),
             K::ImportedCall { .. } | K::InstanceOutput { .. } => None,
             K::Match { subject, arms } => {
-                let value = subject.constant_with_budget(names, remaining)?;
-                constant_match_arm(arms, &value, &subject.ty, remaining)?
-                    .constant_with_budget(names, remaining)
+                let outer = std::mem::replace(&mut remaining.inside_match, true);
+                let result = (|| {
+                    let value = subject.constant_with_budget(names, remaining)?;
+                    constant_match_arm(arms, &value, &subject.ty, remaining)?
+                        .constant_with_budget(names, remaining)
+                })();
+                remaining.inside_match = outer;
+                result
             }
             K::If {
                 condition,
@@ -1465,10 +1753,36 @@ mod tests {
     use xlsynth_pir::{IrBits, IrValue};
 
     use super::{
-        CheckedStmt, ConstantBinding, ConstantFailure, ConstantFunctions, ConstantUse, TypedExpr,
-        TypedExprKind,
+        CONSTEXPR_PREFIX, CheckedBinding, CheckedStmt, ConstantBinding, ConstantFailure,
+        ConstantFunctions, ConstantUse, TEST_DISCARD_PREFIX, Type, TypedExpr, TypedExprKind,
+        body_inputs,
     };
     use crate::{check_module, parse_module};
+
+    #[test]
+    fn a_constexpr_capture_can_also_be_needed_by_pure_test_execution() {
+        let reference = TypedExpr {
+            ty: Type::Bool,
+            kind: TypedExprKind::Name("x".into()),
+        };
+        let output = TypedExpr {
+            ty: Type::Bool,
+            kind: TypedExprKind::Literal(IrValue::bool(true)),
+        };
+        for order in [
+            [CONSTEXPR_PREFIX, TEST_DISCARD_PREFIX],
+            [TEST_DISCARD_PREFIX, CONSTEXPR_PREFIX],
+        ] {
+            let bindings = order.map(|prefix| CheckedBinding {
+                name: format!("{prefix}0"),
+                value: reference.clone(),
+            });
+            let usage = body_inputs(&bindings, &output)["x"];
+            assert!(usage.constexpr());
+            assert!(usage.runtime(true));
+            assert!(!usage.runtime(false));
+        }
+    }
 
     #[test]
     fn nested_constant_helper_expressions_fit_a_small_stack() -> Result<(), String> {
@@ -1493,14 +1807,17 @@ mod tests {
                 let mut calls = ConstantFunctions::new(available);
                 let mut remaining = crate::check::MAX_TYPE_SIZE;
                 assert_eq!(
-                    result.output.constant(
-                        &BTreeMap::new(),
-                        &mut remaining,
-                        true,
-                        ConstantUse::Bx,
-                        Some(&mut calls),
-                        &BTreeMap::new(),
-                    ),
+                    result
+                        .output
+                        .fold(
+                            &BTreeMap::new(),
+                            &mut remaining,
+                            true,
+                            ConstantUse::Bx,
+                            Some(&mut calls),
+                            &BTreeMap::new(),
+                        )
+                        .map(|v| v.map(|fold| fold.value)),
                     Ok(Some(IrValue::make_ubits(8, 254).unwrap()))
                 );
             })
@@ -1579,14 +1896,17 @@ block folded(clk) -> u16 {{
             let module = check_module(&parse_module(&source)?)?;
             let mut remaining = 128;
             assert_eq!(
-                module.blocks()[0].output.constant(
-                    &BTreeMap::new(),
-                    &mut remaining,
-                    false,
-                    ConstantUse::Bx,
-                    None,
-                    &BTreeMap::new()
-                ),
+                module.blocks()[0]
+                    .output
+                    .fold(
+                        &BTreeMap::new(),
+                        &mut remaining,
+                        false,
+                        ConstantUse::Bx,
+                        None,
+                        &BTreeMap::new()
+                    )
+                    .map(|v| v.map(|fold| fold.value)),
                 expected
             );
         }
@@ -1602,7 +1922,7 @@ block folded(clk) -> u16 {{
         let names = BTreeMap::from([("row".to_owned(), ConstantBinding::Known(row))]);
         let mut remaining = 4;
         assert_eq!(
-            module.functions()[0].output.constant(
+            module.functions()[0].output.fold(
                 &names,
                 &mut remaining,
                 false,
@@ -1635,7 +1955,7 @@ fn pack(x: uN[256][2]) -> uN[512] { x as uN[512] }
             let names = BTreeMap::from([("x".to_owned(), ConstantBinding::Known(input))]);
             let mut remaining = 4;
             assert_eq!(
-                function.output.constant(
+                function.output.fold(
                     &names,
                     &mut remaining,
                     false,
@@ -1671,19 +1991,21 @@ block folded(clk, rows: u8[2][2]) -> u8[2][2] {
         let names = BTreeMap::from([("rows".to_string(), ConstantBinding::Known(input))]);
         let mut ample = 1024;
         assert_eq!(
-            output.constant(
-                &names,
-                &mut ample,
-                false,
-                ConstantUse::Bx,
-                None,
-                &BTreeMap::new()
-            ),
+            output
+                .fold(
+                    &names,
+                    &mut ample,
+                    false,
+                    ConstantUse::Bx,
+                    None,
+                    &BTreeMap::new()
+                )
+                .map(|v| v.map(|fold| fold.value)),
             Ok(Some(expected))
         );
         let mut limited = 26;
         assert_eq!(
-            output.constant(
+            output.fold(
                 &names,
                 &mut limited,
                 false,
@@ -1861,7 +2183,7 @@ block wide_capture(clk, data: Payload) -> bool {
         for block in checked.blocks() {
             let mut remaining = crate::check::MAX_TYPE_SIZE;
             assert_eq!(
-                block.output.constant(
+                block.output.fold(
                     &values,
                     &mut remaining,
                     false,
