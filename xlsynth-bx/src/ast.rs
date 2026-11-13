@@ -755,6 +755,8 @@ pub enum WidthSliceType {
 /// Structural declarations, value bindings, and register or child port drivers.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Stmt {
+    /// Check a Boolean constexpr when elaborating this block.
+    ConstAssert(ConstAssert),
     Reg {
         name: String,
         ty: Type,

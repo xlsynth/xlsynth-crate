@@ -1140,6 +1140,7 @@ impl<'s> Parser<'s> {
                 self.pos += 1;
                 self.value_context = ValueContext::DslxItem;
                 let (assertion, _) = self.with_name_scope(|p| p.const_assert_predicate())?;
+                self.expect(";")?;
                 self.value_context = ValueContext::Block;
                 let position = assertion.position;
                 let label = format!("const_assert! at {}:{}", position.line, position.column);
@@ -1701,6 +1702,7 @@ impl<'s> Parser<'s> {
                 let (assertion, predicate_height) = self.const_assert_predicate()?;
                 height = height.max(predicate_height);
                 statements.push(ScopeStatement::ConstAssert(assertion));
+                self.expect(";")?;
             } else {
                 let value = self.expr()?;
                 if self.eat("}") {
@@ -1723,14 +1725,12 @@ impl<'s> Parser<'s> {
         )
     }
 
-    /// Parse the single predicate and terminating semicolon after
-    /// `const_assert!`.
+    /// Parse the single parenthesized predicate after `const_assert!`.
     fn const_assert_predicate(&mut self) -> Result<(ConstAssert, usize), String> {
         let position = self.position_at(self.tokens[self.pos - 1].start);
         self.expect("(")?;
         let predicate = self.expr()?;
         self.expect(")")?;
-        self.expect(";")?;
         Ok((
             ConstAssert {
                 predicate: predicate.value,
@@ -1966,7 +1966,8 @@ impl<'s> Parser<'s> {
             self.shadow_callable(&port.name);
         }
         self.dependent_types = !params.value_parametrics.is_empty();
-        let body = self.with_name_scope(|p| p.block_body_contents(lemmas))?;
+        let body =
+            self.with_name_scope(|p| p.block_body_contents(lemmas, /* guarded= */ false))?;
         self.dependent_types = false;
         self.type_params.clear();
         let (output, output_span) = body
@@ -2380,14 +2381,10 @@ impl<'s> Parser<'s> {
         tuple(self, fields)
     }
 
-    /// Read declarations and updates followed by an optional trailing value.
-    fn body(&mut self) -> Result<Body, String> {
-        self.with_name_scope(|p| p.block_body_contents(None))
-    }
-
     fn block_body_contents(
         &mut self,
         mut lemmas: Option<&mut Vec<InvariantLemma>>,
+        guarded: bool,
     ) -> Result<Body, String> {
         let mut statements = Vec::new();
         let mut statement_spans = Vec::new();
@@ -2436,6 +2433,13 @@ impl<'s> Parser<'s> {
                 statements.push(observation);
             } else if self.eat("let") {
                 statements.push(self.let_stmt(/* allow_wire= */ true)?.0);
+            } else if self.peek(0) == "const_assert!" {
+                if guarded {
+                    return Err(self.error("const_assert! requires the top level of a block body"));
+                }
+                self.pos += 1;
+                let (assertion, _) = self.with_value_grammar(Self::const_assert_predicate)?;
+                statements.push(Stmt::ConstAssert(assertion));
             } else if self.peek(0) == "inst" && is_identifier(self.peek(1)) && self.peek(2) == ":" {
                 return Err(self.error("use `let name = child(args);` to instantiate a block"));
             } else if self.peek(1) == ":=" {
@@ -2471,7 +2475,9 @@ impl<'s> Parser<'s> {
                         output: Some((output, span)),
                     });
                 }
-                let then_body = self.nested(Self::body)?;
+                let then_body = self.nested(|p| {
+                    p.with_name_scope(|p| p.block_body_contents(None, /* guarded= */ true))
+                })?;
                 if then_body.output.is_some() {
                     return Err(self.error("value-producing if requires an else arm"));
                 }

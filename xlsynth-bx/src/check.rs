@@ -2413,7 +2413,7 @@ fn block_binding_names(block: &Block) -> BTreeSet<String> {
                 });
             }
             Stmt::If { body, .. } => pending.extend(body),
-            _ => { /* Drivers introduce no local bindings. */ }
+            _ => { /* Drivers and assertions introduce no local bindings. */ }
         }
     }
     names
@@ -3262,6 +3262,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                     .copied();
             }
             let checked = match stmt {
+                Stmt::ConstAssert(assertion) => {
+                    if conditional {
+                        return Err(format!(
+                            "{}:{}: const_assert! requires the top level of a block body",
+                            assertion.position.line, assertion.position.column
+                        ));
+                    }
+                    self.check_const_assert(assertion)?;
+                    continue;
+                }
                 Stmt::Reg { name, ty, reset } => {
                     if conditional {
                         return Err(format!("conditional declaration of register '{name}'"));
@@ -3473,12 +3483,11 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         initializer: &Expr,
         structural: bool,
     ) -> Result<scope::BindingInitializer, String> {
-        let ty = annotation.map(|t| self.source_type(t)).transpose()?;
         // Preparing a lexical scope exposes its trailing expression, which
         // still occupies a pure value position inside the original scope.
         let structural = structural && !matches!(initializer, Expr::Scope { .. });
-        self.binding_initializer(initializer, ty.as_ref(), |checker, expr| {
-            checker.let_value(name, expr, ty.as_ref(), structural)
+        self.annotated_binding_initializer(initializer, annotation, |checker, expr, ty| {
+            checker.let_value(name, expr, ty, structural)
         })
     }
 
