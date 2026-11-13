@@ -3589,17 +3589,27 @@ word-level Lean definitions. The generated module exposes a typed `eval`
 and a single-bitvector adapter `evalPacked`. Export runs entirely in Rust.
 
 - `<IR>` is a package-form IR file.
-- `--output-dir <DIR>` is required. It receives the generated module,
-  `XlsynthLean/IR.lean`, and the Lean toolchain pin.
+- `--output-dir <DIR>` is required. The command writes only the generated
+  module beneath this directory. The module imports `XlsynthLean.IR`.
 - `--top <FUNCTION>` overrides the package top. A package without a top
   uses its sole function or requires an explicit selection.
 - `--module <NAME>` sets the dotted Lean module name (default `Generated.Function`).
 
+For a new project, compile the shared library once. From the repository root,
+use the Lean version pinned in `xlsynth-lean/lean/lean-toolchain` for both
+the library and the generated model.
+
 ```bash
-xlsynth-driver ir-fn-to-lean design.ir --top main --output-dir lean-out
-cd lean-out
-LEAN_PATH=. lean -o XlsynthLean/IR.olean XlsynthLean/IR.lean
-LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean
+project_root="$PWD/lean-out"
+mkdir -p "$project_root/XlsynthLean"
+(cd xlsynth-lean/lean && lean -o "$project_root/XlsynthLean/IR.olean" XlsynthLean/IR.lean)
+```
+
+Then export and compile each model in that project.
+
+```bash
+xlsynth-driver ir-fn-to-lean design.ir --top main --output-dir "$project_root"
+(cd "$project_root" && LEAN_PATH=. lean -o Generated/Function.olean Generated/Function.lean)
 ```
 
 See the [word-level exporter](../xlsynth-lean/README.md#word-level-ir-functions)

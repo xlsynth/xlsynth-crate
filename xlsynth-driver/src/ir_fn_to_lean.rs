@@ -35,7 +35,7 @@ pub fn command() -> Command {
                 .value_name("DIR")
                 .required(true)
                 .value_parser(value_parser!(PathBuf))
-                .help("Directory for the Lean module, support source, and toolchain pin"),
+                .help("Lean project directory in which to write the generated module"),
         )
 }
 

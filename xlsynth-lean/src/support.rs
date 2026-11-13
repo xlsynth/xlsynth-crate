@@ -32,7 +32,7 @@ pub(crate) struct LeanSupport(&'static [Module]);
 
 // This is also the on-disk contract for previously prepared AIG proof targets.
 pub(crate) const AIG_PROOF_SUPPORT: LeanSupport = LeanSupport(&[AIG, AAG, XLSYNTH_LEAN, EVAL_MAIN]);
-pub(crate) const IR_FUNCTION_SUPPORT: LeanSupport = LeanSupport(&[IR]);
+pub(crate) const IR_SUPPORT: LeanSupport = LeanSupport(&[IR]);
 pub(crate) const EVALUATOR_SUPPORT: LeanSupport = LeanSupport(&[IR, AIG, AAG, EVAL_MAIN]);
 
 impl LeanSupport {
@@ -51,7 +51,7 @@ impl LeanSupport {
 
 /// Writes all companion Lean sources and their toolchain pin.
 pub fn write_lean_support(root: &Path) -> Result<(), LeanError> {
-    let modules = AIG_PROOF_SUPPORT.0.iter().chain(IR_FUNCTION_SUPPORT.0);
+    let modules = AIG_PROOF_SUPPORT.0.iter().chain(IR_SUPPORT.0);
     write_support(root, modules.copied())
 }
 

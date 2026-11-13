@@ -7,12 +7,17 @@
 //! against the PIR evaluator. Word-level proof targets expose each IR node and
 //! check pointwise equivalence over the full signature. Gate proofs use an
 //! evaluator proved equivalent to Lean's stock AIG semantics.
+//!
+//! [`block`] separately exports stateful block models as Lean source text.
+
+pub mod block;
 
 mod error;
 mod evaluate;
 mod gate_fn;
 mod ir_fn;
 mod ir_proof;
+mod local_expr;
 mod process;
 mod proof;
 mod support;

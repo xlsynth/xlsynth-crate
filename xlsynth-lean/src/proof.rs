@@ -10,7 +10,7 @@ use xlsynth_g8r::aig::GateFn;
 use crate::gate_fn::export_gate_fn_aag;
 use crate::ir_proof::FIXED_IR_PROOF_FILES;
 use crate::process::{resolve_lean_executable, run_lean_process};
-use crate::support::{AIG_PROOF_SUPPORT, IR_FUNCTION_SUPPORT, write_file};
+use crate::support::{AIG_PROOF_SUPPORT, IR_SUPPORT, write_file};
 use crate::{InterfaceDirection, LeanError, LeanModuleName};
 
 const CHECK_SOURCE: &str = r#"-- SPDX-License-Identifier: Apache-2.0
@@ -286,14 +286,11 @@ pub fn run_ir_function_equivalence_proof_with_policy(
         "Generated/Rhs.lean",
         "Target.lean",
     ];
-    let modules = IR_FUNCTION_SUPPORT
+    let modules = IR_SUPPORT
         .module_paths()
         .chain(proof_modules)
         .collect::<Vec<_>>();
-    let artifacts = IR_FUNCTION_SUPPORT
-        .paths()
-        .chain(proof_modules)
-        .collect::<Vec<_>>();
+    let artifacts = IR_SUPPORT.paths().chain(proof_modules).collect::<Vec<_>>();
     run_prepared_proof(
         lean_executable,
         target_root,

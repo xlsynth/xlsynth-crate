@@ -1370,8 +1370,10 @@ pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
     Ok(())
 }
 
-/// Lowers extension nodes without imposing function interface or root rules.
-fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
+/// Lowers extensions in place, preserving existing node references, text IDs,
+/// names and source positions. New dependencies are appended, so consumers
+/// must traverse the result in topological order rather than storage order.
+pub fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
     // Lowering rewrites only the original extension nodes and appends their
     // dependencies.
     let originals: Vec<_> = f
