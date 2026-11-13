@@ -916,13 +916,34 @@ pub struct BlockSource {
     pub(crate) output: SourceSpan,
 }
 
-/// Output stages declared in this block's local stage numbering.
+/// A stage as written in BX, before a module constant has been looked up.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum OutputCycles {
+pub enum StageAnnotation {
+    Literal(u64),
+    Constant(String),
+}
+
+impl From<u64> for StageAnnotation {
+    fn from(stage: u64) -> Self {
+        Self::Literal(stage)
+    }
+}
+
+/// Output stages declared in this block's local stage numbering. Checked
+/// blocks carry numbers, while parsed blocks can still refer to constants.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutputCycles<T = u64> {
     /// `-> Ports @1` places every output port at stage 1.
-    Uniform(u64),
+    Uniform(T),
     /// `-> Ports @(live: 0, saved: 1)` gives each physical port its own stage.
-    ByPort(BTreeMap<String, u64>),
+    ByPort(BTreeMap<String, T>),
+}
+
+/// The stage declarations on a single block signature.
+#[derive(Clone)]
+pub(crate) struct BlockStages<T> {
+    pub inputs: BTreeMap<String, T>,
+    pub output: Option<OutputCycles<T>>,
 }
 
 /// A block definition, including its implicit timing domain and output
@@ -947,15 +968,82 @@ pub struct Block {
     pub reset: Option<String>,
     pub params: Vec<Param>,
     /// Explicit cycle offsets by data input name.
-    pub input_cycles: BTreeMap<String, u64>,
+    pub input_cycles: BTreeMap<String, StageAnnotation>,
     pub result: Type,
     /// Declared output timing, if the block opts into checking it.
-    pub output_cycles: Option<OutputCycles>,
+    pub output_cycles: Option<OutputCycles<StageAnnotation>>,
     pub statements: Vec<Stmt>,
     pub output: Expr,
 }
 
 impl Block {
+    /// Visit annotations in signature scope. An input enters scope at its
+    /// declaration and can shadow a module constant for subsequent stages.
+    pub(crate) fn map_stages<T: From<u64>>(
+        &self,
+        constant: impl Fn(&str) -> Result<T, String>,
+    ) -> Result<BlockStages<T>, String> {
+        let mut stages = BlockStages {
+            inputs: BTreeMap::new(),
+            output: None,
+        };
+        if self.input_cycles.is_empty() && self.output_cycles.is_none() {
+            return Ok(stages);
+        }
+        let mut locals: BTreeSet<&str> = std::iter::once(self.clock.as_str())
+            .chain(self.reset.as_deref())
+            .chain(self.type_params.iter().map(String::as_str))
+            .chain(self.value_parametrics.iter().map(|p| p.name.as_str()))
+            .chain(self.callback_params.iter().map(|p| p.name.as_str()))
+            .collect();
+        let stage = |annotation: &StageAnnotation, locals: &BTreeSet<&str>| match annotation {
+            StageAnnotation::Literal(value) => Ok(T::from(*value)),
+            StageAnnotation::Constant(name) => {
+                let head = name
+                    .split_once("::")
+                    .map_or(name.as_str(), |(head, _)| head);
+                if locals.contains(head) {
+                    return Err(format!(
+                        "stage '{name}' refers to a block parameter, expected a module constant"
+                    ));
+                }
+                constant(name)
+            }
+        };
+        for param in &self.params {
+            locals.insert(&param.name);
+            if let Some(annotation) = self.input_cycles.get(&param.name) {
+                stages
+                    .inputs
+                    .insert(param.name.clone(), stage(annotation, &locals)?);
+            }
+        }
+        // Parsed annotations are attached to declared inputs. Check that
+        // invariant for callers that construct a Block directly as well.
+        if let Some(unknown) = self
+            .input_cycles
+            .keys()
+            .find(|p| !stages.inputs.contains_key(*p))
+        {
+            return Err(format!(
+                "unknown input port '{unknown}' in stage annotation"
+            ));
+        }
+        stages.output = match &self.output_cycles {
+            None => None,
+            Some(OutputCycles::Uniform(value)) => {
+                Some(OutputCycles::Uniform(stage(value, &locals)?))
+            }
+            Some(OutputCycles::ByPort(ports)) => Some(OutputCycles::ByPort(
+                ports
+                    .iter()
+                    .map(|(port, value)| Ok((port.clone(), stage(value, &locals)?)))
+                    .collect::<Result<_, String>>()?,
+            )),
+        };
+        Ok(stages)
+    }
+
     /// Whether this declaration needs a call to produce a concrete block.
     pub fn is_parametric(&self) -> bool {
         !self.type_params.is_empty()

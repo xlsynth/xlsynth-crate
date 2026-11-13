@@ -35,6 +35,32 @@ fn compile_design(source: &str, options: &ImportOptions<'_>) -> Result<Package, 
 }
 
 #[test]
+fn imported_block_uses_stage_constants_from_its_defining_module() -> Result<(), Box<dyn Error>> {
+    let dir = tempdir()?;
+    write_module(
+        dir.path(),
+        "stages.bx",
+        r#"
+const START = u32:0;
+pub const SAVED = u32:1;
+pub block delay(clk, x: u8 @START) -> u8 @SAVED { reg q: u8; q := x; q }
+"#,
+    )?;
+    let source = r#"
+use stages;
+const START = u32:4;
+const SAVED = u32:6;
+block top(clk, x: u8 @START) -> u8 @SAVED {
+    let q = stages::delay(x);
+    reg r: u8; r := q; r
+}
+block first(clk, x: u8) -> u8 @stages::SAVED { let q = stages::delay(x); q }
+"#;
+    check_module_with_options(&parse_module(source)?, &search_paths(&[dir.path()]))?;
+    Ok(())
+}
+
+#[test]
 fn explicit_reset_permission_belongs_to_the_defining_file() -> Result<(), Box<dyn Error>> {
     let dir = tempdir()?;
     let options = search_paths(&[dir.path()]);
