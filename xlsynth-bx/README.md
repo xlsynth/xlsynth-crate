@@ -1082,6 +1082,39 @@ The constant must be an unsigned integer whose value fits in `u64`. BX treats
 `bool` and `u1` alike here, so `false` gives stage 0 and `true` gives stage 1.
 Put arithmetic or calls to pure BX helpers in the constant initializer.
 
+For an output whose latency depends on the operation, write a pure BX helper
+and pass it the inputs sampled on the issue clock.
+
+```text
+enum Op : u2 { Fast = 0, Slow = 3 }
+fn latency(valid: bool, op: Op) -> u32 {
+    match (valid, op) {
+        (true, Op::Fast) => u32:1,
+        (true, Op::Slow) => u32:2,
+        (false, _) => u32:1,
+    }
+}
+// On a block signature: -> bool @latency(valid, op)
+```
+
+BX checks each legal input combination separately. For `(true, Op::Slow)`,
+it samples that case at issue and checks the output two rising edges later.
+Payload bits at issue are free, as are all inputs on other clocks and the
+initial register contents. BX must show that only the issuing clock's inputs
+can affect the output at its deadline. This catches an output mux that uses a
+later operation's select. A constant fits any deadline. Use a functional test
+to check the expected value or pulse shape. The `(false, _)` arm above makes
+a real one-edge promise, including when a previous operation is still in flight.
+
+The [clocked example](tests/fixtures/issue_latency.bx) issues Fast, Slow, Fast.
+Slow and the second Fast are due together and can share a Boolean pulse.
+A data mux that picks the newer payload would fail the Slow case. BX checks
+with unrestricted input traffic. It accepts up to 64 combinations of Boolean,
+unsigned-bit or enum inputs and deadlines up to 64 edges. This form currently
+supports reset-free blocks with stage-0 inputs and local register/let
+datapaths. A parent checking fixed stages cannot use a child's case-dependent
+output as a single fixed stage.
+
 Put `#![require_block_timing]` at the top of a `.bx` file to require an output
 stage on every block defined there. A missing annotation emits
 `missing_block_timing`, which fails compilation by default. Imported files set

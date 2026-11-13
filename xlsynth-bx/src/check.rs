@@ -2218,8 +2218,6 @@ pub(crate) fn check_sources_with_tests(
         specialized_blocks.insert(spec.name.clone());
         checked.push(block.block);
     }
-    let mut functions = function_registry.finish(function_bodies)?;
-    functions.extend(test_functions);
     let mut graph = Vec::new();
     for block in &checked {
         let children = block
@@ -2249,7 +2247,14 @@ pub(crate) fn check_sources_with_tests(
     infer_block_resets(&mut blocks, &extern_blocks, &invariant_harnesses)?;
     // A parent may call a generic child defined later in the file. At this
     // point its concrete specialization appears before the parent in `blocks`.
-    timing::check_blocks(&mut blocks, &structs, &invariant_harnesses)?;
+    timing::check_blocks(
+        &mut blocks,
+        &structs,
+        &invariant_harnesses,
+        &function_registry.available,
+    )?;
+    let mut functions = function_registry.finish(function_bodies)?;
+    functions.extend(test_functions);
     let warnings =
         declarations
             .warnings

@@ -15,8 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::StructTable;
 use crate::ast::{BinaryOp, OutputCycles, Param, Type};
 use crate::typed::{
-    CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K, is_constexpr_only_name,
+    AvailableFunctions, CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K,
+    is_constexpr_only_name,
 };
+
+mod issue;
 
 const BLOCK_SCOPE: usize = 0;
 
@@ -26,6 +29,7 @@ pub(super) fn check_blocks(
     blocks: &mut [CheckedBlock],
     structs: &StructTable<'_>,
     invariant_harnesses: &BTreeSet<&str>,
+    functions: &AvailableFunctions,
 ) -> Result<(), String> {
     // In BX, `#[invariant] ... -> bool @0` promises stage 0 for the
     // returned Boolean. The harness exposes it as tuple field 0, followed
@@ -48,7 +52,16 @@ pub(super) fn check_blocks(
         } else {
             &block.output_ports
         };
-        if let Err(error) = check_outputs(block, expected, ports, structs, &children) {
+        let result = match expected {
+            OutputCycles::IssueCall { .. } if invariant => {
+                Err("issue-time latency requires an ordinary block".into())
+            }
+            OutputCycles::IssueCall { function, inputs } => {
+                issue::check(block, function, inputs, functions, &structs.enums)
+            }
+            _ => check_outputs(block, expected, ports, structs, &children),
+        };
+        if let Err(error) = result {
             let deferred = block.statements.iter().any(|stmt| match stmt {
                 CheckedStmt::Wire { .. } => true,
                 CheckedStmt::Inst { block, .. } => children
@@ -111,7 +124,9 @@ fn check_outputs(
     for (index, port) in ports.iter().enumerate() {
         // Suppose `saved` is field 0. In `@(live: 0, saved: 1)`, its stage
         // is 1. Use its name for the annotation and its index for the value.
-        let cycle = expected.stage_for_port(&port.name);
+        let cycle = expected
+            .stage_for_port(&port.name)
+            .ok_or("missing fixed output stage")?;
         let field = aggregate.then_some(index);
         check(field.as_slice(), cycle).map_err(|err| format!("output '{}': {err}", port.name))?;
     }
@@ -120,10 +135,11 @@ fn check_outputs(
 
 impl OutputCycles {
     /// Look up a local stage after validating the declared port names.
-    fn stage_for_port(&self, port: &str) -> u64 {
+    fn stage_for_port(&self, port: &str) -> Option<u64> {
         match self {
-            Self::Uniform(stage) => *stage,
-            Self::ByPort(stages) => stages[port],
+            Self::Uniform(stage) => Some(*stage),
+            Self::ByPort(stages) => stages.get(port).copied(),
+            Self::IssueCall { .. } => None,
         }
     }
 }
@@ -256,12 +272,12 @@ impl Instance<'_> {
 
     /// Translate a verified child output into the stage seen by its caller.
     fn output_cycle(&self, port: &str, offset: Option<i128>) -> Result<Cycle, String> {
-        let Some(offset) = offset else {
+        let (Some(offset), Some(local)) = (offset, self.outputs.stage_for_port(port)) else {
             return Ok(Cycle::Unknown);
         };
         // Connecting child @3 to parent @0 gives offset -3. Only the
         // translated port stage has to fit the unsigned BX stage range.
-        let translated = i128::from(self.outputs.stage_for_port(port)) + offset;
+        let translated = i128::from(local) + offset;
         let stage = u64::try_from(translated).map_err(|_| {
             format!(
                 "instance '{}.{port}': translated cycle {translated} is out of range",
@@ -312,6 +328,7 @@ impl<'a> Checker<'a> {
                 && let Some(child) = children.get(block.as_str())
                 && child.timing_error.is_none()
                 && let Some(outputs) = &child.output_cycles
+                && !matches!(outputs, OutputCycles::IssueCall { .. })
             {
                 let inputs = child
                     .params

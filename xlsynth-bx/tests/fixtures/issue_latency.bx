@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: Apache-2.0
+
+enum Op : u2 { Fast = 0, Slow = 3 }
+
+fn latency(valid: bool, op: Op) -> u32 {
+    match (valid, op) {
+        (true, Op::Fast) => u32:1,
+        (true, Op::Slow) => u32:2,
+        (false, _) => u32:1,
+    }
+}
+
+// Both paths can request the same pulse on the same clock.
+block pulse(clk, valid: bool, op: Op) -> bool @latency(valid, op) {
+    reg short_q: bool;
+    reg long_q: bool;
+    reg long_qq: bool;
+    let long = if valid { op == Op::Slow } else { false };
+    short_q := !long;
+    long_q := long;
+    long_qq := long_q;
+    if short_q { true } else { long_qq }
+}
+
+#[test]
+block back_to_back() {
+    reg valid: bool;
+    reg op: Op;
+    let done = pulse(valid, op);
+    valid := true;
+    op := Op::Fast;
+    tick!();
+    assert_eq(done, true);
+    op := Op::Slow;
+    tick!();
+    assert_eq(done, false);
+    op := Op::Fast;
+    tick!();
+    // Slow from two edges ago and Fast from the last edge are both due.
+    assert_eq(done, true);
+}
