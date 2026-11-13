@@ -1820,7 +1820,7 @@ fn indexed_projection_simp(functions: &BTreeSet<String>) -> String {
         .collect::<Vec<_>>()
         .join(",\n       ");
     format!(
-        "simp only [{rules},\n       vector_map_ite, L.Vector.map_map, L.Function.comp_def,\n       vector_map_append, L.Array.toVector, L.Vector.map_mk, L.List.map_toArray,\n       L.List.map_cons, L.List.map_nil] <;> rfl"
+        "simp only [{rules},\n       vector_map_ite, L.Vector.map_map, L.Function.comp_def,\n       vector_map_append, (L.Array.toVector ·), L.Vector.map_mk, L.List.map_toArray,\n       L.List.map_cons, L.List.map_nil] <;> rfl"
     )
 }
 
