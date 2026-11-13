@@ -27,11 +27,11 @@ top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], s
 // EXPECT-SV:   logic [7:0] data_reg;
 // EXPECT-SV:   logic oe_reg;
 // EXPECT-SV:   logic [7:0] sense_reg;
+// EXPECT-SV:   assign pin = oe_reg ? data_reg : 'z;
 // EXPECT-SV:   always_ff @ (posedge clk) begin
 // EXPECT-SV:     data_reg <= data;
 // EXPECT-SV:     oe_reg <= oe;
 // EXPECT-SV:     sense_reg <= pin;
 // EXPECT-SV:   end
-// EXPECT-SV:   assign pin = oe_reg ? data_reg : 'z;
 // EXPECT-SV:   assign seen = sense_reg;
 // EXPECT-SV: endmodule

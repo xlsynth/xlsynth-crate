@@ -273,7 +273,10 @@ fn rename_logic_conflicting_with_ports(
     let mut reserved_names = BTreeSet::new();
     for port in &template.ports {
         match port {
-            BlockPort::Input(port) | BlockPort::Output(port) | BlockPort::Inout(port) => {
+            BlockPort::Inout(pin) => {
+                reserved_names.insert(pin.name.clone());
+            }
+            BlockPort::Input(port) | BlockPort::Output(port) => {
                 reserved_names.insert(template.port_name(*port).to_string());
                 let node = template.get_node(*port);
                 reserved_names.insert(node.name.clone().unwrap_or_else(|| {

@@ -689,13 +689,13 @@ for example, `bits[8][3][2]` becomes `logic [1:0][2:0][7:0]`. Tuples remain flat
 packed vectors. Element-zero packing, bounds behavior, and explicit `sv_type`
 port overrides are preserved.
 
-Declare a bidirectional pin in the block header as `pad: bits[4]`. In the body,
-`pad: bits[4] = ext_inout_port(drive, oe, name=pad, id=3)` emits
-`assign pad = oe ? drive : 'z;`. The active-high enable is one bit for the
-whole port. Reading `pad` returns the resolved pin value in either enable state.
-Bind a child pin with `ext_instantiation_inout(instantiation=child, port_name=io, parent_port=pad, id=4)`. This emits `.io(pad)` on the child instance. Each
-child inout needs one binding to a same-typed parent inout. Use the default
-`--layout=none` to emit these pins.
+Declare a bidirectional pin as `pad: bits[4]` in the block header and
+`ext_inout pad(bits[4])` in the body. `ext_inout_port_input(name=pad)` samples
+the resolved pin. `ext_inout_port_output(drive, oe, name=pad)` emits
+`assign pad = oe ? drive : 'z;`. A direct `ext_instantiation_inout` binding
+emits `.io(pad)` on the child. To connect a child pin to a private wire, use
+`ext_instantiation_inout_output` to read it, `ext_instantiation_inout_input`
+to drive it, or both. Use the default `--layout=none` for inout designs.
 See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
 ```shell

@@ -227,8 +227,16 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     match payload {
         Nil => vec![],
         Param => vec![],
-        InputPort { .. } | ExtInstantiationInout { .. } => vec![],
-        ExtInoutPort {
+        InputPort { .. }
+        | ExtInoutPortInput { .. }
+        | ExtInstantiationInoutOutput { .. }
+        | ExtInstantiationInout { .. } => vec![],
+        ExtInoutPortOutput {
+            drive,
+            output_enable,
+            ..
+        }
+        | ExtInstantiationInoutInput {
             drive,
             output_enable,
             ..
@@ -1115,18 +1123,29 @@ where
             name: name.clone(),
             sv_type: sv_type.clone(),
         },
-        NodePayload::ExtInoutPort {
+        NodePayload::ExtInoutPortOutput {
             name,
             drive,
             output_enable,
-            sv_type,
-        } => NodePayload::ExtInoutPort {
+        } => NodePayload::ExtInoutPortOutput {
             name: name.clone(),
             drive: map((0, *drive)),
             output_enable: map((1, *output_enable)),
-            sv_type: sv_type.clone(),
         },
-        NodePayload::ExtInstantiationInout { .. } => payload.clone(),
+        NodePayload::ExtInstantiationInoutInput {
+            instantiation,
+            port_name,
+            drive,
+            output_enable,
+        } => NodePayload::ExtInstantiationInoutInput {
+            instantiation: instantiation.clone(),
+            port_name: port_name.clone(),
+            drive: map((0, *drive)),
+            output_enable: map((1, *output_enable)),
+        },
+        NodePayload::ExtInoutPortInput { .. }
+        | NodePayload::ExtInstantiationInoutOutput { .. }
+        | NodePayload::ExtInstantiationInout { .. } => payload.clone(),
         NodePayload::OutputPort { name, arg, sv_type } => NodePayload::OutputPort {
             name: name.clone(),
             arg: map((0, *arg)),

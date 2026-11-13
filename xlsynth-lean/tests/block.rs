@@ -426,6 +426,26 @@ fn emission_rejects_block_from_another_package() {
 // Negative test: Unsupported resets and operations return contextual emission
 // errors.
 #[test]
+fn emission_rejects_an_inout_declaration_without_access_nodes() {
+    let package = Parser::new(
+        r#"package pads
+top block cell(io: bits[1]) {
+  ext_inout io(bits[1])
+}
+block ordinary() {}
+"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    let error = emit(&package, package.get_top_block().unwrap()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Lean block emission: ext_inout_port 'io' in 'cell' requires block-to-Verilog codegen"
+    );
+    emit(&package, package.get_block("ordinary").unwrap()).unwrap();
+}
+
+#[test]
 fn emission_rejects_asynchronous_reset_and_unsupported_operations() {
     let asynchronous = Parser::new(&BLOCK.replace("asynchronous=false", "asynchronous=true"))
         .parse_and_validate_package()

@@ -102,6 +102,14 @@ pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String>
         pkg.members.retain(
             |member| !matches!(member, PackageMember::Block(b) if !selected.contains(&b.name)),
         );
+    } else {
+        // Without a selected block the inliner processes every block before
+        // pruning. Check their pins before mutating any of them.
+        for member in &pkg.members {
+            if let PackageMember::Block(block) = member {
+                block.reject_inouts("block inlining")?;
+            }
+        }
     }
     loop {
         let mut progress = false;
@@ -499,6 +507,21 @@ mod tests {
     use super::*;
     use crate::ir_parser::Parser;
     use crate::ir_query::{matches_node, parse_query};
+
+    #[test]
+    fn inlining_without_a_top_rejects_declaration_only_pins_before_pruning() {
+        let source = r#"package pads
+block ordinary() {}
+block cell(io: bits[1]) {
+  ext_inout io(bits[1])
+}
+"#;
+        let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+        let before = package.to_string();
+        let error = inline_all_blocks_in_package(&mut package).unwrap_err();
+        assert!(error.contains("'io' in 'cell'"), "{error}");
+        assert_eq!(package.to_string(), before);
+    }
 
     fn parse_pkg(text: &str) -> ir::Package {
         let mut parser = Parser::new(text);

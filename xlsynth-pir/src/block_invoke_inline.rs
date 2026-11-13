@@ -365,10 +365,10 @@ fn block_names(block: &Block) -> HashSet<String> {
             .iter()
             .map(|instance| instance.name.clone()),
     );
+    names.extend(block.inout_ports().map(|pin| pin.name.clone()));
     for node in &block.nodes {
         match &node.payload {
             NodePayload::InputPort { name, .. }
-            | NodePayload::ExtInoutPort { name, .. }
             | NodePayload::OutputPort { name, .. }
             | NodePayload::Assert { label: name, .. }
             | NodePayload::Cover { label: name, .. } => {

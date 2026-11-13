@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: Apache-2.0
+package private_modes
+
+block contact(io: bits[2][2]) {
+  ext_inout io(bits[2][2])
+}
+
+block forward(io: bits[2][2]) {
+  ext_inout io(bits[2][2])
+  instantiation leaf(block=contact, kind=block)
+  bind: () = ext_instantiation_inout(instantiation=leaf, port_name=io, parent_port=io, id=1)
+}
+
+top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
+  instantiation reader(block=forward, kind=block)
+  instantiation writer(block=forward, kind=block)
+  tx: bits[2][2] = input_port(name=tx, id=2)
+  oe: bits[1] = input_port(name=oe, id=3)
+  sense: bits[2][2] = ext_instantiation_inout_output(instantiation=reader, port_name=io, id=4)
+  drive: () = ext_instantiation_inout_input(tx, oe, instantiation=writer, port_name=io, id=5)
+  rx: () = output_port(sense, name=rx, id=6)
+}
+
+// EXPECT-SV: module contact(
+// EXPECT-SV:   inout wire [1:0][1:0] io
+// EXPECT-SV: );
+// EXPECT-SV:
+// EXPECT-SV: endmodule
+// EXPECT-SV: module forward(
+// EXPECT-SV:   inout wire [1:0][1:0] io
+// EXPECT-SV: );
+// EXPECT-SV:   contact leaf (
+// EXPECT-SV:     .io(io)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule
+// EXPECT-SV: module host(
+// EXPECT-SV:   input logic [1:0][1:0] tx,
+// EXPECT-SV:   input logic oe,
+// EXPECT-SV:   output logic [1:0][1:0] rx
+// EXPECT-SV: );
+// EXPECT-SV:   wire [1:0][1:0] reader_io;
+// EXPECT-SV:   wire [1:0][1:0] writer_io;
+// EXPECT-SV:   assign writer_io = oe ? tx : 'z;
+// EXPECT-SV:   assign rx = reader_io;
+// EXPECT-SV:   forward reader (
+// EXPECT-SV:     .io(reader_io)
+// EXPECT-SV:   );
+// EXPECT-SV:   forward writer (
+// EXPECT-SV:     .io(writer_io)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

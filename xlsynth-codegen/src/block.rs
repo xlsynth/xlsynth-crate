@@ -114,8 +114,8 @@ pub(crate) struct BlockEmitter<'a, 'file> {
     pub(crate) arithmetic_helpers: BTreeMap<crate::arithmetic::ArithmeticHelper, String>,
     pub(crate) slice_helpers: BTreeMap<crate::slicing::SliceHelper, String>,
     pub(crate) current_stage: Option<usize>,
-    pub(crate) instance_inputs: BTreeMap<(String, String), Expr>,
-    pub(crate) instance_outputs: BTreeMap<(String, String), Expr>,
+    /// Connections indexed by instance, then by child port.
+    pub(crate) instance_connections: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 /// Emits a package after validating its selected block top.
@@ -200,14 +200,16 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
 
 /// Checks which operations the requested layout can emit.
 fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCodegenError> {
+    if layout == Layout::Pipeline
+        && let Some(pin) = block.inout_ports().next()
+    {
+        return Err(BlockCodegenError::NotPipeline(format!(
+            "block `{}` cannot use layout=pipeline with inout port `{}`; use layout=none",
+            block.name, pin.name
+        )));
+    }
     for node in &block.nodes {
         let (operation, lowering) = match &node.payload {
-            NodePayload::ExtInoutPort { name, .. } if layout == Layout::Pipeline => {
-                return Err(BlockCodegenError::NotPipeline(format!(
-                    "block `{}` cannot use layout=pipeline with inout port `{name}`; use layout=none",
-                    block.name
-                )));
-            }
             NodePayload::Invoke { to_apply, .. } => {
                 return Err(unsupported_invoke(block, to_apply));
             }
@@ -382,8 +384,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             arithmetic_helpers: BTreeMap::new(),
             slice_helpers: BTreeMap::new(),
             current_stage: None,
-            instance_inputs: BTreeMap::new(),
-            instance_outputs: BTreeMap::new(),
+            instance_connections: BTreeMap::new(),
         }
     }
 
@@ -427,15 +428,13 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if let Some(clock) = self.block.clock_port_name() {
             reserve(clock, "port")?;
         }
-        for port in self
-            .block
-            .input_ports()
-            .chain(self.block.output_ports())
-            .chain(self.block.inout_ports())
-        {
+        for port in self.block.input_ports().chain(self.block.output_ports()) {
             if self.block.port_type(port).bit_count() != 0 {
                 reserve(self.block.port_name(port), "port")?;
             }
+        }
+        for pin in self.block.inout_ports() {
+            reserve(&pin.name, "port")?;
         }
         for instance in &self.block.instantiations {
             reserve(&instance.name, "instance")?;
@@ -460,62 +459,63 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Emits representable ports in the source block's original header order.
     fn emit_ports(&mut self) -> Result<(), BlockCodegenError> {
+        let mut custom_types = BTreeSet::new();
         for port in &self.block.ports {
-            let (name, ir_type, sv_type, is_output) = match port {
-                BlockPort::Clock(name) => (name.clone(), Type::Bits(1), None, false),
-                BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
+            let (name, ir_type, sv_type) = match port {
+                BlockPort::Clock(name) => (name.as_str(), &Type::Bits(1), None),
+                BlockPort::Inout(pin) => (pin.name.as_str(), &pin.ty, pin.sv_type.as_deref()),
+                BlockPort::Input(node) | BlockPort::Output(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
-                        | NodePayload::ExtInoutPort { sv_type, .. }
                         | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
                         _ => unreachable!("verified block data port"),
                     };
                     (
-                        self.block.port_name(*node).to_string(),
-                        self.block.port_type(*node).clone(),
+                        self.block.port_name(*node),
+                        self.block.port_type(*node),
                         sv_type,
-                        matches!(port, BlockPort::Output(_)),
                     )
                 }
             };
-            if self.ports.contains_key(&name) {
+            if self.ports.contains_key(name) {
                 continue;
             }
             let width = ir_type.bit_count();
             if width == 0 {
                 continue;
             }
-            validate_external_identifier(&name, "port")?;
+            validate_external_identifier(name, "port")?;
             let data_type = if self.options.emit_sv_types {
                 if let Some(sv_type) = sv_type {
+                    custom_types.insert(name);
                     if let Some((package, ty)) = sv_type.rsplit_once("::") {
                         self.file.make_extern_package_type(package, ty)
                     } else {
                         self.file.make_extern_type(sv_type)
                     }
                 } else {
-                    self.value_type(&ir_type)
+                    self.value_type(ir_type)
                 }
             } else {
-                self.value_type(&ir_type)
+                self.value_type(ir_type)
             };
-            let signal = if matches!(port, BlockPort::Inout(_)) {
-                self.file.add_inout(self.module, &name, &data_type)
-            } else if is_output {
-                self.file.add_logic_output(self.module, &name, &data_type)
-            } else {
-                self.file.add_logic_input(self.module, &name, &data_type)
+            let signal = match port {
+                BlockPort::Inout(_) => self.file.add_inout(self.module, name, &data_type),
+                BlockPort::Output(_) => self.file.add_logic_output(self.module, name, &data_type),
+                BlockPort::Input(_) | BlockPort::Clock(_) => {
+                    self.file.add_logic_input(self.module, name, &data_type)
+                }
             };
-            self.ports.insert(name, signal);
+            self.ports.insert(name.to_owned(), signal);
         }
 
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, sv_type }
-            | NodePayload::ExtInoutPort { name, sv_type, .. } = &node.payload
+            if let NodePayload::InputPort { name, .. } | NodePayload::ExtInoutPortInput { name } =
+                &node.payload
             {
                 if let Some(signal) = self.ports.get(name).copied() {
                     let value = Value::signal(signal).with_width(node.ty.bit_count());
-                    self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
+                    self.values[index] = Some(if custom_types.contains(name.as_str()) {
                         value
                     } else {
                         value.with_type(&node.ty)
@@ -538,8 +538,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             match &self.block.get_node(node_ref).payload {
                 NodePayload::Nil
                 | NodePayload::InputPort { .. }
-                | NodePayload::ExtInoutPort { .. }
-                | NodePayload::ExtInstantiationInout { .. }
+                | NodePayload::ExtInoutPortInput { .. }
                 | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
@@ -828,25 +827,6 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Connects representable output ports after their driving logic exists.
     fn emit_outputs(&mut self) -> Result<(), BlockCodegenError> {
-        for pin in self.block.inout_ports() {
-            let NodePayload::ExtInoutPort {
-                name,
-                drive,
-                output_enable,
-                ..
-            } = &self.block.get_node(pin).payload
-            else {
-                unreachable!("verified inout")
-            };
-            let data = self.required_value(*drive)?.expr;
-            let oe = self.required_value(*output_enable)?.expr;
-            let z = self.file.make_unsized_z_literal();
-            let value = self.file.make_ternary(&oe, &data, &z);
-            let target = self.ports[name].to_expr();
-            let assign = self.file.make_continuous_assignment(&target, &value);
-            self.file
-                .add_member_continuous_assignment(self.module, assign);
-        }
         for port in self.block.output_ports() {
             let name = self.block.port_name(port);
             let node_ref = self.block.output_value(port);
@@ -875,27 +855,14 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
         }
 
-        for node in &self.block.nodes {
-            if let NodePayload::ExtInstantiationInout {
-                instantiation,
-                port_name,
-                parent_port,
-            } = &node.payload
-            {
-                self.instance_inputs.insert(
-                    (instantiation.clone(), port_name.clone()),
-                    self.ports[parent_port].to_expr(),
-                );
-            }
-        }
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
-                .instance_inputs
-                .iter()
-                .chain(self.instance_outputs.iter())
-                .filter(|((name, _), _)| name == &instance.name)
-                .map(|((_, port), expr)| (port.clone(), *expr))
+                .instance_connections
+                .remove(&instance.name)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(port, value)| (port, value.expr))
                 .collect::<Vec<_>>();
 
             if instance.kind == InstantiationKind::Block {
@@ -922,9 +889,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .iter()
                     .map(|port| match port {
                         BlockPort::Clock(name) => name.as_str(),
-                        BlockPort::Input(node)
-                        | BlockPort::Output(node)
-                        | BlockPort::Inout(node) => child.port_name(*node),
+                        BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
+                        BlockPort::Inout(pin) => pin.name.as_str(),
                     })
                     .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
@@ -1025,7 +991,7 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         for (index, node) in self.block.nodes.iter().enumerate() {
             if matches!(
                 node.payload,
-                NodePayload::InputPort { .. } | NodePayload::ExtInoutPort { .. }
+                NodePayload::InputPort { .. } | NodePayload::ExtInoutPortInput { .. }
             ) && matches!(node.ty, Type::Array(_))
                 && let Some(value) = self.values[index]
                 && value.array_rank == 0

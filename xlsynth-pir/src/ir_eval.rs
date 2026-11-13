@@ -59,6 +59,8 @@ fn append_operand_values<'a>(
     match payload {
         Nil
         | Param
+        | ExtInoutPortInput { .. }
+        | ExtInstantiationInoutOutput { .. }
         | ExtInstantiationInout { .. }
         | InputPort { .. }
         | Literal(_)
@@ -74,7 +76,12 @@ fn append_operand_values<'a>(
             push(start);
         }
         TupleIndex { tuple, .. } => push(tuple),
-        ExtInoutPort {
+        ExtInoutPortOutput {
+            drive: lhs,
+            output_enable: rhs,
+            ..
+        }
+        | ExtInstantiationInoutInput {
             drive: lhs,
             output_enable: rhs,
             ..
@@ -1176,7 +1183,10 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::Assert { .. }
         | ir::NodePayload::Trace { .. }
         | ir::NodePayload::ExtInstantiationInout { .. }
-        | ir::NodePayload::ExtInoutPort { .. }
+        | ir::NodePayload::ExtInoutPortInput { .. }
+        | ir::NodePayload::ExtInoutPortOutput { .. }
+        | ir::NodePayload::ExtInstantiationInoutInput { .. }
+        | ir::NodePayload::ExtInstantiationInoutOutput { .. }
         | ir::NodePayload::InstantiationInput { .. }
         | ir::NodePayload::InstantiationOutput { .. }
         | ir::NodePayload::RegisterRead { .. }

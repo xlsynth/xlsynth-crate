@@ -139,6 +139,29 @@ impl FileTable {
     }
 }
 
+/// Data carried by the retired combined pin node, alongside its sampled value.
+struct LegacyPinDrive {
+    drive: ir::NodeRef,
+    output_enable: ir::NodeRef,
+    sv_type: Option<String>,
+}
+
+/// Assigns package-unique IDs to the extra writes produced by legacy pin nodes.
+fn append_legacy_drives(
+    block: &mut Block,
+    drives: Vec<ir::Node>,
+    last_id: &mut usize,
+) -> Result<(), ParseError> {
+    for mut drive in drives {
+        *last_id = last_id.checked_add(1).ok_or_else(|| {
+            ParseError::new("node ID overflow while expanding legacy ext_inout_port".into())
+        })?;
+        drive.text_id = *last_id;
+        block.nodes.push(drive);
+    }
+    Ok(())
+}
+
 pub struct Parser {
     chars: Vec<char>,
     offset: usize,
@@ -2015,6 +2038,21 @@ impl Parser {
         self.parse_node_ref(node_env, ctx)
     }
 
+    /// Parses an inout pin declaration independently of its local reads and
+    /// drive.
+    fn parse_inout_decl(&mut self) -> Result<ir::InoutPort, ParseError> {
+        let name = self.pop_identifier_or_error("inout port name")?;
+        self.drop_or_error("(")?;
+        let ty = self.parse_type()?;
+        let sv_type = if self.try_drop(",") {
+            Some(self.parse_string_attribute("sv_type")?)
+        } else {
+            None
+        };
+        self.drop_or_error(")")?;
+        Ok(ir::InoutPort { name, ty, sv_type })
+    }
+
     fn parse_register_decl(
         &mut self,
         block_name: &str,
@@ -2440,6 +2478,19 @@ impl Parser {
     }
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
+        let (node, legacy) = self.parse_node_with_legacy_drive(node_env)?;
+        if legacy.is_some() {
+            return Err(ParseError::new("ext_inout_port requires a block".into()));
+        }
+        Ok(node)
+    }
+
+    /// Parses a node and extracts the second operation implied by a legacy pin.
+    fn parse_node_with_legacy_drive(
+        &mut self,
+        node_env: &mut IrNodeEnv,
+    ) -> Result<(ir::Node, Option<LegacyPinDrive>), ParseError> {
+        let mut legacy = None;
         log::debug!("parse_node");
         let (name_or_id, dotted_prefix_opt) =
             self.pop_node_name_or_error_with_dotted("node name")?;
@@ -2456,16 +2507,17 @@ impl Parser {
 
         let mut port_pos = None;
         let (payload, id) = match operator.as_str() {
-            "input_port" | "output_port" | "ext_inout_port" => {
-                let drive = if operator == "ext_inout_port" {
+            "input_port" | "output_port" | "ext_inout_port" | "ext_inout_port_input" | "ext_inout_port_output" => {
+                let has_drive = matches!(operator.as_str(), "ext_inout_port" | "ext_inout_port_output");
+                let drive = if has_drive {
                     let drive = self.parse_node_ref(node_env, "inout drive")?;
                     self.drop_or_error(",")?;
                     Some(drive)
                 } else {
                     None
                 };
-                let arg = if operator != "input_port" {
-                    let role = if drive.is_some() { "ext_inout_port output enable" } else { "output_port value" };
+                let arg = if has_drive || operator == "output_port" {
+                    let role = if has_drive { "inout output enable" } else { "output_port value" };
                     let arg = self.parse_node_ref(node_env, role)?;
                     self.drop_or_error(",")?;
                     Some(arg)
@@ -2489,7 +2541,7 @@ impl Parser {
                         }
                         maybe_id = Some(self.parse_id_attribute()?);
                         saw_id = true;
-                    } else if self.peek_is("sv_type=") {
+                    } else if self.peek_is("sv_type=") && matches!(operator.as_str(), "input_port" | "output_port" | "ext_inout_port") {
                         if sv_type.is_some() {
                             return Err(ParseError::new(format!("duplicate {operator} sv_type attribute")));
                         }
@@ -2511,11 +2563,16 @@ impl Parser {
                 if id == 0 {
                     return Err(ParseError::new(format!("{operator} id must be greater than zero")));
                 }
-                let payload = match (drive, arg) {
-                    (Some(drive), Some(output_enable)) => ir::NodePayload::ExtInoutPort { drive, output_enable, name, sv_type },
-                    (None, Some(arg)) => ir::NodePayload::OutputPort { name, arg, sv_type },
-                    (None, None) => ir::NodePayload::InputPort { name, sv_type },
-                    (Some(_), None) => unreachable!("inout parses both operands"),
+                let payload = match (operator.as_str(), drive, arg) {
+                    ("ext_inout_port", Some(drive), Some(output_enable)) => {
+                        legacy = Some(LegacyPinDrive { drive, output_enable, sv_type });
+                        ir::NodePayload::ExtInoutPortInput { name }
+                    }
+                    ("ext_inout_port_output", Some(drive), Some(output_enable)) => ir::NodePayload::ExtInoutPortOutput { name, drive, output_enable },
+                    ("ext_inout_port_input", None, None) => ir::NodePayload::ExtInoutPortInput { name },
+                    ("output_port", None, Some(arg)) => ir::NodePayload::OutputPort { name, arg, sv_type },
+                    ("input_port", None, None) => ir::NodePayload::InputPort { name, sv_type },
+                    _ => unreachable!("port arity is selected by its operator"),
                 };
                 (payload, id)
             }
@@ -3190,7 +3247,16 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
-            "ext_instantiation_inout" => {
+            "ext_instantiation_inout" | "ext_instantiation_inout_input" | "ext_instantiation_inout_output" => {
+                let drive = if operator == "ext_instantiation_inout_input" {
+                    let drive = self.parse_node_ref(node_env, "instance inout drive")?;
+                    self.drop_or_error(",")?;
+                    let oe = self.parse_node_ref(node_env, "instance inout output enable")?;
+                    self.drop_or_error(",")?;
+                    Some((drive, oe))
+                } else {
+                    None
+                };
                 let mut instantiation = None;
                 let mut port_name = None;
                 let mut parent_port = None;
@@ -3201,7 +3267,7 @@ impl Parser {
                         instantiation = Some(self.parse_identifier_attribute("instantiation")?);
                     } else if self.peek_is("port_name=") && port_name.is_none() {
                         port_name = Some(self.parse_identifier_attribute("port_name")?);
-                    } else if self.peek_is("parent_port=") && parent_port.is_none() {
+                    } else if operator == "ext_instantiation_inout" && self.peek_is("parent_port=") && parent_port.is_none() {
                         parent_port = Some(self.parse_identifier_attribute("parent_port")?);
                     } else if self.peek_is("id=") && !saw_id {
                         maybe_id = Some(self.parse_id_attribute()?);
@@ -3209,22 +3275,30 @@ impl Parser {
                     } else if self.peek_is("pos=") && port_pos.is_none() {
                         port_pos = self.maybe_drop_pos_attribute()?;
                     } else {
-                        return Err(ParseError::new("unknown or duplicate ext_instantiation_inout attribute".to_string()));
+                        return Err(ParseError::new(format!("unknown or duplicate {operator} attribute")));
                     }
                     if !self.try_drop(",") {
                         break;
                     }
                 }
-                let required = |field| ParseError::new(format!("ext_instantiation_inout missing {field}"));
+                let required = |field| ParseError::new(format!("{operator} missing {field}"));
                 let id = maybe_id.ok_or_else(|| required("id"))?;
                 if id == 0 {
-                    return Err(ParseError::new("ext_instantiation_inout id must be greater than zero".to_string()));
+                    return Err(ParseError::new(format!("{operator} id must be greater than zero")));
                 }
-                (ir::NodePayload::ExtInstantiationInout {
-                    instantiation: instantiation.ok_or_else(|| required("instantiation"))?,
-                    port_name: port_name.ok_or_else(|| required("port_name"))?,
-                    parent_port: parent_port.ok_or_else(|| required("parent_port"))?,
-                }, id)
+                let instantiation = instantiation.ok_or_else(|| required("instantiation"))?;
+                let port_name = port_name.ok_or_else(|| required("port_name"))?;
+                let payload = if let Some((drive, output_enable)) = drive {
+                    ir::NodePayload::ExtInstantiationInoutInput { instantiation, port_name, drive, output_enable }
+                } else if operator == "ext_instantiation_inout_output" {
+                    ir::NodePayload::ExtInstantiationInoutOutput { instantiation, port_name }
+                } else {
+                    ir::NodePayload::ExtInstantiationInout {
+                        instantiation, port_name,
+                        parent_port: parent_port.ok_or_else(|| required("parent_port"))?,
+                    }
+                };
+                (payload, id)
             }
             "instantiation_output" => {
                 let mut instantiation: Option<String> = None;
@@ -3682,16 +3756,19 @@ impl Parser {
             }
         }
 
-        Ok(ir::Node {
-            text_id: id,
-            name: match name_or_id {
-                NameOrId::Id(..) => None,
-                NameOrId::Name(name) => Some(name),
+        Ok((
+            ir::Node {
+                text_id: id,
+                name: match name_or_id {
+                    NameOrId::Id(..) => None,
+                    NameOrId::Name(name) => Some(name),
+                },
+                ty: node_ty,
+                payload,
+                pos: pos_data,
             },
-            ty: node_ty,
-            payload,
-            pos: pos_data,
-        })
+            legacy,
+        ))
     }
 
     fn add_param_node(
@@ -3864,7 +3941,7 @@ impl Parser {
     /// Parses a block, retaining ports as ordinary graph nodes.
     pub fn parse_block(&mut self) -> Result<Block, ParseError> {
         let attrs = self.parse_outer_attributes()?;
-        self.parse_block_with_attributes(attrs)
+        self.parse_standalone_block(attrs)
     }
 
     /// Parses a block and attaches attributes preceding its declaration.
@@ -3876,13 +3953,33 @@ impl Parser {
             .iter()
             .map(|attr| parse_outer_attribute(attr))
             .collect::<Result<_, _>>()?;
-        self.parse_block_with_attributes(attrs)
+        self.parse_standalone_block(attrs)
+    }
+
+    /// Completes legacy write IDs in the scope of a standalone block.
+    fn parse_standalone_block(
+        &mut self,
+        attrs: Vec<ir::OuterAttribute>,
+    ) -> Result<Block, ParseError> {
+        let mut drives = Vec::new();
+        let mut block = self.parse_block_with_attributes(attrs, &mut drives)?;
+        if !drives.is_empty() {
+            let mut last_id = block
+                .nodes
+                .iter()
+                .map(|node| node.text_id)
+                .max()
+                .unwrap_or(0);
+            append_legacy_drives(&mut block, drives, &mut last_id)?;
+        }
+        Ok(block)
     }
 
     /// Parses a block body after the attributes preceding its declaration.
     fn parse_block_with_attributes(
         &mut self,
         outer_attrs: Vec<ir::OuterAttribute>,
+        legacy_drives: &mut Vec<ir::Node>,
     ) -> Result<Block, ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
@@ -3934,10 +4031,40 @@ impl Parser {
         }
         let mut node_env = IrNodeEnv::new();
         let mut port_nodes = BTreeMap::new();
+        let mut add_port = |name: &str, ty: &ir::Type, port: BlockPort| -> Result<(), ParseError> {
+            let declared_ty = header_ports.get(name).ok_or_else(|| {
+                ParseError::new(format!("port '{}' not found in block header ports", name))
+            })?;
+            if declared_ty != ty {
+                return Err(ParseError::new(format!(
+                    "port '{}' type mismatch: header declares {}, node has {}",
+                    name, declared_ty, ty
+                )));
+            }
+            if port_nodes.insert(name.to_owned(), port).is_some() {
+                return Err(ParseError::new(format!(
+                    "duplicate port node '{}' in block '{}'",
+                    name, block_name
+                )));
+            }
+            Ok(())
+        };
         let mut register_names = std::collections::HashSet::new();
         let mut instantiation_names = std::collections::HashSet::new();
         while !self.try_drop("}") {
             self.drop_whitespace_and_comments();
+            let start = self.offset;
+            if self.try_drop_keyword("ext_inout") {
+                self.drop_whitespace_and_comments();
+                if !self.peek_is(":") {
+                    let pin = self.parse_inout_decl()?;
+                    add_port(&pin.name, &pin.ty, BlockPort::Inout(pin.clone()))?;
+                    continue;
+                }
+                // Existing packages can use `ext_inout` as an ordinary node
+                // name.
+                self.offset = start;
+            }
             if self.try_drop_keyword("reg") {
                 block
                     .registers
@@ -3950,7 +4077,7 @@ impl Parser {
                     .push(self.parse_instantiation_decl(&block_name, &mut instantiation_names)?);
                 continue;
             }
-            let node = self.parse_node(&mut node_env)?;
+            let (node, legacy) = self.parse_node_with_legacy_drive(&mut node_env)?;
             let node_ref = ir::NodeRef {
                 index: block.nodes.len(),
             };
@@ -3976,14 +4103,31 @@ impl Parser {
                     )));
                 }
             }
-            let port = match &node.payload {
-                ir::NodePayload::ExtInoutPort { name, .. } => {
-                    Some((name, &node.ty, BlockPort::Inout(node_ref)))
+            let port = match (&node.payload, legacy) {
+                (ir::NodePayload::ExtInoutPortInput { name }, Some(legacy)) => {
+                    legacy_drives.push(ir::Node {
+                        // Assigned after all original IDs are known.
+                        text_id: 0,
+                        name: None,
+                        ty: ir::Type::nil(),
+                        payload: ir::NodePayload::ExtInoutPortOutput {
+                            name: name.clone(),
+                            drive: legacy.drive,
+                            output_enable: legacy.output_enable,
+                        },
+                        pos: node.pos.clone(),
+                    });
+                    let pin = ir::InoutPort {
+                        name: name.clone(),
+                        ty: node.ty.clone(),
+                        sv_type: legacy.sv_type,
+                    };
+                    Some((name, &node.ty, BlockPort::Inout(pin)))
                 }
-                ir::NodePayload::InputPort { name, .. } => {
+                (ir::NodePayload::InputPort { name, .. }, None) => {
                     Some((name, &node.ty, BlockPort::Input(node_ref)))
                 }
-                ir::NodePayload::OutputPort { name, arg, .. } => {
+                (ir::NodePayload::OutputPort { name, arg, .. }, None) => {
                     if node.ty != ir::Type::nil() {
                         return Err(ParseError::new(format!(
                             "output_port '{}' must have () node type, got {}",
@@ -3995,21 +4139,7 @@ impl Parser {
                 _ => None,
             };
             if let Some((name, ty, port)) = port {
-                let declared_ty = header_ports.get(name).ok_or_else(|| {
-                    ParseError::new(format!("port '{}' not found in block header ports", name))
-                })?;
-                if declared_ty != ty {
-                    return Err(ParseError::new(format!(
-                        "port '{}' type mismatch: header declares {}, node has {}",
-                        name, declared_ty, ty
-                    )));
-                }
-                if port_nodes.insert(name.clone(), port).is_some() {
-                    return Err(ParseError::new(format!(
-                        "duplicate port node '{}' in block '{}'",
-                        name, block_name
-                    )));
-                }
+                add_port(name, ty, port)?;
             }
             node_env
                 .add(node.name.clone(), node.text_id, node_ref)
@@ -4119,7 +4249,9 @@ impl Parser {
         file_path_syntax: FilePathSyntax,
     ) -> Result<ir::Package, ParseError> {
         log::debug!("parse_package: {}", package.name);
+        let mut pending_drives = Vec::new();
         while !self.at_eof() {
+            let mut drives = Vec::new();
             let outer_attrs = self.parse_outer_attributes()?;
             if self.try_drop_keyword("top") {
                 if package.top.is_some() {
@@ -4133,7 +4265,7 @@ impl Parser {
                     package.members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
-                    let block = self.parse_block_with_attributes(outer_attrs)?;
+                    let block = self.parse_block_with_attributes(outer_attrs, &mut drives)?;
                     package.top = Some((block.name.clone(), MemberType::Block));
                     package.members.push(PackageMember::Block(block));
                 } else {
@@ -4146,7 +4278,7 @@ impl Parser {
                 let f = self.parse_fn_with_attributes(outer_attrs)?;
                 package.members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
-                let block = self.parse_block_with_attributes(outer_attrs)?;
+                let block = self.parse_block_with_attributes(outer_attrs, &mut drives)?;
                 package.members.push(PackageMember::Block(block));
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
@@ -4172,6 +4304,18 @@ impl Parser {
                     self.rest()
                 )));
             }
+            if !drives.is_empty() {
+                pending_drives.push((package.members.len() - 1, drives));
+            }
+        }
+        if !pending_drives.is_empty() {
+            let mut last_id = crate::ir_rebase_ids::package_max_emitted_node_id(&package);
+            for (index, drives) in pending_drives {
+                let PackageMember::Block(block) = &mut package.members[index] else {
+                    unreachable!("only blocks have legacy inout drives")
+                };
+                append_legacy_drives(block, drives, &mut last_id)?;
+            }
         }
         Ok(package)
     }
@@ -4183,7 +4327,8 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
         .ports
         .iter()
         .map(|port| match port {
-            BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
+            BlockPort::Inout(pin) => format!("{}: {}", pin.name, pin.ty),
+            BlockPort::Input(nr) | BlockPort::Output(nr) => {
                 format!("{}: {}", block.port_name(*nr), block.port_type(*nr))
             }
             BlockPort::Clock(name) => format!("{}: clock", name),
@@ -4201,6 +4346,16 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
             reset.asynchronous,
             reset.active_low,
         ));
+    }
+    for port in &block.ports {
+        if let BlockPort::Inout(pin) = port {
+            let sv_type = pin
+                .sv_type
+                .as_ref()
+                .map(|ty| format!(", sv_type=\"{}\"", ir::escape_xls_ir_string(ty)))
+                .unwrap_or_default();
+            lines.push(format!("  ext_inout {}({}{sv_type})", pin.name, pin.ty));
+        }
     }
     for reg in &block.registers {
         if let Some(reset_value) = &reg.reset_value {
@@ -5952,6 +6107,106 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
 "#;
 
     #[test]
+    fn split_inouts_roundtrip_without_implied_operations() {
+        let source = r#"package pins
+
+block leaf(io: bits[4]) {
+  ext_inout io(bits[4])
+}
+
+top block pads(d: bits[4], oe: bits[1], pad: bits[4], unused_pin: bits[4], seen: bits[4]) {
+  ext_inout pad(bits[4], sv_type="pkg::nibble")
+  ext_inout unused_pin(bits[4])
+  instantiation cell(block=leaf, kind=block)
+  d: bits[4] = input_port(name=d, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  read: bits[4] = ext_inout_port_input(name=pad, id=3)
+  drive: () = ext_inout_port_output(d, oe, name=pad, id=4)
+  child_drive: () = ext_instantiation_inout_input(read, oe, instantiation=cell, port_name=io, id=5)
+  child_read: bits[4] = ext_instantiation_inout_output(instantiation=cell, port_name=io, id=6)
+  seen: () = output_port(child_read, name=seen, id=7)
+}
+"#;
+        let package = Parser::new(source).parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), source);
+    }
+
+    #[test]
+    fn legacy_pin_results_keep_ids_and_names_across_package_migration() {
+        let legacy = r#"package legacy
+
+block tapped(io: bits[1], obs: bits[1]) {
+  low: bits[1] = literal(value=0, id=1)
+  ext_inout_port.2: bits[1] = ext_inout_port(low, low, name=io, sv_type="types::pin", id=2, pos=[(0,3,9)])
+  obs: () = output_port(ext_inout_port.2, name=obs, id=3)
+}
+
+top block unobserved(io: bits[1]) {
+  high: bits[1] = literal(value=1, id=4)
+  my_alias: bits[1] = ext_inout_port(high, high, name=io, id=5)
+}
+
+fn later() -> bits[1] {
+  ret literal.100: bits[1] = literal(value=1, id=100)
+}
+"#;
+        let expected = r#"package legacy
+
+block tapped(io: bits[1], obs: bits[1]) {
+  ext_inout io(bits[1], sv_type="types::pin")
+  low: bits[1] = literal(value=0, id=1)
+  ext_inout_port_input.2: bits[1] = ext_inout_port_input(name=io, id=2, pos=[(0,3,9)])
+  obs: () = output_port(ext_inout_port_input.2, name=obs, id=3)
+  ext_inout_port_output.101: () = ext_inout_port_output(low, low, name=io, id=101, pos=[(0,3,9)])
+}
+
+top block unobserved(io: bits[1]) {
+  ext_inout io(bits[1])
+  high: bits[1] = literal(value=1, id=4)
+  my_alias: bits[1] = ext_inout_port_input(name=io, id=5)
+  ext_inout_port_output.102: () = ext_inout_port_output(high, high, name=io, id=102)
+}
+
+fn later() -> bits[1] {
+  ret literal.100: bits[1] = literal(value=1, id=100)
+}
+"#;
+        let package = Parser::new(legacy).parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), expected);
+        assert_eq!(
+            Parser::new(expected)
+                .parse_and_validate_package()
+                .unwrap()
+                .to_string(),
+            expected
+        );
+    }
+
+    #[test]
+    fn ext_inout_is_still_a_valid_node_name() {
+        let input = r#"block ordinary(ext_inout: bits[1]) {
+  ext_inout: bits[1] = input_port(name=ext_inout, id=1)
+}"#;
+        let parsed = Parser::new(input).parse_block().unwrap();
+        assert_eq!(emit_block(&parsed, false), input);
+    }
+
+    #[test]
+    fn split_pin_declarations_must_match_the_block_header_once() {
+        for body in [
+            "ext_inout pin(bits[2])",
+            "ext_inout other(bits[1])",
+            "ext_inout pin(bits[1]) ext_inout pin(bits[1])",
+            "ext_inout pin(bits[1]) pin: bits[1] = input_port(name=pin, id=1)",
+            "ext_inout pin(bits[1]) pin: bits[1] = ext_inout_port_input(name=pin, sv_type=\"X\", id=1)",
+            "ext_inout pin(bits[1], sv_type=\"X\", sv_type=\"Y\")",
+        ] {
+            let block = format!("block example(pin: bits[1]) {{ {body} }}");
+            assert!(Parser::new(&block).parse_block().is_err(), "{block}");
+        }
+    }
+
+    #[test]
     fn test_roundtrip_block_preserves_interleaved_ports_and_systemverilog_types() {
         let block = Parser::new(BLK_INTERLEAVED_PORTS_AND_TYPES)
             .parse_block()
@@ -5960,9 +6215,8 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
             .ports
             .iter()
             .map(|port| match port {
-                BlockPort::Input(nr) | BlockPort::Inout(nr) | BlockPort::Output(nr) => {
-                    block.port_name(*nr)
-                }
+                BlockPort::Inout(pin) => pin.name.as_str(),
+                BlockPort::Input(nr) | BlockPort::Output(nr) => block.port_name(*nr),
                 BlockPort::Clock(name) => name,
             })
             .collect();

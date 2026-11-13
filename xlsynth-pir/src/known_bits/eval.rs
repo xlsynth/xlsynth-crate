@@ -620,7 +620,10 @@ pub(super) fn evaluate(
         // value.
         NodePayload::Nil
         | NodePayload::Param
-        | NodePayload::ExtInoutPort { .. }
+        | NodePayload::ExtInoutPortInput { .. }
+        | NodePayload::ExtInoutPortOutput { .. }
+        | NodePayload::ExtInstantiationInoutInput { .. }
+        | NodePayload::ExtInstantiationInoutOutput { .. }
         | NodePayload::ExtInstantiationInout { .. }
         | NodePayload::InputPort { .. }
         | NodePayload::RegisterRead { .. }

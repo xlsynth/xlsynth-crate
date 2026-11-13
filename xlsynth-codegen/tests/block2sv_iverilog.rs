@@ -730,32 +730,37 @@ endmodule
 /// drivers release or contend.
 #[test]
 fn shared_inout_drivers_resolve_in_flat_layout() {
-    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain().unwrap();
-    let pkg = Parser::new(include_str!(
-        "goldens/block2sv/hierarchy/shared_inout.golden.ir"
-    ))
-    .parse_and_validate_package()
-    .unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let source = directory.path().join("pads.sv");
-    let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())
-        .unwrap()
-        .system_verilog;
-    fs::write(
-        &source,
-        format!("{rtl}\n{}", include_str!("testdata/shared_inout_tb.sv")),
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir"),
+        include_str!("testdata/shared_inout_tb.sv"),
     )
     .unwrap();
-    let binary = tools
-        .compile(
-            directory.path(),
-            &[&source],
-            "tb",
-            &[],
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    tools
-        .run(directory.path(), &binary, Duration::from_secs(30))
-        .unwrap();
+}
+
+#[test]
+fn private_inout_exchanges_request_and_reply_with_a_released_cycle() {
+    simulate_inout_fixture(
+        include_str!("goldens/block2sv/hierarchy/private_request_reply.golden.ir"),
+        include_str!("testdata/private_request_reply_tb.sv"),
+    )
+    .unwrap();
+}
+
+/// Compiles and runs the flat RTL with a testbench that checks resolved values.
+fn simulate_inout_fixture(ir: &str, testbench: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain()?;
+    let pkg = Parser::new(ir).parse_and_validate_package()?;
+    let directory = tempfile::tempdir()?;
+    let source = directory.path().join("pads.sv");
+    let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())?.system_verilog;
+    fs::write(&source, format!("{rtl}\n{testbench}"))?;
+    let binary = tools.compile(
+        directory.path(),
+        &[&source],
+        "tb",
+        &[],
+        Duration::from_secs(30),
+    )?;
+    tools.run(directory.path(), &binary, Duration::from_secs(30))?;
+    Ok(())
 }

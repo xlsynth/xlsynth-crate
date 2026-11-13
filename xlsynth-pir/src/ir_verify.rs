@@ -11,7 +11,8 @@ use crate::ir_deduce::deduce_graph_result_type;
 mod package;
 
 pub(crate) use package::{
-    CalleeLookup, validate_fn_with, verify_package_inout_hierarchies, verify_package_structure,
+    CalleeLookup, validate_fn_with, verify_block_structure_in_package,
+    verify_package_inout_hierarchies, verify_package_structure,
 };
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
@@ -79,11 +80,18 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             NodePayload::Nil
             | NodePayload::Param
             | NodePayload::Literal(_)
-            | NodePayload::InputPort { .. } => {
+            | NodePayload::InputPort { .. }
+            | NodePayload::ExtInoutPortInput { .. }
+            | NodePayload::ExtInstantiationInoutOutput { .. } => {
                 // Leaf nodes do not reference operands.
             }
             NodePayload::ExtInstantiationInout { .. } => { /* A binding names its pins. */ }
-            NodePayload::ExtInoutPort {
+            NodePayload::ExtInoutPortOutput {
+                drive,
+                output_enable,
+                ..
+            }
+            | NodePayload::ExtInstantiationInoutInput {
                 drive,
                 output_enable,
                 ..
@@ -435,22 +443,15 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         NodePayload::ExtInstantiationInout { .. } => {
             expect_type(&node.ty, &Type::nil(), "ext_instantiation_inout result")
         }
-        NodePayload::ExtInoutPort {
-            drive,
-            output_enable,
-            ..
-        } => {
-            if node.ty.contains_token()
-                || node.ty.checked_bit_count().is_none_or(|width| width == 0)
-            {
-                return Err("ext_inout_port requires a nonempty, token-free port type".into());
-            }
-            expect_type(ty(*drive), &node.ty, "ext_inout_port drive")?;
-            expect_type(
-                ty(*output_enable),
-                &Type::Bits(1),
-                "ext_inout_port output enable",
-            )
+        NodePayload::ExtInoutPortInput { .. } | NodePayload::ExtInstantiationInoutOutput { .. } => {
+            // The block verifies the read type against its endpoint
+            // declaration.
+            Ok(())
+        }
+        NodePayload::ExtInoutPortOutput { output_enable, .. }
+        | NodePayload::ExtInstantiationInoutInput { output_enable, .. } => {
+            expect_type(ty(*output_enable), &Type::Bits(1), "inout output enable")?;
+            expect_type(&node.ty, &Type::nil(), "inout drive result")
         }
         NodePayload::OutputPort { .. } => expect_type(&node.ty, &Type::nil(), "output_port result"),
         NodePayload::ArraySlice {

@@ -60,8 +60,9 @@ struct field ordering policies are exported from the same module.
 - Transitive block hierarchy and existing foreign-function instantiations.
 - Bidirectional pins in flat layout with a whole-port active-high output enable.
   Each local driver emits `assign pad = oe ? drive : 'z;`. A child inout binds directly
-  to the parent pin, so all readers sample the same resolved net. See the
-  [shared-bus example](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir).
+  to the parent pin or to a private wire that the parent can read and drive. See the
+  [shared bus](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir) and
+  [private request/reply](tests/goldens/block2sv/hierarchy/private_request_reply.golden.ir) examples.
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
   partial products, and division/modulo, using original-width operands.
 - Priority selects lowered to compact `unique casez` helpers with disjoint

@@ -11,13 +11,22 @@ use crate::ir::{
     Package, PackageMember, Register, Type, Unop,
 };
 use crate::ir_rebase_ids::{package_max_emitted_node_id, rebase_block_ids_in_place};
-use crate::ir_verify::{verify_block_in_package, verify_function_signature, verify_package};
+use crate::ir_verify::{
+    verify_block_structure_in_package, verify_function_signature, verify_package,
+};
 
 /// A register belonging to exactly one block builder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BRegister {
     builder_id: usize,
     index: usize,
+}
+
+/// A declared inout pin in one builder, independent of any read of that pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BInoutPort {
+    builder_id: usize,
+    port_index: usize,
 }
 
 /// An instance belonging to exactly one block builder.
@@ -78,12 +87,27 @@ enum InstanceSignature {
     Extern(ExternalSignature),
 }
 
+/// Accesses emitted for a single privately connected child pin.
+#[derive(Clone, Copy, Default)]
+struct PrivateInout {
+    read: Option<BValue>,
+    driven: bool,
+}
+
+/// A child pin can share a parent port or have its own private wire.
+enum InoutConnection {
+    Bound,
+    Private(PrivateInout),
+}
+
+/// Signature and connections accumulated for a single instance.
 struct InstanceState {
     definition: Instantiation,
     signature: InstanceSignature,
     input_types: BTreeMap<String, Type>,
     output_types: BTreeMap<String, Type>,
-    inouts: BTreeSet<String>,
+    inout_types: BTreeMap<String, Type>,
+    inout_connections: BTreeMap<String, InoutConnection>,
     inputs: BTreeSet<String>,
     outputs: BTreeMap<String, BValue>,
 }
@@ -93,6 +117,8 @@ struct InstanceState {
 #[derive(Default)]
 pub struct BlockState {
     ports: Vec<BlockPort>,
+    inout_indices: BTreeMap<String, usize>,
+    inout_drives: BTreeSet<usize>,
     port_names: BTreeMap<String, Option<NodeRef>>,
     reset: Option<BlockReset>,
     registers: Vec<RegisterState>,
@@ -193,73 +219,258 @@ impl Builder<BlockState> {
         Ok(value)
     }
 
-    /// Declares an enabled bidirectional pin and returns its resolved readback.
+    /// Declares a bidirectional port without adding a driver or an SSA read.
+    pub fn declare_inout_port(&mut self, name: &str, ty: Type) -> Result<BInoutPort, BuilderError> {
+        self.check_node_name(name, None)?;
+        if checked_flat_width(&ty)? == 0 || ty.contains_token() {
+            return Err(invalid("inout ports require a nonempty, token-free type"));
+        }
+        let port_index = self.state.ports.len();
+        self.state.ports.push(BlockPort::Inout(ir::InoutPort {
+            name: name.to_owned(),
+            ty,
+            sv_type: None,
+        }));
+        self.state.inout_indices.insert(name.to_owned(), port_index);
+        self.state.port_names.insert(name.to_owned(), None);
+        Ok(BInoutPort {
+            builder_id: self.id,
+            port_index,
+        })
+    }
+
+    /// Looks up a typed port handle in its owning builder.
+    fn inout_pin(&self, port: BInoutPort) -> Result<&ir::InoutPort, BuilderError> {
+        if port.builder_id != self.id {
+            return Err(invalid("inout port belongs to a different builder"));
+        }
+        match &self.state.ports[port.port_index] {
+            BlockPort::Inout(pin) => Ok(pin),
+            _ => unreachable!("BInoutPort indexes a declared inout"),
+        }
+    }
+
+    /// Reads the resolved value of a declared inout.
+    pub fn ext_inout_port_input(&mut self, port: BInoutPort) -> Result<BValue, BuilderError> {
+        let pin = self.inout_pin(port)?;
+        self.add_node(
+            NodePayload::ExtInoutPortInput {
+                name: pin.name.clone(),
+            },
+            Some(pin.ty.clone()),
+        )
+    }
+
+    /// Drives a declared inout while its one-bit output enable is asserted.
+    pub fn ext_inout_port_output(
+        &mut self,
+        port: BInoutPort,
+        drive: BValue,
+        output_enable: BValue,
+    ) -> Result<BValue, BuilderError> {
+        let drive = self.node(drive)?;
+        let output_enable = self.node(output_enable)?;
+        let pin = self.inout_pin(port)?;
+        if self.graph.get_node_ty(drive) != &pin.ty {
+            return Err(invalid(format!(
+                "inout '{}' requires drive type {}",
+                pin.name, pin.ty
+            )));
+        }
+        if self.state.inout_drives.contains(&port.port_index) {
+            return Err(invalid(format!(
+                "duplicate local inout driver for '{}'",
+                pin.name
+            )));
+        }
+        let sink = self.add_node(
+            NodePayload::ExtInoutPortOutput {
+                name: pin.name.clone(),
+                drive,
+                output_enable,
+            },
+            None,
+        )?;
+        self.state.inout_drives.insert(port.port_index);
+        Ok(sink)
+    }
+
+    /// Compatibility shorthand for a declaration, a read, and an enabled
+    /// driver.
     pub fn ext_inout_port(
         &mut self,
         name: &str,
         drive: BValue,
         output_enable: BValue,
     ) -> Result<BValue, BuilderError> {
-        self.check_node_name(name, None)?;
-        let drive = self.node(drive)?;
-        let output_enable = self.node(output_enable)?;
-        let pin = self.add_node(
-            NodePayload::ExtInoutPort {
-                drive,
-                output_enable,
-                name: name.to_string(),
-                sv_type: None,
-            },
-            None,
-        )?;
-        self.graph.get_node_mut(pin.node).name = Some(name.to_string());
-        self.names.insert(name.to_string(), pin.node);
+        let ty = self.graph.get_node_ty(self.node(drive)?).clone();
+        if self.graph.get_node_ty(self.node(output_enable)?) != &Type::Bits(1) {
+            return Err(invalid("ext_inout_port output enable must be bits[1]"));
+        }
+        let port = self.declare_inout_port(name, ty)?;
+        let read = self.ext_inout_port_input(port)?;
+        self.graph.get_node_mut(read.node).name = Some(name.to_owned());
+        self.names.insert(name.to_owned(), read.node);
         self.state
             .port_names
-            .insert(name.to_string(), Some(pin.node));
-        self.state.ports.push(BlockPort::Inout(pin.node));
-        Ok(pin)
+            .insert(name.to_owned(), Some(read.node));
+        self.ext_inout_port_output(port, drive, output_enable)?;
+        Ok(read)
     }
 
-    /// Binds a child's bidirectional pin to a pin of this block.
+    /// Returns the declared pin handle represented by an existing local read.
+    fn pin_for_read(&self, node: NodeRef) -> Result<BInoutPort, BuilderError> {
+        let NodePayload::ExtInoutPortInput { name } = &self.graph.get_node(node).payload else {
+            return Err(invalid("expected a local inout port read"));
+        };
+        Ok(BInoutPort {
+            builder_id: self.id,
+            port_index: self.state.inout_indices[name],
+        })
+    }
+
+    /// Binds a child inout using a read of a local pin (compatibility API).
     pub fn ext_instantiation_inout(
         &mut self,
         instance: BInstantiation,
         port_name: &str,
         parent: BValue,
     ) -> Result<BValue, BuilderError> {
+        let port = self.pin_for_read(self.node(parent)?)?;
+        self.bind_inout_port(instance, port_name, port)
+    }
+
+    /// Connects a child pin directly to the parent's declared electrical net.
+    pub fn bind_inout_port(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+        parent: BInoutPort,
+    ) -> Result<BValue, BuilderError> {
         let index = self.instance_index(instance)?;
-        let node = self.graph.get_node(self.node(parent)?);
-        let NodePayload::ExtInoutPort { name, .. } = &node.payload else {
-            return Err(invalid("binding requires a local inout port"));
-        };
+        let pin = self.inout_pin(parent)?;
         let state = &self.state.instances[index];
-        let InstanceSignature::Block(sig) = &state.signature else {
-            return Err(invalid("binding requires a block instance"));
-        };
-        if !sig
-            .ports
-            .contains(&PortSignature::Inout(port_name.to_owned(), node.ty.clone()))
-        {
+        if state.inout_types.get(port_name) != Some(&pin.ty) {
             return Err(invalid(format!(
                 "missing or incompatible child inout {port_name}"
             )));
         }
-        if state.inouts.contains(port_name) {
-            return Err(invalid(format!("duplicate inout binding {port_name}")));
+        if state.inout_connections.contains_key(port_name) {
+            return Err(invalid(format!(
+                "child inout {port_name} is already connected"
+            )));
         }
-        let pin = self.add_node(
+        let link = self.add_node(
             NodePayload::ExtInstantiationInout {
                 instantiation: state.definition.name.clone(),
                 port_name: port_name.to_owned(),
-                parent_port: name.clone(),
+                parent_port: pin.name.clone(),
             },
             None,
         )?;
         self.state.instances[index]
-            .inouts
-            .insert(port_name.to_owned());
-        Ok(pin)
+            .inout_connections
+            .insert(port_name.to_owned(), InoutConnection::Bound);
+        Ok(link)
+    }
+
+    /// Checks the endpoint before a read or drive establishes a private wire.
+    fn private_inout(
+        &self,
+        index: usize,
+        port_name: &str,
+    ) -> Result<(&Type, PrivateInout), BuilderError> {
+        let state = &self.state.instances[index];
+        let ty = state
+            .inout_types
+            .get(port_name)
+            .ok_or_else(|| invalid(format!("unknown child inout {port_name}")))?;
+        match state.inout_connections.get(port_name) {
+            Some(InoutConnection::Bound) => Err(invalid(format!(
+                "child inout {port_name} is directly bound"
+            ))),
+            Some(InoutConnection::Private(access)) => Ok((ty, *access)),
+            None => Ok((ty, PrivateInout::default())),
+        }
+    }
+
+    /// Samples a private child pin, sharing the same wire for repeated reads.
+    pub fn ext_instantiation_inout_output(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+    ) -> Result<BValue, BuilderError> {
+        let index = self.instance_index(instance)?;
+        let (ty, mut access) = self.private_inout(index, port_name)?;
+        let state = &self.state.instances[index];
+        if let Some(read) = access.read {
+            return Ok(read);
+        }
+        let read = self.add_node(
+            NodePayload::ExtInstantiationInoutOutput {
+                instantiation: state.definition.name.clone(),
+                port_name: port_name.to_owned(),
+            },
+            Some(ty.clone()),
+        )?;
+        access.read = Some(read);
+        self.state.instances[index]
+            .inout_connections
+            .insert(port_name.to_owned(), InoutConnection::Private(access));
+        Ok(read)
+    }
+
+    /// Drives the private wire attached to a child inout.
+    pub fn ext_instantiation_inout_input(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+        drive: BValue,
+        output_enable: BValue,
+    ) -> Result<BValue, BuilderError> {
+        let index = self.instance_index(instance)?;
+        let drive = self.node(drive)?;
+        let output_enable = self.node(output_enable)?;
+        let (ty, mut access) = self.private_inout(index, port_name)?;
+        let state = &self.state.instances[index];
+        if ty != self.graph.get_node_ty(drive) {
+            return Err(invalid(format!(
+                "child inout {port_name} requires drive type {ty}"
+            )));
+        }
+        if access.driven {
+            return Err(invalid(format!(
+                "duplicate driver for child inout {port_name}"
+            )));
+        }
+        let write = self.add_node(
+            NodePayload::ExtInstantiationInoutInput {
+                instantiation: state.definition.name.clone(),
+                port_name: port_name.to_owned(),
+                drive,
+                output_enable,
+            },
+            None,
+        )?;
+        access.driven = true;
+        self.state.instances[index]
+            .inout_connections
+            .insert(port_name.to_owned(), InoutConnection::Private(access));
+        Ok(write)
+    }
+
+    /// Sets the SystemVerilog type of a pin without creating an SSA node.
+    pub fn set_inout_sv_type(
+        &mut self,
+        port: BInoutPort,
+        sv_type: Option<&str>,
+    ) -> Result<(), BuilderError> {
+        self.inout_pin(port)?;
+        let BlockPort::Inout(pin) = &mut self.state.ports[port.port_index] else {
+            unreachable!("validated inout handle")
+        };
+        pin.sv_type = sv_type.map(str::to_owned);
+        Ok(())
     }
 
     /// Adds an output port and returns its unit-valued sink node.
@@ -326,11 +537,14 @@ impl Builder<BlockState> {
         sv_type: Option<&str>,
     ) -> Result<(), BuilderError> {
         let node = self.node(port)?;
+        if matches!(
+            self.graph.get_node(node).payload,
+            NodePayload::ExtInoutPortInput { .. }
+        ) {
+            return self.set_inout_sv_type(self.pin_for_read(node)?, sv_type);
+        }
         match &mut self.graph.get_node_mut(node).payload {
             NodePayload::InputPort {
-                sv_type: target, ..
-            }
-            | NodePayload::ExtInoutPort {
                 sv_type: target, ..
             }
             | NodePayload::OutputPort {
@@ -505,6 +719,7 @@ impl Builder<BlockState> {
         let signature = block_signature(block)?;
         let mut input_types = BTreeMap::new();
         let mut output_types = BTreeMap::new();
+        let mut inout_types = BTreeMap::new();
         for port in &signature.ports {
             match port {
                 PortSignature::Input(name, ty) => {
@@ -513,7 +728,9 @@ impl Builder<BlockState> {
                 PortSignature::Output(name, ty) => {
                     output_types.insert(name.clone(), ty.clone());
                 }
-                PortSignature::Inout(..) => { /* Checked by the structural binding API. */ }
+                PortSignature::Inout(name, ty) => {
+                    inout_types.insert(name.clone(), ty.clone());
+                }
                 PortSignature::Clock(_) => {
                     // Clocks are implicit hierarchy connections, not value
                     // nodes.
@@ -526,6 +743,7 @@ impl Builder<BlockState> {
             InstanceSignature::Block(signature),
             input_types,
             output_types,
+            inout_types,
         )
     }
 
@@ -556,6 +774,7 @@ impl Builder<BlockState> {
             InstanceSignature::Extern(external_signature(function)),
             input_types,
             output_types,
+            BTreeMap::new(),
         )
     }
 
@@ -567,6 +786,7 @@ impl Builder<BlockState> {
         signature: InstanceSignature,
         input_types: BTreeMap<String, Type>,
         output_types: BTreeMap<String, Type>,
+        inout_types: BTreeMap<String, Type>,
     ) -> Result<BInstantiation, BuilderError> {
         check_name(name)?;
         if target == self.graph.name {
@@ -599,7 +819,8 @@ impl Builder<BlockState> {
             signature,
             input_types,
             output_types,
-            inouts: BTreeSet::new(),
+            inout_types,
+            inout_connections: BTreeMap::new(),
             inputs: BTreeSet::new(),
             outputs: BTreeMap::new(),
         });
@@ -717,11 +938,10 @@ impl Builder<BlockState> {
             super::block_cycles::verify_block_combinational_cycles(&block, package)?;
             block.compact_and_toposort().map_err(invalid)?;
         }
-        verify_block_in_package(&block, package, package.members.len())
+        verify_block_structure_in_package(&block, package, package.members.len())
             .map_err(|error| invalid(error.to_string()))?;
-        // Package verification already checks hierarchy dependencies for blocks
-        // with inouts.
-        if !has_wires && !block.instantiations.is_empty() && block.inout_ports().next().is_none() {
+        if !has_wires && (!block.instantiations.is_empty() || block.inout_ports().next().is_some())
+        {
             super::block_cycles::verify_block_combinational_cycles(&block, package)?;
         }
         Ok(block)
@@ -833,15 +1053,11 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                     clock_seen = true;
                     PortSignature::Clock(name.clone())
                 }
-                BlockPort::Inout(port) => {
-                    let node = block
-                        .nodes
-                        .get(port.index)
-                        .ok_or_else(|| invalid("missing inout node"))?;
-                    let NodePayload::ExtInoutPort { name, .. } = &node.payload else {
-                        return Err(invalid("invalid inout port node"));
-                    };
-                    PortSignature::Inout(name.clone(), node.ty.clone())
+                BlockPort::Inout(pin) => {
+                    if checked_flat_width(&pin.ty)? == 0 || pin.ty.contains_token() {
+                        return Err(invalid("invalid instance inout port type"));
+                    }
+                    PortSignature::Inout(pin.name.clone(), pin.ty.clone())
                 }
                 BlockPort::Input(port) => {
                     let node = block.nodes.get(port.index).ok_or_else(|| {

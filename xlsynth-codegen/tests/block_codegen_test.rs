@@ -39,12 +39,15 @@ fn invalid_inout_bindings_fail_before_emission() {
         ),
         ("parent_port=pad", "parent_port=left_data"),
         ("parent_port=pad", "parent_port=seen"),
-        ("parent_port=pad", "parent_port=idle"),
+        ("parent_port=pad", "parent_port=sample"),
         (
             "instantiation_input(left_data, instantiation=left, port_name=drive",
             "instantiation_input(left_data, instantiation=left, port_name=io",
         ),
-        ("ext_inout_port(idle, off", "ext_inout_port(idle, idle"),
+        (
+            "ext_inout_port_output(drive, oe",
+            "ext_inout_port_output(drive, drive",
+        ),
     ];
     for (from, to) in wrong_bindings {
         let ir = source.replacen(from, to, 1);
@@ -102,6 +105,27 @@ fn register_breaks_an_inout_feedback_path() {
 }
 
 #[test]
+fn pipeline_layout_rejects_an_unaccessed_pin_in_a_private_child() {
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let package = Parser::new(ir).parse_and_validate_package().unwrap();
+    let error = emit_system_verilog(
+        &package,
+        &BlockCodegenOptions {
+            layout: Layout::Pipeline,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        BlockCodegenError::NotPipeline(
+            "block `contact` cannot use layout=pipeline with inout port `io`; use layout=none"
+                .into()
+        )
+    );
+}
+
+#[test]
 fn inout_data_types_and_enables_are_checked() {
     let single = r#"package pads
 top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
@@ -124,13 +148,9 @@ top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
         );
     }
     // Equal flattened widths are insufficient when binding physical ports.
-    let parent_tuple = SHARED_INOUT
-        .replace("pad: bits[4]", "pad: (bits[4])")
-        .replace(
-            "idle: bits[4] = literal(value=0,",
-            "idle: (bits[4]) = tuple(left_data,",
-        );
-    let error = Parser::new(&parent_tuple)
+    let ir = include_str!("goldens/block2sv/hierarchy/private_pin_modes.golden.ir");
+    let child_scalar = ir.replacen("bits[2][2]", "bits[4]", 2);
+    let error = Parser::new(&child_scalar)
         .parse_and_validate_package()
         .unwrap_err();
     assert!(

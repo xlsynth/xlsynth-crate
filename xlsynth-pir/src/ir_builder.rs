@@ -20,7 +20,8 @@ pub(crate) mod block_cycles;
 mod ops;
 
 pub use block::{
-    BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions, ResetBehavior,
+    BInoutPort, BInstantiation, BRegister, BlockBuilder, BlockState, RegisterWriteOptions,
+    ResetBehavior,
 };
 pub use ops::{NaryAddOptions, NaryAddTerm, NormalizeLeftOptions};
 

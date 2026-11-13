@@ -352,32 +352,50 @@ Also add tests in the same style as the existing extension tests:
 
 ## Bidirectional block ports
 
+A block declares a pin in its port list and marks it as bidirectional with
+a typed `ext_inout` declaration in the body. The declaration can carry
+`sv_type`. Reads and drives refer to the pin by name.
+
 ```text
 package pads
 
 top block pad_cell(drive: bits[4], oe: bits[1], pad: bits[4], observed: bits[4]) {
+  ext_inout pad(bits[4])
   drive: bits[4] = input_port(name=drive, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
-  pad: bits[4] = ext_inout_port(drive, oe, name=pad, id=3)
-  observed: () = output_port(pad, name=observed, id=4)
+  sample: bits[4] = ext_inout_port_input(name=pad, id=3)
+  enable_drive: () = ext_inout_port_output(drive, oe, name=pad, id=4)
+  observed: () = output_port(sample, name=observed, id=5)
 }
 ```
 
-The first operand supplies drive data of the declared pin type. The second is
-an active-high `bits[1]` enable for the entire pin. The operation always reads
-the resolved net. Block-to-Verilog codegen emits one conditional continuous
-assignment for each local driver. Reading an undriven net yields high impedance
-and conflicting equal-strength drivers resolve to X on the conflicting bits.
+A read returns the resolved value. The optional local driver takes data of the
+pin's exact type and one active-high `bits[1]` enable for the entire pin.
+Codegen emits `assign pad = oe ? drive : 'z;`. An undriven wire reads as high
+impedance, and conflicting equal-strength drivers resolve to X on the
+conflicting bits. A pin used only for pass-through needs only its declaration.
 
-A parent binds a child inout structurally. For example,
-`link: () = ext_instantiation_inout(instantiation=child, port_name=io, parent_port=pad, id=4)`
-emits the child connection `.io(pad)`. Each child inout binds exactly once to
-an identically typed inout in its immediate parent. Siblings can share a pin.
-An ordinary input can consume the readback. A constant-zero local enable makes
-a forwarding parent. Combinational feedback from the shared net to its own
-drive or enable is invalid. Registers break combinational feedback. Use
-`block2sv --layout=none` (the default) to emit a hierarchy containing inouts.
+Each child inout has one connection in the parent:
 
-Native text serialization preserves these operations. Evaluation, formal
-projection, gate lowering, and desugared/FFI extension emission require
-two-state ports and reject designs that use inouts.
+- **Direct binding.** `ext_instantiation_inout(instantiation=u, port_name=io, parent_port=pad, id=6)`
+  emits `.io(pad)`. Each bound child pin and its parent pin must have the same
+  type. Multiple children can bind to the same parent pin.
+- **Private connection.** Read or drive a child pin using either or both
+  of the following operations. They use one internal wire connected to `u.io`.
+  The parent can have only ordinary ports.
+
+```text
+rx: bits[4] = ext_instantiation_inout_output(instantiation=u, port_name=io, id=7)
+send: () = ext_instantiation_inout_input(drive, oe, instantiation=u, port_name=io, id=8)
+```
+
+Reads can share a pin or private connection. A block can add at most one local
+driver per declared pin or private connection. Combinational feedback from a
+resolved value to a contributing drive or enable is invalid. A register breaks
+that feedback path.
+
+The parser accepts the older combined `ext_inout_port(drive, oe, name=pad)`
+syntax and prints the declaration and split operations on serialization. Use
+`block2sv --layout=none` (the default) for RTL. Evaluation, formal projection,
+gate lowering, desugared/FFI extension emission, and pipeline layout reject
+inouts.

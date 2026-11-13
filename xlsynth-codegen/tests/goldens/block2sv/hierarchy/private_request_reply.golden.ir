@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: Apache-2.0
+package private_request_reply
+
+block device(clk: clock, capture: bits[1], reply: bits[1], io: bits[4], last_request: bits[4]) {
+  ext_inout io(bits[4])
+  reg saved(bits[4])
+  capture: bits[1] = input_port(name=capture, id=1)
+  reply: bits[1] = input_port(name=reply, id=2)
+  sample: bits[4] = ext_inout_port_input(name=io, id=3)
+  stored: bits[4] = register_read(register=saved, id=4)
+  save: () = register_write(sample, register=saved, load_enable=capture, id=5)
+  response: bits[4] = not(stored, id=6)
+  drive: () = ext_inout_port_output(response, reply, name=io, id=7)
+  last_request: () = output_port(stored, name=last_request, id=8)
+}
+
+top block host(clk: clock, u_device_io: bits[4], send: bits[1], capture: bits[1], reply: bits[1], rx: bits[4], rx_again: bits[4], last_request: bits[4]) {
+  instantiation u_device(block=device, kind=block)
+  u_device_io: bits[4] = input_port(name=u_device_io, id=9)
+  send: bits[1] = input_port(name=send, id=10)
+  capture: bits[1] = input_port(name=capture, id=11)
+  reply: bits[1] = input_port(name=reply, id=12)
+  drive: () = ext_instantiation_inout_input(u_device_io, send, instantiation=u_device, port_name=io, id=13)
+  sample: bits[4] = ext_instantiation_inout_output(instantiation=u_device, port_name=io, id=14)
+  duplicate_sample: bits[4] = ext_instantiation_inout_output(instantiation=u_device, port_name=io, id=15)
+  capture_request: () = instantiation_input(capture, instantiation=u_device, port_name=capture, id=16)
+  send_reply: () = instantiation_input(reply, instantiation=u_device, port_name=reply, id=17)
+  stored: bits[4] = instantiation_output(instantiation=u_device, port_name=last_request, id=18)
+  rx: () = output_port(sample, name=rx, id=19)
+  rx_again: () = output_port(duplicate_sample, name=rx_again, id=20)
+  last_request: () = output_port(stored, name=last_request, id=21)
+}
+
+// EXPECT-SV: module device(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic capture,
+// EXPECT-SV:   input logic reply,
+// EXPECT-SV:   inout wire [3:0] io,
+// EXPECT-SV:   output logic [3:0] last_request
+// EXPECT-SV: );
+// EXPECT-SV:   logic [3:0] saved;
+// EXPECT-SV:   logic [3:0] response;
+// EXPECT-SV:   assign response = ~saved;
+// EXPECT-SV:   assign io = reply ? response : 'z;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     saved <= capture ? io : saved;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign last_request = saved;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module host(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [3:0] u_device_io,
+// EXPECT-SV:   input logic send,
+// EXPECT-SV:   input logic capture,
+// EXPECT-SV:   input logic reply,
+// EXPECT-SV:   output logic [3:0] rx,
+// EXPECT-SV:   output logic [3:0] rx_again,
+// EXPECT-SV:   output logic [3:0] last_request
+// EXPECT-SV: );
+// EXPECT-SV:   wire [3:0] u_device_io__1;
+// EXPECT-SV:   logic [3:0] stored;
+// EXPECT-SV:   assign u_device_io__1 = send ? u_device_io : 'z;
+// EXPECT-SV:   assign rx = u_device_io__1;
+// EXPECT-SV:   assign rx_again = u_device_io__1;
+// EXPECT-SV:   assign last_request = stored;
+// EXPECT-SV:   device u_device (
+// EXPECT-SV:     .clk(clk),
+// EXPECT-SV:     .capture(capture),
+// EXPECT-SV:     .reply(reply),
+// EXPECT-SV:     .io(u_device_io__1),
+// EXPECT-SV:     .last_request(stored)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

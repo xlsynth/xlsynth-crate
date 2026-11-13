@@ -354,7 +354,10 @@ fn constant_only_nodes(graph: &NodeGraph, topological: &[NodeRef]) -> Vec<bool> 
                 .all(|operand| constant_only[operand.index]),
             NodePayload::Nil
             | NodePayload::Param
-            | NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutPortInput { .. }
+            | NodePayload::ExtInoutPortOutput { .. }
+            | NodePayload::ExtInstantiationInoutInput { .. }
+            | NodePayload::ExtInstantiationInoutOutput { .. }
             | NodePayload::ExtInstantiationInout { .. }
             | NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }

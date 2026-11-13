@@ -5,7 +5,7 @@ use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::aig_sim::sequential::{self, SequentialState};
 use xlsynth_g8r::block2sequential::{
     block_ir_to_sequential_gate_fn, block_ir_to_sequential_gate_fn_with_controls,
-    optimize_and_lower_bx_block,
+    block_package_to_sequential_gate_fn, optimize_and_lower_bx_block,
 };
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_pir::IrBits;
@@ -14,6 +14,35 @@ use xlsynth_pir::ir_parser::{Parser, parse_xls_ir_package};
 fn lower(block_ir: &str) -> xlsynth_g8r::aig::SequentialGateFn {
     block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled())
         .expect("block lowering should succeed")
+}
+
+#[test]
+fn gate_lowering_rejects_declaration_only_and_unobserved_private_pins() {
+    let source = r#"package pads
+block cell(io: bits[1]) {
+  ext_inout io(bits[1])
+}
+block wrapper() {
+  instantiation u(block=cell, kind=block)
+  unused: bits[1] = ext_instantiation_inout_output(instantiation=u, port_name=io, id=1)
+}
+"#;
+    let mut package = Parser::new(source).parse_and_validate_package().unwrap();
+    for (name, op) in [
+        ("cell", "ext_inout_port"),
+        ("wrapper", "ext_instantiation_inout_output"),
+    ] {
+        package.set_top_block(name).unwrap();
+        let error =
+            block_package_to_sequential_gate_fn(&package, GatifyOptions::all_opts_disabled())
+                .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "block2sequential: block inlining failed: block inlining: {op} 'io' in '{name}' requires block-to-Verilog codegen"
+            )
+        );
+    }
 }
 
 #[test]

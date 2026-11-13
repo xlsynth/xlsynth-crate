@@ -3,7 +3,7 @@
 //! Package-context portions of PIR verification.
 
 use crate::ir_builder::block_cycles::BlockHierarchy;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ir::{
     Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
@@ -767,8 +767,12 @@ pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationErro
 /// `verify_package_structure`, reusing each child's dependency summary.
 pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
     let mut hierarchy = BlockHierarchy::default();
+    let mut with_inouts = HashSet::new();
     for member in &p.members {
-        if let PackageMember::Block(block) = member {
+        if let PackageMember::Block(block) = member
+            && hierarchy_contains_inouts(block, &with_inouts)
+        {
+            with_inouts.insert(block.name.as_str());
             validate_block_inout_hierarchy(block, p, &mut hierarchy)?;
         }
     }
@@ -845,13 +849,44 @@ pub fn validate_block(
     parent: &Package,
     member_index: usize,
 ) -> Result<(), ValidationError> {
+    verify_block_structure_in_package(f, parent, member_index)?;
+    let mut with_inouts = HashSet::new();
+    if !f.instantiations.is_empty() {
+        for member in parent.members.iter().take(member_index) {
+            if let PackageMember::Block(prior) = member
+                && hierarchy_contains_inouts(prior, &with_inouts)
+            {
+                with_inouts.insert(prior.name.as_str());
+            }
+        }
+    }
+    if hierarchy_contains_inouts(f, &with_inouts) {
+        validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())?;
+    }
+    Ok(())
+}
+
+/// Identifies ancestors of inout blocks, including those exposing only ordinary
+/// ports.
+fn hierarchy_contains_inouts(block: &Block, prior: &HashSet<&str>) -> bool {
+    block.inout_ports().next().is_some()
+        || block.instantiations.iter().any(|inst| {
+            inst.kind == InstantiationKind::Block && prior.contains(inst.block.as_str())
+        })
+}
+
+/// Verifies a block's local invariants against a verified package context.
+pub(crate) fn verify_block_structure_in_package(
+    f: &Block,
+    parent: &Package,
+    member_index: usize,
+) -> Result<(), ValidationError> {
     validate_block_with(
         f,
         parent,
         member_index,
         CalleeLookup::Unverified(&|name| parent.get_fn(name)),
-    )?;
-    validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())
+    )
 }
 
 fn validate_block_with(
@@ -885,7 +920,6 @@ fn validate_block_with(
             }
         }
     }
-    validate_inout_bindings(f, &prior_blocks)?;
     let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
     validate_graph_with(
         f,
@@ -899,6 +933,7 @@ fn validate_block_with(
         Some(&instantiation_info),
         true,
     )?;
+    validate_inout_bindings(f, &prior_blocks)?;
     validate_block_registers(f)
 }
 
@@ -908,71 +943,151 @@ fn validate_block_inout_hierarchy(
     parent: &Package,
     hierarchy: &mut BlockHierarchy,
 ) -> Result<(), ValidationError> {
-    if block.inout_ports().next().is_some() {
-        hierarchy.summarize(block, parent).map_err(|error| {
-            ValidationError::BlockInvariantViolation {
-                block: block.name.clone(),
-                reason: error.to_string(),
-            }
-        })?;
-    }
-    Ok(())
+    hierarchy
+        .summarize(block, parent)
+        .map_err(|error| ValidationError::BlockInvariantViolation {
+            block: block.name.clone(),
+            reason: error.to_string(),
+        })
 }
 
-/// Verifies the one-to-one mapping of child pins to bindings, allowing shared
-/// parent pins.
+/// Records how a child pin is connected in one instance of its parent.
+#[derive(Clone, Copy)]
+enum PinConnection {
+    Missing,
+    Bound,
+    Private { driven: bool },
+}
+
+/// Checks pin types, per-endpoint drive uniqueness, and complete instance
+/// wiring.
 fn validate_inout_bindings(
     block: &Block,
-    prior: &std::collections::HashMap<String, &Block>,
+    prior: &HashMap<String, &Block>,
 ) -> Result<(), ValidationError> {
     let error = |reason: String| ValidationError::BlockInvariantViolation {
         block: block.name.clone(),
         reason,
     };
-    let mut required = BTreeMap::new();
-    let mut bound = BTreeSet::new();
+    let pins: HashMap<_, _> = block
+        .inout_ports()
+        .map(|pin| (pin.name.as_str(), &pin.ty))
+        .collect();
+    let mut local_drivers = HashSet::new();
+    let mut children = BTreeMap::new();
     for inst in &block.instantiations {
         if inst.kind == InstantiationKind::Block {
-            let child = prior[&inst.block];
-            for pin in child.inout_ports() {
-                required.insert(
-                    (inst.name.as_str(), child.port_name(pin)),
-                    child.port_type(pin),
+            for pin in prior[&inst.block].inout_ports() {
+                children.insert(
+                    (inst.name.as_str(), pin.name.as_str()),
+                    (&pin.ty, PinConnection::Missing),
                 );
             }
         }
     }
-    let parents: HashMap<_, _> = block
-        .inout_ports()
-        .map(|pin| (block.port_name(pin), block.port_type(pin)))
-        .collect();
     for node in &block.nodes {
-        if let NodePayload::ExtInstantiationInout {
-            instantiation,
-            port_name,
-            parent_port,
-        } = &node.payload
-        {
-            let endpoint = (instantiation.as_str(), port_name.as_str());
-            let &ty = required.get(&endpoint).ok_or_else(|| {
-                error(format!(
-                    "no block instance inout named {instantiation}.{port_name}"
-                ))
-            })?;
-            if !bound.insert(endpoint) {
-                return Err(error(format!(
-                    "duplicate inout binding {instantiation}.{port_name}"
-                )));
+        let (pin_type, access_type) = match &node.payload {
+            NodePayload::ExtInoutPortInput { name }
+            | NodePayload::ExtInoutPortOutput { name, .. } => {
+                let &ty = pins
+                    .get(name.as_str())
+                    .ok_or_else(|| error(format!("no local inout port named '{name}'")))?;
+                let access_type =
+                    if let NodePayload::ExtInoutPortOutput { drive, .. } = &node.payload {
+                        if !local_drivers.insert(name) {
+                            return Err(error(format!("duplicate driver for inout port '{name}'")));
+                        }
+                        block.get_node_ty(*drive)
+                    } else {
+                        &node.ty
+                    };
+                (ty, access_type)
             }
-            if parents.get(parent_port.as_str()).copied() != Some(ty) {
-                return Err(error(format!(
-                    "binding {instantiation}.{port_name} requires parent inout '{parent_port}' of type {ty}"
-                )));
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                ..
             }
+            | NodePayload::ExtInstantiationInoutInput {
+                instantiation,
+                port_name,
+                ..
+            }
+            | NodePayload::ExtInstantiationInoutOutput {
+                instantiation,
+                port_name,
+            } => {
+                let (ty, connection) = children
+                    .get_mut(&(instantiation.as_str(), port_name.as_str()))
+                    .ok_or_else(|| {
+                        error(format!(
+                            "no block instance inout named {instantiation}.{port_name}"
+                        ))
+                    })?;
+                if let NodePayload::ExtInstantiationInout { parent_port, .. } = &node.payload {
+                    match connection {
+                        PinConnection::Missing => *connection = PinConnection::Bound,
+                        PinConnection::Bound => {
+                            return Err(error(format!(
+                                "duplicate inout binding {instantiation}.{port_name}"
+                            )));
+                        }
+                        PinConnection::Private { .. } => {
+                            return Err(error(format!(
+                                "cannot both bind and access inout {instantiation}.{port_name}"
+                            )));
+                        }
+                    }
+                    if pins.get(parent_port.as_str()) != Some(&*ty) {
+                        return Err(error(format!(
+                            "binding {instantiation}.{port_name} requires parent inout '{parent_port}' of type {ty}"
+                        )));
+                    }
+                    continue;
+                }
+                let already_driven = match *connection {
+                    PinConnection::Missing => false,
+                    PinConnection::Bound => {
+                        return Err(error(format!(
+                            "cannot both bind and access inout {instantiation}.{port_name}"
+                        )));
+                    }
+                    PinConnection::Private { driven } => driven,
+                };
+                let access_type =
+                    if let NodePayload::ExtInstantiationInoutInput { drive, .. } = &node.payload {
+                        if already_driven {
+                            return Err(error(format!(
+                                "duplicate driver for inout {instantiation}.{port_name}"
+                            )));
+                        }
+                        *connection = PinConnection::Private { driven: true };
+                        block.get_node_ty(*drive)
+                    } else {
+                        *connection = PinConnection::Private {
+                            driven: already_driven,
+                        };
+                        &node.ty
+                    };
+                (*ty, access_type)
+            }
+            _ => continue,
+        };
+        if pin_type != access_type {
+            return Err(error(format!(
+                "{} node {} expects pin type {pin_type}, got {access_type}",
+                node.payload.get_operator(),
+                node.text_id
+            )));
         }
     }
-    if let Some((inst, pin)) = required.keys().find(|endpoint| !bound.contains(*endpoint)) {
-        return Err(error(format!("missing inout binding {inst}.{pin}")));
+    if let Some(((inst, pin), _)) = children
+        .iter()
+        .find(|(_, (_, mode))| matches!(mode, PinConnection::Missing))
+    {
+        return Err(error(format!(
+            "missing inout binding or private access for {inst}.{pin}"
+        )));
     }
     Ok(())
 }
@@ -1052,9 +1167,21 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 clock_seen = true;
                 (name.as_str(), 0)
             }
-            BlockPort::Input(reference)
-            | BlockPort::Output(reference)
-            | BlockPort::Inout(reference) => {
+            BlockPort::Inout(pin) => {
+                if pin.ty.contains_token()
+                    || pin.ty.checked_bit_count().is_none_or(|width| width == 0)
+                {
+                    return Err(violation(
+                        0,
+                        format!(
+                            "inout '{}' requires a nonempty, token-free port type",
+                            pin.name
+                        ),
+                    ));
+                }
+                (pin.name.as_str(), 0)
+            }
+            BlockPort::Input(reference) | BlockPort::Output(reference) => {
                 let node = block.nodes.get(reference.index).ok_or_else(|| {
                     violation(
                         reference.index,
@@ -1062,8 +1189,7 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                     )
                 })?;
                 let name = match (port, &node.payload) {
-                    (BlockPort::Inout(_), NodePayload::ExtInoutPort { name, .. })
-                    | (BlockPort::Input(_), NodePayload::InputPort { name, .. })
+                    (BlockPort::Input(_), NodePayload::InputPort { name, .. })
                     | (BlockPort::Output(_), NodePayload::OutputPort { name, .. }) => name,
                     _ => {
                         return Err(violation(
@@ -1090,9 +1216,7 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
     }
     for (index, node) in block.nodes.iter().enumerate() {
         match node.payload {
-            NodePayload::InputPort { .. }
-            | NodePayload::OutputPort { .. }
-            | NodePayload::ExtInoutPort { .. } => {
+            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
                 if !port_nodes.contains(&NodeRef { index }) {
                     return Err(violation(
                         index,
@@ -1387,7 +1511,10 @@ where
         match &node.payload {
             NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
-            | NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInoutPortInput { .. }
+            | NodePayload::ExtInoutPortOutput { .. }
+            | NodePayload::ExtInstantiationInoutInput { .. }
+            | NodePayload::ExtInstantiationInoutOutput { .. }
             | NodePayload::ExtInstantiationInout { .. }
                 if !allow_registers =>
             {

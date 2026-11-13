@@ -1,9 +1,11 @@
 package pads
 
 block pad_cell(drive: bits[4], oe: bits[1], io: bits[4], observed: bits[4]) {
+  ext_inout io(bits[4])
   drive: bits[4] = input_port(name=drive, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
-  io: bits[4] = ext_inout_port(drive, oe, name=io, id=3)
+  io: bits[4] = ext_inout_port_input(name=io, id=3)
+  enable_io: () = ext_inout_port_output(drive, oe, name=io, id=125)
   observed: () = output_port(io, name=observed, id=4)
 }
 
@@ -13,6 +15,7 @@ block listener(value: bits[4], observed: bits[4]) {
 }
 
 top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_oe: bits[1], pad: bits[4], seen: bits[4]) {
+  ext_inout pad(bits[4])
   instantiation left(block=pad_cell, kind=block)
   instantiation right(block=pad_cell, kind=block)
   instantiation sense(block=listener, kind=block)
@@ -20,9 +23,7 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
   right_data: bits[4] = input_port(name=right_data, id=8)
   left_oe: bits[1] = input_port(name=left_oe, id=9)
   right_oe: bits[1] = input_port(name=right_oe, id=10)
-  idle: bits[4] = literal(value=0, id=11)
-  off: bits[1] = literal(value=0, id=12)
-  pad: bits[4] = ext_inout_port(idle, off, name=pad, id=13)
+  pad: bits[4] = ext_inout_port_input(name=pad, id=13)
   left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)
   right_drive: () = instantiation_input(right_data, instantiation=right, port_name=drive, id=15)
   left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)
@@ -60,14 +61,9 @@ top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_
 // EXPECT-SV:   inout wire [3:0] pad,
 // EXPECT-SV:   output logic [3:0] seen
 // EXPECT-SV: );
-// EXPECT-SV:   logic [3:0] idle;
-// EXPECT-SV:   logic off;
 // EXPECT-SV:   logic [3:0] sample;
 // EXPECT-SV:   logic [3:0] left_sample;
 // EXPECT-SV:   logic [3:0] right_sample;
-// EXPECT-SV:   assign idle = 4'h0;
-// EXPECT-SV:   assign off = 1'h0;
-// EXPECT-SV:   assign pad = off ? idle : 'z;
 // EXPECT-SV:   assign seen = sample;
 // EXPECT-SV:   pad_cell left (
 // EXPECT-SV:     .drive(left_data),

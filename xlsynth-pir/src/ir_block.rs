@@ -6,12 +6,20 @@ use std::ops::{Deref, DerefMut};
 
 use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Register, Type};
 
-/// One port in declaration order; a clock is not a graph value.
+/// A declared electrical pin, independent of any SSA reads or drivers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InoutPort {
+    pub name: String,
+    pub ty: Type,
+    pub sv_type: Option<String>,
+}
+
+/// One interface port in declaration order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockPort {
     Input(NodeRef),
     Output(NodeRef),
-    Inout(NodeRef),
+    Inout(InoutPort),
     Clock(String),
 }
 
@@ -70,7 +78,10 @@ impl Block {
                 node.payload,
                 NodePayload::InputPort { .. }
                     | NodePayload::OutputPort { .. }
-                    | NodePayload::ExtInoutPort { .. }
+                    | NodePayload::ExtInoutPortInput { .. }
+                    | NodePayload::ExtInoutPortOutput { .. }
+                    | NodePayload::ExtInstantiationInoutInput { .. }
+                    | NodePayload::ExtInstantiationInoutOutput { .. }
                     | NodePayload::ExtInstantiationInout { .. }
             )
         }) {
@@ -218,15 +229,23 @@ impl Block {
         })
     }
 
-    /// Iterates the locally driven bidirectional pins in declaration order.
-    pub fn inout_ports(&self) -> impl Iterator<Item = NodeRef> + '_ {
-        self.ports.iter().filter_map(|port| {
-            if let BlockPort::Inout(node) = port {
-                Some(*node)
-            } else {
-                None
-            }
+    /// Iterates bidirectional pins in declaration order, including unused pins.
+    pub fn inout_ports(&self) -> impl Iterator<Item = &InoutPort> {
+        self.ports.iter().filter_map(|port| match port {
+            BlockPort::Inout(pin) => Some(pin),
+            _ => None,
         })
+    }
+
+    /// Rejects an inout interface even when no graph node reads or drives it.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        if let Some(pin) = self.inout_ports().next() {
+            return Err(format!(
+                "{backend}: ext_inout_port '{}' in '{}' requires block-to-Verilog codegen",
+                pin.name, self.name
+            ));
+        }
+        self.graph.reject_inouts(backend)
     }
 
     /// Returns the optional clock's declared name.
@@ -240,9 +259,7 @@ impl Block {
     /// Returns the semantic name of an input or output node.
     pub fn port_name(&self, port: NodeRef) -> &str {
         match &self.get_node(port).payload {
-            NodePayload::InputPort { name, .. }
-            | NodePayload::ExtInoutPort { name, .. }
-            | NodePayload::OutputPort { name, .. } => name,
+            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
@@ -251,7 +268,7 @@ impl Block {
     pub fn port_type(&self, port: NodeRef) -> &Type {
         let node = self.get_node(port);
         match node.payload {
-            NodePayload::InputPort { .. } | NodePayload::ExtInoutPort { .. } => &node.ty,
+            NodePayload::InputPort { .. } => &node.ty,
             NodePayload::OutputPort { arg, .. } => self.get_node_ty(arg),
             _ => panic!("node {} is not a data port", port.index),
         }
@@ -272,9 +289,8 @@ impl Block {
     }
 
     /// Finds a bidirectional pin by its semantic port name.
-    pub fn get_inout_port(&self, name: &str) -> Option<NodeRef> {
-        self.inout_ports()
-            .find(|port| self.port_name(*port) == name)
+    pub fn get_inout_port(&self, name: &str) -> Option<&InoutPort> {
+        self.inout_ports().find(|pin| pin.name == name)
     }
 
     /// Finds an output port by its semantic name.
@@ -288,10 +304,11 @@ impl Block {
             return Err(format!("invalid block port name {name:?}"));
         }
         if self.clock_port_name() == Some(name)
+            || self.get_inout_port(name).is_some()
             || self.nodes.iter().any(|node| {
                 node.name.as_deref() == Some(name)
                     || matches!(&node.payload,
-                        NodePayload::ExtInoutPort { name: existing, .. } | NodePayload::InputPort { name: existing, .. }
+                        NodePayload::InputPort { name: existing, .. }
                         | NodePayload::OutputPort { name: existing, .. } if existing == name)
             })
         {
@@ -379,10 +396,8 @@ impl Block {
     /// success, ordered ports and reset references follow the reordered nodes.
     pub fn compact_and_toposort(&mut self) -> Result<(), String> {
         let port_nodes = self.ports.iter().filter_map(|port| match port {
-            BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
-                Some(*node)
-            }
-            BlockPort::Clock(_) => None,
+            BlockPort::Input(node) | BlockPort::Output(node) => Some(*node),
+            BlockPort::Clock(_) | BlockPort::Inout(_) => None,
         });
         for node in port_nodes.chain(self.reset.iter().map(|reset| reset.port)) {
             if self
@@ -420,7 +435,7 @@ impl Block {
             .iter()
             .map(|port| match port {
                 BlockPort::Input(node) => remap(*node).map(BlockPort::Input),
-                BlockPort::Inout(node) => remap(*node).map(BlockPort::Inout),
+                BlockPort::Inout(pin) => Ok(BlockPort::Inout(pin.clone())),
                 BlockPort::Output(node) => remap(*node).map(BlockPort::Output),
                 BlockPort::Clock(name) => Ok(BlockPort::Clock(name.clone())),
             })

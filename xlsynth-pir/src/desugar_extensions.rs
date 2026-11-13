@@ -1193,7 +1193,6 @@ fn wrap_extensions_in_graph(
 fn wrap_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     for member in &pkg.members {
         member
-            .graph()
             .reject_inouts("FFI emission")
             .map_err(DesugarError::new)?;
     }
@@ -1424,7 +1423,6 @@ pub fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError
 pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     for member in &pkg.members {
         member
-            .graph()
             .reject_inouts("extension desugaring")
             .map_err(DesugarError::new)?;
     }

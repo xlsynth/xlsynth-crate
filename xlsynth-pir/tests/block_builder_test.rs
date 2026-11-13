@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use xlsynth_pir::block_eval::BlockEvaluator;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::desugar_extensions::{
@@ -905,7 +906,7 @@ fn inout_builder_preserves_aggregate_pins_and_rejects_projection() {
     cell.output_port("observed", pad).unwrap();
     let mut package = cell.build_package("pads").unwrap();
     let child = package.get_block("cell").unwrap();
-    assert_eq!(child.port_type(child.get_inout_port("pad").unwrap()), &ty);
+    assert_eq!(&child.get_inout_port("pad").unwrap().ty, &ty);
     assert!(
         combinational_block_to_fn(child)
             .unwrap_err()
@@ -944,5 +945,93 @@ fn inout_builder_preserves_aggregate_pins_and_rejects_projection() {
                 .to_string()
                 .contains("ext_inout_port")
         );
+    }
+}
+
+#[test]
+fn split_pin_builder_checks_types_ownership_and_connection_mode() {
+    let mut leaf = BlockBuilder::new("leaf");
+    let pin = leaf.declare_inout_port("io", Type::Bits(4)).unwrap();
+    leaf.set_inout_sv_type(pin, Some("pkg::nibble")).unwrap();
+    let mut package = leaf.build_package("pins").unwrap();
+    let child = package.get_block("leaf").unwrap();
+    assert_eq!(
+        child.get_inout_port("io").unwrap().sv_type.as_deref(),
+        Some("pkg::nibble")
+    );
+
+    let mut parent = BlockBuilder::new("parent");
+    let tx = parent.input_port("tx", Type::Bits(4)).unwrap();
+    let oe = parent.input_port("oe", Type::Bits(1)).unwrap();
+    let shared = parent.declare_inout_port("shared", Type::Bits(4)).unwrap();
+    assert!(parent.ext_inout_port_input(pin).is_err());
+    assert!(parent.ext_inout_port_output(shared, oe, oe).is_err());
+    assert!(parent.ext_inout_port_output(shared, tx, tx).is_err());
+    parent.ext_inout_port_output(shared, tx, oe).unwrap();
+    assert!(parent.ext_inout_port_output(shared, tx, oe).is_err());
+
+    let direct = parent.instantiate("direct", child).unwrap();
+    let private = parent.instantiate("private_cell", child).unwrap();
+    parent.bind_inout_port(direct, "io", shared).unwrap();
+    assert!(parent.ext_instantiation_inout_output(direct, "io").is_err());
+    assert!(
+        parent
+            .ext_instantiation_inout_input(private, "io", tx, tx)
+            .is_err()
+    );
+    assert!(
+        parent
+            .ext_instantiation_inout_input(private, "io", oe, oe)
+            .is_err()
+    );
+    let rx = parent
+        .ext_instantiation_inout_output(private, "io")
+        .unwrap();
+    assert_eq!(
+        parent
+            .ext_instantiation_inout_output(private, "io")
+            .unwrap(),
+        rx
+    );
+    parent
+        .ext_instantiation_inout_input(private, "io", tx, oe)
+        .unwrap();
+    assert!(
+        parent
+            .ext_instantiation_inout_input(private, "io", tx, oe)
+            .is_err()
+    );
+    assert!(parent.bind_inout_port(private, "io", shared).is_err());
+    parent.output_port("rx", rx).unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+}
+
+#[test]
+fn split_pin_backends_reject_unused_declarations_and_private_access() {
+    let mut leaf = BlockBuilder::new("leaf");
+    leaf.declare_inout_port("io", Type::Bits(1)).unwrap();
+    let mut package = leaf.build_package("pins").unwrap();
+    assert!(package.uses_pir_extensions());
+    let mut parent = BlockBuilder::new("parent");
+    let child = parent
+        .instantiate("u", package.get_block("leaf").unwrap())
+        .unwrap();
+    parent.ext_instantiation_inout_output(child, "io").unwrap();
+    parent.build_into_package(&mut package).unwrap();
+    for name in ["leaf", "parent"] {
+        let error = BlockEvaluator::prepare(&package, name)
+            .err()
+            .expect("evaluation must reject inouts");
+        assert!(error.to_string().contains("inout"), "{error}");
+        let error = combinational_block_to_fn(package.get_block(name).unwrap()).unwrap_err();
+        assert!(error.contains("inout"), "{error}");
+    }
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        let error = emit_package_with_extension_mode(&package, mode).unwrap_err();
+        assert!(error.to_string().contains("inout"), "{error}");
     }
 }
