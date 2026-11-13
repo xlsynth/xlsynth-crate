@@ -10,6 +10,7 @@
 
 use crate::ir::{MemberType, NodePayload, Package, PackageMember};
 use crate::ir_parser::Parser;
+use crate::ir_utils::direct_function_references;
 use crate::ir_verify;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -210,27 +211,32 @@ fn residual_counted_for_targets(f: &crate::ir::Fn) -> BTreeSet<String> {
     targets
 }
 
-fn direct_callee_names(f: &crate::ir::Fn) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for node in &f.nodes {
-        match &node.payload {
-            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                names.insert(to_apply.clone());
-            }
-            NodePayload::CountedFor { body, .. } => {
-                names.insert(body.clone());
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
 /// Builds a package for this exact entry function, resolving only its callees
 /// from `pkg`. The entry may be an edited copy of a function in the package.
 pub fn package_with_reachable_callees(
     pkg: &Package,
     entry: &crate::ir::Fn,
+) -> Result<Package, String> {
+    let roots = direct_function_references(entry).into_iter().collect();
+    reachable_function_package(pkg, roots, Some(entry))
+}
+
+/// Collects the named functions and their transitive callees once, in package
+/// order. The resulting package has no designated top.
+pub fn package_with_reachable_functions(pkg: &Package, roots: &[&str]) -> Result<Package, String> {
+    reachable_function_package(
+        pkg,
+        roots.iter().map(|name| (*name).to_owned()).collect(),
+        None,
+    )
+}
+
+/// An optional standalone entry can supply an edited function body, in which
+/// case only its dependencies are looked up in the original package.
+fn reachable_function_package(
+    pkg: &Package,
+    mut worklist: Vec<String>,
+    entry: Option<&crate::ir::Fn>,
 ) -> Result<Package, String> {
     let mut functions = HashMap::new();
     for member in &pkg.members {
@@ -241,9 +247,8 @@ pub fn package_with_reachable_callees(
         }
     }
     let mut reachable = BTreeSet::new();
-    let mut worklist: Vec<_> = direct_callee_names(entry).into_iter().collect();
     while let Some(name) = worklist.pop() {
-        if name == entry.name {
+        if entry.is_some_and(|f| name == f.name) {
             return Err(format!(
                 "entry function {name:?} is also reachable as a callee"
             ));
@@ -254,7 +259,7 @@ pub fn package_with_reachable_callees(
         let f = functions
             .get(name.as_str())
             .ok_or_else(|| format!("reachable function '{name}' is missing from package"))?;
-        for callee in direct_callee_names(f) {
+        for callee in direct_function_references(f) {
             if !reachable.contains(&callee) {
                 worklist.push(callee);
             }
@@ -270,13 +275,15 @@ pub fn package_with_reachable_callees(
         })
         .collect::<Vec<_>>();
 
-    members.push(PackageMember::Function(entry.clone()));
+    if let Some(entry) = entry {
+        members.push(PackageMember::Function(entry.clone()));
+    }
 
     Ok(Package {
         name: pkg.name.clone(),
         file_table: pkg.file_table.clone(),
         members,
-        top: Some((entry.name.clone(), MemberType::Function)),
+        top: entry.map(|f| (f.name.clone(), MemberType::Function)),
     })
 }
 

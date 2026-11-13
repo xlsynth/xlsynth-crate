@@ -151,26 +151,25 @@ pub fn fn_node_count(f: &Fn) -> usize {
 /// Scans all stored nodes, including unreachable ones, without traversing the
 /// referenced functions. Each referenced function name appears once.
 pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
-    let mut refs = BTreeSet::new();
-    for node in f.nodes.iter() {
-        match &node.payload {
-            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
-                if to_apply != &f.name {
-                    refs.insert(to_apply.clone());
-                }
-            }
-            NodePayload::CountedFor { body, .. } => {
-                if body != &f.name {
-                    refs.insert(body.clone());
-                }
-            }
-            _ => {
-                // All other node kinds do not reference out-of-function
-                // callees.
-            }
-        }
-    }
+    let mut refs = direct_function_references(f);
+    refs.remove(&f.name);
     refs
+}
+
+/// Names referenced by call, map, and loop nodes in this function or block.
+/// Includes all stored nodes and keeps self-references for cycle validation.
+pub fn direct_function_references(graph: &NodeGraph) -> BTreeSet<String> {
+    graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.payload {
+            NodePayload::Invoke { to_apply, .. } | NodePayload::Map { to_apply, .. } => {
+                Some(to_apply.clone())
+            }
+            NodePayload::CountedFor { body, .. } => Some(body.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Returns true when `f` references another function via `invoke`, `map`, or
