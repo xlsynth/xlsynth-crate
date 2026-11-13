@@ -160,7 +160,17 @@ private def cutCalls (goal : MVarId) (stage law : Expr) (helper base : Name)
         let name := resultName i
         ctx := (ctx.setUserName site name).modifyLocalDecl site fun decl =>
           .cdecl decl.index site name decl.type .default decl.kind
-      let next ← mkFreshExprMVarAt ctx (← getLocalInstances) (← goal.getType) .syntheticOpaque (← goal.getTag)
+      -- A local proof such as `let h : stage x = rhs := rfl` may depend
+      -- on the concrete value. Check the generalized telescope once.
+      let target ← goal.getType
+      let first := (← calls[0]!.1.getDecl).index
+      let later := ctx.foldl (init := #[]) fun xs d =>
+        if d.index >= first then xs.push d.toExpr else xs
+      let generalized ← withLCtx' ctx <| mkForallFVars later target
+        (usedLetOnly := false) (generalizeNondepLet := false)
+      unless ← isTypeCorrect (← instantiateMVars generalized) do
+        throwError "cannot abstract calls to {helper}: the resulting goal or hypotheses depend on their values"
+      let next ← mkFreshExprMVarAt ctx (← getLocalInstances) target .syntheticOpaque (← goal.getTag)
       goal.assign next
       return next.mvarId!
 
