@@ -645,8 +645,8 @@ impl<'m> BodyChecker<'_, 'm> {
                     false,
                 );
             }
-            Expr::Scope { .. } => {
-                return self.with_prepared_value(value, |checker, result| {
+            Expr::Scope { statements, result } => {
+                return self.with_scope_result(statements, |checker| {
                     checker.splat_base_with_prefix(result, name, prefix)
                 });
             }
@@ -688,7 +688,7 @@ impl<'m> BodyChecker<'_, 'm> {
         name: &str,
         prefix: &[BoundParametricValue],
     ) -> Result<Vec<TypedExpr>, String> {
-        if items.iter().any(|item| matches!(item, Expr::Scope { .. })) {
+        if items.iter().any(|item| item.needs_scope_preparation()) {
             return self.with_scoped_results(items, |checker, items| {
                 checker.splat_branches_with_prefix(items, name, prefix)
             });

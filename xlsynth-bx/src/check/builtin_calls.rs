@@ -2,7 +2,8 @@
 
 //! Typecheck pure builtin calls with inferred value parameters.
 
-use super::{BodyChecker, ConstantUse, K, MAX_ELABORATION_DEPTH, TypedExpr, bits, minimum_type};
+use super::scope::sequence;
+use super::{BodyChecker, K, MAX_ELABORATION_DEPTH, TypedExpr, bits, minimum_type};
 use crate::ast::{Expr, Type};
 use crate::builtin::BuiltinOp;
 use xlsynth_pir::IrValue;
@@ -42,6 +43,21 @@ pub(crate) fn is_call_builtin(name: &str) -> bool {
 }
 
 impl BodyChecker<'_, '_> {
+    /// Keep a value erased by a builtin available for DSLX assertion evaluation
+    /// through a later let or helper call.
+    pub(super) fn builtin_with_assert_operand(
+        &self,
+        ty: Type,
+        kind: K,
+        operand: TypedExpr,
+    ) -> (Type, K) {
+        if !self.preserve_assert_inputs || matches!(operand.kind, K::Literal(_)) {
+            return (ty, kind);
+        }
+        let result = sequence(vec![operand], TypedExpr { ty, kind });
+        (result.ty, result.kind)
+    }
+
     /// An independent parametric needs a type from its argument.
     pub(super) fn builtin_operand(&mut self, name: &str, arg: &Expr) -> Result<TypedExpr, String> {
         if minimum_type(arg)?.is_some() {
@@ -88,7 +104,15 @@ impl BodyChecker<'_, '_> {
                 require_bits(name, &value.ty, None)?;
                 let witness = self.builtin_operand(name, &args[1])?;
                 let width = require_bits(name, &witness.ty, None)?;
-                (witness.ty, BuiltinOp::Signex { width }, vec![value])
+                self.structs.validate_type(&witness.ty)?;
+                return Ok(self.builtin_with_assert_operand(
+                    witness.ty.clone(),
+                    K::Builtin {
+                        op: BuiltinOp::Signex { width },
+                        args: vec![value],
+                    },
+                    witness,
+                ));
             }
             "umulp" | "smulp" => {
                 let signed = name == "smulp";
@@ -140,12 +164,22 @@ impl BodyChecker<'_, '_> {
                         (Type::unsigned(width as usize), BuiltinOp::Encode)
                     }
                     "one_hot" => {
-                        let priority = self
-                            .parametric_value(&args[1], &Type::Bool)
+                        let (priority, operand) = self
+                            .parametric_value_and_operand(
+                                &args[1],
+                                &Type::Bool,
+                                self.preserve_assert_inputs,
+                            )
                             .map_err(|e| format!("'one_hot' priority: {e}"))?;
                         let lsb_priority = priority == IrValue::bool(true);
                         let width = width.checked_add(1).ok_or("'one_hot' width overflow")?;
-                        (Type::unsigned(width), BuiltinOp::OneHot { lsb_priority })
+                        let ty = Type::unsigned(width);
+                        self.structs.validate_type(&ty)?;
+                        let kind = K::Builtin {
+                            op: BuiltinOp::OneHot { lsb_priority },
+                            args: vec![value],
+                        };
+                        return Ok(self.builtin_with_assert_operand(ty, kind, operand));
                     }
                     _ => return Err(format!("unknown builtin '{name}'")),
                 };
@@ -191,15 +225,19 @@ impl BodyChecker<'_, '_> {
         let width = require_bits("ceillog2", &arg.ty, Some(false))?;
         self.enable_constant_functions();
         let value = self
-            .checked_constant_for(&arg, ConstantUse::ValueParametric)?
+            .checked_constant_for(&arg, self.dslx_constant_use)?
             .ok_or("'ceillog2' requires a compile-time argument")?;
-        Ok((arg.ty, K::Literal(ceillog2_value(&value, width)?)))
+        Ok(self.builtin_with_assert_operand(
+            arg.ty.clone(),
+            K::Literal(ceillog2_value(&value, width)?),
+            arg,
+        ))
     }
 
     /// A map of the constexpr callback requires all input elements up front.
     pub(super) fn map_ceillog2(
         &mut self,
-        array: &TypedExpr,
+        array: TypedExpr,
         element: &Type,
         size: usize,
     ) -> Result<(Type, K), String> {
@@ -208,7 +246,7 @@ impl BodyChecker<'_, '_> {
         self.charge_expansion("map ceillog2", size.saturating_add(shape.size.div_ceil(64)))?;
         self.enable_constant_functions();
         let array_value = self
-            .checked_constant_for(array, ConstantUse::ValueParametric)?
+            .checked_constant_for(&array, self.dslx_constant_use)?
             .ok_or("map callback 'ceillog2' requires a compile-time array")?;
         let values = array_value
             .as_elements()
@@ -217,7 +255,7 @@ impl BodyChecker<'_, '_> {
             .map(|value| ceillog2_value(value, width))
             .collect::<Result<Vec<_>, _>>()?;
         let result = IrValue::make_array(&values).map_err(|e| e.to_string())?;
-        Ok((array.ty.clone(), K::Literal(result)))
+        Ok(self.builtin_with_assert_operand(array.ty.clone(), K::Literal(result), array))
     }
 
     /// BX has no conversion-time overrides, so evaluate the declared default.
@@ -229,9 +267,9 @@ impl BodyChecker<'_, '_> {
         self.enable_constant_functions();
         let default = self.builtin_operand("configured_value_or", default)?;
         let value = self
-            .checked_constant_for(&default, ConstantUse::ValueParametric)?
+            .checked_constant_for(&default, self.dslx_constant_use)?
             .ok_or("'configured_value_or' requires a compile-time default")?;
-        Ok((default.ty, K::Literal(value)))
+        Ok(self.builtin_with_assert_operand(default.ty.clone(), K::Literal(value), default))
     }
 }
 

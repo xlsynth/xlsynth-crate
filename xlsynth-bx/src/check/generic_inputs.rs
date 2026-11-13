@@ -309,7 +309,7 @@ impl<'m> BodyChecker<'_, 'm> {
         items: &[&Expr],
         infer_literal_widths: bool,
     ) -> Result<Option<Vec<TypedExpr>>, String> {
-        if items.iter().any(|expr| matches!(expr, Expr::Scope { .. })) {
+        if items.iter().any(|expr| expr.needs_scope_preparation()) {
             return self.with_scoped_results(items, |checker, prepared| {
                 checker.infer_constructors(prepared, infer_literal_widths)
             });

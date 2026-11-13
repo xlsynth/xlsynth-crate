@@ -31,12 +31,14 @@ impl DeclarationOrder {
                 + names.uses.len()
                 + module.tests.len()
                 + module.invariants.len()
+                + module.const_asserts.len()
             || names
                 .definitions
                 .iter()
                 .chain(names.uses.keys())
                 .chain(module.tests.iter().map(|test| &test.name))
                 .chain(module.invariants.iter().map(|i| &i.block.name))
+                .chain(module.const_asserts.keys())
                 .any(|name| !names.positions.contains_key(name))
         {
             return Err("require_define_before_use needs a declaration_order containing each declaration and use binding once".into());

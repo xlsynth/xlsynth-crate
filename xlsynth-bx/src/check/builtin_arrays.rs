@@ -82,12 +82,13 @@ impl BodyChecker<'_, '_> {
         }
         let ty = Type::array(element.clone(), width);
         self.structs.validate_type(&ty)?;
-        Ok((
+        Ok(self.builtin_with_assert_operand(
             ty,
             K::Builtin {
                 op: BuiltinOp::ArraySlice { width },
                 args: vec![array, start],
             },
+            witness,
         ))
     }
 

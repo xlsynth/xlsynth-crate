@@ -169,6 +169,10 @@ impl ImportResolver {
         })
     }
 
+    pub(crate) fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
     pub(crate) fn has_imports(&self) -> bool {
         !self.subjects.is_empty()
     }

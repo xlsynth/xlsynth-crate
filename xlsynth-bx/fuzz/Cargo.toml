@@ -168,6 +168,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_const_assert"
+path = "fuzz_targets/fuzz_bx_dslx_const_assert.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_counted_for"
 path = "fuzz_targets/fuzz_bx_dslx_counted_for.rs"
 test = false

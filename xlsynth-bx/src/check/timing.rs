@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::StructTable;
 use crate::ast::{BinaryOp, OutputCycles, Param, Type};
-use crate::typed::{CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K};
+use crate::typed::{
+    CheckedBlock, CheckedStmt, TypedExpr, TypedExprKind as K, is_constexpr_only_name,
+};
 
 const BLOCK_SCOPE: usize = 0;
 
@@ -353,6 +355,7 @@ impl<'a> Checker<'a> {
         };
         for stmt in statements {
             let (owner, name, binding) = match stmt {
+                CheckedStmt::Let { name, .. } if is_constexpr_only_name(name) => continue,
                 CheckedStmt::Let { name, value } | CheckedStmt::DriveWire { name, value, .. } => {
                     (scope, name, Binding::Let(driver(value)))
                 }
@@ -543,7 +546,7 @@ impl<'a> Checker<'a> {
                 read(name, fields);
             }
             K::Literal(_) => walk.values.push(Cycle::Independent),
-            K::Unary { value, .. } | K::Cast { value } => {
+            K::Unary { value, .. } | K::Cast { value } | K::Sequence { result: value, .. } => {
                 walk.pending.push(Step::Expr(value, scope, fields));
             }
             K::TupleIndex { value, index } => {

@@ -331,6 +331,16 @@ Compares destructuring lets in BX blocks with the same patterns in DSLX function
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_block_let_patterns --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_const_assert.rs
+
+Compares compile-time assertions in BX modules and pure functions with pinned DSLX. The target varies predicate types, lexical lets, local constexpr helpers, imported constants and BX modules, unused functions, and successive explicit or inferred parametric instantiations. Malformed assertions must fail parsing even in unused templates. Assertions in untaken branches and zero-trip counted loops must still be checked. Structural unrolls check each bound iteration index. Runtime inputs exercise the pinned evaluator's constexpr rules for discarded expressions, destructuring, `if`, `match`, logical operators, and function arguments. A helper that indexes an array before returning `true` exposes skipped bounds checks when a predicate is called directly or through a let. For accepted programs the target compares lowered BX IR with DSLX IR and concrete DSLX calls on the same inputs.
+
+Direct assertions exercise untyped integer literals. Let-bound literal predicates have an explicit `bool` annotation because DSLX v0.62.0 infers `bits[0]` for `let b = 0;` and accepts `const_assert!(b);` on that zero-width value.
+
+For let-bound `ceillog2` predicates the target compares BX IR with concrete DSLX execution. The v0.62.0 IR converter can report a missing invocation name for these otherwise valid calls.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_const_assert -- -max_len=14 -len_control=0`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_module_constants.rs
 
 Generates module constants with dependent scalar expressions, nested aggregates, and calls to earlier pure functions. BX blocks and local functions read them in expressions, named match patterns, map callbacks, loop bounds, and slice widths. Constants also set element signedness, bit widths, and array lengths in annotations. Counted traversals use the same length constant as the array they index. The target compares BX and pinned DSLX acceptance, including shadowing, forward references, duplicate definitions, builtin name collisions, and invalid dimension types. It checks every constant's name, declaration order, concrete type, and computed value against DSLX metadata, including signedness and width inside tuples and arrays. It compares block results on shared inputs against both compiled DSLX IR and concrete DSLX calls.

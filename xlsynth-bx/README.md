@@ -159,6 +159,38 @@ go unevaluated in BX even when DSLX reports a constexpr error. Calls to imported
 DSLX functions and extern functions require runtime evaluation, including when
 reached through a local helper.
 
+### Compile-time assertions
+
+Use `const_assert!(predicate);` at module scope or inside a pure function to
+require a Boolean constexpr to be true. A module assertion can use earlier
+constants and pure BX helpers. A parametric function checks its assertions
+when BX specializes it.
+
+```text
+const LANES = u32:4;
+const_assert!(LANES > u32:0);
+
+fn widen<N: u32>(x: uN[N]) -> u16 {
+    const_assert!(N <= u32:16);
+    x as u16
+}
+```
+
+Here `widen(u8:1)` compiles, while `widen(u32:1)` fails at the assertion.
+BX also checks assertions in untaken `if` and `match` arms. A predicate that
+depends on runtime data is a compile error. When a predicate calls a BX helper,
+DSLX constexpr rules require the initializers on the helper's selected path to
+evaluate successfully, including an array read whose result is discarded.
+A successful assertion emits no hardware.
+
+BX can evaluate a counted loop with constant inputs directly in an assertion.
+For a match with constant inputs it executes the selected arm, so an invalid
+array read in a helper called only by an untaken arm does not fail the
+assertion. Pinned DSLX v0.62.0 can reject both forms in a direct predicate,
+even when it accepts the same expression inside a constexpr helper.
+
+### Constants in concrete dimensions
+
 Use an earlier `u32` constant as a bit width or array length in a concrete type.
 Here `LANES` also bounds the traversal of the array.
 

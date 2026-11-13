@@ -644,6 +644,7 @@ impl<'a> Graph<'a> {
                 .iter()
                 .map(|d| (&d.name, false))
                 .chain(source.constants.iter().map(|d| (&d.name, false)))
+                .chain(source.const_asserts.keys().map(|label| (label, false)))
                 .chain(source.enums.iter().map(|d| (&d.name, false)))
                 .chain(source.structs.iter().map(|d| (&d.name, false)))
                 .chain(source.type_aliases.iter().map(|d| (&d.name, false)))
@@ -695,7 +696,10 @@ impl<'a> Graph<'a> {
             match names.uses.get(name) {
                 Some(Binding::Dslx(alias)) => linked.declaration_order.push(alias.clone()),
                 Some(_) => { /* BX use visibility was checked in its source module. */ }
-                None if names.subject.is_none() || names.definitions.contains(name) => {
+                None if names.subject.is_none()
+                    || names.definitions.contains(name)
+                    || source.const_asserts.contains_key(name) =>
+                {
                     linked.declaration_order.push(names.declared(name));
                 }
                 None => { /* Imported test declarations do not enter the linked module. */ }
@@ -712,6 +716,9 @@ impl<'a> Graph<'a> {
                     .chain(m.type_aliases.iter().map(|d| d.name.clone()))
                     .chain(m.functions.iter().map(|d| d.name.clone())),
             );
+            linked
+                .declaration_order
+                .extend(m.const_asserts.keys().cloned());
         }
         linked.structs.append(&mut m.structs);
         linked
@@ -720,6 +727,7 @@ impl<'a> Graph<'a> {
         linked.type_aliases.append(&mut m.type_aliases);
         linked.enums.append(&mut m.enums);
         linked.constants.append(&mut m.constants);
+        linked.const_asserts.append(&mut m.const_asserts);
         linked.externs.append(&mut m.externs);
         linked.functions.append(&mut m.functions);
         linked.extern_blocks.append(&mut m.extern_blocks);
@@ -913,7 +921,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ImportOptions, MAX_ELABORATION_DEPTH, parse_source, read, read_for_tests};
-    use crate::ast::{BinaryOp, Expr, TestStmtKind, Type};
+    use crate::ast::{BinaryOp, Expr, ScopeStatement, TestStmtKind, Type};
 
     #[test]
     fn test_runs_check_forward_references_without_compiling_test_bodies() -> Result<(), String> {
@@ -1121,10 +1129,13 @@ fn root(x:u8)->(u8,u8,u8) { (lib::apply<id,1>([x]), apply<id,1>([x]), lib::ident
         );
         assert_eq!(apply.callback_params[0].result, t);
         assert_eq!(apply.value_parametrics[0].index, 1);
-        let Expr::Scope { bindings, .. } = &apply.body else {
+        let Expr::Scope { statements, .. } = &apply.body else {
             panic!("expected local let");
         };
-        assert_eq!(bindings[0].ty.as_ref(), Some(&t));
+        let ScopeStatement::Let(binding) = &statements[0] else {
+            panic!("expected local let");
+        };
+        assert_eq!(binding.ty.as_ref(), Some(&t));
         let Expr::Tuple(calls) = &linked.functions[3].body else {
             panic!("expected root calls");
         };
