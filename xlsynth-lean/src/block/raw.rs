@@ -195,6 +195,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         write_helper(&mut source, namespace, helper)?;
     }
     source.push_str(&record_type(
+        namespace,
         "State",
         block
             .graph
@@ -203,12 +204,14 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
             .map(|r| (r.name.as_str(), &r.ty)),
     )?);
     source.push_str(&record_type(
+        namespace,
         "Input",
         graph
             .input_ports()
             .map(|port| (graph.port_name(port), graph.port_type(port))),
     )?);
     source.push_str(&record_type(
+        namespace,
         "Output",
         graph
             .output_ports()
@@ -232,7 +235,7 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         }
     }
     source.push_str(&record_declaration(
-        "XlsBlock",
+        namespace,
         "Assertions",
         &fields,
         Some("Repr"),
@@ -558,6 +561,7 @@ impl RecordFields {
 
 /// Declare fields in caller order, retaining names through Lean quotation.
 fn record_type<'a>(
+    namespace: &str,
     name: &str,
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
 ) -> Result<String> {
@@ -569,7 +573,7 @@ fn record_type<'a>(
             ))
         })
         .collect::<Result<Vec<_>>>()?;
-    record_declaration("XlsBlock", name, &fields, Some("Repr"), &[])
+    record_declaration(namespace, name, &fields, Some("Repr"), &[])
 }
 
 /// Assemble a record from already rendered field identifiers and expressions.
