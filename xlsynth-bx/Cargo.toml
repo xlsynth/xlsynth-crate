@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-bx"
-version = "0.84.0"
+version = "0.85.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "A DSLX-like frontend for XLS block IR"
@@ -19,7 +19,7 @@ rand = "0.8"
 rand_pcg = "0.3.1"
 stacker = "0.1.25"
 tempfile = "3.20"
-xlsynth = { path = "../xlsynth", version = "0.84.0" }
-xlsynth-codegen = { path = "../xlsynth-codegen", version = "0.84.0" }
-xlsynth-pir = { path = "../xlsynth-pir", version = "0.84.0" }
-xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.84.0" }
+xlsynth = { path = "../xlsynth", version = "0.85.0" }
+xlsynth-codegen = { path = "../xlsynth-codegen", version = "0.85.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.85.0" }
+xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.85.0" }
