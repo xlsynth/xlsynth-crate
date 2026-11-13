@@ -8,12 +8,14 @@
 
 use std::{ffi::OsString, fmt::Write, fs, path::Path};
 
-use anyhow::{Context, Result, bail, ensure};
-use xlsynth_ir_value::{IrFormatPreference, IrValue};
+use anyhow::{Context, Result, ensure};
+use xlsynth_ir_value::IrValue;
 use xlsynth_pir::ir::{Block, Package, Type};
+use xlsynth_pir::ir_value_utils::ir_value_from_lsb0_bits_with_layout;
 
 use super::{LeanEvaluator, run_lean_process};
 use crate::block::{emit, identifier, record_value};
+use crate::local_expr::{LocalRenderer, bit_width, write_elaboration_limits};
 
 /// The outputs observed before the clock edge and register values after it.
 #[derive(Debug, PartialEq, Eq)]
@@ -25,22 +27,10 @@ pub struct BlockCycleResult {
 }
 
 impl LeanEvaluator {
-    /// Evaluates one clock edge per input vector for a verified block.
-    ///
-    /// Pass a block from `package` and its initial registers in declaration
-    /// order. Each input vector follows input port declaration order, including
-    /// any reset or enable input. The clock itself takes no value. Ports and
-    /// registers must be bit vectors of their declared widths. Two inputs of
-    /// equal width supplied in the wrong order will drive the wrong ports.
-    ///
-    /// Each result pairs the outputs computed from the current registers and
-    /// inputs with the updated registers used for the following cycle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the block cannot be emitted, the register or port
-    /// values do not match the interface, or the Lean trace cannot be run or
-    /// decoded.
+    /// Evaluate a trace of a verified block. Supply registers and data inputs
+    /// with their declared PIR types and in their respective declaration
+    /// orders. Each cycle starts from the state produced by Lean on the
+    /// previous cycle.
     pub fn eval_block_trace(
         &self,
         package: &Package,
@@ -51,10 +41,11 @@ impl LeanEvaluator {
         let mut source = emit(package, block)?;
         let registers = block.registers.iter().map(|r| (r.name.as_str(), &r.ty));
         let ports = |port| (block.port_name(port), block.port_type(port));
-        let registers = bit_fields(registers)?;
-        let input_fields = bit_fields(block.input_ports().map(ports))?;
-        let outputs = bit_fields(block.output_ports().map(ports))?;
+        let registers = trace_fields(registers)?;
+        let input_fields = trace_fields(block.input_ports().map(ports))?;
+        let outputs = trace_fields(block.output_ports().map(ports))?;
         let state = input_record(&registers, initial_state).context("initial registers")?;
+        write_elaboration_limits(&mut source, [&block.graph]);
         writeln!(source, "\ndef main : IO Unit := do")?;
         writeln!(source, "  let mut q : XlsBlock.State := {state}")?;
         writeln!(source, "  let xs : List XlsBlock.Input := [")?;
@@ -75,12 +66,12 @@ impl LeanEvaluator {
         // naturals round-trip without imposing a machine-word width limit.
         let projections = outputs
             .iter()
-            .map(|(field, _)| format!("toString e.output.{field}.toNat"))
-            .chain(
-                registers
-                    .iter()
-                    .map(|(field, _)| format!("toString e.next.{field}.toNat")),
-            )
+            .map(|(field, _)| {
+                format!("toString (_root_.XlsynthLean.IR.Packed.pack e.output.{field})")
+            })
+            .chain(registers.iter().map(|(field, _)| {
+                format!("toString (_root_.XlsynthLean.IR.Packed.pack e.next.{field})")
+            }))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
@@ -106,7 +97,6 @@ impl LeanEvaluator {
         trace
             .lines()
             .map(|line| {
-                let widths = outputs.iter().chain(&registers);
                 let fields: Vec<_> = if line.is_empty() {
                     Vec::new()
                 } else {
@@ -116,12 +106,14 @@ impl LeanEvaluator {
                     fields.len() == outputs.len() + registers.len(),
                     "wrong number of Lean block result fields"
                 );
-                let mut values = widths
+                let mut values = outputs
+                    .iter()
+                    .chain(&registers)
                     .zip(fields)
-                    .map(|((_, width), value)| {
-                        IrValue::parse_typed(&format!("bits[{width}]:{value}"))
+                    .map(|((name, ty), value)| {
+                        decode_field(ty, value).with_context(|| format!("Lean result for {name}"))
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Result<Vec<_>>>()?;
                 let next_state = values.split_off(outputs.len());
                 Ok(BlockCycleResult {
                     outputs: values,
@@ -132,20 +124,31 @@ impl LeanEvaluator {
     }
 }
 
-/// Converts PIR fields to Lean field names and bit widths in declaration order.
-fn bit_fields<'a>(
+fn trace_fields<'a>(
     fields: impl Iterator<Item = (&'a str, &'a Type)>,
-) -> Result<Vec<(String, usize)>> {
+) -> Result<Vec<(String, &'a Type)>> {
     fields
-        .map(|(name, ty)| match ty {
-            Type::Bits(width) => Ok((identifier(name)?, *width)),
-            _ => bail!("expected a bits-valued block trace field, got {name}: {ty}"),
-        })
+        .map(|(name, ty)| Ok((identifier(name)?, ty)))
         .collect()
 }
 
+/// Restore the declared shape from the natural number written by Lean's Packed
+/// instance.
+fn decode_field(ty: &Type, value: &str) -> Result<IrValue> {
+    let width = bit_width(ty).map_err(anyhow::Error::msg)?;
+    let packed = IrValue::parse_typed(&format!("bits[{width}]:{value}"))?;
+    if matches!(ty, Type::Bits(_)) {
+        return Ok(packed);
+    }
+    let bits = packed.as_bits()?;
+    let flat = (0..width)
+        .map(|i| bits.get_bit(i))
+        .collect::<Result<Vec<_>, _>>()?;
+    ir_value_from_lsb0_bits_with_layout(ty, &flat).map_err(anyhow::Error::msg)
+}
+
 /// Builds a Lean record after checking the value count and each field width.
-fn input_record(fields: &[(String, usize)], values: &[IrValue]) -> Result<String> {
+fn input_record(fields: &[(String, &Type)], values: &[IrValue]) -> Result<String> {
     ensure!(
         fields.len() == values.len(),
         "expected {} values, got {}",
@@ -155,21 +158,11 @@ fn input_record(fields: &[(String, usize)], values: &[IrValue]) -> Result<String
     let literals = fields
         .iter()
         .zip(values)
-        .map(|((name, width), value)| {
-            let bits = value
-                .to_bits()
-                .with_context(|| format!("expected bits[{width}] for {name}"))?;
-            ensure!(
-                bits.get_bit_count() == *width,
-                "expected bits[{width}] for {name}, got {value}"
-            );
-            Ok((
-                name.clone(),
-                format!(
-                    "0x{}",
-                    bits.to_string_fmt(IrFormatPreference::PlainHex, false)
-                ),
-            ))
+        .map(|((name, ty), value)| {
+            let actual = value.type_();
+            ensure!(&actual == *ty, "expected {ty} for {name}, got {actual}");
+            // The driver is a top-level function, outside the model namespace.
+            Ok((name.clone(), LocalRenderer::Function.literal(value)))
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(record_value(&literals))

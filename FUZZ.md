@@ -725,8 +725,11 @@ XLSYNTH_LEAN=/path/to/lean cargo fuzz run \
 
 ### xlsynth-lean/fuzz/fuzz_targets/fuzz_block_lean_eval.rs
 
-Generates a sequential PIR block with positive-width bit-vector ports and
-registers, synchronous reset, and optional load enables. The fuzz bytes
+Generates a sequential PIR block with synchronous reset and optional load
+enables. The target shares the function fuzzer's pure operations and value
+types, including extension operations, arrays, tuples, and bit vectors from
+0 to 129 bits wide. Operations requiring a generated
+callee, such as `Invoke` and `Map`, are excluded from blocks. The fuzz bytes
 determine the block, initial registers, and eight clocks of inputs. The first
 and fifth clocks assert reset using the generated polarity. On every clock the
 target compares every Lean output and next register against the independent
