@@ -58,8 +58,8 @@ struct field ordering policies are exported from the same module.
 - Synchronous and asynchronous active-high or active-low resets, load enables,
   state feedback, and optional register-generation templates.
 - Transitive block hierarchy and existing foreign-function instantiations.
-- Bidirectional pins with a whole-port active-high output enable. Each local
-  driver emits `assign pad = oe ? drive : 'z;`. A child inout binds directly
+- Bidirectional pins in flat layout with a whole-port active-high output enable.
+  Each local driver emits `assign pad = oe ? drive : 'z;`. A child inout binds directly
   to the parent pin, so all readers sample the same resolved net. See the
   [shared-bus example](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir).
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
@@ -90,9 +90,10 @@ precede statements in flat layout; pipeline layout groups declarations before
 the statements within each stage, retaining the register sections.
 `Layout::Pipeline` reconstructs
 feed-forward pipeline stages from the existing registers and adds stage and
-register comments without changing their timing. Designs containing register
-feedback or inconsistent stage dependencies are rejected in pipeline layout;
-they remain supported by `Layout::None`.
+register comments without changing their timing. Pipeline layout requires
+consistent stage dependencies and rejects register feedback. A selected top
+or instantiated child with an inout port requires `Layout::None`, even when
+the pin has no feedback.
 Literals and pure constant-only expressions can be shared across stages without
 extra registers. They are emitted before their earliest consumer and are not
 required to have the same stage number as every consuming register write.

@@ -221,6 +221,47 @@ fn backend_error_has_cli_prefix_nonzero_exit_and_empty_stdout() {
 }
 
 #[test]
+fn pipeline_layout_rejects_reachable_inouts() {
+    let fixture = fixture("hierarchy/shared_inout.golden.ir");
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("input.ir"), fixture.source).unwrap();
+    let run_top = |top| {
+        invoke(
+            directory.path(),
+            &[
+                "input.ir".into(),
+                "--layout=pipeline".into(),
+                format!("--top={top}"),
+            ],
+        )
+    };
+    let pads = run_top("pads");
+    assert_eq!(pads.status.code(), Some(1));
+    assert!(pads.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(pads.stderr).unwrap(),
+        "error: block `pad_cell` cannot use layout=pipeline with inout port `io`; use layout=none\n"
+    );
+
+    let listener = run_top("listener");
+    assert!(
+        listener.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listener.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(listener.stdout).unwrap(),
+        r#"module listener(
+  input logic [3:0] value,
+  output logic [3:0] observed
+);
+  assign observed = value;
+endmodule
+"#
+    );
+}
+
+#[test]
 fn invalid_flags_fail_before_reading_the_input() {
     let directory = tempfile::tempdir().unwrap();
     for flag in [

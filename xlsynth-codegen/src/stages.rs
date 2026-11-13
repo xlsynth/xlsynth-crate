@@ -47,22 +47,8 @@ pub(crate) fn reconstruct_stages<'a>(
     let mut instantiation_inputs: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
     let mut instantiation_outputs: BTreeMap<&str, Vec<(usize, &str)>> = BTreeMap::new();
 
-    let pins: BTreeMap<_, _> = block
-        .inout_ports()
-        .map(|pin| (block.port_name(pin), pin.index))
-        .collect();
     for (index, node) in block.nodes.iter().enumerate() {
         match &node.payload {
-            NodePayload::ExtInstantiationInout {
-                instantiation,
-                port_name,
-                parent_port,
-            } => {
-                instantiation_inputs
-                    .entry(instantiation)
-                    .or_default()
-                    .insert(port_name, pins[parent_port.as_str()]);
-            }
             NodePayload::RegisterRead { register } => {
                 register_reads.insert(register.as_str(), index);
             }
@@ -88,11 +74,6 @@ pub(crate) fn reconstruct_stages<'a>(
             _ => {
                 // Ordinary operations contribute only their explicit operands.
             }
-        }
-        // Pin readback is available at the interface, independently of its
-        // driver stage.
-        if matches!(node.payload, NodePayload::ExtInoutPort { .. }) {
-            continue;
         }
         for operand in operands(&node.payload) {
             users[operand.index].push((index, 0));
@@ -200,11 +181,7 @@ pub(crate) fn reconstruct_stages<'a>(
         let stage_index = node_stages[node_ref.index];
         let stage = &mut result[stage_index];
         match &block.get_node(node_ref).payload {
-            NodePayload::Nil
-            | NodePayload::ExtInoutPort { .. }
-            | NodePayload::ExtInstantiationInout { .. }
-            | NodePayload::InputPort { .. }
-            | NodePayload::OutputPort { .. } => {
+            NodePayload::Nil | NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
                 // Inputs are represented by module ports, outside stage
                 // sections.
             }
@@ -279,7 +256,6 @@ fn summarize_outputs<'a>(
     }
     let inputs: Vec<_> = block
         .input_ports()
-        .chain(block.inout_ports())
         .filter(|input| reaches_output[input.index])
         .collect();
 

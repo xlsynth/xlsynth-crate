@@ -16,7 +16,7 @@ top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], s
   seen: () = output_port(sense_q, name=seen, id=10)
 }
 
-// OPTIONS: layout = "pipeline"
+// OPTIONS: # BlockCodegenOptions defaults
 // EXPECT-SV: module registered_pad(
 // EXPECT-SV:   input logic clk,
 // EXPECT-SV:   input logic [7:0] data,
@@ -24,9 +24,6 @@ top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], s
 // EXPECT-SV:   inout wire [7:0] pin,
 // EXPECT-SV:   output logic [7:0] seen
 // EXPECT-SV: );
-// EXPECT-SV:   // ===== Pipe stage 0:
-// EXPECT-SV:
-// EXPECT-SV:   // Registers for pipe stage 0:
 // EXPECT-SV:   logic [7:0] data_reg;
 // EXPECT-SV:   logic oe_reg;
 // EXPECT-SV:   logic [7:0] sense_reg;

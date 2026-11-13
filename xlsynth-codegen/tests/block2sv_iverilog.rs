@@ -729,7 +729,7 @@ endmodule
 /// Every participant sees the same four-state value when local or external
 /// drivers release or contend.
 #[test]
-fn shared_inout_drivers_resolve_in_both_layouts() {
+fn shared_inout_drivers_resolve_in_flat_layout() {
     let tools = xlsynth_test_helpers::iverilog::required_iverilog_toolchain().unwrap();
     let pkg = Parser::new(include_str!(
         "goldens/block2sv/hierarchy/shared_inout.golden.ir"
@@ -738,33 +738,24 @@ fn shared_inout_drivers_resolve_in_both_layouts() {
     .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("pads.sv");
-    for layout in [
-        xlsynth_codegen::Layout::None,
-        xlsynth_codegen::Layout::Pipeline,
-    ] {
-        let options = xlsynth_codegen::BlockCodegenOptions {
-            layout,
-            ..Default::default()
-        };
-        let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &options)
-            .unwrap()
-            .system_verilog;
-        fs::write(
-            &source,
-            format!("{rtl}\n{}", include_str!("testdata/shared_inout_tb.sv")),
+    let rtl = xlsynth_codegen::emit_system_verilog(&pkg, &Default::default())
+        .unwrap()
+        .system_verilog;
+    fs::write(
+        &source,
+        format!("{rtl}\n{}", include_str!("testdata/shared_inout_tb.sv")),
+    )
+    .unwrap();
+    let binary = tools
+        .compile(
+            directory.path(),
+            &[&source],
+            "tb",
+            &[],
+            Duration::from_secs(30),
         )
         .unwrap();
-        let binary = tools
-            .compile(
-                directory.path(),
-                &[&source],
-                "tb",
-                &[],
-                Duration::from_secs(30),
-            )
-            .unwrap();
-        tools
-            .run(directory.path(), &binary, Duration::from_secs(30))
-            .unwrap();
-    }
+    tools
+        .run(directory.path(), &binary, Duration::from_secs(30))
+        .unwrap();
 }

@@ -375,7 +375,8 @@ emits the child connection `.io(pad)`. Each child inout binds exactly once to
 an identically typed inout in its immediate parent. Siblings can share a pin.
 An ordinary input can consume the readback. A constant-zero local enable makes
 a forwarding parent. Combinational feedback from the shared net to its own
-drive or enable is invalid. Registers break combinational feedback.
+drive or enable is invalid. Registers break combinational feedback. Use
+`block2sv --layout=none` (the default) to emit a hierarchy containing inouts.
 
 Native text serialization preserves these operations. Evaluation, formal
 projection, gate lowering, and desugared/FFI extension emission require

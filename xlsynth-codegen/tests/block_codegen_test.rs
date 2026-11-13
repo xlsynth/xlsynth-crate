@@ -88,6 +88,17 @@ fn register_breaks_an_inout_feedback_path() {
     );
     let package = Parser::new(&ir).parse_and_validate_package().unwrap();
     emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+    let pipeline = BlockCodegenOptions {
+        layout: Layout::Pipeline,
+        ..Default::default()
+    };
+    assert_eq!(
+        emit_system_verilog(&package, &pipeline).unwrap_err(),
+        BlockCodegenError::NotPipeline(
+            "block `registered_pad` cannot use layout=pipeline with inout port `pin`; use layout=none"
+                .into()
+        )
+    );
 }
 
 #[test]

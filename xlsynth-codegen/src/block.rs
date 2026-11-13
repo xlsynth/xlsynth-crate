@@ -127,7 +127,7 @@ pub(crate) fn emit_package(
     let top = select_top(package, options.top.as_deref())?;
     let ordered = blocks_in_emission_order(package, top)?;
     for block in &ordered {
-        validate_supported_nodes(block)?;
+        validate_supported_nodes(block, options.layout)?;
     }
     verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
     let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
@@ -198,10 +198,16 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
     Ok(())
 }
 
-/// Rejects operations that must be lowered before SystemVerilog emission.
-fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
+/// Checks which operations the requested layout can emit.
+fn validate_supported_nodes(block: &Block, layout: Layout) -> Result<(), BlockCodegenError> {
     for node in &block.nodes {
         let (operation, lowering) = match &node.payload {
+            NodePayload::ExtInoutPort { name, .. } if layout == Layout::Pipeline => {
+                return Err(BlockCodegenError::NotPipeline(format!(
+                    "block `{}` cannot use layout=pipeline with inout port `{name}`; use layout=none",
+                    block.name
+                )));
+            }
             NodePayload::Invoke { to_apply, .. } => {
                 return Err(unsupported_invoke(block, to_apply));
             }

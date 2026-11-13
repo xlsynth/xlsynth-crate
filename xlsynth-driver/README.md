@@ -694,7 +694,8 @@ Declare a bidirectional pin in the block header as `pad: bits[4]`. In the body,
 `assign pad = oe ? drive : 'z;`. The active-high enable is one bit for the
 whole port. Reading `pad` returns the resolved pin value in either enable state.
 Bind a child pin with `ext_instantiation_inout(instantiation=child, port_name=io, parent_port=pad, id=4)`. This emits `.io(pad)` on the child instance. Each
-child inout needs one binding to a same-typed parent inout.
+child inout needs one binding to a same-typed parent inout. Use the default
+`--layout=none` to emit these pins.
 See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
 ```shell
@@ -706,9 +707,9 @@ Flags:
 
 - `--top <BLOCK>` selects a block and overrides the package top. If omitted, the
   package top is used; a package with exactly one block also selects that block.
-- `--layout <none|pipeline>` controls only the emitted source organization. The
-  default is `none`; `pipeline` groups logic and registers by pipeline stage and
-  rejects register graphs that cannot be layered.
+- `--layout <none|pipeline>` selects the emitted source organization. The default
+  is `none`. Pipeline layout requires a feed-forward register graph and rejects
+  any inout port in the selected top or its transitive children.
 - `--module_name <NAME>` overrides the generated top module name.
 - `--array_index_bounds_checking <BOOL>` controls out-of-range array indexing
   (default: `true`).
