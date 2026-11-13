@@ -11,6 +11,7 @@ pub(crate) use value_parametrics::NativeDataArg;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use xlsynth::dslx::{self, ImportData, MatchableModuleMember, TypecheckedModule};
 use xlsynth_pir::ir::{NodePayload, Package};
@@ -21,7 +22,7 @@ use crate::ast::{StructDef, Type, UsePath};
 use crate::check::{MAX_SPECIALIZATIONS, MAX_TYPE_SIZE, source_type_nodes};
 use crate::import_structs::{DslxSourceLoader, ImportedStructs};
 use crate::parser::{is_dslx_member_name, is_identifier_word};
-use crate::typed::CheckedEnum;
+use crate::typed::{CheckedConstant, CheckedEnum};
 
 /// An imported DSLX function specialized for concrete data types and value
 /// bindings.
@@ -202,6 +203,46 @@ impl ImportResolver {
             return Ok(None);
         }
         self.lookup(prefix)
+    }
+
+    /// Find a public constant through either a module or a member use.
+    /// Enum variants and qualified names under member uses have their own
+    /// lookup.
+    pub(crate) fn constant_binding<'a>(&'a self, name: &'a str) -> Option<(&'a str, &'a str)> {
+        let (head, suffix) = name
+            .split_once("::")
+            .map_or((name, None), |(h, m)| (h, Some(m)));
+        let (subject, member) = match (self.bindings.get(head)?, suffix) {
+            (UseBinding::Module(subject), Some(member)) => (subject, member),
+            (UseBinding::Member { subject, name }, None) => (subject, name.as_str()),
+            _ => return None,
+        };
+        self.structs
+            .has_public_constant(subject, member)
+            .then_some((subject, member))
+    }
+
+    /// Read the typed value from the same snapshot used for native calls.
+    pub(crate) fn resolve_constant(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<Rc<CheckedConstant>>, String> {
+        let Some((subject, member)) = self.constant_binding(name) else {
+            return Ok(None);
+        };
+        let (subject, member) = (subject.to_owned(), member.to_owned());
+        crate::parser::validate_dslx_value_path(name)?;
+        self.with_imports(|structs, data| {
+            structs
+                .resolve_constant(&subject, &member, data)
+                .map(Some)
+                .map_err(|e| {
+                    format!(
+                        "DSLX constant '{subject}::{member}': {}",
+                        structs.remap_diagnostic(e)
+                    )
+                })
+        })
     }
 
     /// Resolve a written enum variant during lexical checking of an

@@ -931,8 +931,8 @@ fn resolve_type<'m>(
             }
         }
         Type::ParametricBits { signed, width } => Ok(Type::Bits {
-            signed: dimensions.signed(signed, is_local, bindings)?,
-            width: dimensions.size(width, is_local, bindings)?,
+            signed: dimensions.signed(signed, is_local, bindings, types.resolver)?,
+            width: dimensions.size(width, is_local, bindings, types.resolver)?,
         }),
         Type::ParametricArray { element, size } => Ok(Type::array(
             resolve_type(
@@ -943,7 +943,7 @@ fn resolve_type<'m>(
                 types,
                 child_type_budget(remaining)?,
             )?,
-            dimensions.size(size, is_local, bindings)?,
+            dimensions.size(size, is_local, bindings, types.resolver)?,
         )),
         Type::Bits { .. } | Type::Bool => Ok(ty.clone()),
     }
@@ -1104,6 +1104,38 @@ fn resolve_signature<'a, 'm>(
 /// declarations.
 pub(crate) fn validate_structural_type(ty: &Type) -> Result<(), String> {
     StructTable::default().validate_type(ty)
+}
+
+/// Validated shapes of the DSLX layouts reflected so far, in dependency order.
+#[derive(Default)]
+pub(crate) struct ImportedValueShapes {
+    named: BTreeMap<String, TypeShape>,
+}
+
+impl ImportedValueShapes {
+    /// Bound materialization of an imported constexpr before copying its value.
+    pub(crate) fn validate(&mut self, ty: &Type, definitions: &[StructDef]) -> Result<(), String> {
+        for def in &definitions[self.named.len()..] {
+            let shape = TypeShape::aggregate(
+                def.fields.iter().map(|field| &field.ty),
+                MAX_ELABORATION_DEPTH,
+                &|name| self.shape(name),
+            )?;
+            self.named.insert(def.name.clone(), shape);
+        }
+        TypeShape::for_type(ty, MAX_ELABORATION_DEPTH, &|name| self.shape(name)).map(|_| ())
+    }
+
+    fn shape(&self, name: &str) -> Result<TypeShape, String> {
+        self.named
+            .get(name)
+            .map(|shape| TypeShape {
+                source_nodes: 1,
+                name_bytes: name.len(),
+                ..*shape
+            })
+            .ok_or_else(|| unknown_declaration("struct", name))
+    }
 }
 
 fn declare(names: &mut BTreeSet<String>, name: &str) -> Result<(), String> {
@@ -3569,14 +3601,31 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
         if !self.has_local_name(name)
             && let Some(value) = self.module_constant(name)
         {
-            let work = source_type_nodes(&value.ty) - 1 + literal_copy_work(&value.value);
-            self.charge_reference_copy(work)?;
-            return Ok((value.ty.clone(), K::Literal(value.value.clone())));
+            return self.constant_literal(value);
+        }
+        let head = name.split_once("::").map_or(name, |(head, _)| head);
+        if !self.has_local_name(head)
+            && self.callback_index(head).is_none()
+            && self
+                .decls
+                .visible(name, self.function_position.or(self.block_position))
+            && let Some(value) = self.resolver.resolve_constant(name)?
+        {
+            self.structs.update_imports(self.resolver)?;
+            return self.constant_literal(&value);
         }
         if let Some((ty, value)) = self.enum_member(name)? {
             return Ok((ty, K::Literal(IrValue::Bits(value))));
         }
         Err(format!("unknown value '{name}'"))
+    }
+
+    /// Preserve a module constant's source type and account for its literal
+    /// storage.
+    fn constant_literal(&self, value: &CheckedConstant) -> Result<(Type, K), String> {
+        let work = source_type_nodes(&value.ty) - 1 + literal_copy_work(&value.value);
+        self.charge_reference_copy(work)?;
+        Ok((value.ty.clone(), K::Literal(value.value.clone())))
     }
 
     /// Bound owned type nodes and literal storage copied by checked references.
@@ -3619,6 +3668,16 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
             self.decls
                 .visible(name, self.function_position.or(self.block_position))
         })
+    }
+
+    /// Recognize constant patterns without evaluating skipped loop iterations.
+    fn is_constant_pattern(&self, name: &str) -> Result<bool, String> {
+        Ok(self.module_constant(name).is_some()
+            || self
+                .decls
+                .visible(name, self.function_position.or(self.block_position))
+                && self.resolver.constant_binding(name).is_some()
+            || self.is_enum_member_name(name)?)
     }
 
     /// Resolve zero! to its local function or construct the intrinsic zero
@@ -4767,8 +4826,7 @@ impl<'a, 'm> BodyChecker<'a, 'm> {
                 Ok(checker.value_parametric_names.contains(name)
                     || (!checker.names.contains(head)
                         && checker.callback_index(head).is_none()
-                        && (checker.module_constant(name).is_some()
-                            || checker.is_enum_member_name(name)?)))
+                        && checker.is_constant_pattern(name)?))
             })?;
             if arms
                 .iter()

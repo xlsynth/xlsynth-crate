@@ -173,7 +173,7 @@ fn sum(xs: uN[WIDTH][LANES]) -> uN[WIDTH] {
 Widths can also appear in `bits[WIDTH]`, `sN[WIDTH]`, and
 `xN[SIGNED][WIDTH]`. Use a `bool` or `u1` constant for `SIGNED`. For a
 computed width or length, declare the expression as a module constant, then
-use its name in the type. A public BX library constant can be qualified, as
+use its name in the type. A public BX or DSLX library constant can be qualified, as
 in `u8[packet::LANES]`. Width slices and value-parametric functions also
 accept dimension expressions.
 
@@ -862,7 +862,21 @@ directory. Library API callers supply directories in
 
 ### Using DSLX modules and members
 
-`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
+`use arithmetic;` resolves `arithmetic.x` on DSLX's module search path. For a nested module, `use ip::arithmetic;` makes its public functions, constants, structs, and numeric enums available as `arithmetic::name`. To bind individual members, write `use ip::arithmetic::clamp;` or group several under the same path, as in `use ip::arithmetic::{clamp, Limits};`. Each leaf binds its final name in the BX module. To migrate an aliased import, use the module’s final name or select the member directly. If two modules export the same member name, qualify it with distinct module bindings. If the module names also collide, bind one module and the other member directly. For example, `use a::math; use b::math::clamp;` gives you `math::clamp(...)` and `clamp(...)`. BX checks every `use` declaration, including unused ones.
+
+DSLX evaluates each imported `pub const` in its declaring module. BX reads its
+typed value, including signedness and the identity of any structs or numeric
+enums it contains. As with DSLX functions and types, BX requires a public
+declaration when a member is used. Given `pub const LANES = u32:4;` and
+`pub const BIAS = s8:-2;` in `config.x`, a BX helper can use both directly.
+
+```text
+use config;
+use config::BIAS;
+fn adjust(xs: s8[config::LANES]) -> s8[config::LANES] {
+    map(xs, |x| x + BIAS)
+}
+```
 
 ```text
 use std;

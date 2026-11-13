@@ -337,6 +337,12 @@ Generates module constants with dependent scalar expressions, nested aggregates,
 
 Run from `xlsynth-bx` with `cargo +nightly fuzz run fuzz_bx_dslx_module_constants --sanitizer none`.
 
+### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_imported_constants.rs
+
+Compares BX qualified and member imports of native DSLX constants with pinned DSLX typechecking, constexpr execution, and compiled IR. Two DSLX modules expose same-named constants with distinct values, including signed and unsigned words from zero to 129 bits, arrays, enums, records, and nested tuples. The dependent module computes new constants from the first module's values and pure functions. BX blocks read native constants, import public constants re-exported by a BX library, or call an intermediate BX function. Consumers exercise named match patterns, type dimensions, local shadowing, private nominal types, and rejection of private or missing names. Calls with record constants that have identical fields but distinct value parameters test specialization identity. For aggregates containing empty arrays, the target compares scalar projections against DSLX constexpr execution because the pinned IR converter cannot represent empty array values. The DSLX reference uses qualified names because its experimental member-import syntax permits private constants.
+
+Run from `xlsynth-bx` with `cargo +nightly fuzz run --sanitizer none fuzz_bx_dslx_imported_constants`.
+
 ### xlsynth-bx/fuzz/fuzz_targets/fuzz_bx_dslx_type_aliases.rs
 
 Compares concrete module type aliases in BX and pinned DSLX. Generated chains refer to booleans, signed and unsigned bits from zero to 129 bits wide, nested arrays and tuples, enums, and structs including specializations with identical fields. The target checks source acceptance, constant values, and runtime outputs in BX block IR, compiled DSLX IR, and concrete DSLX calls. Paired library and consumer modules exercise qualified and directly imported public aliases, re-exported aggregates of private types, and same-named types in different scopes. Rejected programs expose lost nominal identity, invalid alias targets, declaration-order mistakes, and access to private types.

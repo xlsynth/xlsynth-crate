@@ -2580,6 +2580,15 @@ impl TypeInfo {
         }
     }
 
+    /// Returns the module bound to this import in the current type context.
+    pub fn get_imported_module(&self, import: &Import) -> Option<Module> {
+        let ptr = unsafe { sys::xls_dslx_type_info_get_imported_module(self.ptr, import.ptr) };
+        (!ptr.is_null()).then(|| Module {
+            parent: self.parent.clone(),
+            ptr,
+        })
+    }
+
     pub fn get_imported_type_info(&self, module: &Module) -> Option<TypeInfo> {
         let ptr = unsafe { sys::xls_dslx_type_info_get_imported_type_info(self.ptr, module.ptr) };
         if ptr.is_null() {
@@ -3438,12 +3447,28 @@ fn plain_fn(x: u32) -> u32 { x }
         // The enum member's value expression is owned by the imported module.
         let owner_module = member_expr.get_owner_module();
         assert_eq!(owner_module.get_name(), "imported");
+        let import = main_module.get_member(0).to_import().unwrap();
+        let bound = main_type_info.get_imported_module(&import).unwrap();
+        assert_eq!(bound.ptr, owner_module.ptr);
 
         // Now fetch the TypeInfo corresponding to that imported module from the
         // main TCM.
         let imported_type_info = main_tcm
             .get_type_info_for_module(&owner_module)
             .expect("imported type info available");
+        let independent = parse_and_typecheck(
+            "fn other() {}",
+            "other.x",
+            "other",
+            &mut ImportData::default(),
+        )
+        .unwrap();
+        assert!(
+            independent
+                .get_type_info()
+                .get_imported_module(&import)
+                .is_none()
+        );
 
         // Verify we can query type information for the imported EnumDef via the
         // imported TypeInfo.

@@ -114,6 +114,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_bx_dslx_imported_constants"
+path = "fuzz_targets/fuzz_bx_dslx_imported_constants.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_bx_dslx_imported_struct_parametrics"
 path = "fuzz_targets/fuzz_bx_dslx_imported_struct_parametrics.rs"
 test = false

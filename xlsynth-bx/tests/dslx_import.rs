@@ -9,8 +9,8 @@ use tempfile::tempdir;
 use xlsynth::dslx::{ImportData, parse_and_typecheck};
 use xlsynth_bx::ast::Type;
 use xlsynth_bx::{
-    ImportOptions, ResetBehavior, check_module_with_options, compile_with_options, empty_package,
-    lower_module, parse_module,
+    ImportOptions, ResetBehavior, check_module_with_options, check_source_with_options,
+    compile_with_options, empty_package, lower_module, parse_module,
 };
 use xlsynth_pir::IrValue;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
@@ -59,6 +59,261 @@ fn assert_import_rejected(module: &str, body: &str, result: &str, options: &Impo
         .is_err(),
         "{native}"
     );
+}
+
+#[test]
+fn native_constants_supply_dimensions_initializers_and_match_patterns() -> Result<(), Box<dyn Error>>
+{
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "device/config.x",
+        r#"
+const BASE = u32:4;
+fn increment(x: u32) -> u32 { x + u32:1 }
+pub const WIDTH = increment(BASE);
+pub const SIGNED = true;
+pub const LANES = u32:2;
+pub const NEG = s5:-3;
+pub const HIGH = uN[81]:0x1_0000_0000_0000_0000;
+"#,
+    )?;
+    let source = r#"
+use device::config;
+use device::config::{LANES, NEG};
+const TAG = config::HIGH + uN[81]:7;
+fn classify(x: xN[config::SIGNED][config::WIDTH]) -> bool {
+    match x { NEG => true, _ => false }
+}
+#[allow(combinational_block)]
+block sample(clk, x: u8) -> (bool, s8, uN[81]) {
+    let words: sN[config::WIDTH][LANES] = [NEG, x as s5];
+    (classify(words[u32:1]), words[u32:0] as s8, TAG)
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let package = compile_with_options(
+        source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    for (x, matched) in [(29, true), (30, false)] {
+        assert_eq!(
+            run_block(&package, x)?,
+            IrValue::make_tuple(&[
+                IrValue::bool(matched),
+                IrValue::make_sbits(8, -3)?,
+                IrValue::parse_typed("bits[81]:0x1_0000_0000_0000_0007")?,
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_constant_types_and_values_keep_their_defining_module() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    for (subject, offset) in [("device", 13), ("other", 41)] {
+        write_module(
+            root.path(),
+            &format!("{subject}.x"),
+            &format!(
+                r#"
+pub enum Mode : u2 {{ Ready = 1, Done = 2 }}
+pub struct Record {{ offset: u8, mode: Mode }}
+pub const BOOT = Record {{ offset: u8:{offset}, mode: Mode::Ready }};
+pub const MODES = [Mode::Done, Mode::Ready];
+"#
+            ),
+        )?;
+    }
+    write_module(
+        root.path(),
+        "stage.bx",
+        r#"
+use device;
+use device::BOOT;
+pub fn score(x: u8) -> u8 {
+    let boot: device::Record = BOOT;
+    if boot.mode == device::MODES[u32:1] { x + boot.offset } else { x }
+}
+"#,
+    )?;
+    let source = r#"
+use stage::score;
+use other;
+use other::BOOT;
+#[allow(combinational_block)]
+block sample(clk, x: u8) -> (u8, other::Mode, u8) {
+    let first = score(x);
+    let BOOT = x;
+    (first, other::MODES[u32:0], BOOT + other::BOOT.offset)
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let package = compile_with_options(
+        source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        run_block(&package, 4)?,
+        IrValue::parse_typed("(bits[8]:17,bits[2]:2,bits[8]:45)")?,
+    );
+    for source in [
+        "use device; use other; fn bad() -> device::Record { other::BOOT }",
+        "use device; use other; fn bad() -> device::Mode { other::MODES[u32:0] }",
+        "use stage; fn bad() -> u8 { device::BOOT.offset }",
+    ] {
+        assert!(
+            check_source_with_options(source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_constant_parametric_structs_keep_bindings_absent_from_their_fields()
+-> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    let declarations = r#"
+pub struct Tag<K:u32> { data:u8 }
+pub fn label<K:u32>(_tag:Tag<K>) -> u32 { K }
+"#;
+    for subject in ["first", "second"] {
+        write_module(root.path(), &format!("{subject}.x"), declarations)?;
+    }
+    write_module(
+        root.path(),
+        "presets.x",
+        r#"
+import first;
+import second;
+pub const TAGS = (second::Tag<u32:7> { data:u8:3 }, [first::Tag<u32:2> { data:u8:3 }]);
+"#,
+    )?;
+    let options = search_paths(&[root.path()]);
+    let source = r#"
+use first;
+use second;
+use presets::TAGS;
+#[allow(combinational_block)]
+block sample(clk, x:u8) -> (u32, u32, u8) {
+    (second::label(TAGS.0), first::label(TAGS.1[u32:0]), x + TAGS.0.data)
+}
+"#;
+    let package = compile_with_options(
+        source,
+        empty_package("test"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    assert_eq!(
+        run_block(&package, 1)?,
+        IrValue::parse_typed("(bits[32]:7,bits[32]:2,bits[8]:4)")?
+    );
+    for wrong in ["first::Tag<7>", "second::Tag<2>"] {
+        let source =
+            format!("use first; use second; use presets::TAGS; fn bad()->{wrong} {{ TAGS.0 }}");
+        assert!(
+            check_source_with_options(&source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_constant_imports_obey_visibility_and_source_order() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        "const PRIVATE = u32:5; pub const WIDTH = PRIVATE;",
+    )?;
+    write_module(
+        root.path(),
+        "middle.x",
+        "#![feature(use_syntax)]\nuse config::WIDTH;",
+    )?;
+    let options = search_paths(&[root.path()]);
+    let empty_loop = r#"block fold(clk)->u32 {
+    unroll_for! (_, acc) in u32:0..u32:0 {
+        match acc { config::WIDTH => config::WIDTH, _ => acc }
+    }(u32:0)
+}"#;
+    check_source_with_options(&format!("use config; {empty_loop}"), &options)?;
+    assert!(check_source_with_options(&format!("{empty_loop} use config;"), &options).is_err());
+    // As for imported types and functions, DSLX resolves an unused member
+    // binding. BX checks that the declaration is public at the read site.
+    check_source_with_options("use config::PRIVATE; use middle::WIDTH;", &options)?;
+    for source in [
+        "use config::PRIVATE; const BAD = PRIVATE;",
+        "use middle::WIDTH; const BAD = WIDTH;",
+        "use middle; const BAD = middle::WIDTH;",
+        "use config::MISSING; fn id(x:u32)->u32 { x }",
+        "use config; const BAD = config::PRIVATE;",
+        "use config; const BAD = config::MISSING;",
+        "use config::WIDTH; fn bad()->u32 { config::WIDTH }",
+        "use config; fn bad(config:u32)->u32 { config::WIDTH }",
+        "const BAD = config::WIDTH; use config;",
+        "fn bad(x:uN[WIDTH])->u5 { x } use config::WIDTH;",
+    ] {
+        assert!(
+            check_source_with_options(source, &options).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn native_constant_register_reset_keeps_the_checked_source_value() -> Result<(), Box<dyn Error>> {
+    let root = tempdir()?;
+    write_module(
+        root.path(),
+        "config.x",
+        "pub const INITIAL = [s8:-4, s8:7];",
+    )?;
+    let source = r#"
+use config::INITIAL;
+block delay(clk, x:s8[2])->s8[2] {
+    reg q:s8[2] = INITIAL;
+    q := x;
+    q
+}
+"#;
+    let options = search_paths(&[root.path()]);
+    let checked = check_module_with_options(&parse_module(source)?, &options)?;
+    write_module(
+        root.path(),
+        "config.x",
+        "pub const INITIAL = [s8:5, s8:-1];",
+    )?;
+    let saved = lower_module(&checked, empty_package("saved"), ResetBehavior::default())?;
+    let fresh = compile_with_options(
+        source,
+        empty_package("fresh"),
+        ResetBehavior::default(),
+        &options,
+    )?;
+    for (package, expected) in [
+        (saved, "[bits[8]:252,bits[8]:7]"),
+        (fresh, "[bits[8]:5,bits[8]:255]"),
+    ] {
+        assert_eq!(
+            package
+                .get_top_block()
+                .ok_or("expected delay block")?
+                .registers[0]
+                .reset_value,
+            Some(IrValue::parse_typed(expected)?)
+        );
+    }
+    Ok(())
 }
 
 #[test]

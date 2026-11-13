@@ -908,6 +908,12 @@ impl BodyChecker<'_, '_> {
         if let Some((module, member)) =
             lookup_use(name, self.resolver, |binding| locals.contains(binding))?
         {
+            if !callee
+                && self.resolver.constant_binding(name).is_some()
+                && !self.decls.visible(name, self.block_position)
+            {
+                return Err(format!("'{name}' is declared later in the module"));
+            }
             if !callee && name.contains("::") && self.resolver.is_enum_type(&module, &member) {
                 return Err(format!("enum '{name}' cannot be used as a value"));
             }
@@ -1142,9 +1148,7 @@ impl BodyChecker<'_, '_> {
                             scope.parent.is_none() && self.value_parametric_names.contains(name)
                         );
                     }
-                    Ok(self.callback_index(head).is_none()
-                        && (self.module_constant(name).is_some()
-                            || self.is_enum_member_name(name)?))
+                    Ok(self.callback_index(head).is_none() && self.is_constant_pattern(name)?)
                 })? {
                     self.check_expr_names(operand, locals)?;
                 }
