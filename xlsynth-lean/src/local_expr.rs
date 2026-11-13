@@ -160,7 +160,7 @@ impl LocalRenderer {
 
     /// `Array.toVector` avoids unfolding computed elements in a `#v` size
     /// proof. Explicit append lengths keep size checks local to each leaf.
-    fn vector_literal(self, fields: &[String]) -> String {
+    pub(crate) fn vector_literal(self, fields: &[String]) -> String {
         let root = self.root();
         if fields.len() <= 64 {
             return format!("#[{}].toVector", fields.join(", "));

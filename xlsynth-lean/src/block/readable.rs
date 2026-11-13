@@ -851,7 +851,7 @@ impl<'a> Presentation<'a> {
                     .iter()
                     .map(|arg| self.typed_operand(*arg, Some(element), depth))
                     .collect::<Result<Vec<_>>>()?;
-                Ok(format!("#v[{}]", values.join(", ")))
+                Ok(LocalRenderer::Block.vector_literal(&values))
             }
             NodePayload::ArrayIndex { array, indices, .. }
                 if let Some(ty) = &self.node_types[array.index] =>
@@ -1641,11 +1641,12 @@ end XlsReadable
             writeln!(
                 out,
                 r#"  all_goals first
-    | rfl
+    | with_reducible rfl
     | -- Compare indexed fields by mapping the projection over each vector.
       simp only [{rules},
        vector_map_ite, Vector.map_map, Function.comp_def,
-       Vector.map_mk, List.map_toArray, List.map_cons, List.map_nil] <;> rfl
+       vector_map_append, Array.toVector, Vector.map_mk, List.map_toArray,
+       List.map_cons, List.map_nil] <;> rfl
 "#
             )?;
         } else {
@@ -1786,6 +1787,13 @@ private theorem vector_map_ite {α β : Type} {n : Nat} (f : α → β)
     (if p then x else y).map f = (if p then x.map f else y.map f) :=
   apply_ite (Vector.map f) p x y
 
+-- The size-safe literal renderer calls Vector.append with explicit lengths.
+-- Match that head directly; Vector.map_append is stated using ++.
+private theorem vector_map_append {α β : Type} {n m : Nat} (f : α → β)
+    (xs : Vector α n) (ys : Vector α m) :
+    (Vector.append xs ys).map f = Vector.append (xs.map f) (ys.map f) :=
+  Vector.map_append
+
 private theorem vector_getD_back_map {α β : Type} {n : Nat} [NeZero n]
     (f : α → β) (xs : Vector α n) (i : Nat) :
     (xs.map f).getD i (xs.map f).back = f (xs.getD i xs.back) := by
@@ -1808,10 +1816,12 @@ theorem decoded_step (q : XlsBlock.State) (x : XlsBlock.Input) :
   exact congrArg Evaluation.next (decoded_eval q x)
 theorem encoded_observe (q : State) (x : Input) :
     encodeOutput (observe q x) = XlsBlock.observe (encodeState q) (encodeInput x) := by
-  exact congrArg XlsBlock.Evaluation.output (encoded_eval q x)
+  simpa only [encodeEvaluation, observe, XlsBlock.observe] using
+    congrArg XlsBlock.Evaluation.output (encoded_eval q x)
 theorem decoded_observe (q : XlsBlock.State) (x : XlsBlock.Input) :
     decodeOutput (XlsBlock.observe q x) = observe (decodeState q) (decodeInput x) := by
-  exact congrArg Evaluation.output (decoded_eval q x)
+  simpa only [decodeEvaluation, observe, XlsBlock.observe] using
+    congrArg Evaluation.output (decoded_eval q x)
 theorem encoded_assertions (q : State) (x : Input) :
     encodeAssertions (assertions q x) = XlsBlock.assertions (encodeState q) (encodeInput x) := by
   exact congrArg XlsBlock.Evaluation.assertions (encoded_eval q x)

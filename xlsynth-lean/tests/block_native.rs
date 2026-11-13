@@ -854,6 +854,19 @@ block pick(clk, choose: bool, a: Slot, b: Slot, supplied: Slot[2], index: u8) ->
     check_bundle(bx_bundle(bx), "indexed field of a selected record array");
 }
 
+#[cfg(feature = "lean-tests")]
+#[test]
+fn large_constructed_bool_array_elaborates() {
+    let elements = vec!["flag"; 2048].join(", ");
+    let bx = format!(
+        "block pick(clk, flag: bool, index: u11) -> bool {{
+            let slots = [{elements}];
+            slots[index]
+        }}"
+    );
+    check_bundle(bx_bundle(&bx), "large constructed Bool array");
+}
+
 /// Elaborate every generated file in dependency order with the requested Lean.
 fn check_bundle(bundle: LeanBlockBundle, _fixture: &str) {
     let directory = tempfile::tempdir().unwrap();
