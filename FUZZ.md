@@ -744,7 +744,7 @@ proofs are exercised separately by the native Lean tests.
 
 ```sh
 cd xlsynth-lean/fuzz
-cargo fuzz run --sanitizer none fuzz_dslx_parametric_calls -- -timeout=60 -max_len=11
+cargo fuzz run --features external-lean --sanitizer none fuzz_dslx_parametric_calls -- -timeout=60 -max_len=11
 ```
 
 ### xlsynth-lean/fuzz/fuzz_targets/fuzz_block_lean_eval.rs
