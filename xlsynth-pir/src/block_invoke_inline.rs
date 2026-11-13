@@ -9,14 +9,55 @@ use crate::IrValue;
 use crate::ir::{Block, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
 use crate::ir_rebase_ids::package_max_emitted_node_id;
 use crate::ir_utils::remap_payload_with;
-use crate::ir_verify::verify_package;
+use crate::ir_verify::{
+    verify_package, verify_package_inout_hierarchies, verify_package_structure,
+};
+
+/// Inlines ordinary calls in every block, retaining the package's functions,
+/// block hierarchy, and register boundaries. Checks hierarchy dependencies
+/// after expansion so an ignored argument cannot introduce a spurious cycle.
+pub fn inline_block_invokes_in_package(package: Package) -> Result<Package, String> {
+    let block_names: Vec<_> = package
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            PackageMember::Block(block) => Some(block.name.clone()),
+            PackageMember::Function(_) => None,
+        })
+        .collect();
+    inline_block_invokes_in_blocks(package, &block_names)
+}
+
+/// Inlines calls in the named blocks in order, then verifies the entire
+/// package. Unselected blocks can still contain invokes.
+pub fn inline_block_invokes_in_blocks(
+    mut package: Package,
+    block_names: &[String],
+) -> Result<Package, String> {
+    verify_package_structure(&package).map_err(|error| error.to_string())?;
+    let mut inliner = BlockInvokeInliner::from_verified_package(&package);
+    let mut replacements = Vec::new();
+    for name in block_names {
+        if let Cow::Owned(block) = inliner.inline_block(name)? {
+            replacements.push((inliner.blocks[name.as_str()].0, block));
+        }
+    }
+    if !replacements.is_empty() {
+        for (index, block) in replacements {
+            package.members[index] = PackageMember::Block(block);
+        }
+        verify_package_structure(&package).map_err(|error| error.to_string())?;
+    }
+    verify_package_inout_hierarchies(&package).map_err(|error| error.to_string())?;
+    Ok(package)
+}
 
 /// Resolves calls against one verified package and allocates fresh IDs across
 /// its expanded blocks.
 pub struct BlockInvokeInliner<'a> {
     /// Foreign functions have no inlineable implementation.
     functions: HashMap<&'a str, Option<&'a Fn>>,
-    blocks: HashMap<&'a str, &'a Block>,
+    blocks: HashMap<&'a str, (usize, &'a Block)>,
     last_id: usize,
 }
 
@@ -25,24 +66,30 @@ impl<'a> BlockInvokeInliner<'a> {
     /// recursive calls.
     pub fn new(package: &'a Package) -> Result<Self, String> {
         verify_package(package).map_err(|error| error.to_string())?;
+        Ok(Self::from_verified_package(package))
+    }
+
+    /// Indexes callees after verification has established valid call targets
+    /// and IDs.
+    fn from_verified_package(package: &'a Package) -> Self {
         let mut functions = HashMap::new();
         let mut blocks = HashMap::new();
-        for member in &package.members {
+        for (index, member) in package.members.iter().enumerate() {
             match member {
                 PackageMember::Function(function) => {
                     let foreign = function.ffi_proto().is_some();
                     functions.insert(function.name.as_str(), (!foreign).then_some(function));
                 }
                 PackageMember::Block(block) => {
-                    blocks.insert(block.name.as_str(), block);
+                    blocks.insert(block.name.as_str(), (index, block));
                 }
             }
         }
-        Ok(Self {
+        Self {
             functions,
             blocks,
             last_id: package_max_emitted_node_id(package),
-        })
+        }
     }
 
     /// Inlines the callee at each `invoke` node, borrowing the original block
@@ -63,7 +110,7 @@ impl<'a> BlockInvokeInliner<'a> {
     }
 
     fn expand_calls(&mut self, name: &str, limit: Option<usize>) -> Result<Cow<'a, Block>, String> {
-        let &block = self
+        let &(_, block) = self
             .blocks
             .get(name)
             .ok_or_else(|| format!("block '{name}' not found"))?;
@@ -396,7 +443,7 @@ top block sample(init: bits[81], x: bits[81], a: bits[81], b: bits[81]) {
     }
 
     #[test]
-    fn expanded_blocks_can_be_reassembled_in_one_package() {
+    fn package_stage_expands_nested_calls_in_all_blocks() {
         let ir = r#"package calls
 
 fn seen(x: bits[1] id=1) -> bits[1] {
@@ -437,7 +484,8 @@ block untouched() {
             inliner.inline_block("untouched").unwrap(),
             Cow::Borrowed(_)
         ));
-        let first = inliner.inline_block("first").unwrap().into_owned();
+        let expanded = inline_block_invokes_in_package(package).unwrap();
+        let first = expanded.get_block("first").unwrap();
         let labels: Vec<_> = first
             .nodes
             .iter()
@@ -447,7 +495,7 @@ block untouched() {
             })
             .collect();
         assert_eq!(labels, ["invoke_6_was_seen__1"]);
-        let second = inliner.inline_block("second").unwrap().into_owned();
+        let second = expanded.get_block("second").unwrap();
         assert!(
             !second
                 .nodes
@@ -455,13 +503,51 @@ block untouched() {
                 .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
         );
 
-        let mut expanded = package.clone();
-        expanded.replace_block("first", first).unwrap();
-        expanded.replace_block("second", second).unwrap();
-        verify_package(&expanded).unwrap();
-        Parser::new(&expanded.to_string())
-            .parse_and_validate_package()
-            .unwrap();
+        let text = expanded.to_string();
+        let reparsed = Parser::new(&text).parse_and_validate_package().unwrap();
+        assert_eq!(
+            inline_block_invokes_in_package(reparsed)
+                .unwrap()
+                .to_string(),
+            text
+        );
+    }
+
+    #[test]
+    fn hierarchy_cycles_use_inlined_pin_driver_dependencies() {
+        let ir = r#"package pins
+fn drive(sensed: bits[1] id=1) -> bits[1] {
+  ret zero: bits[1] = literal(value=0, id=2)
+}
+block child(data: bits[1], io: bits[1]) {
+  data: bits[1] = input_port(name=data, id=3)
+  on: bits[1] = literal(value=1, id=4)
+  driven: bits[1] = invoke(data, to_apply=drive, id=5)
+  io: bits[1] = ext_inout_port(driven, on, name=io, id=6)
+}
+top block parent(pin: bits[1]) {
+  instantiation cell(block=child, kind=block)
+  off: bits[1] = literal(value=0, id=7)
+  pin: bits[1] = ext_inout_port(off, off, name=pin, id=8)
+  sense: () = instantiation_input(pin, instantiation=cell, port_name=data, id=9)
+  bind_pin: () = ext_instantiation_inout(instantiation=cell, port_name=io, parent_port=pin, id=10)
+}
+"#;
+        let package = Parser::new(ir).parse_package().unwrap();
+        // The standalone verifier conservatively considers the call to read
+        // data.
+        assert!(
+            verify_package(&package)
+                .unwrap_err()
+                .to_string()
+                .contains("combinational cycle")
+        );
+        inline_block_invokes_in_package(package).unwrap();
+
+        let feedback = ir.replace("literal(value=0, id=2)", "identity(sensed, id=2)");
+        let package = Parser::new(&feedback).parse_package().unwrap();
+        let error = inline_block_invokes_in_package(package).unwrap_err();
+        assert!(error.contains("combinational cycle"), "{error}");
     }
 
     #[test]

@@ -3,12 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlsynth::vast_helpers::{RegisterDefinition, RegisterScope, Reset};
-use xlsynth_pir::block_invoke_inline::BlockInvokeInliner;
 use xlsynth_pir::ir::{
     Binop, Block, BlockPort, InstantiationKind, MemberType, NodePayload, NodeRef, Package,
     PackageMember, Register, Type, Unop,
 };
 use xlsynth_pir::ir_utils::{get_topological, operands};
+use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::{IrFormatPreference, IrValue};
 use xlsynth_vast::{
     Expr, IndexableExpr, LiteralFormat, LogicRef, VastDataType, VastFile, VastFileType, VastModule,
@@ -125,23 +125,11 @@ pub(crate) fn emit_package(
     mut top_register_names: Option<&mut BTreeMap<String, String>>,
 ) -> Result<BlockCodegenOutput, BlockCodegenError> {
     let top = select_top(package, options.top.as_deref())?;
-    let mut inliner = BlockInvokeInliner::new(package).map_err(BlockCodegenError::InvalidBlock)?;
-
-    let mut ordered = Vec::new();
-    let mut visited = BTreeSet::new();
-    let mut visiting = BTreeSet::new();
-    collect_dependencies(package, top, &mut ordered, &mut visited, &mut visiting)?;
-    // Hierarchy and pipeline layout must see the same data dependencies as
-    // emission, including when a function ignores one of its arguments.
-    let expanded = ordered
-        .into_iter()
-        .map(|block| {
-            inliner
-                .inline_block(&block.name)
-                .map_err(BlockCodegenError::Unsupported)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let ordered: Vec<&Block> = expanded.iter().map(|block| block.as_ref()).collect();
+    let ordered = blocks_in_emission_order(package, top)?;
+    for block in &ordered {
+        validate_supported_nodes(block)?;
+    }
+    verify_package(package).map_err(|error| BlockCodegenError::InvalidBlock(error.to_string()))?;
     let blocks = ordered.iter().map(|&b| (b.name.as_str(), b)).collect();
     for &block in &ordered {
         validate_single_register_writes(block)?;
@@ -212,27 +200,43 @@ fn validate_single_register_writes(block: &Block) -> Result<(), BlockCodegenErro
 
 /// Rejects operations that must be lowered before SystemVerilog emission.
 fn validate_supported_nodes(block: &Block) -> Result<(), BlockCodegenError> {
-    if block
-        .nodes
-        .iter()
-        .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }))
-    {
+    for node in &block.nodes {
+        let (operation, lowering) = match &node.payload {
+            NodePayload::Invoke { to_apply, .. } => {
+                return Err(unsupported_invoke(block, to_apply));
+            }
+            NodePayload::CountedFor { .. } => ("counted_for", "unroll loops"),
+            NodePayload::Map { .. } => ("map", "expand maps"),
+            _ => continue,
+        };
         return Err(BlockCodegenError::Unsupported(format!(
-            "counted_for is not supported in `{}`; unroll loops before block2sv code generation",
-            block.name
-        )));
-    }
-    if block
-        .nodes
-        .iter()
-        .any(|node| matches!(node.payload, NodePayload::Map { .. }))
-    {
-        return Err(BlockCodegenError::Unsupported(format!(
-            "map is not supported in `{}`; expand maps before block2sv code generation",
+            "{operation} is not supported in `{}`; {lowering} before block2sv code generation",
             block.name
         )));
     }
     Ok(())
+}
+
+/// Identifies a function call that the caller must inline before emission.
+pub(crate) fn unsupported_invoke(block: &Block, callee: &str) -> BlockCodegenError {
+    BlockCodegenError::Unsupported(format!(
+        "block `{}` contains an invoke of `{callee}`. Inline function calls before SystemVerilog emission.",
+        block.name
+    ))
+}
+
+/// Inlines function calls in the selected top and its transitive child blocks.
+pub fn inline_invokes_for_codegen(
+    package: Package,
+    explicit_top: Option<&str>,
+) -> Result<Package, BlockCodegenError> {
+    let top = select_top(&package, explicit_top)?;
+    let names = blocks_in_emission_order(&package, top)?
+        .into_iter()
+        .map(|block| block.name.clone())
+        .collect::<Vec<_>>();
+    xlsynth_pir::block_invoke_inline::inline_block_invokes_in_blocks(package, &names)
+        .map_err(BlockCodegenError::InvalidBlock)
 }
 
 /// Selects the explicitly requested, marked, or uniquely available block.
@@ -284,6 +288,22 @@ fn select_top<'a>(
 }
 
 /// Appends each transitive child once, before the block which instantiates it.
+fn blocks_in_emission_order<'a>(
+    package: &'a Package,
+    top: &'a str,
+) -> Result<Vec<&'a Block>, BlockCodegenError> {
+    let mut ordered = Vec::new();
+    collect_dependencies(
+        package,
+        top,
+        &mut ordered,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+    )?;
+    Ok(ordered)
+}
+
+/// Visits instantiated blocks in declaration order for deterministic emission.
 fn collect_dependencies<'a>(
     package: &'a Package,
     name: &'a str,
@@ -367,7 +387,6 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         child_timings: &mut ChildTimings<'a>,
         summarize_for_parent: bool,
     ) -> Result<(), BlockCodegenError> {
-        validate_supported_nodes(self.block)?;
         self.reserve_fixed_names()?;
         self.emit_ports()?;
         self.emit_arithmetic_helpers()?;

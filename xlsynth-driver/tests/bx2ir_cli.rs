@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use prost::Message;
 use tempfile::TempDir;
 use xlsynth_g8r::netlist::proto::pb;
-use xlsynth_pir::ir::MemberType;
+use xlsynth_pir::ir::{MemberType, NodePayload};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::compare_golden_text;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
@@ -798,9 +798,10 @@ fn imported_dslx_logic_runs_at_the_bx_register_boundary() -> Result<()> {
     fs::write(
         root.join("design.bx"),
         r#"use arithmetic::increment;
+fn bump(x: u8) -> u8 { increment(x) }
 block registered_sum(clk, x: u8) -> u8 {
     reg q: u8;
-    q := increment(x);
+    q := bump(x);
     q
 }"#,
     )?;
@@ -813,6 +814,20 @@ block registered_sum(clk, x: u8) -> u8 {
     assert_eq!(
         package.top,
         Some(("registered_sum".into(), MemberType::Block))
+    );
+    let block = package.get_top_block().context("missing registered_sum")?;
+    assert!(
+        block
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.payload, NodePayload::Invoke { .. }))
+    );
+    let helper = package.get_fn("bump").context("missing BX helper")?;
+    assert!(
+        helper
+            .nodes
+            .iter()
+            .any(|node| matches!(node.payload, NodePayload::Invoke { .. }))
     );
 
     fs::write(root.join("design.ir"), ir)?;

@@ -7,7 +7,9 @@ mod cases;
 mod support;
 use cases::*;
 use std::collections::BTreeSet;
-use xlsynth_codegen::{BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog};
+use xlsynth_codegen::{
+    BlockCodegenError, BlockCodegenOptions, Layout, emit_system_verilog, inline_invokes_for_codegen,
+};
 use xlsynth_pir::ir::{BlockReset, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{
@@ -1021,8 +1023,9 @@ top block parent(clk: clock, value: bits[8], fast: bits[8], slow: bits[8]) {
     for expression in ["add(lhs, rhs, id=20)", "identity(lhs, id=20)"] {
         let source = ir.replace("add(lhs, rhs, id=20)", expression);
         assert_stock_xls_accepts(&source);
-        let generated = emit(
-            &source,
+        let expanded = inline_invokes_for_codegen(package(&source), None).unwrap();
+        let generated = support::TestRtl::emit(
+            &expanded,
             &BlockCodegenOptions {
                 layout: Layout::Pipeline,
                 ..BlockCodegenOptions::default()
@@ -1139,6 +1142,45 @@ fn hierarchy_emits_each_child_once_before_its_parent() {
 }
 
 #[test]
+fn direct_emission_requires_inlined_calls_only_in_reachable_blocks() {
+    let ir = r#"package selected_calls
+fn passthrough(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+block caller() {
+  zero: bits[1] = literal(value=0, id=2)
+  unused: bits[1] = invoke(zero, to_apply=passthrough, id=3)
+}
+top block parent() {
+  instantiation child(block=caller, kind=block)
+}
+block independent() {
+}
+"#;
+    let parsed = package(ir);
+    for layout in [Layout::None, Layout::Pipeline] {
+        for top in ["parent", "caller", "independent"] {
+            let options = BlockCodegenOptions {
+                layout,
+                top: Some(top.to_owned()),
+                ..Default::default()
+            };
+            let result = emit_system_verilog(&parsed, &options);
+            if top == "independent" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    BlockCodegenError::Unsupported(
+                        "block `caller` contains an invoke of `passthrough`. Inline function calls before SystemVerilog emission.".into()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn child_function_dependencies_determine_whether_feedback_is_combinational() {
     let ir = r#"package invoked_child
 
@@ -1162,7 +1204,7 @@ top block parent(value: bits[8], result: bits[8]) {
   result: () = output_port(received, name=result, id=9)
 }
 "#;
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for top in ["parent", "child"] {
             let options = BlockCodegenOptions {
@@ -1190,7 +1232,9 @@ top block parent(value: bits[8], result: bits[8]) {
     }
     // The same wiring becomes a real combinational loop when the callee
     // uses the argument driven by its own output.
-    let cyclic = package(&ir.replace("not(value,", "not(ignored,"));
+    let cyclic =
+        inline_invokes_for_codegen(package(&ir.replace("not(value,", "not(ignored,")), None)
+            .unwrap();
     assert!(matches!(
         emit_system_verilog(&cyclic, &BlockCodegenOptions::default()),
         Err(BlockCodegenError::InvalidBlock(message))
@@ -1242,7 +1286,7 @@ top block parent(clk: clock, value: bits[8], result: bits[8]) {
     ] {
         let source = ir.replace("not(value, id=3)", expression);
         assert_stock_xls_accepts(&source);
-        let parsed = package(&source);
+        let parsed = inline_invokes_for_codegen(package(&source), None).unwrap();
         let flat = support::TestRtl::emit(&parsed, &BlockCodegenOptions::default());
         // Vastly executes one module. Drive the emitted child's feedback port
         // from its last registered output, as it is wired in the parent.
@@ -1647,10 +1691,11 @@ top block wrapper(clk: clock, lhs: bits[8], rhs: bits[8], result: bits[8]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         for emit_asserts in [true, false] {
-            let rtl = emit(
-                ir,
+            let rtl = support::TestRtl::emit(
+                &expanded,
                 &BlockCodegenOptions {
                     layout,
                     emit_asserts,
@@ -1981,7 +2026,7 @@ fn check_combinational_output(rtl: &str, inputs: &[(&str, u32, u64)], expected: 
 /// Checks the packed result of an invoked function under both codegen layouts.
 fn check_invoke_result(ir: &str, inputs: &[(&str, u32, u64)], expected: u64) {
     assert_stock_xls_accepts(ir);
-    let parsed = package(ir);
+    let parsed = inline_invokes_for_codegen(package(ir), None).unwrap();
     let block_name = &parsed.get_top_block().unwrap().name;
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
@@ -2238,13 +2283,14 @@ top block caller(empty: bits[0], out: bits[0]) {
 }
 "#;
     assert_stock_xls_accepts(ir);
+    let expanded = inline_invokes_for_codegen(package(ir), None).unwrap();
     for layout in [Layout::None, Layout::Pipeline] {
         let options = BlockCodegenOptions {
             layout,
             ..BlockCodegenOptions::default()
         };
         assert_eq!(
-            emit_system_verilog(&package(ir), &options).unwrap_err(),
+            emit_system_verilog(&expanded, &options).unwrap_err(),
             BlockCodegenError::Unsupported(
                 "counted_for is not supported in `caller`; unroll loops before block2sv code generation".to_owned()
             )

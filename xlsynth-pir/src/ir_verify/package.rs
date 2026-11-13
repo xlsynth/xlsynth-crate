@@ -691,9 +691,15 @@ impl std::fmt::Display for InstantiationPortDirection {
     }
 }
 
-/// Validates an entire package, ensuring all member names are unique, the top
-/// function (if set) exists, and all contained functions are valid.
+/// Verifies all package members, their references, and their inout hierarchies.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
+    verify_package_structure(p)?;
+    verify_package_inout_hierarchies(p)
+}
+
+/// Checks all package invariants except the inout hierarchy analysis, which
+/// can use more precise dependencies after function calls are inlined.
+pub(crate) fn verify_package_structure(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
     let mut functions = HashMap::new();
     for member in &p.members {
@@ -724,13 +730,10 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     }
     let resolve = |name: &str| functions.get(name).copied();
     let lookup = CalleeLookup::Verified(&resolve);
-    let mut hierarchy = BlockHierarchy::default();
     for (idx, member) in p.members.iter().enumerate() {
         match member {
             PackageMember::Function(f) => validate_fn_body_with(f, Some(lookup))?,
-            PackageMember::Block(block) => {
-                validate_block_with(block, p, idx, lookup, &mut hierarchy)?
-            }
+            PackageMember::Block(block) => validate_block_with(block, p, idx, lookup)?,
         }
     }
     validate_function_call_graph(p, &functions)?;
@@ -757,6 +760,18 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
+    Ok(())
+}
+
+/// Checks inout hierarchies on the same package snapshot that passed
+/// `verify_package_structure`, reusing each child's dependency summary.
+pub(crate) fn verify_package_inout_hierarchies(p: &Package) -> Result<(), ValidationError> {
+    let mut hierarchy = BlockHierarchy::default();
+    for member in &p.members {
+        if let PackageMember::Block(block) = member {
+            validate_block_inout_hierarchy(block, p, &mut hierarchy)?;
+        }
+    }
     Ok(())
 }
 
@@ -835,8 +850,8 @@ pub fn validate_block(
         parent,
         member_index,
         CalleeLookup::Unverified(&|name| parent.get_fn(name)),
-        &mut BlockHierarchy::default(),
-    )
+    )?;
+    validate_block_inout_hierarchy(f, parent, &mut BlockHierarchy::default())
 }
 
 fn validate_block_with(
@@ -844,7 +859,6 @@ fn validate_block_with(
     parent: &Package,
     member_index: usize,
     lookup: CalleeLookup<'_, '_>,
-    hierarchy: &mut BlockHierarchy,
 ) -> Result<(), ValidationError> {
     validate_block_ports(f)?;
     validate_block_resources(f)?;
@@ -885,11 +899,19 @@ fn validate_block_with(
         Some(&instantiation_info),
         true,
     )?;
-    validate_block_registers(f)?;
-    if f.inout_ports().next().is_some() {
-        hierarchy.summarize(f, parent).map_err(|error| {
+    validate_block_registers(f)
+}
+
+/// Checks the shared pins of one block and its transitive instances.
+fn validate_block_inout_hierarchy(
+    block: &Block,
+    parent: &Package,
+    hierarchy: &mut BlockHierarchy,
+) -> Result<(), ValidationError> {
+    if block.inout_ports().next().is_some() {
+        hierarchy.summarize(block, parent).map_err(|error| {
             ValidationError::BlockInvariantViolation {
-                block: f.name.clone(),
+                block: block.name.clone(),
                 reason: error.to_string(),
             }
         })?;

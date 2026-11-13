@@ -12,6 +12,7 @@ use xlsynth_bx::{
 };
 use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
 use xlsynth_pir::IrValue;
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
 use xlsynth_pir::ir::{MemberType, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn_in_package_value;
@@ -742,6 +743,7 @@ pub block capture(clk, en: bool, x: u8) -> u8 {
 }"#;
     let package = compile(source, empty_package("design"), ResetBehavior::default()).unwrap();
     assert_eq!(package.top, Some(("capture".into(), MemberType::Block)));
+    let package = inline_block_invokes_in_package(package).unwrap();
     let rtl = emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
     let pipeline = compile_pipeline_module(&rtl.system_verilog)?;
     let mut runner = FixtureRunner::new(&pipeline)?;

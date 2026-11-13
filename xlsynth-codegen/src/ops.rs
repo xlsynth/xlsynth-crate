@@ -8,7 +8,7 @@ use xlsynth_pir::{IrBits, IrValue};
 use xlsynth_vast::{Expr, GenerateLoop, LiteralFormat, LogicRef};
 
 use crate::BlockCodegenError;
-use crate::block::{BlockEmitter, Value, validate_external_identifier};
+use crate::block::{BlockEmitter, Value, unsupported_invoke, validate_external_identifier};
 
 impl BlockEmitter<'_, '_> {
     /// Lowers one representable combinational or connectivity operation.
@@ -263,8 +263,8 @@ impl BlockEmitter<'_, '_> {
                 let expression = self.file.make_shll(&one, &argument.expr);
                 Some(Value::expression(expression, argument.depth + 1))
             }
-            NodePayload::Invoke { .. } => {
-                unreachable!("invoke nodes are inlined before emission")
+            NodePayload::Invoke { to_apply, .. } => {
+                return Err(unsupported_invoke(self.block, to_apply));
             }
             NodePayload::Map { .. } => unreachable!("map nodes are rejected before emission"),
             NodePayload::CountedFor { .. } => {

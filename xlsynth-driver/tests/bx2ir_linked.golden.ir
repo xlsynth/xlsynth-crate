@@ -8,6 +8,7 @@ fn __arithmetic__twice(x: bits[8] id=1) -> bits[8] {
 
 top block doubler(clk: clock, x: bits[8], out: bits[8]) {
   x: bits[8] = input_port(name=x, id=3)
-  invoke.4: bits[8] = invoke(x, to_apply=__arithmetic__twice, id=4)
-  out: () = output_port(invoke.4, name=out, id=5)
+  add.6: bits[8] = add(x, x, id=6, pos=[(0,0,28)])
+  identity.4: bits[8] = identity(add.6, id=4)
+  out: () = output_port(identity.4, name=out, id=5)
 }

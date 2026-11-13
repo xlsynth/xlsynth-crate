@@ -10,7 +10,9 @@ use crate::ir_deduce::deduce_graph_result_type;
 
 mod package;
 
-pub(crate) use package::{CalleeLookup, validate_fn_with};
+pub(crate) use package::{
+    CalleeLookup, validate_fn_with, verify_package_inout_hierarchies, verify_package_structure,
+};
 pub use package::{InstantiationPortDirection, ValidationError as VerifyError};
 
 /// Checks the sentinel and canonical parameter nodes without checking the body.

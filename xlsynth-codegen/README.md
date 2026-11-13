@@ -7,10 +7,11 @@ and supported foreign-function instantiations.
 
 ## Rust API
 
-Parse and verify a package with `xlsynth-pir`, then emit its selected block:
+Parse a package with `xlsynth-pir`, inline function calls in the selected
+block hierarchy, and emit SystemVerilog:
 
 ```rust
-use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog};
+use xlsynth_codegen::{BlockCodegenOptions, emit_system_verilog, inline_invokes_for_codegen};
 use xlsynth_pir::ir_parser::Parser;
 
 let source = r#"package public_example
@@ -21,9 +22,10 @@ top block identity(data: bits[8], result: bits[8]) {
 }
 "#;
 
-let package = Parser::new(source).parse_and_verify_package().unwrap();
-let generated = emit_system_verilog(&package, &BlockCodegenOptions::default())
-    .unwrap();
+let options = BlockCodegenOptions::default();
+let package = Parser::new(source).parse_package().unwrap();
+let package = inline_invokes_for_codegen(package, options.top.as_deref()).unwrap();
+let generated = emit_system_verilog(&package, &options).unwrap();
 assert!(generated.system_verilog.contains("module identity("));
 assert!(generated.system_verilog.contains("assign result = data;"));
 ```
@@ -120,10 +122,12 @@ child outputs are analyzed separately. Each declared register must have exactly
 one `register_read` and one `register_write`; multiple write nodes are rejected
 instead of silently dropping an update.
 
-The emitter inlines the function body at each `invoke` node, including nested
-calls and their assertion, coverage, and trace operations. Register
-boundaries are preserved. Use an explicit external instantiation for a function
-marked `#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
+The emitter requires the selected block and its instantiated children to be
+free of `invoke` nodes. The `block2sv` CLI runs `inline_invokes_for_codegen`
+before emission. Rust callers can run the same stage to inline nested calls,
+including their assertions, coverage, and traces, while preserving register
+boundaries. Use an explicit external instantiation for a function marked
+`#[ffi_proto]`. Lower `map` operations and unroll `counted_for` loops
 before emission.
 
 Name collisions use double-underscore suffixes such as `add_3__1`.

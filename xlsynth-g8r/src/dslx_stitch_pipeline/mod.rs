@@ -9,6 +9,7 @@ use xlsynth::{
     DslxCallingConvention, mangle_dslx_name, mangle_dslx_name_with_calling_convention, optimize_ir,
     schedule_and_codegen,
 };
+use xlsynth_pir::block_invoke_inline::inline_block_invokes_in_package;
 use xlsynth_vast::{VastFile, VastFileType};
 
 mod block_ir;
@@ -347,13 +348,14 @@ pub fn resolve_pipeline(
 }
 
 impl ResolvedStitchPipeline {
-    /// Emits the selected stage functions and a top block that invokes them.
+    /// Emits a top block with stage functions inlined between register
+    /// boundaries.
     pub fn emit_block_ir(&self) -> Result<xlsynth_pir::ir::Package, xlsynth::XlsynthError> {
         let mut package = stage_package::load_stage_package(&self.ir, &self.stages)
             .map_err(xlsynth::XlsynthError)?;
         block_ir::build_pipeline_block(&mut package, &self.stages, &self.boundary, &self.layout)
             .map_err(xlsynth::XlsynthError)?;
-        Ok(package)
+        inline_block_invokes_in_package(package).map_err(xlsynth::XlsynthError)
     }
 
     /// Rejects registered stage-output bits that are constant for all inputs.

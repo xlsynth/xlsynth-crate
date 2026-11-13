@@ -76,6 +76,56 @@ fn nested_invokes_update_the_registered_output_at_each_clock_edge() {
 }
 
 #[test]
+fn explicit_top_skips_an_unrelated_foreign_call() {
+    let fixture = fixture("structure/explicit_top_override.golden.ir");
+    let source = fixture.source.replace(
+        "inverted: bits[8] = not(data, id=4)",
+        "inverted: bits[8] = invoke(data, to_apply=invert, id=4)",
+    ) + r#"
+fn invert(x: bits[8] id=6) -> bits[8] {
+  ret not.7: bits[8] = not(x, id=7)
+}
+
+#[ffi_proto("""code_template: "custom_cell {fn} (.x({x}), .out({return}));"
+""")]
+fn foreign(x: bits[8] id=8) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=8)
+}
+
+block other(x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=9)
+  result: bits[8] = invoke(x, to_apply=foreign, id=10)
+  out: () = output_port(result, name=out, id=11)
+}
+"#;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("input.ir"), source).unwrap();
+    let run_top = |name| {
+        invoke(
+            directory.path(),
+            &["input.ir".into(), format!("--top={name}")],
+        )
+    };
+    let selected = run_top("selected");
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap(),
+        fixture.expected_output()
+    );
+    let other = run_top("other");
+    assert_eq!(other.status.code(), Some(1));
+    assert!(other.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(other.stderr).unwrap(),
+        "error: block 'other' invokes foreign function 'foreign'; use an extern instantiation to preserve its implementation\n"
+    );
+}
+
+#[test]
 fn underscore_and_hyphen_flags_forward_typed_codegen_options() {
     for relative in [
         "structure/explicit_top_override.golden.ir",
