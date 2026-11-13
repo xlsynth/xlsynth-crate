@@ -43,6 +43,7 @@ name = "fuzz_dslx_parametric_calls"
 path = "fuzz_targets/fuzz_dslx_parametric_calls.rs"
 test = false
 doc = false
+required-features = ["external-lean"]
 
 [[bin]]
 name = "fuzz_ir_fn_lean_eval"
