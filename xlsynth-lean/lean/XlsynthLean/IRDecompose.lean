@@ -145,15 +145,24 @@ private def cutCalls (goal : MVarId) (stage law : Expr) (helper base : Name)
     if calls.isEmpty then throwError "no reachable calls to {helper} in {stage.getAppFn}"
     if let some expected := count then
       unless calls.size == expected do throwError "expected {expected} calls, found {calls.size}"
-    let mut goal := goal
-    for ((site, proof, fact), i) in calls.zipIdx do
-      let name := ctx.getUnusedName (base.appendAfter (toString i))
-      goal ← goal.rename site name
-      goal := (← goal.note (ctx.getUnusedName (name.appendAfter "_spec")) proof (some fact)).2
-    -- Clearing a let reintroduces later local declarations with new IDs.
-    for (site, _, _) in calls.reverse do
-      goal ← goal.clearValue site
-    return goal
+    let mut hypotheses := #[]
+    let resultName := fun (i : Nat) => ctx.getUnusedName (base.appendAfter (toString i))
+    for ((_, proof, fact), i) in calls.zipIdx do
+      hypotheses := hypotheses.push {
+        userName := ctx.getUnusedName ((resultName i).appendAfter "_spec")
+        type := fact, value := proof : Hypothesis}
+    let (_, goal) ← goal.assertHypotheses hypotheses
+    goal.withContext do
+      -- The stronger goal forgets the selected values simultaneously. Its
+      -- proof specializes to the original let values in the old context.
+      let mut ctx ← getLCtx
+      for ((site, _, _), i) in calls.zipIdx do
+        let name := resultName i
+        ctx := (ctx.setUserName site name).modifyLocalDecl site fun decl =>
+          .cdecl decl.index site name decl.type .default decl.kind
+      let next ← mkFreshExprMVarAt ctx (← getLocalInstances) (← goal.getType) .syntheticOpaque (← goal.getTag)
+      goal.assign next
+      return next.mvarId!
 
 /-- Factor a stage proof at all calls to a helper. Each fresh result has the
     helper's proved contract at the actual operands. The remaining goal and
