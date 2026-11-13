@@ -509,8 +509,11 @@ mod tests {
     use crate::ir_query::{matches_node, parse_query};
 
     #[test]
-    fn inlining_without_a_top_rejects_declaration_only_pins_before_pruning() {
+    fn inlining_with_a_function_top_rejects_declaration_only_pins_before_pruning() {
         let source = r#"package pads
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret result: bits[1] = identity(x, id=2)
+}
 block ordinary() {}
 block cell(io: bits[1]) {
   ext_inout io(bits[1])
