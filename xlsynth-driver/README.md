@@ -693,8 +693,7 @@ Declare a bidirectional pin in the block header as `pad: bits[4]`. In the body,
 `pad: bits[4] = ext_inout_port(drive, oe, name=pad, id=3)` emits
 `assign pad = oe ? drive : 'z;`. The active-high enable is one bit for the
 whole port. Reading `pad` returns the resolved pin value in either enable state.
-Bind a child pin with `ext_instantiation_inout(instantiation=child, port_name=io,
-parent_port=pad, id=4)`. This emits `.io(pad)` on the child instance. Each
+Bind a child pin with `ext_instantiation_inout(instantiation=child, port_name=io, parent_port=pad, id=4)`. This emits `.io(pad)` on the child instance. Each
 child inout needs one binding to a same-typed parent inout.
 See the [PIR extension reference](../xlsynth-pir/docs/extensions.md).
 
