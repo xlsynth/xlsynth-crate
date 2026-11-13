@@ -10,48 +10,12 @@ use libfuzzer_sys::fuzz_target;
 use rand::{RngCore, SeedableRng, rngs::StdRng};
 use xlsynth_ir_value::IrValue;
 use xlsynth_lean::LeanEvaluator;
+use xlsynth_lean_fuzz::lean_block_options;
 use xlsynth_pir::block_eval::{BlockEvaluator, RegisterInit};
-use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomBlockOptions, RandomBlockResetTiming, RandomFnOptions,
-    RandomOperation::{
-        BitSlice, Concat, Eq, Literal, Ne, OneHot, OneHotSel, PrioritySel, Sel, SignExt,
-    },
-    StopPolicy, generate_block_package,
-};
+use xlsynth_pir::ir_random::{DepletableBytes, StopPolicy, generate_block_package};
 use xlsynth_pir::random_inputs::generate_mixed_values_with_rng;
 
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
-
-fn block_options() -> RandomBlockOptions {
-    RandomBlockOptions {
-        min_input_ports: 1,
-        max_input_ports: 3,
-        min_output_ports: 1,
-        require_reset_on_all_registers: true,
-        reset_timing: RandomBlockResetTiming::Synchronous,
-        function_options: RandomFnOptions {
-            max_bit_width: 16,
-            allow_arrays: false,
-            allow_tuples: false,
-            // Arithmetic and bitwise generation can insert zero_ext when
-            // adapting operand widths, outside the raw Lean emitter's subset.
-            enabled_operations: OperationSet::new([
-                Literal,
-                Eq,
-                Ne,
-                Concat,
-                BitSlice,
-                SignExt,
-                Sel,
-                PrioritySel,
-                OneHot,
-                OneHotSel,
-            ]),
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
 
 fn check_case(data: &[u8]) {
     let mut rng = StdRng::from_seed(*blake3::hash(data).as_bytes());
@@ -68,7 +32,7 @@ fn check_case(data: &[u8]) {
     };
     let package = generate_block_package(
         &mut DepletableBytes::new(graph_bytes),
-        &block_options(),
+        &lean_block_options(),
         StopPolicy::WhenEntropyDepleted,
     )
     .expect("bounded block generation")

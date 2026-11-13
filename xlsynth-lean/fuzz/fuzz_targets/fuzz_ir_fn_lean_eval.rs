@@ -8,51 +8,15 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use xlsynth_lean::{LeanEvaluator, LeanModuleName, export_ir_function};
+use xlsynth_lean_fuzz::lean_function_options;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
-use xlsynth_pir::ir_random::{
-    ArrayAssumptionMode, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation,
-    RngEntropy, StopPolicy, generate_package,
-};
+use xlsynth_pir::ir_random::{DepletableBytes, RngEntropy, StopPolicy, generate_package};
 use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 
 const INPUTS_PER_FUNCTION: usize = 32;
 const MAX_FUZZ_BYTES: usize = 3072;
 
 static EVALUATOR: OnceLock<LeanEvaluator> = OnceLock::new();
-
-/// Keep generation entirely within the pure value contract of the word-level
-/// exporter.
-fn options() -> RandomFnOptions {
-    let operations = OperationSet::all_supported();
-    RandomFnOptions {
-        max_nodes: 32,
-        max_functions: 3,
-        max_bit_width: 129,
-        max_aggregate_leaves: 12,
-        allow_gate: true,
-        allow_map: true,
-        allow_empty_case_sel: true,
-        allow_zero_width_bits: true,
-        allow_arbitrary_width_multiply: true,
-        allow_extension_ops: true,
-        allow_events: false,
-        max_counted_fors_per_function: 0,
-        array_assumption_mode: ArrayAssumptionMode::ProvenSafe,
-        enabled_operations: OperationSet::new(operations.iter().filter(|op| {
-            !matches!(
-                op,
-                RandomOperation::Smulp
-                    | RandomOperation::Umulp
-                    | RandomOperation::CountedFor
-                    | RandomOperation::AfterAll
-                    | RandomOperation::Assert
-                    | RandomOperation::Trace
-                    | RandomOperation::Cover
-            )
-        })),
-        ..RandomFnOptions::default()
-    }
-}
 
 /// Checks one exported graph and 32 input vectors per reproducible fuzz case.
 fn check_function(data: &[u8]) {
@@ -61,7 +25,7 @@ fn check_function(data: &[u8]) {
     let mut seed = [0; 8];
     seed[..seed_bytes.len()].copy_from_slice(seed_bytes);
     let seed = u64::from_le_bytes(seed);
-    let opts = options();
+    let opts = lean_function_options();
     let generated = if graph.is_empty() {
         let mut rng = StdRng::seed_from_u64(seed);
         let body_nodes = rng.gen_range(1..=opts.max_nodes);
