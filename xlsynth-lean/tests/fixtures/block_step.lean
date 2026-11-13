@@ -5,13 +5,7 @@
 -- Outputs read old registers; all writes commit together.
 -- Source assertions are results, never assumptions.
 
--- SPDX-License-Identifier: Apache-2.0
-
-import Std
-
-namespace XlsBlock.IR
--- Shared IR library omitted.
-end XlsBlock.IR
+import XlsynthLean.IR
 
 namespace XlsBlock
 

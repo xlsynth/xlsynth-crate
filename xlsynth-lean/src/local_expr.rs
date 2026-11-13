@@ -117,14 +117,9 @@ pub(crate) enum LocalRenderer {
     Block,
 }
 
-impl LocalRenderer {
-    fn helpers(self) -> &'static str {
-        match self {
-            Self::Function => "_root_.XlsynthLean.IR",
-            Self::Block => "_root_.XlsBlock.IR",
-        }
-    }
+const IR: &str = "_root_.XlsynthLean.IR";
 
+impl LocalRenderer {
     // Block fields retain source names, which may shadow library names in
     // dependent record declarations. Keep the public function source spelling.
     fn root(self) -> &'static str {
@@ -191,14 +186,13 @@ impl LocalRenderer {
     /// shifts.
     fn binary<E>(self, op: Binop, a: &str, b: &str, w: usize) -> Result<String, RenderError<E>> {
         let root = self.root();
-        let ir = self.helpers();
         Ok(match op {
             Binop::Add => format!("{a} + {b}"),
             Binop::Sub => format!("{a} - {b}"),
             Binop::Umul => format!("{a}.setWidth {w} * {b}.setWidth {w}"),
             Binop::Smul => format!("{a}.signExtend {w} * {b}.signExtend {w}"),
             Binop::Udiv => format!("{root}BitVec.smtUDiv {a} {b}"),
-            Binop::Sdiv => format!("{ir}.sdiv {a} {b}"),
+            Binop::Sdiv => format!("{IR}.sdiv {a} {b}"),
             Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
             Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
             Binop::Shll => format!("{a} <<< ({root}min {b}.toNat {w})"),
@@ -236,7 +230,6 @@ impl LocalRenderer {
         let names = |rs: &[NodeRef]| rs.iter().copied().map(name).collect::<Result<Vec<_>, _>>();
         let width = |ty: &Type| bit_width(ty).map_err(RenderError::Invalid);
         let root = self.root();
-        let ir = self.helpers();
         Ok(match &n.payload {
             P::Literal(v) => self.literal(v),
             P::Tuple(rs) => tuple(&names(rs)?),
@@ -245,7 +238,7 @@ impl LocalRenderer {
             P::TupleIndex { tuple, index } => format!("{}{}.1", name(*tuple)?, ".2".repeat(*index)),
             P::ArrayIndex { array, indices, .. } => {
                 indices.iter().try_fold(name(*array)?, |base, i| {
-                    Ok(format!("({ir}.arrayIndex {base} {}.toNat)", name(*i)?))
+                    Ok(format!("({IR}.arrayIndex {base} {}.toNat)", name(*i)?))
                 })?
             }
             P::ArrayUpdate {
@@ -267,7 +260,7 @@ impl LocalRenderer {
                         format!("v{depth}")
                     };
                     expr = format!(
-                        "{ir}.arrayModify {base} {}.toNat (fun {binder} => {expr})",
+                        "{IR}.arrayModify {base} {}.toNat (fun {binder} => {expr})",
                         name(*idx)?
                     );
                 }
@@ -278,7 +271,7 @@ impl LocalRenderer {
                 start,
                 width,
             } => format!(
-                "{ir}.arraySlice {width} {} {}.toNat",
+                "{IR}.arraySlice {width} {} {}.toNat",
                 name(*array)?,
                 name(*start)?
             ),
@@ -336,7 +329,7 @@ impl LocalRenderer {
                 start,
                 update_value,
             } => format!(
-                "{ir}.bitSliceUpdate {} {} {}",
+                "{IR}.bitSliceUpdate {} {} {}",
                 name(*arg)?,
                 name(*start)?,
                 name(*update_value)?
@@ -347,12 +340,12 @@ impl LocalRenderer {
                     name(*arg)?
                 )
             }
-            P::Encode { arg } => format!("{ir}.encode {} {}", width(&n.ty)?, name(*arg)?),
+            P::Encode { arg } => format!("{IR}.encode {} {}", width(&n.ty)?, name(*arg)?),
             P::OneHot { arg, lsb_prio } => {
-                format!("{ir}.oneHot {lsb_prio} {}", name(*arg)?)
+                format!("{IR}.oneHot {lsb_prio} {}", name(*arg)?)
             }
             P::OneHotSel { selector, cases } => format!(
-                "{ir}.oneHotSel {} #[{}]",
+                "{IR}.oneHotSel {} #[{}]",
                 name(*selector)?,
                 names(cases)?.join(", ")
             ),
@@ -361,7 +354,7 @@ impl LocalRenderer {
                 cases,
                 default,
             } => format!(
-                "{ir}.prioritySel {} #[{}] {}",
+                "{IR}.prioritySel {} #[{}] {}",
                 name(*selector)?,
                 names(cases)?.join(", "),
                 name(default.ok_or_else(|| RenderError::Invalid(

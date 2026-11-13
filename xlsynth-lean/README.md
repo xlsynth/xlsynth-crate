@@ -75,14 +75,22 @@ input node do not affect evaluation. Invalid graphs return `LeanError` values.
 
 ```rust
 let block = xlsynth_lean::block::select_block(&package, None)?;
-let lean_source = xlsynth_lean::block::emit(&package, block)?;
+let name = xlsynth_lean::LeanModuleName::new("Generated.Counter")?;
+let path = xlsynth_lean::block::write_to(&package, block, &name, project_root)?;
 ```
 
-`emit` takes a verified `xlsynth_pir::ir::Package` and a block borrowed from
-it. If you already have the block, pass it directly. Otherwise, `select_block`
+`write_to` takes a verified `xlsynth_pir::ir::Package` and a block borrowed
+from it. If you already have the block, pass it directly. Otherwise, `select_block`
 accepts a block name, or selects the package top when given `None`. A package
 without a top must contain exactly one block for automatic selection.
-`emit` returns a self-contained Lean module and does not run Lean.
+This example writes `Generated/Counter.lean` with declarations such as
+`Generated.Counter.eval`. Generated blocks and functions each write only
+their model file. Build [XlsynthLean/IR.lean](lean/XlsynthLean/IR.lean) once
+as part of your Lean project and put its build output on Lean's module search
+path. Models and proofs can then use `import XlsynthLean.IR`. A proof can
+use any definition from that module, including helpers absent from its model.
+For callers that manage their own files, `block::emit(&package, block)`
+returns source in the `XlsBlock` namespace with the same import.
 
 The generated clock step preserves old-state outputs, simultaneous register
 writes, reset precedence and source assertions. Blocks use the function
@@ -263,9 +271,9 @@ the stored source artifacts.
 ## Word-level IR functions
 
 `export_ir_function(&package, top, &module_name)` exports a PIR package entry
-as a `LeanFunction`. `write_to` writes its Lean source, companion IR module,
-and toolchain pin. The generated `eval` accepts arguments in XLS signature
-order. `bits[N]` becomes `BitVec N`, arrays become `Vector α n`, and tuples
+as a `LeanFunction`. Its `write_to` method writes one model file, which imports
+the project's `XlsynthLean.IR` module. The generated `eval` accepts arguments
+in XLS signature order. `bits[N]` becomes `BitVec N`, arrays become `Vector α n`, and tuples
 become right-nested products ending in `Unit`. For example, a two-field
 tuple value is `(a, b, ())`. `evalPacked` packs the first argument at the
 low end. Within a tuple its last field is least significant, and within an
@@ -284,7 +292,7 @@ element, and out-of-range writes preserve the array. For operations marked
 the promised bounds.
 
 Use `LeanEvaluator::eval_ir_function_batch(&function, &argument_lists)` to
-compile the standalone module written by `LeanFunction::write_to`. A runner
+compile the generated module using the evaluator's prepared support library. A runner
 imports that module and evaluates all argument lists in one request, returning
 one typed `IrValue` per case. `LeanEvaluator::eval_ir_functions` accepts a slice of
 `LeanFunctionInputs { function, input_cases }` and runs all functions in one

@@ -41,9 +41,15 @@ fn emits_typed_lean_for_array_map() {
         f.write_to(root).unwrap(),
         root.join("Generated/Function.lean")
     );
-    assert!(root.join("XlsynthLean/IR.lean").is_file());
-    assert!(root.join("lean-toolchain").is_file());
-    assert!(!root.join("XlsynthLean/Aig.lean").exists());
+    assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::read_dir(root.join("Generated")).unwrap().count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("Generated/Function.lean")).unwrap(),
+        f.lean_source()
+    );
 }
 
 #[test]

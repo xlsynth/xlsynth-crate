@@ -2,29 +2,60 @@
 
 //! Public block emission contracts, including port and sequential semantics.
 
-use xlsynth_lean::block::{emit, select_block};
+use std::path::{Path, PathBuf};
+
+use xlsynth_lean::LeanModuleName;
+use xlsynth_lean::block::{emit, select_block, write_to};
+use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_parser::Parser;
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
 
-fn check_standalone_lean(source: &str) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("Block.lean");
-    std::fs::write(&path, source).unwrap();
+fn compile_lean(root: &Path, imports: &[&Path], source: &Path, object: &Path) {
     let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
     let output = std::process::Command::new(lean)
-        .current_dir(directory.path())
+        .current_dir(root)
         .env_remove("LEAN_SYSROOT")
-        .env_remove("LEAN_PATH")
-        .arg(path)
+        .env("LEAN_PATH", std::env::join_paths(imports).unwrap())
+        .arg("-o")
+        .arg(object)
+        .arg(source)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "Lean failed to check the emitted block:\n{}\n{}",
+        "Lean failed to compile {}:\n{}\n{}",
+        source.display(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn compile_project(root: &Path, sources: impl IntoIterator<Item = PathBuf>) {
+    // Compile the repository module once, outside the model output directory.
+    let support = tempfile::tempdir().unwrap();
+    let library = Path::new(env!("CARGO_MANIFEST_DIR")).join("lean");
+    let object = support.path().join("XlsynthLean/IR.olean");
+    std::fs::create_dir(object.parent().unwrap()).unwrap();
+    compile_lean(&library, &[], &library.join("XlsynthLean/IR.lean"), &object);
+    for source in sources {
+        compile_lean(
+            root,
+            &[root, support.path()],
+            &source,
+            &source.with_extension("olean"),
+        );
+    }
+}
+
+fn check_block(package: &Package, client: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let name = LeanModuleName::new("XlsBlock").unwrap();
+    let block = write_to(package, package.get_top_block().unwrap(), &name, root).unwrap();
+    let proof = root.join("Client.lean");
+    std::fs::write(&proof, format!("import XlsBlock\n{client}")).unwrap();
+    compile_project(root, [block, proof]);
 }
 
 // Verifies: Raw emission preserves old outputs, simultaneous writes, and
@@ -34,29 +65,36 @@ fn check_standalone_lean(source: &str) {
 fn raw_step_preserves_old_outputs_simultaneous_writes_and_disconnected_assertions() {
     let package = Parser::new(BLOCK).parse_and_validate_package().unwrap();
     let source = emit(&package, package.get_top_block().unwrap()).unwrap();
-    // Compare the whole model, including imports and helper namespace
-    // placement. The shared IR library is already maintained as Lean
-    // source.
-    let start = "namespace XlsBlock.IR\n";
-    let end = "\nend XlsBlock.IR\n";
-    let (header, support_and_model) = source.split_once(start).unwrap();
-    let (_, model) = support_and_model.split_once(end).unwrap();
-    let model = format!("{header}{start}-- Shared IR library omitted.{end}{model}");
     // The golden reads output/a and next/b from old_a, next/a from old_b,
     // gives reset precedence over enable, and retains the unused assertion.
     // The checked-in fixture's license is metadata, not generated user text.
     let golden = include_str!("fixtures/block_step.lean")
         .strip_prefix("-- SPDX-License-Identifier: Apache-2.0\n\n")
         .unwrap();
-    pretty_assertions::assert_eq!(model, golden);
+    pretty_assertions::assert_eq!(source, golden);
+    let directory = tempfile::tempdir().unwrap();
+    let name = LeanModuleName::new("Swap").unwrap();
+    let written = write_to(
+        &package,
+        package.get_top_block().unwrap(),
+        &name,
+        directory.path(),
+    )
+    .unwrap();
+    assert_eq!(written, directory.path().join("Swap.lean"));
+    assert_eq!(
+        std::fs::read_to_string(written).unwrap(),
+        golden.replace("XlsBlock", "«Swap»")
+    );
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
 #[cfg(feature = "lean-tests")]
 #[test]
 fn evaluates_swap_reset_and_disconnected_assertion_in_lean() {
     let package = Parser::new(BLOCK).parse_and_validate_package().unwrap();
-    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
-    source.push_str(
+    check_block(
+        &package,
         r#"
 open XlsBlock
 def sample (rst en : BitVec 1) :=
@@ -67,7 +105,6 @@ example : sample 0 1 = (2, 1, 2, true) := by decide
 example : sample 1 0 = (2, 2, 2, false) := by decide
 "#,
     );
-    check_standalone_lean(&source);
 }
 
 #[cfg(feature = "lean-tests")]
@@ -87,7 +124,7 @@ top block adder(rhs: bits[4], cin: bits[1], lhs: bits[4], copied: bits[4], cout:
     )
     .parse_and_validate_package()
     .unwrap();
-    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
+    let source = emit(&package, package.get_top_block().unwrap()).unwrap();
     assert!(
         source
             .lines()
@@ -97,7 +134,8 @@ top block adder(rhs: bits[4], cin: bits[1], lhs: bits[4], copied: bits[4], cout:
 
     // Positional construction and matching use the port list in the block
     // header. Both inputs and outputs appear in a different order in the body.
-    source.push_str(
+    check_block(
+        &package,
         r#"
 open XlsBlock
 def outputs (cin : BitVec 1) :=
@@ -107,7 +145,6 @@ example : outputs 0 = (3, 0) := by decide
 example : outputs 1 = (3, 1) := by decide
 "#,
     );
-    check_standalone_lean(&source);
 }
 
 #[cfg(feature = "lean-tests")]
@@ -124,15 +161,14 @@ top block lookup(i: bits[2], y: (bits[0], bits[4])) {
     )
     .parse_and_validate_package()
     .unwrap();
-    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
-    source.push_str(
+    check_block(
+        &package,
         r#"
 open XlsBlock
 example : (observe {} { i := 0 }).y = (0#0, 2#4, ()) := by decide
 example : (observe {} { i := 3 }).y = (0#0, 9#4, ()) := by decide
 "#,
     );
-    check_standalone_lean(&source);
 }
 
 // Each field becomes a projection in the Lean structure's namespace.
@@ -200,8 +236,8 @@ top block ports(mk: bits[1], mk_: bits[1], mk__: bits[1], rec_: bits[1], result:
     )
     .parse_and_validate_package()
     .unwrap();
-    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
-    source.push_str(
+    check_block(
+        &package,
         r#"
 open XlsBlock
 example (a b c d : BitVec 1) :
@@ -214,13 +250,12 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
 #check Evaluation.Constructors.mk
 "#,
     );
-    check_standalone_lean(&source);
 }
 
 #[cfg(feature = "lean-tests")]
 #[test]
 fn tuple_one_hot_select_agrees_with_pir_for_functions_and_blocks() {
-    use xlsynth_lean::{LeanEvaluator, LeanModuleName, export_ir_function};
+    use xlsynth_lean::export_ir_function;
     use xlsynth_pir::{
         IrValue,
         block_eval::{BlockEvaluator, RegisterInit},
@@ -238,6 +273,13 @@ top block select_ports(s: bits[2], a: (bits[4], bits[4]), b: (bits[4], bits[4]),
   b: (bits[4], bits[4]) = input_port(name=b, id=7)
   chosen: (bits[4], bits[4]) = one_hot_sel(s, cases=[a, b], id=8)
   y: () = output_port(chosen, name=y, id=9)
+}
+block swap_cases(s: bits[2], a: (bits[4], bits[4]), b: (bits[4], bits[4]), y: (bits[4], bits[4])) {
+  s: bits[2] = input_port(name=s, id=10)
+  a: (bits[4], bits[4]) = input_port(name=a, id=11)
+  b: (bits[4], bits[4]) = input_port(name=b, id=12)
+  chosen: (bits[4], bits[4]) = one_hot_sel(s, cases=[b, a], id=13)
+  y: () = output_port(chosen, name=y, id=14)
 }"#,
     )
     .parse_and_validate_package()
@@ -263,24 +305,55 @@ top block select_ports(s: bits[2], a: (bits[4], bits[4]), b: (bits[4], bits[4]),
         std::slice::from_ref(&expected)
     );
 
-    let mut source = emit(&package, package.get_top_block().unwrap()).unwrap();
-    source.push_str(
-        r#"
-open XlsBlock
-example : (observe {} { s := 3, a := (1, 2, ()), b := (4, 8, ()) }).y = (5, 10, ()) := by decide
-"#,
-    );
-    check_standalone_lean(&source);
-
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    for (block, module) in [
+        ("select_ports", "Generated.Select"),
+        ("swap_cases", "Generated.Swap"),
+    ] {
+        write_to(
+            &package,
+            package.get_block(block).unwrap(),
+            &LeanModuleName::new(module).unwrap(),
+            root,
+        )
+        .unwrap();
+    }
     let module = LeanModuleName::new("Generated.Selection").unwrap();
     let function = export_ir_function(&package, Some("select_pair"), &module).unwrap();
-    let lean = std::env::var_os("XLSYNTH_LEAN").expect("set XLSYNTH_LEAN to the Lean executable");
-    let evaluator = LeanEvaluator::new(lean).unwrap();
-    assert_eq!(
-        evaluator
-            .eval_ir_function_batch(&function, &[args])
-            .unwrap(),
-        [expected]
+    let function = function.write_to(root).unwrap();
+    let client = root.join("Client.lean");
+    std::fs::write(
+        &client,
+        r#"import XlsynthLean.IR
+import Generated.Selection
+import Generated.Select
+import Generated.Swap
+
+abbrev Pair4 := BitVec 4 × BitVec 4 × Unit
+
+-- A proof can use library operations absent from every generated model.
+example : XlsynthLean.IR.arrayIndex (#[2#4, 9#4].toVector) 3 = 9#4 := by decide
+
+def selected (s : BitVec 2) (a b : Pair4) := XlsynthLean.IR.oneHotSel s #[a, b]
+example (s : BitVec 2) (a b : Pair4) :
+    Generated.Selection.eval s a b = selected s a b := rfl
+example (s : BitVec 2) (a b : Pair4) :
+    (Generated.Select.observe {} ⟨s, a, b⟩).y = selected s a b := rfl
+example (s : BitVec 2) (a b : Pair4) :
+    (Generated.Swap.observe {} ⟨s, a, b⟩).y = selected s b a := rfl
+example : selected 3 (1, 2, ()) (4, 8, ()) = (5, 10, ()) := by decide
+"#,
+    )
+    .unwrap();
+    compile_project(
+        root,
+        [
+            function,
+            root.join("Generated/Select.lean"),
+            root.join("Generated/Swap.lean"),
+            client,
+        ],
     );
 }
 

@@ -10,16 +10,20 @@
 
 use anyhow::{Context, Result, ensure};
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 use xlsynth_pir::{
     ir::{self, NodePayload, NodeRef, Register, Type},
     ir_utils,
 };
 
+use crate::LeanModuleName;
 use crate::block::BlockContext;
 use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_elaboration_limits};
-use crate::support::IR_SOURCE;
+use crate::support::write_file;
 
-/// Emit a self-contained Lean model of a verified XLS block.
+/// Emit a verified XLS block in the `XlsBlock` namespace.
+/// The returned source imports `XlsynthLean.IR`. Use [`write_to`] to
+/// write a named model into a Lean project that supplies this import.
 /// Return an error if the block uses an unsupported operation.
 ///
 /// Pass a verified block borrowed from `package`, whose file table supplies
@@ -43,8 +47,28 @@ use crate::support::IR_SOURCE;
 /// Do not treat `reset` as a constructor for initialized state: registers
 /// without a reset value still depend on the supplied old state.
 pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
+    emit_in_namespace(package, block, "XlsBlock")
+}
+
+/// Write the generated block under `root`. The project supplies its
+/// `XlsynthLean.IR` import. The module name determines both the file path and
+/// the namespace, so blocks with different module names can be imported
+/// together.
+pub fn write_to(
+    package: &ir::Package,
+    block: &ir::Block,
+    module_name: &LeanModuleName,
+    root: &Path,
+) -> Result<PathBuf> {
+    let source = emit_in_namespace(package, block, &module_name.lean_identifier())?;
+    let path = module_name.source_path();
+    write_file(root, &path, source.as_bytes())?;
+    Ok(root.join(path))
+}
+
+fn emit_in_namespace(package: &ir::Package, block: &ir::Block, namespace: &str) -> Result<String> {
     let block = BlockContext::new(package, block)?;
-    emit_block(&block).with_context(|| {
+    emit_block(&block, namespace).with_context(|| {
         format!(
             "Lean emission of block {} in package {}",
             block.graph.name, block.package_name
@@ -56,7 +80,7 @@ pub fn emit(package: &ir::Package, block: &ir::Block) -> Result<String> {
 ///
 /// Every register must have exactly one write; outputs use the data operand of
 /// each output port, whose graph node itself has the empty tuple type.
-fn emit_block(block: &BlockContext<'_>) -> Result<String> {
+fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     ensure!(
         block.graph.instantiations.is_empty(),
         "block instances are outside the supported Lean subset"
@@ -121,14 +145,11 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
         "-- Generated from XLS block {} in package {}.\n\
          -- Exact BitVec values; tuple elements end in Unit.\n\
          -- Outputs read old registers; all writes commit together.\n\
-         -- Source assertions are results, never assumptions.\n\n",
+         -- Source assertions are results, never assumptions.\n\n\
+         import XlsynthLean.IR\n\nnamespace {namespace}\n\n",
         comment(&graph.name),
         comment(block.package_name)
     );
-    // Standalone block modules can be imported alongside function modules.
-    // Both get their helpers from the same Lean declarations.
-    source.push_str(&IR_SOURCE.replace("XlsynthLean.IR", "XlsBlock.IR"));
-    source.push_str("\nnamespace XlsBlock\n\n");
     write_elaboration_limits(&mut source, [&graph.graph]);
     source.push_str(&record_type(
         "State",
@@ -264,7 +285,7 @@ fn emit_block(block: &BlockContext<'_>) -> Result<String> {
     } else {
         source.push_str("  eval q x\n");
     }
-    source.push_str("\nend XlsBlock\n");
+    writeln!(source, "\nend {namespace}")?;
     Ok(source)
 }
 

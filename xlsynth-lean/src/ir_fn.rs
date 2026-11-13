@@ -15,7 +15,7 @@ use xlsynth_pir::ir_verify::verify_package;
 use crate::local_expr::{
     LeanOperand, LocalRenderer, RenderError, bit_width, write_elaboration_limits,
 };
-use crate::support::{IR_FUNCTION_SUPPORT, write_file};
+use crate::support::write_file;
 use crate::{LeanError, LeanModuleName};
 
 const MODULE_HEADER: &str = "-- SPDX-License-Identifier: Apache-2.0\nimport XlsynthLean.IR\n\n";
@@ -47,14 +47,9 @@ impl LeanFunction {
         &self.signature
     }
 
-    /// Writes the importable module, its Lean support source, and the toolchain
-    /// pin.
+    /// Writes the generated module under `root`. The Lean project supplies
+    /// its `XlsynthLean.IR` import.
     pub fn write_to(&self, root: &Path) -> Result<PathBuf, LeanError> {
-        IR_FUNCTION_SUPPORT.write_to(root)?;
-        self.write_module(root)
-    }
-
-    pub(crate) fn write_module(&self, root: &Path) -> Result<PathBuf, LeanError> {
         let path = self.module_name.source_path();
         write_file(root, &path, self.source.as_bytes())?;
         Ok(root.join(path))

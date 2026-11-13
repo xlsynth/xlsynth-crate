@@ -12,7 +12,7 @@ use xlsynth_pir::desugar_extensions::desugar_extensions_in_graph;
 use xlsynth_pir::ir::{self, MemberType, PackageMember};
 
 mod raw;
-pub use raw::emit;
+pub use raw::{emit, write_to};
 
 /// The block and its package-level context used during emission.
 pub(crate) struct BlockContext<'a> {

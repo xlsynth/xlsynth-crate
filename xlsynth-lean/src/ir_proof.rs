@@ -5,7 +5,7 @@ use std::path::Path;
 use xlsynth_pir::ir::Package;
 
 use crate::ir_fn::{Bindings, export_with_bindings};
-use crate::support::write_file;
+use crate::support::{IR_SUPPORT, write_file};
 use crate::{LeanError, LeanFunction, LeanModuleName};
 
 /// Trusted word-level proof libraries supplied by the checker.
@@ -59,10 +59,12 @@ pub fn prepare_ir_function_equivalence_target(
 }
 
 impl LeanIrFunctionEquivalenceTarget {
-    /// Writes the definitions and their universally quantified, typed equality.
+    /// Prepares a proof directory with the shared IR module, both models, and
+    /// their universally quantified, typed equality.
     pub fn write_to(&self, root: &Path) -> Result<(), LeanError> {
+        IR_SUPPORT.write_to(root)?;
         self.lhs.write_to(root)?;
-        self.rhs.write_module(root)?;
+        self.rhs.write_to(root)?;
         for (path, contents) in FIXED_IR_PROOF_FILES {
             write_file(root, Path::new(path), contents)?;
         }
