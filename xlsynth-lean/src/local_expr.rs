@@ -129,6 +129,14 @@ impl LocalRenderer {
         }
     }
 
+    fn limited_offset(self, offset: &str, width: usize) -> String {
+        let min = match self {
+            Self::Function => "min",
+            Self::Block => "_root_.Nat.min",
+        };
+        format!("({min} {offset}.toNat {width})")
+    }
+
     pub(crate) fn lean_type(self, ty: &Type) -> String {
         let root = self.root();
         match ty {
@@ -195,9 +203,9 @@ impl LocalRenderer {
             Binop::Sdiv => format!("{IR}.sdiv {a} {b}"),
             Binop::Umod => format!("if {b} == 0 then 0 else {a} % {b}"),
             Binop::Smod => format!("if {b} == 0 then 0 else {a}.srem {b}"),
-            Binop::Shll => format!("{a} <<< ({root}min {b}.toNat {w})"),
-            Binop::Shrl => format!("{a} >>> ({root}min {b}.toNat {w})"),
-            Binop::Shra => format!("{a}.sshiftRight ({root}min {b}.toNat {w})"),
+            Binop::Shll => format!("{a} <<< {}", self.limited_offset(b, w)),
+            Binop::Shrl => format!("{a} >>> {}", self.limited_offset(b, w)),
+            Binop::Shra => format!("{a}.sshiftRight {}", self.limited_offset(b, w)),
             Binop::Eq => format!("{root}BitVec.ofBool ({a} == {b})"),
             Binop::Ne => format!("{root}BitVec.ofBool ({a} != {b})"),
             Binop::Ult => format!("{root}BitVec.ofBool ({a}.ult {b})"),
@@ -208,7 +216,13 @@ impl LocalRenderer {
             Binop::Sle => format!("{root}BitVec.ofBool ({a}.sle {b})"),
             Binop::Sgt => format!("{root}BitVec.ofBool ({b}.slt {a})"),
             Binop::Sge => format!("{root}BitVec.ofBool ({b}.sle {a})"),
-            Binop::Gate => format!("if {a} == 1 then {b} else {root}default"),
+            Binop::Gate => {
+                let default = match self {
+                    Self::Function => "default",
+                    Self::Block => "_root_.Inhabited.default",
+                };
+                format!("if {a} == 1 then {b} else {default}")
+            }
             Binop::Smulp | Binop::Umulp => return Err(RenderError::Unsupported),
         })
     }
@@ -319,9 +333,8 @@ impl LocalRenderer {
                 start,
                 width: w,
             } => format!(
-                "{root}BitVec.extractLsb' ({root}min {}.toNat {}) {w} {}",
-                name(*start)?,
-                width(graph.get_node_ty(*arg))?,
+                "{root}BitVec.extractLsb' {} {w} {}",
+                self.limited_offset(&name(*start)?, width(graph.get_node_ty(*arg))?),
                 name(*arg)?
             ),
             P::BitSliceUpdate {
@@ -336,8 +349,8 @@ impl LocalRenderer {
             ),
             P::Decode { arg, width } => {
                 format!(
-                    "{root}BitVec.twoPow {width} ({root}min {}.toNat {width})",
-                    name(*arg)?
+                    "{root}BitVec.twoPow {width} {}",
+                    self.limited_offset(&name(*arg)?, *width)
                 )
             }
             P::Encode { arg } => format!("{IR}.encode {} {}", width(&n.ty)?, name(*arg)?),

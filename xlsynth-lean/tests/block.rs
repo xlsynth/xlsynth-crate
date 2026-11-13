@@ -171,6 +171,35 @@ example : (observe {} { i := 3 }).y = (0#0, 9#4, ()) := by decide
     );
 }
 
+#[cfg(feature = "lean-tests")]
+#[test]
+fn shifts_and_gates_use_qualified_library_names() {
+    let package = Parser::new(
+        r#"package offsets
+top block offsets(amount: bits[64], enable: bits[1], result: (bits[5], bits[3])) {
+  amount: bits[64] = input_port(name=amount, id=1)
+  enable: bits[1] = input_port(name=enable, id=2)
+  input: bits[5] = literal(value=13, id=3)
+  shifted: bits[5] = shll(input, amount, id=4)
+  slice: bits[3] = dynamic_bit_slice(input, amount, width=3, id=5)
+  pair: (bits[5], bits[3]) = tuple(shifted, slice, id=6)
+  gated: (bits[5], bits[3]) = gate(enable, pair, id=7)
+  result: () = output_port(gated, name=result, id=8)
+}"#,
+    )
+    .parse_and_validate_package()
+    .unwrap();
+    check_block(
+        &package,
+        r#"
+open XlsBlock
+#guard (observe {} { amount := 1, enable := 1 }).result == (26#5, 6#3, ())
+#guard (observe {} { amount := 1, enable := 0 }).result == (0#5, 0#3, ())
+#guard (observe {} { amount := 1152921504606846976, enable := 1 }).result == (0#5, 0#3, ())
+"#,
+    );
+}
+
 // Each field becomes a projection in the Lean structure's namespace.
 // Report the owning field when Lean would generate the same declaration.
 #[test]
