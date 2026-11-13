@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 use xlsynth_pir::ir::{Binop, NaryOp, NodeGraph, NodePayload as P, NodeRef, Type, Unop};
 use xlsynth_pir::{IrFormatPreference, IrValue};
 
-/// Named proof nodes may be applications, and readable equations may inline
-/// entire expressions. Group either before applying a projection or operator.
+/// Readable block equations can inline a compound operand. Group it before
+/// applying a projection or operator.
 pub(crate) enum LeanOperand {
     Atom(String),
     Expression(String),

@@ -4,9 +4,8 @@ use std::path::Path;
 
 use xlsynth_pir::ir::Package;
 
-use crate::ir_fn::{Bindings, export_with_bindings};
 use crate::support::{IR_SUPPORT, write_file};
-use crate::{LeanError, LeanFunction, LeanModuleName};
+use crate::{LeanError, LeanFunction, LeanModuleName, export_ir_function};
 
 /// Trusted word-level proof libraries supplied by the checker.
 pub(crate) const FIXED_IR_PROOF_FILES: &[(&str, &[u8])] = &[
@@ -36,18 +35,8 @@ pub fn prepare_ir_function_equivalence_target(
     rhs: &Package,
     rhs_top: Option<&str>,
 ) -> Result<LeanIrFunctionEquivalenceTarget, LeanError> {
-    let lhs = export_with_bindings(
-        lhs,
-        lhs_top,
-        &LeanModuleName::new("Generated.Lhs")?,
-        Bindings::NamedNodes,
-    )?;
-    let rhs = export_with_bindings(
-        rhs,
-        rhs_top,
-        &LeanModuleName::new("Generated.Rhs")?,
-        Bindings::NamedNodes,
-    )?;
+    let lhs = export_ir_function(lhs, lhs_top, &LeanModuleName::new("Generated.Lhs")?)?;
+    let rhs = export_ir_function(rhs, rhs_top, &LeanModuleName::new("Generated.Rhs")?)?;
     if lhs.signature() != rhs.signature() {
         return Err(LeanError::InvalidIr(format!(
             "equivalence requires matching XLS signatures: lhs {:?}, rhs {:?}",

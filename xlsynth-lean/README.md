@@ -407,12 +407,11 @@ positional XLS arguments and equates the complete return values. Both parameter
 and result types must match, including array lengths, tuple nesting and bit widths.
 Parameter names may differ. For nullary functions the target is equality of the results.
 
-Each proof export gives every SSA node its own declaration under the generated
-function's namespace. Its name is the XLS node ID prefixed with `n`. A proof
-can unfold one operation, use `congrArg` on an operand equality, or use a
-callee's previously proved contract. The ordinary executable exporter uses
-local lets to share intermediates during evaluation. Both layouts use the same
-operation translations.
+Proof preparation calls `export_ir_function` for each side. The generated
+function body binds each intermediate with a local `let`, so evaluation and
+proof use the same model. Proofs that unfolded a generated declaration such
+as `Generated.Lhs.ir_stage.n12` need to unfold the enclosing function or
+use `xls_cut` to reason about a helper call.
 
 Supply a Lean module and its theorem name using `LeanIrProofSources`, then call
 `run_ir_function_equivalence_proof`. For example, when the left graph computes
@@ -466,8 +465,17 @@ of the call graph, prove a stage contract
 and use it in its caller. `xls_unfold helper` expands the helper's own
 reachable SSA nodes while preserving calls to other functions.
 
-Lean metaprograms can use `XlsynthLean.IR.sliceCalls` to inspect the actual
-typed call applications, shared result nodes, and downstream definitions.
+Lean metaprograms that used `exportedNodes` or the declaration names in
+`CallSlice.downstream` can inspect local expressions inside a callback. For example,
+`XlsynthLean.IR.sliceCalls stage helper fun s => pure s.calls.size`
+counts reachable calls. In the callback, `s.output` is the stage result,
+`s.bindings` are its local lets, and each site in `s.calls` pairs a local
+result with its typed application. `s.downstream` lists reachable non-call
+bindings that depend on a selected result. Use these expressions in the
+callback's local context, or close an expression with
+`mkLetFVars s.bindings` before returning it. Calls follow binding order.
+When migrating a proof that distinguishes independent calls by number, check
+which arguments correspond to each numbered hypothesis.
 The routing example applies distinct contracts on the two sides of an
 equivalence. [Routing proof](tests/fixtures/decomposition/RouteProof.lean)
 

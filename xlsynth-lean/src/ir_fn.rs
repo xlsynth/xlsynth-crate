@@ -63,24 +63,6 @@ pub fn export_ir_function(
     top: Option<&str>,
     module_name: &LeanModuleName,
 ) -> Result<LeanFunction, LeanError> {
-    export_with_bindings(package, top, module_name, Bindings::LocalLets)
-}
-
-/// Named nodes give proof authors a stable, independently unfoldable
-/// declaration per SSA binding. Local lets share intermediate values during
-/// execution.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Bindings {
-    LocalLets,
-    NamedNodes,
-}
-
-pub(crate) fn export_with_bindings(
-    package: &Package,
-    top: Option<&str>,
-    module_name: &LeanModuleName,
-    bindings: Bindings,
-) -> Result<LeanFunction, LeanError> {
     let entry = match top {
         Some(name) => package.get_named_or_top_or_sole_fn(name),
         None => package.get_top_or_sole_fn(),
@@ -126,7 +108,7 @@ pub(crate) fn export_with_bindings(
         }
         let f = functions[name.as_str()];
         if ready {
-            emit_function(&mut source, f, bindings)?;
+            emit_function(&mut source, f)?;
             emitted.insert(name);
         } else {
             work.push((name, true));
@@ -217,54 +199,29 @@ fn check_supported(f: &Fn, node: &Node) -> Result<(), LeanError> {
 }
 
 /// Emits one typed binding per IR node, retaining shared operands and calls.
-fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), LeanError> {
+fn emit_function(out: &mut String, f: &Fn) -> Result<(), LeanError> {
     let renderer = LocalRenderer::Function;
     let function = function_name(&f.name);
-    let parameters: Vec<_> = f.param_nodes().collect();
-    let signature = parameters
-        .iter()
+    let signature = f
+        .param_nodes()
         .map(|p| format!(" (n{} : {})", p.text_id, renderer.lean_type(&p.ty)))
         .collect::<String>();
-    let arguments = parameters
-        .iter()
-        .map(|p| format!(" n{}", p.text_id))
-        .collect::<String>();
     let result_type = renderer.lean_type(&f.ret_ty);
-    let name = |r: NodeRef| {
-        let node = f.get_node(r);
-        let local = format!("n{}", node.text_id);
-        if bindings == Bindings::NamedNodes
-            && !matches!(node.payload, P::Param)
-            && !arguments.is_empty()
-        {
-            LeanOperand::Expression(format!("{local}{arguments}"))
-        } else {
-            LeanOperand::Atom(local)
-        }
-    };
-    match bindings {
-        Bindings::LocalLets => {
-            writeln!(out, "def {function}{signature} : {result_type} :=").unwrap()
-        }
-        Bindings::NamedNodes => writeln!(out, "namespace {function}").unwrap(),
-    }
+    let name = |r: NodeRef| format!("n{}", f.get_node(r).text_id);
+    writeln!(out, "def {function}{signature} : {result_type} :=").unwrap();
     for (index, n) in f.nodes.iter().enumerate() {
         let e = match &n.payload {
             P::Nil | P::Param => continue,
             P::Map { array, to_apply } => {
-                format!(
-                    "Vector.map {} {}",
-                    function_name(to_apply),
-                    name(*array).into_argument()
-                )
+                format!("Vector.map {} {}", function_name(to_apply), name(*array))
             }
             P::Invoke { to_apply, operands } => std::iter::once(function_name(to_apply))
-                .chain(operands.iter().map(|r| name(*r).into_argument()))
+                .chain(operands.iter().copied().map(name))
                 .collect::<Vec<_>>()
                 .join(" "),
             _ => renderer
                 .local_rhs(f, NodeRef { index }, |r| {
-                    Ok::<_, std::convert::Infallible>(name(r))
+                    Ok::<_, std::convert::Infallible>(LeanOperand::Atom(name(r)))
                 })
                 .map_err(|error| match error {
                     RenderError::Unsupported => LeanError::UnsupportedIr {
@@ -278,29 +235,9 @@ fn emit_function(out: &mut String, f: &Fn, bindings: Bindings) -> Result<(), Lea
                 })?,
         };
         let ty = renderer.lean_type(&n.ty);
-        match bindings {
-            Bindings::LocalLets => writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap(),
-            Bindings::NamedNodes => {
-                writeln!(out, "def n{}{signature} : {ty} :=\n  {e}", n.text_id).unwrap();
-            }
-        }
+        writeln!(out, "  let n{} : {ty} := {e}", n.text_id).unwrap();
     }
     let result = f.ret_node_ref.expect("verified return");
-    match bindings {
-        Bindings::LocalLets => writeln!(out, "  {}\n", name(result).into_argument()).unwrap(),
-        Bindings::NamedNodes => {
-            let node = f.get_node(result);
-            let value = if matches!(node.payload, P::Param) {
-                format!("n{}", node.text_id)
-            } else {
-                format!("{function}.n{}{arguments}", node.text_id)
-            };
-            writeln!(
-                out,
-                "end {function}\n\ndef {function}{signature} : {result_type} :=\n  {value}\n"
-            )
-            .unwrap();
-        }
-    }
+    writeln!(out, "  {}\n", name(result)).unwrap();
     Ok(())
 }
