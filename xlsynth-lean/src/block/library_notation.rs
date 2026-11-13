@@ -12,7 +12,6 @@ use std::fmt::Write as _;
 const TERM_NAMES: &[&str] = &[
     "And",
     "Array.getD",
-    "Array.toVector",
     "BitVec",
     "BitVec.add",
     "BitVec.allOnes",
@@ -75,6 +74,7 @@ const TERM_NAMES: &[&str] = &[
 // differently from an elaborated theorem term (e.g. Vector.map_mk on an unknown
 // vector).
 const DECLARATION_NAMES: &[&str] = &[
+    "Array.toVector",
     "DecidableEq",
     "Function.comp_def",
     "List.map_cons",
