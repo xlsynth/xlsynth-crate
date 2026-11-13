@@ -5,9 +5,15 @@ fn helper(x: bits[8] id=1) -> bits[8] {
   ret v: bits[8] = not(x, id=2)
 }
 
+fn negate(x: bits[8] id=8) -> bits[8] {
+  ret v: bits[8] = neg(x, id=9)
+}
+
 top fn both(x: bits[8] id=3) -> bits[8] {
   first: bits[8] = invoke(x, to_apply=helper, id=4)
   second: bits[8] = invoke(x, to_apply=helper, id=5)
   doubled: bits[8] = add(first, first, id=6)
-  ret result: bits[8] = xor(doubled, second, id=7)
+  mixed: bits[8] = xor(doubled, second, id=7)
+  other: bits[8] = invoke(x, to_apply=negate, id=10)
+  ret result: bits[8] = add(mixed, other, id=11)
 }

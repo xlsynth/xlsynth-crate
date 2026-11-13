@@ -454,8 +454,8 @@ The tactic introduces `routed0` and `routed1` for the two tuple results.
 `routed1_spec` describes the second call with `routed0` as its incoming pair.
 All uses of a shared result refer to the same variable. A premise in the
 original theorem remains a premise in the specialized fact. The caller can
-finish the resulting goal with ordinary Lean tactics or cut the other side
-using a different helper and contract.
+finish the resulting goal with ordinary Lean tactics or apply another
+`xls_cut` to a different helper on the same stage or the other side.
 
 The stage must be fully applied. The contract takes the helper's operands in
 order and states a proposition about its result, which can be a bit vector,
