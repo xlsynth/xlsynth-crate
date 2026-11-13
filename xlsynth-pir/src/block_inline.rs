@@ -82,6 +82,27 @@ pub fn flatten_block_hierarchy(package: &ir::Package, top: &str) -> Result<ir::P
 // Inlines all block instantiations in the package. All blocks are removed after
 // inlining except for the top block.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
+    if let Some(top) = pkg.get_top_block() {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending = vec![top.name.clone()];
+        while let Some(name) = pending.pop() {
+            if selected.insert(name.clone())
+                && let Some(block) = pkg.get_block(&name)
+            {
+                block.reject_inouts("block inlining")?;
+                pending.extend(
+                    block
+                        .instantiations
+                        .iter()
+                        .filter(|i| i.kind == ir::InstantiationKind::Block)
+                        .map(|i| i.block.clone()),
+                );
+            }
+        }
+        pkg.members.retain(
+            |member| !matches!(member, PackageMember::Block(b) if !selected.contains(&b.name)),
+        );
+    }
     loop {
         let mut progress = false;
         let mut has_instantiations = false;

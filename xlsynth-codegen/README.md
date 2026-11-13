@@ -56,6 +56,10 @@ struct field ordering policies are exported from the same module.
 - Synchronous and asynchronous active-high or active-low resets, load enables,
   state feedback, and optional register-generation templates.
 - Transitive block hierarchy and existing foreign-function instantiations.
+- Bidirectional pins with a whole-port active-high output enable. Each local
+  driver emits `assign pad = oe ? drive : 'z;`. A child inout binds directly
+  to the parent pin, so all readers sample the same resolved net. See the
+  [shared-bus example](tests/goldens/block2sv/hierarchy/shared_inout.golden.ir).
 - Width-specific automatic SystemVerilog helpers for mixed-width multiplication,
   partial products, and division/modulo, using original-width operands.
 - Priority selects lowered to compact `unique casez` helpers with disjoint

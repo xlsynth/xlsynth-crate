@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::block2fn::combinational_block_to_fn;
-use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
+use xlsynth_pir::desugar_extensions::{
+    ExtensionEmitMode, desugar_extensions_in_package, emit_package_with_extension_mode,
+};
 use xlsynth_pir::ir::{Block, MemberType, NodePayload, Package, PackageMember, Type};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
@@ -890,4 +892,57 @@ fn stage_keyword_is_rejected_without_poisoning_block_resources() {
             .collect::<Vec<_>>(),
         (1..=4).map(|id| id + maximum).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn inout_builder_preserves_aggregate_pins_and_rejects_projection() {
+    let mut cell = BlockBuilder::new("cell");
+    let ty = Type::Tuple(vec![Box::new(Type::Bits(128)), Box::new(Type::Bits(3))]);
+    let drive = cell.input_port("drive", ty.clone()).unwrap();
+    let oe = cell.input_port("oe", Type::Bits(1)).unwrap();
+    assert!(cell.ext_inout_port("pad", drive, drive).is_err());
+    let pad = cell.ext_inout_port("pad", drive, oe).unwrap();
+    cell.output_port("observed", pad).unwrap();
+    let mut package = cell.build_package("pads").unwrap();
+    let child = package.get_block("cell").unwrap();
+    assert_eq!(child.port_type(child.get_inout_port("pad").unwrap()), &ty);
+    assert!(
+        combinational_block_to_fn(child)
+            .unwrap_err()
+            .contains("ext_inout_port")
+    );
+    let mut parent = BlockBuilder::new("parent");
+    let data = parent.input_port("data", ty).unwrap();
+    let enable = parent.input_port("enable", Type::Bits(1)).unwrap();
+    let pad = parent.ext_inout_port("top_pad", data, enable).unwrap();
+    let instance = parent.instantiate("u", child).unwrap();
+    parent.instantiation_input(instance, "drive", data).unwrap();
+    parent.instantiation_input(instance, "oe", enable).unwrap();
+    parent.instantiation_output(instance, "observed").unwrap();
+    assert!(
+        parent
+            .ext_instantiation_inout(instance, "pad", data)
+            .is_err()
+    );
+    parent
+        .ext_instantiation_inout(instance, "pad", pad)
+        .unwrap();
+    assert!(
+        parent
+            .ext_instantiation_inout(instance, "pad", pad)
+            .is_err()
+    );
+    parent.build_into_package(&mut package).unwrap();
+    assert_pir_package(&package);
+    for mode in [
+        ExtensionEmitMode::Desugared,
+        ExtensionEmitMode::AsFfiFunction,
+    ] {
+        assert!(
+            emit_package_with_extension_mode(&package, mode)
+                .unwrap_err()
+                .to_string()
+                .contains("ext_inout_port")
+        );
+    }
 }

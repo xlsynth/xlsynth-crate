@@ -1,0 +1,88 @@
+package pads
+
+block pad_cell(drive: bits[4], oe: bits[1], io: bits[4], observed: bits[4]) {
+  drive: bits[4] = input_port(name=drive, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  io: bits[4] = ext_inout_port(drive, oe, name=io, id=3)
+  observed: () = output_port(io, name=observed, id=4)
+}
+
+block listener(value: bits[4], observed: bits[4]) {
+  value: bits[4] = input_port(name=value, id=5)
+  observed: () = output_port(value, name=observed, id=6)
+}
+
+top block pads(left_data: bits[4], right_data: bits[4], left_oe: bits[1], right_oe: bits[1], pad: bits[4], seen: bits[4]) {
+  instantiation left(block=pad_cell, kind=block)
+  instantiation right(block=pad_cell, kind=block)
+  instantiation sense(block=listener, kind=block)
+  left_data: bits[4] = input_port(name=left_data, id=7)
+  right_data: bits[4] = input_port(name=right_data, id=8)
+  left_oe: bits[1] = input_port(name=left_oe, id=9)
+  right_oe: bits[1] = input_port(name=right_oe, id=10)
+  idle: bits[4] = literal(value=0, id=11)
+  off: bits[1] = literal(value=0, id=12)
+  pad: bits[4] = ext_inout_port(idle, off, name=pad, id=13)
+  left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)
+  right_drive: () = instantiation_input(right_data, instantiation=right, port_name=drive, id=15)
+  left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)
+  right_enable: () = instantiation_input(right_oe, instantiation=right, port_name=oe, id=17)
+  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, parent_port=pad, id=18)
+  right_link: () = ext_instantiation_inout(instantiation=right, port_name=io, parent_port=pad, id=19)
+  sense_input: () = instantiation_input(pad, instantiation=sense, port_name=value, id=20)
+  sample: bits[4] = instantiation_output(instantiation=sense, port_name=observed, id=21)
+  seen: () = output_port(sample, name=seen, id=22)
+  left_sample: bits[4] = instantiation_output(instantiation=left, port_name=observed, id=23)
+  right_sample: bits[4] = instantiation_output(instantiation=right, port_name=observed, id=24)
+}
+
+// OPTIONS: # BlockCodegenOptions defaults
+// EXPECT-SV: module pad_cell(
+// EXPECT-SV:   input logic [3:0] drive,
+// EXPECT-SV:   input logic oe,
+// EXPECT-SV:   inout wire [3:0] io,
+// EXPECT-SV:   output logic [3:0] observed
+// EXPECT-SV: );
+// EXPECT-SV:   assign io = oe ? drive : 'z;
+// EXPECT-SV:   assign observed = io;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module listener(
+// EXPECT-SV:   input logic [3:0] value,
+// EXPECT-SV:   output logic [3:0] observed
+// EXPECT-SV: );
+// EXPECT-SV:   assign observed = value;
+// EXPECT-SV: endmodule
+// EXPECT-SV: module pads(
+// EXPECT-SV:   input logic [3:0] left_data,
+// EXPECT-SV:   input logic [3:0] right_data,
+// EXPECT-SV:   input logic left_oe,
+// EXPECT-SV:   input logic right_oe,
+// EXPECT-SV:   inout wire [3:0] pad,
+// EXPECT-SV:   output logic [3:0] seen
+// EXPECT-SV: );
+// EXPECT-SV:   logic [3:0] idle;
+// EXPECT-SV:   logic off;
+// EXPECT-SV:   logic [3:0] sample;
+// EXPECT-SV:   logic [3:0] left_sample;
+// EXPECT-SV:   logic [3:0] right_sample;
+// EXPECT-SV:   assign idle = 4'h0;
+// EXPECT-SV:   assign off = 1'h0;
+// EXPECT-SV:   assign pad = off ? idle : 'z;
+// EXPECT-SV:   assign seen = sample;
+// EXPECT-SV:   pad_cell left (
+// EXPECT-SV:     .drive(left_data),
+// EXPECT-SV:     .oe(left_oe),
+// EXPECT-SV:     .io(pad),
+// EXPECT-SV:     .observed(left_sample)
+// EXPECT-SV:   );
+// EXPECT-SV:   pad_cell right (
+// EXPECT-SV:     .drive(right_data),
+// EXPECT-SV:     .oe(right_oe),
+// EXPECT-SV:     .io(pad),
+// EXPECT-SV:     .observed(right_sample)
+// EXPECT-SV:   );
+// EXPECT-SV:   listener sense (
+// EXPECT-SV:     .value(pad),
+// EXPECT-SV:     .observed(sample)
+// EXPECT-SV:   );
+// EXPECT-SV: endmodule

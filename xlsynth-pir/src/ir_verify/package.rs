@@ -2,7 +2,8 @@
 
 //! Package-context portions of PIR verification.
 
-use std::collections::{HashMap, HashSet};
+use crate::ir_builder::block_cycles::BlockHierarchy;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ir::{
     Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
@@ -723,10 +724,13 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     }
     let resolve = |name: &str| functions.get(name).copied();
     let lookup = CalleeLookup::Verified(&resolve);
+    let mut hierarchy = BlockHierarchy::default();
     for (idx, member) in p.members.iter().enumerate() {
         match member {
             PackageMember::Function(f) => validate_fn_body_with(f, Some(lookup))?,
-            PackageMember::Block(block) => validate_block_with(block, p, idx, lookup)?,
+            PackageMember::Block(block) => {
+                validate_block_with(block, p, idx, lookup, &mut hierarchy)?
+            }
         }
     }
     validate_function_call_graph(p, &functions)?;
@@ -831,6 +835,7 @@ pub fn validate_block(
         parent,
         member_index,
         CalleeLookup::Unverified(&|name| parent.get_fn(name)),
+        &mut BlockHierarchy::default(),
     )
 }
 
@@ -839,6 +844,7 @@ fn validate_block_with(
     parent: &Package,
     member_index: usize,
     lookup: CalleeLookup<'_, '_>,
+    hierarchy: &mut BlockHierarchy,
 ) -> Result<(), ValidationError> {
     validate_block_ports(f)?;
     validate_block_resources(f)?;
@@ -865,6 +871,7 @@ fn validate_block_with(
             }
         }
     }
+    validate_inout_bindings(f, &prior_blocks)?;
     let instantiation_info = build_instantiation_info(f, &prior_blocks, parent)?;
     validate_graph_with(
         f,
@@ -878,7 +885,74 @@ fn validate_block_with(
         Some(&instantiation_info),
         true,
     )?;
-    validate_block_registers(f)
+    validate_block_registers(f)?;
+    if f.inout_ports().next().is_some() {
+        hierarchy.summarize(f, parent).map_err(|error| {
+            ValidationError::BlockInvariantViolation {
+                block: f.name.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+/// Verifies the one-to-one mapping of child pins to bindings, allowing shared
+/// parent pins.
+fn validate_inout_bindings(
+    block: &Block,
+    prior: &std::collections::HashMap<String, &Block>,
+) -> Result<(), ValidationError> {
+    let error = |reason: String| ValidationError::BlockInvariantViolation {
+        block: block.name.clone(),
+        reason,
+    };
+    let mut required = BTreeMap::new();
+    let mut bound = BTreeSet::new();
+    for inst in &block.instantiations {
+        if inst.kind == InstantiationKind::Block {
+            let child = prior[&inst.block];
+            for pin in child.inout_ports() {
+                required.insert(
+                    (inst.name.as_str(), child.port_name(pin)),
+                    child.port_type(pin),
+                );
+            }
+        }
+    }
+    let parents: HashMap<_, _> = block
+        .inout_ports()
+        .map(|pin| (block.port_name(pin), block.port_type(pin)))
+        .collect();
+    for node in &block.nodes {
+        if let NodePayload::ExtInstantiationInout {
+            instantiation,
+            port_name,
+            parent_port,
+        } = &node.payload
+        {
+            let endpoint = (instantiation.as_str(), port_name.as_str());
+            let &ty = required.get(&endpoint).ok_or_else(|| {
+                error(format!(
+                    "no block instance inout named {instantiation}.{port_name}"
+                ))
+            })?;
+            if !bound.insert(endpoint) {
+                return Err(error(format!(
+                    "duplicate inout binding {instantiation}.{port_name}"
+                )));
+            }
+            if parents.get(parent_port.as_str()).copied() != Some(ty) {
+                return Err(error(format!(
+                    "binding {instantiation}.{port_name} requires parent inout '{parent_port}' of type {ty}"
+                )));
+            }
+        }
+    }
+    if let Some((inst, pin)) = required.keys().find(|endpoint| !bound.contains(*endpoint)) {
+        return Err(error(format!("missing inout binding {inst}.{pin}")));
+    }
+    Ok(())
 }
 
 /// Checks declarations before any resolver indexes resources by name.
@@ -956,7 +1030,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                 clock_seen = true;
                 (name.as_str(), 0)
             }
-            BlockPort::Input(reference) | BlockPort::Output(reference) => {
+            BlockPort::Input(reference)
+            | BlockPort::Output(reference)
+            | BlockPort::Inout(reference) => {
                 let node = block.nodes.get(reference.index).ok_or_else(|| {
                     violation(
                         reference.index,
@@ -964,7 +1040,8 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
                     )
                 })?;
                 let name = match (port, &node.payload) {
-                    (BlockPort::Input(_), NodePayload::InputPort { name, .. })
+                    (BlockPort::Inout(_), NodePayload::ExtInoutPort { name, .. })
+                    | (BlockPort::Input(_), NodePayload::InputPort { name, .. })
                     | (BlockPort::Output(_), NodePayload::OutputPort { name, .. }) => name,
                     _ => {
                         return Err(violation(
@@ -991,7 +1068,9 @@ fn validate_block_ports(block: &Block) -> Result<(), ValidationError> {
     }
     for (index, node) in block.nodes.iter().enumerate() {
         match node.payload {
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. } => {
                 if !port_nodes.contains(&NodeRef { index }) {
                     return Err(violation(
                         index,
@@ -1284,7 +1363,12 @@ where
             }
         }
         match &node.payload {
-            NodePayload::InputPort { .. } | NodePayload::OutputPort { .. } if !allow_registers => {
+            NodePayload::InputPort { .. }
+            | NodePayload::OutputPort { .. }
+            | NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInstantiationInout { .. }
+                if !allow_registers =>
+            {
                 return Err(ValidationError::NodeSemanticViolation {
                     func: f.name.clone(),
                     node_index: i,

@@ -101,6 +101,7 @@ fn elaborate<'a>(package: &'a Package, top: &'a Block) -> Result<Vec<Instance<'a
     let mut node_base = 1;
     let mut register_base = 0;
     while let Some((block, path, parent)) = pending.pop() {
+        block.reject_inouts("block evaluation")?;
         let index = instances.len();
         if let Some((parent_index, name)) = parent {
             instances[parent_index].children.insert(name, index);

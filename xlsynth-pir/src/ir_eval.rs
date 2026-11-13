@@ -59,6 +59,7 @@ fn append_operand_values<'a>(
     match payload {
         Nil
         | Param
+        | ExtInstantiationInout { .. }
         | InputPort { .. }
         | Literal(_)
         | InstantiationOutput { .. }
@@ -73,7 +74,12 @@ fn append_operand_values<'a>(
             push(start);
         }
         TupleIndex { tuple, .. } => push(tuple),
-        Binop(_, lhs, rhs) => {
+        ExtInoutPort {
+            drive: lhs,
+            output_enable: rhs,
+            ..
+        }
+        | Binop(_, lhs, rhs) => {
             push(lhs);
             push(rhs);
         }
@@ -1169,6 +1175,8 @@ pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) 
         | ir::NodePayload::Param
         | ir::NodePayload::Assert { .. }
         | ir::NodePayload::Trace { .. }
+        | ir::NodePayload::ExtInstantiationInout { .. }
+        | ir::NodePayload::ExtInoutPort { .. }
         | ir::NodePayload::InstantiationInput { .. }
         | ir::NodePayload::InstantiationOutput { .. }
         | ir::NodePayload::RegisterRead { .. }

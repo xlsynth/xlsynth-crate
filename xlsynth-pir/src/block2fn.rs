@@ -29,7 +29,7 @@ pub fn block_package_to_fn(
     options: &Block2FnOptions,
 ) -> Result<Block2FnResult, String> {
     let mut pkg = pkg.clone();
-    inline_all_blocks_in_package(&mut pkg)?;
+    inline_all_blocks_in_package(&mut pkg).map_err(|error| format!("block2fn: {error}"))?;
     let package_name = pkg.name.clone();
     let top_block = pkg
         .get_top_block()
@@ -99,6 +99,7 @@ pub fn combinational_block_to_fn(block: &Block) -> Result<ir::Fn, String> {
 
 /// Rejects stateful interfaces before using the explicit combinational adapter.
 fn require_combinational_block(block: &Block) -> Result<(), String> {
+    block.reject_inouts("block2fn")?;
     if !block.registers.is_empty()
         || !block.instantiations.is_empty()
         || block.nodes.iter().any(|node| {
@@ -179,6 +180,7 @@ pub fn replace_combinational_block_logic(
                 port_pairs.push((*old, new));
                 ports.push(BlockPort::Output(new));
             }
+            BlockPort::Inout(_) => return Err("block2fn: ext_inout_port is Verilog-only".into()),
             BlockPort::Clock(name) => ports.push(BlockPort::Clock(name.clone())),
         }
     }
@@ -271,7 +273,7 @@ fn rename_logic_conflicting_with_ports(
     let mut reserved_names = BTreeSet::new();
     for port in &template.ports {
         match port {
-            BlockPort::Input(port) | BlockPort::Output(port) => {
+            BlockPort::Input(port) | BlockPort::Output(port) | BlockPort::Inout(port) => {
                 reserved_names.insert(template.port_name(*port).to_string());
                 let node = template.get_node(*port);
                 reserved_names.insert(node.name.clone().unwrap_or_else(|| {

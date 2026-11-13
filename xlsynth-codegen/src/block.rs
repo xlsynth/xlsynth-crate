@@ -402,7 +402,12 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         if let Some(clock) = self.block.clock_port_name() {
             reserve(clock, "port")?;
         }
-        for port in self.block.input_ports().chain(self.block.output_ports()) {
+        for port in self
+            .block
+            .input_ports()
+            .chain(self.block.output_ports())
+            .chain(self.block.inout_ports())
+        {
             if self.block.port_type(port).bit_count() != 0 {
                 reserve(self.block.port_name(port), "port")?;
             }
@@ -433,9 +438,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         for port in &self.block.ports {
             let (name, ir_type, sv_type, is_output) = match port {
                 BlockPort::Clock(name) => (name.clone(), Type::Bits(1), None, false),
-                BlockPort::Input(node) | BlockPort::Output(node) => {
+                BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
                     let sv_type = match &self.block.get_node(*node).payload {
                         NodePayload::InputPort { sv_type, .. }
+                        | NodePayload::ExtInoutPort { sv_type, .. }
                         | NodePayload::OutputPort { sv_type, .. } => sv_type.as_deref(),
                         _ => unreachable!("verified block data port"),
                     };
@@ -468,7 +474,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             } else {
                 self.value_type(&ir_type)
             };
-            let signal = if is_output {
+            let signal = if matches!(port, BlockPort::Inout(_)) {
+                self.file.add_inout(self.module, &name, &data_type)
+            } else if is_output {
                 self.file.add_logic_output(self.module, &name, &data_type)
             } else {
                 self.file.add_logic_input(self.module, &name, &data_type)
@@ -477,7 +485,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
         }
 
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if let NodePayload::InputPort { name, sv_type } = &node.payload {
+            if let NodePayload::InputPort { name, sv_type }
+            | NodePayload::ExtInoutPort { name, sv_type, .. } = &node.payload
+            {
                 if let Some(signal) = self.ports.get(name).copied() {
                     let value = Value::signal(signal).with_width(node.ty.bit_count());
                     self.values[index] = Some(if self.options.emit_sv_types && sv_type.is_some() {
@@ -503,6 +513,8 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             match &self.block.get_node(node_ref).payload {
                 NodePayload::Nil
                 | NodePayload::InputPort { .. }
+                | NodePayload::ExtInoutPort { .. }
+                | NodePayload::ExtInstantiationInout { .. }
                 | NodePayload::OutputPort { .. } => {
                     // Reserved nodes and parameters are represented by module
                     // ports.
@@ -791,6 +803,25 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
 
     /// Connects representable output ports after their driving logic exists.
     fn emit_outputs(&mut self) -> Result<(), BlockCodegenError> {
+        for pin in self.block.inout_ports() {
+            let NodePayload::ExtInoutPort {
+                name,
+                drive,
+                output_enable,
+                ..
+            } = &self.block.get_node(pin).payload
+            else {
+                unreachable!("verified inout")
+            };
+            let data = self.required_value(*drive)?.expr;
+            let oe = self.required_value(*output_enable)?.expr;
+            let z = self.file.make_unsized_z_literal();
+            let value = self.file.make_ternary(&oe, &data, &z);
+            let target = self.ports[name].to_expr();
+            let assign = self.file.make_continuous_assignment(&target, &value);
+            self.file
+                .add_member_continuous_assignment(self.module, assign);
+        }
         for port in self.block.output_ports() {
             let name = self.block.port_name(port);
             let node_ref = self.block.output_value(port);
@@ -819,6 +850,19 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
             self.file.add_member_comment(self.module, comment);
         }
 
+        for node in &self.block.nodes {
+            if let NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                parent_port,
+            } = &node.payload
+            {
+                self.instance_inputs.insert(
+                    (instantiation.clone(), port_name.clone()),
+                    self.ports[parent_port].to_expr(),
+                );
+            }
+        }
         for instance in &self.block.instantiations {
             validate_external_identifier(&instance.name, "instance")?;
             let mut connections = self
@@ -853,7 +897,9 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
                     .iter()
                     .map(|port| match port {
                         BlockPort::Clock(name) => name.as_str(),
-                        BlockPort::Input(node) | BlockPort::Output(node) => child.port_name(*node),
+                        BlockPort::Input(node)
+                        | BlockPort::Output(node)
+                        | BlockPort::Inout(node) => child.port_name(*node),
                     })
                     .collect::<Vec<_>>();
                 connections.sort_by_key(|(name, _)| {
@@ -952,8 +998,10 @@ impl<'a, 'file> BlockEmitter<'a, 'file> {
     /// their explicitly requested SystemVerilog types.
     fn emit_input_array_views(&mut self) -> Result<(), BlockCodegenError> {
         for (index, node) in self.block.nodes.iter().enumerate() {
-            if matches!(node.payload, NodePayload::InputPort { .. })
-                && matches!(node.ty, Type::Array(_))
+            if matches!(
+                node.payload,
+                NodePayload::InputPort { .. } | NodePayload::ExtInoutPort { .. }
+            ) && matches!(node.ty, Type::Array(_))
                 && let Some(value) = self.values[index]
                 && value.array_rank == 0
             {

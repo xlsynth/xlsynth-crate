@@ -1,0 +1,40 @@
+package registered_pad
+
+top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], seen: bits[8]) {
+  reg data_reg(bits[8])
+  reg oe_reg(bits[1])
+  reg sense_reg(bits[8])
+  data: bits[8] = input_port(name=data, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  drive_q: bits[8] = register_read(register=data_reg, id=3)
+  oe_q: bits[1] = register_read(register=oe_reg, id=4)
+  sense_q: bits[8] = register_read(register=sense_reg, id=5)
+  pin: bits[8] = ext_inout_port(drive_q, oe_q, name=pin, id=6)
+  drive_write: () = register_write(data, register=data_reg, id=7)
+  oe_write: () = register_write(oe, register=oe_reg, id=8)
+  sense_write: () = register_write(pin, register=sense_reg, id=9)
+  seen: () = output_port(sense_q, name=seen, id=10)
+}
+
+// OPTIONS: layout = "pipeline"
+// EXPECT-SV: module registered_pad(
+// EXPECT-SV:   input logic clk,
+// EXPECT-SV:   input logic [7:0] data,
+// EXPECT-SV:   input logic oe,
+// EXPECT-SV:   inout wire [7:0] pin,
+// EXPECT-SV:   output logic [7:0] seen
+// EXPECT-SV: );
+// EXPECT-SV:   // ===== Pipe stage 0:
+// EXPECT-SV:
+// EXPECT-SV:   // Registers for pipe stage 0:
+// EXPECT-SV:   logic [7:0] data_reg;
+// EXPECT-SV:   logic oe_reg;
+// EXPECT-SV:   logic [7:0] sense_reg;
+// EXPECT-SV:   always_ff @ (posedge clk) begin
+// EXPECT-SV:     data_reg <= data;
+// EXPECT-SV:     oe_reg <= oe;
+// EXPECT-SV:     sense_reg <= pin;
+// EXPECT-SV:   end
+// EXPECT-SV:   assign pin = oe_reg ? data_reg : 'z;
+// EXPECT-SV:   assign seen = sense_reg;
+// EXPECT-SV: endmodule

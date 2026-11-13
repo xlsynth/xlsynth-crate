@@ -15,6 +15,144 @@ use xlsynth_vastly::{
     eval_combo, plan_combo_eval,
 };
 
+const SHARED_INOUT: &str = include_str!("goldens/block2sv/hierarchy/shared_inout.golden.ir");
+
+#[test]
+fn invalid_inout_bindings_fail_before_emission() {
+    let source = SHARED_INOUT.split("// OPTIONS").next().unwrap();
+    let link = "  left_link: () = ext_instantiation_inout(instantiation=left, port_name=io, parent_port=pad, id=18)";
+    let wrong_bindings = [
+        (link, ""),
+        (
+            "instantiation=right, port_name=io",
+            "instantiation=left, port_name=io",
+        ),
+        (
+            "ext_instantiation_inout(instantiation=left",
+            "ext_instantiation_inout(instantiation=absent",
+        ),
+        (
+            "port_name=io, parent_port=pad",
+            "port_name=drive, parent_port=pad",
+        ),
+        ("parent_port=pad", "parent_port=left_data"),
+        ("parent_port=pad", "parent_port=seen"),
+        ("parent_port=pad", "parent_port=idle"),
+        (
+            "instantiation_input(left_data, instantiation=left, port_name=drive",
+            "instantiation_input(left_data, instantiation=left, port_name=io",
+        ),
+        ("ext_inout_port(idle, off", "ext_inout_port(idle, idle"),
+    ];
+    for (from, to) in wrong_bindings {
+        let ir = source.replacen(from, to, 1);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {from} -> {to}"
+        );
+    }
+    // The listener's ordinary output feeds a sibling's local driver on the same
+    // net.
+    let original = "  left_drive: () = instantiation_input(left_data, instantiation=left, port_name=drive, id=14)";
+    let ir = source.replace(original, "").replace(
+        "  seen: ()",
+        &format!(
+            "{}\n  seen: ()",
+            original.replace("input(left_data", "input(sample")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+
+    let enable =
+        "  left_enable: () = instantiation_input(left_oe, instantiation=left, port_name=oe, id=16)";
+    let ir = source.replace(enable, "").replace(
+        "  seen: ()",
+        &format!(
+            "  bit: bits[1] = bit_slice(sample, start=0, width=1, id=25)\n{}\n  seen: ()",
+            enable.replace("input(left_oe", "input(bit")
+        ),
+    );
+    let error = Parser::new(&ir).parse_and_validate_package().unwrap_err();
+    assert!(error.to_string().contains("combinational cycle"), "{error}");
+}
+
+#[test]
+fn register_breaks_an_inout_feedback_path() {
+    let source = include_str!("goldens/block2sv/registers/registered_inout.golden.ir");
+    let ir = source.replace(
+        "register_write(data, register=data_reg",
+        "register_write(pin, register=data_reg",
+    );
+    let package = Parser::new(&ir).parse_and_validate_package().unwrap();
+    emit_system_verilog(&package, &BlockCodegenOptions::default()).unwrap();
+}
+
+#[test]
+fn inout_data_types_and_enables_are_checked() {
+    let single = r#"package pads
+top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
+  data: bits[4] = input_port(name=data, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  io: bits[4] = ext_inout_port(data, oe, name=io, id=3)
+}"#;
+    for (old, new) in [
+        ("ext_inout_port(data, oe,", "ext_inout_port(data,"),
+        ("ext_inout_port(data, oe,", "ext_inout_port(data, oe, oe,"),
+        ("oe: bits[1]", "oe: bits[2]"),
+        ("io: bits[4]", "io: bits[2][2]"),
+        ("bits[4]", "bits[0]"),
+        ("bits[4]", "(token, bits[4])"),
+    ] {
+        let ir = single.replace(old, new);
+        assert!(
+            Parser::new(&ir).parse_and_validate_package().is_err(),
+            "accepted {ir}"
+        );
+    }
+    // Equal flattened widths are insufficient when binding physical ports.
+    let parent_tuple = SHARED_INOUT
+        .replace("pad: bits[4]", "pad: (bits[4])")
+        .replace(
+            "idle: bits[4] = literal(value=0,",
+            "idle: (bits[4]) = tuple(left_data,",
+        );
+    let error = Parser::new(&parent_tuple)
+        .parse_and_validate_package()
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("requires parent inout"),
+        "{error}"
+    );
+}
+
+#[test]
+fn inout_projection_checks_only_the_selected_hierarchy() {
+    let mut package = Parser::new(SHARED_INOUT)
+        .parse_and_validate_package()
+        .unwrap();
+    let options = xlsynth_pir::block2fn::Block2FnOptions::default();
+    assert!(
+        xlsynth_pir::block2fn::block_package_to_fn(&package, &options)
+            .unwrap_err()
+            .contains("ext_inout_port")
+    );
+    let evaluation_error = xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "pads")
+        .err()
+        .expect("an inout pin cannot be evaluated");
+    assert!(evaluation_error.to_string().contains("ext_inout_port"));
+    assert!(xlsynth_pir::block_eval::BlockEvaluator::prepare(&package, "listener").is_ok());
+    assert!(
+        xlsynth_pir::block_transition::lower_block_transition(&package, "pad_cell")
+            .err()
+            .expect("an inout pin cannot be projected to a transition")
+            .contains("ext_inout_port")
+    );
+    package.set_top_block("listener").unwrap();
+    let result = xlsynth_pir::block2fn::block_package_to_fn(&package, &options).unwrap();
+    assert_eq!(result.function.params.len(), 1);
+}
+
 #[test]
 fn simple_passthrough_has_stable_exact_systemverilog() {
     assert_eq!(

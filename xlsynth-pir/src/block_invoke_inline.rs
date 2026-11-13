@@ -321,6 +321,7 @@ fn block_names(block: &Block) -> HashSet<String> {
     for node in &block.nodes {
         match &node.payload {
             NodePayload::InputPort { name, .. }
+            | NodePayload::ExtInoutPort { name, .. }
             | NodePayload::OutputPort { name, .. }
             | NodePayload::Assert { label: name, .. }
             | NodePayload::Cover { label: name, .. } => {

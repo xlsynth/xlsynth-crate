@@ -80,6 +80,18 @@ pub fn verify_graph_operand_indices_in_bounds(f: &NodeGraph) -> Result<(), Strin
             | NodePayload::InputPort { .. } => {
                 // Leaf nodes do not reference operands.
             }
+            NodePayload::ExtInstantiationInout { .. } => { /* A binding names its pins. */ }
+            NodePayload::ExtInoutPort {
+                drive,
+                output_enable,
+                ..
+            } => {
+                check(*drive, format_args!("node {} inout.drive", i))?;
+                check(
+                    *output_enable,
+                    format_args!("node {} inout.output_enable", i),
+                )?;
+            }
             NodePayload::OutputPort { arg, .. } => {
                 check(*arg, format_args!("node {} output_port.arg", i))?;
             }
@@ -417,6 +429,26 @@ pub(crate) fn verify_node_xls_semantics(f: &NodeGraph, node_index: usize) -> Res
         NodePayload::Param | NodePayload::InputPort { .. } => {
             // The owning function or block validates the input declaration.
             Ok(())
+        }
+        NodePayload::ExtInstantiationInout { .. } => {
+            expect_type(&node.ty, &Type::nil(), "ext_instantiation_inout result")
+        }
+        NodePayload::ExtInoutPort {
+            drive,
+            output_enable,
+            ..
+        } => {
+            if node.ty.contains_token()
+                || node.ty.checked_bit_count().is_none_or(|width| width == 0)
+            {
+                return Err("ext_inout_port requires a nonempty, token-free port type".into());
+            }
+            expect_type(ty(*drive), &node.ty, "ext_inout_port drive")?;
+            expect_type(
+                ty(*output_enable),
+                &Type::Bits(1),
+                "ext_inout_port output enable",
+            )
         }
         NodePayload::OutputPort { .. } => expect_type(&node.ty, &Type::nil(), "output_port result"),
         NodePayload::ArraySlice {

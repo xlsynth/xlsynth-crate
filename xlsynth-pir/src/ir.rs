@@ -316,6 +316,19 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
+    /// Bidirectional pin with a local data driver and an active-high enable.
+    ExtInoutPort {
+        drive: NodeRef,
+        output_enable: NodeRef,
+        name: String,
+        sv_type: Option<String>,
+    },
+    /// Electrical binding from a child pin to the immediate parent's inout.
+    ExtInstantiationInout {
+        instantiation: String,
+        port_name: String,
+        parent_port: String,
+    },
     /// Extension (non-upstream) op: carry-out bit of addition.
     ///
     /// Semantics: for `lhs, rhs: bits[w]` and `c_in: bits[1]`, returns
@@ -473,7 +486,9 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtCarryOut { .. }
+            NodePayload::ExtInoutPort { .. }
+                | NodePayload::ExtInstantiationInout { .. }
+                | NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
                 | NodePayload::ExtClz { .. }
                 | NodePayload::ExtNormalizeLeft { .. }
@@ -486,6 +501,8 @@ impl NodePayload {
         match self {
             NodePayload::Nil => "nil",
             NodePayload::Param => "param",
+            NodePayload::ExtInoutPort { .. } => "ext_inout_port",
+            NodePayload::ExtInstantiationInout { .. } => "ext_instantiation_inout",
             NodePayload::InputPort { .. } => "input_port",
             NodePayload::OutputPort { .. } => "output_port",
             NodePayload::Tuple(_) => "tuple",
@@ -624,6 +641,31 @@ impl NodePayload {
                 }
                 parts
             }
+            NodePayload::ExtInoutPort {
+                name,
+                drive,
+                output_enable,
+                sv_type,
+            } => {
+                let mut parts = vec![
+                    format_operand(*drive),
+                    format_operand(*output_enable),
+                    format!("name={name}"),
+                ];
+                if let Some(sv_type) = sv_type {
+                    parts.push(format!("sv_type=\"{}\"", escape_xls_ir_string(sv_type)));
+                }
+                parts
+            }
+            NodePayload::ExtInstantiationInout {
+                instantiation,
+                port_name,
+                parent_port,
+            } => vec![
+                format!("instantiation={instantiation}"),
+                format!("port_name={port_name}"),
+                format!("parent_port={parent_port}"),
+            ],
             NodePayload::OutputPort { name, arg, sv_type } => {
                 let mut parts = vec![format_operand(*arg), format!("name={name}")];
                 if let Some(sv_type) = sv_type {
@@ -1175,6 +1217,25 @@ pub struct NodeGraph {
 }
 
 impl NodeGraph {
+    /// Rejects resolved pin operations before a consumer projects the graph to
+    /// two-state values.
+    pub fn reject_inouts(&self, backend: &str) -> Result<(), String> {
+        for node in &self.nodes {
+            let pin = match &node.payload {
+                NodePayload::ExtInoutPort { name, .. } => name,
+                NodePayload::ExtInstantiationInout { parent_port, .. } => parent_port,
+                _ => continue,
+            };
+            return Err(format!(
+                "{backend}: {} '{}' in '{}' requires block-to-Verilog codegen",
+                node.payload.get_operator(),
+                pin,
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the last `ffi_proto` declaration, which is the one XLS uses.
     pub fn ffi_proto(&self) -> Option<&ForeignFunctionData> {
         self.outer_attrs

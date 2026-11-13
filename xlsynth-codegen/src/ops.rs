@@ -311,7 +311,9 @@ impl BlockEmitter<'_, '_> {
                 let refs = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
                 Some(Value::expression(expression, self.operand_depth(&refs)))
             }
-            NodePayload::InputPort { .. }
+            NodePayload::ExtInoutPort { .. }
+            | NodePayload::ExtInstantiationInout { .. }
+            | NodePayload::InputPort { .. }
             | NodePayload::OutputPort { .. }
             | NodePayload::Param
             | NodePayload::RegisterRead { .. } => {

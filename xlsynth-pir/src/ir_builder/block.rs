@@ -56,6 +56,7 @@ struct RegisterState {
 enum PortSignature {
     Input(String, Type),
     Output(String, Type),
+    Inout(String, Type),
     Clock(String),
 }
 
@@ -82,6 +83,7 @@ struct InstanceState {
     signature: InstanceSignature,
     input_types: BTreeMap<String, Type>,
     output_types: BTreeMap<String, Type>,
+    inouts: BTreeSet<String>,
     inputs: BTreeSet<String>,
     outputs: BTreeMap<String, BValue>,
 }
@@ -191,6 +193,75 @@ impl Builder<BlockState> {
         Ok(value)
     }
 
+    /// Declares an enabled bidirectional pin and returns its resolved readback.
+    pub fn ext_inout_port(
+        &mut self,
+        name: &str,
+        drive: BValue,
+        output_enable: BValue,
+    ) -> Result<BValue, BuilderError> {
+        self.check_node_name(name, None)?;
+        let drive = self.node(drive)?;
+        let output_enable = self.node(output_enable)?;
+        let pin = self.add_node(
+            NodePayload::ExtInoutPort {
+                drive,
+                output_enable,
+                name: name.to_string(),
+                sv_type: None,
+            },
+            None,
+        )?;
+        self.graph.get_node_mut(pin.node).name = Some(name.to_string());
+        self.names.insert(name.to_string(), pin.node);
+        self.state
+            .port_names
+            .insert(name.to_string(), Some(pin.node));
+        self.state.ports.push(BlockPort::Inout(pin.node));
+        Ok(pin)
+    }
+
+    /// Binds a child's bidirectional pin to a pin of this block.
+    pub fn ext_instantiation_inout(
+        &mut self,
+        instance: BInstantiation,
+        port_name: &str,
+        parent: BValue,
+    ) -> Result<BValue, BuilderError> {
+        let index = self.instance_index(instance)?;
+        let node = self.graph.get_node(self.node(parent)?);
+        let NodePayload::ExtInoutPort { name, .. } = &node.payload else {
+            return Err(invalid("binding requires a local inout port"));
+        };
+        let state = &self.state.instances[index];
+        let InstanceSignature::Block(sig) = &state.signature else {
+            return Err(invalid("binding requires a block instance"));
+        };
+        if !sig
+            .ports
+            .contains(&PortSignature::Inout(port_name.to_owned(), node.ty.clone()))
+        {
+            return Err(invalid(format!(
+                "missing or incompatible child inout {port_name}"
+            )));
+        }
+        if state.inouts.contains(port_name) {
+            return Err(invalid(format!("duplicate inout binding {port_name}")));
+        }
+        let pin = self.add_node(
+            NodePayload::ExtInstantiationInout {
+                instantiation: state.definition.name.clone(),
+                port_name: port_name.to_owned(),
+                parent_port: name.clone(),
+            },
+            None,
+        )?;
+        self.state.instances[index]
+            .inouts
+            .insert(port_name.to_owned());
+        Ok(pin)
+    }
+
     /// Adds an output port and returns its unit-valued sink node.
     pub fn output_port(&mut self, name: &str, value: BValue) -> Result<BValue, BuilderError> {
         self.check_node_name(name, None)?;
@@ -257,6 +328,9 @@ impl Builder<BlockState> {
         let node = self.node(port)?;
         match &mut self.graph.get_node_mut(node).payload {
             NodePayload::InputPort {
+                sv_type: target, ..
+            }
+            | NodePayload::ExtInoutPort {
                 sv_type: target, ..
             }
             | NodePayload::OutputPort {
@@ -439,6 +513,7 @@ impl Builder<BlockState> {
                 PortSignature::Output(name, ty) => {
                     output_types.insert(name.clone(), ty.clone());
                 }
+                PortSignature::Inout(..) => { /* Checked by the structural binding API. */ }
                 PortSignature::Clock(_) => {
                     // Clocks are implicit hierarchy connections, not value
                     // nodes.
@@ -524,6 +599,7 @@ impl Builder<BlockState> {
             signature,
             input_types,
             output_types,
+            inouts: BTreeSet::new(),
             inputs: BTreeSet::new(),
             outputs: BTreeMap::new(),
         });
@@ -643,7 +719,9 @@ impl Builder<BlockState> {
         }
         verify_block_in_package(&block, package, package.members.len())
             .map_err(|error| invalid(error.to_string()))?;
-        if !has_wires && !block.instantiations.is_empty() {
+        // Package verification already checks hierarchy dependencies for blocks
+        // with inouts.
+        if !has_wires && !block.instantiations.is_empty() && block.inout_ports().next().is_none() {
             super::block_cycles::verify_block_combinational_cycles(&block, package)?;
         }
         Ok(block)
@@ -755,6 +833,16 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
                     clock_seen = true;
                     PortSignature::Clock(name.clone())
                 }
+                BlockPort::Inout(port) => {
+                    let node = block
+                        .nodes
+                        .get(port.index)
+                        .ok_or_else(|| invalid("missing inout node"))?;
+                    let NodePayload::ExtInoutPort { name, .. } = &node.payload else {
+                        return Err(invalid("invalid inout port node"));
+                    };
+                    PortSignature::Inout(name.clone(), node.ty.clone())
+                }
                 BlockPort::Input(port) => {
                     let node = block.nodes.get(port.index).ok_or_else(|| {
                         invalid("instance target input references a missing node")
@@ -785,6 +873,7 @@ fn block_signature(block: &Block) -> Result<BlockSignature, BuilderError> {
             };
         let name = match &signature {
             PortSignature::Input(name, _)
+            | PortSignature::Inout(name, _)
             | PortSignature::Output(name, _)
             | PortSignature::Clock(name) => name,
         };

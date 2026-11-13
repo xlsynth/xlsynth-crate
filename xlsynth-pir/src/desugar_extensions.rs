@@ -1191,6 +1191,12 @@ fn wrap_extensions_in_graph(
 }
 
 fn wrap_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
+    for member in &pkg.members {
+        member
+            .graph()
+            .reject_inouts("FFI emission")
+            .map_err(DesugarError::new)?;
+    }
     let mut existing_names: BTreeSet<String> = pkg
         .members
         .iter()
@@ -1374,6 +1380,8 @@ pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
 /// names and source positions. New dependencies are appended, so consumers
 /// must traverse the result in topological order rather than storage order.
 pub fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError> {
+    f.reject_inouts("extension desugaring")
+        .map_err(DesugarError::new)?;
     // Lowering rewrites only the original extension nodes and appends their
     // dependencies.
     let originals: Vec<_> = f
@@ -1414,6 +1422,12 @@ pub fn desugar_extensions_in_graph(f: &mut NodeGraph) -> Result<(), DesugarError
 
 /// Desugars extension ops within `pkg` into upstream-compatible PIR operations.
 pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
+    for member in &pkg.members {
+        member
+            .graph()
+            .reject_inouts("extension desugaring")
+            .map_err(DesugarError::new)?;
+    }
     for member in pkg.members.iter_mut() {
         match member {
             PackageMember::Function(f) => desugar_extensions_in_fn(f)?,

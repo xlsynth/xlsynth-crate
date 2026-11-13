@@ -11,6 +11,7 @@ use crate::ir::{Fn, Instantiation, Node, NodeGraph, NodePayload, NodeRef, Regist
 pub enum BlockPort {
     Input(NodeRef),
     Output(NodeRef),
+    Inout(NodeRef),
     Clock(String),
 }
 
@@ -67,7 +68,10 @@ impl Block {
         if function.nodes.iter().any(|node| {
             matches!(
                 node.payload,
-                NodePayload::InputPort { .. } | NodePayload::OutputPort { .. }
+                NodePayload::InputPort { .. }
+                    | NodePayload::OutputPort { .. }
+                    | NodePayload::ExtInoutPort { .. }
+                    | NodePayload::ExtInstantiationInout { .. }
             )
         }) {
             return Err("function already contains block port nodes".to_string());
@@ -214,6 +218,17 @@ impl Block {
         })
     }
 
+    /// Iterates the locally driven bidirectional pins in declaration order.
+    pub fn inout_ports(&self) -> impl Iterator<Item = NodeRef> + '_ {
+        self.ports.iter().filter_map(|port| {
+            if let BlockPort::Inout(node) = port {
+                Some(*node)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Returns the optional clock's declared name.
     pub fn clock_port_name(&self) -> Option<&str> {
         self.ports.iter().find_map(|port| match port {
@@ -225,7 +240,9 @@ impl Block {
     /// Returns the semantic name of an input or output node.
     pub fn port_name(&self, port: NodeRef) -> &str {
         match &self.get_node(port).payload {
-            NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
+            NodePayload::InputPort { name, .. }
+            | NodePayload::ExtInoutPort { name, .. }
+            | NodePayload::OutputPort { name, .. } => name,
             _ => panic!("node {} is not a data port", port.index),
         }
     }
@@ -234,7 +251,7 @@ impl Block {
     pub fn port_type(&self, port: NodeRef) -> &Type {
         let node = self.get_node(port);
         match node.payload {
-            NodePayload::InputPort { .. } => &node.ty,
+            NodePayload::InputPort { .. } | NodePayload::ExtInoutPort { .. } => &node.ty,
             NodePayload::OutputPort { arg, .. } => self.get_node_ty(arg),
             _ => panic!("node {} is not a data port", port.index),
         }
@@ -254,6 +271,12 @@ impl Block {
             .find(|port| self.port_name(*port) == name)
     }
 
+    /// Finds a bidirectional pin by its semantic port name.
+    pub fn get_inout_port(&self, name: &str) -> Option<NodeRef> {
+        self.inout_ports()
+            .find(|port| self.port_name(*port) == name)
+    }
+
     /// Finds an output port by its semantic name.
     pub fn get_output_port(&self, name: &str) -> Option<NodeRef> {
         self.output_ports()
@@ -268,7 +291,7 @@ impl Block {
             || self.nodes.iter().any(|node| {
                 node.name.as_deref() == Some(name)
                     || matches!(&node.payload,
-                        NodePayload::InputPort { name: existing, .. }
+                        NodePayload::ExtInoutPort { name: existing, .. } | NodePayload::InputPort { name: existing, .. }
                         | NodePayload::OutputPort { name: existing, .. } if existing == name)
             })
         {
@@ -356,7 +379,9 @@ impl Block {
     /// success, ordered ports and reset references follow the reordered nodes.
     pub fn compact_and_toposort(&mut self) -> Result<(), String> {
         let port_nodes = self.ports.iter().filter_map(|port| match port {
-            BlockPort::Input(node) | BlockPort::Output(node) => Some(*node),
+            BlockPort::Input(node) | BlockPort::Output(node) | BlockPort::Inout(node) => {
+                Some(*node)
+            }
             BlockPort::Clock(_) => None,
         });
         for node in port_nodes.chain(self.reset.iter().map(|reset| reset.port)) {
@@ -395,6 +420,7 @@ impl Block {
             .iter()
             .map(|port| match port {
                 BlockPort::Input(node) => remap(*node).map(BlockPort::Input),
+                BlockPort::Inout(node) => remap(*node).map(BlockPort::Inout),
                 BlockPort::Output(node) => remap(*node).map(BlockPort::Output),
                 BlockPort::Clock(name) => Ok(BlockPort::Clock(name.clone())),
             })

@@ -1604,6 +1604,14 @@ impl VastFile {
         })
     }
 
+    /// Creates the context-sized SystemVerilog high-impedance literal.
+    pub fn make_unsized_z_literal(&mut self) -> Expr {
+        self.add_expression(ExprData::Literal {
+            text: "'z".into(),
+            value: None,
+        })
+    }
+
     /// Creates a reusable declaration describing its name, kind, and data type.
     pub fn make_def(&mut self, name: &str, kind: DataKind, data_type: &VastDataType) -> Def {
         self.check(data_type.0);

@@ -349,3 +349,34 @@ Also add tests in the same style as the existing extension tests:
 - Desugar/prover equivalence under `xlsynth-prover/tests/`
 - g8r lowering and prep-for-gatify coverage under `xlsynth-g8r/tests/`
 - Fuzz target coverage when the op affects `xlsynth-g8r` behavior
+
+## Bidirectional block ports
+
+```text
+package pads
+
+top block pad_cell(drive: bits[4], oe: bits[1], pad: bits[4], observed: bits[4]) {
+  drive: bits[4] = input_port(name=drive, id=1)
+  oe: bits[1] = input_port(name=oe, id=2)
+  pad: bits[4] = ext_inout_port(drive, oe, name=pad, id=3)
+  observed: () = output_port(pad, name=observed, id=4)
+}
+```
+
+The first operand supplies drive data of the declared pin type. The second is
+an active-high `bits[1]` enable for the entire pin. The operation always reads
+the resolved net. Block-to-Verilog codegen emits one conditional continuous
+assignment for each local driver. Reading an undriven net yields high impedance
+and conflicting equal-strength drivers resolve to X on the conflicting bits.
+
+A parent binds a child inout structurally. For example,
+`link: () = ext_instantiation_inout(instantiation=child, port_name=io, parent_port=pad, id=4)`
+emits the child connection `.io(pad)`. Each child inout binds exactly once to
+an identically typed inout in its immediate parent. Siblings can share a pin.
+An ordinary input can consume the readback. A constant-zero local enable makes
+a forwarding parent. Combinational feedback from the shared net to its own
+drive or enable is invalid. Registers break combinational feedback.
+
+Native text serialization preserves these operations. Evaluation, formal
+projection, gate lowering, and desugared/FFI extension emission require
+two-state ports and reject designs that use inouts.

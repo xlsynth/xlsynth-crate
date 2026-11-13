@@ -82,6 +82,7 @@ fn hash_payload_attributes(
     match payload {
         NodePayload::Nil => {}
         NodePayload::InputPort { name, sv_type }
+        | NodePayload::ExtInoutPort { name, sv_type, .. }
         | NodePayload::OutputPort { name, sv_type, .. } => {
             update_hash_string_attribute(hasher, "port_name", name);
             if let Some(sv_type) = sv_type {
@@ -181,6 +182,15 @@ fn hash_payload_attributes(
         } => {
             update_hash_string_attribute(hasher, "format", format);
             update_hash_i64(hasher, *verbosity);
+        }
+        NodePayload::ExtInstantiationInout {
+            instantiation,
+            port_name,
+            parent_port,
+        } => {
+            update_hash_str(hasher, instantiation);
+            update_hash_str(hasher, port_name);
+            update_hash_str(hasher, parent_port);
         }
         NodePayload::InstantiationInput {
             instantiation,

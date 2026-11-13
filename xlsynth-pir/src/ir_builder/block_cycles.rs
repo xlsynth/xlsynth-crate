@@ -11,8 +11,10 @@ use crate::ir_utils::operands;
 type InputDependencies = BTreeSet<String>;
 type OutputDependencies = BTreeMap<String, InputDependencies>;
 
+/// Caches boundary dependencies for each verified block in an unchanged
+/// package.
 #[derive(Default)]
-struct Hierarchy {
+pub(crate) struct BlockHierarchy {
     summaries: BTreeMap<String, OutputDependencies>,
     active: BTreeSet<String>,
 }
@@ -28,14 +30,18 @@ pub(super) fn verify_block_combinational_cycles(
     package: &Package,
 ) -> Result<(), BuilderError> {
     // Only children need interface summaries; nobody consumes the root's.
-    Hierarchy::default()
+    BlockHierarchy::default()
         .verify_graph(block, package)
         .map(|_| ())
 }
 
-impl Hierarchy {
+impl BlockHierarchy {
     /// Memoizes only each child's interface dependencies, not interior nodes.
-    fn summarize(&mut self, block: &Block, package: &Package) -> Result<(), BuilderError> {
+    pub(crate) fn summarize(
+        &mut self,
+        block: &Block,
+        package: &Package,
+    ) -> Result<(), BuilderError> {
         if self.summaries.contains_key(&block.name) {
             return Ok(());
         }
@@ -74,18 +80,57 @@ impl Hierarchy {
                 self.summarize(child, package)?;
             }
         }
+        let pins: BTreeMap<_, _> = block
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                if let NodePayload::ExtInoutPort { name, .. } = &node.payload {
+                    Some((name.as_str(), NodeRef { index }))
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut input_connections: BTreeMap<&str, BTreeMap<&str, NodeRef>> = BTreeMap::new();
+        let mut output_connections = Vec::new();
         for (index, node) in block.nodes.iter().enumerate() {
-            if let NodePayload::InstantiationInput {
-                instantiation,
-                port_name,
-                ..
-            } = &node.payload
-            {
-                input_connections
-                    .entry(instantiation)
-                    .or_default()
-                    .insert(port_name, NodeRef { index });
+            match &node.payload {
+                NodePayload::InstantiationInput {
+                    instantiation,
+                    port_name,
+                    ..
+                } => {
+                    input_connections
+                        .entry(instantiation)
+                        .or_default()
+                        .insert(port_name, NodeRef { index });
+                }
+                NodePayload::InstantiationOutput {
+                    instantiation,
+                    port_name,
+                } => {
+                    output_connections.push((instantiation, port_name, index));
+                }
+                NodePayload::ExtInstantiationInout {
+                    instantiation,
+                    port_name,
+                    parent_port,
+                } => {
+                    let pin = pins.get(parent_port.as_str()).ok_or_else(|| {
+                        invalid(format!(
+                            "missing parent inout '{parent_port}' in block '{}'",
+                            block.name
+                        ))
+                    })?;
+                    // Reads and drivers of the child pin share the parent net.
+                    input_connections
+                        .entry(instantiation)
+                        .or_default()
+                        .insert(port_name, *pin);
+                    output_connections.push((instantiation, port_name, pin.index));
+                }
+                _ => { /* Other nodes have no implicit instance connections. */ }
             }
         }
         let definitions: BTreeMap<_, _> = block
@@ -93,52 +138,44 @@ impl Hierarchy {
             .iter()
             .map(|instance| (instance.name.as_str(), instance))
             .collect();
-        let mut dependencies = Vec::with_capacity(block.nodes.len());
-        for node in &block.nodes {
-            let mut edges = operands(&node.payload);
-            if let NodePayload::InstantiationOutput {
-                instantiation,
-                port_name,
-            } = &node.payload
-            {
-                let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
-                    invalid(format!(
-                        "unknown instance '{instantiation}' in block '{}'",
-                        block.name
-                    ))
-                })?;
-                // Follow the input sink node so a cycle can name the
-                // connection. Its explicit operand already
-                // points to the driving value.
-                let connected = input_connections.get(instantiation.as_str());
-                match definition.kind {
-                    InstantiationKind::Block => {
-                        let summary = &self.summaries[&definition.block];
-                        let inputs = summary.get(port_name).ok_or_else(|| {
-                            invalid(format!(
-                                "unknown output '{port_name}' on child '{}'",
-                                definition.block
-                            ))
-                        })?;
-                        for input in inputs {
-                            let connection = connected
-                                .and_then(|ports| ports.get(input.as_str()))
-                                .ok_or_else(|| {
-                                    invalid(format!(
-                                        "unconnected input '{input}' on instance '{instantiation}'"
-                                    ))
-                                })?;
-                            edges.push(*connection);
-                        }
-                    }
-                    InstantiationKind::Extern => {
-                        // The extern interface doesn't tell us which inputs can
-                        // affect this output combinationally, so traversal
-                        // stops here.
+        let mut dependencies: Vec<_> = block
+            .nodes
+            .iter()
+            .map(|node| operands(&node.payload))
+            .collect();
+        for (instantiation, port_name, index) in output_connections {
+            let edges = &mut dependencies[index];
+            let definition = definitions.get(instantiation.as_str()).ok_or_else(|| {
+                invalid(format!(
+                    "unknown instance '{instantiation}' in block '{}'",
+                    block.name
+                ))
+            })?;
+            let connected = input_connections.get(instantiation.as_str());
+            match definition.kind {
+                InstantiationKind::Block => {
+                    let summary = &self.summaries[&definition.block];
+                    let inputs = summary.get(port_name).ok_or_else(|| {
+                        invalid(format!(
+                            "unknown output '{port_name}' on child '{}'",
+                            definition.block
+                        ))
+                    })?;
+                    for input in inputs {
+                        let driver = connected
+                            .and_then(|ports| ports.get(input.as_str()))
+                            .ok_or_else(|| {
+                                invalid(format!(
+                                    "unconnected input '{input}' on instance '{instantiation}'"
+                                ))
+                            })?;
+                        edges.push(*driver);
                     }
                 }
+                InstantiationKind::Extern => {
+                    // The extern's internal connectivity is opaque.
+                }
             }
-            dependencies.push(edges);
         }
         verify_graph_acyclic(block, &dependencies)?;
         self.active.remove(&block.name);
@@ -242,21 +279,28 @@ fn graph_output_dependencies(
     let mut pending = Vec::new();
     let mut summary = BTreeMap::new();
     for port in &block.ports {
-        let BlockPort::Output(reference) = port else {
+        let (BlockPort::Output(reference) | BlockPort::Inout(reference)) = port else {
             continue;
         };
         let node = block
             .nodes
             .get(reference.index)
             .ok_or_else(|| invalid("block output references a missing node"))?;
-        let NodePayload::OutputPort { name, .. } = &node.payload else {
-            return Err(invalid("block output does not reference an output_port"));
+        let (NodePayload::OutputPort { name, .. } | NodePayload::ExtInoutPort { name, .. }) =
+            &node.payload
+        else {
+            return Err(invalid("block output or inout references an invalid node"));
         };
         let mut inputs = BTreeSet::new();
         visited[reference.index] = Some(*reference);
         pending.push(*reference);
         while let Some(node) = pending.pop() {
-            if let NodePayload::InputPort { name, .. } = &block.nodes[node.index].payload {
+            // A pin's independent read can influence other outputs. Only its
+            // driver dependencies are exported for the pin itself.
+            if let NodePayload::InputPort { name, .. } | NodePayload::ExtInoutPort { name, .. } =
+                &block.nodes[node.index].payload
+                && node != *reference
+            {
                 inputs.insert(name.clone());
             }
             for dependency in &dependencies[node.index] {
@@ -303,7 +347,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
 }
 "#;
         let package = Parser::new(source).parse_and_verify_package().unwrap();
-        let mut hierarchy = Hierarchy::default();
+        let mut hierarchy = BlockHierarchy::default();
         hierarchy
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();
@@ -317,7 +361,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
         ]);
         assert_eq!(hierarchy.summaries["child"], expected);
 
-        let mut root_check = Hierarchy::default();
+        let mut root_check = BlockHierarchy::default();
         root_check
             .verify_graph(package.get_top_block().unwrap(), &package)
             .unwrap();
@@ -336,7 +380,7 @@ top block child(x: bits[8], y: bits[8], z: bits[8], left: bits[8], right: bits[8
             expected.insert(output_name, BTreeSet::from([input_name]));
         }
         let package = builder.build_package("disjoint_cones").unwrap();
-        let mut hierarchy = Hierarchy::default();
+        let mut hierarchy = BlockHierarchy::default();
         hierarchy
             .summarize(package.get_top_block().unwrap(), &package)
             .unwrap();

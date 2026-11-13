@@ -2456,9 +2456,17 @@ impl Parser {
 
         let mut port_pos = None;
         let (payload, id) = match operator.as_str() {
-            "input_port" | "output_port" => {
-                let arg = if operator == "output_port" {
-                    let arg = self.parse_node_ref(node_env, "output_port value")?;
+            "input_port" | "output_port" | "ext_inout_port" => {
+                let drive = if operator == "ext_inout_port" {
+                    let drive = self.parse_node_ref(node_env, "inout drive")?;
+                    self.drop_or_error(",")?;
+                    Some(drive)
+                } else {
+                    None
+                };
+                let arg = if operator != "input_port" {
+                    let role = if drive.is_some() { "ext_inout_port output enable" } else { "output_port value" };
+                    let arg = self.parse_node_ref(node_env, role)?;
                     self.drop_or_error(",")?;
                     Some(arg)
                 } else {
@@ -2503,9 +2511,11 @@ impl Parser {
                 if id == 0 {
                     return Err(ParseError::new(format!("{operator} id must be greater than zero")));
                 }
-                let payload = match arg {
-                    Some(arg) => ir::NodePayload::OutputPort { name, arg, sv_type },
-                    None => ir::NodePayload::InputPort { name, sv_type },
+                let payload = match (drive, arg) {
+                    (Some(drive), Some(output_enable)) => ir::NodePayload::ExtInoutPort { drive, output_enable, name, sv_type },
+                    (None, Some(arg)) => ir::NodePayload::OutputPort { name, arg, sv_type },
+                    (None, None) => ir::NodePayload::InputPort { name, sv_type },
+                    (Some(_), None) => unreachable!("inout parses both operands"),
                 };
                 (payload, id)
             }
@@ -3179,6 +3189,42 @@ impl Parser {
                     },
                     maybe_id.unwrap(),
                 )
+            }
+            "ext_instantiation_inout" => {
+                let mut instantiation = None;
+                let mut port_name = None;
+                let mut parent_port = None;
+                let mut saw_id = false;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation=") && instantiation.is_none() {
+                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
+                    } else if self.peek_is("port_name=") && port_name.is_none() {
+                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                    } else if self.peek_is("parent_port=") && parent_port.is_none() {
+                        parent_port = Some(self.parse_identifier_attribute("parent_port")?);
+                    } else if self.peek_is("id=") && !saw_id {
+                        maybe_id = Some(self.parse_id_attribute()?);
+                        saw_id = true;
+                    } else if self.peek_is("pos=") && port_pos.is_none() {
+                        port_pos = self.maybe_drop_pos_attribute()?;
+                    } else {
+                        return Err(ParseError::new("unknown or duplicate ext_instantiation_inout attribute".to_string()));
+                    }
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                }
+                let required = |field| ParseError::new(format!("ext_instantiation_inout missing {field}"));
+                let id = maybe_id.ok_or_else(|| required("id"))?;
+                if id == 0 {
+                    return Err(ParseError::new("ext_instantiation_inout id must be greater than zero".to_string()));
+                }
+                (ir::NodePayload::ExtInstantiationInout {
+                    instantiation: instantiation.ok_or_else(|| required("instantiation"))?,
+                    port_name: port_name.ok_or_else(|| required("port_name"))?,
+                    parent_port: parent_port.ok_or_else(|| required("parent_port"))?,
+                }, id)
             }
             "instantiation_output" => {
                 let mut instantiation: Option<String> = None;
@@ -3931,6 +3977,9 @@ impl Parser {
                 }
             }
             let port = match &node.payload {
+                ir::NodePayload::ExtInoutPort { name, .. } => {
+                    Some((name, &node.ty, BlockPort::Inout(node_ref)))
+                }
                 ir::NodePayload::InputPort { name, .. } => {
                     Some((name, &node.ty, BlockPort::Input(node_ref)))
                 }
@@ -4134,7 +4183,7 @@ pub fn emit_block(block: &Block, is_top: bool) -> String {
         .ports
         .iter()
         .map(|port| match port {
-            BlockPort::Input(nr) | BlockPort::Output(nr) => {
+            BlockPort::Input(nr) | BlockPort::Output(nr) | BlockPort::Inout(nr) => {
                 format!("{}: {}", block.port_name(*nr), block.port_type(*nr))
             }
             BlockPort::Clock(name) => format!("{}: clock", name),
@@ -5911,7 +5960,9 @@ top block wrapper(low: bits[8], high: bits[16], result: bits[16]) {
             .ports
             .iter()
             .map(|port| match port {
-                BlockPort::Input(nr) | BlockPort::Output(nr) => block.port_name(*nr),
+                BlockPort::Input(nr) | BlockPort::Inout(nr) | BlockPort::Output(nr) => {
+                    block.port_name(*nr)
+                }
                 BlockPort::Clock(name) => name,
             })
             .collect();
