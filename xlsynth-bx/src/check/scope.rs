@@ -154,6 +154,9 @@ impl BodyChecker<'_, '_> {
             let start = self.statements.len();
             let had_functions = self.constant_functions.is_some();
             let preserve_inputs = std::mem::replace(&mut self.preserve_assert_inputs, true);
+            // A predicate elaborates only pure expressions, even in a block's
+            // zero-trip unroll where the body receives only lexical checking.
+            let outer_kind = std::mem::replace(&mut self.kind, super::BodyKind::Function);
             let outer_use = std::mem::replace(&mut self.dslx_constant_use, ConstantUse::Assertion);
             let outer_match = std::mem::replace(&mut self.in_match_bytecode, false);
             let outer_cache = self.assertion_cache.replace(AssertionCache {
@@ -184,6 +187,7 @@ impl BodyChecker<'_, '_> {
                 self.unroll_binding_count,
             ) = ids;
             self.preserve_assert_inputs = preserve_inputs;
+            self.kind = outer_kind;
             self.dslx_constant_use = outer_use;
             self.in_match_bytecode = outer_match;
             let cache = std::mem::replace(&mut self.assertion_cache, outer_cache)
@@ -291,25 +295,15 @@ impl BodyChecker<'_, '_> {
                 }
             };
             self.validate_source_pattern(&binding.pattern)?;
-            let mut widths = None;
-            let value = self.with_assert_operands(|checker| {
-                let annotation = binding
-                    .ty
-                    .as_ref()
-                    .map(|ty| checker.source_type(ty))
-                    .transpose()?;
-                let init = checker.binding_initializer(
-                    &binding.value,
-                    annotation.as_ref(),
-                    |checker, expr| checker.elaborate_result(expr, annotation.as_ref(), false),
-                )?;
-                widths = init.widths;
-                Ok(init.value)
-            })?;
+            let init = self.annotated_binding_initializer(
+                &binding.value,
+                binding.ty.as_ref(),
+                |checker, expr, ty| checker.elaborate_result(expr, ty, false),
+            )?;
             self.bind_pattern_initializer(
                 &binding.pattern,
-                value,
-                widths,
+                init.value,
+                init.widths,
                 &mut saved,
                 Some(&mut operands),
             )
@@ -319,6 +313,26 @@ impl BodyChecker<'_, '_> {
             return Err(error);
         }
         Ok(EnteredScope { saved, operands })
+    }
+
+    /// Retain any erased dimensions of a let's source annotation alongside
+    /// its initializer, so an assertion that reads it can replay both.
+    pub(super) fn annotated_binding_initializer(
+        &mut self,
+        expr: &Expr,
+        source_ty: Option<&Type>,
+        check_value: impl FnOnce(&mut Self, &Expr, Option<&Type>) -> Result<TypedExpr, String>,
+    ) -> Result<BindingInitializer, String> {
+        let mut widths = None;
+        let value = self.with_assert_operands(|checker| {
+            let ty = source_ty.map(|ty| checker.source_type(ty)).transpose()?;
+            let init = checker.binding_initializer(expr, ty.as_ref(), |checker, expr| {
+                check_value(checker, expr, ty.as_ref())
+            })?;
+            widths = init.widths;
+            Ok(init.value)
+        })?;
+        Ok(BindingInitializer { value, widths })
     }
 
     /// Capture inferred widths while the bindings that produced the result

@@ -268,6 +268,10 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
     pending.extend(block.statements.iter().map(SourceNode::Statement));
     while let Some(node) = pending.pop() {
         match node {
+            SourceNode::Statement(Stmt::ConstAssert(_)) => {
+                // Compile-time predicates cannot instantiate hardware.
+                continue;
+            }
             SourceNode::Statement(Stmt::Reg { .. } | Stmt::Write { .. }) => {
                 return TemplateHardware::Known(true);
             }

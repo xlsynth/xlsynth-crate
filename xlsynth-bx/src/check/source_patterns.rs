@@ -4,7 +4,7 @@ use super::{MAX_ELABORATION_DEPTH, MAX_TYPE_SIZE};
 use crate::ast::SourceNode::{Annotation, Expression, Statement, TestStatement};
 use crate::ast::{
     CallbackParam, Expr, MatchArm, MatchPattern, Module, Param, ParametricBinding, ScopeStatement,
-    SourceNode, Type,
+    SourceNode, Stmt, Type,
 };
 
 /// Bound match patterns throughout a supplied AST before any recursive clones.
@@ -26,6 +26,9 @@ pub(super) fn has_const_assert(module: &Module, include_tests: bool) -> bool {
     }
     let mut pending = module_nodes(module, include_tests);
     while let Some(node) = pending.pop() {
+        if matches!(node, Statement(Stmt::ConstAssert(_))) {
+            return true;
+        }
         if let Expression(Expr::Scope { statements, .. }) = node
             && statements
                 .iter()

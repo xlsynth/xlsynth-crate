@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compare compile-time assertions in modules and pure function
-//! specializations.
+//! Compare compile-time assertions in modules, functions and blocks.
 
 use std::fs;
 
@@ -250,11 +249,112 @@ fn ignores_arg(value: u32) -> bool {{ true }}
     }
 }
 
+/// Use a pure DSLX function as the reference for each BX block specialization.
+/// Keeping the accepted blocks combinational lets the oracle also compare
+/// their lowered outputs with concrete DSLX calls.
+fn compare_block_assert(bytes: [u8; 6], seed: u64) -> Result<(), String> {
+    let [scope, predicate, flags, first, second, floor] = bytes;
+    let generic = scope & 1 != 0;
+    let (first, second, floor) = (first % 130, second % 130, floor % 130);
+    let width = if flags & 2 == 0 { 8 } else { second.max(1) };
+    let meets_floor = first >= floor && (!generic || second >= floor);
+    let value = if generic { "N" } else { "VALUE" };
+    let bx_formals = if generic { "<T, N:u32>" } else { "" };
+    let bx_type = if generic { "T" } else { "u8" };
+    let dslx_formals = if generic { "<N:u32, W:u32>" } else { "" };
+    let dslx_type = if generic { "uN[W]" } else { "u8" };
+    let helpers = format!(
+        "const VALUE = u32:{first}; const FLOOR = u32:{floor}; fn meets(v:u32)->bool {{ v >= FLOOR }}"
+    );
+    let mut bx_prefix = String::new();
+    let mut dslx_prefix = String::new();
+    let mut suffix = "";
+    let (predicate, valid) = match predicate % 12 {
+        0 => (format!("{value} >= FLOOR"), meets_floor),
+        1 => (format!("meets({value})"), meets_floor),
+        2 => {
+            bx_prefix = format!("let width = bit_count<{bx_type}>();");
+            dslx_prefix = format!("let width = bit_count<{dslx_type}>();");
+            (
+                "width >= FLOOR".into(),
+                8 >= floor && (!generic || width >= floor),
+            )
+        }
+        3 => {
+            let binding = format!("let (candidate, limit) = ({value}, FLOOR);");
+            bx_prefix = binding.clone();
+            dslx_prefix = binding;
+            ("candidate >= limit".to_owned(), meets_floor)
+        }
+        4 => {
+            let binding = format!("let allowed = meets({value});");
+            bx_prefix = binding.clone();
+            dslx_prefix = binding;
+            ("allowed".to_owned(), meets_floor)
+        }
+        5 => ("x == x".into(), false),
+        6 => {
+            bx_prefix = "reg held: u8 = u8:0; held := x as u8;".into();
+            dslx_prefix = "let held = x as u8;".into();
+            ("held == u8:0".into(), false)
+        }
+        7 => {
+            bx_prefix = "let wire_value: u8; wire_value = x as u8;".into();
+            dslx_prefix = "let wire_value = x as u8;".into();
+            ("wire_value == u8:0".into(), false)
+        }
+        8 => {
+            suffix = "let later = true;";
+            ("later".into(), false)
+        }
+        9 => ("u8:1".into(), false),
+        10 => ("false".into(), false),
+        _ => ("true".into(), true),
+    };
+    let assertion = if flags & 4 == 0 {
+        format!("const_assert!({predicate});")
+    } else {
+        format!("let condition = {predicate}; const_assert!(condition);")
+    };
+    let result = format!("(x as u8) ^ ({value} as u8)");
+    let bx_decls = format!(
+        "{helpers}\n#[allow(combinational_block)]\nblock guard{bx_formals}(clk,x:{bx_type})->u8 {{ {bx_prefix} {assertion} {suffix} {result} }}"
+    );
+    let dslx_decls = format!(
+        "{helpers}\nfn guard{dslx_formals}(x:{dslx_type})->u8 {{ {dslx_prefix} {assertion} {suffix} {result} }}"
+    );
+    let body = if generic {
+        format!("let a=guard<{first}>(x); let b=guard<{second}>(x as uN[{width}]); a + b")
+    } else {
+        "let a=guard(x); a".into()
+    };
+    let bx = format!("{bx_decls}\n{}", bx_source("x: u8", "u8", &body));
+    compare_bx_program(
+        &bx,
+        FunctionProgram {
+            functions: dslx_decls,
+            params: "x: u8".into(),
+            result: "u8".into(),
+            body,
+            valid: Some(valid),
+            dslx_ir: true,
+            dynamic_index: None,
+        },
+        seed,
+        DslxExecution::ConcreteConstants,
+        vec![],
+        &[],
+    )
+}
+
 /// Compare source acceptance, compiled IR execution, and concrete DSLX calls
 /// for the same assertions and runtime inputs.
 pub fn check_const_assert(data: &[u8]) -> Result<(), String> {
-    let [scope, predicate, flags, first, second, floor] =
-        std::array::from_fn(|i| data.get(i).copied().unwrap_or(0));
+    let bytes = std::array::from_fn(|i| data.get(i).copied().unwrap_or(0));
+    let [scope, predicate, flags, first, second, floor] = bytes;
+    if scope & 8 != 0 {
+        return compare_block_assert(bytes, input_seed(data));
+    }
     let sample = Sample {
         scope: match scope % 8 {
             0 => Scope::Module,
@@ -331,6 +431,20 @@ pub fn check_const_assert(data: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::check_const_assert;
+
+    #[test]
+    fn compare_block_const_assert_matrix() -> Result<(), String> {
+        for scope in [8, 9] {
+            for predicate in 0..12 {
+                for (flags, first, second, floor) in
+                    [(0, 0, 0, 0), (2, 7, 8, 8), (4, 8, 7, 8), (6, 8, 129, 8)]
+                {
+                    check_const_assert(&[scope, predicate, flags, first, second, floor])?;
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn compare_const_assert_matrix() -> Result<(), String> {

@@ -161,10 +161,11 @@ reached through a local helper.
 
 ### Compile-time assertions
 
-Use `const_assert!(predicate);` at module scope or inside a pure function to
-require a Boolean constexpr to be true. A module assertion can use earlier
-constants and pure BX helpers. A parametric function checks its assertions
-when BX specializes it.
+Use `const_assert!(predicate);` at module scope, inside a pure function, or
+as a statement directly in a block body to require a Boolean constexpr to be
+true. A module assertion can use earlier constants and pure BX helpers.
+Parametric functions and blocks check their assertions at each concrete
+specialization.
 
 ```text
 const LANES = u32:4;
@@ -1232,6 +1233,7 @@ block stage<T>(clk, data: T) -> T {
 }
 
 block delay<T, N: u32>(clk, data: T) -> T {
+    const_assert!(N > u32:0);
     unroll_for! (_, prev): (u32, T) in u32:0..N {
         let next = stage(prev);
         next
@@ -1243,6 +1245,11 @@ pub block pipeline(clk, data: u8) -> u8 {
     delayed
 }
 ```
+
+The assertion makes a zero-stage instantiation a compile error. Its predicate
+can read a value parametric, a type property such as `bit_count<T>()`, or a
+preceding compile-time `let`. Input signals and register contents have runtime
+values, including registers with constant reset values.
 
 Value arguments can be literals, constant names, or braced expressions such as
 `delay<{u32:1 + u32:2}>(data)`. If a block declares both value and callable
