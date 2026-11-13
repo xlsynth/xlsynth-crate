@@ -6,8 +6,16 @@ use std::path::{Path, PathBuf};
 
 use xlsynth_lean::LeanModuleName;
 use xlsynth_lean::block::{emit, select_block, write_to};
+#[cfg(feature = "lean-tests")]
+use xlsynth_lean::export_ir_function;
 use xlsynth_pir::ir::Package;
 use xlsynth_pir::ir_parser::Parser;
+#[cfg(feature = "lean-tests")]
+use xlsynth_pir::{
+    IrValue,
+    block_eval::{BlockEvaluator, RegisterInit},
+    ir_eval::eval_fn_in_package_value,
+};
 
 const BLOCK: &str = include_str!("fixtures/block_step.ir");
 
@@ -284,13 +292,6 @@ example (q : State) (x : Input) : (observe q x).result = x.mk_ := rfl
 #[cfg(feature = "lean-tests")]
 #[test]
 fn tuple_one_hot_select_agrees_with_pir_for_functions_and_blocks() {
-    use xlsynth_lean::export_ir_function;
-    use xlsynth_pir::{
-        IrValue,
-        block_eval::{BlockEvaluator, RegisterInit},
-        ir_eval::eval_fn_in_package_value,
-    };
-
     let package = Parser::new(
         r#"package selection
 fn select_pair(s: bits[2] id=1, a: (bits[4], bits[4]) id=2, b: (bits[4], bits[4]) id=3) -> (bits[4], bits[4]) {
