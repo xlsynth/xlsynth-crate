@@ -23,6 +23,10 @@ theorem equivalent : Target.Equivalent := by
       let #[_, _, output] := s.downstream | throwError "expected three downstream bindings"
       unless output == s.output && (← isDefEq (← mkLetFVars s.bindings output) app) do
         throwError "the downstream slice does not reconstruct the stage"
+  -- Abstracting the results would invalidate this local definition's proof.
+  let concrete : stage x = Generated.Rhs.eval x := rfl
+  fail_if_success xls_cut (stage x) at helper using helper_spec expect 2
+  clear concrete
   have h : stage x = Generated.Rhs.eval x := rfl
   change stage x = _
   xls_cut (Generated.Lhs.eval x) at helper using helper_spec as r expect 2
