@@ -164,7 +164,13 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         comment(&graph.name),
         comment(block.package_name)
     );
-    write_elaboration_limits(&mut source, [&graph.graph]);
+    write_elaboration_limits(
+        &mut source,
+        std::iter::once(&graph.graph).chain(block.helpers.iter().map(|f| &f.graph)),
+    );
+    for helper in &block.helpers {
+        write_helper(&mut source, namespace, helper)?;
+    }
     source.push_str(&record_type(
         "State",
         block
@@ -225,8 +231,14 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
         let node = graph.get_node(reference);
         if !matches!(node.payload, NodePayload::Nil) {
             let context = node_context(block, reference);
+            if let NodePayload::RegisterRead { register } = &node.payload {
+                ensure!(
+                    graph.registers.iter().any(|decl| decl.name == *register),
+                    "{context}: no declaration for register {register}"
+                );
+            }
             let ty = lean_type(&node.ty).with_context(|| context.clone())?;
-            let expression = node_expression(block, reference, |operand| {
+            let expression = node_expression(namespace, graph, reference, |operand| {
                 Ok(LeanOperand::Atom(names[operand.index].clone()))
             })
             .with_context(|| context.clone())?;
@@ -311,6 +323,49 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
     }
     writeln!(source, "\nend {namespace}")?;
     Ok(source)
+}
+
+pub(super) fn helper_path(namespace: &str, physical: &str) -> Result<String> {
+    Ok(format!(
+        "_root_.{namespace}.Helpers.{}",
+        identifier(physical)?
+    ))
+}
+
+fn write_helper(source: &mut String, namespace: &str, function: &ir::Fn) -> Result<()> {
+    write!(source, "def Helpers.{}", identifier(&function.name)?)?;
+    for param in &function.params {
+        write!(
+            source,
+            " (n{} : {})",
+            param.index,
+            lean_type(&function.get_node(*param).ty)?
+        )?;
+    }
+    writeln!(source, " : {} :=", lean_type(&function.ret_ty)?)?;
+    for reference in ir_utils::get_topological_nodes(&function.nodes) {
+        let node = function.get_node(reference);
+        if !matches!(node.payload, NodePayload::Nil | NodePayload::Param) {
+            ensure!(
+                !matches!(node.payload, NodePayload::Assert { .. }),
+                "assertion in helper {} is unsupported",
+                function.name
+            );
+            let expr = node_expression(namespace, function, reference, |operand| {
+                Ok(LeanOperand::Atom(format!("n{}", operand.index)))
+            })
+            .with_context(|| format!("function {}, node {}", function.name, node.text_id))?;
+            writeln!(
+                source,
+                "  let n{} : {} := {expr}",
+                reference.index,
+                lean_type(&node.ty)?
+            )?;
+        }
+    }
+    let result = function.ret_node_ref.context("helper has no return node")?;
+    writeln!(source, "  n{}\n", result.index)?;
+    Ok(())
 }
 
 /// Array reads clamp to the last element, so every dimension must be nonempty.
@@ -430,21 +485,22 @@ fn predicate(value: &str) -> String {
 /// Resolve only the operands used by this operation. Register writes and
 /// output ports return unit here; their effects are collected by `emit_block`.
 pub(crate) fn node_expression(
-    block: &BlockContext<'_>,
+    namespace: &str,
+    graph: &ir::NodeGraph,
     reference: NodeRef,
     operand: impl Fn(NodeRef) -> Result<LeanOperand>,
 ) -> Result<String> {
-    let graph = &*block.graph;
     let node = graph.get_node(reference);
     match &node.payload {
         NodePayload::InputPort { name, .. } => Ok(format!("x.{}", identifier(name)?)),
-        NodePayload::RegisterRead { register } => {
-            ensure!(
-                graph.registers.iter().any(|r| r.name == *register),
-                "no declaration for register {register}"
-            );
-            Ok(format!("q.{}", identifier(register)?))
+        NodePayload::Invoke { to_apply, operands } => {
+            let mut call = helper_path(namespace, to_apply)?;
+            for arg in operands {
+                write!(call, " {}", operand(*arg)?.into_argument())?;
+            }
+            Ok(call)
         }
+        NodePayload::RegisterRead { register } => Ok(format!("q.{}", identifier(register)?)),
         // These effects are collected by emit_block, including disconnected
         // assertions. The output and write nodes themselves have unit type.
         NodePayload::OutputPort { .. }
@@ -452,7 +508,7 @@ pub(crate) fn node_expression(
         | NodePayload::AfterAll(_) => Ok("()".to_string()),
         NodePayload::Assert { token, .. } => Ok(operand(*token)?.into_argument()),
         other => LocalRenderer::Block
-            .local_rhs(&graph.graph, reference, operand)
+            .local_rhs(graph, reference, operand)
             .map_err(|error| match error {
                 RenderError::Operand(error) => error,
                 RenderError::Invalid(reason) => anyhow::anyhow!("{reason}"),
