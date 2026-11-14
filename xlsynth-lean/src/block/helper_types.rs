@@ -27,6 +27,8 @@ pub(super) struct DslxLink {
     pub(super) module: dslx::TypecheckedModule,
     module_names: Option<ImportNames>,
     symbols: BTreeMap<String, String>,
+    #[cfg(feature = "dslx-loop-bindings")]
+    bindings: Vec<dslx::LoopBinding>,
 }
 
 impl DslxLink {
@@ -35,6 +37,8 @@ impl DslxLink {
             module: import.module,
             module_names: Some(import.module_names),
             symbols: import.symbols,
+            #[cfg(feature = "dslx-loop-bindings")]
+            bindings: import.loop_bindings,
         }
     }
 
@@ -42,7 +46,23 @@ impl DslxLink {
         let text = module
             .to_ir_text()
             .context("converting checked DSLX for BX externs")?;
-        let package = Parser::new(&text)
+        Self::from_conversion(module, &text)
+    }
+
+    #[cfg(feature = "dslx-loop-bindings")]
+    pub(super) fn compile_with_bindings(
+        module: dslx::TypecheckedModule,
+    ) -> Result<(ir::Package, Self)> {
+        let (text, bindings) = module
+            .convert_to_ir_text_with_loop_bindings()
+            .context("collecting checked loop names for BX externs")?;
+        let (package, mut link) = Self::from_conversion(module, &text)?;
+        link.bindings = bindings;
+        Ok((package, link))
+    }
+
+    fn from_conversion(module: dslx::TypecheckedModule, text: &str) -> Result<(ir::Package, Self)> {
+        let package = Parser::new(text)
             .parse_and_validate_package()
             .context("parsing linked DSLX IR")?;
         let symbols = package
@@ -62,6 +82,8 @@ impl DslxLink {
                 module,
                 module_names: None,
                 symbols,
+                #[cfg(feature = "dslx-loop-bindings")]
+                bindings: Vec::new(),
             },
         ))
     }
@@ -114,12 +136,21 @@ impl DslxLink {
             .map(String::as_str)
             .filter(|destination| linked.contains(destination))
             .collect();
-        merge_declarations(
-            declarations,
-            std::mem::take(&mut catalogue.declarations),
+        catalogue.declarations = merge_declarations(
+            std::mem::take(declarations),
+            catalogue.declarations,
             interface,
         )?;
         catalogue.add_loop_bodies(block, interface);
+        #[cfg(feature = "dslx-loop-bindings")]
+        catalogue.collect_loop_helpers(
+            block,
+            &self.bindings,
+            &interface.inputs,
+            &interface.registers,
+        )?;
+        // Loop bindings can introduce local types absent from any signature.
+        *declarations = catalogue.declarations;
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
                 ensure!(
@@ -149,14 +180,13 @@ impl DslxLink {
 /// BX reflects imported structs into concrete port types and erases aliases.
 /// Keep the checked DSLX spelling, with its dependencies before its users.
 fn merge_declarations(
-    prior: &mut Vec<TypeDecl>,
-    incoming: Vec<TypeDecl>,
+    prior: Vec<TypeDecl>,
+    mut merged: Vec<TypeDecl>,
     interface: &mut StatefulInterface,
-) -> Result<()> {
+) -> Result<Vec<TypeDecl>> {
     let mut replaced = Vec::new();
-    let mut merged = incoming;
     let mut aliases = BTreeSet::new();
-    for decl in prior.drain(..) {
+    for decl in prior {
         if let Some(index) = merged.iter().position(|d| d.name() == decl.name()) {
             if decl != merged[index] {
                 if matches!(decl, TypeDecl::Struct { .. })
@@ -216,6 +246,9 @@ fn merge_declarations(
                 restore_alias(ty, &aliases);
             }
             restore_alias(&mut sig.result, &aliases);
+            for (_, ty) in sig.node_bindings.values_mut() {
+                restore_alias(ty, &aliases);
+            }
         }
     }
     for (old, index) in replaced {
@@ -250,8 +283,7 @@ fn merge_declarations(
             new.name()
         );
     }
-    *prior = merged;
-    Ok(())
+    Ok(merged)
 }
 
 #[cfg(test)]
@@ -267,7 +299,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
             })
             .collect(),
     };
-    let mut reflected = vec![record("Alias", ["zebra", "apple"])];
+    let reflected = vec![record("Alias", ["zebra", "apple"])];
     let checked = vec![
         record("Packet", ["apple", "zebra"]),
         TypeDecl::Alias {
@@ -284,7 +316,7 @@ fn linked_struct_alias_rejects_reordered_equal_width_fields() {
         registers: Default::default(),
         helpers: Default::default(),
     };
-    let error = merge_declarations(&mut reflected, checked, &mut interface).unwrap_err();
+    let error = merge_declarations(reflected, checked, &mut interface).unwrap_err();
     assert_eq!(error.to_string(), "conflicting fields in linked type Alias");
 }
 
@@ -981,6 +1013,7 @@ impl Catalogue<'_> {
                     HelperSignature {
                         source_name: None,
                         result: params[1].1.clone(),
+                        node_bindings: BTreeMap::new(),
                         params,
                     },
                 );
@@ -1024,6 +1057,120 @@ impl Catalogue<'_> {
         }
     }
 
+    #[cfg(feature = "dslx-loop-bindings")]
+    fn loop_type(&mut self, ty: &dslx::Type) -> Result<SourceType> {
+        if ty.is_enum() || ty.is_struct() {
+            self.checked_nominal_type(ty)
+        } else if let Some((false, width)) = ty.is_bits_like() {
+            match width {
+                0 => bail!("zero-width loop binding"),
+                1 => Ok(SourceType::Bool),
+                _ => Ok(SourceType::Bits { width }),
+            }
+        } else if ty.is_array() {
+            Ok(SourceType::Array {
+                element: Box::new(self.loop_type(&ty.get_array_element_type())?),
+                size: ty.get_array_size(),
+            })
+        } else if let Some(tuple) = ty.get_tuple_members() {
+            Ok(SourceType::Tuple {
+                members: tuple
+                    .iter()
+                    .map(|item| self.loop_type(item))
+                    .collect::<Result<_>>()?,
+            })
+        } else {
+            bail!("unsupported checked loop type {ty}")
+        }
+    }
+
+    #[cfg(feature = "dslx-loop-bindings")]
+    fn collect_loop_helpers(
+        &mut self,
+        block: &BlockContext<'_>,
+        bindings: &[dslx::LoopBinding],
+        inputs: &BTreeMap<String, SourceType>,
+        registers: &BTreeMap<String, SourceType>,
+    ) -> Result<()> {
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        let operands = self.declared_loop_operands(block, inputs, registers);
+        let mut by_body = BTreeMap::<&str, Vec<_>>::new();
+        for binding in bindings {
+            by_body
+                .entry(&binding.ir_function)
+                .or_default()
+                .push(binding);
+        }
+        for function in &block.helpers {
+            let Some(bindings) = by_body.remove(function.name.as_str()) else {
+                continue;
+            };
+            let by_id: BTreeMap<_, _> = bindings
+                .iter()
+                .map(|binding| Ok((usize::try_from(binding.ir_node_id)?, *binding)))
+                .collect::<Result<_>>()?;
+            // A checked binding may refer to the index after adding the range's
+            // lower bound. Keep it on that node; the first physical
+            // argument is a zero-based iteration count.
+            let mut params = Vec::new();
+            for (position, param) in function.params.iter().enumerate() {
+                let node = function.get_node(*param);
+                let source = by_id.get(&node.text_id);
+                let (name, ty) = if let Some(binding) = source {
+                    let Some(ty) = self
+                        .loop_type(&binding.concrete_type)
+                        .ok()
+                        .or_else(|| operands.get(&(function.name.as_str(), position))?.clone())
+                    else {
+                        break;
+                    };
+                    (
+                        binding.source_name.as_deref().unwrap_or(node.param_name()),
+                        ty,
+                    )
+                } else if position == 0
+                    && let ir::Type::Bits(width) = node.ty
+                {
+                    ("xls_iteration", SourceType::Bits { width })
+                } else {
+                    break;
+                };
+                if source_shape(&ty, &self.declarations)? != node.ty {
+                    break;
+                }
+                params.push((name.to_owned(), ty));
+            }
+            // A compiler-created argument such as a token-wrapped carry can
+            // still use the existing raw loop body when there is no
+            // matching source signature.
+            if params.len() == function.params.len() && params.len() >= 2 {
+                let mut node_bindings = BTreeMap::new();
+                for node in &function.nodes {
+                    if !matches!(node.payload, ir::NodePayload::Param)
+                        && let Some(binding) = by_id.get(&node.text_id)
+                        && let Some(name) = &binding.source_name
+                        && let Ok(ty) = self.loop_type(&binding.concrete_type)
+                        && source_shape(&ty, &self.declarations)? == node.ty
+                    {
+                        node_bindings.insert(node.text_id, (name.clone(), ty));
+                    }
+                }
+                self.helpers.insert(
+                    function.name.clone(),
+                    HelperSignature {
+                        source_name: None,
+                        result: params[1].1.clone(),
+                        params,
+                        node_bindings,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn helper_signature<'a>(
         &mut self,
         name: &str,
@@ -1043,6 +1190,7 @@ impl Catalogue<'_> {
             source_name: Some((self.source_qualifier().to_owned(), name.to_owned())),
             params,
             result,
+            node_bindings: BTreeMap::new(),
         })
     }
 }

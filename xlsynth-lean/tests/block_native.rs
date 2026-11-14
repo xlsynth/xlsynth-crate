@@ -1931,11 +1931,107 @@ fn checked_nonzero_range() -> xlsynth::dslx::TypecheckedModule {
     .unwrap()
 }
 
+#[cfg(feature = "dslx-loop-bindings")]
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn bx_import_loop_names_follow_rebased_nodes_and_function_symbols() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    fs::write(
+        root.path().join("sum.x"),
+        r#"
+struct Row { value: u8 }
+pub fn lanes(xs: u8[3]) -> u8 {
+    let row = for (lane, carry): (u32, Row) in u32:1..u32:3 {
+        Row { value: carry.value + xs[lane] }
+    }(Row { value: u8:0 });
+    row.value
+}
+"#,
+    )?;
+    let source = "use sum; block rows(clk, xs: u8[3]) -> u8 { sum::lanes(xs) }";
+    let imports = xlsynth_bx::ImportOptions {
+        additional_search_paths: vec![root.path()],
+        ..Default::default()
+    };
+    let plain = compile_bx(
+        "rows",
+        source,
+        xlsynth_bx::empty_package("plain"),
+        Default::default(),
+        &imports,
+    )?;
+    fn loop_body(compiled: &xlsynth_lean::block::CompiledBx) -> &str {
+        compiled
+            .package()
+            .members
+            .iter()
+            .flat_map(|m| &m.graph().nodes)
+            .find_map(|n| match &n.payload {
+                xlsynth_pir::ir::NodePayload::CountedFor { body, .. } => Some(body.as_str()),
+                _ => None,
+            })
+            .unwrap()
+    }
+    let body = loop_body(&plain);
+    let reserved = format!(
+        "package occupied\nfn {body}(a: bits[8] id=500) -> bits[8] {{ ret n: bits[8] = not(a, id=501) }}"
+    );
+    let compiled = xlsynth_lean::block::compile_bx_with_loop_bindings(
+        "rows",
+        source,
+        Parser::new(&reserved).parse_and_validate_package()?,
+        Default::default(),
+        &imports,
+    )?;
+    let linked = loop_body(&compiled);
+    assert_ne!(linked, body);
+    assert!(
+        compiled
+            .package()
+            .get_fn(linked)
+            .unwrap()
+            .param_nodes()
+            .all(|p| p.text_id > 501)
+    );
+    let mut bundle = compiled.emit_readable(None)?;
+    let model = &bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap()
+        .1;
+    let (_, body) = model
+        .split_once(&format!("def _root_.XlsReadable.Helpers.«{linked}»"))
+        .unwrap();
+    let body = body.split("\n\n").next().unwrap();
+    assert!(
+        body.lines()
+            .any(|l| l.trim_start().starts_with("let «lane» :")
+                && l.contains("L.BitVec.add («xls_iteration»)")),
+        "{body}"
+    );
+    bundle.files.push((
+        "CheckImport.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XlsReadable
+#check XLS.sum.Row.value
+#guard observe {} { xs := #v[100, 3, 5] } == (8 : BitVec 8)
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "imported nonzero loop with colliding IDs and symbol",
+    );
+    Ok(())
+}
+
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn nonzero_range_without_loop_records() {
     let mut bundle = xlsynth_lean::block::compile_bx_with_dslx(
-        "design",
+        "counter",
         include_str!("fixtures/bx_loop_bindings/counter.bx"),
         checked_nonzero_range(),
         Default::default(),
@@ -1949,6 +2045,158 @@ fn nonzero_range_without_loop_records() {
         include_str!("fixtures/bx_loop_bindings/CheckLoop.lean").into(),
     ));
     check_bundle(bundle, "nonzero range without loop records");
+}
+
+#[cfg(feature = "dslx-loop-bindings")]
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn loop_keeps_the_source_index_and_captured_record_fields() {
+    let mut bundle = xlsynth_lean::block::compile_bx_with_dslx_loop_bindings(
+        "counter",
+        include_str!("fixtures/bx_loop_bindings/counter.bx"),
+        checked_nonzero_range(),
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
+    let (_, model) = bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap();
+    // The helper still computes the same result if the wrong local is named
+    // bank.
+    let (_, body) = model
+        .split_once("def _root_.XlsReadable.Helpers.«____machine__fold_counted_for_0_body»")
+        .unwrap();
+    let body = body.split("\n\n").next().unwrap();
+    let offset = body
+        .lines()
+        .find_map(|line| {
+            let (binding, _) = line.trim().strip_prefix("let ")?.split_once(" : ")?;
+            line.ends_with(" := L.BitVec.ofNat 32 0x1")
+                .then_some(binding)
+        })
+        .expect("the loop offset should be the literal one");
+    let offset_iteration = format!(" := L.BitVec.add («xls_iteration») ({offset})");
+    assert!(
+        body.lines()
+            .any(|line| line.trim().starts_with("let «bank» : ")
+                && line.ends_with(&offset_iteration)),
+        "bank should name the offset iteration"
+    );
+    assert!(body.lines().any(|line| {
+        line.split_once("L.Vector.getD ")
+            .is_some_and(|(_, args)| args.contains(" (L.BitVec.toNat («bank»)) "))
+    }));
+    assert!(body.contains(".«valid»"));
+    let checks = r#"import ReadableCorrespondence
+open XlsReadable
+private def pool : XLS.packets.«Pool<5>» := { status := (3, 4), slots := #v[
+  {write := {valid := true, data := 11}},
+  {write := {valid := false, data := 19}},
+  {write := {valid := true, data := 23}}] }
+#guard Helpers.«____machine__fold_counted_for_0_body»
+  (xls_iteration := 1) (acc := 7) (pool := pool) (mode := XLS.packets.Mode.Run) == 30
+"#;
+    bundle
+        .files
+        .push(("CheckLoopNames.lean".into(), checks.into()));
+    bundle.files.push((
+        "CheckLoop.lean".into(),
+        include_str!("fixtures/bx_loop_bindings/CheckLoop.lean").into(),
+    ));
+    check_bundle(bundle, "nonzero range with loop records");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+#[cfg(feature = "dslx-loop-bindings")]
+fn loop_captures_keep_their_declared_struct_arguments() {
+    let source = r#"
+struct Tagged<N: u32> { value: u8 }
+fn fold(first: Tagged<1>, other: Tagged<2>, q: u8) -> u8 {
+    let second = first;
+    for (_, acc) in u32:0..u32:2 {
+        acc + second.value + other.value
+    }(q)
+}
+fn machine(first: u8, other: u8, q: u8) -> u8 {
+    fold(Tagged<1> {value: first}, Tagged<2> {value: other}, q)
+}
+"#;
+    let bx = r#"
+extern fn machine::machine(first: u8, other: u8, q: u8) -> u8;
+block sum(clk, first: u8, other: u8) -> u8 {
+    reg q: u8 = 0;
+    q := machine::machine(first, other, q);
+    q
+}
+"#;
+    let mut imports = xlsynth::dslx::ImportData::new(None, &[]);
+    let module =
+        xlsynth::dslx::parse_and_typecheck(source, "machine.x", "machine", &mut imports).unwrap();
+    let mut bundle = xlsynth_lean::block::compile_bx_with_dslx_loop_bindings(
+        "sum",
+        bx,
+        module,
+        Default::default(),
+        &Default::default(),
+    )
+    .unwrap()
+    .emit_readable(None)
+    .unwrap();
+    bundle.files.push((
+        "Captures.lean".into(),
+        r#"import ReadableCorrespondence
+open XlsReadable
+variable (first : XLS.machine.«Tagged<1>») (other : XLS.machine.«Tagged<2>»)
+#check Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := first) (other := other)
+#check_failure Helpers.«____machine__fold_counted_for_0_body» 0 0 (second := other) (other := first)
+"#
+        .into(),
+    ));
+    check_bundle(bundle, "distinct equal-layout captures");
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn counted_loop_proves_indexed_record_fields_in_block_and_body() {
+    let source = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+fn fold(index: u8, a: Slot, b: Slot, last: u8) -> u8 {
+    for (i, acc) in u32:0..u32:3 {
+        let inner_slots = [b, a];
+        let inner_slot = inner_slots[index + (i as u8)];
+        acc + inner_slot.write.data
+    }(last)
+}
+"#;
+    let bx = r#"
+struct Write { data: u8 }
+struct Slot { write: Write }
+extern fn machine::fold(index: u8, a: Slot, b: Slot, last: u8) -> u8;
+block indexed(clk, index: u8, a: Slot, b: Slot) -> u8 {
+    reg last: u8 = 0;
+    let slots = [a, b];
+    last := machine::fold(index, a, b, last);
+    slots[index].write.data
+}
+"#;
+    let bundle = checked_helper_bundle(bx, source, &[]).unwrap();
+    let readable = &bundle
+        .files
+        .iter()
+        .find(|(name, _)| name == "ReadableGenerated.lean")
+        .unwrap()
+        .1;
+    for projection in [").«write»", ").«data»"] {
+        assert!(readable.matches(projection).count() >= 2, "{readable}");
+    }
+    check_bundle(bundle, "indexed records in a block and its loop body");
 }
 
 /// Elaborate every generated file in dependency order with the requested Lean.

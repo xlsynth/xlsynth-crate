@@ -1802,7 +1802,7 @@ pub(crate) fn check_sources(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    check_sources_with_tests(root, imports, options, None, |_| {}, None)
+    check_sources_with_tests(root, imports, options, None, |batch| batch.plain_ir(), None)
 }
 
 /// Elaborate test-only harnesses before draining the shared specialization
@@ -1812,7 +1812,7 @@ pub(crate) fn check_sources_with_tests(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
     mut tests: Option<&mut crate::test_runner::TestSuite>,
-    on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
+    convert: impl FnMut(crate::dslx_import::ImportConversion<'_>) -> Result<String, String>,
     captured_sources: Option<&mut crate::import_structs::CapturedSources>,
 ) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
@@ -2313,7 +2313,7 @@ pub(crate) fn check_sources_with_tests(
     if let Some(sources) = captured_sources {
         *sources = resolver.take_sources();
     }
-    checked.imports = resolver.finish_with_calls(used.as_ref(), on_import)?;
+    checked.imports = resolver.finish_with_calls(used.as_ref(), convert)?;
     Ok(checked)
 }
 

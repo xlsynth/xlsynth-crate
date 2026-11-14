@@ -1107,6 +1107,75 @@ block delay(clk, x: u8, y: u8) -> u8 {
 }
 
 #[test]
+fn bx_to_lean_offers_loop_names_only_with_compiler_support() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let help = stdout(root, &["bx-to-lean", "--help"])?;
+    assert_eq!(
+        help.contains("--readable-loop-names"),
+        cfg!(feature = "dslx-loop-bindings")
+    );
+    #[cfg(feature = "dslx-loop-bindings")]
+    {
+        fs::write(
+            root.join("sum.x"),
+            r#"pub fn sum_lanes(xs: u8[3]) -> u8 {
+    for (lane, acc) in u32:1..u32:3 { acc + xs[lane] }(u8:0)
+}"#,
+        )?;
+        fs::write(
+            root.join("lanes.bx"),
+            r#"extern fn sum::sum_lanes(xs: u8[3]) -> u8;
+block delay(clk, xs: u8[3]) -> u8 {
+    reg q: u8;
+    q := sum::sum_lanes(xs);
+    q
+}"#,
+        )?;
+        let args = [
+            "bx-to-lean",
+            "lanes.bx",
+            "--link-dslx=sum.x",
+            "--readable-loop-names",
+            "--output-dir=model",
+        ];
+        assert!(stdout(root, &args)?.is_empty());
+        let source = fs::read_to_string(root.join("model/ReadableGenerated.lean"))?;
+        assert!(
+            source
+                .lines()
+                .any(|line| line.trim_start().starts_with("let «lane» : ")),
+            "{source}"
+        );
+        fs::write(
+            root.join("import.bx"),
+            "use sum; #[allow(combinational_block)] block lanes(clk, xs: u8[3]) -> u8 { sum::sum_lanes(xs) }",
+        )?;
+        assert!(
+            stdout(
+                root,
+                &[
+                    "bx-to-lean",
+                    "import.bx",
+                    "--dslx-path=.",
+                    "--readable-loop-names",
+                    "--output-dir=imported"
+                ]
+            )?
+            .is_empty()
+        );
+        let source = fs::read_to_string(root.join("imported/ReadableGenerated.lean"))?;
+        assert!(
+            source
+                .lines()
+                .any(|line| line.trim_start().starts_with("let «lane» : ")),
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn mapped_protobuf_matches_the_staged_pipeline_with_synchronous_reset_and_enable() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();

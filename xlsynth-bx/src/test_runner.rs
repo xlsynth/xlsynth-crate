@@ -423,10 +423,16 @@ fn compile_tests(
         format!("{}:{space}{message}", path.display())
     };
     let (root, imports) = bx_import::read_for_tests(source, options).map_err(at_file)?;
-    let mut checked =
-        check::check_sources_with_tests(&root, imports, options, Some(&mut suite), |_| {}, None)
-            .map_err(bx_import::diagnostic)
-            .map_err(at_file)?;
+    let mut checked = check::check_sources_with_tests(
+        &root,
+        imports,
+        options,
+        Some(&mut suite),
+        |batch| batch.plain_ir(),
+        None,
+    )
+    .map_err(bx_import::diagnostic)
+    .map_err(at_file)?;
     for block in &mut checked.blocks {
         if let Some(source) = &mut block.source {
             source.path.get_or_insert_with(|| path.to_owned());
