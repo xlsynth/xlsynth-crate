@@ -632,6 +632,7 @@ xlsynth-driver bx-to-lean counter.bx --output-dir lean
 ### `ir-block-to-lean`: Block IR to Lean
 
 Generate a raw Lean clock-step model for a block in a saved XLS IR package. The model imports the project module `XlsynthLean.IR`.
+Like `ir-fn-to-lean`, this command parses and verifies the input package with PIR.
 The model evaluates outputs and simultaneous register updates from current
 inputs and old register values. Assertions are reported as results.
 

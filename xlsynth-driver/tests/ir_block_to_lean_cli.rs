@@ -80,6 +80,25 @@ fn raw_top_overrides_the_package_top_and_resolves_ambiguity() {
 }
 
 #[test]
+fn accepts_pir_extension_in_saved_block() {
+    let directory = tempfile::tempdir().unwrap();
+    let ir = "package adder
+top block adder(a: bits[1], carry: bits[1]) {
+  a: bits[1] = input_port(name=a, id=1)
+  c: bits[1] = ext_carry_out(a, a, a, id=2)
+  carry: () = output_port(c, name=carry, id=3)
+}";
+    std::fs::write(directory.path().join("input.ir"), ir).unwrap();
+    let output = invoke(directory.path(), &["input.ir"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("def eval")
+    );
+}
+
+#[test]
 fn invalid_block_preserves_existing_output() {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
@@ -90,11 +109,10 @@ fn invalid_block_preserves_existing_output() {
     let output = invoke(directory, &["input.ir", "--output", "model.lean"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("native XLS")
-    );
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    for detail in ["load_enable", "bits[1]", "bits[2]"] {
+        assert!(diagnostic.contains(detail), "{diagnostic}");
+    }
     assert_eq!(
         std::fs::read_to_string(directory.join("model.lean")).unwrap(),
         "keep"

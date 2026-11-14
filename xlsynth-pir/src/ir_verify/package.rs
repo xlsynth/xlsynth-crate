@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
-    Binop, Block, BlockPort, Fn, InstantiationKind, MemberType, NaryOp, NodeGraph, NodePayload,
-    NodeRef, Package, PackageMember, Type,
+    Binop, Block, BlockPort, BlockProvenance, BlockProvenanceKind, Fn, InstantiationKind,
+    MemberType, NaryOp, NodeGraph, NodePayload, NodeRef, Package, PackageMember, Type,
 };
 use crate::ir_deduce::deduce_graph_result_type;
 use crate::ir_utils::operands;
@@ -16,6 +16,8 @@ use crate::ir_utils::operands;
 pub enum ValidationError {
     /// Two package members share the same name.
     DuplicateMemberName(String),
+    /// Multiple blocks originate from the same proc or function.
+    DuplicateBlockProvenance(BlockProvenance),
     /// The `top` attribute references a missing function.
     MissingTop(String),
     /// A node references an undefined operand (index out of bounds).
@@ -250,6 +252,17 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::DuplicateMemberName(name) => {
                 write!(f, "duplicate member name '{}'", name)
+            }
+            ValidationError::DuplicateBlockProvenance(provenance) => {
+                let kind = match provenance.kind {
+                    BlockProvenanceKind::Proc => "proc",
+                    BlockProvenanceKind::Function => "function",
+                };
+                write!(
+                    f,
+                    "multiple blocks have the same provenance: {kind} {:?}",
+                    provenance.name
+                )
             }
             ValidationError::MissingTop(name) => {
                 write!(f, "top member '{}' not found", name)
@@ -695,13 +708,25 @@ impl std::fmt::Display for InstantiationPortDirection {
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     let mut names = HashSet::<(String, MemberType)>::new();
     let mut functions = HashMap::new();
+    let mut provenances = HashSet::new();
     for member in &p.members {
         let (name, member_type) = match member {
             PackageMember::Function(f) => {
                 functions.insert(f.name.as_str(), f);
                 (f.name.clone(), MemberType::Function)
             }
-            PackageMember::Block(block) => (block.name.clone(), MemberType::Block),
+            PackageMember::Block(block) => {
+                let provenance = crate::ir_parser::block_provenance(block).map_err(|error| {
+                    ValidationError::BlockInvariantViolation {
+                        block: block.name.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if let Some(duplicate) = provenance.and_then(|p| provenances.replace(p)) {
+                    return Err(ValidationError::DuplicateBlockProvenance(duplicate));
+                }
+                (block.name.clone(), MemberType::Block)
+            }
         };
         if !names.insert((name.clone(), member_type)) {
             return Err(ValidationError::DuplicateMemberName(name));
@@ -1942,6 +1967,39 @@ mod tests {
     use super::*;
     use crate::ir;
     use crate::ir_parser::Parser;
+
+    #[test]
+    fn blocks_require_distinct_effective_provenance() {
+        let function_f = r#"#![provenance(name="f", kind="function")]"#;
+        let function_g = r#"#![provenance(name="g", kind="function")]"#;
+        let proc_f = r#"#![provenance(name="f", kind="proc")]"#;
+        let escaped_f = r#"#![provenance(kind="function", name="\x66")]"#;
+        for (first, second, valid) in [
+            ("", "", true),
+            (function_f, function_g, true),
+            (function_f, proc_f, true),
+            (function_f, escaped_f, false),
+            // When an attribute is repeated within a block, XLS uses the last.
+            (function_f, &format!("{function_f}\n{function_g}"), true),
+            (function_f, &format!("{function_g}\n{function_f}"), false),
+        ] {
+            let text =
+                format!("package p\ntop block a() {{\n{first}\n}}\nblock b() {{\n{second}\n}}");
+            let native = xlsynth::IrPackage::parse_ir(&text, None);
+            assert_eq!(native.is_ok(), valid, "native: {text}");
+            let package = Parser::new(&text).parse_package().unwrap();
+            let result = validate_package(&package);
+            let expected = if valid {
+                Ok(())
+            } else {
+                Err(ValidationError::DuplicateBlockProvenance(BlockProvenance {
+                    name: "f".into(),
+                    kind: BlockProvenanceKind::Function,
+                }))
+            };
+            assert_eq!(result, expected, "{text}");
+        }
+    }
 
     const VALID_REGISTER_BLOCK: &str = r#"package public_register_validation
 

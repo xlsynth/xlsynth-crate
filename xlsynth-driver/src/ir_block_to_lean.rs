@@ -8,7 +8,6 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use clap::ArgMatches;
-use xlsynth::IrPackage;
 use xlsynth_lean::block;
 use xlsynth_pir::ir_parser::Parser;
 
@@ -20,10 +19,6 @@ pub fn handle(matches: &ArgMatches) -> Result<()> {
     let input = std::fs::read_to_string(input_path)
         .with_context(|| format!("failed to read block IR file '{input_path}'"))?;
     let top = matches.get_one::<String>("top").map(String::as_str);
-    IrPackage::parse_ir(&input, None)
-        .context("native XLS package parse")?
-        .verify()
-        .context("native XLS package verification")?;
     let package = Parser::new(&input)
         .parse_and_validate_package()
         .context("typed PIR package parse/validation")?;
