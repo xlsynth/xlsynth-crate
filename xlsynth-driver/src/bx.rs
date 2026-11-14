@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use xlsynth::dslx;
 use xlsynth_bx::invariant_prover::{
     InvariantMode, InvariantQueryResult, InvariantResult, check_invariant,
 };
@@ -16,6 +17,7 @@ use xlsynth_bx::{
 };
 use xlsynth_g8r::block2sequential::optimize_and_lower_bx_block;
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
+use xlsynth_lean::block;
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::parse_xls_ir_package;
 use xlsynth_pir::ir_utils::is_valid_package_name;
@@ -182,6 +184,13 @@ pub fn bx_prove_invariant_command() -> Command {
 
 pub fn bx_to_lean_command() -> Command {
     add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
+        .arg(
+            Arg::new("link-dslx")
+                .long("link-dslx")
+                .value_name("MODULE.x")
+                .conflicts_with("link-ir")
+                .help("Compile a DSLX module to implement BX extern functions and retain their declared types"),
+        )
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
@@ -630,9 +639,21 @@ pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Res
             active_low: input.active_low,
             asynchronous: matches.get_flag("reset-asynchronous"),
         };
-        let compiled =
-            xlsynth_lean::block::compile_bx(&input.source, input.package, reset, &input.imports)
-                .with_context(|| input.path.display().to_string())?;
+        let compiled = if let Some(path) = matches.get_one::<String>("link-dslx") {
+            let dslx_source = fs::read_to_string(path)
+                .with_context(|| format!("reading linked DSLX module '{path}'"))?;
+            let name = xlsynth::dslx_path_to_module_name(Path::new(path))?;
+            let mut import_data = dslx::ImportData::new(
+                input.imports.dslx_stdlib_path,
+                &input.imports.additional_search_paths,
+            );
+            let module = dslx::parse_and_typecheck(&dslx_source, path, name, &mut import_data)
+                .with_context(|| format!("checking linked DSLX module '{path}'"))?;
+            block::compile_bx_with_dslx(&input.source, module, reset, &input.imports)
+        } else {
+            block::compile_bx(&input.source, input.package, reset, &input.imports)
+        }
+        .with_context(|| input.path.display().to_string())?;
         report_warnings(input.path, input.warnings_as_errors, compiled.warnings())?;
         Ok(compiled)
     })?;

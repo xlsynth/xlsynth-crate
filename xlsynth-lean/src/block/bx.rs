@@ -17,6 +17,7 @@ use super::{BlockContext, LeanBlockBundle, readable, select_block};
 pub struct CompiledBx {
     pub(super) checked: CheckedModule,
     pub(super) package: ir::Package,
+    dslx: Option<super::helper_types::DslxLink>,
 }
 
 /// Check BX source with its import paths and lower it into the supplied
@@ -31,7 +32,27 @@ pub fn compile_bx(
     let checked =
         xlsynth_bx::check_source_with_options(source, options).map_err(anyhow::Error::msg)?;
     let package = xlsynth_bx::lower_module(&checked, package, reset).map_err(anyhow::Error::msg)?;
-    Ok(CompiledBx { checked, package })
+    Ok(CompiledBx {
+        checked,
+        package,
+        dslx: None,
+    })
+}
+
+/// Link the IR produced from this checked DSLX module and retain its source
+/// types for calls from the BX block.
+pub fn compile_bx_with_dslx(
+    source: &str,
+    module: xlsynth::dslx::TypecheckedModule,
+    reset: ResetBehavior,
+    options: &ImportOptions<'_>,
+) -> Result<CompiledBx> {
+    let (package, link) = super::helper_types::DslxLink::compile(module)?;
+    let compiled = compile_bx(source, package, reset, options)?;
+    Ok(CompiledBx {
+        dslx: Some(link),
+        ..compiled
+    })
 }
 
 impl CompiledBx {
@@ -50,7 +71,10 @@ impl CompiledBx {
     pub fn emit_readable(&self, block_name: Option<&str>) -> Result<LeanBlockBundle> {
         let graph = select_block(&self.package, block_name)?;
         let block = BlockContext::new(&self.package, graph)?;
-        let (declarations, interface) = self.readable_interface(&block)?;
+        let (mut declarations, mut interface) = self.readable_interface(&block)?;
+        if let Some(link) = &self.dslx {
+            link.add_signatures(&block, &mut declarations, &mut interface)?;
+        }
         readable::emit(&block, &declarations, &interface)
     }
 
