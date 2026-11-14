@@ -87,8 +87,7 @@ pub fn lower_module(
     package: Package,
     reset: ResetBehavior,
 ) -> Result<Package, String> {
-    lower_checked_module(module, package, reset, crate::check::MAX_TYPE_SIZE)
-        .map_err(|error| error.0)
+    lower_with_imports(module, package, reset, |_| {})
 }
 
 /// A lowering diagnostic ready for display, including any source excerpt.
@@ -101,11 +100,28 @@ impl From<String> for LowerError {
     }
 }
 
+pub(crate) fn lower_with_imports(
+    module: &CheckedModule,
+    package: Package,
+    reset: ResetBehavior,
+    on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
+) -> Result<Package, String> {
+    lower_checked_module(
+        module,
+        package,
+        reset,
+        crate::check::MAX_TYPE_SIZE,
+        on_import,
+    )
+    .map_err(|error| error.0)
+}
+
 fn lower_checked_module(
     module: &CheckedModule,
     mut package: Package,
     reset: ResetBehavior,
     empty_array_limit: usize,
+    mut on_import: impl FnMut(BTreeMap<String, crate::import_link::Symbol>),
 ) -> Result<Package, LowerError> {
     verify_package(&package).map_err(|error| error.to_string())?;
     let mut layouts = Layouts::new(&module.structs);
@@ -132,12 +148,13 @@ fn lower_checked_module(
         .collect::<Vec<_>>();
     let mut imported = BTreeMap::new();
     for batch in &module.imports.batches {
-        let indices = link_imported_functions(
+        let (indices, symbols) = link_imported_functions(
             &mut package,
             batch.package.clone(),
             &batch.roots,
             &reserved_names,
         )?;
+        on_import(symbols);
         for (&id, index) in batch.call_ids.iter().zip(indices) {
             let call = &module.imports.calls[id];
             let PackageMember::Function(function) = &package.members[index] else {
@@ -1753,6 +1770,7 @@ block both(clk, x: u1) -> u1 {
                 empty_package("design"),
                 ResetBehavior::default(),
                 limit,
+                |_| {},
             )
             .map_err(|error| error.0);
             if let Some(scope) = exhausted_scope {

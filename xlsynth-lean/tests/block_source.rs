@@ -43,6 +43,33 @@ block show(clk, value: Packet) -> (Packet,) { (value,) }
 }
 
 #[test]
+fn readable_interface_uses_linked_bx_library_structs() {
+    let library = tempfile::tempdir().unwrap();
+    std::fs::write(
+        library.path().join("lib.bx"),
+        "struct Word { value: u8 } pub struct Packet { payload: Word }",
+    )
+    .unwrap();
+    let compiled = compile_bx(
+        "use lib; struct Packet { tag: bool }
+         block demo(clk, p: lib::Packet, q: Packet) -> lib::Packet { p }",
+        xlsynth_bx::empty_package("example"),
+        Default::default(),
+        &xlsynth_bx::ImportOptions {
+            additional_search_paths: vec![library.path()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bundle = compiled.emit_readable(Some("demo")).unwrap();
+    let types = &bundle.files[1].1;
+    assert!(types.contains("structure «lib::Packet»"), "{types}");
+    assert!(types.contains("structure «Packet»"), "{types}");
+    assert!(types.contains("«value» : _root_.BitVec 8"), "{types}");
+    assert!(types.contains("«payload» :"), "{types}");
+}
+
+#[test]
 fn signed_public_output_reports_the_bx_port() {
     let compiled = compile("block machine(clk, data: u8) -> s8 { data as s8 }");
     let diagnostic = format!("{:#}", compiled.emit_readable(None).err().unwrap());

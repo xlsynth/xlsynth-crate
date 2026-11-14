@@ -871,11 +871,15 @@ fn resolve_type<'m>(
                 return Ok(alias.ty.clone());
             }
             if let Some((subject, member)) = lookup_use(name, types.resolver, is_local)? {
-                if let Type::Applied { args, .. } = ty {
-                    types.resolver.resolve_applied(&subject, &member, args)
+                let resolved = if let Type::Applied { args, .. } = ty {
+                    types.resolver.resolve_applied(&subject, &member, args)?
                 } else {
-                    types.resolver.resolve_named(&subject, &member)
-                }
+                    types.resolver.resolve_named(&subject, &member)?
+                };
+                types
+                    .resolver
+                    .record_written_type(ty, &subject, &member, &resolved)?;
+                Ok(resolved)
             } else if let Some((qualifier, _)) = name.split_once("::") {
                 Err(format!("unknown use binding '{qualifier}' in '{name}'"))
             } else if let Some(template) = types.structs.template(name) {
@@ -1798,7 +1802,7 @@ pub(crate) fn check_sources(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
 ) -> Result<CheckedModule, String> {
-    check_sources_with_tests(root, imports, options, None)
+    check_sources_with_tests(root, imports, options, None, |_| {}, None)
 }
 
 /// Elaborate test-only harnesses before draining the shared specialization
@@ -1808,6 +1812,8 @@ pub(crate) fn check_sources_with_tests(
     imports: crate::bx_import::SourceImports<'_>,
     options: &ImportOptions<'_>,
     mut tests: Option<&mut crate::test_runner::TestSuite>,
+    on_import: impl FnMut(xlsynth::dslx::TypecheckedModule),
+    captured_sources: Option<&mut crate::import_structs::CapturedSources>,
 ) -> Result<CheckedModule, String> {
     let linked = imports.libraries.as_ref();
     let module = linked.map_or(root, |l| &l.module);
@@ -1851,6 +1857,7 @@ pub(crate) fn check_sources_with_tests(
     for order in imports.declaration_orders {
         order.verify(&resolver)?;
     }
+    resolver.capture_written_types(captured_sources.is_some());
     let mut structs = StructTable::default();
     for alias in &module.type_aliases {
         let name =
@@ -2294,15 +2301,19 @@ pub(crate) fn check_sources_with_tests(
             .collect();
         checked.resolve_pure_test_dependencies(harnesses);
     }
-    checked.imports = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
+    let used = if linked.is_some() || declarations.assertion_instantiated_callee.get() {
         let calls = checked.retain_reachable_dependencies();
         if linked.is_some() {
             checked.restore_extern_names();
         }
-        resolver.finish_with_calls(Some(&calls))?
+        Some(calls)
     } else {
-        resolver.finish()?
+        None
     };
+    if let Some(sources) = captured_sources {
+        *sources = resolver.take_sources();
+    }
+    checked.imports = resolver.finish_with_calls(used.as_ref(), on_import)?;
     Ok(checked)
 }
 

@@ -5,7 +5,7 @@ use super::{
     BlockContext,
     source_types::{
         EnumMember, HelperSignature, SourceType, StatefulInterface, StructField, TypeDecl,
-        source_shape,
+        resolve_aliases, source_shape,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -17,6 +17,7 @@ use xlsynth::{
         convert_named_type_definition,
     },
 };
+use xlsynth_bx::ImportNames;
 use xlsynth_pir::{ir, ir_parser::Parser};
 
 /// The owner of the checked declarations and the functions emitted from them.
@@ -24,10 +25,19 @@ use xlsynth_pir::{ir, ir_parser::Parser};
 /// these functions.
 pub(super) struct DslxLink {
     module: dslx::TypecheckedModule,
-    symbols: BTreeSet<String>,
+    module_names: Option<ImportNames>,
+    symbols: BTreeMap<String, String>,
 }
 
 impl DslxLink {
+    pub(super) fn from_import(import: xlsynth_bx::LinkedImport) -> Self {
+        Self {
+            module: import.module,
+            module_names: Some(import.module_names),
+            symbols: import.symbols,
+        }
+    }
+
     pub(super) fn compile(module: dslx::TypecheckedModule) -> Result<(ir::Package, Self)> {
         let text = module
             .to_ir_text()
@@ -39,12 +49,21 @@ impl DslxLink {
             .members
             .iter()
             .filter_map(|member| match member {
-                ir::PackageMember::Function(function) => Some(function.name.clone()),
+                ir::PackageMember::Function(function) => {
+                    Some((function.name.clone(), function.name.clone()))
+                }
                 // Only IR functions can be called as BX helpers.
                 _ => None,
             })
             .collect();
-        Ok((package, Self { module, symbols }))
+        Ok((
+            package,
+            Self {
+                module,
+                module_names: None,
+                symbols,
+            },
+        ))
     }
 
     pub(super) fn add_signatures(
@@ -53,30 +72,36 @@ impl DslxLink {
         declarations: &mut Vec<TypeDecl>,
         interface: &mut StatefulInterface,
     ) -> Result<()> {
-        let reachable = block
-            .helpers
+        let linked: BTreeSet<_> = block.helpers.iter().map(|f| f.name.as_str()).collect();
+        let reachable = self
+            .symbols
             .iter()
-            .filter(|f| self.symbols.contains(&f.name))
-            .map(|f| f.name.as_str())
+            .filter(|(_, destination)| linked.contains(destination.as_str()))
+            .map(|(original, _)| original.as_str())
             .collect::<BTreeSet<_>>();
         if reachable.is_empty() {
             return Ok(());
         }
-        let module = self.module.get_module();
-        let root = ModuleContext {
-            qualifier: module.get_name(),
-            module,
-            type_info: self.module.get_type_info(),
-        };
-        let mut catalogue = Catalogue {
-            context: root.clone(),
-            reachable,
-            declarations: Vec::new(),
-            helpers: BTreeMap::new(),
-            unsupported: BTreeMap::new(),
-            entry: root,
-        };
+        let mut catalogue = Catalogue::new(&self.module, self.module_names.as_ref(), reachable);
         catalogue.collect_helpers()?;
+        catalogue.helpers = catalogue
+            .helpers
+            .into_iter()
+            .map(|(original, sig)| (self.symbols[&original].clone(), sig))
+            .collect();
+        // From this point all call edges (including generated loop bodies)
+        // come from the destination package.
+        catalogue.reachable = self
+            .symbols
+            .values()
+            .map(String::as_str)
+            .filter(|destination| linked.contains(destination))
+            .collect();
+        merge_declarations(
+            declarations,
+            std::mem::take(&mut catalogue.declarations),
+            interface,
+        )?;
         catalogue.add_loop_bodies(block, interface);
         for function in &block.helpers {
             if let Some(sig) = catalogue.helpers.get(&function.name) {
@@ -87,25 +112,167 @@ impl DslxLink {
                 );
                 for ((name, ty), param) in sig.params.iter().zip(&function.params) {
                     ensure!(
-                        source_shape(ty, &catalogue.declarations)? == function.get_node(*param).ty,
+                        source_shape(ty, declarations)? == function.get_node(*param).ty,
                         "type of linked helper {} parameter {name}",
                         function.name
                     );
                 }
                 ensure!(
-                    source_shape(&sig.result, &catalogue.declarations)? == function.ret_ty,
+                    source_shape(&sig.result, declarations)? == function.ret_ty,
                     "result of linked helper {}",
                     function.name
                 );
             }
         }
-        declarations.extend(catalogue.declarations);
         interface.helpers.extend(catalogue.helpers);
         Ok(())
     }
 }
+
+/// BX reflects imported structs into concrete port types and erases aliases.
+/// Keep the checked DSLX spelling, with its dependencies before its users.
+fn merge_declarations(
+    prior: &mut Vec<TypeDecl>,
+    incoming: Vec<TypeDecl>,
+    interface: &mut StatefulInterface,
+) -> Result<()> {
+    let mut replaced = Vec::new();
+    let mut merged = incoming;
+    let mut aliases = BTreeSet::new();
+    for decl in prior.drain(..) {
+        if let Some(index) = merged.iter().position(|d| d.name() == decl.name()) {
+            if decl != merged[index] {
+                if matches!(decl, TypeDecl::Struct { .. })
+                    && matches!(merged[index], TypeDecl::Alias { .. })
+                {
+                    aliases.insert(decl.name().to_owned());
+                }
+                replaced.push((decl, index));
+            }
+        } else {
+            merged.push(decl);
+        }
+    }
+    // BX can refer to the imported spelling inside another record or aggregate.
+    // Keep that spelling, but use its checked declaration kind throughout.
+    fn restore_alias(ty: &mut SourceType, aliases: &BTreeSet<String>) {
+        match ty {
+            SourceType::Struct { name } if aliases.contains(name) => {
+                *ty = SourceType::Alias {
+                    name: std::mem::take(name),
+                };
+            }
+            SourceType::Tuple { members } => {
+                for ty in members {
+                    restore_alias(ty, aliases);
+                }
+            }
+            SourceType::Array { element, .. } => restore_alias(element, aliases),
+            _ => {}
+        }
+    }
+    if !aliases.is_empty() {
+        for decl in merged
+            .iter_mut()
+            .chain(replaced.iter_mut().map(|(decl, _)| decl))
+        {
+            match decl {
+                TypeDecl::Struct { fields, .. } => {
+                    for field in fields {
+                        restore_alias(&mut field.source_type, &aliases);
+                    }
+                }
+                TypeDecl::Alias { target, .. } => restore_alias(target, &aliases),
+                TypeDecl::Enum { .. } => {}
+            }
+        }
+        for ty in interface
+            .inputs
+            .values_mut()
+            .chain(interface.registers.values_mut())
+            .chain(&mut interface.outputs)
+        {
+            restore_alias(ty, &aliases);
+        }
+        for sig in interface.helpers.values_mut() {
+            for (_, ty) in &mut sig.params {
+                restore_alias(ty, &aliases);
+            }
+            restore_alias(&mut sig.result, &aliases);
+        }
+    }
+    for (old, index) in replaced {
+        let new = &merged[index];
+        let mut target = new;
+        if let TypeDecl::Alias { target: ty, .. } = new
+            && let SourceType::Struct { name } = resolve_aliases(ty, &merged)?
+        {
+            target = merged
+                .iter()
+                .find(|d| d.name() == name)
+                .with_context(|| format!("unknown linked struct {name}"))?;
+        }
+        let (
+            TypeDecl::Struct {
+                fields: old_fields, ..
+            },
+            TypeDecl::Struct { fields, .. },
+        ) = (&old, target)
+        else {
+            bail!("conflicting declarations for linked type {}", new.name());
+        };
+        let normalized = |fields: &[StructField]| -> Result<Vec<_>> {
+            fields
+                .iter()
+                .map(|f| Ok((f.name.clone(), resolve_aliases(&f.source_type, &merged)?)))
+                .collect()
+        };
+        ensure!(
+            normalized(old_fields)? == normalized(fields)?,
+            "conflicting fields in linked type {}",
+            new.name()
+        );
+    }
+    *prior = merged;
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn linked_struct_alias_rejects_reordered_equal_width_fields() {
+    let record = |name: &str, field_names: [&str; 2]| TypeDecl::Struct {
+        name: name.into(),
+        fields: field_names
+            .into_iter()
+            .map(|name| StructField {
+                name: name.into(),
+                source_type: SourceType::Bits { width: 8 },
+            })
+            .collect(),
+    };
+    let mut reflected = vec![record("Alias", ["zebra", "apple"])];
+    let checked = vec![
+        record("Packet", ["apple", "zebra"]),
+        TypeDecl::Alias {
+            name: "Alias".into(),
+            target: SourceType::Struct {
+                name: "Packet".into(),
+            },
+        },
+    ];
+    let mut interface = StatefulInterface {
+        inputs: Default::default(),
+        outputs: Default::default(),
+        registers: Default::default(),
+        helpers: Default::default(),
+    };
+    let error = merge_declarations(&mut reflected, checked, &mut interface).unwrap_err();
+    assert_eq!(error.to_string(), "conflicting fields in linked type Alias");
+}
+
 /// Declarations collected in source order from the native DSLX type checker.
 struct Catalogue<'a> {
+    module_names: Option<&'a ImportNames>,
     entry: ModuleContext,
     declarations: Vec<TypeDecl>,
     reachable: BTreeSet<&'a str>,
@@ -143,9 +310,55 @@ impl ModuleContext {
     }
 }
 
-impl Catalogue<'_> {
+/// Collect an interface annotation before transparent aliases are erased.
+pub(super) fn imported_struct(
+    source: &xlsynth_bx::LinkedStruct,
+    declarations: &mut Vec<TypeDecl>,
+) -> Result<SourceType> {
+    let mut catalogue = Catalogue::new(&source.module, Some(&source.module_names), BTreeSet::new());
+    catalogue.declarations = std::mem::take(declarations);
+    let ty = catalogue.annotation_type(&source.annotation)?;
+    *declarations = catalogue.declarations;
+    Ok(ty)
+}
+
+impl<'a> Catalogue<'a> {
+    fn new(
+        module: &dslx::TypecheckedModule,
+        module_names: Option<&'a ImportNames>,
+        reachable: BTreeSet<&'a str>,
+    ) -> Self {
+        let root = ModuleContext {
+            module: module.get_module(),
+            qualifier: module.get_module().get_name(),
+            type_info: module.get_type_info(),
+        };
+        Self {
+            context: root.clone(),
+            module_names,
+            reachable,
+            declarations: Vec::new(),
+            helpers: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
+            entry: root,
+        }
+    }
+
+    fn source_qualifier(&self) -> &str {
+        let native = self.context.qualifier.as_str();
+        self.module_names
+            .map_or(native, |names| names.source_module_name(native))
+    }
+
+    fn linked_symbol(&self, native: String) -> String {
+        match self.module_names {
+            Some(names) => names.restore_ir_name(&native),
+            None => native,
+        }
+    }
+
     fn qualified_name(&self, local: &str) -> String {
-        format!("{}::{local}", self.context.qualifier)
+        format!("{}::{local}", self.source_qualifier())
     }
 
     // Visit imported declarations on demand. The compiler already resolved each
@@ -507,6 +720,7 @@ impl BridgeBuilder for Catalogue<'_> {
             // Key by the IR symbol so a function of the same name in an import
             // cannot acquire a local function's source types.
             let symbol = xlsynth::mangle_dslx_name(&self.context.module.get_name(), name)?;
+            let symbol = self.linked_symbol(symbol);
             self.helpers.insert(symbol, signature);
         }
         Ok(())
@@ -538,6 +752,7 @@ impl Catalogue<'_> {
             }
             if caller.get_parametric_binding_count() == 0 {
                 let symbol = xlsynth::mangle_dslx_name(&module_name, &function_name)?;
+                let symbol = self.linked_symbol(symbol);
                 if self.reachable.contains(symbol.as_str()) {
                     self.context = owner.clone();
                     convert_function(&caller, &owner.type_info, self)?;
@@ -625,6 +840,7 @@ impl Catalogue<'_> {
                 Some(&env),
                 None,
             )?;
+            let symbol = self.linked_symbol(symbol);
             if self.helpers.contains_key(&symbol) || !self.reachable.contains(symbol.as_str()) {
                 continue;
             }
