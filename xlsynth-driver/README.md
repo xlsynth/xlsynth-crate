@@ -596,7 +596,7 @@ checked. Three runnable examples compare DSLX state machines using the same
 input stream and show the effect of induction depth and a checked helper lemma.
 [Observational equivalence case studies](examples/bx-observational-equivalence/README.md)
 
-### `bx2lean`: BX to raw and readable Lean
+### `bx-to-lean`: BX to raw and readable Lean
 
 Generate a clock-step model from a BX block. Proofs can use its declared
 register, input, and output field names. For example, this block outputs the
@@ -612,7 +612,7 @@ block counter(clk, x: u8) -> Outputs {
 ```
 
 ```shell
-xlsynth-driver bx2lean counter.bx --output-dir lean
+xlsynth-driver bx-to-lean counter.bx --output-dir lean
 ```
 
 - `--output-dir <NEW_DIR>` is required. Its parent must exist and the directory
@@ -629,14 +629,14 @@ xlsynth-driver bx2lean counter.bx --output-dir lean
 - Reset defaults to synchronous and active-high. Use `--reset-active-low` to
   change polarity. The clock-step model rejects asynchronous register resets.
 
-### `block2lean`: Block IR to Lean
+### `ir-block-to-lean`: Block IR to Lean
 
 Generate a raw Lean clock-step model for a block in a saved XLS IR package. The model imports the project module `XlsynthLean.IR`.
 The model evaluates outputs and simultaneous register updates from current
 inputs and old register values. Assertions are reported as results.
 
 ```shell
-xlsynth-driver block2lean counter.ir --top counter --output Generated.lean
+xlsynth-driver ir-block-to-lean counter.ir --top counter --output Generated.lean
 ```
 
 - `--top <NAME>` selects a block, overriding the declared package top. Without

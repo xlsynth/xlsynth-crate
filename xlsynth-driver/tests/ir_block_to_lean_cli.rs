@@ -16,7 +16,7 @@ fn invoke(directory: &Path, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
         .current_dir(directory)
         .env_remove("RUST_LOG")
-        .arg("block2lean")
+        .arg("ir-block-to-lean")
         .args(arguments)
         .output()
         .unwrap()

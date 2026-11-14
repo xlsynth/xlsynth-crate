@@ -980,7 +980,7 @@ block delay(clk, x: u8) -> u8 {
 }
 
 #[test]
-fn bx2lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()> {
+fn bx_to_lean_emits_the_selected_block_and_preserves_existing_output() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     fs::write(
@@ -995,7 +995,7 @@ block counter(clk, x: u8) -> Outputs {
 }"#,
     )?;
     let options = ["design.bx", "--top=counter", "--reset-active-low"];
-    let args = [&["bx2lean"][..], &options, &["--output-dir=lean"]].concat();
+    let args = [&["bx-to-lean"][..], &options, &["--output-dir=lean"]].concat();
     assert!(stdout(root, &args)?.is_empty());
     let mut files = fs::read_dir(root.join("lean"))?
         .map(|entry| entry.map(|entry| entry.file_name()))
@@ -1017,7 +1017,7 @@ block counter(clk, x: u8) -> Outputs {
     )?;
     assert_eq!(
         fs::read_to_string(root.join("lean/Generated.lean"))?,
-        stdout(root, &["block2lean", "saved.ir"])?
+        stdout(root, &["ir-block-to-lean", "saved.ir"])?
     );
     fs::write(root.join("lean/Generated.lean"), "keep")?;
     assert!(!driver(root, &args)?.status.success());
@@ -1028,7 +1028,7 @@ block counter(clk, x: u8) -> Outputs {
     let missing = driver(
         root,
         &[
-            "bx2lean",
+            "bx-to-lean",
             "design.bx",
             "--top=unknown",
             "--output-dir=missing",
