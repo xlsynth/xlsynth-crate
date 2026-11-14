@@ -2,22 +2,26 @@
 package private_modes
 
 block contact(io: bits[2][2]) {
-  ext_inout io(bits[2][2])
+  ext_inout_net io(bits[2][2], ports=[io])
 }
 
 block forward(io: bits[2][2]) {
-  ext_inout io(bits[2][2])
+  ext_inout_net io(bits[2][2], ports=[io])
   instantiation leaf(block=contact, kind=block)
-  bind: () = ext_instantiation_inout(instantiation=leaf, port_name=io, parent_port=io, id=1)
+  bind: () = ext_instantiation_inout(instantiation=leaf, port_name=io, net=io, id=1)
 }
 
 top block host(tx: bits[2][2], oe: bits[1], rx: bits[2][2]) {
+  ext_inout_net reader_io(bits[2][2])
+  ext_inout_net writer_io(bits[2][2])
   instantiation reader(block=forward, kind=block)
   instantiation writer(block=forward, kind=block)
   tx: bits[2][2] = input_port(name=tx, id=2)
   oe: bits[1] = input_port(name=oe, id=3)
-  sense: bits[2][2] = ext_instantiation_inout_output(instantiation=reader, port_name=io, id=4)
-  drive: () = ext_instantiation_inout_input(tx, oe, instantiation=writer, port_name=io, id=5)
+  read_link: () = ext_instantiation_inout(instantiation=reader, port_name=io, net=reader_io, id=7)
+  write_link: () = ext_instantiation_inout(instantiation=writer, port_name=io, net=writer_io, id=8)
+  sense: bits[2][2] = ext_inout_read(net=reader_io, id=4)
+  drive: () = ext_inout_drive(tx, oe, net=writer_io, id=5)
   rx: () = output_port(sense, name=rx, id=6)
 }
 

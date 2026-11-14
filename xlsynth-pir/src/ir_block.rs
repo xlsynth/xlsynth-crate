@@ -473,8 +473,8 @@ impl std::fmt::Display for Block {
     }
 }
 
-/// Allocates block-local net names without capturing existing IR names or net
-/// references.
+/// Allocates names for builder-created private nets without shadowing user
+/// names.
 pub(crate) struct InoutNetNames {
     taken: std::collections::HashSet<String>,
     next_suffix: std::collections::HashMap<String, usize>,
@@ -499,11 +499,6 @@ impl InoutNetNames {
             let name = match &node.payload {
                 NodePayload::InputPort { name, .. } | NodePayload::OutputPort { name, .. } => name,
                 NodePayload::Assert { label, .. } | NodePayload::Cover { label, .. } => label,
-                // An undeclared reference must still fail verification after
-                // migration.
-                NodePayload::ExtInoutRead { net }
-                | NodePayload::ExtInoutDrive { net, .. }
-                | NodePayload::ExtInstantiationInout { net, .. } => net,
                 _ => continue,
             };
             taken.insert(name.clone());

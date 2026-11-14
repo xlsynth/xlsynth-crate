@@ -1009,16 +1009,19 @@ fn split_pin_builder_checks_types_ownership_and_connection_mode() {
 }
 
 #[test]
-fn split_pin_backends_reject_unused_declarations_and_private_access() {
+fn backends_reject_unused_inout_declarations_and_private_reads() {
     let mut leaf = BlockBuilder::new("leaf");
-    leaf.declare_inout_port("io", Type::Bits(1)).unwrap();
+    leaf.declare_inout_net("pin", Type::Bits(1), &["io"])
+        .unwrap();
     let mut package = leaf.build_package("pins").unwrap();
     assert!(package.uses_pir_extensions());
     let mut parent = BlockBuilder::new("parent");
     let child = parent
         .instantiate("u", package.get_block("leaf").unwrap())
         .unwrap();
-    parent.ext_instantiation_inout_output(child, "io").unwrap();
+    let bus = parent.declare_inout_net("bus", Type::Bits(1), &[]).unwrap();
+    parent.bind_inout_net(child, "io", bus).unwrap();
+    parent.ext_inout_read(bus).unwrap();
     parent.build_into_package(&mut package).unwrap();
     for name in ["leaf", "parent"] {
         let error = BlockEvaluator::prepare(&package, name)

@@ -147,13 +147,16 @@ top block unused() { ext_inout_net floating(bits[3]) }";
 fn inout_data_types_and_enables_are_checked() {
     let single = r#"package pads
 top block cell_io(data: bits[4], oe: bits[1], io: bits[4]) {
+  ext_inout_net pin(bits[4], ports=[io])
   data: bits[4] = input_port(name=data, id=1)
   oe: bits[1] = input_port(name=oe, id=2)
-  io: bits[4] = ext_inout_port(data, oe, name=io, id=3)
+  drive: () = ext_inout_drive(data, oe, net=pin, id=3)
 }"#;
+    Parser::new(single).parse_and_validate_package().unwrap();
     for (old, new) in [
-        ("ext_inout_port(data, oe,", "ext_inout_port(data,"),
-        ("ext_inout_port(data, oe,", "ext_inout_port(data, oe, oe,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(data, oe, oe,"),
+        ("ext_inout_drive(data, oe,", "ext_inout_drive(oe, oe,"),
         ("oe: bits[1]", "oe: bits[2]"),
         ("io: bits[4]", "io: bits[2][2]"),
         ("bits[4]", "bits[0]"),

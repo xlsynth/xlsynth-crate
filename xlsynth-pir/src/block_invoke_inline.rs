@@ -521,17 +521,18 @@ fn drive(sensed: bits[1] id=1) -> bits[1] {
   ret zero: bits[1] = literal(value=0, id=2)
 }
 block child(data: bits[1], io: bits[1]) {
+  ext_inout_net pad(bits[1], ports=[io])
   data: bits[1] = input_port(name=data, id=3)
   on: bits[1] = literal(value=1, id=4)
   driven: bits[1] = invoke(data, to_apply=drive, id=5)
-  io: bits[1] = ext_inout_port(driven, on, name=io, id=6)
+  drive_pad: () = ext_inout_drive(driven, on, net=pad, id=6)
 }
 top block parent(pin: bits[1]) {
+  ext_inout_net bus(bits[1], ports=[pin])
   instantiation cell(block=child, kind=block)
-  off: bits[1] = literal(value=0, id=7)
-  pin: bits[1] = ext_inout_port(off, off, name=pin, id=8)
-  sense: () = instantiation_input(pin, instantiation=cell, port_name=data, id=9)
-  bind_pin: () = ext_instantiation_inout(instantiation=cell, port_name=io, parent_port=pin, id=10)
+  bind_pin: () = ext_instantiation_inout(instantiation=cell, port_name=io, net=bus, id=7)
+  sample: bits[1] = ext_inout_read(net=bus, id=8)
+  sense: () = instantiation_input(sample, instantiation=cell, port_name=data, id=9)
 }
 "#;
         let package = Parser::new(ir).parse_package().unwrap();

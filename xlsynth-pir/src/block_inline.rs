@@ -516,13 +516,13 @@ top fn main(x: bits[1] id=1) -> bits[1] {
 }
 block ordinary() {}
 block cell(io: bits[1]) {
-  ext_inout io(bits[1])
+  ext_inout_net pad(bits[1], ports=[io])
 }
 "#;
         let mut package = Parser::new(source).parse_and_validate_package().unwrap();
         let before = package.to_string();
         let error = inline_all_blocks_in_package(&mut package).unwrap_err();
-        assert!(error.contains("'io' in 'cell'"), "{error}");
+        assert!(error.contains("ext_inout_net 'pad' in 'cell'"), "{error}");
         assert_eq!(package.to_string(), before);
     }
 

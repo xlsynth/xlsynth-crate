@@ -401,8 +401,3 @@ is invalid. Registers break combinational feedback. Use `block2sv --layout=none`
 (the default) for RTL. Evaluation, formal and gate projection, desugared/FFI
 extension emission, and pipeline layout reject inout nets, including unused
 private declarations.
-
-The Rust parser accepts the previous `ext_inout` declarations, split port and
-instance access operations, `parent_port` bindings, and combined
-`ext_inout_port` syntax. Serialization emits net declarations and generic
-read, drive, and binding operations.

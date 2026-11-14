@@ -1,6 +1,7 @@
 package registered_pad
 
 top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], seen: bits[8]) {
+  ext_inout_net pin(bits[8], ports=[pin])
   reg data_reg(bits[8])
   reg oe_reg(bits[1])
   reg sense_reg(bits[8])
@@ -9,7 +10,8 @@ top block registered_pad(clk: clock, data: bits[8], oe: bits[1], pin: bits[8], s
   drive_q: bits[8] = register_read(register=data_reg, id=3)
   oe_q: bits[1] = register_read(register=oe_reg, id=4)
   sense_q: bits[8] = register_read(register=sense_reg, id=5)
-  pin: bits[8] = ext_inout_port(drive_q, oe_q, name=pin, id=6)
+  pin: bits[8] = ext_inout_read(net=pin, id=6)
+  drive: () = ext_inout_drive(drive_q, oe_q, net=pin, id=11)
   drive_write: () = register_write(data, register=data_reg, id=7)
   oe_write: () = register_write(oe, register=oe_reg, id=8)
   sense_write: () = register_write(pin, register=sense_reg, id=9)
