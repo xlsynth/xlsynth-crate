@@ -1269,7 +1269,7 @@ block delay(clk, xs: u8[3]) -> u8 {
             stdout(
                 root,
                 &[
-                    "bx2lean",
+                    "bx-to-lean",
                     "import.bx",
                     "--dslx-path=.",
                     "--readable-loop-names",
