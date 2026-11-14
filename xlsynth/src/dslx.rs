@@ -2162,9 +2162,8 @@ fn call() -> bits[32] {
             }
         }
 
-        assert!(function_names.contains(&"id".to_string()));
-        assert!(function_names.contains(&"id_N32".to_string()));
-        assert!(function_names.contains(&"call".to_string()));
+        function_names.sort_unstable();
+        assert_eq!(function_names, ["call", "id", "id_N32"]);
     }
 }
 
