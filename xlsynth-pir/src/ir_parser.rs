@@ -26,6 +26,25 @@ pub(crate) fn parse_outer_attribute(source: &str) -> Result<ir::OuterAttribute, 
     Ok(ir::OuterAttribute::new(kind, source))
 }
 
+/// XLS uses the last inner provenance attribute, if one is present. Read it
+/// from the spelling the block will emit, including programmatic edits.
+pub(crate) fn block_provenance(block: &Block) -> Result<Option<ir::BlockProvenance>, ParseError> {
+    for source in block.inner_attrs.iter().rev() {
+        let mut parser = Parser::new(source);
+        if parser.pop_attribute_name(AttributePosition::Inner)? == "provenance" {
+            let provenance = parser.parse_provenance_attribute()?;
+            parser.drop_or_error("]")?;
+            if !parser.at_eof() {
+                return Err(ParseError::new(
+                    "unexpected text after provenance attribute".into(),
+                ));
+            }
+            return Ok(Some(provenance));
+        }
+    }
+    Ok(None)
+}
+
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
         .map_err(|e| ParseError::new(format!("failed to read file: {}", e)))?;
@@ -95,6 +114,20 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ParseError: {}", self.msg)
     }
+}
+
+fn set_node_attribute<T>(
+    slot: &mut Option<T>,
+    value: T,
+    operator: &str,
+    name: &str,
+) -> Result<(), ParseError> {
+    if slot.replace(value).is_some() {
+        return Err(ParseError::new(format!(
+            "duplicate {operator} {name} attribute"
+        )));
+    }
+    Ok(())
 }
 
 /// Unified error for parse-and-validate helpers.
@@ -1250,6 +1283,15 @@ impl Parser {
         self.peek_is("#")
     }
 
+    fn pop_attribute_name(&mut self, position: AttributePosition) -> Result<String, ParseError> {
+        self.drop_or_error("#")?;
+        if matches!(position, AttributePosition::Inner) {
+            self.drop_or_error("!")?;
+        }
+        self.drop_or_error("[")?;
+        self.pop_identifier_or_error("attribute name")
+    }
+
     /// Parses one attribute production, retaining its original spelling.
     fn parse_attribute(
         &mut self,
@@ -1257,12 +1299,7 @@ impl Parser {
     ) -> Result<(ir::OuterAttributeKind, String), ParseError> {
         self.drop_whitespace_and_comments();
         let start = self.offset;
-        self.drop_or_error("#")?;
-        if matches!(position, AttributePosition::Inner) {
-            self.drop_or_error("!")?;
-        }
-        self.drop_or_error("[")?;
-        let name = self.pop_identifier_or_error("attribute name")?;
+        let name = self.pop_attribute_name(position)?;
         let kind = match name.as_str() {
             "non_synth" => ir::OuterAttributeKind::NonSynth,
             "initiation_interval" => {
@@ -1295,7 +1332,7 @@ impl Parser {
             }
             "reset" => ir::OuterAttributeKind::Reset(self.parse_reset_attribute()?),
             "provenance" => {
-                self.validate_provenance_attribute()?;
+                self.parse_provenance_attribute()?;
                 ir::OuterAttributeKind::Provenance
             }
             _ => return Err(ParseError::new(format!("unknown attribute: {name}"))),
@@ -1495,30 +1532,38 @@ impl Parser {
         Ok(reset)
     }
 
-    /// Validates a preserved `provenance` attribute.
-    fn validate_provenance_attribute(&mut self) -> Result<(), ParseError> {
+    /// Decodes the source identity regardless of argument order or spelling.
+    fn parse_provenance_attribute(&mut self) -> Result<ir::BlockProvenance, ParseError> {
+        let mut provenance = ir::BlockProvenance {
+            name: String::new(),
+            kind: ir::BlockProvenanceKind::Function,
+        };
         self.validate_attribute_keyword_args("provenance", &["name", "kind"], |key, parser| {
             match key {
                 "name" => {
-                    parser.pop_string_or_error()?;
+                    provenance.name = parser.pop_string_or_error()?;
                     Ok(())
                 }
                 "kind" => {
                     let value = parser.pop_string_or_error()?;
-                    match value.as_str() {
-                        "proc" | "function" => Ok(()),
-                        _ => Err(ParseError::new(format!(
-                            "invalid provenance kind: {}",
-                            value
-                        ))),
-                    }
+                    provenance.kind = match value.as_str() {
+                        "proc" => ir::BlockProvenanceKind::Proc,
+                        "function" => ir::BlockProvenanceKind::Function,
+                        _ => {
+                            return Err(ParseError::new(format!(
+                                "invalid provenance kind: {value}"
+                            )));
+                        }
+                    };
+                    Ok(())
                 }
                 _ => Err(ParseError::new(format!(
                     "unknown provenance attribute key: {}",
                     key
                 ))),
             }
-        })
+        })?;
+        Ok(provenance)
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
@@ -2344,6 +2389,7 @@ impl Parser {
         let mut saw_arch = false;
         let mut saw_signed = false;
         let mut saw_negated = false;
+        let mut explicit_id = None;
 
         loop {
             self.drop_whitespace_and_comments();
@@ -2358,7 +2404,8 @@ impl Parser {
             }
 
             if self.peek_is("id=") {
-                *maybe_id = Some(self.parse_id_attribute()?);
+                let value = self.parse_id_attribute()?;
+                set_node_attribute(&mut explicit_id, value, "ext_nary_add", "id")?;
             } else if self.peek_is("arch=") {
                 if saw_arch {
                     return Err(ParseError::new(
@@ -2400,6 +2447,7 @@ impl Parser {
             }
         }
 
+        *maybe_id = explicit_id.or(*maybe_id);
         if maybe_id.is_none() {
             return Err(ParseError::new(format!(
                 "expected id for ext_nary_add; rest: {:?}",
@@ -2778,7 +2826,8 @@ impl Parser {
                         maybe_id = Some(id_attr);
                         break;
                     } else if self.peek_is("lsb_prio=") {
-                        lsb_prio = Some(self.parse_bool_attribute("lsb_prio")?);
+                        let value = self.parse_bool_attribute("lsb_prio")?;
+                        set_node_attribute(&mut lsb_prio, value, &operator, "lsb_prio")?;
                     } else {
                         return Err(ParseError::new(format!(
                             "unexpected ext_prio_encode attribute; rest_of_line: {:?}",
@@ -3082,48 +3131,40 @@ impl Parser {
                 let mut register: Option<String> = None;
                 let mut load_enable: Option<ir::NodeRef> = None;
                 let mut reset: Option<ir::NodeRef> = None;
-                loop {
-                    self.drop_whitespace_and_comments();
-                    if !self.try_drop(",") {
-                        break;
-                    }
+                let mut explicit_id = None;
+                while self.try_drop(",") {
                     self.drop_whitespace_and_comments();
                     if self.peek_is("register") {
-                        register = Some(self.parse_identifier_attribute("register")?);
-                        continue;
-                    }
-                    if self.peek_is("load_enable") {
-                        load_enable = Some(self.parse_node_ref_attribute(
+                        let value = self.parse_identifier_attribute("register")?;
+                        set_node_attribute(&mut register, value, &operator, "register")?;
+                    } else if self.peek_is("load_enable") {
+                        let value = self.parse_node_ref_attribute(
                             "load_enable",
-                            &node_env,
+                            node_env,
                             "register_write load_enable",
-                        )?);
-                        continue;
+                        )?;
+                        set_node_attribute(&mut load_enable, value, &operator, "load_enable")?;
+                    } else if self.peek_is("reset") {
+                        let value = self.parse_node_ref_attribute(
+                            "reset", node_env, "register_write reset",
+                        )?;
+                        set_node_attribute(&mut reset, value, &operator, "reset")?;
+                    } else if self.peek_is("id=") {
+                        let value = self.parse_id_attribute()?;
+                        set_node_attribute(&mut explicit_id, value, &operator, "id")?;
+                    } else {
+                        break;
                     }
-                    if self.peek_is("reset") {
-                        reset = Some(self.parse_node_ref_attribute(
-                            "reset",
-                            &node_env,
-                            "register_write reset",
-                        )?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
                 }
                 let register = register.ok_or_else(|| {
                     ParseError::new("register_write missing register attribute".to_string())
                 })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
+                let id = explicit_id.or(maybe_id).ok_or_else(|| {
+                    ParseError::new(format!(
                         "expected id for register_write; rest_of_line: {:?}",
                         self.rest_of_line()
-                    )));
-                }
+                    ))
+                })?;
                 (
                     ir::NodePayload::RegisterWrite {
                         arg,
@@ -3131,104 +3172,62 @@ impl Parser {
                         load_enable,
                         reset,
                     },
-                    maybe_id.unwrap(),
+                    id,
                 )
             }
-            "instantiation_input" => {
-                let arg = self.parse_node_ref(&node_env, "instantiation_input arg")?;
-                let mut instantiation: Option<String> = None;
-                let mut port_name: Option<String> = None;
+            "instantiation_input" | "instantiation_output" => {
+                let arg = if operator == "instantiation_input" {
+                    let value = self.parse_node_ref(node_env, "instantiation_input arg")?;
+                    self.drop_or_error(",")?;
+                    Some(value)
+                } else {
+                    None
+                };
+                let mut instantiation = None;
+                let mut port_name = None;
+                let mut explicit_id = None;
                 loop {
                     self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation") {
+                        let value = self.parse_identifier_attribute("instantiation")?;
+                        set_node_attribute(&mut instantiation, value, &operator, "instantiation")?;
+                    } else if self.peek_is("port_name") {
+                        let value = self.parse_dotted_identifier_attribute("port_name")?;
+                        set_node_attribute(&mut port_name, value, &operator, "port_name")?;
+                    } else if self.peek_is("id=") {
+                        let value = self.parse_id_attribute()?;
+                        set_node_attribute(&mut explicit_id, value, &operator, "id")?;
+                    } else {
+                        break;
+                    }
                     if !self.try_drop(",") {
                         break;
                     }
-                    self.drop_whitespace_and_comments();
-                    if self.peek_is("instantiation") {
-                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
-                        continue;
-                    }
-                    if self.peek_is("port_name") {
-                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
                 }
                 let instantiation = instantiation.ok_or_else(|| {
-                    ParseError::new("instantiation_input missing instantiation attribute".to_string())
+                    ParseError::new(format!("{operator} missing instantiation attribute"))
                 })?;
                 let port_name = port_name.ok_or_else(|| {
-                    ParseError::new("instantiation_input missing port_name attribute".to_string())
+                    ParseError::new(format!("{operator} missing port_name attribute"))
                 })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
-                        "expected id for instantiation_input; rest_of_line: {:?}",
+                let id = explicit_id.or(maybe_id).ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected id for {operator}; rest_of_line: {:?}",
                         self.rest_of_line()
-                    )));
-                }
-                (
-                    ir::NodePayload::InstantiationInput {
+                    ))
+                })?;
+                let payload = match arg {
+                    Some(arg) => ir::NodePayload::InstantiationInput {
                         instantiation,
                         port_name,
                         arg,
                     },
-                    maybe_id.unwrap(),
-                )
-            }
-            "instantiation_output" => {
-                let mut instantiation: Option<String> = None;
-                let mut port_name: Option<String> = None;
-                let mut saw_attr = false;
-                loop {
-                    self.drop_whitespace_and_comments();
-                    if saw_attr {
-                        if !self.try_drop(",") {
-                            break;
-                        }
-                        self.drop_whitespace_and_comments();
-                    } else {
-                        saw_attr = true;
-                    }
-                    self.drop_whitespace_and_comments();
-                    if self.peek_is("instantiation") {
-                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
-                        continue;
-                    }
-                    if self.peek_is("port_name") {
-                        port_name = Some(self.parse_dotted_identifier_attribute("port_name")?);
-                        continue;
-                    }
-                    if self.peek_is("id=") {
-                        let id_attr = self.parse_id_attribute()?;
-                        maybe_id = Some(id_attr);
-                        continue;
-                    }
-                    break;
-                }
-                let instantiation = instantiation.ok_or_else(|| {
-                    ParseError::new("instantiation_output missing instantiation attribute".to_string())
-                })?;
-                let port_name = port_name.ok_or_else(|| {
-                    ParseError::new("instantiation_output missing port_name attribute".to_string())
-                })?;
-                if maybe_id.is_none() {
-                    return Err(ParseError::new(format!(
-                        "expected id for instantiation_output; rest_of_line: {:?}",
-                        self.rest_of_line()
-                    )));
-                }
-                (
-                    ir::NodePayload::InstantiationOutput {
+                    None => ir::NodePayload::InstantiationOutput {
                         instantiation,
                         port_name,
                     },
-                    maybe_id.unwrap(),
-                )
+                };
+                (payload, id)
             }
             "after_all" => {
                 // This is a variadic operation that puts the variadic node refs at the top

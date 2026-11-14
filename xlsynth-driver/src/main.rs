@@ -99,6 +99,7 @@ mod ir2pipeline;
 mod ir_aig_sharing;
 mod ir_annotate_ranges;
 mod ir_block_eval;
+mod ir_block_to_lean;
 mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
@@ -951,6 +952,7 @@ fn main() {
                 )
         )
         .subcommand(bx::bx2ir_command())
+        .subcommand(bx::bx_to_lean_command())
         .subcommand(bx::bx2gv_command())
         .subcommand(bx::bx_test_command())
         .subcommand(bx::bx_prove_quickcheck_command())
@@ -2089,6 +2091,23 @@ fn main() {
                         .help("Comma-separated output port names to drop")
                         .required(false)
                         .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-block-to-lean")
+                .about("Converts an XLS block IR package to Lean without invoking Lean")
+                .arg(Arg::new("input_file").value_name("INPUT_FILE").required(true))
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_name("NAME")
+                        .help("Select a block, overriding the package top"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .value_name("FILE")
+                        .help("Write to a file instead of stdout"),
                 ),
         )
         .subcommand(
@@ -4110,6 +4129,16 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("bx2ir", subm)) => {
             if let Err(error) = bx::bx2ir(subm, &config) {
                 report_cli_error_and_exit(&format!("{error:#}"), Some("bx2ir"), vec![]);
+            }
+        }
+        Some(("bx-to-lean", subm)) => {
+            if let Err(error) = bx::bx_to_lean(subm, &config) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("bx-to-lean"), vec![]);
+            }
+        }
+        Some(("ir-block-to-lean", subm)) => {
+            if let Err(error) = ir_block_to_lean::handle(subm) {
+                report_cli_error_and_exit(&format!("{error:#}"), Some("ir-block-to-lean"), vec![]);
             }
         }
         Some(("bx2gv", subm)) => {
