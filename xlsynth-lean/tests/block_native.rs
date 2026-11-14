@@ -849,7 +849,9 @@ example (q : State) (x : Input) : observe q x = (x.packet.zebra, x.flag) := by r
 #[test]
 fn bx_segmented_eval_projects_a_wide_positional_tuple() {
     let lanes = ["u8"; 64].join(", ");
-    let mut bx = format!("block reduce(clk, lane: ({lanes}), bias: u8) -> u8 {{\n");
+    let mut bx = format!(
+        "block reduce(clk, lane: ({lanes}), biases: u8[2], i: u1) -> u8 {{\nlet bias = biases[i];\n"
+    );
     let mut previous = "bias".to_string();
     // The 40 additions place the 160-op cut inside the lane reduction.
     for (i, operand) in std::iter::repeat_n("bias".to_string(), 40)
@@ -871,7 +873,10 @@ fn bx_segmented_eval_projects_a_wide_positional_tuple() {
         .count();
     assert_eq!(direct_reads, 64);
     #[cfg(feature = "lean-tests")]
-    check_bundle(bundle, "64-field tuple crossing a cut");
+    check_bundle(
+        bundle,
+        "64-field tuple crossing a cut with a separately indexed bias",
+    );
 }
 
 fn boolean_chain(operations: usize, operator: &str) -> LeanBlockBundle {
@@ -894,22 +899,33 @@ fn bx_boolean_xor_chain_corresponds_before_and_after_the_cut() {
 #[cfg(feature = "lean-tests")]
 #[test]
 fn bx_segmented_boolean_passthrough_reduces_symbolically() {
-    let mut bx =
-        String::from("block passthrough(clk, flag: bool, x: u8) -> (bool, u8) { let v0 = x;\n");
+    let mut bx = String::from(
+        "struct Packet { status: (bool, u8) }
+         block passthrough(clk, flag: bool, p: (bool, u8), packet: Packet, x: u8)
+             -> (bool, bool, bool, u8) {
+             reg saved: Packet;
+             saved := packet;
+             let v0 = x;\n",
+    );
     for i in 1..=161 {
         writeln!(bx, "let v{i} = v{} + x;", i - 1).unwrap();
     }
-    bx.push_str("(flag, v161)\n}");
+    bx.push_str("(flag, p.0, saved.status.0, v161)\n}");
     let mut bundle = bx_bundle(&bx);
     bundle.files.push((
         "PublicInterface.lean".into(),
         r#"import ReadableCorrespondence
 open XlsReadable
 example (q : State) (x : Input) : (observe q x).1 = x.flag := by rfl
+example (q : State) (x : Input) : (observe q x).2.1 = x.p.1 := by rfl
+example (q : State) (x : Input) : (observe q x).2.2.1 = q.saved.status.1 := by rfl
 "#
         .into(),
     ));
-    check_bundle(bundle, "Boolean input returned directly");
+    check_bundle(
+        bundle,
+        "direct Boolean input and forwarded input and register fields",
+    );
 }
 
 #[test]

@@ -35,7 +35,7 @@ use xlsynth_pir::{
 use crate::block::{
     BlockContext,
     raw::{self as lean, LeanBlockBundle, identifier, lean_type},
-    segments::{Segments, bundle_value, is_interface_read, projection},
+    segments::{Segments, bundle_value, is_interface_projection, projection},
     source_types::{SourceType, StatefulInterface, TypeDecl, resolve_aliases, source_shape},
 };
 use crate::local_expr::{LeanOperand, LocalRenderer, balanced};
@@ -57,6 +57,8 @@ fn tuple_value(elements: impl DoubleEndedIterator<Item = String>) -> String {
 /// Segmented evaluators bind each equation once and project incoming wires.
 #[derive(Clone, Copy)]
 enum OperandScope<'a> {
+    /// The public wrapper reads a verified field projection from q or x.
+    Interface,
     Local {
         inline_depth: usize,
     },
@@ -83,7 +85,7 @@ impl OperandScope<'_> {
     fn with_inline_depth(self, inline_depth: usize) -> Self {
         match self {
             Self::Local { .. } => Self::Local { inline_depth },
-            Self::Cut { .. } => self,
+            Self::Cut { .. } | Self::Interface => self,
         }
     }
 }
@@ -964,15 +966,14 @@ impl<'a> Presentation<'a> {
                 node.payload,
                 NodePayload::Literal(_) | NodePayload::Tuple(_) | NodePayload::Sel { .. }
             );
-            let value = if let OperandScope::Local {
-                inline_depth: depth @ 1..,
-            } = scope
-                && structural
-                && node.name.is_none()
-            {
-                self.expression(reference, scope.with_inline_depth(depth - 1))?
-            } else {
-                self.names[reference.index].clone()
+            let value = match scope {
+                OperandScope::Interface => self.expression(reference, scope)?,
+                OperandScope::Local {
+                    inline_depth: depth @ 1..,
+                } if structural && node.name.is_none() => {
+                    self.expression(reference, scope.with_inline_depth(depth - 1))?
+                }
+                _ => self.names[reference.index].clone(),
             };
             self.coerce(self.node_types[reference.index].as_ref(), target, &value)
         }
@@ -1475,11 +1476,10 @@ impl<'a> Presentation<'a> {
         };
         let result_operand = |reference: NodeRef, target: Option<&SourceType>| {
             if let Some(wires) = finished {
-                if is_interface_read(&block.graph.get_node(reference).payload) {
-                    // The wrapper still has the source input and old state.
-                    // A codec round trip need not reduce on a symbolic Bool.
-                    let source = self.expression(reference, OperandScope::LOCAL)?;
-                    self.coerce(self.node_types[reference.index].as_ref(), target, &source)
+                if is_interface_projection(&block.graph, reference) {
+                    // Keep source fields directly reducible. A Boolean codec
+                    // round trip need not reduce on a symbolic value.
+                    self.typed_operand(reference, target, OperandScope::Interface)
                 } else {
                     let scope = OperandScope::Cut {
                         wires,
@@ -1784,7 +1784,7 @@ end XlsReadable
     ///
     /// Restricting the rule to these functions avoids moving unrelated nested
     /// conditionals and reads through one another.
-    fn projection_functions(&self, include_tuple_projections: bool) -> Result<BTreeSet<String>> {
+    fn projection_functions(&self) -> Result<BTreeSet<String>> {
         let mut functions = BTreeSet::from([
             "XlsCodec.encodeBool".to_owned(),
             "XlsCodec.decodeBool".to_owned(),
@@ -1797,16 +1797,23 @@ end XlsReadable
                 &name,
             )?);
         }
-        // For wide cuts, enumerating the full tuple type for each field can
-        // exhaust the heartbeat budget as Lean compiles the segment tactic.
-        // Generic pair projections cover these unless vector indexing needs
-        // the typed projections in the final indexed rewrite.
-        if !include_tuple_projections {
-            return Ok(functions);
+        // Pair projections already distribute through conditionals. Only a
+        // projection through an indexed value also needs a typed vector-map
+        // rule. Including unrelated wide tuples repeats their entire type
+        // for every field when Lean elaborates the tactic.
+        let mut indexed_tuples = BTreeSet::new();
+        for graph in self.proof_graphs() {
+            for node in &graph.nodes {
+                if matches!(node.payload, NodePayload::ArrayIndex { .. }) {
+                    collect_tuple_types(&node.ty, &mut indexed_tuples);
+                }
+            }
         }
         for graph in self.proof_graphs() {
             for node in &graph.nodes {
-                if let NodePayload::TupleIndex { tuple, index } = &node.payload {
+                if let NodePayload::TupleIndex { tuple, index } = &node.payload
+                    && indexed_tuples.contains(graph.get_node_ty(*tuple))
+                {
                     functions.insert(format!(
                         "(fun (value : {}) => {})",
                         lean_type(&graph.get_node(*tuple).ty)?,
@@ -1885,8 +1892,7 @@ end XlsReadable
                 )?;
             }
         }
-        let functions = self
-            .projection_functions(segments.is_none() || self.proof_graphs().any(has_array_index))?;
+        let functions = self.projection_functions()?;
         let indexed = self
             .proof_graphs()
             .any(has_array_index)
@@ -2008,7 +2014,7 @@ end XlsReadable
                 out,
                 r#"local macro "xls_normalize" : tactic => `(tactic|
   first
-  | rfl
+  | with_reducible rfl
   | (simp only [{BOOLEAN_GATE_ENCODERS}] <;> done)
   | (
 {normalize}))
@@ -2104,6 +2110,20 @@ fn has_array_index(graph: &ir::NodeGraph) -> bool {
         .nodes
         .iter()
         .any(|node| matches!(node.payload, NodePayload::ArrayIndex { .. }))
+}
+
+/// Mapping a field projection over an indexed tuple yields another indexed
+/// value, so also collect tuples nested within its fields.
+fn collect_tuple_types<'a>(ty: &'a Type, tuples: &mut BTreeSet<&'a Type>) {
+    match ty {
+        Type::Tuple(fields) if tuples.insert(ty) => {
+            for field in fields {
+                collect_tuple_types(field, tuples);
+            }
+        }
+        Type::Array(array) => collect_tuple_types(&array.element_type, tuples),
+        _ => {}
+    }
 }
 
 /// Move each supplied projection inside a clamped array read so Lean can

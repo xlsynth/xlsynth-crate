@@ -7,7 +7,7 @@ use std::{collections::BTreeSet, fmt::Write};
 
 use anyhow::{Context, Result};
 use xlsynth_pir::{
-    ir::{NodePayload, NodeRef},
+    ir::{NodeGraph, NodePayload, NodeRef},
     ir_utils,
 };
 
@@ -17,10 +17,13 @@ use super::{BlockContext, raw};
 // for 192 Boolean operations exceeded Lean's default recursion limit.
 const MAX_LEAF_OPERATIONS: usize = 160;
 
-/// The public wrapper can read these wires from its old state or inputs.
-pub(super) fn is_interface_read(payload: &NodePayload) -> bool {
+/// A public result can select fields directly from the old state or inputs.
+pub(super) fn is_interface_projection(graph: &NodeGraph, mut wire: NodeRef) -> bool {
+    while let NodePayload::TupleIndex { tuple, .. } = &graph.get_node(wire).payload {
+        wire = *tuple;
+    }
     matches!(
-        payload,
+        graph.get_node(wire).payload,
         NodePayload::InputPort { .. } | NodePayload::RegisterRead { .. }
     )
 }
@@ -76,7 +79,7 @@ impl Segments {
         };
         // The result wrapper reads these fields directly. Reverse traversal
         // still adds them to the cuts required by equations that use them.
-        live.retain(|&index| !is_interface_read(&graph.nodes[index].payload));
+        live.retain(|&index| !is_interface_projection(graph, NodeRef { index }));
         let mut cuts = vec![snapshot(&live)];
         for leaf in leaves.iter().rev() {
             for &reference in leaf.iter().rev() {

@@ -24,7 +24,7 @@ impl Presentation<'_> {
         let mut eval_rules = self.enum_dispatch_laws(&mut out)?;
         self.proof_tactics(&mut out)?;
         if self.proof_graphs().any(has_array_index) {
-            let indexed = indexed_projection_simp(&self.projection_functions(true)?);
+            let indexed = indexed_projection_simp(&self.projection_functions()?);
             writeln!(
                 out,
                 "local macro \"xls_indexed_rfl\" : tactic =>\n  `(tactic| first | rfl | ({indexed}))\n"

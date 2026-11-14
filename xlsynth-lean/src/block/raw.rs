@@ -20,7 +20,7 @@ use xlsynth_pir::{
 
 use crate::LeanModuleName;
 use crate::block::BlockContext;
-use crate::block::segments::{Segments, bundle_value, is_interface_read, projection};
+use crate::block::segments::{Segments, bundle_value, is_interface_projection, projection};
 use crate::local_expr::{LeanOperand, LocalRenderer, RenderError, write_body_elaboration_limits};
 use crate::support::write_file;
 
@@ -330,8 +330,8 @@ fn emit_block(
     let result_operand = |reference: NodeRef| -> Result<String> {
         match finished {
             None => Ok(names[reference.index].clone()),
-            Some(_) if is_interface_read(&graph.get_node(reference).payload) => {
-                entry_value(reference)
+            Some(_) if is_interface_projection(graph, reference) => {
+                interface_value(namespace, graph, reference)
             }
             Some(wires) => {
                 let index = wires
@@ -829,6 +829,13 @@ pub(crate) fn node_expression(
                 }
             }),
     }
+}
+
+/// Replay a verified field projection against the public inputs or old state.
+fn interface_value(namespace: &str, graph: &ir::NodeGraph, reference: NodeRef) -> Result<String> {
+    node_expression(namespace, graph, reference, |operand| {
+        interface_value(namespace, graph, operand).map(LeanOperand::Expression)
+    })
 }
 
 /// Compute one next-state field with reset taking precedence over load enable.
