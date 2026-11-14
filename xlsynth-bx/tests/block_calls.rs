@@ -8,6 +8,35 @@ use xlsynth_pir::ir_parser::Parser;
 use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
 
 #[test]
+fn clockless_blocks_diagnose_registers_and_clocked_children_at_the_use() {
+    for (operation, child, reason) in [
+        (
+            "reg q: u8; q := x;",
+            "",
+            "2:5: clockless block cannot declare register 'q'; add `clk` to the block signature",
+        ),
+        (
+            "let q = child(x);",
+            "block child<T>(clk, x: T) -> T { reg r: T; r := x; r }",
+            "let 'q': 2:5: clockless block cannot call clocked block 'child'; add `clk` to the parent signature",
+        ),
+        (
+            "let q = child(x);",
+            "extern block child(clk, x: u8) -> u8;",
+            "let 'q': 2:5: clockless block cannot call clocked block 'child'; add `clk` to the parent signature",
+        ),
+    ] {
+        let source =
+            format!("pub block parent(x: u8) -> u8 {{\n    {operation}\n    q\n}}\n{child}");
+        let module = parse_module(&source).unwrap();
+        assert_eq!(
+            check_module(&module).unwrap_err(),
+            format!("block 'parent': {reason}")
+        );
+    }
+}
+
+#[test]
 fn nested_let_patterns_require_matching_tuple_members() -> Result<(), String> {
     for (ty, pattern, result) in [
         ("((u8,), u8)", "((a), b)", "a + b"),
@@ -389,6 +418,44 @@ fn imported_block_checks_by_name_and_wires_real_clock_and_reset_ports() {
         xlsynth::IrPackage::parse_ir(&pkg.to_string(), None).unwrap();
         emit_system_verilog(&pkg, &BlockCodegenOptions::default()).unwrap();
     }
+}
+
+#[test]
+fn extern_block_clock_presence_must_match_the_linked_interface() -> Result<(), String> {
+    let source = r#"extern block passthrough(data: u8) -> u8;
+block wrapper(x: u8) -> u8 {
+    let result = passthrough(x);
+    result
+}"#;
+    let ir = r#"package imported
+block passthrough(data: bits[8], out: bits[8]) {
+  data: bits[8] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}"#;
+    let linked = Parser::new(ir).parse_and_validate_package().unwrap();
+    let package = compile(source, linked.clone(), ResetBehavior::default())?;
+    let wrapper = package.get_block("wrapper").unwrap();
+    assert_eq!(wrapper.clock_port_name(), None);
+    assert_eq!(wrapper.instantiations[0].block, "passthrough");
+    xlsynth::IrPackage::parse_ir(&package.to_string(), None).map_err(|e| e.to_string())?;
+    emit_system_verilog(&package, &BlockCodegenOptions::default()).map_err(|e| e.to_string())?;
+
+    let clocked_source = source
+        .replace("passthrough(data:", "passthrough(clk, data:")
+        .replace("wrapper(x:", "wrapper(clk, x:");
+    assert_eq!(
+        compile(&clocked_source, linked, ResetBehavior::default()).unwrap_err(),
+        "extern block 'passthrough' requires a clock but the linked block has none"
+    );
+    let clocked_ir = ir.replace("passthrough(data:", "passthrough(timing: clock, data:");
+    let linked = Parser::new(&clocked_ir)
+        .parse_and_validate_package()
+        .unwrap();
+    assert_eq!(
+        compile(source, linked, ResetBehavior::default()).unwrap_err(),
+        "extern block 'passthrough' omits the linked block's clock"
+    );
+    Ok(())
 }
 
 #[test]

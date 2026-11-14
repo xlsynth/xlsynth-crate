@@ -248,7 +248,7 @@ pub struct CheckedBlock {
     /// Original file for statement diagnostic ranges, when available.
     pub source: Option<SourceFile>,
     pub public: bool,
-    pub clock: String,
+    pub clock: Option<String>,
     /// Physical reset port, including one inferred from elaborated hardware.
     pub reset: Option<String>,
     pub params: Vec<Param>,

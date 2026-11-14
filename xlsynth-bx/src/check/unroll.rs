@@ -147,7 +147,7 @@ impl BodyChecker<'_, '_> {
             if self.loop_values.contains_key(target) {
                 return Err(format!("'{target}' names a loop-local value"));
             }
-            self.check_block_parametric_count(
+            self.check_block_call_signature(
                 target,
                 parametrics.len(),
                 self.function_values.contains_key(target)
@@ -1081,7 +1081,7 @@ impl BodyChecker<'_, '_> {
                             if self.kind == BodyKind::Function || locals.in_lambda {
                                 return Err(format!("pure function cannot call block '{name}'"));
                             }
-                            self.check_block_parametric_count(name, 0, false)?;
+                            self.check_block_call_signature(name, 0, false)?;
                             self.uses_child.set(true);
                         } else if self.kind != BodyKind::Function
                             && !locals.in_lambda
@@ -1092,7 +1092,7 @@ impl BodyChecker<'_, '_> {
                             // A hardware port or wire can share the structural
                             // child's name. A nearer lexical or iteration
                             // binder shadows it.
-                            self.check_block_parametric_count(name, 0, false)?;
+                            self.check_block_call_signature(name, 0, false)?;
                             self.uses_child.set(true);
                         }
                     }
@@ -1112,7 +1112,7 @@ impl BodyChecker<'_, '_> {
                 let block = self.decls.is_block(name) && self.callback_index(name).is_none();
                 let template = self.decls.function_templates.get(name.as_str());
                 if block {
-                    self.check_block_parametric_count(
+                    self.check_block_call_signature(
                         name,
                         parametrics.len(),
                         locals.contains(name),

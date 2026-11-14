@@ -131,7 +131,7 @@ pub(super) fn qualify(module: &Module, names: &Names) -> Result<Module, String> 
     }
     for def in &module.extern_blocks {
         let mut scope = Scope::new(names, None, &def.name);
-        scope.timing_ports(&def.clock, def.reset.as_deref());
+        scope.timing_ports(def.clock.as_deref(), def.reset.as_deref());
         out.extern_blocks.push(ExternBlock {
             name: names.declared(&def.name),
             clock: def.clock.clone(),
@@ -637,10 +637,9 @@ impl<'a> Scope<'a> {
             .collect()
     }
 
-    fn timing_ports(&mut self, clock: &str, reset: Option<&str>) {
-        self.bind_as(clock, Local::Hardware);
-        if let Some(reset) = reset {
-            self.bind_as(reset, Local::Hardware);
+    fn timing_ports(&mut self, clock: Option<&str>, reset: Option<&str>) {
+        for name in clock.into_iter().chain(reset) {
+            self.bind_as(name, Local::Hardware);
         }
     }
 
@@ -783,7 +782,7 @@ impl<'a> Scope<'a> {
             .iter()
             .map(|p| self.callback(p))
             .collect::<Result<_, _>>()?;
-        self.timing_ports(&def.clock, def.reset.as_deref());
+        self.timing_ports(def.clock.as_deref(), def.reset.as_deref());
         let params = self.params(&def.params, Local::Hardware)?;
         let result = self.ty(&def.result)?;
         self.region = DeclarationRegion::BlockBody;

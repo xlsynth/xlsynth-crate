@@ -13,7 +13,7 @@ use crate::bx_import::{LibraryModuleInfo, LinkedSources, UnlinkedBlockScope, lib
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[non_exhaustive]
 pub enum BxWarningKind {
-    /// A concrete block contains only computations that belong in a function.
+    /// A block contains only computations that belong in a function.
     CombinationalBlock,
     /// A block in a module marked `#![require_block_timing]` has no output
     /// annotation.
@@ -176,7 +176,8 @@ impl<'m> WarningCollector<'m> {
             }
 
             let kind = BxWarningKind::CombinationalBlock;
-            if !block.type_params.is_empty()
+            // Retain the existing exemption for clocked type-generic blocks.
+            if (block.clock.is_some() && !block.type_params.is_empty())
                 || block.allowed_warnings.contains(&kind)
                 || self
                     .hardware
@@ -261,7 +262,7 @@ fn template_hardware(block: &Block, is_block: &impl Fn(&str) -> bool) -> Templat
         .chain(block.value_parametrics.iter().map(|p| p.name.as_str()))
         .collect();
     let mut binders: BTreeSet<_> = block.params.iter().map(|p| p.name.clone()).collect();
-    binders.insert(block.clock.clone());
+    binders.extend(block.clock.iter().cloned());
     binders.extend(block.reset.iter().cloned());
     let mut callees = BTreeSet::new();
     let mut pending = vec![SourceNode::Expression(&block.output)];

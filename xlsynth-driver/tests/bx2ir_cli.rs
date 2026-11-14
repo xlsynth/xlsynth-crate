@@ -14,7 +14,10 @@ use xlsynth_g8r::netlist::proto::pb;
 use xlsynth_pir::ir::MemberType;
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_test_helpers::compare_golden_text;
-use xlsynth_vastly::{FixtureRunner, compile_pipeline_module};
+use xlsynth_vastly::{
+    FixtureRunner, Signedness, Value4, compile_combo_module, compile_pipeline_module, eval_combo,
+    plan_combo_eval,
+};
 
 fn driver(directory: &Path, arguments: &[&str]) -> std::io::Result<Output> {
     Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
@@ -367,6 +370,113 @@ block circuit(clk, x: u8) -> u8 { let y = stages::identity(x); y }
     assert_eq!(
         package.get_top_block().map(|b| b.name.as_str()),
         Some("circuit")
+    );
+    Ok(())
+}
+
+#[test]
+fn bx2ir_emits_combinational_rtl_with_only_the_declared_ports() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::write(
+        root.join("adder.bx"),
+        r#"struct Sum { low: u8, carry: bool }
+fn wide_add(a: u8, b: u8) -> u9 { (a as u9) + (b as u9) }
+#[allow(combinational_block)]
+pub block adder(a: u8, b: u8) -> Sum {
+    let wide = wide_add(a, b);
+    Sum { low: wide as u8, carry: wide[8+:u1] }
+}"#,
+    )?;
+    let ir = stdout(root, &["bx2ir", "adder.bx"])?;
+    xlsynth::IrPackage::parse_ir(&ir, None)?;
+    fs::write(root.join("adder.ir"), ir)?;
+    let sv = stdout(root, &["block2sv", "adder.ir"])?;
+    let module = compile_combo_module(&sv).unwrap();
+    assert_eq!(
+        module
+            .input_ports
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
+    assert_eq!(
+        module
+            .output_ports
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>(),
+        ["low", "carry"]
+    );
+    let plan = plan_combo_eval(&module).unwrap();
+    for (a, b) in [(0, 0), (2, 7), (255, 1), (255, 255), (1, 0)] {
+        let inputs = [
+            ("a".to_owned(), Value4::from_u64(8, Signedness::Unsigned, a)),
+            ("b".to_owned(), Value4::from_u64(8, Signedness::Unsigned, b)),
+        ]
+        .into();
+        let outputs = eval_combo(&module, &plan, &inputs).unwrap();
+        assert_eq!(outputs["low"].to_u64_if_known(), Some((a + b) & 255));
+        assert_eq!(outputs["carry"].to_u64_if_known(), Some((a + b) >> 8));
+    }
+    Ok(())
+}
+
+#[test]
+fn clockless_library_blocks_compose_under_both_kinds_of_parent() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    fs::write(
+        root.join("parts.bx"),
+        r#"#[allow(combinational_block)]
+block bias() -> u8 { u8:3 }
+pub block offset(x: u8) -> u8 {
+    let extra = bias();
+    x + extra
+}"#,
+    )?;
+    fs::write(
+        root.join("design.bx"),
+        r#"use parts;
+#[allow(combinational_block)]
+block passthrough<T>(x: T) -> T { x }
+pub block offset_reg(clk, x: u8) -> u8 {
+    let value = passthrough(x);
+    let adjusted = parts::offset(value);
+    reg q: u8 = u8:0;
+    q := adjusted;
+    q
+}
+#[test]
+block reacts_to_drive() {
+    reg x: u8 = u8:2;
+    let live = parts::offset(x);
+    let saved = offset_reg(x);
+    tick!(rst: true);
+    assert_eq(live, u8:5);
+    assert_eq(saved, u8:0);
+    x := u8:255;
+    assert_eq(live, u8:2);
+    assert_eq(saved, u8:0);
+    tick!();
+    assert_eq(saved, u8:2);
+}"#,
+    )?;
+    let ir = stdout(root, &["bx2ir", "design.bx"])?;
+    let package = Parser::new(&ir).parse_and_verify_package()?;
+    let stage = package.get_top_block().unwrap();
+    assert_eq!(stage.clock_port_name(), Some("clk"));
+    for instance in &stage.instantiations {
+        let child = package.get_block(&instance.block).unwrap();
+        assert_eq!(child.clock_port_name(), None);
+        assert!(child.reset.is_none());
+    }
+    fs::write(root.join("design.ir"), ir)?;
+    stdout(root, &["block2sv", "design.ir"])?;
+    assert_eq!(
+        stdout(root, &["bx-test", "design.bx"])?,
+        "test reacts_to_drive ... ok\n1 passed; 0 failed\n"
     );
     Ok(())
 }
