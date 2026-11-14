@@ -8,7 +8,8 @@
 //! check pointwise equivalence over the full signature. Gate proofs use an
 //! evaluator proved equivalent to Lean's stock AIG semantics.
 //!
-//! [`block`] separately exports stateful block models as Lean source text.
+//! [`block`] emits transition equations from block IR. For BX sources it
+//! also emits a typed interface and a proof relating the models.
 
 pub mod block;
 
