@@ -180,8 +180,8 @@ pub fn bx_prove_invariant_command() -> Command {
     .arg(time_limit_arg())
 }
 
-pub fn bx2lean_command() -> Command {
-    add_bx_args(Command::new("bx2lean").about("Generates raw and readable Lean for a BX block"))
+pub fn bx_to_lean_command() -> Command {
+    add_bx_args(Command::new("bx-to-lean").about("Generates raw and readable Lean for a BX block"))
         .arg(
             Arg::new("output-dir")
                 .long("output-dir")
@@ -624,7 +624,7 @@ pub fn bx_prove_invariant(matches: &ArgMatches, config: &Option<ToolchainConfig>
 
 /// Generate and validate the complete model before creating its output
 /// directory.
-pub fn bx2lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
+pub fn bx_to_lean(matches: &ArgMatches, config: &Option<ToolchainConfig>) -> Result<()> {
     let compiled = with_bx_input(matches, config, |input| {
         let reset = ResetBehavior {
             active_low: input.active_low,

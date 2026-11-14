@@ -13,7 +13,7 @@ use xlsynth_lean::block;
 use xlsynth_pir::ir_parser::Parser;
 
 /// Generate all Lean text before creating or truncating the output file.
-pub fn handle_block2lean(matches: &ArgMatches) -> Result<()> {
+pub fn handle(matches: &ArgMatches) -> Result<()> {
     let input_path = matches
         .get_one::<String>("input_file")
         .expect("clap requires an input file");
