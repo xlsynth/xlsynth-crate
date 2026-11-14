@@ -80,4 +80,16 @@ def oneHotSel [p : Packed α] (s : BitVec w) (cases : Array α) : α :=
   p.unpack (cases.toList.zipIdx.foldl (fun acc (v, i) =>
     if s.getLsbD i then acc ||| p.pack v else acc) 0)
 
+theorem arrayIndex_eq_getD_back [Inhabited α] [NeZero n] (xs : Vector α n) (i : Nat) :
+    arrayIndex xs i = xs.getD i xs.back := by
+  have hn := NeZero.ne n
+  by_cases h : i < n
+  · simp [arrayIndex, Nat.min_eq_left (by omega : i ≤ n - 1), Vector.getD, Array.getD, h]
+  · simp [arrayIndex, Nat.min_eq_right (by omega : n - 1 ≤ i), Vector.getD, Array.getD,
+      Vector.back_eq_getElem, h, (by omega : n - 1 < n)]
+
+theorem arrayModify_eq_setIfInBounds [NeZero n] (xs : Vector α n) (i : Nat) (f : α → α) :
+    arrayModify xs i f = xs.setIfInBounds i (f (xs.getD i xs.back)) := by
+  by_cases h : i < n <;> simp [arrayModify, Vector.setIfInBounds, Array.setIfInBounds, Vector.getD, Array.getD, h]
+
 end XlsynthLean.IR

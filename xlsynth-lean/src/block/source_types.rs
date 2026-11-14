@@ -64,6 +64,11 @@ pub(super) enum SourceType {
     Bits { width: usize },
     /// Positional source tuple; its members retain their written types.
     Tuple { members: Vec<SourceType> },
+    /// Fixed-length array whose elements retain their checked source type.
+    Array {
+        element: Box<SourceType>,
+        size: usize,
+    },
     /// A reference to an enum declaration in the same catalogue.
     Enum { name: String },
     /// A reference to a struct declaration in the same catalogue.
@@ -100,6 +105,30 @@ fn declaration<'a>(declarations: &'a [TypeDecl], name: &str) -> Result<&'a TypeD
         .with_context(|| format!("unknown supported source type {name}"))
 }
 
+/// Expand transparent aliases while preserving named struct and enum
+/// identities.
+pub(super) fn resolve_aliases(ty: &SourceType, declarations: &[TypeDecl]) -> Result<SourceType> {
+    match ty {
+        SourceType::Alias { name } => {
+            let TypeDecl::Alias { target, .. } = declaration(declarations, name)? else {
+                bail!("source type {name} is not an alias")
+            };
+            resolve_aliases(target, declarations)
+        }
+        SourceType::Tuple { members } => Ok(SourceType::Tuple {
+            members: members
+                .iter()
+                .map(|ty| resolve_aliases(ty, declarations))
+                .collect::<Result<_>>()?,
+        }),
+        SourceType::Array { element, size } => Ok(SourceType::Array {
+            element: Box::new(resolve_aliases(element, declarations)?),
+            size: *size,
+        }),
+        nominal_or_primitive => Ok(nominal_or_primitive.clone()),
+    }
+}
+
 /// Erase nominal types to the physical shapes used by block IR.
 pub(super) fn source_shape(
     source_type: &SourceType,
@@ -108,6 +137,10 @@ pub(super) fn source_shape(
     match source_type {
         SourceType::Bool => Ok(ir::Type::Bits(1)),
         SourceType::Bits { width } => Ok(ir::Type::Bits(*width)),
+        SourceType::Array { element, size } => Ok(ir::Type::new_array(
+            source_shape(element, declarations)?,
+            *size,
+        )),
         SourceType::Tuple { members } => Ok(ir::Type::Tuple(
             members
                 .iter()

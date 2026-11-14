@@ -210,7 +210,10 @@ fn bx_type(
         | Type::ParametricArray { .. }
         | Type::ParametricStruct { .. }
         | Type::TypeApplied { .. } => bail!("BX type {ty} is unsupported by readable Lean"),
-        Type::Array { .. } => bail!("BX array type {ty} is unsupported by readable Lean"),
+        Type::Array { element, size } => SourceType::Array {
+            element: Box::new(bx_type(element, module, declarations)?),
+            size: *size,
+        },
         Type::Named(name) => {
             if !declarations.iter().any(|d| d.name() == name) {
                 let def = module

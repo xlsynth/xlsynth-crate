@@ -284,6 +284,16 @@ impl Catalogue<'_> {
             } else {
                 Ok(SourceType::Bits { width })
             }
+        } else if ty.is_array() {
+            let element_annotation = annotation
+                .and_then(dslx::TypeAnnotation::to_array_type_annotation)
+                .map(|array| array.get_element_type());
+            let element =
+                self.source_type(element_annotation.as_ref(), &ty.get_array_element_type())?;
+            Ok(SourceType::Array {
+                element: Box::new(element),
+                size: ty.get_array_size(),
+            })
         } else {
             bail!(
                 "unsupported source shape {} in readable Lean",

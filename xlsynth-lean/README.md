@@ -79,8 +79,7 @@ returns source in the `XlsBlock` namespace with the same import.
 The generated clock step preserves old-state outputs, simultaneous register
 writes, reset precedence and source assertions. Blocks use the function
 emitter's translation of PIR types, literals and local operations, including
-one-hot selection over tuples and arrays. Block emission reports an error for
-unsupported operations, including function calls, and for asynchronous resets.
+one-hot selection over tuples and arrays. Calls to pure functions and fixed-trip-count loops remain explicit. Unsupported operations and asynchronous resets return contextual errors.
 
 When starting from saved IR text, call PIR's `Parser::parse_and_validate_package`
 before selecting the block, as in the `export_block` example.
@@ -119,7 +118,7 @@ let bundle = compiled.emit_readable(None)?;
 ```
 
 The readable interface preserves unsigned bits, Boolean fields, positional
-tuples and named BX structs. A struct result exposes its fields as output
+tuples, fixed-size arrays and named BX structs. A struct result exposes its fields as output
 ports in BX declaration order. One output becomes the value of `observe q x`;
 several outputs become a Lean product in port order. The register and port
 types come from checked declarations, and every equation comes from the linked
