@@ -1102,6 +1102,56 @@ private def initial : State := { count := 7 }
 
 #[test]
 #[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
+fn source_enum_constructors_keep_lean_generated_names() -> Result<()> {
+    let source = r#"
+enum Tag : u2 { Tag = 3, recOn = 2, ofNat = 0 }
+fn route(tag: Tag, a: bool, b: bool, c: bool) -> (u2, bool) {
+    let result = match tag { Tag::recOn => a, Tag::ofNat => b, _ => c };
+    (tag as u2, result)
+}
+"#;
+    let bx = r#"
+extern fn machine::route(tag: u2, a: bool, b: bool, c: bool) -> (u2, bool);
+block router(clk, tag: u2, a: bool, b: bool, c: bool) -> (u2, bool) {
+    machine::route(tag, a, b, c)
+}
+"#;
+    let mut bundle = checked_helper_bundle(bx, source, &[])?;
+    bundle.files.push((
+        "EnumNames.lean".into(),
+        r#"
+import ReadableCorrespondence
+open XLS.machine (Tag)
+def expected : Tag → Bool → Bool → Bool → BitVec 2 × Bool
+  | .recOn, a, _, _ => (2, a)
+  | .ofNat, _, b, _ => (0, b)
+  | .Tag, _, _, c => (3, c)
+  | .encoding1, _, _, c => (1, c)
+example : Tag := _root_.XLS.machine.Tag.recOn
+example : (match Tag.recOn with | .recOn => true | .Tag | .ofNat | .encoding1 => false) = true := rfl
+example (t : Tag) (a b c : Bool) : XLS.machine.route t a b c = expected t a b c := by
+  cases t <;> rfl
+"#
+        .into(),
+    ));
+    check_bundle(
+        bundle,
+        "source enum constructors that overlap Lean declarations",
+    );
+    let unsupported = source.replace("Tag = 3", "_root_ = 3");
+    let diagnostic = format!(
+        "{:#}",
+        checked_helper_bundle(bx, &unsupported, &[]).err().unwrap()
+    );
+    assert!(
+        diagnostic.contains("Tag._root_") && diagnostic.contains("constructor abbreviation"),
+        "{diagnostic}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires matching XLS DSO and XLSYNTH_LEAN pointing to Lean 4.34.1"]
 fn computed_enum_dispatch_in_checked_helper() {
     for (control, choose, subject) in [
         (

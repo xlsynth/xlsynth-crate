@@ -620,6 +620,57 @@ impl<'a> Presentation<'a> {
         Ok(cases)
     }
 
+    /// When Lean needs a source constructor's name for an eliminator or
+    /// derived instance, give the constructor a pattern-matchable public
+    /// abbreviation. Lean's `export` aliases cannot be referenced via `_root_`.
+    fn write_enum(
+        &self,
+        out: &mut String,
+        original: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Result<String> {
+        let cases = self.enum_cases(original)?;
+        let needs_backing = cases.iter().any(|(member, _)| {
+            lean::generated_member(member)
+                || matches!(
+                    member.as_str(),
+                    "ofNat" | "ofNat_ctorIdx" | "ctorElim" | "ctorElimType"
+                )
+        });
+        let (backing, prefix) = if needs_backing {
+            ensure!(
+                !cases.iter().any(|(member, _)| member == "_root_"),
+                "cannot emit {original}._root_: Lean reserves this name for the root namespace and this enum needs a public constructor abbreviation"
+            );
+            (format!("«xls:implementation».{name}"), "Constructors.")
+        } else {
+            (name.to_owned(), "")
+        };
+        let members = cases
+            .iter()
+            .map(|(member, _)| identifier(member))
+            .collect::<Result<Vec<_>>>()?;
+        writeln!(out, "inductive {backing} where")?;
+        for member in &members {
+            writeln!(out, "  | {prefix}{member}")?;
+        }
+        out.push('\n');
+        if needs_backing {
+            writeln!(out, "abbrev {name} := {backing}\n")?;
+            for member in &members {
+                // A match on this constructor infers its pattern namespace from
+                // the result type.
+                writeln!(
+                    out,
+                    "@[match_pattern] abbrev {name}.{member} : _root_.{namespace}.{name} := {backing}.{prefix}{member}"
+                )?;
+            }
+            out.push('\n');
+        }
+        Ok(backing)
+    }
+
     /// Emit source declarations, total codecs, and codec round-trip proof
     /// source.
     fn types_module(&self) -> Result<String> {
@@ -635,22 +686,10 @@ impl<'a> Presentation<'a> {
             let name = source_names::declaration_identifier(module, local, "type")?;
             writeln!(out, "namespace {namespace}\n")?;
             let derived = match declaration {
-                TypeDecl::Enum { name: original, .. } => {
-                    writeln!(out, "inductive {name} where")?;
-                    for (member, _) in self.enum_cases(original)? {
-                        lean::validate_lean_member(original, &member)?;
-                        ensure!(
-                            !matches!(
-                                member.as_str(),
-                                "ofNat" | "ofNat_ctorIdx" | "ctorElim" | "ctorElimType"
-                            ),
-                            "cannot emit {original}.{member}: Lean generates an enum declaration with this name"
-                        );
-                        writeln!(out, "  | {}", identifier(&member)?)?;
-                    }
-                    out.push('\n');
-                    Some(("Repr, DecidableEq", name))
-                }
+                TypeDecl::Enum { name: original, .. } => Some((
+                    "Repr, DecidableEq",
+                    self.write_enum(&mut out, original, &namespace, &name)?,
+                )),
                 TypeDecl::Struct { fields, .. } => {
                     let backing = write_struct(
                         &mut out,

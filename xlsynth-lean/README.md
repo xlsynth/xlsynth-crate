@@ -148,6 +148,14 @@ source field. For a struct with such a collision, use positional construction
 and pattern matching, for example `(⟨41, true⟩ : XLS.bus.Packet)` for two fields
 declared in that order.
 
+For a two-bit DSLX enum with a constructor such as `recOn`, use the source
+spelling to construct a value (`XLS.bus.Tag.recOn`) or match it
+(`| .recOn => ...`). Lean's `cases t` tactic also works. When naming its
+tactic branches explicitly, use `| Constructors.recOn => ...` for enums
+whose constructor names overlap Lean-generated declarations.
+Lean reserves `_root_` for absolute names, so an enum that needs these
+constructor abbreviations cannot also declare a constructor named `_root_`.
+
 For a BX `use` of a DSLX function, readable emission takes parameter names
 and types from the same checked DSLX compilation that supplied the function's
 IR, including concrete parametric calls. The BX linker records the final
