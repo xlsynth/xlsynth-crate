@@ -58,6 +58,20 @@ pub(super) fn apply_tree(
     apply_plans(netlist, library, buffer, &[(root, branches)])
 }
 
+pub(super) fn apply_tree_tracked(
+    netlist: &mut MappedNetlist,
+    library: &Library,
+    root: &Root,
+    buffer: &Buffer,
+    branches: &[Branch],
+    owned: &mut super::owned::OwnedBuffers,
+) -> Result<()> {
+    let first = netlist.module.instances.len();
+    apply_tree(netlist, library, root, buffer, branches)?;
+    owned.record(netlist, root, first..netlist.module.instances.len());
+    Ok(())
+}
+
 /// Graph discovery certifies driver/sink roles and bit-level alias equivalence.
 /// Recheck their physical bindings and tree topology before allocating names.
 /// Empty branches may drive child buffers. An entirely empty forest is a no-op.

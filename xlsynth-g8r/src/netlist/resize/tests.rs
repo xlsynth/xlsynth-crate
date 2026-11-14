@@ -392,6 +392,7 @@ fn productive_recovery_windows_resume_the_pending_strength_without_losing_timing
     let initial_area = sta.cell_indices().iter().map(|&i| lib.cells[i].area).sum();
     let families = CellFamilies::new(&lib);
     let mut search = ResizeSearch {
+        electrical_guard: ElectricalGuard::Absolute,
         library: &lib,
         options: &opts,
         families: &families,
@@ -2208,6 +2209,64 @@ fn electrical_limit_cannot_be_exchanged_for_timing_gain() -> Result<()> {
             "{limit}"
         );
         assert_eq!(sta.score(), before);
+    }
+    Ok(())
+}
+
+// A pin that starts above its limit allows no increase in relative excess.
+// Other pins must stay legal even when a substitution improves delay.
+#[test]
+fn post_repair_sizing_preserves_each_pins_relative_limit() -> Result<()> {
+    let net = read_gv_from_str(
+        "module m(input clk, input d, output y); wire q;
+         DFF1 launch(.CLK(clk),.D(d),.Q(q)); BUF1 data(.A(q),.Y(y)); endmodule",
+    )?;
+    let timing = StaOptions {
+        module_output_load: 0.001,
+        ..Default::default()
+    };
+    for limit in ["capacitance", "transition", "zero transition"] {
+        let mut lib = library()?;
+        let small = lib.cells.iter().position(|c| c.name == "BUF1").unwrap();
+        let large = lib.cells.iter().position(|c| c.name == "BUF4").unwrap();
+        for i in [small, large] {
+            let out = lib.cells[i]
+                .pins
+                .iter_mut()
+                .find(|p| p.direction == PinDirection::Output as i32)
+                .unwrap();
+            match limit {
+                // The new excess is below the ordinary native-unit allowance
+                // but exceeds the tolerance at this small capacitance limit.
+                "capacitance" => {
+                    out.max_capacitance = Some(if i == small { 0.001 } else { 0.001 - 5e-10 })
+                }
+                // A faster cell can reduce absolute slew excess while its own
+                // tighter limit makes the relative excess worse.
+                "transition" => out.max_transition = Some(if i == small { 0.5 } else { 0.1 }),
+                "zero transition" => out.max_transition = Some(if i == small { 0.5 } else { 0.0 }),
+                _ => unreachable!(),
+            }
+        }
+        let mut sta = IncrementalSta::new(&net.modules[0], &net.nets, &net.interner, &lib, timing)?;
+        assert_eq!(
+            sta.guarded_trial(
+                1,
+                large,
+                usize::MAX,
+                None,
+                ElectricalGuard::Relative,
+                |_| true
+            )?,
+            TrialOutcome::Rejected,
+            "{limit}"
+        );
+        assert_eq!(sta.cell_indices()[1], small);
+        assert_eq!(
+            sta.trial(1, large, usize::MAX, None, |_| true)?,
+            TrialOutcome::Accepted,
+            "{limit}"
+        );
     }
     Ok(())
 }

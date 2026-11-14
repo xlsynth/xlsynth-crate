@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use super::timing::{ResizeTimingPolicy, TimingTieBreak, electrical_worsens};
+use super::timing::{ElectricalGuard, ResizeTimingPolicy, TimingTieBreak};
 use super::{
     BoundaryDelays, CellFamilies, ResizeOptions, ResizeSearch, SearchPhase, verify_timing,
 };
@@ -14,7 +14,9 @@ use crate::liberty_model::Library;
 use crate::netlist::fanout_opt::FanoutOptimizationOptions;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::mapped::MappedNetlist;
-use crate::netlist::registered_fanout::{ForestRetry, TopologyTrial, visit_topology_candidates};
+use crate::netlist::registered_fanout::{
+    ForestRetry, OwnedBuffers, TopologyTrial, visit_topology_candidates,
+};
 use crate::netlist::sta::incremental::{
     IncrementalSta, TIMING_COMPARISON_TOLERANCE, TimingEndpoint,
     measure_boundary_delays_with_library,
@@ -22,6 +24,18 @@ use crate::netlist::sta::incremental::{
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
+
+/// Selects additional topology proposals for one registered netlist. Both
+/// policies use identical electrical, whole-stage timing and area acceptance.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RegisteredCandidateSelection {
+    /// Original bounded severity/fanout order.
+    #[default]
+    Legacy,
+    /// Also evaluate joint repairs on critical and near-critical
+    /// register-to-register paths.
+    TimingCones,
+}
 
 /// Timing model and optional buffering and cell-sizing policies for optimizing
 /// a netlist with its boundary registers attached.
@@ -31,6 +45,32 @@ pub struct RegisteredOptimizationOptions {
     pub timing: StaOptions,
     pub fanout: Option<FanoutOptimizationOptions>,
     pub resize: Option<ResizeOptions>,
+}
+
+/// Area penalty and ceiling for fanout edits, relative to the assembled cover.
+#[derive(Clone, Copy)]
+pub(crate) struct FanoutAreaPolicy {
+    pub(crate) weight: f64,
+    pub(crate) limit: f64,
+}
+
+impl FanoutAreaPolicy {
+    pub(crate) const UNBOUNDED: Self = Self {
+        weight: 0.5,
+        limit: f64::INFINITY,
+    };
+}
+
+impl RegisteredOptimizationOptions {
+    pub(crate) fn fanout_area_policy(&self, initial_area: f64) -> FanoutAreaPolicy {
+        match &self.fanout {
+            Some(fanout) => FanoutAreaPolicy {
+                weight: fanout.area_weight,
+                limit: initial_area * (1.0 + fanout.area_growth_limit),
+            },
+            None => FanoutAreaPolicy::UNBOUNDED,
+        }
+    }
 }
 
 /// Area and boundary timing before and after optimization, with trial counts
@@ -57,6 +97,15 @@ pub struct RegisteredOptimizationReport {
 pub struct RegisteredOptimizationRound {
     pub topology_trials: usize,
     pub electrical_retry_trials: usize,
+    /// Largest number of drivers evaluated together in each timing window,
+    /// first critical and then near-critical.
+    pub timing_cone_root_counts: [usize; 2],
+    pub timing_cone_trials: usize,
+    pub accepted_timing_cone: bool,
+    /// Window and original group size of the winner, including an electrical
+    /// retry.
+    pub accepted_timing_cone_window: Option<usize>,
+    pub accepted_timing_cone_roots: Option<usize>,
     pub timing_trials: usize,
     pub recovery_trials: usize,
     pub renewed_recovery_windows: usize,
@@ -71,11 +120,46 @@ pub struct RegisteredOptimizationRound {
 /// guarded. The input is replaced only after an independent full STA verifies
 /// the winner. There is no inferred clock constraint or estimate of routed
 /// interconnect.
-pub fn optimize_registered_netlist(
+#[cfg(test)]
+pub(crate) fn optimize_registered_netlist(
     netlist: &mut ParsedNetlist,
     library: &Library,
     options: &RegisteredOptimizationOptions,
 ) -> Result<RegisteredOptimizationReport> {
+    optimize_registered_netlist_tracked(netlist, library, options, None)
+}
+
+/// Run the same search, carrying data-buffer ownership across selected edits.
+/// The ledger and netlist are committed together after full timing
+/// verification.
+#[cfg(test)]
+pub(crate) fn optimize_registered_netlist_tracked(
+    netlist: &mut ParsedNetlist,
+    library: &Library,
+    options: &RegisteredOptimizationOptions,
+    ownership: Option<&mut OwnedBuffers>,
+) -> Result<RegisteredOptimizationReport> {
+    optimize_registered_stage(
+        netlist,
+        library,
+        options,
+        ElectricalGuard::Absolute,
+        ownership,
+        RegisteredCandidateSelection::Legacy,
+    )
+}
+
+/// Run topology proposal selection on the same snapshot and under the same
+/// whole-stage acceptance checks as ordinary sizing and recovery.
+pub(crate) fn optimize_registered_stage(
+    netlist: &mut ParsedNetlist,
+    library: &Library,
+    options: &RegisteredOptimizationOptions,
+    electrical_guard: ElectricalGuard,
+    ownership: Option<&mut OwnedBuffers>,
+    selection: RegisteredCandidateSelection,
+) -> Result<RegisteredOptimizationReport> {
+    let mut current_owned = ownership.as_deref().cloned();
     let [module] = netlist.modules.as_slice() else {
         anyhow::bail!("registered electrical optimization requires one assembled module");
     };
@@ -97,20 +181,21 @@ pub fn optimize_registered_netlist(
     let mut sta = analyze(&current)?;
     let mut objective = sta.objective();
     let mut score = Score::measure(&sta, library, objective)?;
-    let weight = options.fanout.as_ref().map_or(0.5, |f| f.area_weight);
+    let FanoutAreaPolicy {
+        weight,
+        limit: topology_area_limit,
+    } = options.fanout_area_policy(score.area);
     ensure!(
         weight.is_finite() && weight >= 0.0,
         "area weight must be finite and nonnegative"
     );
     let mut topology_rounds = 0;
-    let mut topology_area_limit = score.area;
     if let Some(f) = &options.fanout {
         ensure!(
             f.area_growth_limit.is_finite() && f.area_growth_limit >= 0.0,
             "invalid fanout area growth limit"
         );
         topology_rounds = f.max_rounds;
-        topology_area_limit *= 1.0 + f.area_growth_limit;
     }
     let mut sizing = options.resize.clone().unwrap_or_default();
     if options.resize.is_none() {
@@ -159,6 +244,11 @@ pub fn optimize_registered_netlist(
         let mut round = RegisteredOptimizationRound {
             topology_trials: 0,
             electrical_retry_trials: 0,
+            timing_cone_root_counts: [0; 2],
+            timing_cone_trials: 0,
+            accepted_timing_cone: false,
+            accepted_timing_cone_window: None,
+            accepted_timing_cone_roots: None,
             timing_trials: 0,
             recovery_trials: 0,
             renewed_recovery_windows: 0,
@@ -178,10 +268,17 @@ pub fn optimize_registered_netlist(
                 &prepared,
                 options.timing,
                 fanout,
-                |candidate, kind| {
+                (selection == RegisteredCandidateSelection::TimingCones)
+                    .then_some((&sta, objective)),
+                |candidate, kind, edits| {
+                    if let TopologyTrial::TimingCone(cone) = kind {
+                        round.timing_cone_trials += 1;
+                        round.timing_cone_root_counts[cone.window] =
+                            round.timing_cone_root_counts[cone.window].max(cone.roots);
+                    }
                     round.topology_trials += 1;
                     round.electrical_retry_trials +=
-                        usize::from(kind == TopologyTrial::ElectricalRetry);
+                        usize::from(matches!(kind, TopologyTrial::ElectricalRetry(_)));
                     let trial = match analyze(&candidate) {
                         Ok(trial) => trial,
                         Err(error) => {
@@ -198,7 +295,9 @@ pub fn optimize_registered_netlist(
                         && let Some((improved, worse_outputs)) = electrical_progress(
                             &sta,
                             &trial,
-                            if kind == TopologyTrial::Forest {
+                            electrical_guard,
+                            if matches!(kind, TopologyTrial::Forest | TopologyTrial::TimingCone(_))
+                            {
                                 fanout.drivers_per_round
                             } else {
                                 0
@@ -212,7 +311,11 @@ pub fn optimize_registered_netlist(
                                 outputs: worse_outputs,
                             }));
                         }
-                        topology = Some((candidate, trial, next));
+                        let mut candidate_owned = current_owned.clone();
+                        if let Some(ref mut owned) = candidate_owned {
+                            edits.record(&candidate, current.module.instances.len(), owned);
+                        }
+                        topology = Some((candidate, trial, next, candidate_owned, kind));
                         best_rank = Some(rank);
                     }
                     Ok(None)
@@ -226,6 +329,7 @@ pub fn optimize_registered_netlist(
         let mut timing_changes = 0;
         let mut next = score;
         let mut search = families.as_ref().map(|families| ResizeSearch {
+            electrical_guard,
             library,
             options: &sizing,
             families,
@@ -257,11 +361,16 @@ pub fn optimize_registered_netlist(
             round.accepted = "cell_substitutions";
             timing_rounds -= 1;
             score = next;
-        } else if let Some((candidate, timing, accepted)) = topology {
+        } else if let Some((candidate, timing, accepted, candidate_owned, kind)) = topology {
             sizing_area_limit += accepted.area - score.area;
             round.added_cells = candidate.module.instances.len() - current.module.instances.len();
             round.accepted = "topology";
+            let cone = kind.timing_cone();
+            round.accepted_timing_cone = cone.is_some();
+            round.accepted_timing_cone_window = cone.map(|c| c.window);
+            round.accepted_timing_cone_roots = cone.map(|c| c.roots);
             current = candidate;
+            current_owned = candidate_owned;
             sta = timing;
             score = accepted;
         } else if timing_changes > 0 {
@@ -337,19 +446,26 @@ pub fn optimize_registered_netlist(
     report.final_delay = full;
     report.objective_delay = full.values()[sta.objective()];
     *netlist = current.into();
+    if let (Some(dst), Some(src)) = (ownership, current_owned) {
+        *dst = src;
+    }
     Ok(report)
 }
 
 #[derive(Clone, Copy)]
-struct Score {
+pub(crate) struct Score {
     boundaries: BoundaryDelays,
-    delay: f64,
+    pub(crate) delay: f64,
     secondary: TimingTieBreak,
-    area: f64,
+    pub(crate) area: f64,
 }
 
 impl Score {
-    fn measure(sta: &IncrementalSta<'_>, library: &Library, objective: usize) -> Result<Self> {
+    pub(crate) fn measure(
+        sta: &IncrementalSta<'_>,
+        library: &Library,
+        objective: usize,
+    ) -> Result<Self> {
         let area: f64 = sta
             .cell_indices()
             .iter()
@@ -378,7 +494,7 @@ impl Score {
     /// Rank candidates using delay with an area penalty. If worst delay is
     /// unchanged, also reward reducing the number of tied critical endpoints or
     /// improving near-critical paths enough to justify the added area.
-    fn rank(self, old: Self, weight: f64) -> Option<(u8, f64)> {
+    pub(crate) fn rank(self, old: Self, weight: f64) -> Option<(u8, f64)> {
         if !self.boundaries.within(old.boundaries) {
             return None;
         }
@@ -422,7 +538,7 @@ impl Score {
 /// The frontier consists of original IO bits and register data endpoints.
 /// Register cells and ports retain their indices in an append-only topology
 /// edit.
-fn preserves_endpoints(old: &IncrementalSta<'_>, new: &IncrementalSta<'_>) -> bool {
+pub(crate) fn preserves_endpoints(old: &IncrementalSta<'_>, new: &IncrementalSta<'_>) -> bool {
     let key = |(endpoint, arrivals): (TimingEndpoint, [Option<f64>; 2])| {
         let id = match endpoint {
             TimingEndpoint::Output(i) => (false, i),
@@ -442,6 +558,7 @@ fn preserves_endpoints(old: &IncrementalSta<'_>, new: &IncrementalSta<'_>) -> bo
 fn electrical_progress(
     old: &IncrementalSta<'_>,
     new: &IncrementalSta<'_>,
+    guard: ElectricalGuard,
     output_budget: usize,
 ) -> Option<(bool, Vec<(usize, String)>)> {
     let mut improved = false;
@@ -455,8 +572,11 @@ fn electrical_progress(
             .iter()
             .enumerate()
         {
-            let previous = before.get(pin).copied().unwrap_or_default();
-            if electrical_worsens(next, previous) {
+            let previous = before.get(pin).map_or_else(Default::default, |&v| {
+                guard.excess(old, old.cell_indices()[instance], pin, v)
+            });
+            let next = guard.excess(new, new.cell_indices()[instance], pin, next);
+            if guard.worsens(next, previous) {
                 if output_budget == 0 || instance >= old.instance_count() {
                     return None;
                 }
@@ -475,7 +595,7 @@ fn electrical_progress(
                     worse_outputs.push((driver, name.to_owned()));
                 }
             }
-            improved |= electrical_worsens(previous, next);
+            improved |= guard.worsens(previous, next);
         }
     }
     Some((improved, worse_outputs))
@@ -520,9 +640,11 @@ mod tests {
         let old = analyze("aaaabb")?;
         let trial = analyze("aaabbb")?;
         assert!(trial.score().register_to_register < old.score().register_to_register);
-        let (_, outputs) = electrical_progress(&old, &trial, 1).expect("expected a retry");
+        let progress =
+            |budget| electrical_progress(&old, &trial, ElectricalGuard::Relative, budget);
+        let (_, outputs) = progress(1).expect("expected a retry");
         assert_eq!(outputs, [(1, "Q".into())]);
-        assert!(electrical_progress(&old, &trial, 0).is_none());
+        assert!(progress(0).is_none());
         Ok(())
     }
 

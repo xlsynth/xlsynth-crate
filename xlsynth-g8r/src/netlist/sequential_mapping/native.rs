@@ -8,6 +8,7 @@
 //!            |<-------- clock-to-Q + logic + setup -------->|
 //! ```
 use anyhow::{Error, Result};
+use serde::Serialize;
 
 use super::SequentialMappingOptions;
 use super::assembly::SequentialMappingCatalog;
@@ -16,12 +17,42 @@ use crate::aig_serdes::canonical_mapping_graph;
 use crate::liberty_model::Library;
 use crate::netlist::io::ParsedNetlist;
 use crate::netlist::register_mapping::RegisterCellSelection;
-use crate::netlist::registered_opt::{RegisteredOptimizationOptions, optimize_registered_netlist};
+use crate::netlist::registered_fanout::{
+    OwnedBuffers, TreeRefinementReport, refine_registered_trees,
+};
+use crate::netlist::registered_opt::{
+    RegisteredCandidateSelection, RegisteredOptimizationOptions, RegisteredOptimizationReport,
+    optimize_registered_stage,
+};
+use crate::netlist::resize::timing::ElectricalGuard;
 use crate::netlist::resize::{ResizeOptions, resize_netlist};
 use crate::netlist::sta::StaOptions;
 use crate::techmap::area::AreaMappedNetlist;
 use crate::techmap::delay::{DelayMappingLibrary, map_gatefn_to_delay_candidates};
 use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions, map_and_optimize_cover};
+
+/// Select registered topology proposals and the optional buffer-tree pass.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeMappingSchedule {
+    pub refine_buffer_trees: bool,
+    pub candidate_selection: RegisteredCandidateSelection,
+}
+
+/// Optimization and tree-refinement measurements for the selected cover.
+#[derive(Serialize)]
+pub struct NativeRefinementReport {
+    pub cover: &'static str,
+    pub existing_optimizer: RegisteredOptimizationReport,
+    pub owned_buffers_before_tree_refinement: usize,
+    pub tree_refinement: TreeRefinementReport,
+}
+
+/// Native-mapped netlist and optional registered-stage diagnostics.
+pub struct NativeMappingResult {
+    pub netlist: ParsedNetlist,
+    /// Present if buffer-tree refinement ran on the selected cover.
+    pub refinement: Option<NativeRefinementReport>,
+}
 
 /// Maps combinational logic with g8r's area mapper and assembles the selected
 /// flops and clock gates into the same flat netlist.
@@ -51,11 +82,20 @@ pub fn map_sequential_to_native_netlist(
     strategy: CoverStrategy,
     post: &PostMappingOptions,
 ) -> Result<ParsedNetlist> {
-    map_sequential_with_policy(design, library, options, strategy, post, None)
+    Ok(map_sequential_with_policy(
+        design,
+        library,
+        options,
+        strategy,
+        post,
+        None,
+        NativeMappingSchedule::default(),
+    )?
+    .netlist)
 }
 
-/// Maps with an optional final sizing policy. Registered candidates are
-/// evaluated with their actual launch drivers and capture pin loads.
+/// Evaluate covers with their actual launch drivers and capture pin loads.
+/// Optionally size the assembled netlist and refine its buffer trees.
 pub fn map_sequential_with_policy(
     design: &SequentialGateFn,
     library: &Library,
@@ -63,7 +103,12 @@ pub fn map_sequential_with_policy(
     strategy: CoverStrategy,
     post: &PostMappingOptions,
     final_resize: Option<&ResizeOptions>,
-) -> Result<ParsedNetlist> {
+    mapping: NativeMappingSchedule,
+) -> Result<NativeMappingResult> {
+    let NativeMappingSchedule {
+        refine_buffer_trees,
+        candidate_selection,
+    } = mapping;
     let catalog = SequentialMappingCatalog::new(library).map_err(Error::msg)?;
     let prepared = catalog
         .prepare(library, design, options)
@@ -91,7 +136,10 @@ pub fn map_sequential_with_policy(
             };
             resize_netlist(module, &mapped.nets, &mut mapped.interner, library, resize)?;
         }
-        return Ok(mapped);
+        return Ok(NativeMappingResult {
+            netlist: mapped,
+            refinement: None,
+        });
     }
 
     // Full sizing includes area recovery. A fixed register-cell choice also
@@ -111,16 +159,35 @@ pub fn map_sequential_with_policy(
             module_output_load: fanout.module_output_load,
             wire_load: fanout.wire_load,
         },
-        (None, None) => return assemble(map_and_optimize_cover(graph, library, strategy, post)?.0),
+        (None, None) => {
+            return Ok(NativeMappingResult {
+                netlist: assemble(map_and_optimize_cover(graph, library, strategy, post)?.0)?,
+                refinement: None,
+            });
+        }
     };
     let mut policy = RegisteredOptimizationOptions {
         timing,
         fanout: post.fanout.clone(),
         resize,
     };
-    let mut finish = |cover| -> Result<_> {
+    let mut finish = |cover, name| -> Result<_> {
         let mut netlist = assemble(cover)?;
-        let report = optimize_registered_netlist(&mut netlist, library, &policy)?;
+        let mut ownership = OwnedBuffers::default();
+        let tree_ownership = refine_buffer_trees.then_some(&mut ownership);
+        let guard = if refine_buffer_trees {
+            ElectricalGuard::Relative
+        } else {
+            ElectricalGuard::Absolute
+        };
+        let report = optimize_registered_stage(
+            &mut netlist,
+            library,
+            &policy,
+            guard,
+            tree_ownership,
+            candidate_selection,
+        )?;
         if let Some(sizing) = &mut policy.resize {
             if let Some(left) = &mut sizing.timing_evaluation_budget {
                 *left = left.saturating_sub(report.timing_evaluations);
@@ -130,22 +197,48 @@ pub fn map_sequential_with_policy(
             }
         }
         log::debug!(target: "xlsynth_g8r::netlist::registered_opt", "{report:?}");
-        Ok(((report.objective_delay, report.final_area), netlist))
+        let mut rank = (report.objective_delay, report.final_area);
+        let diagnostics = if refine_buffer_trees {
+            let owned_buffers_before_tree_refinement = ownership.len();
+            let tree_refinement = refine_registered_trees(
+                &mut netlist,
+                library,
+                timing,
+                &mut ownership,
+                policy.fanout_area_policy(report.initial_area),
+            )?;
+            rank = (tree_refinement.final_delay, tree_refinement.final_area);
+            Some(NativeRefinementReport {
+                cover: name,
+                existing_optimizer: report,
+                owned_buffers_before_tree_refinement,
+                tree_refinement,
+            })
+        } else {
+            None
+        };
+        Ok((
+            rank,
+            NativeMappingResult {
+                netlist,
+                refinement: diagnostics,
+            },
+        ))
     };
     match strategy {
         CoverStrategy::Area => {
             let (cover, _) =
                 map_and_optimize_cover(graph, library, strategy, &PostMappingOptions::default())?;
-            Ok(finish(cover)?.1)
+            Ok(finish(cover, "area")?.1)
         }
         CoverStrategy::Delay(delay) => {
             let cells = DelayMappingLibrary::new(library, delay)?;
             let candidates = map_gatefn_to_delay_candidates(graph, &cells)?;
             let Some(local) = candidates.local else {
-                return Ok(finish(candidates.demanded)?.1);
+                return Ok(finish(candidates.demanded, "demanded")?.1);
             };
-            let local = finish(local);
-            match (finish(candidates.demanded), local) {
+            let local = finish(local, "local");
+            match (finish(candidates.demanded, "demanded"), local) {
                 (Ok(demanded), Ok(local)) => Ok(if local.0 < demanded.0 {
                     local.1
                 } else {
@@ -198,7 +291,9 @@ mod tests {
             CoverStrategy::Area,
             &PostMappingOptions::default(),
             Some(&ResizeOptions::default()),
-        )?;
+            NativeMappingSchedule::default(),
+        )?
+        .netlist;
         let cells = mapped.modules[0]
             .instances
             .iter()

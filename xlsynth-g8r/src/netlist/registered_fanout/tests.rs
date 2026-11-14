@@ -10,9 +10,11 @@ use crate::netlist::fanout_opt::FanoutOptimizationOptions;
 use crate::netlist::gatefn_from_netlist::project_labeled_sequential_netlist_aig;
 use crate::netlist::io::{ParsedNetlist, read_gv_from_str};
 use crate::netlist::mapped::MappedNetlist;
+use crate::netlist::registered_opt::RegisteredCandidateSelection;
 use crate::netlist::report::build_area_report;
 use crate::netlist::sequential_mapping::{
-    SequentialMappingOptions, map_sequential_to_native_netlist,
+    NativeMappingSchedule, SequentialMappingOptions, map_sequential_to_native_netlist,
+    map_sequential_with_policy,
 };
 use crate::netlist::sta::{PreparedStaLibrary, StaOptions, analyze_register_boundary_max_arrival};
 use crate::techmap::postprocess::{CoverStrategy, PostMappingOptions};
@@ -46,73 +48,6 @@ pub(super) fn library() -> Result<Library> {
         }
     }
     Ok(lib)
-}
-
-#[test]
-fn capture_broadcast_can_be_repaired_only_for_a_proven_data_pin() -> Result<()> {
-    use crate::netlist::registered_opt::{
-        RegisteredOptimizationOptions, optimize_registered_netlist,
-    };
-    use std::fmt::Write;
-
-    let mut lib = library()?;
-    let mut scan = lib.cells.iter().find(|c| c.name == "DFF1").unwrap().clone();
-    scan.name = "SDFF".into();
-    let state_dependent = format!("D ^ {}", scan.sequential[0].state_var);
-    let and = lib.cells.iter().find(|c| c.name == "AND1").unwrap();
-    scan.pins.extend(
-        and.pins
-            .iter()
-            .filter(|p| p.direction == crate::liberty_proto::PinDirection::Input as i32)
-            .cloned(),
-    );
-    let capture = lib.cells.len();
-    lib.cells.push(scan);
-    for (next_state, select, repairable) in [
-        ("!D", "1'b0", true),
-        ("(!A & D) | (A & B)", "1'b0", true),
-        ("(!A & D) | (A & B)", "en", false),
-        ("(!A & !D) | (A & B)", "1'b0", true),
-        ("(!A & !D) | (A & B)", "en", false),
-        ("(!A & !D) | (A & B)", "1'b1", false),
-        (state_dependent.as_str(), "1'b0", false),
-    ] {
-        lib.cells[capture].sequential[0].next_state = next_state.into();
-        let mut gv = String::from(
-            "module t(input clk, input d, input en, output [31:0] y);
-             wire q, shared;
-             DFF1 launch(.CLK(clk),.D(d),.Q(q));
-             INV1 inv(.A(q),.Y(shared));",
-        );
-        for i in 0..32 {
-            writeln!(
-                gv,
-                "SDFF cap{i}(.CLK(clk),.A({select}),.B(1'b0),.D(shared),.Q(y[{i}]));"
-            )?;
-        }
-        gv.push_str("endmodule");
-        let report = optimize_registered_netlist(
-            &mut read_gv_from_str(&gv)?,
-            &lib,
-            &RegisteredOptimizationOptions {
-                timing: StaOptions::default(),
-                fanout: Some(FanoutOptimizationOptions::default()),
-                resize: None,
-            },
-        )?;
-        if repairable {
-            assert!(
-                report.final_delay.register_to_register < report.initial_delay.register_to_register,
-                "next_state={next_state}, select={select}"
-            );
-        } else {
-            assert_eq!(
-                report.topology_trials, 0,
-                "next_state={next_state}, select={select}"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn broadcast(lanes: usize) -> Result<SequentialGateFn> {
@@ -228,8 +163,146 @@ fn native_mapping_repairs_the_loaded_launch_q_and_preserves_the_clocked_mask() -
     Ok(())
 }
 
+#[test]
+fn capture_broadcast_can_be_repaired_only_for_a_proven_data_pin() -> Result<()> {
+    use crate::netlist::registered_opt::{
+        RegisteredOptimizationOptions, optimize_registered_netlist,
+    };
+    use std::fmt::Write;
+
+    let mut lib = library()?;
+    let mut scan = lib.cells.iter().find(|c| c.name == "DFF1").unwrap().clone();
+    scan.name = "SDFF".into();
+    let state_dependent = format!("D ^ {}", scan.sequential[0].state_var);
+    let and = lib.cells.iter().find(|c| c.name == "AND1").unwrap();
+    scan.pins.extend(
+        and.pins
+            .iter()
+            .filter(|p| p.direction == crate::liberty_proto::PinDirection::Input as i32)
+            .cloned(),
+    );
+    let capture = lib.cells.len();
+    lib.cells.push(scan);
+    for (next_state, select, repairable) in [
+        ("!D", "1'b0", true),
+        ("(!A & D) | (A & B)", "1'b0", true),
+        ("(!A & D) | (A & B)", "en", false),
+        ("(!A & !D) | (A & B)", "1'b0", true),
+        ("(!A & !D) | (A & B)", "en", false),
+        ("(!A & !D) | (A & B)", "1'b1", false),
+        (state_dependent.as_str(), "1'b0", false),
+    ] {
+        lib.cells[capture].sequential[0].next_state = next_state.into();
+        let mut gv = String::from(
+            "module t(input clk, input d, input en, output [31:0] y);
+             wire q, shared;
+             DFF1 launch(.CLK(clk),.D(d),.Q(q));
+             INV1 inv(.A(q),.Y(shared));",
+        );
+        for i in 0..32 {
+            writeln!(
+                gv,
+                "SDFF cap{i}(.CLK(clk),.A({select}),.B(1'b0),.D(shared),.Q(y[{i}]));"
+            )?;
+        }
+        gv.push_str("endmodule");
+        let report = optimize_registered_netlist(
+            &mut read_gv_from_str(&gv)?,
+            &lib,
+            &RegisteredOptimizationOptions {
+                timing: StaOptions::default(),
+                fanout: Some(FanoutOptimizationOptions::default()),
+                resize: None,
+            },
+        )?;
+        if repairable {
+            assert!(
+                report.final_delay.register_to_register < report.initial_delay.register_to_register,
+                "next_state={next_state}, select={select}"
+            );
+        } else {
+            assert_eq!(
+                report.topology_trials, 0,
+                "next_state={next_state}, select={select}"
+            );
+        }
+    }
+    Ok(())
+}
+
+// Seed an existing buffer whose name resembles an inserted buffer. Neither
+// that buffer nor the cells of rejected trials belong to the winning tree.
+#[test]
+fn ordinary_optimizer_tracks_only_buffers_in_the_accepted_topology() -> Result<()> {
+    use super::OwnedBuffers;
+    use crate::netlist::registered_opt::{
+        RegisteredOptimizationOptions, optimize_registered_netlist,
+        optimize_registered_netlist_tracked,
+    };
+    use std::fmt::Write;
+
+    let mut gv = String::from(
+        "module t(input clk, input d, output tap, output [31:0] y); wire q;
+         DFF1 launch(.CLK(clk),.D(d),.Q(q));
+         BUF4 g8r_data_fanout_buf_42(.A(d),.Y(tap));",
+    );
+    for lane in 0..32 {
+        writeln!(
+            gv,
+            "wire n{lane}; INV1 inv{lane}(.A(q),.Y(n{lane}));
+            DFF1 cap{lane}(.CLK(clk),.D(n{lane}),.Q(y[{lane}]));"
+        )?;
+    }
+    gv.push_str("endmodule");
+    let lib = library()?;
+    let mut opts = RegisteredOptimizationOptions {
+        timing: StaOptions::default(),
+        fanout: Some(FanoutOptimizationOptions::default()),
+        resize: None,
+    };
+    let mut plain = read_gv_from_str(&gv)?;
+    let original = plain.modules[0].clone();
+    optimize_registered_netlist(&mut plain, &lib, &opts)?;
+
+    let mut tracked = read_gv_from_str(&gv)?;
+    let mut owned = OwnedBuffers::default();
+    let report = optimize_registered_netlist_tracked(&mut tracked, &lib, &opts, Some(&mut owned))?;
+    assert!(report.objective_delay < report.initial_delay.register_to_register);
+    assert_eq!(plain.modules, tracked.modules);
+    let (originals, inserted) = tracked.modules[0]
+        .instances
+        .split_at(original.instances.len());
+    let root = (
+        tracked.interner.get("launch").unwrap(),
+        tracked.interner.get("Q").unwrap(),
+    );
+    assert!(!inserted.is_empty());
+    assert_eq!(inserted.len(), owned.len());
+    for cell in originals {
+        assert_eq!(owned.root_of(cell.instance_name), None);
+    }
+    for cell in inserted {
+        assert_eq!(tracked.interner.resolve(cell.type_name), Some("BUF4"));
+        assert_eq!(owned.root_of(cell.instance_name), Some(root));
+    }
+
+    // All forest proposals add area. A prohibitive weight rejects them after
+    // pricing.
+    opts.fanout.as_mut().unwrap().area_weight = 1e6;
+    let mut rejected = read_gv_from_str(&gv)?;
+    let mut unused = OwnedBuffers::default();
+    let report =
+        optimize_registered_netlist_tracked(&mut rejected, &lib, &opts, Some(&mut unused))?;
+    assert!(report.topology_trials > 0);
+    assert_eq!(rejected.modules[0], original);
+    assert!(unused.is_empty());
+    Ok(())
+}
+
 /// Two independent electrical bottlenecks share a stage; the third broadcast
 /// is also an aliased generated clock, so every tap of that net stays fixed.
+// Exercise a mixed forest with a flip-flop Q and a gate driven by primary inputs.
+// A queue full of one driver type must leave room for the other.
 #[test]
 fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()> {
     use std::fmt::Write;
@@ -271,7 +344,8 @@ fn joint_candidates_can_buffer_launch_and_internal_data_together() -> Result<()>
             fanout_trigger: 8,
             ..Default::default()
         },
-        |trial, _| {
+        None,
+        |trial, _, _| {
             // First four instances include both driver types and the
             // generated-clock capture.
             let moved = |i: usize| {
@@ -344,7 +418,8 @@ fn buffering_preserves_registered_logic_and_external_alias() -> Result<()> {
         &PreparedStaLibrary::new(&lib)?,
         timing,
         &options,
-        |trial, _| {
+        None,
+        |trial, _, _| {
             let added = &trial.module.instances[original.module.instances.len()..];
             assert!(!added.is_empty());
             assert!(
@@ -420,7 +495,8 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
             &PreparedStaLibrary::new(&lib)?,
             StaOptions::default(),
             &FanoutOptimizationOptions::default(),
-            |trial, kind| {
+            None,
+            |trial, kind, _| {
                 let direct = |bank: usize| {
                     let first_sink = bank * (sinks + 1) + 1;
                     original.module.instances[first_sink].connections
@@ -437,10 +513,13 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
                             outputs: vec![(outside * (sinks + 1), output.into())],
                         }));
                     }
-                    TopologyTrial::ElectricalRetry => {
+                    TopologyTrial::ElectricalRetry(None) => {
                         retries += 1;
                         assert!(!(0..banks).any(direct));
                         assert_eq!(simulate_stage(&trial)?, expected);
+                    }
+                    TopologyTrial::ElectricalRetry(Some(_)) | TopologyTrial::TimingCone(_) => {
+                        unreachable!("legacy selector")
                     }
                 }
                 Ok(None)
@@ -449,5 +528,81 @@ fn a_forest_retries_only_a_named_driver_output_and_keeps_registered_values() -> 
         assert!(requested > 0);
         assert_eq!(retries, usize::from(output == "Q"));
     }
+    Ok(())
+}
+
+// Pass the ownership ledger into refinement and check that it counts the
+// buffers inserted by the winning registered optimization.
+#[test]
+fn tree_refinement_receives_buffers_inserted_by_the_registered_optimizer() -> Result<()> {
+    let lib = library()?;
+    let design = broadcast(32)?;
+    let timing = StaOptions::default();
+    let post = PostMappingOptions {
+        fanout: Some(FanoutOptimizationOptions {
+            module_output_load: timing.module_output_load,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let result = map_sequential_with_policy(
+        &design,
+        &lib,
+        &SequentialMappingOptions::default(),
+        CoverStrategy::Area,
+        &post,
+        None,
+        NativeMappingSchedule {
+            refine_buffer_trees: true,
+            candidate_selection: RegisteredCandidateSelection::Legacy,
+        },
+    )?;
+    let report = result
+        .refinement
+        .expect("broadcast has registered timing paths");
+    // Tree refinement can reconsider the buffers accepted by the optimizer.
+    assert!(report.owned_buffers_before_tree_refinement > 0);
+    let trees = report.tree_refinement;
+    assert!(trees.rounds.iter().any(|round| round.ordinary_trials > 0));
+    Ok(())
+}
+
+#[test]
+fn tree_refinement_respects_fanout_area_policy() -> Result<()> {
+    let design = broadcast(32)?;
+    let run = |lib: &Library, limit, weight| -> Result<bool> {
+        let post = PostMappingOptions {
+            fanout: Some(FanoutOptimizationOptions {
+                // Give refinement the unbuffered cover.
+                max_rounds: 0,
+                area_growth_limit: limit,
+                area_weight: weight,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let result = map_sequential_with_policy(
+            &design,
+            lib,
+            &SequentialMappingOptions::default(),
+            CoverStrategy::Area,
+            &post,
+            None,
+            NativeMappingSchedule {
+                refine_buffer_trees: true,
+                ..Default::default()
+            },
+        )?;
+        let report = result.refinement.unwrap();
+        Ok(report.tree_refinement.final_area > report.existing_optimizer.initial_area)
+    };
+    let mut lib = library()?;
+    assert!(run(&lib, 0.0, 0.5)?, "permit growth to repair overloaded Q");
+    for pin in lib.cells.iter_mut().flat_map(|c| &mut c.pins) {
+        pin.max_capacitance = None;
+    }
+    assert!(run(&lib, 1.0, 0.5)?, "buffering improves delay");
+    assert!(!run(&lib, 0.0, 0.5)?, "zero growth budget");
+    assert!(!run(&lib, 1.0, 1e6)?, "prohibitive area weight");
     Ok(())
 }
