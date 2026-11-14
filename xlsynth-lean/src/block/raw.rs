@@ -182,6 +182,16 @@ fn emit_block(block: &BlockContext<'_>, namespace: &str) -> Result<String> {
 ",
         );
     }
+    if graph
+        .nodes
+        .iter()
+        .chain(block.helpers.iter().flat_map(|f| &f.nodes))
+        .any(|n| matches!(n.payload, NodePayload::BitSliceUpdate { .. }))
+    {
+        source.push_str(
+            "abbrev bitSliceUpdate {n s w : Nat} (value : BitVec n) (start : BitVec s) (update : BitVec w) : BitVec n :=\n  _root_.XlsynthLean.IR.bitSliceUpdate value start update\n\n",
+        );
+    }
     for helper in &block.helpers {
         write_helper(&mut source, namespace, helper)?;
     }
